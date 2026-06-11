@@ -65,12 +65,14 @@ crabbox
 crabbox-apple-vz-helper
 ```
 
-Crabbox finds the sibling helper automatically. It copies the helper into the
-Crabbox state directory, ad-hoc signs that managed copy with the required
-virtualization and local-network entitlements, and leaves the installed source
-binary untouched. The managed helper is refreshed only when the source
-binary changes or the signed managed copy no longer matches its recorded
-SHA-256 digest.
+Crabbox finds the sibling helper automatically. It creates a content-addressed
+copy in the Crabbox state directory, ad-hoc signs that managed copy with the
+required virtualization and local-network entitlements, and leaves the
+installed source binary untouched. Different helper versions can run
+concurrently without replacing each other. A managed helper is refreshed only
+when its signed copy no longer matches the recorded SHA-256 digest. Crabbox
+retains active versions and prunes older inactive copies as new versions are
+installed.
 
 For source development:
 

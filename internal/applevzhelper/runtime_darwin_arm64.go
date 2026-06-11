@@ -39,6 +39,14 @@ type startConfig struct {
 
 const maxRemoteImageBytes int64 = 32 << 30
 
+const (
+	qcow2HeaderV2Bytes       = 72
+	qcow2HeaderV3Bytes       = 104
+	qcow2MaxL1TableBytes     = 32 << 20
+	qcow2MaxRefcountBytes    = 8 << 20
+	qcow2MinSnapshotHdrBytes = 40
+)
+
 func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, error) {
 	inst := cfg.Instance
 	if err := ensurePrivateDir(InstanceDir(cfg.StateRoot, inst.Name)); err != nil {
@@ -510,7 +518,7 @@ func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expec
 		}
 		return sourcePath, nil
 	}
-	if err := validateStandaloneQCOW2Path(sourcePath); err != nil {
+	if err := validateStandaloneQCOW2Path(sourcePath, maxDiskBytes); err != nil {
 		return "", err
 	}
 	info, err := os.Stat(sourcePath)
@@ -554,16 +562,21 @@ func ensureRawImage(ctx context.Context, stateRoot, sourceRef, sourcePath, expec
 	return target, nil
 }
 
-func validateStandaloneQCOW2Path(sourcePath string) error {
+func validateStandaloneQCOW2Path(sourcePath string, maxDiskBytes int64) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open qcow2 image: %w", err)
 	}
 	defer source.Close()
-	if _, err := newStandaloneQCOW2Reader(source); err != nil {
+	info, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf("stat qcow2 image: %w", err)
+	}
+	if err := validateQCOW2Metadata(source, info.Size(), maxDiskBytes); err != nil {
 		return err
 	}
-	return nil
+	_, err = newStandaloneQCOW2Reader(source)
+	return err
 }
 
 func rawImageCacheKey(sourceRef, sourcePath, checksum string, info os.FileInfo) [sha256.Size]byte {
@@ -733,6 +746,13 @@ func convertQCOW2ToRaw(ctx context.Context, sourcePath string, target *os.File, 
 		return fmt.Errorf("open qcow2 image: %w", err)
 	}
 	defer source.Close()
+	info, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf("stat qcow2 image: %w", err)
+	}
+	if err := validateQCOW2Metadata(source, info.Size(), maxDiskBytes); err != nil {
+		return err
+	}
 	reader, err := newStandaloneQCOW2Reader(source)
 	if err != nil {
 		return err
@@ -803,6 +823,138 @@ func newStandaloneQCOW2Reader(source io.ReaderAt) (*standaloneQCOW2Reader, error
 	return reader, nil
 }
 
+func validateQCOW2Metadata(source io.ReaderAt, sourceBytes, maxDiskBytes int64) error {
+	if sourceBytes < qcow2HeaderV2Bytes {
+		return fmt.Errorf("qcow2 image is shorter than the %d-byte header", qcow2HeaderV2Bytes)
+	}
+	header := make([]byte, qcow2HeaderV3Bytes)
+	if _, err := source.ReadAt(header[:qcow2HeaderV2Bytes], 0); err != nil {
+		return fmt.Errorf("read qcow2 header: %w", err)
+	}
+	if !bytes.Equal(header[:4], []byte{'Q', 'F', 'I', 0xfb}) {
+		return fmt.Errorf("invalid qcow2 magic")
+	}
+	version := binary.BigEndian.Uint32(header[4:8])
+	if version != 2 && version != 3 {
+		return fmt.Errorf("unsupported qcow2 version %d", version)
+	}
+	if binary.BigEndian.Uint64(header[8:16]) != 0 || binary.BigEndian.Uint32(header[16:20]) != 0 {
+		return fmt.Errorf("qcow2 backing files are not supported")
+	}
+	clusterBits := binary.BigEndian.Uint32(header[20:24])
+	if clusterBits < 9 || clusterBits > 21 {
+		return fmt.Errorf("qcow2 cluster bits %d are outside the supported range 9..21", clusterBits)
+	}
+	clusterBytes := uint64(1) << clusterBits
+	virtualBytes := binary.BigEndian.Uint64(header[24:32])
+	if virtualBytes == 0 || virtualBytes > math.MaxInt64 {
+		return fmt.Errorf("invalid qcow2 virtual disk size %d bytes", virtualBytes)
+	}
+	if err := validateSourceDiskSize(int64(virtualBytes), maxDiskBytes); err != nil {
+		return err
+	}
+	if cryptMethod := binary.BigEndian.Uint32(header[32:36]); cryptMethod != 0 {
+		return fmt.Errorf("encrypted qcow2 images are not supported")
+	}
+
+	incompatibleFeatures := uint64(0)
+	headerBytes := uint64(qcow2HeaderV2Bytes)
+	if version == 3 {
+		if sourceBytes < qcow2HeaderV3Bytes {
+			return fmt.Errorf("qcow2 v3 image is shorter than the %d-byte header", qcow2HeaderV3Bytes)
+		}
+		if _, err := source.ReadAt(header[qcow2HeaderV2Bytes:], qcow2HeaderV2Bytes); err != nil {
+			return fmt.Errorf("read qcow2 v3 header: %w", err)
+		}
+		incompatibleFeatures = binary.BigEndian.Uint64(header[72:80])
+		if incompatibleFeatures&^uint64(0x1b) != 0 || incompatibleFeatures&(1<<2) != 0 {
+			return fmt.Errorf("unsupported qcow2 incompatible features 0x%x", incompatibleFeatures)
+		}
+		if refcountOrder := binary.BigEndian.Uint32(header[96:100]); refcountOrder > 6 {
+			return fmt.Errorf("qcow2 refcount order %d exceeds 6", refcountOrder)
+		}
+		headerBytes = uint64(binary.BigEndian.Uint32(header[100:104]))
+		if headerBytes < qcow2HeaderV3Bytes || headerBytes%8 != 0 || headerBytes > clusterBytes {
+			return fmt.Errorf("invalid qcow2 header length %d", headerBytes)
+		}
+		if incompatibleFeatures&(1<<4) != 0 && clusterBits < 14 {
+			return fmt.Errorf("qcow2 extended L2 entries require cluster bits >= 14")
+		}
+	}
+
+	l1Entries := uint64(binary.BigEndian.Uint32(header[36:40]))
+	l1Bytes := l1Entries * 8
+	if l1Entries == 0 || l1Bytes > qcow2MaxL1TableBytes {
+		return fmt.Errorf("qcow2 L1 table size %d bytes exceeds the %d-byte limit", l1Bytes, qcow2MaxL1TableBytes)
+	}
+	l2EntryBytes := uint64(8)
+	if incompatibleFeatures&(1<<4) != 0 {
+		l2EntryBytes = 16
+	}
+	coveragePerL1Entry := clusterBytes * (clusterBytes / l2EntryBytes)
+	requiredL1Entries := (virtualBytes + coveragePerL1Entry - 1) / coveragePerL1Entry
+	if l1Entries < requiredL1Entries {
+		return fmt.Errorf("qcow2 L1 table has %d entries; virtual disk requires at least %d", l1Entries, requiredL1Entries)
+	}
+	if err := validateQCOW2Range("L1 table", binary.BigEndian.Uint64(header[40:48]), l1Bytes, clusterBytes, sourceBytes); err != nil {
+		return err
+	}
+
+	refcountClusters := uint64(binary.BigEndian.Uint32(header[56:60]))
+	refcountBytes := refcountClusters * clusterBytes
+	if refcountClusters == 0 || refcountBytes > qcow2MaxRefcountBytes {
+		return fmt.Errorf("qcow2 refcount table size %d bytes exceeds the %d-byte limit", refcountBytes, qcow2MaxRefcountBytes)
+	}
+	if err := validateQCOW2Range("refcount table", binary.BigEndian.Uint64(header[48:56]), refcountBytes, clusterBytes, sourceBytes); err != nil {
+		return err
+	}
+
+	snapshots := uint64(binary.BigEndian.Uint32(header[60:64]))
+	if snapshots > 0 {
+		snapshotBytes := snapshots * qcow2MinSnapshotHdrBytes
+		if err := validateQCOW2Range("snapshot table", binary.BigEndian.Uint64(header[64:72]), snapshotBytes, clusterBytes, sourceBytes); err != nil {
+			return err
+		}
+	}
+	return validateQCOW2HeaderExtensions(source, headerBytes, clusterBytes, sourceBytes)
+}
+
+func validateQCOW2Range(label string, offset, length, alignment uint64, sourceBytes int64) error {
+	if offset == 0 || offset%alignment != 0 {
+		return fmt.Errorf("qcow2 %s offset %d is not cluster-aligned", label, offset)
+	}
+	limit := uint64(sourceBytes)
+	if offset > limit || length > limit-offset {
+		return fmt.Errorf("qcow2 %s range [%d,%d) exceeds the %d-byte image", label, offset, offset+length, sourceBytes)
+	}
+	return nil
+}
+
+func validateQCOW2HeaderExtensions(source io.ReaderAt, offset, clusterBytes uint64, sourceBytes int64) error {
+	limit := min(clusterBytes, uint64(sourceBytes))
+	var extensionHeader [8]byte
+	for offset+uint64(len(extensionHeader)) <= limit {
+		if _, err := source.ReadAt(extensionHeader[:], int64(offset)); err != nil {
+			return fmt.Errorf("read qcow2 header extension: %w", err)
+		}
+		extensionType := binary.BigEndian.Uint32(extensionHeader[:4])
+		extensionBytes := uint64(binary.BigEndian.Uint32(extensionHeader[4:]))
+		if extensionType == 0 {
+			if extensionBytes != 0 {
+				return fmt.Errorf("qcow2 end header extension has nonzero length %d", extensionBytes)
+			}
+			return nil
+		}
+		paddedBytes := (extensionBytes + 7) &^ uint64(7)
+		offset += uint64(len(extensionHeader))
+		if paddedBytes > limit-offset {
+			return fmt.Errorf("qcow2 header extension exceeds the first cluster")
+		}
+		offset += paddedBytes
+	}
+	return fmt.Errorf("qcow2 header extensions are missing an end marker")
+}
+
 func (r *standaloneQCOW2Reader) ReadAt(p []byte, offset int64) (int, error) {
 	n, err := r.source.ReadAt(p, offset)
 	if n == 0 || offset >= int64(len(r.header)) || offset+int64(n) <= 0 {
@@ -845,6 +997,13 @@ func validateImageDiskSize(sourcePath string, maxDiskBytes int64) error {
 		return fmt.Errorf("open qcow2 image: %w", err)
 	}
 	defer source.Close()
+	info, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf("stat qcow2 image: %w", err)
+	}
+	if err := validateQCOW2Metadata(source, info.Size(), maxDiskBytes); err != nil {
+		return err
+	}
 	reader, err := newStandaloneQCOW2Reader(source)
 	if err != nil {
 		return err

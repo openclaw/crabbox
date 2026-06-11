@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 var (
@@ -49,11 +51,19 @@ type preparationMarker struct {
 }
 
 func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	useLock, err := lockManagedHelperUse()
+	if err != nil {
+		fmt.Fprintf(stderr, "lock managed helper use: %v\n", err)
+		return 1
+	}
+	if useLock != nil {
+		defer useLock.Unlock()
+	}
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: crabbox-apple-vz-helper <doctor|start|serve|list|inspect|delete>")
 		return 2
 	}
-	var err error
+	err = nil
 	switch args[0] {
 	case "doctor":
 		err = runDoctor(args[1:], stdin, stdout, stderr)
@@ -76,6 +86,21 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func lockManagedHelperUse() (*flock.Flock, error) {
+	path := strings.TrimSpace(os.Getenv(ManagedHelperUseLockEnv))
+	if path == "" {
+		return nil, nil
+	}
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("%s must be an absolute path", ManagedHelperUseLockEnv)
+	}
+	lock := flock.New(path, flock.SetPermissions(0o600))
+	if err := lock.RLock(); err != nil {
+		return nil, err
+	}
+	return lock, nil
 }
 
 func runDoctor(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -898,7 +923,7 @@ func helperDaemonEnv() []string {
 		"LANG=C",
 		"TZ=UTC",
 	}
-	for _, name := range []string{"HOME", "TMPDIR"} {
+	for _, name := range []string{"HOME", "TMPDIR", ManagedHelperUseLockEnv} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			env = append(env, name+"="+value)
 		}

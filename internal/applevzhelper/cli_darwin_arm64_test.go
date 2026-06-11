@@ -11,12 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"golang.org/x/sys/unix"
 )
 
@@ -913,6 +915,43 @@ func TestHelperDaemonEnvExcludesCallerCredentials(t *testing.T) {
 	}
 	if !strings.Contains(joined, "PATH=/usr/bin:/bin:/usr/sbin:/sbin") {
 		t.Fatalf("daemon environment missing deterministic PATH: %q", joined)
+	}
+}
+
+func TestManagedHelperUseLockIsSharedAndPropagatedToDaemon(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "managed-helper.use.lock")
+	t.Setenv(ManagedHelperUseLockEnv, lockPath)
+	useLock, err := lockManagedHelperUse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if useLock == nil {
+		t.Fatal("managed helper use lock was not acquired")
+	}
+	exclusive := flock.New(lockPath, flock.SetPermissions(0o600))
+	locked, err := exclusive.TryLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locked {
+		_ = exclusive.Unlock()
+		t.Fatal("exclusive cleanup lock acquired while helper use lock was held")
+	}
+	if !slices.Contains(helperDaemonEnv(), ManagedHelperUseLockEnv+"="+lockPath) {
+		t.Fatal("helper daemon environment did not preserve managed helper use lock")
+	}
+	if err := useLock.Unlock(); err != nil {
+		t.Fatal(err)
+	}
+	locked, err = exclusive.TryLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked {
+		t.Fatal("exclusive cleanup lock unavailable after helper use lock release")
+	}
+	if err := exclusive.Unlock(); err != nil {
+		t.Fatal(err)
 	}
 }
 

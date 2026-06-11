@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -736,15 +737,62 @@ func TestStandaloneQCOW2ReaderRejectsAndPinsBackingFileHeader(t *testing.T) {
 	}
 }
 
+func TestValidateQCOW2MetadataBoundsParserAllocations(t *testing.T) {
+	image := minimalQCOW2Image()
+	if err := validateQCOW2Metadata(bytes.NewReader(image), int64(len(image)), 2<<30); err != nil {
+		t.Fatalf("valid qcow2 metadata rejected: %v", err)
+	}
+
+	oversizedL1 := append([]byte(nil), image...)
+	binary.BigEndian.PutUint32(oversizedL1[36:40], math.MaxUint32)
+	if err := validateQCOW2Metadata(bytes.NewReader(oversizedL1), int64(len(oversizedL1)), 2<<30); err == nil || !strings.Contains(err.Error(), "L1 table size") {
+		t.Fatalf("oversized L1 validation error=%v", err)
+	}
+
+	unalignedL1 := append([]byte(nil), image...)
+	binary.BigEndian.PutUint64(unalignedL1[40:48], 65537)
+	if err := validateQCOW2Metadata(bytes.NewReader(unalignedL1), int64(len(unalignedL1)), 2<<30); err == nil || !strings.Contains(err.Error(), "not cluster-aligned") {
+		t.Fatalf("unaligned L1 validation error=%v", err)
+	}
+
+	largeExtension := append([]byte(nil), image...)
+	binary.BigEndian.PutUint32(largeExtension[104:108], 1)
+	binary.BigEndian.PutUint32(largeExtension[108:112], 5000)
+	if err := validateQCOW2Metadata(bytes.NewReader(largeExtension), int64(len(largeExtension)), 2<<30); err != nil {
+		t.Fatalf("valid large extension rejected: %v", err)
+	}
+
+	outOfBoundsExtension := append([]byte(nil), image...)
+	binary.BigEndian.PutUint32(outOfBoundsExtension[104:108], 1)
+	binary.BigEndian.PutUint32(outOfBoundsExtension[108:112], 64<<10)
+	if err := validateQCOW2Metadata(bytes.NewReader(outOfBoundsExtension), int64(len(outOfBoundsExtension)), 2<<30); err == nil || !strings.Contains(err.Error(), "exceeds the first cluster") {
+		t.Fatalf("out-of-bounds extension validation error=%v", err)
+	}
+}
+
+func minimalQCOW2Image() []byte {
+	const clusterBytes = 64 << 10
+	image := make([]byte, 3*clusterBytes)
+	copy(image, []byte{'Q', 'F', 'I', 0xfb})
+	binary.BigEndian.PutUint32(image[4:8], 3)
+	binary.BigEndian.PutUint32(image[20:24], 16)
+	binary.BigEndian.PutUint64(image[24:32], 1<<20)
+	binary.BigEndian.PutUint32(image[36:40], 1)
+	binary.BigEndian.PutUint64(image[40:48], clusterBytes)
+	binary.BigEndian.PutUint64(image[48:56], 2*clusterBytes)
+	binary.BigEndian.PutUint32(image[56:60], 1)
+	binary.BigEndian.PutUint32(image[96:100], 4)
+	binary.BigEndian.PutUint32(image[100:104], qcow2HeaderV3Bytes)
+	return image
+}
+
 func TestEnsureRawImageRejectsBackedSourceBeforeCacheHit(t *testing.T) {
 	stateRoot := t.TempDir()
 	sourcePath := filepath.Join(t.TempDir(), "backed.qcow2")
-	header := make([]byte, 20)
-	copy(header, []byte{'Q', 'F', 'I', 0xfb})
-	binary.BigEndian.PutUint32(header[4:8], 3)
-	binary.BigEndian.PutUint64(header[8:16], 4096)
-	binary.BigEndian.PutUint32(header[16:20], uint32(len("/tmp/host-secret")))
-	if err := os.WriteFile(sourcePath, header, 0o600); err != nil {
+	image := minimalQCOW2Image()
+	binary.BigEndian.PutUint64(image[8:16], qcow2HeaderV3Bytes)
+	binary.BigEndian.PutUint32(image[16:20], uint32(len("/tmp/host-secret")))
+	if err := os.WriteFile(sourcePath, image, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(sourcePath)

@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	ManagedHelperName = "crabbox-apple-vz-helper"
+	ManagedHelperName       = "crabbox-apple-vz-helper"
+	ManagedHelperUseLockEnv = "CRABBOX_APPLE_VZ_HELPER_USE_LOCK"
 
 	StatusStarting = "starting"
 	StatusRunning  = "running"
@@ -32,6 +33,10 @@ const (
 	EFIFileName         = "efi-variable-store.bin"
 	PreparationFileName = "preparing.json"
 )
+
+func ManagedHelperUseLockPath(helperPath string) string {
+	return helperPath + ".use.lock"
+}
 
 const HelperEntitlements = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

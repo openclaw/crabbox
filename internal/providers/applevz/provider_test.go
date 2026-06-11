@@ -3,6 +3,7 @@ package applevz
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/openclaw/crabbox/internal/applevzhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -718,11 +720,7 @@ func TestEnsureHelperBinarySignsOnlyWhenSourceChanges(t *testing.T) {
 		t.Fatalf("unchanged source codesign calls=%d want 1", got)
 	}
 
-	root, err := b.stateRoot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	digestPath := filepath.Join(applevzhelper.HelperDir(root), managedHelperDigestFileName)
+	digestPath := managedHelperDigestPath(managedPath)
 	digestData, err := os.ReadFile(digestPath)
 	if err != nil {
 		t.Fatal(err)
@@ -759,18 +757,29 @@ func TestEnsureHelperBinarySignsOnlyWhenSourceChanges(t *testing.T) {
 	if err := os.WriteFile(sourcePath, []byte("other"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.ensureHelperBinary(context.Background(), cfg); err != nil {
+	changedPath, err := b.ensureHelperBinary(context.Background(), cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got := codesignCallCount(runner.calls); got != 4 {
 		t.Fatalf("changed source codesign calls=%d want 4", got)
 	}
-	data, err := os.ReadFile(managedPath)
+	if changedPath == managedPath {
+		t.Fatalf("changed source reused managed helper path %q", managedPath)
+	}
+	data, err := os.ReadFile(changedPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(data) != "other" {
 		t.Fatalf("managed helper=%q want changed source", string(data))
+	}
+	data, err = os.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "first" {
+		t.Fatalf("previous managed helper changed to %q", string(data))
 	}
 }
 
@@ -827,11 +836,185 @@ func TestEnsureHelperBinarySignsManagedSourcePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != managedPath {
-		t.Fatalf("managed helper path=%q want %q", got, managedPath)
+	sourceDigest := dataSHA256([]byte("managed source"))
+	entitlementsDigest := dataSHA256([]byte(applevzhelper.HelperEntitlements))
+	want := managedHelperInstallPath(helperDir, sourceDigest, entitlementsDigest)
+	if got != want {
+		t.Fatalf("managed helper path=%q want %q", got, want)
 	}
 	if got := codesignCallCount(runner.calls); got != 1 {
 		t.Fatalf("codesign calls=%d want 1", got)
+	}
+}
+
+func TestManagedHelperPathsIncludeEntitlementsDigest(t *testing.T) {
+	helperDir := t.TempDir()
+	sourceDigest := strings.Repeat("a", 64)
+	firstEntitlements := strings.Repeat("b", 64)
+	secondEntitlements := strings.Repeat("c", 64)
+
+	firstHelper := managedHelperInstallPath(helperDir, sourceDigest, firstEntitlements)
+	secondHelper := managedHelperInstallPath(helperDir, sourceDigest, secondEntitlements)
+	if firstHelper == secondHelper {
+		t.Fatalf("helper paths collide across entitlement sets: %q", firstHelper)
+	}
+	firstFile := managedHelperEntitlementsPath(helperDir, firstEntitlements)
+	secondFile := managedHelperEntitlementsPath(helperDir, secondEntitlements)
+	if firstFile == secondFile || !strings.Contains(firstFile, firstEntitlements) || !strings.Contains(secondFile, secondEntitlements) {
+		t.Fatalf("entitlements paths are not content-specific: %q %q", firstFile, secondFile)
+	}
+}
+
+func TestCleanupObsoleteManagedHelpersKeepsCurrentAndNewest(t *testing.T) {
+	helperDir := t.TempDir()
+	now := time.Now()
+	paths := make([]string, 6)
+	for index := range paths {
+		digest := strings.Repeat(string(rune('a'+index)), sha256.Size*2)
+		paths[index] = filepath.Join(helperDir, applevzhelper.ManagedHelperName+"-"+digest)
+		if err := os.WriteFile(paths[index], []byte(digest), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		digestPath := managedHelperDigestPath(paths[index])
+		if err := os.WriteFile(digestPath, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		modTime := now.Add(-managedHelperRecentGrace - time.Duration(index+1)*time.Minute)
+		if err := os.Chtimes(paths[index], modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unmanagedPath := filepath.Join(helperDir, applevzhelper.ManagedHelperName+"-custom")
+	if err := os.WriteFile(unmanagedPath, []byte("leave me"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(unmanagedPath, now.Add(-2*managedHelperRecentGrace), now.Add(-2*managedHelperRecentGrace)); err != nil {
+		t.Fatal(err)
+	}
+	bareDigestPath := filepath.Join(helperDir, strings.Repeat("f", sha256.Size*2))
+	if err := os.WriteFile(bareDigestPath, []byte("leave me too"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(bareDigestPath, now.Add(-2*managedHelperRecentGrace), now.Add(-2*managedHelperRecentGrace)); err != nil {
+		t.Fatal(err)
+	}
+
+	currentPath := paths[len(paths)-1]
+	if err := cleanupObsoleteManagedHelpers(helperDir, currentPath, now); err != nil {
+		t.Fatal(err)
+	}
+	remaining := 0
+	for _, path := range paths {
+		_, err := os.Stat(path)
+		if err == nil {
+			remaining++
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(managedHelperDigestPath(path)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("removed helper sidecar still exists for %s: %v", path, err)
+		}
+	}
+	if remaining != managedHelperKeepVersions {
+		t.Fatalf("remaining managed helpers=%d want %d", remaining, managedHelperKeepVersions)
+	}
+	if _, err := os.Stat(currentPath); err != nil {
+		t.Fatalf("current managed helper was removed: %v", err)
+	}
+	if _, err := os.Stat(unmanagedPath); err != nil {
+		t.Fatalf("unmanaged helper was removed: %v", err)
+	}
+	if _, err := os.Stat(bareDigestPath); err != nil {
+		t.Fatalf("bare digest file was removed: %v", err)
+	}
+}
+
+func TestCleanupObsoleteManagedHelpersPreservesActiveVersion(t *testing.T) {
+	helperDir := t.TempDir()
+	now := time.Now()
+	paths := make([]string, 6)
+	for index := range paths {
+		digest := strings.Repeat(string(rune('a'+index)), sha256.Size*2)
+		paths[index] = filepath.Join(helperDir, applevzhelper.ManagedHelperName+"-"+digest)
+		if err := os.WriteFile(paths[index], []byte(digest), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(managedHelperDigestPath(paths[index]), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		modTime := now.Add(-managedHelperRecentGrace - time.Duration(index+1)*time.Minute)
+		if err := os.Chtimes(paths[index], modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	activePath := paths[4]
+	useLock := flock.New(applevzhelper.ManagedHelperUseLockPath(activePath), flock.SetPermissions(0o600))
+	if err := useLock.RLock(); err != nil {
+		t.Fatal(err)
+	}
+	defer useLock.Unlock()
+
+	if err := cleanupObsoleteManagedHelpers(helperDir, paths[5], now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(activePath); err != nil {
+		t.Fatalf("active managed helper was removed: %v", err)
+	}
+	if _, err := os.Stat(managedHelperDigestPath(activePath)); err != nil {
+		t.Fatalf("active managed helper sidecar was removed: %v", err)
+	}
+	if _, err := os.Stat(paths[3]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inactive obsolete managed helper was not removed: %v", err)
+	}
+}
+
+func TestAppleVZHelperEnvAddsUseLockOnlyForManagedCopies(t *testing.T) {
+	managedPath := filepath.Join(t.TempDir(), applevzhelper.ManagedHelperName+"-"+strings.Repeat("a", sha256.Size*2))
+	lockEntry := applevzhelper.ManagedHelperUseLockEnv + "=" + applevzhelper.ManagedHelperUseLockPath(managedPath)
+	if !slices.Contains(appleVZHelperEnv(managedPath), lockEntry) {
+		t.Fatalf("managed helper environment missing %q", lockEntry)
+	}
+	if slices.ContainsFunc(appleVZHelperEnv("/tmp/custom-helper"), func(entry string) bool {
+		return strings.HasPrefix(entry, applevzhelper.ManagedHelperUseLockEnv+"=")
+	}) {
+		t.Fatal("custom helper environment unexpectedly includes managed helper use lock")
+	}
+	if slices.ContainsFunc(appleVZHelperEnv(filepath.Join(t.TempDir(), strings.Repeat("a", sha256.Size*2))), func(entry string) bool {
+		return strings.HasPrefix(entry, applevzhelper.ManagedHelperUseLockEnv+"=")
+	}) {
+		t.Fatal("bare digest helper environment unexpectedly includes managed helper use lock")
+	}
+}
+
+func TestManagedHelperInstallLockExcludesSecondOwner(t *testing.T) {
+	helperDir := t.TempDir()
+	first, err := lockManagedHelperDir(helperDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := flock.New(filepath.Join(helperDir, ".install.lock"), flock.SetPermissions(0o600))
+	locked, err := second.TryLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locked {
+		_ = second.Unlock()
+		t.Fatal("second owner acquired managed helper install lock")
+	}
+	if err := unlockManagedHelperDir(first); err != nil {
+		t.Fatal(err)
+	}
+	locked, err = second.TryLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked {
+		t.Fatal("second owner could not acquire released managed helper install lock")
+	}
+	if err := second.Unlock(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -934,16 +934,21 @@ fi
 
 if has_provider apple-vz || has_provider applevz; then
   apple_vz_args=(--ttl 15m --idle-timeout 5m)
+  apple_vz_helper=""
   if [[ -n "${CRABBOX_LIVE_APPLE_VZ_HELPER:-}" ]]; then
     if [[ ! -x "$CRABBOX_LIVE_APPLE_VZ_HELPER" ]]; then
       echo "CRABBOX_LIVE_APPLE_VZ_HELPER must point to an executable helper: $CRABBOX_LIVE_APPLE_VZ_HELPER" >&2
       exit 2
     fi
-    apple_vz_args=(--apple-vz-helper "$CRABBOX_LIVE_APPLE_VZ_HELPER" "${apple_vz_args[@]}")
+    apple_vz_helper="$CRABBOX_LIVE_APPLE_VZ_HELPER"
   elif [[ -x "$root/bin/crabbox-apple-vz-helper" ]]; then
-    apple_vz_args=(--apple-vz-helper "$root/bin/crabbox-apple-vz-helper" "${apple_vz_args[@]}")
+    apple_vz_helper="$root/bin/crabbox-apple-vz-helper"
   fi
-  provider_smoke apple-vz "${apple_vz_args[@]}"
+  if [[ -n "$apple_vz_helper" ]]; then
+    CRABBOX_APPLE_VZ_HELPER="$apple_vz_helper" provider_smoke apple-vz "${apple_vz_args[@]}"
+  else
+    provider_smoke apple-vz "${apple_vz_args[@]}"
+  fi
 fi
 
 if has_provider kubevirt; then

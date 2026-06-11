@@ -11,25 +11,29 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/openclaw/crabbox/internal/applevzhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const (
-	defaultUser                 = "crabbox"
-	defaultWorkRoot             = "/work/crabbox"
-	defaultCPUs                 = 4
-	defaultMemoryMiB            = 8192
-	defaultDiskGiB              = 30
-	managedHelperDigestFileName = applevzhelper.ManagedHelperName + ".digests.json"
-	diagnosticTailBytes         = 8 * 1024
-	rollbackTimeout             = 30 * time.Second
-	helperCancelGracePeriod     = 30 * time.Second
-	unclaimedInstanceGrace      = 3 * time.Hour
+	defaultUser               = "crabbox"
+	defaultWorkRoot           = "/work/crabbox"
+	defaultCPUs               = 4
+	defaultMemoryMiB          = 8192
+	defaultDiskGiB            = 30
+	managedHelperDigestSuffix = ".digests.json"
+	diagnosticTailBytes       = 8 * 1024
+	rollbackTimeout           = 30 * time.Second
+	helperCancelGracePeriod   = 30 * time.Second
+	unclaimedInstanceGrace    = 3 * time.Hour
+	managedHelperRecentGrace  = time.Hour
+	managedHelperKeepVersions = 4
 )
 
 var hostGOOS, hostGOARCH = runtime.GOOS, runtime.GOARCH
@@ -711,7 +715,7 @@ func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, arg
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:              helperPath,
 		Args:              args,
-		Env:               appleVZHelperEnv(),
+		Env:               appleVZHelperEnv(helperPath),
 		Stdin:             stdin,
 		CancelGracePeriod: helperCancelGracePeriod,
 	})
@@ -727,7 +731,7 @@ func (b *backend) runHelperJSONInput(ctx context.Context, helperPath string, arg
 	return nil
 }
 
-func appleVZHelperEnv() []string {
+func appleVZHelperEnv(helperPath string) []string {
 	env := []string{
 		"PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
 		"LC_ALL=C",
@@ -749,6 +753,9 @@ func appleVZHelperEnv() []string {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			env = append(env, name+"="+value)
 		}
+	}
+	if isManagedHelperPath(helperPath) {
+		env = append(env, applevzhelper.ManagedHelperUseLockEnv+"="+applevzhelper.ManagedHelperUseLockPath(helperPath))
 	}
 	return env
 }
@@ -772,7 +779,7 @@ func (b *backend) appleVZStateRoot() (string, error) {
 	return root, nil
 }
 
-func (b *backend) ensureHelperBinary(ctx context.Context, cfg core.Config) (string, error) {
+func (b *backend) ensureHelperBinary(ctx context.Context, cfg core.Config) (_ string, returnErr error) {
 	root, err := b.stateRoot()
 	if err != nil {
 		return "", err
@@ -781,46 +788,51 @@ func (b *backend) ensureHelperBinary(ctx context.Context, cfg core.Config) (stri
 	if err := ensurePrivateDir(helperDir); err != nil {
 		return "", exit(2, "create apple-vz helper directory: %v", err)
 	}
+	installLock, err := lockManagedHelperDir(helperDir)
+	if err != nil {
+		return "", exit(2, "lock apple-vz helper directory: %v", err)
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, unlockManagedHelperDir(installLock))
+	}()
 	sourcePath, err := resolveHelperSourcePath(cfg)
 	if err != nil {
 		return "", err
-	}
-	managedPath := filepath.Join(helperDir, applevzhelper.ManagedHelperName)
-	if sourcePath == managedPath {
-		if _, err := os.Stat(managedPath); err != nil {
-			return "", exit(2, "apple-vz helper missing at %s", managedPath)
-		}
-		entitlementsPath := filepath.Join(helperDir, "apple-vz.entitlements")
-		if err := writeAtomicFile(entitlementsPath, []byte(applevzhelper.HelperEntitlements), 0o644); err != nil {
-			return "", exit(2, "write apple-vz entitlements: %v", err)
-		}
-		result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-			Name: "codesign",
-			Args: []string{"--force", "--sign", "-", "--entitlements", entitlementsPath, managedPath},
-		})
-		if err != nil {
-			return "", exit(2, "codesign apple-vz helper: %s", localCommandDetail(result, err))
-		}
-		return managedPath, nil
 	}
 	sourceDigest, err := fileSHA256(sourcePath)
 	if err != nil {
 		return "", exit(2, "hash apple-vz helper %s: %v", sourcePath, err)
 	}
 	entitlementsDigest := dataSHA256([]byte(applevzhelper.HelperEntitlements))
-	digestPath := filepath.Join(helperDir, managedHelperDigestFileName)
+	managedPath := managedHelperInstallPath(helperDir, sourceDigest, entitlementsDigest)
+	digestPath := managedHelperDigestPath(managedPath)
 	if managedHelperCurrent(managedPath, digestPath, sourceDigest, entitlementsDigest) {
+		if err := touchAndCleanupManagedHelpers(helperDir, managedPath); err != nil {
+			return "", exit(2, "clean apple-vz helper directory: %v", err)
+		}
 		return managedPath, nil
 	}
-	entitlementsPath := filepath.Join(helperDir, "apple-vz.entitlements")
-	if err := writeAtomicFile(entitlementsPath, []byte(applevzhelper.HelperEntitlements), 0o644); err != nil {
-		return "", exit(2, "write apple-vz entitlements: %v", err)
-	}
-	stagedPath, err := stageHelperBinary(sourcePath, helperDir)
+	stagedPath, stagedDigest, err := stageHelperBinary(sourcePath, helperDir)
 	if err != nil {
 		return "", err
 	}
 	defer os.Remove(stagedPath)
+	if stagedDigest != sourceDigest {
+		sourceDigest = stagedDigest
+		managedPath = managedHelperInstallPath(helperDir, sourceDigest, entitlementsDigest)
+		digestPath = managedHelperDigestPath(managedPath)
+		if managedHelperCurrent(managedPath, digestPath, sourceDigest, entitlementsDigest) {
+			if err := touchAndCleanupManagedHelpers(helperDir, managedPath); err != nil {
+				return "", exit(2, "clean apple-vz helper directory: %v", err)
+			}
+			return managedPath, nil
+		}
+	}
+	entitlementsPath := managedHelperEntitlementsPath(helperDir, entitlementsDigest)
+	if err := writeAtomicFile(entitlementsPath, []byte(applevzhelper.HelperEntitlements), 0o644); err != nil {
+		return "", exit(2, "write apple-vz entitlements: %v", err)
+	}
+	defer os.Remove(entitlementsPath)
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: "codesign",
 		Args: []string{"--force", "--sign", "-", "--entitlements", entitlementsPath, stagedPath},
@@ -846,7 +858,134 @@ func (b *backend) ensureHelperBinary(ctx context.Context, cfg core.Config) (stri
 	if err := writeAtomicFile(digestPath, append(digestData, '\n'), 0o644); err != nil {
 		return "", exit(2, "write apple-vz helper digest: %v", err)
 	}
+	if err := touchAndCleanupManagedHelpers(helperDir, managedPath); err != nil {
+		return "", exit(2, "clean apple-vz helper directory: %v", err)
+	}
 	return managedPath, nil
+}
+
+func managedHelperInstallPath(helperDir, sourceDigest, entitlementsDigest string) string {
+	key := dataSHA256([]byte(sourceDigest + "\x00" + entitlementsDigest))
+	return filepath.Join(helperDir, applevzhelper.ManagedHelperName+"-"+key)
+}
+
+func managedHelperDigestPath(managedPath string) string {
+	return managedPath + managedHelperDigestSuffix
+}
+
+func managedHelperEntitlementsPath(helperDir, entitlementsDigest string) string {
+	return filepath.Join(helperDir, "apple-vz-"+entitlementsDigest+".entitlements")
+}
+
+func lockManagedHelperDir(helperDir string) (*flock.Flock, error) {
+	path := filepath.Join(helperDir, ".install.lock")
+	lock := flock.New(path, flock.SetPermissions(0o600))
+	if err := lock.Lock(); err != nil {
+		return nil, err
+	}
+	return lock, nil
+}
+
+func unlockManagedHelperDir(lock *flock.Flock) error {
+	if lock == nil {
+		return nil
+	}
+	return lock.Unlock()
+}
+
+func touchAndCleanupManagedHelpers(helperDir, currentPath string) error {
+	now := time.Now()
+	if err := os.Chtimes(currentPath, now, now); err != nil {
+		return err
+	}
+	return cleanupObsoleteManagedHelpers(helperDir, currentPath, now)
+}
+
+func cleanupObsoleteManagedHelpers(helperDir, currentPath string, now time.Time) error {
+	entries, err := os.ReadDir(helperDir)
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	var candidates []candidate
+	prefix := applevzhelper.ManagedHelperName + "-"
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		digest := strings.TrimPrefix(name, prefix)
+		if len(digest) != sha256.Size*2 || !isLowerHex(digest) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		candidates = append(candidates, candidate{path: filepath.Join(helperDir, name), modTime: info.ModTime()})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	keep := map[string]bool{currentPath: true}
+	for _, candidate := range candidates {
+		if len(keep) >= managedHelperKeepVersions {
+			break
+		}
+		keep[candidate.path] = true
+	}
+	cutoff := now.Add(-managedHelperRecentGrace)
+	for _, candidate := range candidates {
+		if keep[candidate.path] || !candidate.modTime.Before(cutoff) {
+			continue
+		}
+		useLockPath := applevzhelper.ManagedHelperUseLockPath(candidate.path)
+		useLock := flock.New(useLockPath, flock.SetPermissions(0o600))
+		locked, err := useLock.TryLock()
+		if err != nil {
+			return err
+		}
+		if !locked {
+			continue
+		}
+		if err := os.Remove(candidate.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = useLock.Unlock()
+			return err
+		}
+		if err := os.Remove(managedHelperDigestPath(candidate.path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = useLock.Unlock()
+			return err
+		}
+		if err := useLock.Unlock(); err != nil {
+			return err
+		}
+		if err := os.Remove(useLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func isLowerHex(value string) bool {
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func isManagedHelperPath(path string) bool {
+	name := filepath.Base(path)
+	prefix := applevzhelper.ManagedHelperName + "-"
+	if !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	digest := strings.TrimPrefix(name, prefix)
+	return len(digest) == sha256.Size*2 && isLowerHex(digest)
 }
 
 func resolveHelperSourcePath(cfg core.Config) (string, error) {
@@ -912,15 +1051,15 @@ func dataSHA256(data []byte) string {
 	return fmt.Sprintf("%x", hash[:])
 }
 
-func stageHelperBinary(sourcePath, helperDir string) (string, error) {
+func stageHelperBinary(sourcePath, helperDir string) (string, string, error) {
 	source, err := os.Open(sourcePath)
 	if err != nil {
-		return "", exit(2, "read apple-vz helper %s: %v", sourcePath, err)
+		return "", "", exit(2, "read apple-vz helper %s: %v", sourcePath, err)
 	}
 	defer source.Close()
 	staged, err := os.CreateTemp(helperDir, "."+applevzhelper.ManagedHelperName+"-*")
 	if err != nil {
-		return "", exit(2, "stage apple-vz helper: %v", err)
+		return "", "", exit(2, "stage apple-vz helper: %v", err)
 	}
 	stagedPath := staged.Name()
 	cleanup := true
@@ -930,20 +1069,21 @@ func stageHelperBinary(sourcePath, helperDir string) (string, error) {
 			_ = os.Remove(stagedPath)
 		}
 	}()
-	if _, err := io.Copy(staged, source); err != nil {
-		return "", exit(2, "copy apple-vz helper: %v", err)
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(staged, hash), source); err != nil {
+		return "", "", exit(2, "copy apple-vz helper: %v", err)
 	}
 	if err := staged.Chmod(0o755); err != nil {
-		return "", exit(2, "chmod apple-vz helper: %v", err)
+		return "", "", exit(2, "chmod apple-vz helper: %v", err)
 	}
 	if err := staged.Sync(); err != nil {
-		return "", exit(2, "sync apple-vz helper: %v", err)
+		return "", "", exit(2, "sync apple-vz helper: %v", err)
 	}
 	if err := staged.Close(); err != nil {
-		return "", exit(2, "close apple-vz helper: %v", err)
+		return "", "", exit(2, "close apple-vz helper: %v", err)
 	}
 	cleanup = false
-	return stagedPath, nil
+	return stagedPath, fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
