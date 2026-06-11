@@ -95,25 +95,24 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"--tun=userspace-networking",
 		"--socks5-server=127.0.0.2:1055",
 		"--outbound-http-proxy-listen=127.0.0.2:1055",
-		`--state="${TS_STATE_FILE}"`,
-		`if [ -z "${TS_AUTH_FILE}" ]; then`,
+		"--state=mem:",
+		`if [ "${TS_HAS_AUTH}" != "true" ]; then`,
 		`Starting|Running)`,
-		`TS_AUTH_FILE="$(mktemp "${TS_RUNTIME_DIR}/auth.XXXXXX")"`,
+		`TS_AUTH_VALUE="${TS_AUTHKEY}"`,
 		`TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"`,
 		`TS_LOCK_FILE="${TS_STATE_DIR}/operation.lock"`,
 		`set -o noclobber`,
 		`kill -0 "${lock_pid}"`,
-		`rm -f "${TS_RUNTIME_DIR}"/auth.*`,
 		`TS_ARCHIVE="${TS_INSTALL_DIR}/tailscale.tgz"`,
 		`if [ ! -S "${TS_SOCKET}" ] || ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json >/dev/null 2>&1; then`,
 		"for _ in $(seq 1 120)",
 		"exit 75",
-		`--auth-key="file:${TS_AUTH_FILE}"`,
-		`if [ -n "${TS_AUTH_FILE}" ]; then set -- "$@" --auth-key="file:${TS_AUTH_FILE}"; fi`,
+		`--auth-key="file:/dev/stdin"`,
+		`printf '%s' "${TS_AUTH_VALUE}" | "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"`,
 		`Stopped) : ;;`,
 		"unset TS_AUTHKEY",
-		`if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi`,
-		"--shields-up=false",
+		"unset TS_AUTH_VALUE",
+		"--shields-up=true",
 		defaultIsloTailscaleAMD64SHA256,
 		defaultIsloTailscaleARM64SHA256,
 		"sha256sum -c -",
@@ -129,8 +128,11 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	if strings.Contains(isloTailscaleBringUp, `--authkey="${TS_AUTHKEY}"`) {
 		t.Fatal("bring-up script must not expose the auth key in tailscale argv")
 	}
-	if strings.Contains(isloTailscaleBringUp, "--state=mem:") {
-		t.Fatal("bring-up script must retain node state for one-off auth keys")
+	if strings.Contains(isloTailscaleBringUp, "/auth.") || strings.Contains(isloTailscaleBringUp, "TS_AUTH_FILE") {
+		t.Fatal("bring-up script must not persist a snapshot-clonable auth key file")
+	}
+	if strings.Contains(isloTailscaleBringUp, "tailscaled.state") {
+		t.Fatal("bring-up script must not persist snapshot-clonable node identity")
 	}
 	if strings.Contains(isloTailscaleBringUp, `Starting|Running|NeedsMachineAuth`) || strings.Contains(isloTailscaleBringUp, `Starting|Running|"")`) {
 		t.Fatal("machine approval and empty backend states must fail closed")
@@ -158,6 +160,14 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		!strings.Contains(isloTailscaleHealthCheck, `kill -0 "${lock_pid}"`) ||
 		!strings.Contains(isloTailscaleHealthCheck, "exit 75") {
 		t.Fatal("health check must validate the recovery lock owner")
+	}
+}
+
+func TestIsloTailscaleBringUpScriptIsValidBash(t *testing.T) {
+	cmd := exec.Command("bash", "-n")
+	cmd.Stdin = strings.NewReader(isloTailscaleBringUp)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bring-up script syntax: %v\n%s", err, out)
 	}
 }
 
@@ -385,7 +395,7 @@ func TestEnsureLeaseTailscaleClearsClaimForMissingSandbox(t *testing.T) {
 	}
 }
 
-func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
+func TestEnsureLeaseTailscaleReenrollsWithPersistedSettings(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"
 	if err := claimLeaseForRepoProviderWithPond(leaseID, "node-a", isloProvider, "mesh-demo", t.TempDir(), time.Minute, false); err != nil {
@@ -410,6 +420,7 @@ func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
 	}
 	backend := &isloBackend{
 		cfg: Config{Tailscale: core.TailscaleConfig{
+			AuthKey:  "tskey-recovery",
 			Hostname: "ambient-node",
 			Tags:     []string{"tag:ambient"},
 			ExitNode: "ambient-exit.example.com",
@@ -425,8 +436,8 @@ func TestEnsureLeaseTailscaleRestartsFromStateWithPondTag(t *testing.T) {
 		t.Fatalf("restart metadata=%#v requests=%d", meta, len(client.execRequests))
 	}
 	restartReq := client.execRequests[1]
-	if got := *restartReq.Env["TS_AUTHKEY"]; got != "" {
-		t.Fatalf("state recovery should not require an auth key, got %q", got)
+	if got := *restartReq.Env["TS_AUTHKEY"]; got != "tskey-recovery" {
+		t.Fatalf("re-enrollment auth key=%q", got)
 	}
 	for key, want := range map[string]string{
 		"TS_HOST":                "original-node",

@@ -50,9 +50,10 @@ printf '%s  %s\n' "${TS_SHA256}" "${TS_ARCHIVE}" | sha256sum -c - >/dev/null
 //   - runs `tailscale up` with the pond-scoped advertise tags;
 //   - prints the assigned 100.x address on its own CRABBOX_TS_IP= line.
 //
-// It is idempotent: a second warmup that reuses the sandbox re-uses the
-// existing daemon and state. It never uses `pkill -f tailscaled`, which would
-// match this very shell's command line and kill the session.
+// It is idempotent while the daemon remains alive. Node identity stays in
+// memory so provider snapshots cannot clone the tailnet private key. It never
+// uses `pkill -f tailscaled`, which would match this very shell's command line
+// and kill the session.
 const isloTailscaleBringUp = `
 set -e
 umask 077
@@ -74,18 +75,12 @@ for _ in $(seq 1 720); do
   sleep 0.5
 done
 test "${TS_LOCKED}" = 1 || { echo "timed out waiting for tailscale operation lock" >&2; exit 75; }
-TS_RUNTIME_DIR="/run/crabbox/tailscale/$(basename "${TS_STATE_DIR}")"
-mkdir -p "${TS_RUNTIME_DIR}"
-chmod 700 "${TS_RUNTIME_DIR}"
-rm -f "${TS_RUNTIME_DIR}"/auth.*
-TS_AUTH_FILE=""
-if [ -n "${TS_AUTHKEY}" ]; then
-  TS_AUTH_FILE="$(mktemp "${TS_RUNTIME_DIR}/auth.XXXXXX")"
-  printf '%s' "${TS_AUTHKEY}" >"${TS_AUTH_FILE}"
-fi
+TS_AUTH_VALUE="${TS_AUTHKEY}"
+TS_HAS_AUTH=false
+if [ -n "${TS_AUTH_VALUE}" ]; then TS_HAS_AUTH=true; fi
 unset TS_AUTHKEY
 TS_INSTALL_DIR="$(mktemp -d "${TS_STATE_DIR}/install.XXXXXX")"
-trap 'if [ -n "${TS_AUTH_FILE}" ]; then rm -f "${TS_AUTH_FILE}"; fi; rm -rf "${TS_INSTALL_DIR}"; if [ "${TS_LOCKED}" = 1 ]; then rm -f "${TS_LOCK_FILE}"; fi' EXIT
+trap 'rm -rf "${TS_INSTALL_DIR}"; if [ "${TS_LOCKED}" = 1 ]; then rm -f "${TS_LOCK_FILE}"; fi' EXIT
 case "$(uname -m)" in
   x86_64) A=amd64; TS_SHA256=` + defaultIsloTailscaleAMD64SHA256 + ` ;;
   aarch64|arm64) A=arm64; TS_SHA256=` + defaultIsloTailscaleARM64SHA256 + ` ;;
@@ -101,7 +96,6 @@ TS_BIN_DIR="${TS_STATE_DIR}/bin"
 rm -rf "${TS_BIN_DIR}"
 mv "${TS_EXTRACT_DIR}" "${TS_BIN_DIR}"
 TS_SOCKET="${TS_STATE_DIR}/tailscaled.sock"
-TS_STATE_FILE="${TS_STATE_DIR}/tailscaled.state"
 tailscale_ip_if_ready() {
   status_json="$("${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json 2>/dev/null || true)"
   printf '%s' "${status_json}" | grep -Eq '"BackendState"[[:space:]]*:[[:space:]]*"Running"' || return 1
@@ -116,7 +110,7 @@ if [ ! -S "${TS_SOCKET}" ] || ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}
   # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
   # unauthenticated outbound proxy on another loopback address.
   rm -f "${TS_SOCKET}"
-  setsid "${TS_BIN_DIR}/tailscaled" --tun=userspace-networking --state="${TS_STATE_FILE}" \
+  setsid "${TS_BIN_DIR}/tailscaled" --tun=userspace-networking --state=mem: \
     --socket="${TS_SOCKET}" --socks5-server=127.0.0.2:1055 \
     --outbound-http-proxy-listen=127.0.0.2:1055 \
     >"${TS_STATE_DIR}/tailscaled.log" 2>&1 </dev/null &
@@ -134,28 +128,33 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 if [ -z "${ts_ip}" ]; then
-  if [ -z "${TS_AUTH_FILE}" ]; then
+  if [ "${TS_HAS_AUTH}" != "true" ]; then
     case "${backend_state}" in
       Starting|Running) echo "tailscale recovery is still starting" >&2; exit 75 ;;
       Stopped) : ;;
       *) echo "tailscale state unavailable and no auth key provided" >&2; exit 4 ;;
     esac
   fi
-  set -- --hostname="${TS_HOST}" --accept-dns=false --shields-up=false --timeout=120s
-  if [ -n "${TS_AUTH_FILE}" ]; then set -- "$@" --auth-key="file:${TS_AUTH_FILE}"; fi
+  set -- --hostname="${TS_HOST}" --accept-dns=false --shields-up=true --timeout=120s
+  if [ "${TS_HAS_AUTH}" = "true" ]; then set -- "$@" --auth-key="file:/dev/stdin"; fi
   if [ -n "${TS_TAGS}" ]; then set -- "$@" --advertise-tags="${TS_TAGS}"; fi
   if [ -n "${TS_LOGIN_SERVER}" ]; then set -- "$@" --login-server="${TS_LOGIN_SERVER}"; fi
   if [ -n "${TS_EXIT_NODE}" ]; then
     set -- "$@" --exit-node="${TS_EXIT_NODE}"
     if [ "${TS_EXIT_NODE_ALLOW_LAN}" = "true" ]; then set -- "$@" --exit-node-allow-lan-access; fi
   fi
-  "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"
+  if [ "${TS_HAS_AUTH}" = "true" ]; then
+    printf '%s' "${TS_AUTH_VALUE}" | "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"
+  else
+    "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" up "$@"
+  fi
   for _ in $(seq 1 24); do
     ts_ip="$(tailscale_ip_if_ready || true)"
     if [ -n "${ts_ip}" ]; then break; fi
     sleep 5
   done
 fi
+unset TS_AUTH_VALUE
 test -n "${ts_ip}"
 echo "CRABBOX_TS_IP=${ts_ip}"
 `

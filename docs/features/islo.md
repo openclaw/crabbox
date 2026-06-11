@@ -135,21 +135,23 @@ proxy defaults (`ALL_PROXY=socks5://127.0.0.2:1055`,
 command environment values in either case override those defaults. An explicit
 `ALL_PROXY`/`all_proxy` also suppresses the protocol-specific defaults. Other
 processes must opt into those proxies or another userspace Tailscale surface.
-The proxy uses `127.0.0.2` because userspace Tailscale forwards inbound tailnet
-TCP to `127.0.0.1`; keeping the proxy on a separate loopback address prevents
-tailnet peers from using the unauthenticated outbound proxy.
-Crabbox runs `tailscaled` as `root` with node state and its control socket in a
-root-only directory inside the sandbox, while repository sync and workload
-commands run as Islo's non-root `islo` user. Persisting node state lets a
-stopped daemon recover without reusing a one-off auth key. The control socket is
-revalidated before lease reuse, status reporting, and `pond peers`; if neither
-saved state nor a usable auth key can restore the daemon, stale tailnet claim
-metadata is removed and the lease falls back to its URL bridge.
+The proxy uses `127.0.0.2`, separate from userspace Tailscale's inbound loopback
+mapping. Crabbox runs `tailscaled` as `root` with its binaries and control
+socket in a root-only directory, while repository sync and workload commands
+run as Islo's non-root `islo` user. Node identity stays in memory and the auth
+key is passed through stdin, so an Islo filesystem snapshot cannot clone either
+credential. The control socket is revalidated before lease reuse, status
+reporting, and `pond peers`; after daemon loss, recovery requires a usable auth
+key. If recovery fails, stale tailnet claim metadata is removed and the lease
+falls back to its URL bridge.
 Read-only `status` and `pond peers` checks do not run the long repair path;
-lease reuse through `run` performs saved-state recovery.
+lease reuse through `run` performs re-enrollment when needed.
 Unproxied process traffic still uses the sandbox's normal network namespace.
 Exit-node settings are passed through to `tailscale up`, but only traffic sent
 through the userspace Tailscale path uses them.
+Inbound tailnet connections are blocked with shields-up; Islo's
+`FeatureTailscale` contract is outbound proxy access, not a forwarded loopback
+service surface.
 
 A lease warmed **without** `--tailscale` is unchanged: no tailnet IP is recorded
 and `pond peers` reports it on the URL bridge as before. The pond ACL tag and its
