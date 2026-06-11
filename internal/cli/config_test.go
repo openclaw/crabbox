@@ -2811,6 +2811,36 @@ func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestCoderConfigDefaultsSetWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "coder"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/home/coder/crabbox" {
+		t.Fatalf("WorkRoot=%q want /home/coder/crabbox", cfg.WorkRoot)
+	}
+	cfg = baseConfig()
+	cfg.Provider = "coder"
+	cfg.Coder.WorkRoot = "/home/coder/custom"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/home/coder/custom" {
+		t.Fatalf("custom WorkRoot=%q want /home/coder/custom", cfg.WorkRoot)
+	}
+	cfg = baseConfig()
+	cfg.Provider = "coder"
+	cfg.WorkRoot = "/tmp/explicit"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Coder.WorkRoot != "/tmp/explicit" || cfg.WorkRoot != "/tmp/explicit" {
+		t.Fatalf("explicit top-level work root not propagated: coder=%q work=%q", cfg.Coder.WorkRoot, cfg.WorkRoot)
+	}
+}
+
 func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

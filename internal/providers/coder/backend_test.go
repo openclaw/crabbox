@@ -97,6 +97,24 @@ func TestCoderSSHTargetUsesProxyCommand(t *testing.T) {
 	}
 }
 
+func TestCoderSSHTargetUsesValidHostForOwnerQualifiedWorkspace(t *testing.T) {
+	target := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "alice/shared")
+	if !regexp.MustCompile(`^coder-alice-shared-[0-9a-f]{6}$`).MatchString(target.Host) {
+		t.Fatalf("Host=%q want unique owner-qualified alias", target.Host)
+	}
+	if !strings.Contains(target.ProxyCommand, "'alice/shared'") {
+		t.Fatalf("proxy command %q missing owner-qualified ref", target.ProxyCommand)
+	}
+}
+
+func TestCoderSSHTargetKeepsOwnerQualifiedHostsUnique(t *testing.T) {
+	alice := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "alice/shared")
+	bob := coderSSHTarget(Config{Coder: CoderConfig{CLIPath: "coder", Wait: "yes"}}, "bob/shared")
+	if alice.Host == bob.Host {
+		t.Fatalf("owner-qualified SSH hosts collided: %q", alice.Host)
+	}
+}
+
 func TestCoderReleaseStopsByDefaultAndDeletesOnlyWhenConfigured(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -272,6 +290,9 @@ func TestCoderListAndCleanupFilterCrabboxOwnedStoppedWorkspaces(t *testing.T) {
 	}
 	if got := strings.Join(runner.calls[len(runner.calls)-1].Args, " "); got != "stop --yes crabbox-blue" {
 		t.Fatalf("cleanup final call=%q", got)
+	}
+	if servers[0].Labels["work_root"] != "/home/coder/crabbox" {
+		t.Fatalf("work_root label=%q", servers[0].Labels["work_root"])
 	}
 }
 
@@ -636,7 +657,7 @@ func TestCoderOwnerQualifiedResolveAndReleaseUseOwnerWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.SSH.Host != "alice/shared" || lease.Server.Labels["coder_workspace_ref"] != "alice/shared" {
+	if !regexp.MustCompile(`^coder-alice-shared-[0-9a-f]{6}$`).MatchString(lease.SSH.Host) || !strings.Contains(lease.SSH.ProxyCommand, "'alice/shared'") || lease.Server.Labels["coder_workspace_ref"] != "alice/shared" {
 		t.Fatalf("owner-qualified target not preserved: %#v", lease)
 	}
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
