@@ -45,6 +45,22 @@ func TestDockerSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
+	for _, name := range []string{"sandbox-runtime", "srt"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "sandbox-runtime" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		}
+	}
+	spec := mustProvider(t, "sandbox-runtime").Spec()
+	if spec.Family != "sandbox-runtime" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Features) != 0 {
+		t.Fatalf("sandbox-runtime spec=%#v", spec)
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -85,6 +101,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"proxmox",
 		"railway",
 		"runpod",
+		"sandbox-runtime",
 		"semaphore",
 		"sprites",
 		"ssh",
@@ -105,4 +122,13 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mustProvider(t *testing.T, name string) core.Provider {
+	t.Helper()
+	provider, err := core.ProviderFor(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return provider
 }
