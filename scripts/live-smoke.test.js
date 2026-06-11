@@ -446,7 +446,7 @@ esac
   assert.doesNotMatch(failedAudit.stderr, /unbound variable/);
 });
 
-test("apple-vz live smoke requires an explicit helper binary", () => {
+test("apple-vz live smoke rejects an invalid explicit helper binary", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-apple-vz-"));
   const bin = path.join(dir, "bin");
   const fakeCrabbox = path.join(bin, "crabbox");
@@ -479,7 +479,7 @@ exit 99
   });
 
   assert.equal(result.status, 2, result.stdout + result.stderr);
-  assert.match(result.stderr, /apple-vz smoke requires an executable helper/);
+  assert.match(result.stderr, /CRABBOX_LIVE_APPLE_VZ_HELPER must point to an executable helper/);
   assert.match(result.stderr, new RegExp(missingHelper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 

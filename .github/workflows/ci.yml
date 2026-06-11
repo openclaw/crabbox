@@ -66,6 +66,33 @@ jobs:
       - name: Build
         run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
 
+  apple-vz:
+    name: Apple VZ
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Vet native helper
+        run: go vet ./internal/applevzhelper ./cmd/crabbox-apple-vz-helper
+
+      - name: Test native helper and provider
+        run: go test -race ./internal/applevzhelper ./internal/providers/applevz
+
+      - name: Build native helper
+        run: go build -trimpath -o /tmp/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
+
   worker:
     name: Worker
     runs-on: ubuntu-latest
@@ -157,7 +184,7 @@ jobs:
 
   release-check:
     name: Release Check
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     timeout-minutes: 15
 
     steps:
@@ -165,6 +192,9 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
 
       - name: Set up Go
         uses: actions/setup-go@v6
