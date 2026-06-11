@@ -518,6 +518,48 @@ func TestFreestyleSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 }
 
+func TestFreestyleSyncWorkspaceValidatesArchiveBeforeDeletingWorkspace(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "missing.txt"), []byte("tracked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	cmd = exec.Command("git", "add", "missing.txt")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	trackedPath := filepath.Join(root, "missing.txt")
+	if err := os.Chmod(trackedPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(trackedPath, 0o644) })
+	client := &fakeFreestyleClient{}
+	backend := &freestyleBackend{
+		cfg: Config{
+			Freestyle: FreestyleConfig{Workdir: "repo"},
+			Sync:      SyncConfig{Delete: true},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+
+	if _, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
+		Repo: Repo{Root: root, Name: "repo"},
+	}); err == nil {
+		t.Fatal("syncWorkspace err=nil, want local archive failure")
+	}
+	if len(client.prepareCommands) != 0 {
+		t.Fatalf("remote commands=%#v, want no workspace mutation before archive validation", client.prepareCommands)
+	}
+}
+
 func TestFreestyleSyncWorkspaceHonorsIncludes(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

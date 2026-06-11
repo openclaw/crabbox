@@ -178,6 +178,9 @@ func (c *freestyleHTTPClient) DeleteVM(ctx context.Context, id string) error {
 		return freestyleError("delete vm", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
 	if resp.StatusCode >= 400 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return freestyleError("delete vm", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))

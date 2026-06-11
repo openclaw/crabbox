@@ -97,3 +97,65 @@ func TestFreestyleCreateVMOmitsUnsetSizing(t *testing.T) {
 		t.Fatalf("vm.ID=%q", vm.ID)
 	}
 }
+
+func TestFreestyleListVMsPaginates(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got, want := r.URL.Query().Get("limit"), "100"; got != want {
+			t.Errorf("limit=%q want %q", got, want)
+		}
+		switch got := r.URL.Query().Get("offset"); got {
+		case "0":
+			vms := make([]freestyleVM, freestyleListPageSize)
+			for i := range vms {
+				vms[i].ID = "page-one"
+			}
+			_ = json.NewEncoder(w).Encode(freestyleListVMsResponse{VMs: vms, TotalCount: freestyleListPageSize + 1})
+		case "100":
+			_ = json.NewEncoder(w).Encode(freestyleListVMsResponse{
+				VMs:        []freestyleVM{{ID: "page-two"}},
+				TotalCount: freestyleListPageSize + 1,
+			})
+		default:
+			t.Errorf("unexpected offset %q", got)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := &freestyleHTTPClient{
+		apiKey:     "test-key",
+		apiURL:     server.URL,
+		httpClient: server.Client(),
+	}
+	vms, err := client.ListVMs(context.Background())
+	if err != nil {
+		t.Fatalf("ListVMs err=%v", err)
+	}
+	if requests != 2 || len(vms) != freestyleListPageSize+1 || vms[len(vms)-1].ID != "page-two" {
+		t.Fatalf("requests=%d vms=%d last=%q", requests, len(vms), vms[len(vms)-1].ID)
+	}
+}
+
+func TestFreestyleDeleteVMTreatsNotFoundAsSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.Method, http.MethodDelete; got != want {
+			t.Errorf("method=%s want %s", got, want)
+		}
+		if got, want := r.URL.EscapedPath(), "/v1/vms/vm123"; got != want {
+			t.Errorf("path=%q want %q", got, want)
+		}
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := &freestyleHTTPClient{
+		apiKey:     "test-key",
+		apiURL:     server.URL,
+		httpClient: server.Client(),
+	}
+	if err := client.DeleteVM(context.Background(), "vm123"); err != nil {
+		t.Fatalf("DeleteVM err=%v, want nil for missing VM", err)
+	}
+}

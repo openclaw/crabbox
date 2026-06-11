@@ -34,6 +34,21 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 		return nil, 0, err
 	}
 	preflightDuration := b.now().Sub(preflightStarted)
+	archiveStarted := b.now()
+	archive, err := createFreestyleSyncArchive(ctx, req.Repo, manifest, b.rt.Stderr)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer os.Remove(archive.Name())
+	defer archive.Close()
+	if _, err := archive.Seek(0, 0); err != nil {
+		return nil, 0, fmt.Errorf("freestyle rewind archive: %w", err)
+	}
+	archiveData, err := readFreestyleArchiveForUpload(archive)
+	if err != nil {
+		return nil, 0, fmt.Errorf("freestyle read archive: %w", err)
+	}
+	archiveDuration := b.now().Sub(archiveStarted)
 	workspace, err := freestyleWorkspacePath(b.cfg)
 	if err != nil {
 		return nil, 0, err
@@ -43,22 +58,7 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 		return nil, 0, err
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
-	archiveStarted := b.now()
-	archive, err := createFreestyleSyncArchive(ctx, req.Repo, manifest, b.rt.Stderr)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer os.Remove(archive.Name())
-	defer archive.Close()
-	archiveDuration := b.now().Sub(archiveStarted)
 	uploadStarted := b.now()
-	if _, err := archive.Seek(0, 0); err != nil {
-		return nil, 0, fmt.Errorf("freestyle rewind archive: %w", err)
-	}
-	archiveData, err := readFreestyleArchiveForUpload(archive)
-	if err != nil {
-		return nil, 0, fmt.Errorf("freestyle read archive: %w", err)
-	}
 	b64Content := base64.StdEncoding.EncodeToString(archiveData)
 	suffix := freestyleRandomSuffix()
 	remoteArchive := "/tmp/crabbox-" + suffix + ".tgz"
@@ -78,8 +78,8 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 	return []timingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
-		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
 		{Name: "archive", Ms: archiveDuration.Milliseconds()},
+		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
 		{Name: "upload", Ms: uploadDuration.Milliseconds()},
 		{Name: "freestyle_sync", Ms: total.Milliseconds()},
 	}, total, nil

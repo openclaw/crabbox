@@ -64,8 +64,9 @@ export FREESTYLE_API_KEY=...
 Freestyle API keys must not be passed as CLI flags. Crabbox reads them from
 environment variables only.
 
-`FREESTYLE_API_URL` or `freestyle.apiUrl` can override the default
-`https://api.freestyle.sh`.
+`FREESTYLE_API_URL`, `CRABBOX_FREESTYLE_API_URL`, or `freestyle.apiUrl` in the
+user config can override the default `https://api.freestyle.sh`. Repository
+config cannot override this credential destination.
 
 ## Config
 

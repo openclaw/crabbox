@@ -878,8 +878,12 @@ func defaultConfig() Config {
 func loadConfig() (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
+		freestyleAPIURL := cfg.Freestyle.APIURL
 		if err := applyConfigFile(&cfg, path); err != nil {
 			return Config{}, err
+		}
+		if !trustedProviderEndpointConfigPath(path) {
+			cfg.Freestyle.APIURL = freestyleAPIURL
 		}
 	}
 	if err := applyEnv(&cfg); err != nil {
@@ -2157,6 +2161,13 @@ func configPaths() []string {
 		}
 	}
 	return paths
+}
+
+func trustedProviderEndpointConfigPath(path string) bool {
+	if explicit := os.Getenv("CRABBOX_CONFIG"); explicit != "" {
+		return path == explicit
+	}
+	return path == userConfigPath()
 }
 
 func userConfigPath() string {
