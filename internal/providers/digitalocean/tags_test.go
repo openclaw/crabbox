@@ -105,3 +105,38 @@ func TestLeaseTagsPreserveTailscaleMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestLeaseTagsRoundTripCapabilityAndPondLabels(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Profile = "daily"
+	cfg.Desktop = true
+	cfg.DesktopEnv = "gnome"
+	cfg.Browser = true
+	cfg.Code = true
+	cfg.Pond = "ci pond"
+	cfg.ExposedPorts = []string{"3000", "5173"}
+
+	tags := leaseTags(cfg, "cbx_abcdef123456", "blue", "ready", true, time.Now())
+	for _, tag := range tags {
+		if !digitalOceanTagNameRE.MatchString(tag) {
+			t.Fatalf("invalid digitalocean tag %q in %v", tag, tags)
+		}
+	}
+
+	labels := labelsFromTags(tags)
+	for key, want := range map[string]string{
+		"profile":               "daily",
+		"desktop":               "true",
+		"desktop_env":           "gnome",
+		"browser":               "true",
+		"code":                  "true",
+		"pond":                  "ci-pond",
+		"crabbox_exposed_ports": "3000-5173",
+	} {
+		if got := labels[key]; got != want {
+			t.Fatalf("labels[%q]=%q want %q; all=%v tags=%v", key, got, want, labels, tags)
+		}
+	}
+}

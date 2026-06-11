@@ -55,6 +55,7 @@ func tagLabelKeys() []string {
 	return []string{
 		"lease", "slug", "state", "keep", "target", "class", "server_type", "provider_key",
 		"ttl_secs", "idle_timeout", "idle_timeout_secs", "expires_at", "created_at", "last_touched_at", "updated_at",
+		"profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports",
 		"tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access",
 	}
 }
@@ -106,7 +107,7 @@ func labelsFromTags(tags []string) map[string]string {
 				continue
 			}
 			switch parts[0] {
-			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access":
+			case "lease", "slug", "keep", "target", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access":
 				labels[parts[0]] = parts[1]
 			case "state":
 				if statePriority(parts[1]) >= statePriority(labels["state"]) {
