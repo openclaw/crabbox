@@ -1,63 +1,122 @@
 # Apple VZ Provider
 
-Read this when you:
+Use `provider: apple-vz` when an Apple Silicon Mac should run tests in a full
+ARM64 Linux virtual machine without a cloud account or third-party VM daemon.
+Crabbox boots Ubuntu with Apple's `Virtualization.framework`, exposes SSH on a
+loopback-only host port, then uses the normal Crabbox sync and command path.
 
-- choose `provider: apple-vz` (alias `applevz`);
-- want a local Linux VM on Apple Silicon using Apple's `Virtualization.framework`;
-- change `internal/providers/applevz` or `internal/applevzhelper`.
+The alias is `applevz`. The provider is direct and local: it never contacts the
+Crabbox coordinator and needs no cloud credentials.
 
-`apple-vz` is an experimental local SSH-lease provider. Crabbox shells out to a
-small macOS helper, boots an Ubuntu cloud image with `Virtualization.framework`,
-exposes guest SSH through a host-local VSOCK proxy, then reuses the normal
-Crabbox SSH sync and command path.
+**Target:** Linux ARM64.
 
-The provider is local only. It never uses the coordinator or cloud
-credentials.
+**Host:** Apple Silicon macOS.
 
-**Targets:** Linux.
+## When to use it
 
-**Hosts:** Apple Silicon macOS only.
+Apple VZ is useful when tests need machine semantics rather than only a
+container:
 
-## Host requirements
+- a real Linux kernel, EFI boot, systemd, cloud-init, and a writable root disk;
+- an isolated per-lease VM with explicit CPU, memory, and disk sizing;
+- Ubuntu cloud-image behavior close to common cloud VMs;
+- no Docker, Multipass, Parallels, or Tart dependency.
 
-- macOS on Apple Silicon
-- Xcode command-line tools, for `codesign`, `hdiutil`, and `newfs_msdos`
-- a locally built `crabbox-apple-vz-helper` binary:
+Choose a different local provider when its ownership model fits better:
+
+- `apple-container`: fastest container-oriented Linux runs;
+- `apple-machine`: persistent Apple Container development machines;
+- `local-container`: Docker-compatible images and container tooling;
+- `multipass`: Canonical-managed Ubuntu VMs;
+- `parallels`: Linux, macOS, or Windows VMs plus checkpoint workflows;
+- `tart`: macOS VM leases.
+
+Apple VZ is not a claim that containers lack VM-backed isolation. Its
+difference is full-machine Linux boot and disk semantics under direct
+`Virtualization.framework` control.
+
+## Requirements
+
+- Apple Silicon Mac;
+- Xcode command-line tools;
+- hardware virtualization available to the current macOS host;
+- enough free disk for the downloaded image, converted raw cache, and lease
+  disks.
+
+The Xcode tools provide `codesign`, `hdiutil`, and `newfs_msdos`. Check the
+host before provisioning:
 
 ```sh
-go build -o ./bin/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
+xcode-select -p
+sysctl -n kern.hv_support
+crabbox doctor --provider apple-vz
 ```
 
-Release installs intentionally gate `apple-vz` behind this separate helper.
-The standard GoReleaser job runs on Linux and cannot cross-compile the helper's
-Apple `Virtualization.framework` bindings. Crabbox copies the helper into its
-user state directory and ad-hoc signs the managed copy with the Apple
-virtualization and local networking entitlements it needs. The source helper
-binary itself is left untouched.
+`kern.hv_support` must report `1`. Nested Apple virtualization is commonly
+unavailable inside macOS VMs, including Parallels guests, even when the outer
+VM product exposes a nested-virtualization setting.
+
+## Installation
+
+Apple Silicon Homebrew bottles and release archives include both:
+
+```text
+crabbox
+crabbox-apple-vz-helper
+```
+
+Crabbox finds the sibling helper automatically. It copies the helper into the
+Crabbox state directory, ad-hoc signs that managed copy with the required
+virtualization and local-network entitlements, and leaves the installed source
+binary untouched. The managed helper is refreshed only when the source
+binary changes or the signed managed copy no longer matches its recorded
+SHA-256 digest.
+
+For source development:
+
+```sh
+go build -trimpath -o ./bin/crabbox ./cmd/crabbox
+go build -trimpath -o ./bin/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
+
+./bin/crabbox doctor --provider apple-vz
+```
+
+If the helper is elsewhere, use `--apple-vz-helper`, `appleVZ.helperPath`, or
+`CRABBOX_APPLE_VZ_HELPER`.
 
 ## Quick start
 
 ```sh
-go build -o ./bin/crabbox ./cmd/crabbox
-go build -o ./bin/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
+crabbox doctor --provider apple-vz
 
-./bin/crabbox doctor --provider apple-vz --apple-vz-helper ./bin/crabbox-apple-vz-helper
-./bin/crabbox run --provider apple-vz --apple-vz-helper ./bin/crabbox-apple-vz-helper -- echo apple-vz-ok
+# One-shot VM: create, sync, run, delete.
+crabbox run --provider apple-vz -- uname -a
 
-./bin/crabbox warmup --provider apple-vz --apple-vz-helper ./bin/crabbox-apple-vz-helper --slug apple-vz-smoke
-./bin/crabbox status --provider apple-vz --id apple-vz-smoke
-./bin/crabbox ssh --provider apple-vz --id apple-vz-smoke
-./bin/crabbox stop --provider apple-vz apple-vz-smoke
+# Retained VM: create once, inspect, reuse, then delete.
+crabbox warmup --provider apple-vz --slug vz-dev
+crabbox status --provider apple-vz --id vz-dev
+crabbox run --provider apple-vz --id vz-dev -- systemctl is-system-running
+crabbox ssh --provider apple-vz --id vz-dev
+crabbox stop --provider apple-vz vz-dev
 ```
+
+Use `crabbox list --provider apple-vz --json` to inspect all local Apple VZ
+leases. `crabbox cleanup --provider apple-vz` removes stopped or otherwise
+cleanup-eligible instances and stale claims.
 
 ## Configuration
 
 ```yaml
 provider: apple-vz
+os: ubuntu:26.04
 appleVZ:
-  helperPath: ./bin/crabbox-apple-vz-helper
+  # Optional for normal Homebrew/release installs.
+  helperPath: /custom/path/crabbox-apple-vz-helper
+
+  # Optional image override. Remote URLs require imageSHA256.
   image: https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img
   imageSHA256: 5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b
+
   user: crabbox
   workRoot: /work/crabbox
   cpus: 4
@@ -65,20 +124,21 @@ appleVZ:
   diskGiB: 30
 ```
 
-Defaults applied when unset: `user=crabbox`, `workRoot=/work/crabbox`,
-`cpus=4`, `memoryMiB=8192`, `diskGiB=30`.
+Defaults:
 
-The default `appleVZ.image` follows Crabbox's portable `osImage` selector and
-uses dated Ubuntu cloud-image release directories instead of moving `release/`
-aliases:
+| Setting | Default |
+| --- | --- |
+| Architecture | `arm64` |
+| OS image | `ubuntu:26.04` |
+| SSH user | `crabbox` |
+| Work root | `/work/crabbox` |
+| CPUs | `4` |
+| Memory | `8192` MiB |
+| Disk | `30` GiB |
 
-- `ubuntu:24.04` → Noble arm64 cloud image
-- `ubuntu:26.04` → Resolute arm64 cloud image
-
-Default remote image URLs include pinned SHA-256 checksums. Custom remote image
-URLs must set `appleVZ.imageSHA256` or `--apple-vz-image-sha256`; cached
-downloads are re-verified before reuse. Local image paths may omit the checksum,
-but if a checksum is supplied the helper verifies the local file before boot.
+`--arch arm64` is accepted. Explicit `--arch amd64` is rejected because
+`Virtualization.framework` on Apple Silicon boots ARM64 guests for this
+provider.
 
 Provider flags:
 
@@ -106,40 +166,120 @@ CRABBOX_APPLE_VZ_MEMORY
 CRABBOX_APPLE_VZ_DISK
 ```
 
-## Lease behavior
+## Images and integrity
 
-1. Crabbox ensures a per-lease SSH key and starts the `apple-vz` helper.
-2. The helper downloads or reuses the configured Ubuntu cloud image, converts
-   qcow2 images to sparse raw once, clones a per-lease disk, and writes a
-   NoCloud seed disk.
-3. The helper boots the VM headless with NAT networking, an EFI variable store,
-   and a VSOCK device.
-4. Cloud-init creates the SSH user, installs the Crabbox readiness marker, and
-   starts a guest-side VSOCK to SSH bridge.
-5. The helper exposes that bridge on a host-local `127.0.0.1:<port>` listener.
-6. Crabbox waits for SSH readiness, then syncs and runs commands normally.
-7. `stop` terminates the helper process and removes the per-lease VM state.
+The portable `osImage` selector maps to dated Ubuntu ARM64 cloud images:
 
-## Limits and caveats
+- `ubuntu:24.04`: Noble;
+- `ubuntu:26.04`: Resolute.
 
-- Experimental, local-only, Apple Silicon only, Linux only.
-- No desktop, browser, VNC, WebVNC, or code-server surfaces in v1.
-- No checkpoint, fork, restore, or snapshot flow.
-- No Tailscale bootstrap.
-- Release archives and the Homebrew formula do not install
-  `crabbox-apple-vz-helper`; build the helper from a source checkout and pass
-  `--apple-vz-helper` or put it on `PATH`.
-- The first run can take longer while Crabbox downloads and converts the base
-  cloud image.
+Built-in remote URLs have pinned SHA-256 digests. A custom HTTP or HTTPS image
+must also set `appleVZ.imageSHA256`; Crabbox refuses an unverified remote image.
+A local image path may omit the checksum, or set one to verify the file before
+boot.
 
-## Runtime expectations
+QCOW2 cloud images are converted once into a sparse raw base image. Each lease
+gets a clone or sparse copy of that base, resized to `diskGiB`. Changing the
+image reference or source file creates a new converted cache entry.
 
-The provider depends on:
+## Lifecycle and networking
 
-- the `crabbox-apple-vz-helper` binary
-- `codesign`
-- `hdiutil`
-- `newfs_msdos`
-- Apple's `Virtualization.framework`
+1. Crabbox creates a per-lease SSH key and asks the helper to start an instance.
+2. The helper verifies/downloads the image, prepares the root disk, creates an
+   EFI variable store, and writes a NoCloud seed disk.
+3. Cloud-init creates the SSH user and work root, then starts a guest VSOCK to
+   SSH bridge.
+4. The helper listens on an ephemeral `127.0.0.1` port and proxies it to the
+   guest over VSOCK. The SSH endpoint is not exposed on the LAN.
+5. Crabbox waits for `/usr/local/bin/crabbox-ready`, records the lease claim,
+   syncs the checkout, and runs the command.
+6. `stop` terminates the owning helper process and removes the per-lease VM
+   state. Failed acquisitions roll back even when `--keep` was requested.
 
-The helper validates those prerequisites during `crabbox doctor --provider apple-vz`.
+The VM uses NAT for outbound networking. There is no inbound LAN address,
+Tailscale bootstrap, desktop, browser, VNC, or code-server surface.
+
+## State and disk usage
+
+The default macOS state root is:
+
+```text
+~/Library/Application Support/crabbox/state/apple-vz
+```
+
+With `XDG_STATE_HOME`, it is:
+
+```text
+$XDG_STATE_HOME/crabbox/apple-vz
+```
+
+Important paths beneath that root:
+
+```text
+cache/downloads/                  verified source downloads
+cache/images/                     converted sparse raw images
+helper/                           managed signed helper and integrity digests
+instances/<name>/instance.json    lifecycle metadata
+instances/<name>/helper.log       helper process output
+instances/<name>/console.log      Linux serial console output
+instances/<name>/disk.raw         per-lease root disk
+```
+
+Downloaded and converted base images are shared caches. Stopping a lease
+removes its instance directory but keeps reusable base-image caches.
+
+## Troubleshooting
+
+Start with:
+
+```sh
+crabbox doctor --provider apple-vz
+crabbox list --provider apple-vz --json
+sysctl -n kern.hv_support
+```
+
+### Helper not found
+
+Reinstall the Apple Silicon Homebrew bottle or release archive. For a source
+checkout, build `./cmd/crabbox-apple-vz-helper` beside the CLI or pass its path
+explicitly.
+
+### Runtime VM creation fails
+
+Confirm the command runs on a physical Apple Silicon macOS host with
+`kern.hv_support=1`. A clean macOS guest is useful for installation checks but
+usually cannot run another `Virtualization.framework` VM.
+
+### SSH readiness times out
+
+Read the bounded diagnostics printed by Crabbox, then inspect the retained log
+files if the instance still exists:
+
+```sh
+root="$HOME/Library/Application Support/crabbox/state/apple-vz"
+find "$root/instances" -name helper.log -o -name console.log
+```
+
+The serial console usually shows cloud-init, filesystem, or boot failures.
+`helper.log` shows host-side VM and VSOCK failures.
+
+### Disk use grows
+
+List the cache and instance sizes:
+
+```sh
+du -sh "$HOME/Library/Application Support/crabbox/state/apple-vz"/*
+```
+
+Stop active leases before manually removing state. Converted images are
+rebuildable, but deleting them makes the next run reconvert the cloud image.
+
+## Current limits
+
+- experimental, local-only, Apple Silicon only, Linux ARM64 only;
+- no checkpoint, fork, restore, or snapshot support;
+- no suspend/resume: retained leases remain running until stopped;
+- no desktop, browser, VNC, WebVNC, or code-server;
+- no Tailscale bootstrap or inbound LAN networking;
+- first use downloads and converts the selected cloud image and is slower than
+  subsequent leases.

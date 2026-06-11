@@ -86,7 +86,7 @@ parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
 incus            Incus containers or VMs over SSH         Linux
 local-container  Local Docker-compatible containers       Linux
-apple-vz         Apple Virtualization.framework Linux VM  Linux
+apple-vz         Apple Virtualization.framework Linux VM  Linux ARM64
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
 exe-dev          exe.dev managed VMs (public SSH)         Linux

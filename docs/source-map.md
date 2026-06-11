@@ -76,7 +76,8 @@ SSH-lease providers:
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
 - Local Docker container: `internal/providers/localcontainer`
 - Apple `Virtualization.framework` Linux VM helper and provider:
-  `internal/applevzhelper`, `internal/providers/applevz`
+  `internal/applevzhelper`, `internal/providers/applevz`; native helper release
+  packaging is in `.goreleaser.yaml` and the macOS CI/release jobs
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Daytona, Morph, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Railway:
