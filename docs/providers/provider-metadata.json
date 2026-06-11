@@ -223,6 +223,20 @@
     "caveat": "Requires env-only SDK auth and a local Node bridge",
     "docs": "codesandbox.md"
   },
+  "coder": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Coder workspace",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "unknown",
+    "lifecycle": "Coder CLI",
+    "cleanup": "workspace stop or delete",
+    "bestFit": "Coder-backed Linux workspace over SSH proxy",
+    "caveat": "Requires the coder CLI, login, template access, and workspace quota",
+    "docs": "coder.md"
+  },
   "daytona": {
     "status": "built-in",
     "category": "direct-cloud",

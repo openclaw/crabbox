@@ -46,6 +46,9 @@ Crabbox lease ID and local slug:
 - `semaphore` — stops the Semaphore CI job and removes the local claim.
 - `sprites` — deletes the Sprites sprite and removes the local claim.
 - `daytona` — deletes the Daytona sandbox.
+- `coder` — stops the Coder workspace by default and removes the local claim.
+  Set `coder.deleteOnRelease` or pass `--coder-delete-on-release` to delete the
+  workspace instead.
 - `islo` — accepts an `isb_...` ID, a Crabbox-created sandbox name, or a local
   slug and deletes the Islo sandbox.
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
@@ -126,6 +129,7 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 
 ```text
 --namespace-delete-on-release            delete the Namespace Devbox instead of shutting it down
+--coder-delete-on-release                delete the Coder workspace instead of stopping it
 --exe-dev-control-host <host>            exe.dev SSH API host
 --sprites-api-url <url>                  Sprites API URL
 --e2b-api-url <url>                      E2B API URL

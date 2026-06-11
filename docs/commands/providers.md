@@ -363,6 +363,9 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
 ]
 ```
 
+`coder` appears as an SSH-lease provider with Linux target, `ssh`,
+`crabbox-sync`, and `cleanup` features, and `coordinator: never`.
+
 ## Fields
 
 - `provider`: canonical provider name (the value you pass to `--provider`).

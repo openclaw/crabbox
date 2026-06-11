@@ -56,6 +56,9 @@ providers resolve access lazily or wrap the connection:
 - **`provider=xcp-ng`** resolves the VM IPv4 address from XCP-ng guest metrics
   during provisioning, then prints the normal per-lease SSH command for the
   cloud-init user.
+- **`provider=coder`** prints a proxy-backed SSH command that uses
+  `coder ssh --stdio --wait <mode> <workspace>`. Coder owns authentication and
+  tunneling; Crabbox does not print or pass Coder tokens on argv.
 - **Provider-routed direct providers** accept the same provider-specific routing
   flags here as `status` and `stop`; for example `--kubevirt-context` or
   `--external-routing-file` can select the exact lease backend when config

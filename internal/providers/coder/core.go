@@ -1,0 +1,109 @@
+package coder
+
+import (
+	"context"
+	"flag"
+	"io"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
+
+type Config = core.Config
+type CoderConfig = core.CoderConfig
+type ProviderSpec = core.ProviderSpec
+type Feature = core.Feature
+type Runtime = core.Runtime
+type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
+type DoctorCheck = core.DoctorCheck
+type AcquireRequest = core.AcquireRequest
+type ResolveRequest = core.ResolveRequest
+type ReleaseLeaseRequest = core.ReleaseLeaseRequest
+type TouchRequest = core.TouchRequest
+type ListRequest = core.ListRequest
+type CleanupRequest = core.CleanupRequest
+type LeaseClaim = core.LeaseClaim
+type Repo = core.Repo
+type LeaseView = core.LeaseView
+type LeaseTarget = core.LeaseTarget
+type Server = core.Server
+type SSHTarget = core.SSHTarget
+type LocalCommandRequest = core.LocalCommandRequest
+type LocalCommandResult = core.LocalCommandResult
+type ExitError = core.ExitError
+
+const (
+	coderProvider = "coder"
+	targetLinux   = core.TargetLinux
+	networkPublic = core.NetworkPublic
+)
+
+func exit(code int, format string, args ...any) core.ExitError {
+	return core.Exit(code, format, args...)
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	return core.FlagWasSet(fs, name)
+}
+
+func blank(value, fallback string) string {
+	return core.Blank(value, fallback)
+}
+
+func newLeaseID() string {
+	return core.NewLeaseID()
+}
+
+func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {
+	return core.AllocateDirectLeaseSlug(leaseID, requested, servers)
+}
+
+func normalizeLeaseSlug(value string) string {
+	return core.NormalizeLeaseSlug(value)
+}
+
+func serverSlug(server Server) string {
+	return core.ServerSlug(server)
+}
+
+func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
+	return core.DirectLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
+}
+
+func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
+	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
+}
+
+func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
+}
+
+func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
+}
+
+func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProvider(identifier, provider)
+}
+
+func listLeaseClaims() ([]core.LeaseClaim, error) {
+	return core.ListLeaseClaims()
+}
+
+func removeLeaseClaim(leaseID string) {
+	core.RemoveLeaseClaim(leaseID)
+}
+
+func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
+}
+
+func bootstrapWaitTimeout(cfg Config) time.Duration {
+	return core.BootstrapWaitTimeout(cfg)
+}
+
+func shellQuote(s string) string {
+	return core.ShellQuote(s)
+}

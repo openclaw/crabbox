@@ -399,6 +399,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT",
 		"CRABBOX_NAMESPACE_WORK_ROOT",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_CODER_CLI",
+		"CRABBOX_CODER_TEMPLATE",
+		"CRABBOX_CODER_PRESET",
+		"CRABBOX_CODER_WORKSPACE_PREFIX",
+		"CRABBOX_CODER_WORK_ROOT",
+		"CRABBOX_CODER_DELETE_ON_RELEASE",
+		"CRABBOX_CODER_WAIT",
+		"CRABBOX_CODER_USE_PARAMETER_DEFAULTS",
+		"CRABBOX_CODER_PARAMETERS",
+		"CRABBOX_CODER_RICH_PARAMETER_FILE",
 		"CRABBOX_MORPH_API_KEY",
 		"MORPH_API_KEY",
 		"CRABBOX_MORPH_API_URL",
@@ -4540,6 +4550,19 @@ tenki:
   cpus: 4
   memoryMB: 8192
   diskGB: 40
+coder:
+  cliPath: /usr/local/bin/coder
+  template: go-dev
+  preset: large
+  workspacePrefix: cbx-
+  workRoot: /home/coder/test
+  deleteOnRelease: true
+  wait: auto
+  useParameterDefaults: true
+  parameters:
+    - region=iad
+    - size=large
+  richParameterFile: ~/.config/coder/params.yaml
 tensorlake:
   apiUrl: https://api.tensorlake.example.test
   cliPath: /usr/local/bin/tl
@@ -4765,6 +4788,9 @@ ssh:
 	}
 	if cfg.Tenki.CLIPath != "/usr/local/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki.example.test" || cfg.Tenki.Gateway != "wss://gateway.tenki.example.test" || cfg.Tenki.Workspace != "ws_file" || cfg.Tenki.Project != "proj_file" || cfg.Tenki.Image != "ubuntu:tenki" || cfg.Tenki.WorkRoot != "/home/tenki/test" || cfg.Tenki.CPUs != 4 || cfg.Tenki.MemoryMB != 8192 || cfg.Tenki.DiskGB != 40 {
 		t.Fatalf("tenki config not loaded: %#v", cfg.Tenki)
+	}
+	if cfg.Coder.CLIPath != "/usr/local/bin/coder" || cfg.Coder.Template != "go-dev" || cfg.Coder.Preset != "large" || cfg.Coder.WorkspacePrefix != "cbx-" || cfg.Coder.WorkRoot != "/home/coder/test" || !cfg.Coder.DeleteOnRelease || cfg.Coder.Wait != "auto" || !cfg.Coder.UseParameterDefaults || len(cfg.Coder.Parameters) != 2 || cfg.Coder.Parameters[1] != "size=large" || cfg.Coder.RichParameterFile != filepath.Join(home, ".config", "coder", "params.yaml") {
+		t.Fatalf("coder config not loaded: %#v", cfg.Coder)
 	}
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
@@ -5230,6 +5256,16 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT", "4h")
 	t.Setenv("CRABBOX_NAMESPACE_WORK_ROOT", "/workspaces/env")
 	t.Setenv("CRABBOX_NAMESPACE_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_CODER_CLI", "/opt/coder/bin/coder")
+	t.Setenv("CRABBOX_CODER_TEMPLATE", "python-dev")
+	t.Setenv("CRABBOX_CODER_PRESET", "gpu")
+	t.Setenv("CRABBOX_CODER_WORKSPACE_PREFIX", "env-")
+	t.Setenv("CRABBOX_CODER_WORK_ROOT", "/home/coder/env")
+	t.Setenv("CRABBOX_CODER_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_CODER_WAIT", "no")
+	t.Setenv("CRABBOX_CODER_USE_PARAMETER_DEFAULTS", "true")
+	t.Setenv("CRABBOX_CODER_PARAMETERS", "region=sfo,size=xl")
+	t.Setenv("CRABBOX_CODER_RICH_PARAMETER_FILE", "~/coder-rich.yaml")
 	t.Setenv("CRABBOX_BLACKSMITH_IDLE_TIMEOUT", "2h")
 	t.Setenv("CRABBOX_BLACKSMITH_DEBUG", "true")
 	t.Setenv("CRABBOX_ACTIONS_RUNNER_LABELS", "crabbox,linux-large")
@@ -5340,6 +5376,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Tenki.CLIPath != "/opt/tenki/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki-env.example" || cfg.Tenki.Gateway != "wss://gateway.tenki-env.example" || cfg.Tenki.Workspace != "ws_env" || cfg.Tenki.Project != "proj_env" || cfg.Tenki.Image != "ubuntu:tenki-env" || cfg.Tenki.Snapshot != "snap-env" || cfg.Tenki.WorkRoot != "/home/tenki/env" || cfg.Tenki.CPUs != 8 || cfg.Tenki.MemoryMB != 16384 || cfg.Tenki.DiskGB != 80 {
 		t.Fatalf("unexpected tenki env: %#v", cfg.Tenki)
+	}
+	if cfg.Coder.CLIPath != "/opt/coder/bin/coder" || cfg.Coder.Template != "python-dev" || cfg.Coder.Preset != "gpu" || cfg.Coder.WorkspacePrefix != "env-" || cfg.Coder.WorkRoot != "/home/coder/env" || !cfg.Coder.DeleteOnRelease || cfg.Coder.Wait != "no" || !cfg.Coder.UseParameterDefaults || len(cfg.Coder.Parameters) != 2 || cfg.Coder.Parameters[0] != "region=sfo" || cfg.Coder.RichParameterFile != filepath.Join(home, "coder-rich.yaml") {
+		t.Fatalf("unexpected coder env: %#v", cfg.Coder)
 	}
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
