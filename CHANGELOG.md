@@ -5,6 +5,7 @@
 ### Added
 
 - Added `provider: hyperv` for local Windows VM SSH leases through Microsoft Hyper-V, including differencing-disk provisioning, OpenSSH and MinGit bootstrap, password-less dev-image initialization, retained lease reuse, and cleanup. Thanks @anagnorisis2peripeteia.
+- Added an opt-in Islo userspace Tailscale plane with tailnet-aware pond peers, proxy-routed tailnet traffic, and URL-bridge fallback for leases without `--tailscale`. Thanks @zozo123.
 
 ### Fixed
 

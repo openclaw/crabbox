@@ -239,6 +239,9 @@ type ProviderSpec struct {
 	Targets     []TargetSpec
 	Features    FeatureSet
 	Coordinator CoordinatorMode
+	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
+	// not a bidirectional peer endpoint.
+	TailscaleEgressOnly bool
 }
 
 type ProviderKind string
