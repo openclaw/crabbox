@@ -69,9 +69,12 @@ func mustJSON(t *testing.T, value any) string {
 func testBackend(t *testing.T, runner *recordingRunner) *backend {
 	t.Helper()
 	oldGOOS, oldGOARCH := hostGOOS, hostGOARCH
+	oldMacOSVersion := hostMacOSVersion
 	hostGOOS, hostGOARCH = "darwin", "arm64"
+	hostMacOSVersion = func() (string, error) { return "26.5", nil }
 	t.Cleanup(func() {
 		hostGOOS, hostGOARCH = oldGOOS, oldGOARCH
+		hostMacOSVersion = oldMacOSVersion
 	})
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -96,6 +99,40 @@ func testBackend(t *testing.T, runner *recordingRunner) *backend {
 	b.stateRoot = func() (string, error) { return root, nil }
 	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	return b
+}
+
+func TestRequireHostRequiresMacOS13(t *testing.T) {
+	oldGOOS, oldGOARCH := hostGOOS, hostGOARCH
+	oldMacOSVersion := hostMacOSVersion
+	hostGOOS, hostGOARCH = "darwin", "arm64"
+	t.Cleanup(func() {
+		hostGOOS, hostGOARCH = oldGOOS, oldGOARCH
+		hostMacOSVersion = oldMacOSVersion
+	})
+
+	for _, tc := range []struct {
+		version string
+		wantErr string
+	}{
+		{version: "12.7.6", wantErr: "requires macOS 13 or newer"},
+		{version: "13.0"},
+		{version: "26.5"},
+		{version: "invalid", wantErr: "could not parse macOS version"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			hostMacOSVersion = func() (string, error) { return tc.version, nil }
+			err := requireHost()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("requireHost(%q): %v", tc.version, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("requireHost(%q) error=%v want %q", tc.version, err, tc.wantErr)
+			}
+		})
+	}
 }
 
 func TestProviderSpecAndAliases(t *testing.T) {

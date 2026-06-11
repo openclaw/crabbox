@@ -37,7 +37,7 @@ difference is full-machine Linux boot and disk semantics under direct
 
 ## Requirements
 
-- Apple Silicon Mac;
+- Apple Silicon Mac running macOS 13 or newer;
 - Xcode command-line tools;
 - hardware virtualization available to the current macOS host;
 - enough free disk for the downloaded image, converted raw cache, and lease

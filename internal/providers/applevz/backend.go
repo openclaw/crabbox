@@ -36,7 +36,11 @@ const (
 	managedHelperKeepVersions = 4
 )
 
-var hostGOOS, hostGOARCH = runtime.GOOS, runtime.GOARCH
+var (
+	hostGOOS         = runtime.GOOS
+	hostGOARCH       = runtime.GOARCH
+	hostMacOSVersion = readHostMacOSVersion
+)
 
 type backend struct {
 	spec                  core.ProviderSpec
@@ -1227,7 +1231,39 @@ func requireHost() error {
 	if hostGOOS != "darwin" || hostGOARCH != "arm64" {
 		return exit(2, "provider=%s requires macOS on Apple silicon; current host is %s/%s", providerName, hostGOOS, hostGOARCH)
 	}
+	version, err := hostMacOSVersion()
+	if err != nil {
+		return exit(2, "provider=%s could not determine the macOS version: %v", providerName, err)
+	}
+	major, err := macOSMajorVersion(version)
+	if err != nil {
+		return exit(2, "provider=%s could not parse macOS version %q: %v", providerName, version, err)
+	}
+	if major < 13 {
+		return exit(2, "provider=%s requires macOS 13 or newer for Virtualization.framework EFI support; current version is %s", providerName, version)
+	}
 	return nil
+}
+
+func readHostMacOSVersion() (string, error) {
+	out, err := exec.Command("sw_vers", "-productVersion").Output()
+	if err != nil {
+		return "", err
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "", fmt.Errorf("sw_vers returned an empty product version")
+	}
+	return version, nil
+}
+
+func macOSMajorVersion(version string) (int, error) {
+	majorText, _, _ := strings.Cut(strings.TrimSpace(version), ".")
+	major, err := strconv.Atoi(majorText)
+	if err != nil || major <= 0 {
+		return 0, fmt.Errorf("invalid major version")
+	}
+	return major, nil
 }
 
 func shouldCleanup(inst applevzhelper.Instance, server core.Server, claim core.LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
