@@ -5,7 +5,9 @@ package applevzhelper
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +24,9 @@ func TestRunStartCleansUpDaemonAndInstanceDirectoryOnReadinessTimeout(t *testing
 	pidFile := filepath.Join(t.TempDir(), "helper.pid")
 	helperPath := filepath.Join(t.TempDir(), "fake-helper")
 	helperScript := `#!/bin/sh
+dd bs=1 count=1 <&3 >/dev/null 2>&1 || exit 24
 printf '%s\n' "$$" > "$CRABBOX_TEST_HELPER_PID_FILE"
+printf 'fake helper waiting for readiness\n'
 trap 'exit 0' TERM INT
 while :; do sleep 1; done
 `
@@ -88,37 +92,103 @@ while :; do sleep 1; done
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting for helper daemon to report readiness") {
 		t.Fatalf("runStart error = %v, want readiness timeout", err)
 	}
+	if !strings.Contains(err.Error(), "console.log tail") || !strings.Contains(err.Error(), "test asset") {
+		t.Fatalf("runStart error missing startup diagnostics: %v", err)
+	}
 
 	pidData, readErr := os.ReadFile(pidFile)
-	if readErr != nil {
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		t.Fatalf("read helper pid: %v", readErr)
 	}
-	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if parseErr != nil {
-		t.Fatalf("parse helper pid %q: %v", string(pidData), parseErr)
-	}
-	if err := waitForDeadPID(pid, 2*time.Second); err != nil {
-		t.Fatal(err)
+	if readErr == nil {
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidData)))
+		if parseErr != nil {
+			t.Fatalf("parse helper pid %q: %v", string(pidData), parseErr)
+		}
+		if err := waitForDeadPID(pid, 2*time.Second); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, statErr := os.Stat(InstanceDir(stateRoot, name)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("instance directory stat error = %v, want os.ErrNotExist", statErr)
 	}
 }
 
-func TestRunStartCleansUpDaemonAndInstanceDirectoryOnMetadataWriteFailure(t *testing.T) {
+func TestRunStartReportsHelperExitWithoutWaitingForReadinessTimeout(t *testing.T) {
 	stateRoot := t.TempDir()
-	name := "metadata-write-failure"
-	pidFile := filepath.Join(t.TempDir(), "helper.pid")
+	name := "early-exit"
 	helperPath := filepath.Join(t.TempDir(), "fake-helper")
 	helperScript := `#!/bin/sh
-printf '%s\n' "$$" > "$CRABBOX_TEST_HELPER_PID_FILE"
-trap 'exit 0' TERM INT
+dd bs=1 count=1 <&3 >/dev/null 2>&1 || exit 24
+printf 'helper identity setup failed\n'
+exit 23
+`
+	if err := os.WriteFile(helperPath, []byte(helperScript), 0o755); err != nil {
+		t.Fatalf("write fake helper: %v", err)
+	}
+
+	originalPrepare := prepareInstanceAssetsFunc
+	originalExecutable := helperExecutable
+	originalStartPoll := runStartPollInterval
+	t.Cleanup(func() {
+		prepareInstanceAssetsFunc = originalPrepare
+		helperExecutable = originalExecutable
+		runStartPollInterval = originalStartPoll
+	})
+	prepareInstanceAssetsFunc = func(_ context.Context, cfg startConfig) (Instance, error) {
+		inst := cfg.Instance
+		inst.SourceImage = cfg.Instance.Image
+		inst.DiskPath = DiskPath(cfg.StateRoot, inst.Name)
+		inst.SeedPath = SeedPath(cfg.StateRoot, inst.Name)
+		inst.EFIVariableStorePath = EFIPath(cfg.StateRoot, inst.Name)
+		inst.ConsoleLogPath = ConsoleLogPath(cfg.StateRoot, inst.Name)
+		return inst, nil
+	}
+	helperExecutable = func() (string, error) { return helperPath, nil }
+	runStartPollInterval = 5 * time.Millisecond
+
+	err := runStart([]string{
+		"--state-root", stateRoot,
+		"--name", name,
+		"--lease-id", "lease-test",
+		"--slug", "my-app",
+		"--image", "test.img",
+		"--ssh-user", "alice",
+		"--ssh-public-key", "ssh-ed25519 AAAATEST alice@example.com",
+		"--work-root", "/workspace",
+		"--cpus", "2",
+		"--memory-mib", "2048",
+		"--disk-gib", "16",
+		"--ready-timeout", "5s",
+	}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil ||
+		(!strings.Contains(err.Error(), "helper daemon exited before the VM reached running state") &&
+			!strings.Contains(err.Error(), "apple-vz helper stopped before reporting readiness")) {
+		t.Fatalf("runStart error=%v, want early helper exit", err)
+	}
+	if strings.Contains(err.Error(), "helper daemon exited before the VM reached running state") &&
+		!strings.Contains(err.Error(), "exit status 23") {
+		t.Fatalf("runStart error missing process exit detail: %v", err)
+	}
+	if !strings.Contains(err.Error(), "helper identity setup failed") {
+		t.Fatalf("runStart error missing exit detail: %v", err)
+	}
+	if _, statErr := os.Stat(InstanceDir(stateRoot, name)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestRunStartStopsUnauthorizedChildWhenIdentityMetadataFails(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "identity-write-failure"
+	helperPath := filepath.Join(t.TempDir(), "fake-helper")
+	helperScript := `#!/bin/sh
+dd bs=1 count=1 <&3 >/dev/null 2>&1 || exit 24
 while :; do sleep 1; done
 `
 	if err := os.WriteFile(helperPath, []byte(helperScript), 0o755); err != nil {
 		t.Fatalf("write fake helper: %v", err)
 	}
-	t.Setenv("CRABBOX_TEST_HELPER_PID_FILE", pidFile)
 
 	originalPrepare := prepareInstanceAssetsFunc
 	originalExecutable := helperExecutable
@@ -134,22 +204,18 @@ while :; do sleep 1; done
 		terminateInstanceGraceTime = originalTerminateGrace
 		terminateInstancePollTime = originalTerminatePoll
 	})
-
 	prepareInstanceAssetsFunc = func(_ context.Context, cfg startConfig) (Instance, error) {
-		inst := cfg.Instance
-		inst.DiskPath = DiskPath(cfg.StateRoot, inst.Name)
-		inst.SeedPath = SeedPath(cfg.StateRoot, inst.Name)
-		inst.EFIVariableStorePath = EFIPath(cfg.StateRoot, inst.Name)
-		inst.ConsoleLogPath = ConsoleLogPath(cfg.StateRoot, inst.Name)
-		return inst, nil
+		return cfg.Instance, nil
 	}
 	helperExecutable = func() (string, error) { return helperPath, nil }
-	spawnedPID := 0
+	capturedPID := 0
 	processStartTime = func(pid int) (string, error) {
-		spawnedPID = pid
+		capturedPID = pid
 		return strconv.Itoa(pid) + "-start", nil
 	}
-	writeMetadataFunc = func(string, Instance) error { return errors.New("injected metadata write failure") }
+	writeMetadataFunc = func(string, Instance) error {
+		return errors.New("injected identity metadata failure")
+	}
 	terminateInstanceGraceTime = 500 * time.Millisecond
 	terminateInstancePollTime = 5 * time.Millisecond
 
@@ -166,17 +232,190 @@ while :; do sleep 1; done
 		"--memory-mib", "2048",
 		"--disk-gib", "16",
 	}, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "injected metadata write failure") {
-		t.Fatalf("runStart error = %v, want injected metadata write failure", err)
+	if err == nil || !strings.Contains(err.Error(), "injected identity metadata failure") {
+		t.Fatalf("runStart error=%v, want identity metadata failure", err)
 	}
-	if spawnedPID <= 0 {
-		t.Fatal("processStartTime hook did not observe spawned helper PID")
+	if capturedPID <= 0 {
+		t.Fatal("helper process identity was not inspected")
 	}
-	if err := waitForDeadPID(spawnedPID, 2*time.Second); err != nil {
+	if err := waitForDeadPID(capturedPID, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if _, statErr := os.Stat(InstanceDir(stateRoot, name)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("instance directory stat error = %v, want os.ErrNotExist", statErr)
+		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestAuthorizeStartedHelperPersistsIdentityBeforeSignal(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "authorized-start"
+	mustCreateInstanceDir(t, stateRoot, name)
+	inst := Instance{
+		Name:      name,
+		PID:       os.Getpid(),
+		Status:    StatusStarting,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	originalProcessStartTime := processStartTime
+	t.Cleanup(func() { processStartTime = originalProcessStartTime })
+	processStartTime = func(pid int) (string, error) {
+		if pid != os.Getpid() {
+			t.Fatalf("processStartTime pid=%d want %d", pid, os.Getpid())
+		}
+		return "authorized-start-time", nil
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	got, err := authorizeStartedHelper(stateRoot, name, inst, writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marker [1]byte
+	if _, err := io.ReadFull(reader, marker[:]); err != nil {
+		t.Fatal(err)
+	}
+	if marker[0] != startupAuthorizationByte {
+		t.Fatalf("startup marker=%x want %x", marker[0], startupAuthorizationByte)
+	}
+	persisted, err := readMetadata(MetadataPath(stateRoot, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PIDStartedAt != "authorized-start-time" || persisted.PID != os.Getpid() || persisted.PIDStartedAt != "authorized-start-time" {
+		t.Fatalf("authorized=%+v persisted=%+v", got, persisted)
+	}
+}
+
+func TestWaitForStartupAuthorizationRejectsParentExit(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := int(reader.Fd())
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = waitForStartupAuthorization(fd)
+	if err == nil || !strings.Contains(err.Error(), "closed before approval") {
+		t.Fatalf("waitForStartupAuthorization error=%v", err)
+	}
+}
+
+func TestRunDeleteRemovesMetadataLessInstanceDirectory(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "partial-instance"
+	mustCreateInstanceDir(t, stateRoot, name)
+	var stdout bytes.Buffer
+	if err := runDelete([]string{"--state-root", stateRoot, "--name", name}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	var response DeleteResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Deleted || response.Instance.Name != name {
+		t.Fatalf("delete response=%+v", response)
+	}
+	if _, err := os.Stat(InstanceDir(stateRoot, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", err)
+	}
+}
+
+func TestInitializeServeInstancePersistsChildProcessIdentity(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "serve-identity"
+	mustCreateInstanceDir(t, stateRoot, name)
+	initial := Instance{
+		Name:      name,
+		Status:    StatusStarting,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := writeMetadata(MetadataPath(stateRoot, name), initial); err != nil {
+		t.Fatal(err)
+	}
+	originalProcessStartTime := processStartTime
+	originalWriteMetadata := writeMetadataFunc
+	t.Cleanup(func() {
+		processStartTime = originalProcessStartTime
+		writeMetadataFunc = originalWriteMetadata
+	})
+
+	processStartTime = func(pid int) (string, error) {
+		if pid != os.Getpid() {
+			t.Fatalf("processStartTime pid=%d want %d", pid, os.Getpid())
+		}
+		return "child-start", nil
+	}
+
+	inst, err := initializeServeInstance(stateRoot, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.PID != os.Getpid() || inst.PIDStartedAt != "child-start" {
+		t.Fatalf("identity pid=%d started=%q", inst.PID, inst.PIDStartedAt)
+	}
+	persisted, err := readMetadata(MetadataPath(stateRoot, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.PID != os.Getpid() || persisted.PIDStartedAt != "child-start" {
+		t.Fatalf("persisted identity pid=%d started=%q", persisted.PID, persisted.PIDStartedAt)
+	}
+}
+
+func TestInitializeServeInstanceRejectsMissingProcessIdentity(t *testing.T) {
+	stateRoot := t.TempDir()
+	name := "serve-missing-identity"
+	mustCreateInstanceDir(t, stateRoot, name)
+	initial := Instance{
+		Name:      name,
+		Status:    StatusStarting,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := writeMetadata(MetadataPath(stateRoot, name), initial); err != nil {
+		t.Fatal(err)
+	}
+	originalProcessStartTime := processStartTime
+	t.Cleanup(func() { processStartTime = originalProcessStartTime })
+	processStartTime = func(int) (string, error) {
+		return "", errors.New("identity unavailable")
+	}
+
+	if _, err := initializeServeInstance(stateRoot, name); err == nil || !strings.Contains(err.Error(), "identity unavailable") {
+		t.Fatalf("initializeServeInstance error=%v", err)
+	}
+	persisted, err := readMetadata(MetadataPath(stateRoot, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.PID != 0 || persisted.PIDStartedAt != "" {
+		t.Fatalf("unexpected persisted identity pid=%d started=%q", persisted.PID, persisted.PIDStartedAt)
+	}
+}
+
+func TestReadProcessStartTimeIsTimezoneInvariant(t *testing.T) {
+	t.Setenv("TZ", "Pacific/Honolulu")
+	first, err := readProcessStartTime(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("TZ", "Asia/Tokyo"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := readProcessStartTime(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("process start time changed with TZ: %q != %q", first, second)
 	}
 }
 
@@ -251,6 +490,43 @@ func TestTerminateInstanceSignalsOnlyMatchingPIDIdentity(t *testing.T) {
 	waited = true
 	if _, err := os.Stat(InstanceDir(root, name)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", err)
+	}
+}
+
+func TestNormalizeInstanceMarksReusedPIDStopped(t *testing.T) {
+	originalProcessStartTime := processStartTime
+	t.Cleanup(func() { processStartTime = originalProcessStartTime })
+	processStartTime = func(pid int) (string, error) {
+		if pid != os.Getpid() {
+			t.Fatalf("processStartTime pid=%d want %d", pid, os.Getpid())
+		}
+		return "new-start", nil
+	}
+
+	inst := normalizeInstance(Instance{
+		PID:          os.Getpid(),
+		PIDStartedAt: "old-start",
+		Status:       StatusRunning,
+	})
+	if inst.Status != StatusStopped || inst.PID != 0 || inst.PIDStartedAt != "" {
+		t.Fatalf("normalized instance=%+v", inst)
+	}
+}
+
+func TestNormalizeInstanceKeepsRunningOnIdentityProbeFailure(t *testing.T) {
+	originalProcessStartTime := processStartTime
+	t.Cleanup(func() { processStartTime = originalProcessStartTime })
+	processStartTime = func(int) (string, error) {
+		return "", errors.New("transient ps failure")
+	}
+
+	inst := normalizeInstance(Instance{
+		PID:          os.Getpid(),
+		PIDStartedAt: "known-start",
+		Status:       StatusRunning,
+	})
+	if inst.Status != StatusRunning || inst.PID != os.Getpid() || inst.PIDStartedAt != "known-start" {
+		t.Fatalf("normalized instance=%+v", inst)
 	}
 }
 

@@ -25,8 +25,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const helperLogFileName = "helper.log"
-
 type startConfig struct {
 	StateRoot    string
 	Instance     Instance
@@ -557,14 +555,8 @@ while True:
 `
 
 func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
-	inst, err := readMetadata(MetadataPath(stateRoot, name))
+	inst, err := initializeServeInstance(stateRoot, name)
 	if err != nil {
-		return err
-	}
-	inst.PID = os.Getpid()
-	inst.Status = StatusStarting
-	inst.UpdatedAt = time.Now().UTC()
-	if err := writeMetadata(MetadataPath(stateRoot, name), inst); err != nil {
 		return err
 	}
 	vmConfig, closers, err := buildVMConfig(inst)
@@ -668,6 +660,25 @@ func runServe(stateRoot, name string, stdout, stderr io.Writer) error {
 			}
 		}
 	}
+}
+
+func initializeServeInstance(stateRoot, name string) (Instance, error) {
+	inst, err := readMetadata(MetadataPath(stateRoot, name))
+	if err != nil {
+		return Instance{}, err
+	}
+	inst.PID = os.Getpid()
+	startedAt, err := processStartTime(inst.PID)
+	if err != nil {
+		return Instance{}, fmt.Errorf("read helper process identity: %w", err)
+	}
+	inst.PIDStartedAt = startedAt
+	inst.Status = StatusStarting
+	inst.UpdatedAt = time.Now().UTC()
+	if err := writeMetadataFunc(MetadataPath(stateRoot, name), inst); err != nil {
+		return Instance{}, err
+	}
+	return inst, nil
 }
 
 type vmStateResult struct {

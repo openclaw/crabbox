@@ -32,6 +32,7 @@ func TestProtocolPathsAndStatusHelpers(t *testing.T) {
 		"seed":    SeedPath(root, name),
 		"efi":     EFIPath(root, name),
 		"console": ConsoleLogPath(root, name),
+		"helper":  HelperLogPath(root, name),
 	} {
 		if path == "" {
 			t.Fatalf("%s path is empty", label)

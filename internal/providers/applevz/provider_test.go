@@ -3,8 +3,10 @@ package applevz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,10 +20,16 @@ type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
+	hook      func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
+	if r.hook != nil {
+		if result, err, handled := r.hook(req); handled {
+			return result, err
+		}
+	}
 	key := commandKey(req.Name, req.Args)
 	if err, ok := r.errors[key]; ok {
 		return r.responses[key], err
@@ -264,6 +272,256 @@ func TestAcquireResolveListAndRelease(t *testing.T) {
 	}
 }
 
+func TestAcquireKeepRollsBackFailedProvisioning(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	var leaseID, name string
+	deleted := false
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if req.Name != "helper" || len(req.Args) == 0 {
+			return core.LocalCommandResult{}, nil, false
+		}
+		switch req.Args[0] {
+		case "list":
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.ListResponse{})}, nil, true
+		case "start":
+			name = argumentValue(req.Args, "--name")
+			leaseID = argumentValue(req.Args, "--lease-id")
+			if err := os.MkdirAll(applevzhelper.InstanceDir(root, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(applevzhelper.HelperLogPath(root, name), []byte("helper failed after boot\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			inst := applevzhelper.Instance{
+				Name:      name,
+				LeaseID:   leaseID,
+				Slug:      argumentValue(req.Args, "--slug"),
+				Status:    applevzhelper.StatusRunning,
+				SSHUser:   argumentValue(req.Args, "--ssh-user"),
+				WorkRoot:  argumentValue(req.Args, "--work-root"),
+				SSHHost:   "127.0.0.1",
+				SSHPort:   43022,
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			}
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.StartResponse{Instance: inst})}, nil, true
+		case "delete":
+			deleted = true
+			if err := os.RemoveAll(applevzhelper.InstanceDir(root, name)); err != nil {
+				t.Fatal(err)
+			}
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.DeleteResponse{Deleted: true})}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+		return core.Exit(7, "injected SSH readiness failure")
+	}
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "keep-failure",
+		Keep:          true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected SSH readiness failure") || !strings.Contains(err.Error(), "helper failed after boot") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	var exitErr core.ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("Acquire error=%v, want exit code 7", err)
+	}
+	for _, want := range []string{"injected SSH readiness failure", "helper failed after boot"} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("ExitError message=%q, want %q", exitErr.Message, want)
+		}
+	}
+	if !deleted {
+		t.Fatal("failed keep acquisition did not delete the instance")
+	}
+	if _, statErr := os.Stat(applevzhelper.InstanceDir(root, name)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("instance directory stat error=%v, want os.ErrNotExist", statErr)
+	}
+	if keyPath, keyErr := core.TestboxKeyPath(leaseID); keyErr != nil {
+		t.Fatal(keyErr)
+	} else if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("lease key stat error=%v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestAcquirePreservesKeyWhenRollbackFails(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(t, runner)
+	root, _ := b.stateRoot()
+	var leaseID, name string
+	runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if req.Name != "helper" || len(req.Args) == 0 {
+			return core.LocalCommandResult{}, nil, false
+		}
+		switch req.Args[0] {
+		case "list":
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.ListResponse{})}, nil, true
+		case "start":
+			name = argumentValue(req.Args, "--name")
+			leaseID = argumentValue(req.Args, "--lease-id")
+			if err := os.MkdirAll(applevzhelper.InstanceDir(root, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			inst := applevzhelper.Instance{
+				Name:      name,
+				LeaseID:   leaseID,
+				Slug:      argumentValue(req.Args, "--slug"),
+				Status:    applevzhelper.StatusRunning,
+				SSHUser:   argumentValue(req.Args, "--ssh-user"),
+				WorkRoot:  argumentValue(req.Args, "--work-root"),
+				SSHHost:   "127.0.0.1",
+				SSHPort:   43022,
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			}
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.StartResponse{Instance: inst})}, nil, true
+		case "delete":
+			return core.LocalCommandResult{Stdout: mustJSON(t, applevzhelper.DeleteResponse{Deleted: false})}, nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+		return errors.New("injected SSH readiness failure")
+	}
+	t.Cleanup(func() {
+		core.RemoveStoredTestboxKey(leaseID)
+		_ = os.RemoveAll(applevzhelper.InstanceDir(root, name))
+	})
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "rollback-failure",
+	})
+	if err == nil || !strings.Contains(err.Error(), "apple-vz cleanup failed") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	keyPath, keyErr := core.TestboxKeyPath(leaseID)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	if _, statErr := os.Stat(keyPath); statErr != nil {
+		t.Fatalf("rollback failure should preserve lease key: %v", statErr)
+	}
+}
+
+func TestEnsureHelperBinarySignsOnlyWhenSourceChanges(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(t, runner)
+	sourcePath := filepath.Join(t.TempDir(), applevzhelper.ManagedHelperName)
+	if err := os.WriteFile(sourcePath, []byte("first"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := b.configForRun()
+	cfg.AppleVZ.HelperPath = sourcePath
+
+	managedPath, err := b.ensureHelperBinary(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := codesignCallCount(runner.calls); got != 1 {
+		t.Fatalf("codesign calls=%d want 1", got)
+	}
+	if _, err := b.ensureHelperBinary(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := codesignCallCount(runner.calls); got != 1 {
+		t.Fatalf("unchanged source codesign calls=%d want 1", got)
+	}
+
+	root, err := b.stateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digestPath := filepath.Join(applevzhelper.HelperDir(root), managedHelperDigestFileName)
+	digestData, err := os.ReadFile(digestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var digests managedHelperDigests
+	if err := json.Unmarshal(digestData, &digests); err != nil {
+		t.Fatal(err)
+	}
+	digests.EntitlementsSHA256 = "stale"
+	digestData, err = json.Marshal(digests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(digestPath, digestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ensureHelperBinary(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := codesignCallCount(runner.calls); got != 2 {
+		t.Fatalf("stale entitlements codesign calls=%d want 2", got)
+	}
+
+	if err := os.WriteFile(managedPath, []byte("wrong"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ensureHelperBinary(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := codesignCallCount(runner.calls); got != 3 {
+		t.Fatalf("tampered managed helper codesign calls=%d want 3", got)
+	}
+
+	if err := os.WriteFile(sourcePath, []byte("other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ensureHelperBinary(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := codesignCallCount(runner.calls); got != 4 {
+		t.Fatalf("changed source codesign calls=%d want 4", got)
+	}
+	data, err := os.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "other" {
+		t.Fatalf("managed helper=%q want changed source", string(data))
+	}
+}
+
+func TestEnsureHelperBinarySignsManagedSourcePath(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(t, runner)
+	root, err := b.stateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperDir := applevzhelper.HelperDir(root)
+	if err := os.MkdirAll(helperDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	managedPath := filepath.Join(helperDir, applevzhelper.ManagedHelperName)
+	if err := os.WriteFile(managedPath, []byte("managed source"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := b.configForRun()
+	cfg.AppleVZ.HelperPath = managedPath
+
+	got, err := b.ensureHelperBinary(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != managedPath {
+		t.Fatalf("managed helper path=%q want %q", got, managedPath)
+	}
+	if got := codesignCallCount(runner.calls); got != 1 {
+		t.Fatalf("codesign calls=%d want 1", got)
+	}
+}
+
 func TestCleanupRemovesStoppedInstance(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(t, runner)
@@ -302,4 +560,23 @@ func TestCleanupRemovesStoppedInstance(t *testing.T) {
 	} else if ok {
 		t.Fatalf("cleanup should remove claim for %s", leaseID)
 	}
+}
+
+func argumentValue(args []string, name string) string {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == name {
+			return args[index+1]
+		}
+	}
+	return ""
+}
+
+func codesignCallCount(calls []core.LocalCommandRequest) int {
+	count := 0
+	for _, call := range calls {
+		if call.Name == "codesign" {
+			count++
+		}
+	}
+	return count
 }

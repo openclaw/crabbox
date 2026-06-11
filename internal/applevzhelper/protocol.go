@@ -19,6 +19,7 @@ const (
 	GuestVSOCKSSHPort uint32 = 2222
 
 	MetadataFileName   = "instance.json"
+	HelperLogFileName  = "helper.log"
 	ConsoleLogFileName = "console.log"
 	DiskFileName       = "disk.raw"
 	SeedFileName       = "seed.img"
@@ -130,6 +131,10 @@ func EFIPath(stateRoot, name string) string {
 
 func ConsoleLogPath(stateRoot, name string) string {
 	return filepath.Join(InstanceDir(stateRoot, name), ConsoleLogFileName)
+}
+
+func HelperLogPath(stateRoot, name string) string {
+	return filepath.Join(InstanceDir(stateRoot, name), HelperLogFileName)
 }
 
 func IsRunningStatus(status string) bool {

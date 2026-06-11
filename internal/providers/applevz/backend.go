@@ -2,6 +2,7 @@ package applevz
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,11 +20,14 @@ import (
 )
 
 const (
-	defaultUser      = "crabbox"
-	defaultWorkRoot  = "/work/crabbox"
-	defaultCPUs      = 4
-	defaultMemoryMiB = 8192
-	defaultDiskGiB   = 30
+	defaultUser                 = "crabbox"
+	defaultWorkRoot             = "/work/crabbox"
+	defaultCPUs                 = 4
+	defaultMemoryMiB            = 8192
+	defaultDiskGiB              = 30
+	managedHelperDigestFileName = applevzhelper.ManagedHelperName + ".digests.json"
+	diagnosticTailBytes         = 8 * 1024
+	rollbackTimeout             = 30 * time.Second
 )
 
 var hostGOOS, hostGOARCH = runtime.GOOS, runtime.GOARCH
@@ -35,6 +39,12 @@ type backend struct {
 	prepareHelper func(context.Context, core.Config) (string, error)
 	stateRoot     func() (string, error)
 	waitForSSH    func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+}
+
+type managedHelperDigests struct {
+	SourceSHA256       string `json:"sourceSHA256"`
+	ManagedSHA256      string `json:"managedSHA256"`
+	EntitlementsSHA256 string `json:"entitlementsSHA256"`
 }
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
@@ -144,13 +154,17 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}()
 	cfg.SSHKey = keyPath
 	name := core.LeaseProviderName(leaseID, slug)
+	rollback := func(cause error) error {
+		rollbackErr, cleaned := b.rollbackInstance(cfg, name, leaseID, cause)
+		if !cleaned {
+			cleanupKey = false
+		}
+		return rollbackErr
+	}
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMiB disk=%dGiB keep=%v\n", providerName, leaseID, slug, cfg.AppleVZ.Image, cfg.AppleVZ.CPUs, cfg.AppleVZ.MemoryMiB, cfg.AppleVZ.DiskGiB, req.Keep)
 	inst, err := b.startInstance(ctx, cfg, name, leaseID, slug, publicKey)
 	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-	if req.Keep {
-		cleanupKey = false
+		return core.LeaseTarget{}, rollback(err)
 	}
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
 	labels["instance"] = name
@@ -161,16 +175,6 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	labels["work_root"] = cfg.AppleVZ.WorkRoot
 	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
-	rollback := func(cause error) error {
-		if req.Keep {
-			return cause
-		}
-		if err := b.deleteInstance(context.Background(), cfg, name); err != nil {
-			return errors.Join(cause, fmt.Errorf("apple-vz cleanup failed for instance %s: %w", name, err))
-		}
-		core.RemoveLeaseClaim(leaseID)
-		return cause
-	}
 	lease, err := b.prepareLease(ctx, cfg, inst, claim, true)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
@@ -457,6 +461,87 @@ func (b *backend) startInstance(ctx context.Context, cfg core.Config, name, leas
 	return resp.Instance, nil
 }
 
+func (b *backend) rollbackInstance(cfg core.Config, name, leaseID string, cause error) (error, bool) {
+	root, err := b.stateRoot()
+	if err != nil {
+		return appendErrorDetails(cause, fmt.Errorf("resolve apple-vz state for rollback: %w", err)), false
+	}
+	cause = appendErrorDetails(cause, instanceDiagnostics(root, name))
+	if _, err := os.Stat(applevzhelper.InstanceDir(root, name)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			core.RemoveLeaseClaim(leaseID)
+			return cause, true
+		}
+		return appendErrorDetails(cause, fmt.Errorf("inspect apple-vz instance %s for rollback: %w", name, err)), false
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	if err := b.deleteInstance(cleanupCtx, cfg, name); err != nil {
+		return appendErrorDetails(cause, fmt.Errorf("apple-vz cleanup failed for instance %s: %w", name, err)), false
+	}
+	core.RemoveLeaseClaim(leaseID)
+	return cause, true
+}
+
+func appendErrorDetails(cause error, details ...error) error {
+	combined := errors.Join(append([]error{cause}, details...)...)
+	var exitErr core.ExitError
+	if core.AsExitError(cause, &exitErr) {
+		return core.Exit(exitErr.Code, "%s", combined.Error())
+	}
+	return combined
+}
+
+func instanceDiagnostics(stateRoot, name string) error {
+	parts := make([]string, 0, 2)
+	for _, log := range []struct {
+		label string
+		path  string
+	}{
+		{label: applevzhelper.HelperLogFileName, path: applevzhelper.HelperLogPath(stateRoot, name)},
+		{label: applevzhelper.ConsoleLogFileName, path: applevzhelper.ConsoleLogPath(stateRoot, name)},
+	} {
+		tail, err := readFileTail(log.path, diagnosticTailBytes)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				parts = append(parts, fmt.Sprintf("%s unavailable: %v", log.label, err))
+			}
+			continue
+		}
+		if tail != "" {
+			parts = append(parts, fmt.Sprintf("%s tail:\n%s", log.label, tail))
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return fmt.Errorf("apple-vz diagnostics for %s:\n%s", name, strings.Join(parts, "\n"))
+}
+
+func readFileTail(path string, limit int64) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	offset := info.Size() - limit
+	if offset < 0 {
+		offset = 0
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
 func (b *backend) deleteInstance(ctx context.Context, cfg core.Config, name string) error {
 	helperPath, err := b.prepareHelper(ctx, cfg)
 	if err != nil {
@@ -469,6 +554,13 @@ func (b *backend) deleteInstance(ctx context.Context, cfg core.Config, name stri
 	var resp applevzhelper.DeleteResponse
 	if err := b.runHelperJSON(ctx, helperPath, []string{"delete", "--state-root", root, "--name", name}, &resp); err != nil {
 		return err
+	}
+	if !resp.Deleted {
+		if _, err := os.Stat(applevzhelper.InstanceDir(root, name)); err == nil {
+			return fmt.Errorf("apple-vz helper did not delete instance %s", name)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("verify apple-vz instance %s deletion: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -610,25 +702,65 @@ func (b *backend) ensureHelperBinary(ctx context.Context, cfg core.Config) (stri
 		return "", err
 	}
 	managedPath := filepath.Join(helperDir, applevzhelper.ManagedHelperName)
-	if sourcePath != managedPath {
-		if refreshManagedHelper(sourcePath, managedPath) {
-			if err := copyHelperBinary(sourcePath, managedPath); err != nil {
-				return "", err
-			}
+	if sourcePath == managedPath {
+		if _, err := os.Stat(managedPath); err != nil {
+			return "", exit(2, "apple-vz helper missing at %s", managedPath)
 		}
-	} else if _, err := os.Stat(managedPath); err != nil {
-		return "", exit(2, "apple-vz helper missing at %s", managedPath)
+		entitlementsPath := filepath.Join(helperDir, "apple-vz.entitlements")
+		if err := writeAtomicFile(entitlementsPath, []byte(applevzhelper.HelperEntitlements), 0o644); err != nil {
+			return "", exit(2, "write apple-vz entitlements: %v", err)
+		}
+		result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+			Name: "codesign",
+			Args: []string{"--force", "--sign", "-", "--entitlements", entitlementsPath, managedPath},
+		})
+		if err != nil {
+			return "", exit(2, "codesign apple-vz helper: %s", localCommandDetail(result, err))
+		}
+		return managedPath, nil
+	}
+	sourceDigest, err := fileSHA256(sourcePath)
+	if err != nil {
+		return "", exit(2, "hash apple-vz helper %s: %v", sourcePath, err)
+	}
+	entitlementsDigest := dataSHA256([]byte(applevzhelper.HelperEntitlements))
+	digestPath := filepath.Join(helperDir, managedHelperDigestFileName)
+	if managedHelperCurrent(managedPath, digestPath, sourceDigest, entitlementsDigest) {
+		return managedPath, nil
 	}
 	entitlementsPath := filepath.Join(helperDir, "apple-vz.entitlements")
-	if err := os.WriteFile(entitlementsPath, []byte(applevzhelper.HelperEntitlements), 0o644); err != nil {
+	if err := writeAtomicFile(entitlementsPath, []byte(applevzhelper.HelperEntitlements), 0o644); err != nil {
 		return "", exit(2, "write apple-vz entitlements: %v", err)
 	}
+	stagedPath, err := stageHelperBinary(sourcePath, helperDir)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(stagedPath)
 	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: "codesign",
-		Args: []string{"--force", "--sign", "-", "--entitlements", entitlementsPath, managedPath},
+		Args: []string{"--force", "--sign", "-", "--entitlements", entitlementsPath, stagedPath},
 	})
 	if err != nil {
 		return "", exit(2, "codesign apple-vz helper: %s", localCommandDetail(result, err))
+	}
+	if err := os.Rename(stagedPath, managedPath); err != nil {
+		return "", exit(2, "install apple-vz helper %s: %v", managedPath, err)
+	}
+	managedDigest, err := fileSHA256(managedPath)
+	if err != nil {
+		return "", exit(2, "hash managed apple-vz helper: %v", err)
+	}
+	digestData, err := json.MarshalIndent(managedHelperDigests{
+		SourceSHA256:       sourceDigest,
+		ManagedSHA256:      managedDigest,
+		EntitlementsSHA256: entitlementsDigest,
+	}, "", "  ")
+	if err != nil {
+		return "", exit(2, "encode apple-vz helper digests: %v", err)
+	}
+	if err := writeAtomicFile(digestPath, append(digestData, '\n'), 0o644); err != nil {
+		return "", exit(2, "write apple-vz helper digest: %v", err)
 	}
 	return managedPath, nil
 }
@@ -663,33 +795,102 @@ func resolveHelperSourcePath(cfg core.Config) (string, error) {
 	if path, err := exec.LookPath(applevzhelper.ManagedHelperName); err == nil {
 		return path, nil
 	}
-	return "", exit(2, "apple-vz helper binary not found; release installs intentionally require a separate Apple Silicon helper. Build it with `go build -o ./bin/%s ./cmd/%s`, put `%s` on PATH, or pass --apple-vz-helper", applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName)
+	return "", exit(2, "apple-vz helper binary not found. Reinstall Crabbox on Apple Silicon, build it with `go build -o ./bin/%s ./cmd/%s`, put `%s` on PATH, or pass --apple-vz-helper", applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName, applevzhelper.ManagedHelperName)
 }
 
-func refreshManagedHelper(sourcePath, managedPath string) bool {
-	sourceInfo, err := os.Stat(sourcePath)
+func managedHelperCurrent(managedPath, digestPath, sourceDigest, entitlementsDigest string) bool {
+	if _, err := os.Stat(managedPath); err != nil {
+		return false
+	}
+	data, err := os.ReadFile(digestPath)
 	if err != nil {
-		return true
+		return false
 	}
-	managedInfo, err := os.Stat(managedPath)
-	if err != nil {
-		return true
+	var digests managedHelperDigests
+	if err := json.Unmarshal(data, &digests); err != nil ||
+		digests.SourceSHA256 != sourceDigest ||
+		digests.EntitlementsSHA256 != entitlementsDigest {
+		return false
 	}
-	if sourceInfo.Size() != managedInfo.Size() {
-		return true
-	}
-	return sourceInfo.ModTime().After(managedInfo.ModTime())
+	managedDigest, err := fileSHA256(managedPath)
+	return err == nil && managedDigest == digests.ManagedSHA256
 }
 
-func copyHelperBinary(sourcePath, managedPath string) error {
-	data, err := os.ReadFile(sourcePath)
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		return exit(2, "read apple-vz helper %s: %v", sourcePath, err)
+		return "", err
 	}
-	if err := os.WriteFile(managedPath, data, 0o755); err != nil {
-		return exit(2, "write apple-vz helper %s: %v", managedPath, err)
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
 	}
-	return nil
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func dataSHA256(data []byte) string {
+	hash := sha256.Sum256(data)
+	return fmt.Sprintf("%x", hash[:])
+}
+
+func stageHelperBinary(sourcePath, helperDir string) (string, error) {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return "", exit(2, "read apple-vz helper %s: %v", sourcePath, err)
+	}
+	defer source.Close()
+	staged, err := os.CreateTemp(helperDir, "."+applevzhelper.ManagedHelperName+"-*")
+	if err != nil {
+		return "", exit(2, "stage apple-vz helper: %v", err)
+	}
+	stagedPath := staged.Name()
+	cleanup := true
+	defer func() {
+		_ = staged.Close()
+		if cleanup {
+			_ = os.Remove(stagedPath)
+		}
+	}()
+	if _, err := io.Copy(staged, source); err != nil {
+		return "", exit(2, "copy apple-vz helper: %v", err)
+	}
+	if err := staged.Chmod(0o755); err != nil {
+		return "", exit(2, "chmod apple-vz helper: %v", err)
+	}
+	if err := staged.Sync(); err != nil {
+		return "", exit(2, "sync apple-vz helper: %v", err)
+	}
+	if err := staged.Close(); err != nil {
+		return "", exit(2, "close apple-vz helper: %v", err)
+	}
+	cleanup = false
+	return stagedPath, nil
+}
+
+func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := file.Name()
+	defer os.Remove(tmpPath)
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Chmod(mode); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func providerClaims() (map[string]core.LeaseClaim, error) {
