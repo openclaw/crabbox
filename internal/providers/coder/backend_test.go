@@ -248,6 +248,35 @@ func TestCoderCleanupSkipsActiveClaimedAndRunningUnclaimedWorkspaces(t *testing.
 	}
 }
 
+func TestCoderCleanupSkipsStoppedActiveClaim(t *testing.T) {
+	installCoderClaimState(t)
+	if err := claimLeaseForRepoProvider("cbx_stopped", "stopped", coderProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "list -o json":
+			return LocalCommandResult{Stdout: `[
+				{"id":"ws1","name":"crabbox-stopped","template_name":"go-dev","latest_build":{"status":"stopped"}}
+			]`}, nil
+		default:
+			t.Fatalf("cleanup must not act on a stopped active claim, got: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{Coder: CoderConfig{CLIPath: "coder", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: true}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.(*coderLeaseBackend).Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("cleanup made mutating calls: %#v", runner.calls)
+	}
+}
+
 func TestCoderListAndResolveUseStandardCrabboxLabels(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {

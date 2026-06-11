@@ -329,9 +329,6 @@ func shouldCleanupCoder(server Server, claim LeaseClaim, hasClaim bool, now time
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
 	}
-	if !coderServerRunning(server.Status) && server.Status != "ready" {
-		return true, "workspace state=" + blank(server.Status, "unknown")
-	}
 	if hasClaim {
 		lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
 		if err != nil || lastUsed.IsZero() {
@@ -345,6 +342,9 @@ func shouldCleanupCoder(server Server, claim LeaseClaim, hasClaim bool, now time
 			return true, "claim expired"
 		}
 		return false, "claim active"
+	}
+	if !coderServerRunning(server.Status) && server.Status != "ready" {
+		return true, "workspace state=" + blank(server.Status, "unknown")
 	}
 	return false, "missing claim"
 }
