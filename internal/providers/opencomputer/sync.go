@@ -3,6 +3,7 @@ package opencomputer
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
@@ -16,6 +17,12 @@ import (
 // islo and tensorlake do.
 func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClient, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
 	start := b.now()
+	syncCtx := ctx
+	cancel := func() {}
+	if b.cfg.Sync.Timeout > 0 {
+		syncCtx, cancel = context.WithTimeout(ctx, b.cfg.Sync.Timeout)
+	}
+	defer cancel()
 
 	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
@@ -30,13 +37,13 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	manifestDuration := b.now().Sub(manifestStart)
 
 	preflightStart := b.now()
-	if err := checkSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
+	if err := checkOpenComputerSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
 		return nil, 0, err
 	}
 	preflightDuration := b.now().Sub(preflightStart)
 
 	archiveStart := b.now()
-	archive, err := createOpenComputerSyncArchive(ctx, req.Repo, manifest)
+	archive, err := createOpenComputerSyncArchive(syncCtx, req.Repo, manifest)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -51,7 +58,7 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 		return nil, 0, exit(6, "rewind sync archive: %v", err)
 	}
 	remoteArchive := path.Join("/tmp", "crabbox-sync-"+randomSuffix()+".tgz")
-	if err := api.uploadFile(ctx, sandboxID, remoteArchive, archive); err != nil {
+	if err := api.uploadFile(syncCtx, sandboxID, remoteArchive, archive); err != nil {
 		return nil, 0, err
 	}
 	uploadDuration := b.now().Sub(uploadStart)
@@ -80,9 +87,9 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 
 	prepareStart := b.now()
 	if stagingDir == "" {
-		err = b.ensureWorkspace(ctx, api, sandboxID, workdir)
+		err = b.ensureWorkspace(syncCtx, api, sandboxID, workdir)
 	} else {
-		err = b.execShell(ctx, api, sandboxID, "rm -rf "+shellQuote(stagingDir)+" && mkdir -p "+shellQuote(stagingDir))
+		err = b.execShell(syncCtx, api, sandboxID, "rm -rf "+shellQuote(stagingDir)+" && mkdir -p "+shellQuote(stagingDir))
 	}
 	if err != nil {
 		return nil, 0, err
@@ -90,7 +97,7 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	prepareDuration := b.now().Sub(prepareStart)
 
 	extractStart := b.now()
-	if err := b.execShell(ctx, api, sandboxID, "tar -xzf "+shellQuote(remoteArchive)+" -C "+shellQuote(extractDir)); err != nil {
+	if err := b.execShell(syncCtx, api, sandboxID, "tar -xzf "+shellQuote(remoteArchive)+" -C "+shellQuote(extractDir)); err != nil {
 		return nil, 0, err
 	}
 	extractDuration := b.now().Sub(extractStart)
@@ -98,7 +105,7 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	replaceDuration := time.Duration(0)
 	if stagingDir != "" {
 		replaceStart := b.now()
-		if err := b.replaceWorkspace(ctx, api, sandboxID, stagingDir, workdir); err != nil {
+		if err := b.replaceWorkspace(syncCtx, api, sandboxID, stagingDir, workdir); err != nil {
 			return nil, 0, err
 		}
 		replaceDuration = b.now().Sub(replaceStart)
@@ -124,6 +131,15 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 	phases = append(phases, timingPhase{Name: "cleanup", Ms: cleanupDuration.Milliseconds()})
 	phases = append(phases, timingPhase{Name: "opencomputer_sync", Ms: total.Milliseconds()})
 	return phases, total, nil
+}
+
+func checkOpenComputerSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
+	// OpenComputer uploads a full archive even when only a small dirty delta
+	// exists, so guardrails must evaluate the full candidate.
+	archiveManifest := manifest
+	archiveManifest.Changed = nil
+	archiveManifest.ChangedBytes = 0
+	return checkSyncPreflight(archiveManifest, cfg, force, stderr)
 }
 
 func (b *openComputerBackend) ensureWorkspace(ctx context.Context, api *ocAPIClient, sandboxID, workdir string) error {

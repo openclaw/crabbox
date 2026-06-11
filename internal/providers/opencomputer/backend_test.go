@@ -61,6 +61,9 @@ func TestBuildCommandAutoWrapsShellMetacharacters(t *testing.T) {
 	if len(got) != 3 || got[0] != "bash" || got[1] != "-lc" {
 		t.Fatalf("command=%#v want bash -lc wrapping", got)
 	}
+	if got[2] != "pnpm install && pnpm test" {
+		t.Fatalf("script=%q want unquoted shell expression", got[2])
+	}
 }
 
 func TestBuildCommandAutoWrapsLeadingEnvAssignment(t *testing.T) {
@@ -188,18 +191,18 @@ func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
 
 func TestResolveLeaseIDPrefersExactLeaseOverCollidingSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	exactLeaseID := "ocbx_sb-exact"
+	exactLeaseID := "ocbx_sb-z-exact"
 	if err := claimLeaseForRepoProvider(exactLeaseID, "exact", providerName, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("ocbx_sb-other", exactLeaseID, providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProvider("ocbx_sb-a-other", exactLeaseID, providerName, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	leaseID, sandboxID, _, err := resolveLeaseID(exactLeaseID, "", false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaseID != exactLeaseID || sandboxID != "sb-exact" {
+	if leaseID != exactLeaseID || sandboxID != "sb-z-exact" {
 		t.Fatalf("resolved lease=%q sandbox=%q", leaseID, sandboxID)
 	}
 }
@@ -258,6 +261,7 @@ type fakeAPI struct {
 	blockDelete   bool
 	deleteStatus  int
 	uploadStatus  int
+	blockUpload   bool
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -303,6 +307,10 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/files"):
+		if f.blockUpload {
+			<-r.Context().Done()
+			return
+		}
 		if f.uploadStatus != 0 {
 			w.WriteHeader(f.uploadStatus)
 			_, _ = w.Write([]byte(`{"error":"upload denied"}`))
@@ -558,6 +566,40 @@ func TestRunPerformsArchiveSyncViaFileAPI(t *testing.T) {
 	}
 	if !sawExtract {
 		t.Fatalf("expected a tar extract exec after upload")
+	}
+}
+
+func TestSyncHonorsConfiguredTimeout(t *testing.T) {
+	f := newFakeAPI(t)
+	f.blockUpload = true
+	backend := newAPIBackend(t, f)
+	backend.cfg.Sync.Timeout = 50 * time.Millisecond
+	started := time.Now()
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"true"}, Keep: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("Run err=%v, want sync timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Run took %s, sync timeout should bound upload", elapsed)
+	}
+}
+
+func TestSyncPreflightGuardsFullArchiveCandidate(t *testing.T) {
+	cfg := newTestConfig("")
+	cfg.Sync.FailBytes = 100
+	manifest := SyncManifest{
+		Files:        []string{"large.bin", "small.txt"},
+		Bytes:        1000,
+		Changed:      []string{"small.txt"},
+		ChangedBytes: 1,
+	}
+	var stderr bytes.Buffer
+	err := checkOpenComputerSyncPreflight(manifest, cfg, false, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "sync candidate too large") {
+		t.Fatalf("preflight err=%v stderr=%q, want full candidate rejection", err, stderr.String())
 	}
 }
 
@@ -880,18 +922,25 @@ func TestListFetchesClaimedHibernatedSandbox(t *testing.T) {
 	}
 	// The collection endpoint omits hibernated sandboxes, so List must fetch
 	// each locally claimed sandbox by ID.
-	if err := claimLeaseForRepoProvider("ocbx_"+f.sandboxID, "slug", providerName, "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderPond("ocbx_"+f.sandboxID, "slug", providerName, "alpha", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	views, err = backend.List(context.Background(), ListRequest{})
 	if err != nil {
 		t.Fatalf("List err=%v", err)
 	}
-	if len(views) != 1 || views[0].CloudID != f.sandboxID || views[0].Status != "hibernated" {
+	if len(views) != 1 || views[0].CloudID != f.sandboxID || views[0].Status != "hibernated" || views[0].Labels["pond"] != "alpha" {
 		t.Fatalf("views=%#v", views)
 	}
 	if f.callsExact(http.MethodGet, "/api/sandboxes/"+f.sandboxID) != 1 {
 		t.Fatalf("want one status fetch, requests=%#v", f.requests)
+	}
+	status, err := backend.Status(context.Background(), StatusRequest{ID: "slug"})
+	if err != nil {
+		t.Fatalf("Status err=%v", err)
+	}
+	if status.Pond != "alpha" || status.Labels["pond"] != "alpha" {
+		t.Fatalf("status=%#v, want top-level pond and pond label", status)
 	}
 }
 

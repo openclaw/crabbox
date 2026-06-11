@@ -229,6 +229,7 @@ func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]Leas
 				"provider": providerName,
 				"lease":    claim.LeaseID,
 				"slug":     claim.Slug,
+				"pond":     claim.Pond,
 				"target":   targetLinux,
 				"state":    state,
 			},
@@ -261,6 +262,13 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 	if err != nil {
 		return StatusView{}, err
 	}
+	claim, ok, err := resolveOpenComputerLeaseClaim(leaseID)
+	if err != nil {
+		return StatusView{}, err
+	}
+	if !ok {
+		return StatusView{}, exit(4, "opencomputer sandbox %q is not claimed by Crabbox", req.ID)
+	}
 	deadline := b.now().Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
 		deadline = b.now().Add(5 * time.Minute)
@@ -280,11 +288,13 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 			TargetOS: targetLinux,
 			State:    state,
 			ServerID: sandboxID,
+			Pond:     claim.Pond,
 			Network:  NetworkPublic,
 			Ready:    isReadyState(state),
 			Labels: map[string]string{
 				"provider": providerName,
 				"lease":    leaseID,
+				"pond":     claim.Pond,
 				"state":    state,
 			},
 		}
@@ -392,12 +402,12 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 	if !strings.HasPrefix(exactLeaseID, leasePrefix) {
 		exactLeaseID = leasePrefix + exactLeaseID
 	}
-	if claim, ok, err := resolveLeaseClaim(exactLeaseID); err != nil {
+	if claim, ok, err := resolveOpenComputerLeaseClaim(exactLeaseID); err != nil {
 		return "", "", "", err
-	} else if ok && claim.Provider == providerName {
+	} else if ok {
 		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout)
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(id, providerName)
+	claim, ok, err := resolveOpenComputerLeaseClaim(id)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -405,6 +415,27 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout)
 	}
 	return "", "", "", exit(4, "opencomputer sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
+}
+
+func resolveOpenComputerLeaseClaim(identifier string) (LeaseClaim, bool, error) {
+	claims, err := listOpenComputerLeaseClaims()
+	if err != nil {
+		return LeaseClaim{}, false, err
+	}
+	for _, claim := range claims {
+		if claim.Provider == providerName && claim.LeaseID == identifier {
+			return claim, true, nil
+		}
+	}
+	slug := normalizeLeaseSlug(identifier)
+	if slug != "" {
+		for _, claim := range claims {
+			if claim.Provider == providerName && normalizeLeaseSlug(claim.Slug) == slug {
+				return claim, true, nil
+			}
+		}
+	}
+	return LeaseClaim{}, false, nil
 }
 
 func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
@@ -483,6 +514,9 @@ func buildCommand(command []string, shellMode bool) ([]string, error) {
 		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
 	}
 	if shouldUseShell(command) || leadingEnvAssignment(command) {
+		if len(command) == 1 {
+			return []string{"bash", "-lc", command[0]}, nil
+		}
 		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
 	}
 	return command, nil
