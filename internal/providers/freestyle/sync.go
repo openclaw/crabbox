@@ -98,9 +98,21 @@ func (b *freestyleBackend) uploadArchiveViaExec(ctx context.Context, client free
 	suffix := freestyleRandomSuffix()
 	remoteB64 := "/tmp/crabbox-" + suffix + ".tgz.b64"
 	remoteArchive := "/tmp/crabbox-" + suffix + ".tgz"
-	if err := b.execShell(ctx, client, name, "rm -f "+shellQuote(remoteB64)+" "+shellQuote(remoteArchive)); err != nil {
+	cleanupCommand := "rm -f " + shellQuote(remoteB64) + " " + shellQuote(remoteArchive)
+	if err := b.execShell(ctx, client, name, cleanupCommand); err != nil {
 		return err
 	}
+	cleanupNeeded := true
+	defer func() {
+		if !cleanupNeeded {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), freestyleCleanupTimeout)
+		defer cancel()
+		if err := b.execShell(cleanupCtx, client, name, cleanupCommand); err != nil && b.rt.Stderr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: freestyle fallback upload cleanup failed for %s: %v\n", name, err)
+		}
+	}()
 	buf := archiveData
 	chunkSize := 48 * 1024
 	for i := 0; i < len(buf); i += chunkSize {
@@ -114,7 +126,11 @@ func (b *freestyleBackend) uploadArchiveViaExec(ctx context.Context, client free
 			return err
 		}
 	}
-	return b.execShell(ctx, client, name, freestyleFallbackExtractCommand(remoteB64, remoteArchive, workspace))
+	if err := b.execShell(ctx, client, name, freestyleFallbackExtractCommand(remoteB64, remoteArchive, workspace)); err != nil {
+		return err
+	}
+	cleanupNeeded = false
+	return nil
 }
 
 func readFreestyleArchiveForUpload(r io.Reader) ([]byte, error) {

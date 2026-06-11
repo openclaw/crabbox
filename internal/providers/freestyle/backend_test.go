@@ -606,6 +606,21 @@ func TestFreestyleSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 }
 
+func TestFreestyleFallbackUploadCleansPartialArchiveAfterChunkFailure(t *testing.T) {
+	client := &fakeFreestyleClient{execErrAt: 2}
+	backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
+	err := backend.uploadArchiveViaExec(context.Background(), client, "vm123", "/workspace/repo", []byte("payload"))
+	if err == nil || !strings.Contains(err.Error(), "exec failed") {
+		t.Fatalf("err=%v, want chunk upload failure", err)
+	}
+	if len(client.execCommands) != 3 {
+		t.Fatalf("commands=%#v, want initial cleanup, failed chunk, rollback cleanup", client.execCommands)
+	}
+	if client.execCommands[0] != client.execCommands[2] || !strings.Contains(client.execCommands[2], "rm -f") {
+		t.Fatalf("commands=%#v, want matching cleanup commands", client.execCommands)
+	}
+}
+
 func TestFreestyleFallbackExtractCommandCleansUploadsOnFailure(t *testing.T) {
 	cmd := freestyleFallbackExtractCommand("/tmp/crabbox-test.tgz.b64", "/tmp/crabbox-test.tgz", "/workspace/repo")
 	for _, want := range []string{
@@ -681,6 +696,8 @@ type fakeFreestyleClient struct {
 	deleteIDs         []string
 	deleteErr         error
 	deleteDeadlineSet bool
+	execCalls         int
+	execErrAt         int
 }
 
 func (f *fakeFreestyleClient) CreateVM(_ context.Context, req freestyleCreateVMRequest) (freestyleVM, error) {
@@ -713,8 +730,12 @@ func (f *fakeFreestyleClient) DeleteVM(ctx context.Context, id string) error {
 }
 
 func (f *fakeFreestyleClient) Exec(_ context.Context, _ string, command string, _, _ io.Writer) (int, error) {
+	f.execCalls++
 	f.execCommands = append(f.execCommands, command)
 	f.prepareCommands = append(f.prepareCommands, command)
+	if f.execCalls == f.execErrAt {
+		return 1, errors.New("exec failed")
+	}
 	return 0, nil
 }
 
