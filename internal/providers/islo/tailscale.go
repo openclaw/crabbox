@@ -112,7 +112,7 @@ tailscale_backend_state() {
     sed -n 's/.*"BackendState"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
     head -n1
 }
-if ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status >/dev/null 2>&1; then
+if [ ! -S "${TS_SOCKET}" ] || ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json >/dev/null 2>&1; then
   # Userspace ingress forwards tailnet TCP to 127.0.0.1:<port>. Keep the
   # unauthenticated outbound proxy on another loopback address.
   rm -f "${TS_SOCKET}"

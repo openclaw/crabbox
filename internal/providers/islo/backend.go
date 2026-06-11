@@ -633,11 +633,16 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 	applyIsloTailscaleSandboxState(labels, status)
 	var tailscale *core.TailscaleMetadata
 	if labels["tailscale"] == "true" {
+		claim, _, _ := resolveLeaseClaim(leaseID)
 		tailscale = &core.TailscaleMetadata{
-			Enabled: true,
-			FQDN:    labels["tailscale_fqdn"],
-			IPv4:    labels["tailscale_ipv4"],
-			State:   labels["tailscale_state"],
+			Enabled:                true,
+			Hostname:               claim.TailscaleHostname,
+			FQDN:                   labels["tailscale_fqdn"],
+			IPv4:                   labels["tailscale_ipv4"],
+			Tags:                   append([]string(nil), claim.TailscaleTags...),
+			State:                  labels["tailscale_state"],
+			ExitNode:               claim.TailscaleExitNode,
+			ExitNodeAllowLANAccess: claim.TailscaleExitLAN,
 		}
 	}
 	return statusView{

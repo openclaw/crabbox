@@ -259,6 +259,9 @@ func TestIsloStatusViewIncludesTailscaleMetadata(t *testing.T) {
 	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", "node-a.tailnet.example"); err != nil {
 		t.Fatal(err)
 	}
+	if err := updateLeaseClaimTailscaleSettings(leaseID, "node-a", []string{"tag:demo"}, "", "exit.tailnet.example", true); err != nil {
+		t.Fatal(err)
+	}
 
 	view := isloStatusView(leaseID, &gosdk.SandboxResponse{Name: "crabbox-node-a", Status: "running"})
 	if view.Tailscale == nil {
@@ -266,6 +269,10 @@ func TestIsloStatusViewIncludesTailscaleMetadata(t *testing.T) {
 	}
 	if !view.Tailscale.Enabled || view.Tailscale.IPv4 != "100.64.7.7" || view.Tailscale.FQDN != "node-a.tailnet.example" || view.Tailscale.State != "ready" {
 		t.Fatalf("tailscale metadata=%#v", view.Tailscale)
+	}
+	if view.Tailscale.Hostname != "node-a" || strings.Join(view.Tailscale.Tags, ",") != "tag:demo" ||
+		view.Tailscale.ExitNode != "exit.tailnet.example" || !view.Tailscale.ExitNodeAllowLANAccess {
+		t.Fatalf("tailscale settings=%#v", view.Tailscale)
 	}
 }
 

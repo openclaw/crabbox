@@ -103,6 +103,7 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		`kill -0 "${lock_pid}"`,
 		`rm -f "${TS_RUNTIME_DIR}"/auth.*`,
 		`TS_ARCHIVE="${TS_INSTALL_DIR}/tailscale.tgz"`,
+		`if [ ! -S "${TS_SOCKET}" ] || ! "${TS_BIN_DIR}/tailscale" --socket="${TS_SOCKET}" status --json >/dev/null 2>&1; then`,
 		"for _ in $(seq 1 120)",
 		"exit 75",
 		`--auth-key="file:${TS_AUTH_FILE}"`,
