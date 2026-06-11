@@ -501,6 +501,7 @@ func coderWorkspaceToServer(workspace coderWorkspace, cfg Config, leaseID, slug 
 	}
 	labels["coder_workspace"] = workspace.Name
 	labels["coder_workspace_ref"] = coderWorkspaceCommandName(workspace)
+	labels["work_root"] = coderWorkRoot(cfg)
 	labels["state"] = coderWorkspaceState(workspace)
 	server := Server{CloudID: workspace.Name, Provider: coderProvider, Name: workspace.Name, Status: labels["state"], Labels: labels}
 	server.ServerType.Name = blank(workspace.Template, "coder-workspace")
@@ -550,9 +551,10 @@ func coderSlugFromWorkspace(name, prefix string) string {
 }
 
 func coderSSHTarget(cfg Config, workspaceName string) SSHTarget {
+	host := coderWorkspaceSSHHost(workspaceName)
 	return SSHTarget{
 		User:           "coder",
-		Host:           workspaceName,
+		Host:           host,
 		Port:           "22",
 		TargetOS:       targetLinux,
 		NetworkKind:    networkPublic,
@@ -560,6 +562,26 @@ func coderSSHTarget(cfg Config, workspaceName string) SSHTarget {
 		SSHConfigProxy: true,
 		ProxyCommand:   shellQuote(cfg.Coder.CLIPath) + " ssh --stdio --wait " + shellQuote(blank(cfg.Coder.Wait, "yes")) + " " + shellQuote(workspaceName),
 	}
+}
+
+func coderWorkspaceSSHHost(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if !strings.Contains(ref, "/") {
+		return blank(coderWorkspaceNameFromRef(ref), "coder-workspace")
+	}
+	base := normalizeLeaseSlug(ref)
+	hash := coderWorkspaceHash(ref)
+	maxBase := 63 - len("coder-") - len(hash) - 1
+	if maxBase < 1 {
+		return "coder-" + hash
+	}
+	if len(base) > maxBase {
+		base = strings.Trim(base[:maxBase], "-")
+	}
+	if base == "" {
+		return "coder-" + hash
+	}
+	return "coder-" + base + "-" + hash
 }
 
 func coderWorkspaceReady(workspace coderWorkspace) bool {

@@ -1889,13 +1889,35 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		return nil
 	}
+	if cfg.Provider == "coder" {
+		base := baseConfig()
+		if cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser {
+			cfg.SSHUser = "coder"
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if !isDefaultWorkRoot(cfg.WorkRoot) && (cfg.Coder.WorkRoot == "" || cfg.Coder.WorkRoot == base.Coder.WorkRoot) {
+			cfg.Coder.WorkRoot = cfg.WorkRoot
+		} else if cfg.Coder.WorkRoot == "" {
+			cfg.Coder.WorkRoot = base.Coder.WorkRoot
+		}
+		if cfg.Coder.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Coder.WorkRoot
+		}
+		if cfg.TargetOS == "" {
+			cfg.TargetOS = targetLinux
+		}
+		return nil
+	}
 	if cfg.Provider == "firecracker" {
 		base := baseConfig()
 		if cfg.Firecracker.User != "" && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser || cfg.Firecracker.User != base.Firecracker.User) {
 			cfg.SSHUser = cfg.Firecracker.User
 		}
 		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
-			cfg.SSHPort = "22"
+			cfg.SSHPort = blank(cfg.Firecracker.SSHPort, "22")
 		}
 		cfg.SSHFallbackPorts = nil
 		if cfg.Firecracker.WorkRoot != "" && (isDefaultWorkRoot(cfg.WorkRoot) || cfg.Firecracker.WorkRoot != base.Firecracker.WorkRoot) {
