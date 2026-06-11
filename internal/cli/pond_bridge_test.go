@@ -235,6 +235,36 @@ func TestResolvePondPeersKeepsTailnetPeerWhenSecondaryBridgeFails(t *testing.T) 
 	}
 }
 
+func TestResolvePondPeersKeepsTailnetPeerWhenURLMemberFails(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_tailnet", Slug: "tailnet", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_url", Slug: "url", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_tailnet", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	fake := &fakeBridgeProvider{listErr: errors.New("Islo API unavailable")}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("URL member failure must not discard healthy tailnet peer: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("expected healthy and degraded members, got %#v", peers)
+	}
+	bySlug := map[string]BridgePeer{}
+	for _, peer := range peers {
+		bySlug[peer.Slug] = peer
+	}
+	if got := bySlug["tailnet"]; got.Transport != TransportTailnet || got.Endpoint != "100.64.7.7" {
+		t.Fatalf("healthy tailnet peer missing: %#v", got)
+	}
+	if got := bySlug["url"]; got.Transport != TransportNone || got.BridgeState != "error" {
+		t.Fatalf("failed URL peer should degrade in place: %#v", got)
+	}
+}
+
 func TestResolvePondPeersUnknownProvider(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},

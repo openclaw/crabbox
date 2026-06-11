@@ -326,6 +326,14 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider string, claims []leaseClaim, flags pondPeersFlags) ([]BridgePeer, error) {
 	class := providerTransportClass(provider)
 	peers := make([]BridgePeer, 0, len(claims))
+	hasIndependentPrimary := false
+	for _, claim := range claims {
+		transport := bridgePeerFromClaim(claim, class).Transport
+		if transport == TransportTailnet || transport == TransportSSH {
+			hasIndependentPrimary = true
+			break
+		}
+	}
 	var bridge BridgeProvider
 	bridgeLoaded := false
 	var bridgeLoadErr error
@@ -342,6 +350,13 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 			}
 			if bridgeLoadErr != nil {
 				if secondaryRead {
+					peers = append(peers, peer)
+					continue
+				}
+				if flags.SharePort == 0 && hasIndependentPrimary {
+					peer.BridgeState = "error"
+					peer.Transport = TransportNone
+					peer.Note = fmt.Sprintf("bridge lookup failed for provider %s: %v", peer.Provider, bridgeLoadErr)
 					peers = append(peers, peer)
 					continue
 				}
@@ -398,6 +413,13 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 								peer.Transport = TransportNone
 							}
 							peer.Note = fmt.Sprintf("bridge adapter for provider %s reports unsupported", peer.Provider)
+							peers = append(peers, peer)
+							continue
+						}
+						if hasIndependentPrimary {
+							peer.BridgeState = "error"
+							peer.Transport = TransportNone
+							peer.Note = fmt.Sprintf("list bridge targets failed: %v", lerr)
 							peers = append(peers, peer)
 							continue
 						}
