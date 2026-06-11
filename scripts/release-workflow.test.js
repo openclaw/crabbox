@@ -29,3 +29,20 @@ test("manual release checks out requested tag before setup-go reads go.mod", () 
   assert.ok(checkoutTag < setupGo, "setup-go should read go.mod from the requested release tag");
   assert.match(workflow.slice(setupGo), /go-version-file:\s+go\.mod/);
 });
+
+test("macOS GoReleaser jobs bound build parallelism", () => {
+  const ciWorkflow = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+  const releaseWorkflow = fs.readFileSync(
+    path.join(repoRoot, ".github", "workflows", "release.yml"),
+    "utf8",
+  );
+
+  assert.match(
+    ciWorkflow,
+    /args:\s+release --snapshot --clean --skip=publish --parallelism 1/,
+  );
+  assert.match(
+    releaseWorkflow,
+    /args:\s+release --clean --config \/tmp\/\.goreleaser\.yaml --parallelism 1/,
+  );
+});
