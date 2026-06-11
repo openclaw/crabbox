@@ -516,7 +516,12 @@ func runDelete(args []string, stdout, stderr io.Writer) error {
 func terminateInstance(stateRoot, name string, inst Instance) error {
 	pid := inst.PID
 	if pid > 0 && pidAlive(pid) {
-		if processIdentityMatches(inst) {
+		matches, err := processIdentityMatches(inst)
+		if err != nil {
+			if pidAlive(pid) {
+				return fmt.Errorf("verify helper process %d identity: %w", pid, err)
+			}
+		} else if matches {
 			process, err := os.FindProcess(pid)
 			if err != nil {
 				return fmt.Errorf("find helper process %d: %w", pid, err)
@@ -537,13 +542,19 @@ func terminateInstance(stateRoot, name string, inst Instance) error {
 	return nil
 }
 
-func processIdentityMatches(inst Instance) bool {
+func processIdentityMatches(inst Instance) (bool, error) {
 	expected := strings.TrimSpace(inst.PIDStartedAt)
-	if inst.PID <= 0 || expected == "" {
-		return false
+	if inst.PID <= 0 {
+		return false, nil
+	}
+	if expected == "" {
+		return false, fmt.Errorf("recorded process start time is missing")
 	}
 	actual, err := processStartTime(inst.PID)
-	return err == nil && actual == expected
+	if err != nil {
+		return false, err
+	}
+	return actual == expected, nil
 }
 
 func readProcessStartTime(pid int) (string, error) {

@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestRunStartCleansUpDaemonAndInstanceDirectoryOnReadinessTimeout(t *testing.T) {
@@ -297,7 +299,13 @@ func TestWaitForStartupAuthorizationRejectsParentExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd := int(reader.Fd())
+	fd, err := unix.Dup(int(reader.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -447,6 +455,37 @@ func TestTerminateInstanceSkipsSignalWhenPIDIdentityMismatches(t *testing.T) {
 	}
 	if !pidAlive(cmd.Process.Pid) {
 		t.Fatal("identity mismatch should not signal the live process")
+	}
+}
+
+func TestTerminateInstancePreservesStateWhenIdentityProbeFails(t *testing.T) {
+	root := t.TempDir()
+	name := "identity-probe-failure"
+	mustCreateInstanceDir(t, root, name)
+	cmd := startSleepProcess(t)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	originalProcessStartTime := processStartTime
+	t.Cleanup(func() { processStartTime = originalProcessStartTime })
+	processStartTime = func(pid int) (string, error) {
+		if pid != cmd.Process.Pid {
+			t.Fatalf("processStartTime pid=%d want %d", pid, cmd.Process.Pid)
+		}
+		return "", errors.New("transient ps failure")
+	}
+
+	err := terminateInstance(root, name, Instance{PID: cmd.Process.Pid, PIDStartedAt: "recorded-start"})
+	if err == nil || !strings.Contains(err.Error(), "transient ps failure") {
+		t.Fatalf("terminateInstance error=%v, want process identity probe failure", err)
+	}
+	if _, err := os.Stat(InstanceDir(root, name)); err != nil {
+		t.Fatalf("instance state should be preserved: %v", err)
+	}
+	if !pidAlive(cmd.Process.Pid) {
+		t.Fatal("identity probe failure should not signal the live process")
 	}
 }
 

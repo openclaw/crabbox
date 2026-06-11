@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +90,33 @@ func TestResolveSourceImageVerifiesRemoteImageChecksum(t *testing.T) {
 	}
 }
 
+func TestResolveSourceImageExcludesURLQueryFromCacheFilename(t *testing.T) {
+	payload := []byte("signed image")
+	sum := sha256.Sum256(payload)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(server.Close)
+
+	token := strings.Repeat("secret", 100)
+	resolved, err := resolveSourceImage(
+		context.Background(),
+		t.TempDir(),
+		server.URL+"/ubuntu.img?token="+token,
+		hex.EncodeToString(sum[:]),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Base(resolved)
+	if strings.Contains(name, "token") || strings.Contains(name, "secret") {
+		t.Fatalf("cache filename exposes URL query: %q", name)
+	}
+	if !strings.HasSuffix(name, "-ubuntu.img") {
+		t.Fatalf("cache filename=%q, want URL path basename", name)
+	}
+}
+
 func TestResolveSourceImageVerifiesLocalImageWhenChecksumProvided(t *testing.T) {
 	path := t.TempDir() + "/image.img"
 	payload := []byte("local image")
@@ -108,5 +136,41 @@ func TestResolveSourceImageVerifiesLocalImageWhenChecksumProvided(t *testing.T) 
 	_, err = resolveSourceImage(context.Background(), t.TempDir(), path, strings.Repeat("f", 64))
 	if err == nil {
 		t.Fatal("expected local checksum mismatch to fail")
+	}
+}
+
+func TestCreateCacheTempUsesUniqueSiblingFiles(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ubuntu.raw")
+	first, err := createCacheTemp(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := first.Name()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(firstPath) })
+
+	second, err := createCacheTemp(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPath := second.Name()
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(secondPath) })
+
+	if firstPath == secondPath {
+		t.Fatalf("cache staging paths must be unique: %q", firstPath)
+	}
+	for _, path := range []string{firstPath, secondPath} {
+		if filepath.Dir(path) != dir {
+			t.Fatalf("staging path %q is not beside target %q", path, target)
+		}
+		if !strings.HasPrefix(filepath.Base(path), ".ubuntu.raw.tmp-") {
+			t.Fatalf("staging path %q does not use target-specific prefix", path)
+		}
 	}
 }

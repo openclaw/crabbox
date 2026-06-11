@@ -12,8 +12,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -94,7 +96,11 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 			return "", fmt.Errorf("create downloads cache: %w", err)
 		}
 		sum := sha256.Sum256([]byte(image))
-		name := filepath.Base(image)
+		parsedURL, err := url.Parse(image)
+		if err != nil {
+			return "", fmt.Errorf("parse image URL: %w", err)
+		}
+		name := path.Base(parsedURL.EscapedPath())
 		if name == "." || name == "/" || name == "" {
 			name = "image.img"
 		}
@@ -105,8 +111,6 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 			}
 			return target, nil
 		}
-		tmp := target + ".tmp"
-		_ = os.Remove(tmp)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, image, nil)
 		if err != nil {
 			return "", fmt.Errorf("build image request: %w", err)
@@ -120,26 +124,28 @@ func resolveSourceImage(ctx context.Context, stateRoot, image, expectedSHA256 st
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return "", fmt.Errorf("download image: http %d", resp.StatusCode)
 		}
-		file, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		file, err := createCacheTemp(target)
 		if err != nil {
 			return "", fmt.Errorf("create image cache file: %w", err)
+		}
+		tmp := file.Name()
+		defer os.Remove(tmp)
+		if err := file.Chmod(0o644); err != nil {
+			file.Close()
+			return "", fmt.Errorf("set image cache permissions: %w", err)
 		}
 		hash := sha256.New()
 		if _, err := io.Copy(file, io.TeeReader(resp.Body, hash)); err != nil {
 			file.Close()
-			_ = os.Remove(tmp)
 			return "", fmt.Errorf("write image cache file: %w", err)
 		}
 		if err := file.Close(); err != nil {
-			_ = os.Remove(tmp)
 			return "", fmt.Errorf("close image cache file: %w", err)
 		}
 		if actual := hex.EncodeToString(hash.Sum(nil)); actual != checksum {
-			_ = os.Remove(tmp)
 			return "", fmt.Errorf("verify image %q: sha256 %s does not match expected %s", image, actual, checksum)
 		}
 		if err := os.Rename(tmp, target); err != nil {
-			_ = os.Remove(tmp)
 			return "", fmt.Errorf("commit image cache file: %w", err)
 		}
 		return target, nil
@@ -224,17 +230,27 @@ func ensureRawImage(stateRoot, sourceRef, sourcePath string) (string, error) {
 	if _, err := os.Stat(target); err == nil {
 		return target, nil
 	}
-	tmp := target + ".tmp"
-	_ = os.Remove(tmp)
-	if err := convertQCOW2ToRaw(sourcePath, tmp); err != nil {
+	tmpFile, err := createCacheTemp(target)
+	if err != nil {
+		return "", fmt.Errorf("create raw image staging file: %w", err)
+	}
+	tmp := tmpFile.Name()
+	if err := tmpFile.Close(); err != nil {
 		_ = os.Remove(tmp)
+		return "", fmt.Errorf("close raw image staging file: %w", err)
+	}
+	defer os.Remove(tmp)
+	if err := convertQCOW2ToRaw(sourcePath, tmp); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, target); err != nil {
-		_ = os.Remove(tmp)
 		return "", fmt.Errorf("commit raw image: %w", err)
 	}
 	return target, nil
+}
+
+func createCacheTemp(target string) (*os.File, error) {
+	return os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-*")
 }
 
 func isQCOW2(path string) (bool, error) {
