@@ -164,19 +164,19 @@ func TestIsTerminalState(t *testing.T) {
 }
 
 func TestResolveLeaseIDRejectsUnclaimed(t *testing.T) {
-	if _, _, _, err := resolveLeaseID("not-a-known-slug", "", false, 0, testOCClaimScope("https://api.example.test")); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+	if _, _, _, err := resolveLeaseID("not-a-known-slug", "", false, 0, "https://api.example.test"); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection", err)
 	}
 }
 
 func TestResolveLeaseIDRejectsLeasePrefixWithoutClaim(t *testing.T) {
-	if _, _, _, err := resolveLeaseID("ocbx_sb-unknown", "", false, 0, testOCClaimScope("https://api.example.test")); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+	if _, _, _, err := resolveLeaseID("ocbx_sb-unknown", "", false, 0, "https://api.example.test"); err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection", err)
 	}
 }
 
 func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
-	if _, _, _, err := resolveLeaseID("", "", false, 0, testOCClaimScope("https://api.example.test")); err == nil {
+	if _, _, _, err := resolveLeaseID("", "", false, 0, "https://api.example.test"); err == nil {
 		t.Fatalf("expected error for empty id")
 	}
 }
@@ -187,7 +187,7 @@ func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
 	if err := claimLeaseForRepoProviderScopePond(leaseID, "", providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	gotLease, sandboxID, slug, err := resolveLeaseID(leaseID, "", false, 0, testOCClaimScope("https://api.example.test"))
+	gotLease, sandboxID, slug, err := resolveLeaseID(leaseID, "", false, 0, "https://api.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestResolveLeaseIDPrefersExactLeaseOverCollidingSlug(t *testing.T) {
 	if err := claimLeaseForRepoProviderScopePond("ocbx_sb-a-other", exactLeaseID, providerName, testOCClaimScope("https://api.example.test"), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	leaseID, sandboxID, _, err := resolveLeaseID(exactLeaseID, "", false, 0, testOCClaimScope("https://api.example.test"))
+	leaseID, sandboxID, _, err := resolveLeaseID(exactLeaseID, "", false, 0, "https://api.example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,16 +242,39 @@ func TestStopRejectsClaimFromDifferentAPIAccount(t *testing.T) {
 	f := newFakeAPI(t)
 	backend := newAPIBackend(t, f)
 	leaseID := leasePrefix + f.sandboxID
-	otherScope := (&ocAPIClient{baseURL: f.server.URL, apiKey: "osb_other_account"}).claimScope()
+	otherScope := openComputerEndpointScope(f.server.URL) + "/ownership:11111111111111111111111111111111"
 	if err := claimLeaseForRepoProviderScopePond(leaseID, "other-account", providerName, otherScope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
-	if err == nil || !strings.Contains(err.Error(), "different API endpoint or account") {
-		t.Fatalf("Stop err=%v, want endpoint mismatch", err)
+	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
+		t.Fatalf("Stop err=%v, want ownership mismatch", err)
 	}
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
 		t.Fatal("stop contacted the configured endpoint for a claim from another endpoint")
+	}
+}
+
+func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
+	f := newFakeAPI(t)
+	backend := newAPIBackend(t, f)
+	leaseID := leasePrefix + f.sandboxID
+	otherScope := openComputerEndpointScope(f.server.URL) + "/ownership:11111111111111111111111111111111"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "other-account", providerName, otherScope, "", "/original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "carbbox", Root: "/replacement"}, Reclaim: true, NoSync: true, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
+		t.Fatalf("Run err=%v, want ownership mismatch", err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RepoRoot != "/original" {
+		t.Fatalf("repo root=%q changed before ownership verification", claim.RepoRoot)
 	}
 }
 
@@ -303,6 +326,8 @@ type fakeAPI struct {
 	execs         []execRecord
 	execReply     []execRunResult // popped in order; last/zero reused when empty
 	sandboxID     string
+	metadata      map[string]string
+	tags          map[string]string
 	listState     string
 	listStatus    int
 	getStatusCode int // when non-zero, GET /api/sandboxes/:id returns this code
@@ -329,6 +354,11 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/sandboxes":
+		var req createSandboxRequest
+		_ = json.Unmarshal(body, &req)
+		f.mu.Lock()
+		f.metadata = req.Metadata
+		f.mu.Unlock()
 		writeJSON(w, map[string]any{"sandboxID": f.sandboxID, "status": "running"})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sandboxes":
 		if f.listStatus != 0 {
@@ -347,7 +377,11 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"error":"boom"}`))
 			return
 		}
-		writeJSON(w, map[string]any{"sandboxID": f.sandboxID, "status": f.listState})
+		f.mu.Lock()
+		metadata := f.metadata
+		tags := f.tags
+		f.mu.Unlock()
+		writeJSON(w, map[string]any{"sandboxID": f.sandboxID, "status": f.listState, "metadata": metadata, "tags": tags})
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/sandboxes/"):
 		if f.blockDelete {
 			<-r.Context().Done()
@@ -359,6 +393,13 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/tags"):
+		var tags map[string]string
+		_ = json.Unmarshal(body, &tags)
+		f.mu.Lock()
+		f.tags = tags
+		f.mu.Unlock()
+		writeJSON(w, map[string]any{"tags": tags})
 	case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/files"):
 		if f.blockUpload {
 			<-r.Context().Done()
@@ -441,7 +482,7 @@ func newTestConfig(apiURL string) Config {
 }
 
 func testOCClaimScope(apiURL string) string {
-	return (&ocAPIClient{baseURL: apiURL, apiKey: "osb_testkey"}).claimScope()
+	return openComputerEndpointScope(apiURL) + "/ownership:00000000000000000000000000000000"
 }
 
 // newAPIBackend wires a backend to the fake API and isolates it from the real
@@ -451,6 +492,7 @@ func newAPIBackend(t *testing.T, f *fakeAPI) *openComputerBackend {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir()) // no real ~/.oc/config.json
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_testkey")
+	f.tags = map[string]string{openComputerClaimTagKey: testOCClaimScope(f.server.URL)}
 	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: f.server.Client()}
 	return NewOpenComputerBackend(Provider{}.Spec(), newTestConfig(f.server.URL), rt).(*openComputerBackend)
 }

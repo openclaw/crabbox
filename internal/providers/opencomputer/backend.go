@@ -3,6 +3,7 @@ package opencomputer
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 const (
 	openComputerCleanupTimeout  = 15 * time.Second
 	openComputerExecTimeoutSecs = 3600
+	openComputerClaimTagKey     = "crabbox.claim"
 )
 
 func NewOpenComputerBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -83,7 +85,18 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 		acquired = true
 	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.claimScope())
+		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, "", false, 0, api.baseURL)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if _, err := verifyOpenComputerClaim(ctx, api, leaseID, sandboxID); err != nil {
+			return RunResult{}, err
+		}
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.baseURL)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -207,7 +220,7 @@ func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]Leas
 		if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
 			continue
 		}
-		if claim.ProviderScope != api.claimScope() {
+		if validateOpenComputerClaimScope(claim, api.baseURL) != nil {
 			continue
 		}
 		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
@@ -223,6 +236,9 @@ func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]Leas
 				return nil, getErr
 			}
 		} else {
+			if err := validateOpenComputerSandboxOwnership(claim, sb); err != nil {
+				return nil, err
+			}
 			state = blank(sb.Status, statusViewReady)
 		}
 		servers = append(servers, Server{
@@ -263,11 +279,11 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0, api.claimScope())
+	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0, api.baseURL)
 	if err != nil {
 		return StatusView{}, err
 	}
-	claim, ok, err := resolveOpenComputerLeaseClaim(leaseID, api.claimScope())
+	claim, ok, err := resolveOpenComputerLeaseClaim(leaseID, api.baseURL)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -297,6 +313,9 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 			// Surface real API failures (auth, 5xx, sandbox gone) instead of
 			// masking them as a not-ready status.
 			return StatusView{}, getErr
+		}
+		if err := validateOpenComputerSandboxOwnership(claim, sb); err != nil {
+			return StatusView{}, err
 		}
 		state := strings.ToLower(strings.TrimSpace(sb.Status))
 		view := StatusView{
@@ -341,9 +360,17 @@ func (b *openComputerBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, err := resolveLeaseID(req.ID, "", false, 0, api.claimScope())
+	leaseID, sandboxID, _, err := resolveLeaseID(req.ID, "", false, 0, api.baseURL)
 	if err != nil {
 		return err
+	}
+	if _, err := verifyOpenComputerClaim(ctx, api, leaseID, sandboxID); err != nil {
+		if !isOCNotFound(err) || !b.cfg.OpenComputer.ForgetMissing {
+			return err
+		}
+		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing opencomputer sandbox=%s after explicit request\n", sandboxID)
+		removeLeaseClaim(leaseID)
+		return nil
 	}
 	if err := api.killSandbox(ctx, sandboxID); err != nil {
 		if !isOCNotFound(err) || !b.cfg.OpenComputer.ForgetMissing {
@@ -384,9 +411,16 @@ func (b *openComputerBackend) execCommand(ctx context.Context, api *ocAPIClient,
 // createSandbox creates a Crabbox-owned sandbox and records the local lease.
 // Returns (leaseID, sandboxID, slug, err).
 func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClient, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+	providerScope, err := newOpenComputerClaimScope(api.baseURL)
+	if err != nil {
+		return "", "", "", err
+	}
 	req := createSandboxRequest{
-		Timeout:  b.cfg.OpenComputer.TimeoutSecs,
-		Metadata: map[string]string{"crabbox": "true", "crabbox-name": newSandboxName(repo)},
+		Timeout: b.cfg.OpenComputer.TimeoutSecs,
+		Metadata: map[string]string{
+			"crabbox":      "true",
+			"crabbox-name": newSandboxName(repo),
+		},
 	}
 	if b.cfg.OpenComputer.CPU > 0 {
 		req.CPUCount = b.cfg.OpenComputer.CPU
@@ -398,12 +432,15 @@ func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClien
 	if err != nil {
 		return "", "", "", err
 	}
+	if err := api.replaceSandboxTags(ctx, sb.ID, map[string]string{openComputerClaimTagKey: providerScope}); err != nil {
+		return leasePrefix + sb.ID, sb.ID, "", b.cleanupCreateFailure(ctx, api, sb.ID, err)
+	}
 	leaseID := leasePrefix + sb.ID
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return leaseID, sb.ID, "", b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, api.claimScope(), b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, providerScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, nil
@@ -414,7 +451,7 @@ func (b *openComputerBackend) createSandbox(ctx context.Context, api *ocAPIClien
 // strict: only locally-claimed Crabbox sandboxes are accepted, mirroring islo
 // and tensorlake. Raw IDs are accepted only when a matching `ocbx_<id>` claim
 // exists.
-func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, providerScope string) (string, string, string, error) {
+func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return "", "", "", exit(2, "provider=opencomputer requires a Crabbox-created sandbox slug or lease id")
@@ -426,26 +463,26 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 	if claim, err := readLeaseClaim(exactLeaseID); err != nil {
 		return "", "", "", err
 	} else if claim.LeaseID == exactLeaseID && claim.Provider == providerName {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, providerScope)
+		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL)
 	}
-	claim, ok, err := resolveOpenComputerLeaseClaim(id, providerScope)
+	claim, ok, err := resolveOpenComputerLeaseClaim(id, baseURL)
 	if err != nil {
 		return "", "", "", err
 	}
 	if ok {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, providerScope)
+		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL)
 	}
 	return "", "", "", exit(4, "opencomputer sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
 }
 
-func resolveOpenComputerLeaseClaim(identifier, providerScope string) (LeaseClaim, bool, error) {
+func resolveOpenComputerLeaseClaim(identifier, baseURL string) (LeaseClaim, bool, error) {
 	claims, err := listOpenComputerLeaseClaims()
 	if err != nil {
 		return LeaseClaim{}, false, err
 	}
 	for _, claim := range claims {
 		if claim.Provider == providerName && claim.LeaseID == identifier {
-			if err := validateOpenComputerClaimScope(claim, providerScope); err != nil {
+			if err := validateOpenComputerClaimScope(claim, baseURL); err != nil {
 				return LeaseClaim{}, false, err
 			}
 			return claim, true, nil
@@ -455,7 +492,7 @@ func resolveOpenComputerLeaseClaim(identifier, providerScope string) (LeaseClaim
 	if slug != "" {
 		for _, claim := range claims {
 			if claim.Provider == providerName && normalizeLeaseSlug(claim.Slug) == slug {
-				if err := validateOpenComputerClaimScope(claim, providerScope); err != nil {
+				if err := validateOpenComputerClaimScope(claim, baseURL); err != nil {
 					return LeaseClaim{}, false, err
 				}
 				return claim, true, nil
@@ -465,12 +502,12 @@ func resolveOpenComputerLeaseClaim(identifier, providerScope string) (LeaseClaim
 	return LeaseClaim{}, false, nil
 }
 
-func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, providerScope string) (string, string, string, error) {
-	if err := validateOpenComputerClaimScope(claim, providerScope); err != nil {
+func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
+	if err := validateOpenComputerClaimScope(claim, baseURL); err != nil {
 		return "", "", "", err
 	}
 	if repoRoot != "" {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, providerScope, claim.Pond, repoRoot,
+		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot,
 			timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
 			return "", "", "", err
 		}
@@ -482,9 +519,47 @@ func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTi
 	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
 }
 
-func validateOpenComputerClaimScope(claim LeaseClaim, providerScope string) error {
-	if strings.TrimSpace(claim.ProviderScope) != providerScope {
-		return exit(4, "opencomputer lease %q belongs to a different API endpoint or account; restore the credentials used to create it", claim.LeaseID)
+func validateOpenComputerClaimScope(claim LeaseClaim, baseURL string) error {
+	if !strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), openComputerEndpointScope(baseURL)+"/ownership:") {
+		return exit(4, "opencomputer lease %q belongs to a different API endpoint; restore the endpoint used to create it", claim.LeaseID)
+	}
+	return nil
+}
+
+func newOpenComputerClaimScope(baseURL string) (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", exit(5, "generate opencomputer ownership token: %v", err)
+	}
+	return openComputerEndpointScope(baseURL) + "/ownership:" + hex.EncodeToString(token[:]), nil
+}
+
+func openComputerEndpointScope(baseURL string) string {
+	digest := sha256.Sum256([]byte(baseURL))
+	return "endpoint-sha256:" + hex.EncodeToString(digest[:])
+}
+
+func verifyOpenComputerClaim(ctx context.Context, api *ocAPIClient, leaseID, sandboxID string) (sandbox, error) {
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return sandbox{}, err
+	}
+	if err := validateOpenComputerClaimScope(claim, api.baseURL); err != nil {
+		return sandbox{}, err
+	}
+	sb, err := api.getSandbox(ctx, sandboxID)
+	if err != nil {
+		return sandbox{}, err
+	}
+	if err := validateOpenComputerSandboxOwnership(claim, sb); err != nil {
+		return sandbox{}, err
+	}
+	return sb, nil
+}
+
+func validateOpenComputerSandboxOwnership(claim LeaseClaim, sb sandbox) error {
+	if sb.Tags[openComputerClaimTagKey] != claim.ProviderScope {
+		return exit(4, "opencomputer sandbox %q ownership tag does not match its local claim", sb.ID)
 	}
 	return nil
 }

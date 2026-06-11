@@ -3,7 +3,6 @@ package opencomputer
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,11 +26,6 @@ type ocAPIClient struct {
 	apiKey  string
 }
 
-func (c *ocAPIClient) claimScope() string {
-	keyHash := sha256.Sum256([]byte(c.apiKey))
-	return fmt.Sprintf("endpoint:%s/key-sha256:%x", c.baseURL, keyHash[:])
-}
-
 // ocFileConfig mirrors the subset of ~/.oc/config.json that `oc config set`
 // persists. Crabbox reuses that credential rather than introducing a new
 // secret in its own config.
@@ -45,6 +39,7 @@ type sandbox struct {
 	ID       string            `json:"sandboxID"`
 	Status   string            `json:"status"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+	Tags     map[string]string `json:"tags,omitempty"`
 	CPUCount int               `json:"cpuCount,omitempty"`
 	MemoryMB int               `json:"memoryMB,omitempty"`
 }
@@ -262,6 +257,10 @@ func (c *ocAPIClient) probeSandboxes(ctx context.Context) error {
 
 func (c *ocAPIClient) killSandbox(ctx context.Context, id string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/api/sandboxes/"+url.PathEscape(id), nil, nil)
+}
+
+func (c *ocAPIClient) replaceSandboxTags(ctx context.Context, id string, tags map[string]string) error {
+	return c.doJSON(ctx, http.MethodPut, "/api/sandboxes/"+url.PathEscape(id)+"/tags", tags, nil)
 }
 
 func (c *ocAPIClient) execRun(ctx context.Context, id string, req execRunRequest) (execRunResult, error) {

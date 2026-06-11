@@ -57,11 +57,12 @@ if already configured). It is sent only in the `X-API-Key` header, never
 persisted in Crabbox config and never placed on argv. If no key is resolvable,
 operations fail with a clear error.
 
-Local lease claims are scoped to the normalized API URL and a SHA-256 fingerprint
-of the API key. The key itself is never stored. This prevents `status`, `run`,
-or `stop` from applying a claim created for another endpoint or account. Restore
-the original endpoint and credential when managing a retained lease after
-switching accounts or rotating keys.
+Local lease claims are scoped to the normalized API URL and a random ownership
+marker stored in both the local claim and the sandbox tags. The API key is
+never stored. Before reusing or deleting a retained sandbox, Crabbox verifies
+that both markers match. This prevents a claim from being applied to a sandbox
+at another endpoint or account while allowing API-key rotation within the same
+account.
 
 The API base URL defaults to `https://app.opencomputer.dev`. A trusted local
 override can come from `--opencomputer-api-url`,
@@ -123,7 +124,8 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
 
 1. `warmup` or `run` without `--id` calls `POST /api/sandboxes` with the
    configured timeout and sizing tier and `metadata` tagging the box as
-   Crabbox-owned (`crabbox=true`, `crabbox-name=crabbox-<repo-slug>-<random6>`).
+   Crabbox-owned (`crabbox=true`, `crabbox-name=crabbox-<repo-slug>-<random6>`),
+   then writes the random ownership marker as the `crabbox.claim` sandbox tag.
    The returned sandbox ID (`sb-...`) is the canonical identifier.
 2. The local lease is stored as `ocbx_<sandbox-id>` with a friendly slug and a
    repo claim.
@@ -196,6 +198,9 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
 - IDs accepted by `--id` and `stop` are Crabbox slugs and `ocbx_<sandbox-id>`
   lease IDs that have a local Crabbox claim. Sandboxes without a local claim are
   rejected (the same Crabbox-owned-only safety pattern as Islo).
+- Do not edit the reserved `crabbox.claim` sandbox tag. A missing or changed
+  value fails closed for reuse and deletion; restore it from the local claim or
+  clean up the sandbox explicitly in OpenComputer.
 
 Related docs:
 
