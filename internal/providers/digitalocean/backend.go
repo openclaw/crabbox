@@ -377,17 +377,22 @@ func parseDropletID(id string) (int64, bool) {
 
 func applyDigitalOceanDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
+	base := core.BaseConfig()
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.DigitalOcean.Region == "" {
 		cfg.DigitalOcean.Region = firstNonBlank(cfg.Location, "nyc3")
 	}
-	cfg.Location = cfg.DigitalOcean.Region
+	if cfg.Location == "" || cfg.Location == base.Location {
+		cfg.Location = cfg.DigitalOcean.Region
+	}
 	if cfg.DigitalOcean.Image == "" {
 		cfg.DigitalOcean.Image = firstNonBlank(cfg.Image, "ubuntu-24-04-x64")
 	}
-	cfg.Image = cfg.DigitalOcean.Image
+	if cfg.Image == "" || cfg.Image == base.Image {
+		cfg.Image = cfg.DigitalOcean.Image
+	}
 	if cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
 	}

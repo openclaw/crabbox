@@ -396,6 +396,48 @@ func TestAcquireReadyTagsPreserveRenderedTailscaleHostname(t *testing.T) {
 	}
 }
 
+func TestApplyDigitalOceanDefaultsDoesNotClobberExplicitLocation(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Location = "us-east-1"
+	cfg.DigitalOcean.Region = "sfo3"
+
+	applyDigitalOceanDefaults(&cfg)
+
+	if cfg.Location != "us-east-1" {
+		t.Fatalf("Location=%q want %q", cfg.Location, "us-east-1")
+	}
+}
+
+func TestApplyDigitalOceanDefaultsDoesNotClobberExplicitImage(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Image = "custom-do-image"
+	cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+
+	applyDigitalOceanDefaults(&cfg)
+
+	if cfg.Image != "custom-do-image" {
+		t.Fatalf("Image=%q want %q", cfg.Image, "custom-do-image")
+	}
+}
+
+func TestApplyDigitalOceanDefaultsMirrorProviderDefaultsToBaseValues(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.DigitalOcean.Region = "sfo3"
+	cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+
+	applyDigitalOceanDefaults(&cfg)
+
+	if cfg.Location != "sfo3" {
+		t.Fatalf("Location=%q want %q", cfg.Location, "sfo3")
+	}
+	if cfg.Image != "ubuntu-24-04-x64" {
+		t.Fatalf("Image=%q want %q", cfg.Image, "ubuntu-24-04-x64")
+	}
+}
+
 type fixedClock struct{ t time.Time }
 
 func (c fixedClock) Now() time.Time { return c.t }
