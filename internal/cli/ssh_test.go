@@ -1005,17 +1005,23 @@ func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"bash", "dirname", "perl", "rm", "rmdir"} {
+	for _, name := range []string{"dirname", "rm", "rmdir"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
+	mustWriteTestBashNoProfileWrapper(t, toolDir)
+	perlMarker := filepath.Join(t.TempDir(), "perl-invoked")
+	mustWriteTestCommandWrapperWithMarker(t, toolDir, "perl", perlMarker)
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bashPath, "-lc", remotePruneSyncManifest(workdir))
+	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remotePruneSyncManifest(workdir))
 	cmd.Env = append(os.Environ(), "PATH="+toolDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("remote prune perl fallback failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(perlMarker); err != nil {
+		t.Fatalf("perl fallback was not invoked: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(workdir, "keep.txt")); err != nil {
 		t.Fatalf("keep.txt should survive prune: %v", err)
@@ -1166,18 +1172,22 @@ func TestRemoteWriteSyncManifestsNewFallsBackToPerlWithoutPython(t *testing.T) {
 	input := fmt.Sprintf("%d\n", len(manifest)) + manifest + deleted
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"bash", "mkdir", "perl"} {
-		mustWriteTestCommandWrapper(t, toolDir, name)
-	}
+	mustWriteTestCommandWrapper(t, toolDir, "mkdir")
+	mustWriteTestBashNoProfileWrapper(t, toolDir)
+	perlMarker := filepath.Join(t.TempDir(), "perl-invoked")
+	mustWriteTestCommandWrapperWithMarker(t, toolDir, "perl", perlMarker)
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bashPath, "-lc", remoteWriteSyncManifestsNew(workdir))
+	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remoteWriteSyncManifestsNew(workdir))
 	cmd.Env = append(os.Environ(), "PATH="+toolDir)
 	cmd.Stdin = strings.NewReader(input)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("write manifests perl fallback failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(perlMarker); err != nil {
+		t.Fatalf("perl fallback was not invoked: %v", err)
 	}
 	metaDir := filepath.Join(workdir, ".crabbox")
 	gotManifest, err := os.ReadFile(filepath.Join(metaDir, "sync-manifest.new"))
@@ -1193,6 +1203,37 @@ func TestRemoteWriteSyncManifestsNewFallsBackToPerlWithoutPython(t *testing.T) {
 	}
 	if string(gotDeleted) != deleted {
 		t.Fatalf("unexpected deleted manifest: %q", gotDeleted)
+	}
+}
+
+func mustWriteTestBashNoProfileWrapper(t *testing.T, dir string) {
+	t.Helper()
+	target, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bash")
+	script := "#!/bin/sh\n" +
+		`if [ "$1" = "-lc" ]; then` + "\n" +
+		"  shift\n" +
+		"  exec " + shellQuote(target) + ` --noprofile --norc -c "$@"` + "\n" +
+		"fi\n" +
+		"exec " + shellQuote(target) + ` "$@"` + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteTestCommandWrapperWithMarker(t *testing.T, dir, name, marker string) {
+	t.Helper()
+	target, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("lookpath %s: %v", name, err)
+	}
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\n: > " + shellQuote(marker) + "\nexec " + shellQuote(target) + ` "$@"` + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 
