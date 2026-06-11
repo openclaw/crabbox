@@ -60,6 +60,16 @@ func TestProviderForResolvesNameAndAliases(t *testing.T) {
 	}
 }
 
+func TestProviderDoesNotReportServerTypeMetadata(t *testing.T) {
+	p := Provider{}
+	if got := p.ServerTypeForConfig(core.Config{Provider: providerName, Class: "beast"}); got != "" {
+		t.Fatalf("ServerTypeForConfig=%q want empty", got)
+	}
+	if got := p.ServerTypeForClass("beast"); got != "" {
+		t.Fatalf("ServerTypeForClass=%q want empty", got)
+	}
+}
+
 func TestBuildCommandAutoWrapsShellMetacharacters(t *testing.T) {
 	got, err := buildCommand([]string{"pnpm install && pnpm test"}, false)
 	if err != nil {

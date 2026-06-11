@@ -15,6 +15,9 @@ type Provider struct{}
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"oc", "open-computer"} }
 
+func (Provider) ServerTypeForConfig(core.Config) string { return "" }
+func (Provider) ServerTypeForClass(string) string       { return "" }
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        providerName,
