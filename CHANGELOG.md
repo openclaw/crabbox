@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added an opt-in Islo userspace Tailscale plane with tailnet-aware pond peers, proxy-routed tailnet traffic, and URL-bridge fallback for leases without `--tailscale`. Thanks @zozo123.
+
 ### Fixed
 
 - Fixed Namespace Devbox setup instructions to use the current browser workspace approval flow instead of obsolete token environment variables.
@@ -11,7 +15,6 @@
 ### Added
 
 - Added `provider: opencomputer` for delegated Linux sandbox runs through the OpenComputer REST API, including archive sync, retained leases, optional burst capacity, status, and cleanup. Thanks @zozo123.
-- Added an opt-in Islo userspace Tailscale plane with tailnet-aware pond peers, proxy-routed tailnet traffic, and URL-bridge fallback for leases without `--tailscale`. Thanks @zozo123.
 - Added local-container checkpoint forks that launch a fresh Docker lease from a committed checkpoint image while replaying and validating its recorded daemon scope. Thanks @anagnorisis2peripeteia.
 - Added opt-in native Docker local-container checkpoints with immutable image identity, daemon-scope-aware verification and deletion, mounted-workspace guards, and live lifecycle coverage. Thanks @anagnorisis2peripeteia.
 - Added `provider: morph` for Morph Cloud Linux SSH leases, including snapshot boot, Morph API key/config plumbing, per-instance SSH key retrieval, pause-on-release reuse, and provider docs. Thanks @coygeek.
