@@ -1,6 +1,11 @@
 package islo
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -71,6 +76,9 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 		"unset TS_AUTHKEY",
 		`trap 'rm -f "${TS_AUTH_FILE}"' EXIT`,
 		"--shields-up=false",
+		defaultIsloTailscaleAMD64SHA256,
+		defaultIsloTailscaleARM64SHA256,
+		"sha256sum -c -",
 		`--login-server="${TS_LOGIN_SERVER}"`,
 		`--exit-node="${TS_EXIT_NODE}"`,
 		"--exit-node-allow-lan-access",
@@ -88,5 +96,29 @@ func TestIsloTailscaleBringUpScriptIncludesUserspaceProxyAndOptionalFlags(t *tes
 	}
 	if strings.Contains(isloTailscaleBringUp, "--socks5-server=127.0.0.1:") || strings.Contains(isloTailscaleBringUp, "--outbound-http-proxy-listen=127.0.0.1:") {
 		t.Fatal("outbound proxies must not bind the loopback address used for tailnet ingress")
+	}
+}
+
+func TestIsloTailscaleArchiveVerification(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "tailscale.tgz")
+	content := []byte("archive")
+	if err := os.WriteFile(archive, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	run := func(expected string) error {
+		cmd := exec.Command("bash", "-lc", isloTailscaleVerifyArchive)
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"TS_ARCHIVE=" + archive,
+			"TS_SHA256=" + expected,
+		}
+		return cmd.Run()
+	}
+	if err := run(fmt.Sprintf("%x", sum)); err != nil {
+		t.Fatalf("matching checksum rejected: %v", err)
+	}
+	if err := run(strings.Repeat("0", 64)); err == nil {
+		t.Fatal("mismatched checksum accepted")
 	}
 }

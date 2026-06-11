@@ -125,7 +125,8 @@ crabbox warmup --pond mesh --slug node-b --provider islo --tailscale
 crabbox pond peers --pond mesh --json                # both members on transport=tailnet
 ```
 
-The static build is pinned; override it with `CRABBOX_ISLO_TAILSCALE_VERSION`.
+The static build and its architecture-specific SHA-256 digests are pinned
+together in Crabbox.
 The Islo path runs Tailscale in userspace mode, so it does not install a kernel
 TUN route. Traffic from sandbox processes must use the local proxies that
 Crabbox starts with the daemon (`ALL_PROXY=socks5://127.0.0.2:1055` and

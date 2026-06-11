@@ -11,17 +11,23 @@ import (
 	gosdk "github.com/islo-labs/go-sdk"
 )
 
-// defaultIsloTailscaleVersion pins the static Tailscale build downloaded into
-// the sandbox. Override with CRABBOX_ISLO_TAILSCALE_VERSION when a newer build
-// is required. We pin rather than chase "latest" so a warmup is reproducible.
+// The version and architecture-specific digests move together in code review
+// because every opted-in sandbox executes these downloaded binaries.
 const defaultIsloTailscaleVersion = "1.98.4"
 
-// isloTailscaleVersionEnv lets operators override the pinned Tailscale build.
-const isloTailscaleVersionEnv = "CRABBOX_ISLO_TAILSCALE_VERSION"
+const (
+	defaultIsloTailscaleAMD64SHA256 = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
+	defaultIsloTailscaleARM64SHA256 = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
+)
 
 // isloTailscaleIPRe extracts the tailnet IPv4 the bring-up script reports back
 // on its own line so we never have to parse the full `tailscale status`.
 var isloTailscaleIPRe = regexp.MustCompile(`(?m)^CRABBOX_TS_IP=([0-9.]+)`)
+
+const isloTailscaleVerifyArchive = `
+command -v sha256sum >/dev/null 2>&1 || { echo "sha256sum is required" >&2; exit 3; }
+printf '%s  %s\n' "${TS_SHA256}" "${TS_ARCHIVE}" | sha256sum -c -
+`
 
 // isloTailscaleBringUp is the in-sandbox script crabbox runs over the islo exec
 // stream. Islo is a delegated-run provider with no SSH lease, so crabbox cannot
@@ -50,14 +56,16 @@ unset TS_AUTHKEY
 trap 'rm -f "${TS_AUTH_FILE}"' EXIT
 cd /tmp
 case "$(uname -m)" in
-  x86_64) A=amd64 ;;
-  aarch64|arm64) A=arm64 ;;
+  x86_64) A=amd64; TS_SHA256=` + defaultIsloTailscaleAMD64SHA256 + ` ;;
+  aarch64|arm64) A=arm64; TS_SHA256=` + defaultIsloTailscaleARM64SHA256 + ` ;;
   *) echo "unsupported arch $(uname -m)" >&2; exit 3 ;;
 esac
 if [ ! -x /tmp/ts/tailscaled ]; then
-  wget -q -O /tmp/ts.tgz "https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${A}.tgz"
+  TS_ARCHIVE=/tmp/ts.tgz
+  wget -q -O "${TS_ARCHIVE}" "https://pkgs.tailscale.com/stable/tailscale_` + defaultIsloTailscaleVersion + `_${A}.tgz"
+` + isloTailscaleVerifyArchive + `
   rm -rf /tmp/ts; mkdir -p /tmp/ts
-  tar -xzf /tmp/ts.tgz -C /tmp/ts --strip-components=1
+  tar -xzf "${TS_ARCHIVE}" -C /tmp/ts --strip-components=1
 fi
 : "${TS_STATE_DIR:?}"
 mkdir -p "${TS_STATE_DIR}"
@@ -104,7 +112,6 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 	authKey := strings.TrimSpace(b.cfg.Tailscale.AuthKey)
 	hostname := isloTailscaleHostname(b.cfg, leaseID, slug)
 	tags := strings.Join(b.cfg.Tailscale.Tags, ",")
-	version := blank(strings.TrimSpace(os.Getenv(isloTailscaleVersionEnv)), defaultIsloTailscaleVersion)
 	loginServer := strings.TrimSpace(os.Getenv("TS_CONTROL_URL"))
 	exitNode := strings.TrimSpace(b.cfg.Tailscale.ExitNode)
 	allowLAN := fmt.Sprint(b.cfg.Tailscale.ExitNodeAllowLANAccess)
@@ -116,7 +123,6 @@ func (b *isloBackend) maybeJoinTailscale(ctx context.Context, client isloAPI, sa
 		"TS_AUTHKEY":             authKey,
 		"TS_HOST":                hostname,
 		"TS_TAGS":                tags,
-		"TS_VERSION":             version,
 		"TS_LOGIN_SERVER":        loginServer,
 		"TS_EXIT_NODE":           exitNode,
 		"TS_EXIT_NODE_ALLOW_LAN": allowLAN,
