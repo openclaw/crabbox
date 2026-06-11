@@ -45,6 +45,21 @@ func TestDockerSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
+	provider, err := core.ProviderFor("opensandbox")
+	if err != nil {
+		t.Fatalf("ProviderFor(opensandbox): %v", err)
+	}
+	if provider.Name() != "opensandbox" {
+		t.Fatalf("ProviderFor(opensandbox).Name=%q", provider.Name())
+	}
+	for _, alias := range []string{"osb", "open-sandbox"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "opensandbox" {
+			t.Fatalf("%q alias unexpectedly resolves to opensandbox; v1 should reserve aliases", alias)
+		}
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -81,6 +96,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"mxc",
 		"namespace-devbox",
 		"opencomputer",
+		"opensandbox",
 		"parallels",
 		"proxmox",
 		"railway",

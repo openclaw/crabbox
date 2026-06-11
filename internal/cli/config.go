@@ -118,6 +118,7 @@ type Config struct {
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
+	OpenSandbox                   OpenSandboxConfig
 	DockerSandbox                 DockerSandboxConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
@@ -428,6 +429,25 @@ type OpenComputerConfig struct {
 	TimeoutSecs     int
 	ExecTimeoutSecs int
 	Burst           bool
+	ForgetMissing   bool
+}
+
+// OpenSandboxConfig configures the delegated OpenSandbox provider. The API key
+// is intentionally absent: it is read at runtime from
+// CRABBOX_OPENSANDBOX_API_KEY / OPEN_SANDBOX_API_KEY and sent only in request
+// headers, never persisted in Crabbox config or placed on argv.
+type OpenSandboxConfig struct {
+	APIURL          string
+	Image           string
+	Workdir         string
+	CPU             string
+	Memory          string
+	TimeoutSecs     int
+	ExecTimeoutSecs int
+	PlatformOS      string
+	PlatformArch    string
+	SecureAccess    bool
+	UseServerProxy  bool
 	ForgetMissing   bool
 }
 
@@ -1302,6 +1322,18 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 3600,
 		},
+		OpenSandbox: OpenSandboxConfig{
+			// APIURL is intentionally unset here so repository YAML cannot
+			// redirect a shell-provided API key. The provider applies the
+			// OpenSandbox SDK local default as the final fallback.
+			Image:           "ubuntu:24.04",
+			Workdir:         "/workspace/crabbox",
+			CPU:             "1",
+			Memory:          "2Gi",
+			ExecTimeoutSecs: 3600,
+			PlatformOS:      "linux",
+			PlatformArch:    "amd64",
+		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -1445,6 +1477,7 @@ type fileConfig struct {
 	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
+	OpenSandbox          *fileOpenSandboxConfig             `yaml:"openSandbox,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
@@ -1833,6 +1866,19 @@ type fileOpenComputerConfig struct {
 	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
 	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
 	Burst           *bool  `yaml:"burst,omitempty"`
+}
+
+type fileOpenSandboxConfig struct {
+	Image           *string `yaml:"image,omitempty"`
+	Workdir         *string `yaml:"workdir,omitempty"`
+	CPU             *string `yaml:"cpu,omitempty"`
+	Memory          *string `yaml:"memory,omitempty"`
+	TimeoutSecs     *int    `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
+	PlatformOS      *string `yaml:"platformOS,omitempty"`
+	PlatformArch    *string `yaml:"platformArch,omitempty"`
+	SecureAccess    *bool   `yaml:"secureAccess,omitempty"`
+	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -3117,6 +3163,44 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.OpenComputer.Burst = *file.OpenComputer.Burst
 		}
 	}
+	if file.OpenSandbox != nil {
+		if file.OpenSandbox.Image != nil {
+			cfg.OpenSandbox.Image = *file.OpenSandbox.Image
+		}
+		if file.OpenSandbox.Workdir != nil {
+			cfg.OpenSandbox.Workdir = *file.OpenSandbox.Workdir
+		}
+		if file.OpenSandbox.CPU != nil {
+			cfg.OpenSandbox.CPU = *file.OpenSandbox.CPU
+		}
+		if file.OpenSandbox.Memory != nil {
+			cfg.OpenSandbox.Memory = *file.OpenSandbox.Memory
+		}
+		if file.OpenSandbox.TimeoutSecs != nil {
+			if *file.OpenSandbox.TimeoutSecs < 0 {
+				return exit(2, "opensandbox timeoutSecs must be non-negative")
+			}
+			cfg.OpenSandbox.TimeoutSecs = *file.OpenSandbox.TimeoutSecs
+		}
+		if file.OpenSandbox.ExecTimeoutSecs != nil {
+			if *file.OpenSandbox.ExecTimeoutSecs < 0 {
+				return exit(2, "opensandbox execTimeoutSecs must be non-negative")
+			}
+			cfg.OpenSandbox.ExecTimeoutSecs = *file.OpenSandbox.ExecTimeoutSecs
+		}
+		if file.OpenSandbox.PlatformOS != nil {
+			cfg.OpenSandbox.PlatformOS = *file.OpenSandbox.PlatformOS
+		}
+		if file.OpenSandbox.PlatformArch != nil {
+			cfg.OpenSandbox.PlatformArch = *file.OpenSandbox.PlatformArch
+		}
+		if file.OpenSandbox.SecureAccess != nil {
+			cfg.OpenSandbox.SecureAccess = *file.OpenSandbox.SecureAccess
+		}
+		if file.OpenSandbox.UseServerProxy != nil {
+			cfg.OpenSandbox.UseServerProxy = *file.OpenSandbox.UseServerProxy
+		}
+	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
 			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
@@ -4114,6 +4198,21 @@ func applyEnv(cfg *Config) error {
 	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
 	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
 		cfg.OpenComputer.Burst = v
+	}
+	cfg.OpenSandbox.APIURL = getenv("CRABBOX_OPENSANDBOX_API_URL", getenv("OPEN_SANDBOX_API_URL", cfg.OpenSandbox.APIURL))
+	cfg.OpenSandbox.Image = getenv("CRABBOX_OPENSANDBOX_IMAGE", cfg.OpenSandbox.Image)
+	cfg.OpenSandbox.Workdir = getenv("CRABBOX_OPENSANDBOX_WORKDIR", cfg.OpenSandbox.Workdir)
+	cfg.OpenSandbox.CPU = getenv("CRABBOX_OPENSANDBOX_CPU", cfg.OpenSandbox.CPU)
+	cfg.OpenSandbox.Memory = getenv("CRABBOX_OPENSANDBOX_MEMORY", cfg.OpenSandbox.Memory)
+	cfg.OpenSandbox.TimeoutSecs = getenvInt("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", cfg.OpenSandbox.TimeoutSecs)
+	cfg.OpenSandbox.ExecTimeoutSecs = getenvInt("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", cfg.OpenSandbox.ExecTimeoutSecs)
+	cfg.OpenSandbox.PlatformOS = getenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", cfg.OpenSandbox.PlatformOS)
+	cfg.OpenSandbox.PlatformArch = getenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", cfg.OpenSandbox.PlatformArch)
+	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_SECURE_ACCESS"); ok {
+		cfg.OpenSandbox.SecureAccess = v
+	}
+	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
+		cfg.OpenSandbox.UseServerProxy = v
 	}
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)

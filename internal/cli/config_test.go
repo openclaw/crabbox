@@ -1234,6 +1234,18 @@ openComputer:
   memoryMB: 16384
   timeoutSecs: 600
   execTimeoutSecs: 7200
+openSandbox:
+  apiUrl: https://opensandbox-file-ignored.example.test
+  image: docker.io/library/python:3.12
+  workdir: /workspace/osb-test
+  cpu: "2"
+  memory: 4Gi
+  timeoutSecs: 900
+  execTimeoutSecs: 1800
+  platformOS: linux
+  platformArch: arm64
+  secureAccess: true
+  useServerProxy: true
 cloudflare:
   apiUrl: https://cloudflare.example.test
   token: cloudflare-token
@@ -1397,6 +1409,9 @@ ssh:
 	}
 	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
 		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)
+	}
+	if cfg.OpenSandbox.APIURL != "" || cfg.OpenSandbox.Image != "docker.io/library/python:3.12" || cfg.OpenSandbox.Workdir != "/workspace/osb-test" || cfg.OpenSandbox.CPU != "2" || cfg.OpenSandbox.Memory != "4Gi" || cfg.OpenSandbox.TimeoutSecs != 900 || cfg.OpenSandbox.ExecTimeoutSecs != 1800 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "arm64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
+		t.Fatalf("opensandbox config not loaded safely: %#v", cfg.OpenSandbox)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
 		t.Fatalf("cloudflare config not loaded: %#v", cfg.Cloudflare)
@@ -1718,6 +1733,18 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_OPENCOMPUTER_MEMORY_MB", "12288")
 	t.Setenv("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", "1200")
 	t.Setenv("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", "2400")
+	t.Setenv("OPEN_SANDBOX_API_URL", "https://opensandbox-file.example")
+	t.Setenv("CRABBOX_OPENSANDBOX_API_URL", "https://opensandbox-env.example")
+	t.Setenv("CRABBOX_OPENSANDBOX_IMAGE", "ubuntu:osb-env")
+	t.Setenv("CRABBOX_OPENSANDBOX_WORKDIR", "/workspace/osb-env")
+	t.Setenv("CRABBOX_OPENSANDBOX_CPU", "750m")
+	t.Setenv("CRABBOX_OPENSANDBOX_MEMORY", "1536Mi")
+	t.Setenv("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "123")
+	t.Setenv("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", "456")
+	t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", "linux")
+	t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", "amd64")
+	t.Setenv("CRABBOX_OPENSANDBOX_SECURE_ACCESS", "true")
+	t.Setenv("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY", "true")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
 	t.Setenv("CRABBOX_CLOUDFLARE_WORKDIR", "/workspace/cloudflare-env")
@@ -1874,6 +1901,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
 		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
+	}
+	if cfg.OpenSandbox.APIURL != "https://opensandbox-env.example" || cfg.OpenSandbox.Image != "ubuntu:osb-env" || cfg.OpenSandbox.Workdir != "/workspace/osb-env" || cfg.OpenSandbox.CPU != "750m" || cfg.OpenSandbox.Memory != "1536Mi" || cfg.OpenSandbox.TimeoutSecs != 123 || cfg.OpenSandbox.ExecTimeoutSecs != 456 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "amd64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
+		t.Fatalf("unexpected opensandbox env: %#v", cfg.OpenSandbox)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {
 		t.Fatalf("unexpected cloudflare env: %#v", cfg.Cloudflare)

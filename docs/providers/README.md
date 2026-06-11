@@ -95,6 +95,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Modal](modal.md) — `modal` | Linux |
 | [Microsoft Execution Containers](mxc.md) — `mxc` (`execution-container`) | Windows |
 | [OpenComputer](opencomputer.md) — `opencomputer` (`oc`, `open-computer`) | Linux |
+| [OpenSandbox](opensandbox.md) — `opensandbox` | Linux |
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
@@ -114,6 +115,9 @@ reports.
 - Docker Sandbox is a delegated-run provider driven by the standalone `sbx`
   CLI. It has no aliases, so `docker`, `container`, and `local-docker` remain
   Local Container aliases.
+- OpenSandbox is a delegated-run provider using the OpenSandbox Go SDK for
+  lifecycle, file upload, and execd command execution. It has no aliases in v1,
+  so `osb` remains reserved.
 - ASCII Box is an SSH-lease provider. Crabbox uses the documented `box --json`
   CLI for lifecycle/status/delete, then runs normal sync and commands over SSH.
 - `incus` is a direct Linux SSH-lease provider that stores Crabbox ownership and
