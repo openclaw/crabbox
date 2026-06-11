@@ -2,6 +2,7 @@ package coder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -65,19 +66,23 @@ func (b *coderLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=coder lease=%s slug=%s workspace=%s template=%s keep=%v\n", leaseID, slug, workspaceName, b.cfg.Coder.Template, req.Keep)
 	if err := client.create(ctx, b.cfg, workspaceName); err != nil {
+		if !req.Keep {
+			err = b.rollbackCreateError(workspaceName, client, err)
+		}
 		return LeaseTarget{}, err
 	}
 	workspaces, err := client.list(ctx)
 	if err != nil {
 		if !req.Keep {
-			_ = client.stop(context.Background(), workspaceName)
+			err = b.rollbackCreatedWorkspace(workspaceName, client, err)
 		}
 		return LeaseTarget{}, err
 	}
 	workspace, ok := findCoderWorkspace(workspaces, workspaceName)
 	if !ok {
 		if !req.Keep {
-			_ = client.stop(context.Background(), workspaceName)
+			err = b.rollbackCreatedWorkspace(workspaceName, client, exit(5, "coder workspace %s was created but not found in coder list", workspaceName))
+			return LeaseTarget{}, err
 		}
 		return LeaseTarget{}, exit(5, "coder workspace %s was created but not found in coder list", workspaceName)
 	}
@@ -85,7 +90,7 @@ func (b *coderLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	target := coderSSHTarget(b.cfg, workspaceName)
 	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "coder ssh", bootstrapWaitTimeout(b.cfg)); err != nil {
 		if !req.Keep {
-			_ = client.stop(context.Background(), workspaceName)
+			err = b.rollbackCreatedWorkspace(workspaceName, client, err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -93,12 +98,49 @@ func (b *coderLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	server.Labels["state"] = "ready"
 	if err := claimLeaseForRepoProvider(leaseID, slug, coderProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
-			_ = client.stop(context.Background(), workspaceName)
+			err = b.rollbackCreatedWorkspace(workspaceName, client, err)
 		}
 		return LeaseTarget{}, err
 	}
 	_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b *coderLeaseBackend) rollbackCreatedWorkspace(name string, client *coderClient, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := b.releaseWorkspace(cleanupCtx, client, name); err != nil {
+		return exit(coderExitCode(cause), "%v; coder cleanup failed for workspace %s; manual cleanup: crabbox stop --provider coder %s: %v", cause, name, name, err)
+	}
+	return cause
+}
+
+func (b *coderLeaseBackend) rollbackCreateError(name string, client *coderClient, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	workspaces, err := client.list(cleanupCtx)
+	if err != nil {
+		return cause
+	}
+	if _, ok := findCoderWorkspace(workspaces, name); !ok {
+		return cause
+	}
+	return b.rollbackCreatedWorkspace(name, client, cause)
+}
+
+func (b *coderLeaseBackend) releaseWorkspace(ctx context.Context, client *coderClient, name string) error {
+	if b.cfg.Coder.DeleteOnRelease {
+		return client.delete(ctx, name)
+	}
+	return client.stop(ctx, name)
+}
+
+func coderExitCode(err error) int {
+	var exitErr ExitError
+	if errors.As(err, &exitErr) && exitErr.Code != 0 {
+		return exitErr.Code
+	}
+	return 1
 }
 
 func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {

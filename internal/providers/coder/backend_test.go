@@ -122,36 +122,68 @@ func TestCoderReleaseStopsByDefaultAndDeletesOnlyWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestCoderAcquireStopsWorkspaceWhenPostCreateInventoryMissesIt(t *testing.T) {
-	runner := &fakeRunner{}
-	listCalls := 0
-	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
-		switch strings.Join(req.Args, " ") {
-		case "list -o json":
-			listCalls++
-			return LocalCommandResult{Stdout: `[]`}, nil
-		case "create --yes --template go-dev crabbox-blue":
-			return LocalCommandResult{}, nil
-		case "stop --yes crabbox-blue":
-			return LocalCommandResult{}, nil
-		default:
-			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
-		}
-		return LocalCommandResult{}, nil
-	}
-	backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{IdleTimeout: time.Hour, Coder: CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), AcquireRequest{RequestedSlug: "blue", Repo: Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "created but not found") {
-		t.Fatalf("expected inventory miss error, got %v", err)
-	}
-	if listCalls != 2 {
-		t.Fatalf("list calls=%d want 2", listCalls)
-	}
-	if got := strings.Join(runner.calls[len(runner.calls)-1].Args, " "); got != "stop --yes crabbox-blue" {
-		t.Fatalf("final rollback command=%q", got)
+func TestCoderAcquireRollbackUsesReleasePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		delete         bool
+		createErr      error
+		postCreateList string
+		wantErr        string
+		wantAction     string
+		wantListCalls  int
+	}{
+		{name: "inventory miss stops by default", wantErr: "created but not found", wantAction: "stop --yes crabbox-blue", wantListCalls: 2},
+		{name: "inventory miss deletes when configured", delete: true, wantErr: "created but not found", wantAction: "delete --yes crabbox-blue", wantListCalls: 2},
+		{name: "create failure without workspace skips rollback", createErr: errors.New("build failed"), postCreateList: `[]`, wantErr: "build failed", wantListCalls: 2},
+		{name: "create failure rolls back when workspace exists", createErr: errors.New("build failed"), postCreateList: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`, wantErr: "build failed", wantAction: "stop --yes crabbox-blue", wantListCalls: 2},
+		{name: "create failure rollback honors delete policy", delete: true, createErr: errors.New("build failed"), postCreateList: `[{"id":"ws1","name":"crabbox-blue","template_name":"go-dev","latest_build":{"status":"stopped"}}]`, wantErr: "build failed", wantAction: "delete --yes crabbox-blue", wantListCalls: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeRunner{}
+			listCalls := 0
+			runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+				switch strings.Join(req.Args, " ") {
+				case "list -o json":
+					listCalls++
+					if tc.createErr != nil && listCalls == 2 {
+						return LocalCommandResult{Stdout: tc.postCreateList}, nil
+					}
+					return LocalCommandResult{Stdout: `[]`}, nil
+				case "create --yes --template go-dev crabbox-blue":
+					if tc.createErr != nil {
+						return LocalCommandResult{ExitCode: 1, Stderr: tc.createErr.Error()}, tc.createErr
+					}
+					return LocalCommandResult{}, nil
+				case "stop --yes crabbox-blue", "delete --yes crabbox-blue":
+					return LocalCommandResult{}, nil
+				default:
+					t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
+				}
+				return LocalCommandResult{}, nil
+			}
+			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{IdleTimeout: time.Hour, Coder: CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.delete}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), AcquireRequest{RequestedSlug: "blue", Repo: Repo{Root: t.TempDir()}})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q error, got %v", tc.wantErr, err)
+			}
+			if listCalls != tc.wantListCalls {
+				t.Fatalf("list calls=%d want %d", listCalls, tc.wantListCalls)
+			}
+			if tc.wantAction == "" {
+				for _, call := range runner.calls {
+					if strings.HasPrefix(strings.Join(call.Args, " "), "stop --yes") || strings.HasPrefix(strings.Join(call.Args, " "), "delete --yes") {
+						t.Fatalf("unexpected rollback call: %#v", runner.calls)
+					}
+				}
+				return
+			}
+			if got := strings.Join(runner.calls[len(runner.calls)-1].Args, " "); got != tc.wantAction {
+				t.Fatalf("final rollback command=%q want %q", got, tc.wantAction)
+			}
+		})
 	}
 }
 
