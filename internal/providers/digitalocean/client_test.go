@@ -62,8 +62,20 @@ func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 			if len(tags) == 0 {
 				t.Fatalf("tags missing: %v", body)
 			}
+			if !containsAnyTag(tags, tagCrabbox) {
+				t.Fatalf("tags missing ownership tag: %v", tags)
+			}
 			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"droplet":{"id":456,"name":"crabbox-blue","status":"new","tags":["crabbox"]}}`))
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"droplet": map[string]any{
+					"id":     456,
+					"name":   body["name"],
+					"status": "new",
+					"tags":   []string{"Crabbox"},
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -90,13 +102,150 @@ func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 	if len(requests) == 0 {
 		t.Fatal("no requests captured")
 	}
+	var tagRequests int
 	for _, req := range requests {
 		if req.Auth != "Bearer secret-token" {
 			t.Fatalf("%s %s auth=%q", req.Method, req.Path, req.Auth)
 		}
-		if req.Method == http.MethodPost && req.Path == "/tags" {
-			t.Fatalf("create performed redundant tag request: requests=%v", requests)
+		if strings.HasPrefix(req.Path, "/tags") {
+			tagRequests++
 		}
+		if req.Method == http.MethodGet && req.Path == "/tags?page=1&per_page=200" {
+			t.Fatalf("create scanned all account tags: requests=%v", requests)
+		}
+	}
+	if tagRequests != 0 {
+		t.Fatalf("normal create tag requests=%d, want 0: requests=%v", tagRequests, requests)
+	}
+}
+
+func containsAnyTag(tags []any, want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
+}
+
+func writeDigitalOceanTagList(t *testing.T, w http.ResponseWriter, names ...string) {
+	t.Helper()
+	tags := make([]digitalOceanTag, 0, len(names))
+	for _, name := range names {
+		tags = append(tags, digitalOceanTag{Name: name})
+	}
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"tags":  tags,
+		"links": map[string]any{"pages": map[string]any{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDigitalOceanClientCreateDropletRollsBackKeyOnSemanticTagCollision(t *testing.T) {
+	var deleteKey bool
+	var keyListCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			keyListCalls++
+			if keyListCalls == 1 {
+				_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"ssh_keys":[{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			http.Error(w, "tag conflict", http.StatusUnprocessableEntity)
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			writeDigitalOceanTagList(t, w, "Crabbox:Slug:Blue")
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			deleteKey = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+
+	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
+	if err == nil || !strings.Contains(err.Error(), `conflicts with existing account tag "Crabbox:Slug:Blue"`) {
+		t.Fatalf("CreateDroplet err=%v", err)
+	}
+	if !deleteKey {
+		t.Fatal("semantic tag collision did not roll back its SSH key")
+	}
+}
+
+func TestDigitalOceanClientCreateDropletRetriesWithCanonicalTags(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	canonicalLeaseTag := "Crabbox:Lease:" + leaseID
+	var createCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.RequestURI(), "/account/keys"):
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			createCalls++
+			if createCalls == 1 {
+				http.Error(w, "tag conflict", http.StatusUnprocessableEntity)
+				return
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			tags, _ := body["tags"].([]any)
+			if !containsAnyTag(tags, "Crabbox") || !containsAnyTag(tags, canonicalLeaseTag) {
+				t.Fatalf("retry tags=%v", tags)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"droplet": map[string]any{"id": 456, "name": body["name"], "status": "new", "tags": tags},
+			}); err != nil {
+				t.Fatal(err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			writeDigitalOceanTagList(t, w, "Crabbox", canonicalLeaseTag)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+
+	item, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", leaseID, "blue", false, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createCalls != 2 || item.ID != 456 {
+		t.Fatalf("createCalls=%d droplet=%#v", createCalls, item)
 	}
 }
 
@@ -243,6 +392,28 @@ func TestDigitalOceanClientEnsureTagRejectsUnconfirmedConflict(t *testing.T) {
 	}
 }
 
+func TestDigitalOceanClientEnsureTagRejectsSemanticCanonicalCollision(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tags/crabbox:slug:blue":
+			_, _ = w.Write([]byte(`{"tag":{"name":"Crabbox:Slug:Blue"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	if _, err := client.EnsureTag(context.Background(), "crabbox:slug:blue", map[string]string{}); err == nil {
+		t.Fatal("EnsureTag accepted semantic canonical collision")
+	}
+}
+
 func slicesContainSubstring(values []string, substring string) bool {
 	for _, value := range values {
 		if strings.Contains(value, substring) {
@@ -332,6 +503,8 @@ func TestDigitalOceanClientCreateDropletPreservesKeyOnAmbiguousFailure(t *testin
 			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
 			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			writeDigitalOceanTagList(t, w)
 		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
 			_, _ = w.Write([]byte(`{"droplets":[],"links":{"pages":{}}}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
@@ -360,6 +533,56 @@ func TestDigitalOceanClientCreateDropletPreservesKeyOnAmbiguousFailure(t *testin
 	var ambiguous *ambiguousDropletCreateError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("CreateDroplet err=%v, want ambiguousDropletCreateError", err)
+	}
+	if deleteKey {
+		t.Fatal("ambiguous create deleted its SSH key")
+	}
+}
+
+func TestDigitalOceanClientCreateDropletStopsReconciliationOnLeaseTagCollision(t *testing.T) {
+	var deleteKey bool
+	var dropletLookup bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/account/keys":
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			writeDigitalOceanTagList(t, w, "Crabbox:Lease:CBX_ABCDEF123456")
+		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
+			dropletLookup = true
+			t.Fatal("semantic lease collision reached Droplet reconciliation")
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			deleteKey = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+
+	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
+	var ambiguous *ambiguousDropletCreateError
+	if !errors.As(err, &ambiguous) || !strings.Contains(err.Error(), "conflicts with existing account tag") {
+		t.Fatalf("CreateDroplet err=%v", err)
+	}
+	if dropletLookup {
+		t.Fatal("semantic lease collision queried Droplets")
 	}
 	if deleteKey {
 		t.Fatal("ambiguous create deleted its SSH key")
@@ -424,6 +647,8 @@ func TestDigitalOceanClientCreateDropletReconcilesLostResponse(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = conn.Close()
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			writeDigitalOceanTagList(t, w)
 		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
 			if r.URL.Query().Get("type") == "gpus" {
 				if got := r.URL.Query().Get("tag_name"); got != "" {
@@ -471,6 +696,122 @@ func TestDigitalOceanClientCreateDropletReconcilesLostResponse(t *testing.T) {
 	}
 }
 
+func TestDigitalOceanClientCreateDropletReconcilesEmptySuccessBody(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	slug := "empty-response"
+	name := core.LeaseProviderName(leaseID, slug)
+	canonicalLeaseTag := "Crabbox:Lease:" + leaseID
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+	tags := leaseTags(cfg, leaseID, slug, "provisioning", false, time.Now())
+	var deleteKey bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/account/keys":
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			writeDigitalOceanTagList(t, w, canonicalLeaseTag)
+		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
+			if r.URL.Query().Get("type") == "gpus" {
+				_, _ = w.Write([]byte(`{"droplets":[],"links":{"pages":{}}}`))
+				return
+			}
+			if got := r.URL.Query().Get("tag_name"); got != canonicalLeaseTag {
+				t.Fatalf("tag_name=%q", got)
+			}
+			payload, err := json.Marshal(map[string]any{
+				"droplets": []droplet{{ID: 456, Name: name, Status: "new", Tags: tags}},
+				"links":    map[string]any{"pages": map[string]any{}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write(payload)
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			deleteKey = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+
+	item, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", leaseID, slug, false, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ID != 456 || item.Name != name {
+		t.Fatalf("droplet=%#v", item)
+	}
+	if deleteKey {
+		t.Fatal("reconciled create deleted its SSH key")
+	}
+}
+
+func TestDigitalOceanClientCreateDropletPreservesKeyWhenEmptySuccessCannotReconcile(t *testing.T) {
+	var deleteKey bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/account/keys":
+			_, _ = w.Write([]byte(`{"ssh_keys":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/account/keys":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ssh_key":{"id":123,"name":"crabbox-cbx-abcdef123456","fingerprint":"fp","public_key":"ssh-ed25519 test"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/droplets":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/tags":
+			writeDigitalOceanTagList(t, w)
+		case r.Method == http.MethodGet && r.URL.Path == "/droplets":
+			_, _ = w.Write([]byte(`{"droplets":[],"links":{"pages":{}}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/account/keys/123":
+			deleteKey = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("DIGITALOCEAN_TOKEN", "token")
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	client.reconcileTimeout = 20 * time.Millisecond
+	client.reconcileInterval = time.Millisecond
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+
+	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "empty-response", false, time.Now())
+	var ambiguous *ambiguousDropletCreateError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("CreateDroplet err=%v, want ambiguousDropletCreateError", err)
+	}
+	if deleteKey {
+		t.Fatal("indeterminate create deleted its SSH key")
+	}
+}
+
 func TestDigitalOceanClientCreateDropletReconcilesTruncatedSuccessBody(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	slug := "truncated-response"
@@ -495,6 +836,8 @@ func TestDigitalOceanClientCreateDropletReconcilesTruncatedSuccessBody(t *testin
 				}
 			}
 			switch {
+			case req.Method == http.MethodGet && req.URL.Path == "/tags":
+				return response(http.StatusOK, io.NopCloser(strings.NewReader(`{"tags":[],"links":{"pages":{}}}`))), nil
 			case req.Method == http.MethodGet && req.URL.Path == "/account/keys":
 				return response(http.StatusOK, io.NopCloser(strings.NewReader(`{"ssh_keys":[],"links":{"pages":{}}}`))), nil
 			case req.Method == http.MethodPost && req.URL.Path == "/account/keys":

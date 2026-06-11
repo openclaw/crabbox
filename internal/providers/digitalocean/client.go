@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -230,6 +231,9 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
+	tags := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
+	leaseTag := encodeTagKV("lease", leaseID)
+	leaseTagResolved := false
 	keyName := providerKeyForLease(leaseID)
 	key, createdKey, err := c.EnsureSSHKey(ctx, keyName, publicKey)
 	if err != nil {
@@ -241,7 +245,6 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		}
 		return c.rollbackCreatedSSHKey(keyName, cause)
 	}
-	tags := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
 	name := core.LeaseProviderName(leaseID, slug)
 	body := map[string]any{
 		"name":       name,
@@ -260,15 +263,41 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 	var res struct {
 		Droplet droplet `json:"droplet"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/droplets", body, &res); err != nil {
-		if shouldReconcileMutation(err) {
-			if item, reconcileErr := c.reconcileDropletCreate(leaseID, name); reconcileErr == nil {
+	createErr := c.do(ctx, http.MethodPost, "/droplets", body, &res)
+	if isDigitalOceanUnprocessable(createErr) {
+		resolvedTags, resolvedLeaseTag, changed, resolveErr := c.resolveCreateTagConflict(ctx, tags, leaseID)
+		if resolveErr != nil {
+			return droplet{}, rollbackKey(errors.Join(createErr, resolveErr))
+		}
+		if changed {
+			body["tags"] = resolvedTags
+			leaseTag = resolvedLeaseTag
+			leaseTagResolved = true
+			createErr = c.do(ctx, http.MethodPost, "/droplets", body, &res)
+		}
+	}
+	if createErr != nil {
+		if shouldReconcileMutation(createErr) {
+			if item, reconcileErr := c.reconcileDropletCreate(leaseTag, leaseTagResolved, leaseID, name); reconcileErr == nil {
 				return item, nil
 			} else {
-				return droplet{}, &ambiguousDropletCreateError{err: errors.Join(err, reconcileErr)}
+				return droplet{}, &ambiguousDropletCreateError{err: errors.Join(createErr, reconcileErr)}
 			}
 		}
-		return droplet{}, rollbackKey(err)
+		return droplet{}, rollbackKey(createErr)
+	}
+	if res.Droplet.ID <= 0 || res.Droplet.Name != name {
+		incomplete := fmt.Errorf(
+			"digitalocean create returned incomplete droplet identity: id=%d name=%q, want name=%q",
+			res.Droplet.ID,
+			res.Droplet.Name,
+			name,
+		)
+		if item, reconcileErr := c.reconcileDropletCreate(leaseTag, leaseTagResolved, leaseID, name); reconcileErr == nil {
+			return item, nil
+		} else {
+			return droplet{}, &ambiguousDropletCreateError{err: errors.Join(incomplete, reconcileErr)}
+		}
 	}
 	return res.Droplet, nil
 }
@@ -278,7 +307,12 @@ func shouldReconcileMutation(err error) bool {
 	return !errors.As(err, &apiErr) || apiErr.Status >= http.StatusInternalServerError
 }
 
-func (c *digitalOceanClient) reconcileDropletCreate(leaseID, name string) (droplet, error) {
+func isDigitalOceanUnprocessable(err error) bool {
+	var apiErr *digitalOceanAPIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusUnprocessableEntity
+}
+
+func (c *digitalOceanClient) reconcileDropletCreate(leaseTag string, leaseTagResolved bool, leaseID, name string) (droplet, error) {
 	timeout := c.reconcileTimeout
 	if timeout <= 0 {
 		timeout = createReconcileTimeout
@@ -290,7 +324,13 @@ func (c *digitalOceanClient) reconcileDropletCreate(leaseID, name string) (dropl
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	leaseTag := encodeTagKV("lease", leaseID)
+	if !leaseTagResolved {
+		canonical, err := c.resolveCanonicalLeaseTag(ctx, leaseID)
+		if err != nil {
+			return droplet{}, err
+		}
+		leaseTag = canonical
+	}
 	var lastErr error
 	for {
 		droplets, err := c.listDropletsByTag(ctx, leaseTag)
@@ -477,6 +517,56 @@ func canonicalTagNames(tags []digitalOceanTag) map[string]string {
 	return names
 }
 
+func (c *digitalOceanClient) resolveCreateTagConflict(ctx context.Context, tags []string, leaseID string) ([]string, string, bool, error) {
+	existing, err := c.ListTags(ctx)
+	if err != nil {
+		return nil, "", false, err
+	}
+	known := canonicalTagNames(existing)
+	canonical := make([]string, 0, len(tags))
+	leaseTag := encodeTagKV("lease", leaseID)
+	changed := false
+	for _, tag := range tags {
+		name := tag
+		if existingName := known[strings.ToLower(tag)]; existingName != "" {
+			name, err = canonicalTagName(tag, existingName)
+			if err != nil {
+				return nil, "", false, err
+			}
+			changed = changed || name != tag
+		}
+		if labelsFromTags([]string{name})["lease"] == leaseID {
+			leaseTag = name
+		}
+		canonical = append(canonical, name)
+	}
+	return normalizeTags(canonical), leaseTag, changed, nil
+}
+
+func (c *digitalOceanClient) resolveCanonicalLeaseTag(ctx context.Context, leaseID string) (string, error) {
+	requested := encodeTagKV("lease", leaseID)
+	tags, err := c.ListTags(ctx)
+	if err != nil {
+		return "", err
+	}
+	if existing := canonicalTagNames(tags)[strings.ToLower(requested)]; existing != "" {
+		return canonicalTagName(requested, existing)
+	}
+	return requested, nil
+}
+
+func canonicalTagName(requested, existing string) (string, error) {
+	existing = strings.TrimSpace(existing)
+	if existing == "" {
+		existing = requested
+	}
+	requestedLabels := labelsFromTags([]string{requested})
+	if len(requestedLabels) == 0 || !maps.Equal(requestedLabels, labelsFromTags([]string{existing})) {
+		return "", core.Exit(2, "digitalocean tag %q conflicts with existing account tag %q", requested, existing)
+	}
+	return existing, nil
+}
+
 func (c *digitalOceanClient) GetTag(ctx context.Context, name string) (digitalOceanTag, bool, error) {
 	var res struct {
 		Tag digitalOceanTag `json:"tag"`
@@ -494,14 +584,14 @@ func (c *digitalOceanClient) GetTag(ctx context.Context, name string) (digitalOc
 func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known map[string]string) (string, error) {
 	key := strings.ToLower(tag)
 	if canonical := known[key]; canonical != "" {
-		return canonical, nil
+		return canonicalTagName(tag, canonical)
 	}
 	if existing, ok, err := c.GetTag(ctx, tag); err != nil {
 		return "", err
 	} else if ok {
-		canonical := strings.TrimSpace(existing.Name)
-		if canonical == "" {
-			canonical = tag
+		canonical, canonicalErr := canonicalTagName(tag, existing.Name)
+		if canonicalErr != nil {
+			return "", canonicalErr
 		}
 		known[key] = canonical
 		return canonical, nil
@@ -511,9 +601,9 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known ma
 	}
 	err := c.do(ctx, http.MethodPost, "/tags", map[string]any{"name": tag}, &res)
 	if err == nil {
-		canonical := strings.TrimSpace(res.Tag.Name)
-		if canonical == "" {
-			canonical = tag
+		canonical, canonicalErr := canonicalTagName(tag, res.Tag.Name)
+		if canonicalErr != nil {
+			return "", canonicalErr
 		}
 		known[key] = canonical
 		return canonical, nil
@@ -530,7 +620,7 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known ma
 		known[folded] = canonical
 	}
 	if canonical := known[key]; canonical != "" {
-		return canonical, nil
+		return canonicalTagName(tag, canonical)
 	}
 	return "", err
 }
