@@ -219,13 +219,13 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		id = req.Lease.LeaseID
 	}
 	leaseID := proxmoxClaimLeaseID(req.Lease.Server, req.Lease.LeaseID)
-	if err := client.DeleteServer(ctx, id); err != nil {
+	if err := client.DeleteServer(ctx, id); err != nil && !core.IsProxmoxNotFound(err) {
 		return err
 	}
 	remaining, err := client.ListCrabboxServers(ctx)
 	if err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: preserve local lease residue lease=%s reason=inventory_refresh_failed error=%v\n", leaseID, err)
-		return nil
+		return fmt.Errorf("reconcile Proxmox lease after release: %w", err)
 	}
 	deleted := req.Lease.Server
 	deleted.CloudID = id

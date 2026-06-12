@@ -960,7 +960,7 @@ func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing
 	assertStoredTestboxKeyExists(t, leaseID)
 }
 
-func TestProxmoxReleasePreservesExactClaimWhenInventoryRefreshFails(t *testing.T) {
+func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_proxmox_release_inventory_failure"
@@ -979,8 +979,9 @@ func TestProxmoxReleasePreservesExactClaimWhenInventoryRefreshFails(t *testing.T
 
 	var stderr strings.Builder
 	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*leaseBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	req := ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}
+	if err := backend.ReleaseLease(context.Background(), req); err == nil {
+		t.Fatal("expected inventory reconciliation failure")
 	}
 	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok || claim.CloudID != "101" {
@@ -990,6 +991,18 @@ func TestProxmoxReleasePreservesExactClaimWhenInventoryRefreshFails(t *testing.T
 	if !strings.Contains(stderr.String(), "reason=inventory_refresh_failed") {
 		t.Fatalf("stderr=%q, want reconciliation warning", stderr.String())
 	}
+
+	fake.listErr = nil
+	fake.deleteErrByID = map[string]error{
+		"101": &core.ProxmoxError{Method: "DELETE", Path: "/nodes/pve1/qemu/101", StatusCode: 404, Body: "not found"},
+	}
+	if err := backend.ReleaseLease(context.Background(), req); err != nil {
+		t.Fatalf("retry release: %v", err)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
+		t.Fatalf("claim ok=%t err=%v, want removed after successful retry reconciliation", ok, err)
+	}
+	assertStoredTestboxKeyRemoved(t, leaseID)
 }
 
 func TestProxmoxReleasePreservesDifferentClaimWhenInventoryRefreshFails(t *testing.T) {
@@ -1012,8 +1025,8 @@ func TestProxmoxReleasePreservesDifferentClaimWhenInventoryRefreshFails(t *testi
 	t.Cleanup(func() { newClient = oldClient })
 
 	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: deleted}}); err != nil {
-		t.Fatal(err)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: deleted}}); err == nil {
+		t.Fatal("expected inventory reconciliation failure")
 	}
 	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok || claim.CloudID != "202" {

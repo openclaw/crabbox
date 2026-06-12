@@ -43,6 +43,10 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "missing required tool: jq" >&2
   exit 2
 fi
+if ! command -v perl >/dev/null 2>&1; then
+  echo "missing required tool: perl" >&2
+  exit 2
+fi
 
 resolve_configured_value() {
   local field="$1"
@@ -165,6 +169,7 @@ run_step() {
   local raw="$proof_dir/${name}.raw.log"
   local redacted="$proof_dir/${name}.redacted.log"
   local status=0
+  local redaction_status=0
 
   secure_log_file "$raw"
   {
@@ -175,7 +180,15 @@ run_step() {
   } >"$raw" 2>&1 || status=$?
 
   secure_log_file "$redacted"
-  redact_stream <"$raw" >"$redacted"
+  redact_stream <"$raw" >"$redacted" || redaction_status=$?
+  if [[ "$redaction_status" -ne 0 ]]; then
+    : >"$redacted"
+    printf 'step=%s status=fail exit=%s reason=redaction_failed log=private_raw_not_publishable\n' "$name" "$redaction_status" | tee -a "$summary"
+    if [[ "$status" -ne 0 ]]; then
+      return "$status"
+    fi
+    return "$redaction_status"
+  fi
   if [[ "$status" -eq 0 ]]; then
     printf 'step=%s status=pass log=%s\n' "$name" "$(summary_log_path "$redacted")" | tee -a "$summary"
   else

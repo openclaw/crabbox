@@ -252,6 +252,32 @@ test("generated proof directory paths are redacted", () => {
 	assert.match(redacted, /UserKnownHostsFile=<proof-dir>\/proxmox-node-known-hosts/);
 });
 
+test("redaction failure fails the proof and clears public logs", () => {
+	const fake = setupFakeCrabbox();
+	writeExecutable(
+		path.join(fake.tools, "perl"),
+		`#!/usr/bin/env bash
+exit 73
+`,
+	);
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			PATH: `${fake.tools}${path.delimiter}${process.env.PATH ?? ""}`,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /reason=redaction_failed/);
+	assert.match(result.stdout, /classification=external_user_owned/);
+	assert.equal(fs.readFileSync(path.join(fake.proof, "doctor.redacted.log"), "utf8"), "");
+	assert.equal(fs.readFileSync(path.join(fake.proof, "list-before.redacted.log"), "utf8"), "");
+});
+
 test("caller-supplied proof directories replace pre-existing log symlinks", () => {
 	const fake = setupFakeCrabbox();
 	const external = path.join(fake.dir, "external.log");
