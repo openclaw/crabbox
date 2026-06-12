@@ -33,6 +33,24 @@ func TestNetworkTailscaleRequiresMetadata(t *testing.T) {
 	}
 }
 
+func TestLoginOnlySSHConfigProxyIgnoresInboundTailscaleSelection(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Network = NetworkTailscale
+	server := Server{Labels: map[string]string{
+		"lease":          "isb_crabbox-repo-abcdef",
+		"tailscale":      "true",
+		"tailscale_fqdn": "outbound-only.example.ts.net",
+	}}
+	target := SSHTarget{Host: "crabbox-repo-abcdef.islo", Port: "22", SSHConfigProxy: true}
+	got, err := resolveSSHTargetNetwork(context.Background(), cfg, server, target, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Target.Host != target.Host || !got.Target.SSHConfigProxy {
+		t.Fatalf("login proxy target=%#v", got.Target)
+	}
+}
+
 func TestBootstrapNetworkPrefersTailscaleForExitNode(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Network = NetworkAuto

@@ -420,7 +420,7 @@ func (a App) resolveNetworkSSHTargetWithRepoConfig(ctx context.Context, cfg *Con
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
-	resolved, err := resolveNetworkTarget(ctx, *cfg, server, target)
+	resolved, err := resolveSSHTargetNetwork(ctx, *cfg, server, target, allowLoginOnly)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
@@ -440,6 +440,13 @@ func (a App) resolveNetworkSSHTargetWithRepoConfig(ctx context.Context, cfg *Con
 		fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 	}
 	return server, target, leaseID, nil
+}
+
+func resolveSSHTargetNetwork(ctx context.Context, cfg Config, server Server, target SSHTarget, allowLoginOnly bool) (resolvedNetworkTarget, error) {
+	if allowLoginOnly && target.SSHConfigProxy {
+		return resolvedNetworkTarget{Target: target, Network: NetworkPublic}, nil
+	}
+	return resolveNetworkTarget(ctx, cfg, server, target)
 }
 
 func resolvedLeaseClaimSnapshot(leaseID string, server Server) (leaseClaim, bool, error) {

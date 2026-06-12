@@ -346,6 +346,29 @@ func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
 	}
 }
 
+func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
+	client := &fakeIsloSyncClient{
+		getSandboxes: []*gosdk.SandboxResponse{
+			{Name: "crabbox-repo-abcdef", Status: "starting"},
+			{Name: "crabbox-repo-abcdef", Status: "running"},
+		},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-repo-abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "running" || len(client.getSandboxes) != 0 {
+		t.Fatalf("status=%q remaining responses=%d", lease.Server.Status, len(client.getSandboxes))
+	}
+}
+
 func TestIsloStatusViewIncludesTailscaleMetadata(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"
@@ -1357,6 +1380,7 @@ type fakeIsloSyncClient struct {
 	createRequest            *gosdk.SandboxCreate
 	createName               string
 	getSandbox               *gosdk.SandboxResponse
+	getSandboxes             []*gosdk.SandboxResponse
 	getSandboxErr            error
 	getSandboxGone           bool
 	resumeErr                error
@@ -1383,6 +1407,11 @@ func (f *fakeIsloSyncClient) GetSandbox(_ context.Context, name string) (*gosdk.
 	}
 	if f.getSandboxGone {
 		return nil, nil
+	}
+	if len(f.getSandboxes) > 0 {
+		sandbox := f.getSandboxes[0]
+		f.getSandboxes = f.getSandboxes[1:]
+		return sandbox, nil
 	}
 	if f.getSandbox != nil {
 		return f.getSandbox, nil

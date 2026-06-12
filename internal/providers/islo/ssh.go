@@ -62,10 +62,7 @@ func (b *isloBackend) resolveSSHReadySandbox(ctx context.Context, client isloAPI
 		}
 		return sandbox, nil
 	}
-	if req.ReadyProbe || req.Prepare {
-		return waitForIsloSandboxRunning(ctx, client, name, 2*time.Minute)
-	}
-	return nil, exit(5, "islo sandbox %s is not running state=%s", name, sandbox.GetStatus())
+	return waitForIsloSandboxRunning(ctx, client, name, 2*time.Minute)
 }
 
 func waitForIsloSandboxRunning(ctx context.Context, client isloAPI, name string, timeout time.Duration) (*gosdk.SandboxResponse, error) {
