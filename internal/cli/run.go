@@ -486,13 +486,6 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		ProfileVariables:      expansion.Variables,
 		StopAfter:             strings.TrimSpace(*stopAfter),
 	}
-	if scriptRequested && backend.Spec().Features.Has(FeatureModuleRun) {
-		script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
-		if err != nil {
-			return err
-		}
-		runReq.Script = script
-	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if strings.TrimSpace(*readyPool) != "" {
 			return exit(2, "--pool requires a brokered SSH lease provider")
@@ -502,6 +495,13 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		}
 		if err := RejectDelegatedSyncOptionsForSpec(backend.Spec(), runReq); err != nil {
 			return err
+		}
+		if scriptRequested && backend.Spec().Features.Has(FeatureModuleRun) {
+			script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
+			if err != nil {
+				return err
+			}
+			runReq.Script = script
 		}
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)

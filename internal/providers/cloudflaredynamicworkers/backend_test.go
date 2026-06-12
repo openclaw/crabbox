@@ -62,6 +62,33 @@ func TestLoaderURLRejectsUnsafeComponents(t *testing.T) {
 	}
 }
 
+func TestLoaderURLRedactsQueryAndFragmentFromErrors(t *testing.T) {
+	cfg := testConfig("https://loader.example.test/path?token=secret#frag")
+	_, err := loaderURL(cfg)
+	if err == nil {
+		t.Fatal("loaderURL succeeded")
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "token=") || strings.Contains(err.Error(), "#frag") {
+		t.Fatalf("loader URL error leaked sensitive components: %v", err)
+	}
+	if !strings.Contains(err.Error(), "https://loader.example.test/path") {
+		t.Fatalf("loader URL error omitted sanitized URL: %v", err)
+	}
+}
+
+func TestDefaultHTTPClientHonorsConfiguredRunTimeout(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.CloudflareDynamicWorkers.TimeoutSecs = 60
+	client := defaultHTTPClient(cfg)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout < 65*time.Second {
+		t.Fatalf("response header timeout=%s, want at least configured run timeout plus overhead", transport.ResponseHeaderTimeout)
+	}
+}
+
 func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

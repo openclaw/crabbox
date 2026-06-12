@@ -224,6 +224,21 @@ type runModuleRuntimeTestBackend struct {
 
 var runModuleRuntimeTestRequests []RunRequest
 
+type countingReader struct {
+	data  string
+	reads int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.data == "" {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
 func (b runModuleRuntimeTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runModuleRuntimeTestBackend) Warmup(context.Context, WarmupRequest) error {
 	return nil
@@ -577,6 +592,36 @@ func TestRunCommandRejectsModuleDelegatedTrailingCommand(t *testing.T) {
 	}
 	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; trailing shell commands are not supported") {
 		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
+	}
+}
+
+func TestRunCommandRejectsModuleDelegatedScriptStdinTrailingCommandBeforeReading(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	stdin := &countingReader{data: "export default {}"}
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  stdin,
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--script-stdin",
+		"--",
+		"echo",
+		"nope",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; trailing shell commands are not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if stdin.reads != 0 {
+		t.Fatalf("stdin was read %d times before delegated option validation", stdin.reads)
 	}
 	if len(runModuleRuntimeTestRequests) != 0 {
 		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)

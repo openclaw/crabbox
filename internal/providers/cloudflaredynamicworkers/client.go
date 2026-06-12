@@ -91,7 +91,10 @@ func (e *apiError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-const defaultResponseHeaderTimeout = 30 * time.Second
+const (
+	defaultResponseHeaderTimeout  = 30 * time.Second
+	responseHeaderTimeoutOverhead = 5 * time.Second
+)
 
 var newLoaderAPI = func(cfg Config, rt Runtime) (loaderAPI, error) {
 	baseURL, err := loaderURL(cfg)
@@ -104,7 +107,7 @@ var newLoaderAPI = func(cfg Config, rt Runtime) (loaderAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = defaultHTTPClient()
+		httpClient = defaultHTTPClient(cfg)
 	}
 	return &client{baseURL: baseURL, token: token, http: httpClient}, nil
 }
@@ -116,18 +119,36 @@ func loaderURL(cfg Config) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", exit(2, "%s loader URL %q is invalid", providerName, raw)
+		return "", exit(2, "%s loader URL %q is invalid", providerName, loaderURLForError(raw))
 	}
 	if parsed.User != nil {
 		return "", exit(2, "%s loader URL must not include userinfo", providerName)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return "", exit(2, "%s loader URL %q must use https unless it targets localhost", providerName, raw)
+		return "", exit(2, "%s loader URL %q must use https unless it targets localhost", providerName, loaderURLForError(raw))
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "%s loader URL %q must not include query or fragment components", providerName, raw)
+		return "", exit(2, "%s loader URL %q must not include query or fragment components", providerName, loaderURLForError(raw))
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func loaderURLForError(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err == nil {
+		parsed.RawQuery = ""
+		parsed.ForceQuery = false
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+	out := raw
+	if before, _, ok := strings.Cut(out, "?"); ok {
+		out = before
+	}
+	if before, _, ok := strings.Cut(out, "#"); ok {
+		out = before
+	}
+	return out
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {
@@ -138,10 +159,22 @@ func isLoopbackHTTPURL(parsed *url.URL) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-func defaultHTTPClient() *http.Client {
+func defaultHTTPClient(cfg Config) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = defaultResponseHeaderTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout(cfg)
 	return &http.Client{Transport: transport}
+}
+
+func responseHeaderTimeout(cfg Config) time.Duration {
+	runTimeout := time.Duration(cfg.CloudflareDynamicWorkers.TimeoutSecs) * time.Second
+	if runTimeout <= 0 {
+		return defaultResponseHeaderTimeout
+	}
+	timeout := runTimeout + responseHeaderTimeoutOverhead
+	if timeout < defaultResponseHeaderTimeout {
+		return defaultResponseHeaderTimeout
+	}
+	return timeout
 }
 
 func (c *client) Readiness(ctx context.Context) (readinessResponse, error) {
