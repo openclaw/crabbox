@@ -69,6 +69,22 @@ type Region struct {
 	Status string `json:"status,omitempty"`
 }
 
+func (r *Region) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		r.Name = name
+		r.Status = ""
+		return nil
+	}
+	type regionAlias Region
+	var out regionAlias
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	*r = Region(out)
+	return nil
+}
+
 type Flavor struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`

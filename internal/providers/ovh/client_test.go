@@ -21,7 +21,7 @@ func TestClientSignsReadOnlyRequests(t *testing.T) {
 		gotConsumer = r.Header.Get("X-Ovh-Consumer")
 		gotTimestamp = r.Header.Get("X-Ovh-Timestamp")
 		gotSignature = r.Header.Get("X-Ovh-Signature")
-		_ = json.NewEncoder(w).Encode([]Region{{Name: "GRA11"}})
+		_ = json.NewEncoder(w).Encode([]string{"GRA11"})
 	}))
 	defer server.Close()
 
@@ -80,6 +80,8 @@ func TestClientReadOnlyDiscoveryMethods(t *testing.T) {
 		switch r.URL.Path {
 		case "/cloud/project":
 			_ = json.NewEncoder(w).Encode([]Project{{ID: "project-test"}})
+		case "/cloud/project/project-test/region":
+			_ = json.NewEncoder(w).Encode([]string{"BHS5", "GRA11"})
 		case "/cloud/project/project-test/flavor":
 			_ = json.NewEncoder(w).Encode([]Flavor{{ID: "flavor-id", Name: "b3-8"}})
 		case "/cloud/project/project-test/flavor/flavor-id":
@@ -106,6 +108,13 @@ func TestClientReadOnlyDiscoveryMethods(t *testing.T) {
 	ctx := context.Background()
 	if _, err := client.ListProjects(ctx); err != nil {
 		t.Fatal(err)
+	}
+	regions, err := client.ListRegions(ctx, "project-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(regions) != 2 || regions[0].Name != "BHS5" || regions[1].Name != "GRA11" {
+		t.Fatalf("regions=%#v", regions)
 	}
 	if _, err := client.ListFlavors(ctx, "project-test", "GRA11"); err != nil {
 		t.Fatal(err)
