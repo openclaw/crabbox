@@ -289,6 +289,45 @@ func TestProxmoxDoctorReadinessAcceptsSDNVNet(t *testing.T) {
 	}
 }
 
+func TestProxmoxDoctorReadinessFallsBackForPVE8NetworkInventory(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/pve1/network" {
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+		requests = append(requests, r.URL.String())
+		switch r.URL.Query().Get("type") {
+		case "include_sdn":
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"errors": map[string]string{"type": "value 'include_sdn' does not have a value in the enumeration"},
+			})
+			return
+		case "any_bridge":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1},
+				map[string]any{"iface": "ci-vnet", "type": "vnet", "active": 1},
+			}})
+		default:
+			t.Fatalf("unexpected %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.Bridge = "ci-vnet"
+	check := client.proxmoxNetworkCheck(context.Background(), cfg)
+	if check.Status != "ok" || check.Details["bridge"] != "ci-vnet" || check.Details["type"] != "vnet" {
+		t.Fatalf("bridge check=%#v", check)
+	}
+	want := []string{"/api2/json/nodes/pve1/network?type=include_sdn", "/api2/json/nodes/pve1/network?type=any_bridge"}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests=%v, want %v", requests, want)
+	}
+}
+
 func TestProxmoxDoctorReadinessRequiresUsableTemplateBridgeWhenUnset(t *testing.T) {
 	tests := []struct {
 		name       string

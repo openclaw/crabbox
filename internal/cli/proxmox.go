@@ -437,7 +437,17 @@ func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) Pro
 	inventoryPath := path + "?type=include_sdn"
 	var networks []proxmoxNetwork
 	if err := c.doRequired(ctx, http.MethodGet, inventoryPath, nil, &networks); err != nil {
-		return c.proxmoxFailedReadiness("bridge", inventoryPath, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
+		var proxErr *ProxmoxError
+		if !errors.As(err, &proxErr) || proxErr.StatusCode != http.StatusBadRequest {
+			return c.proxmoxFailedReadiness("bridge", inventoryPath, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
+		}
+		// include_sdn was added in PVE 9. PVE 8 uses any_bridge for local
+		// bridges and SDN vnets.
+		inventoryPath = path + "?type=any_bridge"
+		networks = nil
+		if err := c.doRequired(ctx, http.MethodGet, inventoryPath, nil, &networks); err != nil {
+			return c.proxmoxFailedReadiness("bridge", inventoryPath, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
+		}
 	}
 	bridges := []string{strings.TrimSpace(cfg.Proxmox.Bridge)}
 	source := "config"

@@ -8,6 +8,10 @@
 - Added non-mutating Proxmox storage, bridge, pool, template, and cluster inventory readiness diagnostics plus guarded live lifecycle smoke coverage, with safer failed-create and cleanup claim handling. Thanks @coygeek.
 - Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
 
+### Fixed
+
+- Fixed Proxmox bridge readiness on PVE 8 by falling back to its compatible local-bridge and SDN-vnet inventory filter.
+
 ## 0.29.0 - 2026-06-12
 
 ### Added
