@@ -9,7 +9,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-const isloSSHDomain = "islo.dev"
+const isloSSHDomain = "islo"
 
 var _ core.SSHLeaseBackend = (*isloBackend)(nil)
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
+
 ## 0.29.0 - 2026-06-12
 
 ### Added

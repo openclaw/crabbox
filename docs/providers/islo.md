@@ -115,7 +115,7 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
 ## Capabilities
 
 - SSH: yes for direct login to existing Crabbox-created sandboxes. `crabbox ssh
-  --provider islo --id <slug>` renders `ssh islo@<sandbox>.islo.dev` on port 22
+  --provider islo --id <slug>` renders `ssh islo@<sandbox>.islo` on port 22
   by default. Crabbox still does not use SSH for Islo `run` or sync.
 - Crabbox sync: yes, archive sync through the Islo files-archive API, with a
   base64 exec-upload fallback.
@@ -131,6 +131,9 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
 
 ## Gotchas
 
+- Direct SSH requires the authenticated Islo CLI and a one-time `islo ssh
+  --setup`. The Islo CLI reads `islo login` state or `ISLO_API_KEY`;
+  `CRABBOX_ISLO_API_KEY` alone only authenticates Crabbox.
 - `--sync-only` and `--checksum` are rejected because `run` still uses Islo's
   delegated archive/exec transport, not Crabbox-managed rsync.
 - `--full-resync`, `--force-sync-large`, `--script`, `--script-stdin`,

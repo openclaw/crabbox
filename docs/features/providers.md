@@ -350,7 +350,7 @@ Delegated-run providers (`cloudflare`, `azure-dynamic-sessions`, `e2b`, `islo`,
 the broker for run execution; each owns sandbox lifecycle and command execution
 and syncs through its own API (gzipped archive upload for most). Islo also
 exposes a direct `crabbox ssh` login helper for kept sandboxes at
-`<sandbox>.islo.dev`, but Islo run/sync remains delegated. See the linked
+`<sandbox>.islo`, but Islo run/sync remains delegated. See the linked
 provider pages for per-provider auth and configuration.
 
 ## Static SSH targets

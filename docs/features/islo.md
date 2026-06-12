@@ -16,7 +16,7 @@ a small SSE reader for the `POST /sandboxes/{name}/exec/stream` endpoint, since
 the SDK's exec helper coalesces streamed output.
 
 Sandboxes are Linux-only. `crabbox ssh --provider islo` can print a direct SSH
-command for a Crabbox-created sandbox at `<sandbox>.islo.dev`, but Islo `run`
+command for a Crabbox-created sandbox at `<sandbox>.islo`, but Islo `run`
 commands and sync still use Islo's streaming exec and archive APIs rather than
 SSH/rsync.
 
@@ -194,11 +194,16 @@ instead. `--shell` passes the raw shell string through to the remote shell.
 Crabbox can resolve kept Islo sandboxes for direct SSH:
 
 ```sh
+islo ssh --setup
 crabbox ssh --provider islo --id blue-lobster
-# ssh islo@crabbox-repo-abcdef.islo.dev
+# ssh islo@crabbox-repo-abcdef.islo
 ```
 
-By default the rendered target is `islo@<sandbox>.islo.dev` on port `22`.
+Install and authenticate the [Islo CLI](https://docs.islo.dev/cli/sandbox-commands),
+then run `islo ssh --setup` once to install its SSH proxy configuration and
+short-lived certificate support. The Islo CLI must remain authenticated through
+`islo login` or `ISLO_API_KEY`; `CRABBOX_ISLO_API_KEY` alone is only read by
+Crabbox. By default the rendered target is `islo@<sandbox>.islo` on port `22`.
 Explicit `ssh.user`, `ssh.port`, or `ssh.key` settings are honored. This is a
 login helper only: `vnc`, `code`, Crabbox rsync, and Actions hydration are not
 available on `provider: islo`. When you need a Crabbox-managed SSH box, use
