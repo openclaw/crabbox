@@ -281,11 +281,15 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 		// bounded while covering Crabbox's default command budget.
 		timeoutSecs = openSandboxExecTimeoutSecs
 	}
+	platformOS, platformArch, err := openSandboxPlatform(opts.PlatformOS, opts.PlatformArch)
+	if err != nil {
+		return sandboxInfo{}, err
+	}
 	var platform *sdk.PlatformSpec
-	if strings.TrimSpace(opts.PlatformOS) != "" || strings.TrimSpace(opts.PlatformArch) != "" {
+	if platformOS != "" {
 		platform = &sdk.PlatformSpec{
-			OS:   sdk.PlatformOS(strings.TrimSpace(opts.PlatformOS)),
-			Arch: sdk.PlatformArch(strings.TrimSpace(opts.PlatformArch)),
+			OS:   sdk.PlatformOS(platformOS),
+			Arch: sdk.PlatformArch(platformArch),
 		}
 	}
 	req := sdk.CreateSandboxRequest{
@@ -846,6 +850,9 @@ func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID strin
 	}
 	execdAuthHeader := http.CanonicalHeaderKey("X-EXECD-ACCESS-TOKEN")
 	if c.cfg.OpenSandbox.UseServerProxy && headers[execdAuthHeader] == "" && c.key != "" {
+		if headers == nil {
+			headers = make(map[string]string, 1)
+		}
 		headers[execdAuthHeader] = c.key
 	}
 	return execdConnection{baseURL: endpointURL, rawQuery: rawQuery, headers: headers}, nil

@@ -680,7 +680,7 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 	if image == "" {
 		image = defaultImage
 	}
-	platformOS, err := openSandboxPlatformOS(b.cfg.OpenSandbox.PlatformOS)
+	platformOS, platformArch, err := openSandboxPlatform(b.cfg.OpenSandbox.PlatformOS, b.cfg.OpenSandbox.PlatformArch)
 	if err != nil {
 		return "", "", "", sandboxInfo{}, nil, err
 	}
@@ -692,7 +692,7 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 		SecureAccess:   b.cfg.OpenSandbox.SecureAccess,
 		UseServerProxy: b.cfg.OpenSandbox.UseServerProxy,
 		PlatformOS:     platformOS,
-		PlatformArch:   b.cfg.OpenSandbox.PlatformArch,
+		PlatformArch:   platformArch,
 		Metadata: map[string]string{
 			openSandboxClaimKey: providerScope,
 			openSandboxNameKey:  newSandboxName(repo),
@@ -812,6 +812,18 @@ func openSandboxPlatformOS(value string) (string, error) {
 		return "", exit(2, "provider=opensandbox only supports Linux sandboxes; set openSandbox.platformOS to linux or leave it empty")
 	}
 	return "linux", nil
+}
+
+func openSandboxPlatform(osValue, archValue string) (string, string, error) {
+	osValue, err := openSandboxPlatformOS(osValue)
+	if err != nil {
+		return "", "", err
+	}
+	archValue = strings.TrimSpace(archValue)
+	if (osValue == "") != (archValue == "") {
+		return "", "", exit(2, "openSandbox.platformOS and openSandbox.platformArch must be set together or both left empty")
+	}
+	return osValue, archValue, nil
 }
 
 func newOpenSandboxClaimScope(baseURL string) (string, error) {

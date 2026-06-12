@@ -92,8 +92,8 @@ openSandbox:
   memory: 2Gi                      # resource limit string; empty = service default
   timeoutSecs: 0                   # 0 = Crabbox TTL; positive values add a provider cap
   execTimeoutSecs: 600             # command/sync-helper timeout
-  platformOS: linux                # empty = service default
-  platformArch: amd64              # empty = service default
+  platformOS: linux                # set with platformArch; both empty = service default
+  platformArch: amd64              # set with platformOS; both empty = service default
   secureAccess: false              # request secured endpoints
   useServerProxy: false            # route execd through the OpenSandbox server
 ```

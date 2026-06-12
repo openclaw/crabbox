@@ -459,6 +459,36 @@ func TestRunRejectsNonLinuxPlatformOS(t *testing.T) {
 	}
 }
 
+func TestRunRejectsPartialPlatformConstraint(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		os   string
+		arch string
+	}{
+		{name: "OS only", os: "linux"},
+		{name: "architecture only", arch: "amd64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeClient()
+			backend := newTestBackend(fake)
+			backend.cfg.OpenSandbox.PlatformOS = tc.os
+			backend.cfg.OpenSandbox.PlatformArch = tc.arch
+			_, err := backend.Run(context.Background(), RunRequest{
+				Repo:    Repo{Name: "my-app", Root: tempGitRepo(t)},
+				NoSync:  true,
+				Command: []string{"true"},
+			})
+			if err == nil || !strings.Contains(err.Error(), "must be set together") {
+				t.Fatalf("err=%v, want partial platform rejection", err)
+			}
+			if fake.created.Image != "" {
+				t.Fatalf("created sandbox despite partial platform: %#v", fake.created)
+			}
+		})
+	}
+}
+
 func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -1436,7 +1466,7 @@ func TestSDKClientProxyExecdAddsAccessTokenWhenEndpointOmitsIt(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-proxy/endpoints/44772":
 			gotEndpointQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-Route-Hint":"sticky"}}`)
+			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/command":
 			gotExecdAuth = r.Header.Get("X-EXECD-ACCESS-TOKEN")
 			w.Header().Set("Content-Type", "text/event-stream")
