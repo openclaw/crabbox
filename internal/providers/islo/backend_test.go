@@ -297,7 +297,7 @@ func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 	if lease.SSH.Host != "crabbox-repo-abcdef.islo" || lease.SSH.User != isloWorkloadUser || lease.SSH.Port != "22" {
 		t.Fatalf("ssh target=%#v", lease.SSH)
 	}
-	if lease.SSH.Key != "" || len(lease.SSH.FallbackPorts) != 0 || !lease.SSH.SSHConfigProxy {
+	if lease.SSH.Key != "" || len(lease.SSH.FallbackPorts) != 0 || !lease.SSH.SSHConfigProxy || !lease.SSH.DisableHostKeyChecking {
 		t.Fatalf("islo ssh should not force Crabbox's default key or fallback ports: %#v", lease.SSH)
 	}
 	if lease.Server.PublicNet.IPv4.IP != "crabbox-repo-abcdef.islo" || lease.Server.Labels["ssh_host"] != "crabbox-repo-abcdef.islo" {

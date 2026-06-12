@@ -108,13 +108,14 @@ func (b *isloBackend) sshTargetForSandbox(name string) core.SSHTarget {
 		key = b.cfg.SSHKey
 	}
 	return core.SSHTarget{
-		User:           user,
-		Host:           isloSSHHost(name),
-		Key:            key,
-		Port:           port,
-		FallbackPorts:  []string{},
-		TargetOS:       targetLinux,
-		SSHConfigProxy: true,
+		User:                   user,
+		Host:                   isloSSHHost(name),
+		Key:                    key,
+		Port:                   port,
+		FallbackPorts:          []string{},
+		TargetOS:               targetLinux,
+		SSHConfigProxy:         true,
+		DisableHostKeyChecking: true,
 	}
 }
 
