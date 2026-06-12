@@ -682,6 +682,28 @@ func TestXCPNgRollbackContextIsBoundedAndDetachedFromCancellation(t *testing.T) 
 	}
 }
 
+func TestXAPIRequestTimeoutsPreserveLongOperations(t *testing.T) {
+	client := newXAPIHTTPClient(false)
+	if client.Timeout != 0 {
+		t.Fatalf("http client timeout=%s", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T", client.Transport)
+	}
+	if transport.TLSHandshakeTimeout != 30*time.Second {
+		t.Fatalf("TLS handshake timeout=%s", transport.TLSHandshakeTimeout)
+	}
+	if got := xcpNgRequestTimeoutForMethod("VM.get_record"); got != 5*time.Minute {
+		t.Fatalf("routine request timeout=%s", got)
+	}
+	for _, method := range []string{"VM.clone", "VM.copy", "VM.provision"} {
+		if got := xcpNgRequestTimeoutForMethod(method); got != 90*time.Minute {
+			t.Fatalf("%s timeout=%s", method, got)
+		}
+	}
+}
+
 func TestCloneVMProvisionRollbackDestroysUnlabeledCopiedDisk(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

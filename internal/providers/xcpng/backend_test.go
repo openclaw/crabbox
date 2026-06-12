@@ -57,7 +57,7 @@ func (f *fakeLifecycleClient) fail(call string) error {
 
 func (f *fakeLifecycleClient) Close(context.Context) error {
 	f.record("close")
-	return nil
+	return f.fail("close")
 }
 
 func (f *fakeLifecycleClient) DoctorInventory(context.Context, xcpNgConfig) ([]Server, error) {
@@ -788,6 +788,61 @@ func TestRunISOE2ELinuxReadOnlyAcceptsLocalInstallerPath(t *testing.T) {
 	}
 }
 
+func TestRunISOE2EReportsLogoutFailureInSummary(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:      "OpaqueRef:sr",
+		networkRef: "OpaqueRef:net",
+		hostRef:    "OpaqueRef:host",
+		iso:        xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
+		errOn:      map[string]error{"close": errors.New("logout failed")},
+	}
+	oldClient := newLifecycleClient
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	t.Cleanup(func() { newLifecycleClient = oldClient })
+
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "read-only", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence")})
+	if err == nil || !strings.Contains(err.Error(), "logout failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if summary.Classification != "resource_cleanup_failed" || summary.Cleanup != "failed" || summary.Phase != "close" || !strings.Contains(summary.Reason, "logout failed") {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestRunISOE2EJoinsLogoutFailureWithPrimaryFailure(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:      "OpaqueRef:sr",
+		networkRef: "OpaqueRef:net",
+		hostRef:    "OpaqueRef:host",
+		errOn: map[string]error{
+			"resolve-iso": errors.New("ISO unavailable"),
+			"close":       errors.New("logout failed"),
+		},
+	}
+	oldClient := newLifecycleClient
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	t.Cleanup(func() { newLifecycleClient = oldClient })
+
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "read-only", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence")})
+	if err == nil || !strings.Contains(err.Error(), "ISO unavailable") || !strings.Contains(err.Error(), "logout failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if summary.Classification != "environment_blocked" || summary.Cleanup != "failed" || summary.Phase != "installer_iso" ||
+		!strings.Contains(summary.Reason, "ISO unavailable") || !strings.Contains(summary.Reason, "logout failed") {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
 func TestRunISOE2EWindowsReadOnlyBlocksARMInstaller(t *testing.T) {
 	dir := t.TempDir()
 	isoDir := filepath.Join(dir, "ISOs-ARM")
@@ -833,8 +888,14 @@ func TestRunISOE2EWindowsMutateGeneratesAndAttachesBootstrapBeforeStart(t *testi
 	oldEnsure := isoE2EEnsureTestboxKey
 	oldWrite := isoE2EWriteWindowsAnswerISO
 	oldPassword := isoE2EGenerateWindowsPassword
+	var sshTimeout time.Duration
+	var sshContextDeadline time.Time
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
-	isoE2EWaitForSSHReady = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
+	isoE2EWaitForSSHReady = func(ctx context.Context, _ *core.SSHTarget, _ string, timeout time.Duration) error {
+		sshTimeout = timeout
+		sshContextDeadline, _ = ctx.Deadline()
+		return nil
+	}
 	isoE2ERunSSHQuiet = func(context.Context, core.SSHTarget, string) error { return nil }
 	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
 		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
@@ -867,6 +928,9 @@ func TestRunISOE2EWindowsMutateGeneratesAndAttachesBootstrapBeforeStart(t *testi
 	}
 	if summary.Details["answer_iso_source"] != "generated-local-file" || summary.Details["windows_bootstrap"] != "openssh-key" {
 		t.Fatalf("summary=%#v", summary)
+	}
+	if sshTimeout != isoE2EDefaultTimeout || time.Until(sshContextDeadline) <= isoE2EWindowsInstallTimeout {
+		t.Fatalf("ssh proof timeout=%s deadline=%s", sshTimeout, sshContextDeadline)
 	}
 	if _, err := os.Stat(summary.AnswerISO); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("generated answer ISO was not removed: err=%v", err)

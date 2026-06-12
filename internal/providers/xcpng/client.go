@@ -44,6 +44,8 @@ var (
 	xcpNgStartTimeout         = 1 * time.Minute
 	xcpNgTaskPollInterval     = 1 * time.Second
 	xcpNgTaskTimeout          = 1 * time.Minute
+	xcpNgRequestTimeout       = 5 * time.Minute
+	xcpNgLongRequestTimeout   = 90 * time.Minute
 	xcpNgProbeTCPAddress      = func(ctx context.Context, address string, timeout time.Duration) error {
 		conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", address)
 		if err == nil {
@@ -67,15 +69,7 @@ func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: xcfg.InsecureTLS}, //nolint:gosec // explicit private-lab opt-in.
-	}
-	httpClient := &http.Client{Timeout: 5 * time.Minute, Transport: transport}
+	httpClient := newXAPIHTTPClient(xcfg.InsecureTLS)
 	c := &xapiClient{
 		endpoint:  endpoint,
 		username:  xcfg.Username,
@@ -87,6 +81,20 @@ func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+func newXAPIHTTPClient(insecureTLS bool) *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: 30 * time.Second,
+		IdleConnTimeout:     90 * time.Second,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecureTLS}, //nolint:gosec // explicit private-lab opt-in.
+	}
+	return &http.Client{Transport: transport}
 }
 
 func (c *xapiClient) login(ctx context.Context) error {
@@ -1464,7 +1472,9 @@ func (c *xapiClient) importReaderVDI(ctx context.Context, vdiRef string, reader 
 	q.Set("vdi", vdiRef)
 	q.Set("format", "raw")
 	u.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), reader)
+	uploadCtx, uploadCancel := context.WithTimeout(ctx, xcpNgLongRequestTimeout)
+	defer uploadCancel()
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPut, u.String(), reader)
 	if err != nil {
 		return err
 	}
@@ -1483,7 +1493,7 @@ func (c *xapiClient) importReaderVDI(ctx context.Context, vdiRef string, reader 
 		secrets := append([]string{c.session}, urlUserinfoSecrets(u)...)
 		return xapiHTTPError{StatusCode: res.StatusCode, Body: redactXAPISensitiveText(strings.TrimSpace(string(data)), secrets...)}
 	}
-	return c.waitForTaskSuccess(ctx, taskRef)
+	return c.waitForTaskSuccess(uploadCtx, taskRef)
 }
 
 func (c *xapiClient) waitForTaskSuccess(ctx context.Context, taskRef string) error {
@@ -1694,7 +1704,9 @@ func (c *xapiClient) callRaw(ctx context.Context, method string, params ...any) 
 	if err != nil {
 		return xmlRPCValue{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	requestCtx, cancel := context.WithTimeout(ctx, xcpNgRequestTimeoutForMethod(method))
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return xmlRPCValue{}, err
 	}
@@ -1724,6 +1736,15 @@ func (c *xapiClient) callRaw(ctx context.Context, method string, params ...any) 
 		return xmlRPCValue{}, nil
 	}
 	return unwrapXAPIResponse(response.Params[0].Value, secrets)
+}
+
+func xcpNgRequestTimeoutForMethod(method string) time.Duration {
+	switch method {
+	case "VM.clone", "VM.copy", "VM.provision":
+		return xcpNgLongRequestTimeout
+	default:
+		return xcpNgRequestTimeout
+	}
 }
 
 func (c *xapiClient) xapiSecrets(method string, params ...any) []string {

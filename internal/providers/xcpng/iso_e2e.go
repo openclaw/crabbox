@@ -156,8 +156,22 @@ func RunISOE2E(ctx context.Context, opts ISOE2EOptions) (summary ISOE2ESummary, 
 		return summary, err
 	}
 	defer func() {
-		if closeErr := client.Close(context.Background()); closeErr != nil && err == nil {
-			err = closeErr
+		closeCtx, closeCancel := xcpNgRollbackContext(ctx)
+		defer closeCancel()
+		if closeErr := client.Close(closeCtx); closeErr != nil {
+			hadPrimaryError := err != nil
+			closeErr = fmt.Errorf("close xcp-ng session: %w", closeErr)
+			err = errors.Join(err, closeErr)
+			summary.Cleanup = "failed"
+			if summary.Reason == "" {
+				summary.Reason = closeErr.Error()
+			} else {
+				summary.Reason = fmt.Sprintf("%s; %v", summary.Reason, closeErr)
+			}
+			if !hadPrimaryError {
+				summary.Classification = "resource_cleanup_failed"
+				summary.Phase = "close"
+			}
 		}
 	}()
 
@@ -323,7 +337,7 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	if runtime.sshTarget.Port == "" {
 		runtime.sshTarget.Port = firstNonBlank(opts.Config.SSHPort, "22")
 	}
-	if err = isoE2EWaitForSSHReady(ctx, &runtime.sshTarget, "windows_first_boot", minDuration(isoE2EGuestMetricsTimeout, opts.Timeout/3)); err != nil {
+	if err = isoE2EWaitForSSHReady(ctx, &runtime.sshTarget, "windows_first_boot", opts.Timeout); err != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "windows_first_boot"
 		result.Reason = err.Error()
