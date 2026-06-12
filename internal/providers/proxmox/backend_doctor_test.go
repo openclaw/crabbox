@@ -36,6 +36,7 @@ type fakeProxmoxDoctorClient struct {
 	clusterExistsByID     map[string]bool
 	clusterExistsErr      error
 	setLabels             []map[string]string
+	labelNodes            []string
 	readiness             []core.ProxmoxReadinessCheck
 	leaseIDs              []string
 }
@@ -182,6 +183,11 @@ func (c *fakeProxmoxDoctorClient) SetLabels(_ context.Context, _ string, labels 
 	return nil
 }
 
+func (c *fakeProxmoxDoctorClient) SetLabelsOnNode(ctx context.Context, node, id string, labels map[string]string) error {
+	c.labelNodes = append(c.labelNodes, node)
+	return c.SetLabels(ctx, id, labels)
+}
+
 func TestProxmoxDoctorReportsReadinessChecksWithoutMutation(t *testing.T) {
 	fake := &fakeProxmoxDoctorClient{readiness: []core.ProxmoxReadinessCheck{
 		{Status: "ok", Check: "auth", Message: "auth=ready endpoint=/version", Details: map[string]string{"auth": "ready", "endpoint": "/version"}},
@@ -229,6 +235,23 @@ func TestProxmoxDoctorReportsReadinessChecksWithoutMutation(t *testing.T) {
 	}
 	if fake.mutated {
 		t.Fatal("doctor called a mutating Proxmox method")
+	}
+}
+
+func TestProxmoxTouchUsesMigratedVMNode(t *testing.T) {
+	fake := &fakeProxmoxDoctorClient{}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	server := expiredProxmoxServer("101", "cbx_migrated_touch")
+	server.HostID = "pve2"
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{Proxmox: core.ProxmoxConfig{Node: "pve1"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{LeaseID: "cbx_migrated_touch", Server: server}, State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.labelNodes) != 1 || fake.labelNodes[0] != "pve2" {
+		t.Fatalf("labelNodes=%v, want [pve2]", fake.labelNodes)
 	}
 }
 

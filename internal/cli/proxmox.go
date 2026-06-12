@@ -1226,6 +1226,12 @@ func (c *ProxmoxClient) SetLabels(ctx context.Context, id string, labels map[str
 	return c.configureVM(ctx, vmid, url.Values{"description": {proxmoxDescription(labels)}})
 }
 
+func (c *ProxmoxClient) SetLabelsOnNode(ctx context.Context, node, id string, labels map[string]string) error {
+	scoped := *c
+	scoped.Node = node
+	return scoped.SetLabels(ctx, id, labels)
+}
+
 func (c *ProxmoxClient) configureVM(ctx context.Context, vmid int, form url.Values) error {
 	var upid string
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), form, &upid); err != nil {

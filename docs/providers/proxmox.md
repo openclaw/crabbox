@@ -260,19 +260,23 @@ doctor on these paths, then add clone/config/start/stop/delete permissions only
 for lease lifecycle operations:
 
 ```text
-/nodes/<node>
-/nodes/<node>/storage/<storage>
-/nodes/<node>/qemu/<templateId>
-/sdn or /nodes/<node>/network, depending on how the bridge is managed
-/pool/<pool>, when a pool is configured
-/vms/<vmid>
+/                         Sys.Audit for cluster allocation metadata
+/nodes/<node>             Sys.Audit for node status and local network inventory
+/storage/<storage>        Datastore.Audit for clone and template storage checks
+/vms/<templateId>         VM.Audit for template inspection
+/vms                     propagated VM.Audit for authoritative cluster inventory
+/sdn                     SDN.Audit when the configured bridge is SDN-managed
+/pool/<pool>              Pool.Audit when a pool is configured
 ```
 
 The exact least-privilege role depends on the Proxmox VE version and local ACL
 model. If doctor fails with `class=permission`, fix the named endpoint first and
 rerun doctor before attempting `warmup` or `run`. Doctor requires propagated
 `VM.Audit` on `/vms`. Release recovery checks the exact target path before
-treating `/cluster/resources?type=vm` as authoritative for that VM.
+treating `/cluster/resources?type=vm` as authoritative for that VM. Lease
+lifecycle operations additionally need the corresponding VM clone, allocation,
+configuration, power-management, datastore-allocation, and pool-allocation
+privileges.
 
 For CI or lab smoke checks after building the local binary:
 

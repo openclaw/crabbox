@@ -269,6 +269,15 @@ extract_list_inventory() {
 
 baseline_inventory="$proof_dir/list-before.inventory.tsv"
 
+baseline_contains_identity() {
+  local candidate_lease="$1"
+  local candidate_slug="$2"
+  local cloud_id="$3"
+  awk -F '\t' -v lease="$candidate_lease" -v slug="$candidate_slug" -v id="$cloud_id" \
+    '$1 == lease && $2 == slug && $3 == id { found = 1 } END { exit !found }' \
+    "$baseline_inventory"
+}
+
 reconcile_new_smoke_lease() {
   local after_raw="$1"
   local after_inventory="$proof_dir/list-reconcile.inventory.tsv"
@@ -284,7 +293,7 @@ reconcile_new_smoke_lease() {
   fi
   while IFS=$'\t' read -r candidate candidate_slug cloud_id; do
     is_owned_smoke_lease "$candidate" "$candidate_slug" || continue
-    if awk -F '\t' -v id="$cloud_id" '$3 == id { found = 1 } END { exit !found }' "$baseline_inventory"; then
+    if baseline_contains_identity "$candidate" "$candidate_slug" "$cloud_id"; then
       continue
     fi
     candidate_lease="$candidate"
@@ -317,7 +326,7 @@ verify_no_new_smoke_lease() {
   fi
   while IFS=$'\t' read -r candidate candidate_slug cloud_id; do
     is_owned_smoke_lease "$candidate" "$candidate_slug" || continue
-    if awk -F '\t' -v id="$cloud_id" '$3 == id { found = 1 } END { exit !found }' "$baseline_inventory"; then
+    if baseline_contains_identity "$candidate" "$candidate_slug" "$cloud_id"; then
       continue
     fi
     candidate_count=$((candidate_count + 1))

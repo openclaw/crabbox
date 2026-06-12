@@ -44,6 +44,7 @@ type proxmoxClient interface {
 	DeleteServer(context.Context, string) error
 	DeleteServerOnNode(context.Context, string, string) error
 	SetLabels(context.Context, string, map[string]string) error
+	SetLabelsOnNode(context.Context, string, string, map[string]string) error
 }
 
 func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -417,7 +418,8 @@ func (b *leaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, err
 	}
 	server := req.Lease.Server
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
-	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
+	node := core.Blank(server.HostID, b.Cfg.Proxmox.Node)
+	if err := client.SetLabelsOnNode(ctx, node, server.CloudID, server.Labels); err != nil {
 		return Server{}, err
 	}
 	return server, nil

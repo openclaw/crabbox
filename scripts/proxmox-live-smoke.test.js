@@ -41,10 +41,14 @@ case "$1" in
   list)
     if [[ -f "${leaseState}" ]]; then
       created_slug="$(cat "${leaseState}")"
+      created_cloud_id=100
+      if [[ "\${FAKE_CRABBOX_REUSE_BASELINE_VMID:-0}" == "1" ]]; then
+        created_cloud_id=99
+      fi
       if [[ "\${FAKE_CRABBOX_SUFFIXED_SLUG:-0}" == "1" ]]; then
         created_slug="\${created_slug}-abcd"
       fi
-      printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"100","name":"crabbox-proxmox-live-smoke","labels":{"lease":"cbx_test123","slug":"%s","provider":"proxmox"}}]\\n' "$created_slug"
+      printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"%s","name":"crabbox-proxmox-live-smoke","labels":{"lease":"cbx_test123","slug":"%s","provider":"proxmox"}}]\\n' "$created_cloud_id" "$created_slug"
     elif [[ -f "${extraLeaseState}" ]]; then
       extra_slug="$(cat "${extraLeaseState}")"
       printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"101","name":"crabbox-proxmox-live-smoke-retry","labels":{"lease":"cbx_leaked","slug":"%s","provider":"proxmox"}}]\\n' "$extra_slug"
@@ -252,6 +256,27 @@ test("live mode releases a uniquely created lease after warmup fails", () => {
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
 	assert.equal(fs.existsSync(path.join(fake.dir, "lease.state")), false);
+});
+
+test("live mode reconciles an owned lease that reuses a baseline VMID", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_FAIL_WARMUP_WITH_LEASE: "1",
+			FAKE_CRABBOX_REUSE_BASELINE_VMID: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /step=stop-reconciled status=pass/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
 });
 
 test("live mode reconciles a collision-suffixed lease slug", () => {
