@@ -684,8 +684,13 @@ type commandEventResult struct {
 }
 
 type commandOutputState struct {
-	stdout bool
-	stderr bool
+	stdout commandLineState
+	stderr commandLineState
+}
+
+type commandLineState struct {
+	seen       bool
+	terminated bool
 }
 
 func (c *sdkOpenSandboxClient) handleCommandEvent(event commandStreamEvent) (commandEventResult, error) {
@@ -697,10 +702,10 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 	if !event.Structured {
 		switch explicitType {
 		case "stdout":
-			err := writeCommandOutput(c.rt.Stdout, event.Data, &outputState.stdout)
+			err := writeCommandLine(c.rt.Stdout, event.Data, &outputState.stdout)
 			return commandEventResult{}, err
 		case "stderr":
-			err := writeCommandOutput(c.rt.Stderr, event.Data, &outputState.stderr)
+			err := writeCommandLine(c.rt.Stderr, event.Data, &outputState.stderr)
 			return commandEventResult{}, err
 		}
 	}
@@ -722,19 +727,19 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 		case "result", "error", "execution_complete":
 			return commandEventResult{}, fmt.Errorf("decode opensandbox %s event: %w", event.Event, err)
 		case "stderr":
-			writeErr := writeCommandOutput(c.rt.Stderr, event.Data, &outputState.stderr)
+			writeErr := writeCommandLine(c.rt.Stderr, event.Data, &outputState.stderr)
 			return commandEventResult{}, writeErr
 		}
-		writeErr := writeCommandOutput(c.rt.Stdout, event.Data, &outputState.stdout)
+		writeErr := writeCommandLine(c.rt.Stdout, event.Data, &outputState.stdout)
 		return commandEventResult{}, writeErr
 	}
 	if payload.Type == "" {
 		switch explicitType {
 		case "stdout":
-			err := writeCommandOutput(c.rt.Stdout, event.Data, &outputState.stdout)
+			err := writeCommandLine(c.rt.Stdout, event.Data, &outputState.stdout)
 			return commandEventResult{}, err
 		case "stderr":
-			err := writeCommandOutput(c.rt.Stderr, event.Data, &outputState.stderr)
+			err := writeCommandLine(c.rt.Stderr, event.Data, &outputState.stderr)
 			return commandEventResult{}, err
 		}
 	}
@@ -750,13 +755,13 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 	case "init":
 		return commandEventResult{executionID: payload.Text}, nil
 	case "stdout":
-		err := writeCommandOutput(c.rt.Stdout, commandOutput(payload.Text, payload.Data), &outputState.stdout)
+		err := writeCommandLine(c.rt.Stdout, commandOutput(payload.Text, payload.Data), &outputState.stdout)
 		return commandEventResult{}, err
 	case "result":
-		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
+		err := writeCommandLine(c.rt.Stdout, commandOutput(payload.Text, payload.Data), &outputState.stdout)
 		return commandEventResult{}, err
 	case "stderr":
-		err := writeCommandOutput(c.rt.Stderr, commandOutput(payload.Text, payload.Data), &outputState.stderr)
+		err := writeCommandLine(c.rt.Stderr, commandOutput(payload.Text, payload.Data), &outputState.stderr)
 		return commandEventResult{}, err
 	case "error":
 		value := payload.EValue
@@ -781,8 +786,23 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 	return commandEventResult{}, nil
 }
 
-func writeCommandOutput(w io.Writer, value string, previous *bool) error {
-	if *previous {
+func writeCommandLine(w io.Writer, value string, state *commandLineState) error {
+	// OpenSandbox stdout/stderr events are line records without required
+	// terminators. The stream parser removes SSE framing before this point.
+	if value == "" {
+		if state.seen && !state.terminated {
+			if _, err := io.WriteString(w, "\n"); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+		state.seen = true
+		state.terminated = true
+		return nil
+	}
+	if state.seen && !state.terminated {
 		if _, err := io.WriteString(w, "\n"); err != nil {
 			return err
 		}
@@ -790,7 +810,8 @@ func writeCommandOutput(w io.Writer, value string, previous *bool) error {
 	if _, err := io.WriteString(w, value); err != nil {
 		return err
 	}
-	*previous = true
+	state.seen = true
+	state.terminated = strings.HasSuffix(value, "\n")
 	return nil
 }
 

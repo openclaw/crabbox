@@ -1869,7 +1869,7 @@ func TestCommandEventUsesDataFieldForOutput(t *testing.T) {
 	}
 }
 
-func TestCommandEventPreservesStructuredOutputLineBoundaries(t *testing.T) {
+func TestCommandEventReconstructsStructuredOutputLines(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
 	state := commandOutputState{}
@@ -1888,7 +1888,26 @@ func TestCommandEventPreservesStructuredOutputLineBoundaries(t *testing.T) {
 	}
 }
 
-func TestCommandEventPreservesStandardSSEOutputLineBoundaries(t *testing.T) {
+func TestCommandEventDoesNotDuplicateStructuredLineTerminators(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
+	state := commandOutputState{}
+	for _, event := range []commandStreamEvent{
+		streamEvent("{\"type\":\"stdout\",\"text\":\"line1\\n\"}"),
+		streamEvent("{\"type\":\"stderr\",\"text\":\"warn1\\n\"}"),
+		streamEvent("{\"type\":\"stdout\",\"text\":\"line2\\n\"}"),
+		streamEvent("{\"type\":\"stderr\",\"text\":\"warn2\\n\"}"),
+	} {
+		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stdout.String() != "line1\nline2\n" || stderr.String() != "warn1\nwarn2\n" {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCommandEventReconstructsRawSSEOutputLines(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
 	state := commandOutputState{}
@@ -1907,6 +1926,23 @@ func TestCommandEventPreservesStandardSSEOutputLineBoundaries(t *testing.T) {
 	}
 }
 
+func TestCommandEventDoesNotDuplicateRawSSELineTerminators(t *testing.T) {
+	var stdout bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: io.Discard}}
+	state := commandOutputState{}
+	for _, event := range []commandStreamEvent{
+		{Event: "stdout", Data: "line1\n"},
+		{Event: "stdout", Data: "line2\n"},
+	} {
+		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stdout.String() != "line1\nline2\n" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
 func TestCommandEventPreservesOutputWhitespace(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
@@ -1921,7 +1957,7 @@ func TestCommandEventPreservesOutputWhitespace(t *testing.T) {
 	}
 }
 
-func TestCommandEventPreservesRawSSEBlankLines(t *testing.T) {
+func TestCommandEventPreservesRawSSEWhitespaceChunks(t *testing.T) {
 	var stdout bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: io.Discard}}
 	state := commandOutputState{}
@@ -1935,6 +1971,41 @@ func TestCommandEventPreservesRawSSEBlankLines(t *testing.T) {
 		}
 	}
 	if stdout.String() != "\n  \ndone" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestCommandEventPreservesTrailingBlankOutputRecord(t *testing.T) {
+	var stdout bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: io.Discard}}
+	state := commandOutputState{}
+	for _, event := range []commandStreamEvent{
+		streamEvent("{\"type\":\"stdout\",\"text\":\"line1\\n\"}"),
+		streamEvent(`{"type":"stdout","text":""}`),
+	} {
+		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stdout.String() != "line1\n\n" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestCommandEventPreservesLineStateAcrossResultOutput(t *testing.T) {
+	var stdout bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: io.Discard}}
+	state := commandOutputState{}
+	for _, event := range []commandStreamEvent{
+		streamEvent("{\"type\":\"stdout\",\"text\":\"a\\n\"}"),
+		streamEvent(`{"type":"result","text":"b"}`),
+		streamEvent(`{"type":"stdout","text":"c"}`),
+	} {
+		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stdout.String() != "a\nb\nc" {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
