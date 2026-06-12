@@ -262,36 +262,45 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 	if err != nil {
 		return xapiVM{}, err
 	}
+	vm := xapiVM{Ref: ref, Name: name, PowerState: "halted", Labels: req.Labels}
+	if err := c.setVMLabels(ctx, ref, req.Labels); err != nil {
+		return c.rollbackClonedVM(ref, vm, req.Labels, false, err)
+	}
 	if req.HostRef != "" {
 		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil && req.HostRef != "" {
-			_ = c.deleteServer(context.Background(), ref, true)
-			return xapiVM{}, err
+			return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
 		}
 	}
 	if req.NetworkRef != "" {
 		if err := c.setVMNetwork(ctx, ref, req.NetworkRef.value()); err != nil {
-			_ = c.deleteServer(context.Background(), ref, true)
-			return xapiVM{}, err
+			return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
 		}
 	}
-	if err := c.setVMLabels(ctx, ref, req.Labels); err != nil {
-		_ = c.deleteServer(context.Background(), ref, true)
-		return xapiVM{}, err
-	}
 	if _, err := c.call(ctx, "VM.provision", c.session, ref); err != nil {
-		_ = c.deleteServer(context.Background(), ref, true)
-		return xapiVM{}, err
+		return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
 	}
 	if err := c.markAttachedUserDisks(ctx, ref, vmDiskLabels(req.Labels)); err != nil {
-		_ = c.deleteServer(context.Background(), ref, true)
-		return xapiVM{}, err
+		return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
 	}
 	uuid, err := c.callString(ctx, "VM.get_uuid", c.session, ref)
 	if err != nil {
-		_ = c.deleteServer(context.Background(), ref, true)
-		return xapiVM{}, err
+		return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
 	}
-	return xapiVM{Ref: ref, UUID: uuid, Name: name, PowerState: "halted", Labels: req.Labels}, nil
+	vm.UUID = uuid
+	return vm, nil
+}
+
+func (c *xapiClient) rollbackClonedVM(ref string, vm xapiVM, labels map[string]string, labeled bool, cause error) (xapiVM, error) {
+	cleanupErr := c.deleteServer(context.Background(), ref, true)
+	if cleanupErr == nil {
+		return xapiVM{}, cause
+	}
+	if !labeled {
+		if recoveryErr := c.setVMLabels(context.Background(), ref, labels); recoveryErr != nil {
+			return vm, errors.Join(cause, fmt.Errorf("rollback copied xcp-ng VM: %w", cleanupErr), fmt.Errorf("mark copied xcp-ng VM for recovery: %w", recoveryErr))
+		}
+	}
+	return vm, errors.Join(cause, fmt.Errorf("rollback copied xcp-ng VM: %w", cleanupErr))
 }
 
 func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest) (xcpNgFreshVMResult, error) {
@@ -1004,7 +1013,22 @@ func (c *xapiClient) SetLabels(ctx context.Context, id string, labels map[string
 }
 
 func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
-	return c.deleteServer(ctx, id, false)
+	ref, err := c.vmRefForID(ctx, id)
+	if err != nil {
+		return err
+	}
+	server, err := c.GetServer(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if !isCrabboxLease(server) {
+		return exit(4, "refusing to delete non-Crabbox xcp-ng VM: %s", id)
+	}
+	isTemplate, err := c.callString(ctx, "VM.get_is_a_template", c.session, ref)
+	if err != nil {
+		return fmt.Errorf("inspect xcp-ng VM template state before delete: %w", err)
+	}
+	return c.deleteServer(ctx, ref, isTemplate == "true")
 }
 
 func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks bool) error {
@@ -1477,7 +1501,8 @@ func (c *xapiClient) vmRecords(ctx context.Context) ([]xapiVM, error) {
 	records := xmlValueToStructMap(value)
 	vms := make([]xapiVM, 0, len(records))
 	for ref, record := range records {
-		if xmlStructString(record, "is_a_template") == "true" {
+		labels := parseRenderedLabels(xmlStructStringMap(record, "other_config")["crabbox:labels"])
+		if xmlStructString(record, "is_a_template") == "true" && !isCrabboxLease(xcpNgVMToServer(xapiVM{Ref: ref}, labels, "")) {
 			continue
 		}
 		vms = append(vms, xapiVM{
@@ -1485,7 +1510,7 @@ func (c *xapiClient) vmRecords(ctx context.Context) ([]xapiVM, error) {
 			UUID:       xmlStructString(record, "uuid"),
 			Name:       xapiName(xmlStructString(record, "name_label")),
 			PowerState: xmlStructString(record, "power_state"),
-			Labels:     parseRenderedLabels(xmlStructStringMap(record, "other_config")["crabbox:labels"]),
+			Labels:     labels,
 		})
 	}
 	return vms, nil
@@ -1529,11 +1554,21 @@ func (c *xapiClient) setVMNetwork(ctx context.Context, vmRef, networkRef string)
 }
 
 func (c *xapiClient) setVMOtherConfig(ctx context.Context, ref string, values map[string]string) error {
+	otherConfig, err := c.callStringMap(ctx, "VM.get_other_config", c.session, ref)
+	if err != nil {
+		return err
+	}
 	for key, value := range values {
+		oldValue, hadOldValue := otherConfig[key]
 		if err := c.callDiscard(ctx, "VM.remove_from_other_config", c.session, ref, key); err != nil && !isMissingMapKey(err) {
 			return err
 		}
 		if _, err := c.call(ctx, "VM.add_to_other_config", c.session, ref, key, value); err != nil {
+			if hadOldValue {
+				if _, restoreErr := c.call(context.Background(), "VM.add_to_other_config", c.session, ref, key, oldValue); restoreErr != nil {
+					return errors.Join(err, fmt.Errorf("restore xcp-ng VM metadata %q: %w", key, restoreErr))
+				}
+			}
 			return err
 		}
 	}

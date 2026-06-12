@@ -465,12 +465,19 @@ func TestXMLValueToStringAcceptsBareCharacterData(t *testing.T) {
 	}
 }
 
-func TestSetVMOtherConfigRemovesBeforeAdding(t *testing.T) {
+func TestSetVMOtherConfigUsesKeyScopedUpdates(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := readXMLRPCMethod(t, r)
 		methods = append(methods, method)
-		writeXMLRPCString(t, w, "true")
+		switch method {
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{"crabbox:labels": "old"})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
 	}))
 	defer server.Close()
 	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
@@ -478,8 +485,37 @@ func TestSetVMOtherConfigRemovesBeforeAdding(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(methods, ",")
-	if got != "VM.remove_from_other_config,VM.add_to_other_config" {
+	if got != "VM.get_other_config,VM.remove_from_other_config,VM.add_to_other_config" {
 		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestSetVMOtherConfigRestoresPreviousValueOnAddFailure(t *testing.T) {
+	var addCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch method := readXMLRPCMethod(t, r); method {
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{"crabbox:labels": "old-labels"})
+		case "VM.remove_from_other_config":
+			writeXMLRPCString(t, w, "true")
+		case "VM.add_to_other_config":
+			addCalls++
+			if addCalls == 1 {
+				writeXMLRPCFault(t, w, "SR_BACKEND_FAILURE")
+			} else {
+				writeXMLRPCString(t, w, "true")
+			}
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.setVMOtherConfig(context.Background(), "OpaqueRef:vm", map[string]string{"crabbox:labels": "new-labels"}); err == nil {
+		t.Fatal("expected add failure")
+	}
+	if addCalls != 2 {
+		t.Fatalf("add calls=%d want failed update plus restore", addCalls)
 	}
 }
 
@@ -491,6 +527,10 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 		switch method {
 		case "VM.copy":
 			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{"existing": "preserved"})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
 		case "VM.get_VBDs":
 			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:root-vbd"})
 		case "VBD.get_record":
@@ -511,10 +551,6 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 			writeXMLRPCString(t, w, "true")
 		case "VM.get_uuid":
 			writeXMLRPCString(t, w, xcpNgTestVMUUID)
-		case "VM.remove_from_other_config":
-			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
-		case "VM.add_to_other_config":
-			writeXMLRPCString(t, w, "true")
 		default:
 			t.Fatalf("unexpected method %s", method)
 		}
@@ -537,7 +573,7 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 		t.Fatalf("vm=%#v", vm)
 	}
 	got := strings.Join(methods, ",")
-	for _, want := range []string{"VM.copy", "VM.set_affinity", "VM.get_VIFs", "VIF.move", "VM.remove_from_other_config", "VM.add_to_other_config", "VM.provision", "VM.get_uuid"} {
+	for _, want := range []string{"VM.copy", "VM.get_other_config", "VM.remove_from_other_config", "VM.add_to_other_config", "VM.set_affinity", "VM.get_VIFs", "VIF.move", "VM.provision", "VM.get_uuid"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("methods=%s missing %s", got, want)
 		}
@@ -547,7 +583,7 @@ func TestCloneVMUsesCopyForSRAndRewiresVIFsForNetwork(t *testing.T) {
 	}
 }
 
-func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
+func TestCloneVMLabelsBeforeAffinityAndRollsBackCopiedDisk(t *testing.T) {
 	var methods []string
 	uuidShapedRef := "OpaqueRef:22222222-2222-2222-2222-222222222222"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -556,12 +592,18 @@ func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
 		switch method {
 		case "VM.copy":
 			writeXMLRPCString(t, w, uuidShapedRef)
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
 		case "VM.set_affinity":
 			writeXMLRPCFault(t, w, "HOST_NOT_LIVE")
 		case "VM.get_record":
 			writeXMLRPCUnmanagedVMRecord(t, w)
 		case "VM.get_guest_metrics":
 			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+		case "VDI.get_all_records":
+			writeXMLRPCEmptyRecordMap(t, w)
 		case "VM.get_VBDs":
 			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:root-vbd"})
 		case "VBD.get_record":
@@ -594,13 +636,16 @@ func TestCloneVMRollbackDestroysCopiedDiskBeforeLabels(t *testing.T) {
 		t.Fatal("expected host affinity failure")
 	}
 	got := strings.Join(methods, ",")
-	for _, want := range []string{"VM.copy", "VM.set_affinity", "VM.get_record", "VM.get_VBDs", "VBD.get_record", "VDI.get_record", "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.destroy"} {
+	for _, want := range []string{"VM.copy", "VM.get_other_config", "VM.remove_from_other_config", "VM.add_to_other_config", "VM.set_affinity", "VM.get_record", "VM.get_VBDs", "VBD.get_record", "VDI.get_record", "VBD.unplug", "VBD.destroy", "VDI.destroy", "VM.destroy"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("methods=%s missing %s", got, want)
 		}
 	}
 	if strings.Index(got, "VDI.destroy") > strings.Index(got, "VM.destroy") {
 		t.Fatalf("methods=%s destroyed VM before copied VDI", got)
+	}
+	if strings.Index(got, "VM.add_to_other_config") > strings.Index(got, "VM.set_affinity") {
+		t.Fatalf("methods=%s labeled VM after affinity", got)
 	}
 	if strings.Contains(got, "VM.get_by_uuid") {
 		t.Fatalf("methods=%s unexpectedly resolved UUID-shaped OpaqueRef as UUID", got)
@@ -615,9 +660,9 @@ func TestCloneVMProvisionRollbackDestroysUnlabeledCopiedDisk(t *testing.T) {
 		switch method {
 		case "VM.copy":
 			writeXMLRPCString(t, w, "OpaqueRef:vm")
-		case "VM.remove_from_other_config":
-			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
-		case "VM.add_to_other_config":
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
 			writeXMLRPCString(t, w, "true")
 		case "VM.provision":
 			writeXMLRPCFault(t, w, "SR_BACKEND_FAILURE")
@@ -661,6 +706,75 @@ func TestCloneVMProvisionRollbackDestroysUnlabeledCopiedDisk(t *testing.T) {
 	}
 	if strings.Index(got, "VDI.destroy") > strings.Index(got, "VM.destroy") {
 		t.Fatalf("methods=%s destroyed VM before copied VDI", got)
+	}
+}
+
+func TestCloneVMReturnsRecoveryHandleWhenRollbackFails(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.copy":
+			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
+			writeXMLRPCString(t, w, "true")
+		case "VM.set_affinity":
+			writeXMLRPCFault(t, w, "HOST_NOT_LIVE")
+		case "VM.get_record":
+			writeXMLRPCVMRecord(t, w, "cbx_lease")
+		case "VM.get_guest_metrics":
+			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+		case "VDI.get_all_records":
+			writeXMLRPCEmptyRecordMap(t, w)
+		case "VM.get_VBDs":
+			writeXMLRPCStringArray(t, w, []string{})
+		case "VM.get_power_state":
+			writeXMLRPCString(t, w, "Halted")
+		case "VM.destroy":
+			writeXMLRPCFault(t, w, "SR_BACKEND_FAILURE")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	vm, err := client.CloneVM(context.Background(), xcpNgCloneRequest{
+		TemplateRef: "OpaqueRef:tpl",
+		SRRef:       "OpaqueRef:sr",
+		HostRef:     "OpaqueRef:bad-host",
+		LeaseID:     "cbx_lease",
+		Slug:        "blue",
+		Labels:      map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": "xcp-ng", "lease": "cbx_lease"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "rollback copied xcp-ng VM") {
+		t.Fatalf("err=%v", err)
+	}
+	if vm.Ref != "OpaqueRef:vm" || vm.Labels["lease"] != "cbx_lease" {
+		t.Fatalf("recovery vm=%#v", vm)
+	}
+	if strings.Index(strings.Join(methods, ","), "VM.add_to_other_config") > strings.Index(strings.Join(methods, ","), "VM.set_affinity") {
+		t.Fatalf("methods=%v", methods)
+	}
+}
+
+func TestVMRecordsIncludesManagedTemplateStageCopy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if method := readXMLRPCMethod(t, r); method != "VM.get_all_records" {
+			t.Fatalf("unexpected method %s", method)
+		}
+		writeXMLRPCManagedTemplateRecords(t, w)
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	vms, err := client.vmRecords(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vms) != 1 || vms[0].Ref != "OpaqueRef:managed-template-copy" || vms[0].Labels["lease"] != "cbx_recovery" {
+		t.Fatalf("vms=%#v", vms)
 	}
 }
 
@@ -740,9 +854,9 @@ func TestCreateFreshVMPreservesTemplateDefaults(t *testing.T) {
 				t.Fatalf("unexpected add platform body=%s", body)
 			}
 			writeXMLRPCString(t, w, "true")
-		case "VM.remove_from_other_config":
-			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
-		case "VM.add_to_other_config":
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
 			writeXMLRPCString(t, w, "true")
 		case "VM.get_uuid":
 			writeXMLRPCString(t, w, xcpNgTestVMUUID)
@@ -852,9 +966,9 @@ func TestCreateFreshVMSecureBootOverridesTemplateWithoutDroppingPlatformDefaults
 				t.Fatalf("unexpected add platform body=%s", body)
 			}
 			writeXMLRPCString(t, w, "true")
-		case "VM.remove_from_other_config":
-			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
-		case "VM.add_to_other_config":
+		case "VM.get_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
 			writeXMLRPCString(t, w, "true")
 		case "VM.get_uuid":
 			writeXMLRPCString(t, w, xcpNgTestVMUUID)
@@ -1193,12 +1307,12 @@ func TestGetServerAndSetLabelsResolveUUIDToFreshRef(t *testing.T) {
 			writeXMLRPCVMRecord(t, w, "cbx_lease")
 		case "VM.get_guest_metrics":
 			writeXMLRPCFault(t, w, "HANDLE_INVALID")
-		case "VM.remove_from_other_config":
+		case "VM.get_other_config":
 			if !strings.Contains(strings.Join(methods, ","), "VM.get_by_uuid") {
 				t.Fatalf("set labels did not resolve UUID first; methods=%v", methods)
 			}
-			writeXMLRPCFault(t, w, "MAP_KEY_NOT_FOUND")
-		case "VM.add_to_other_config":
+			writeXMLRPCStringMap(t, w, map[string]string{"existing": "preserved"})
+		case "VM.remove_from_other_config", "VM.add_to_other_config":
 			writeXMLRPCString(t, w, "true")
 		default:
 			t.Fatalf("unexpected method %s", method)
@@ -1216,7 +1330,7 @@ func TestGetServerAndSetLabelsResolveUUIDToFreshRef(t *testing.T) {
 	if err := client.SetLabels(context.Background(), xcpNgTestVMUUID, map[string]string{"lease": "cbx_lease"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(methods, ","); !strings.Contains(got, "VM.get_by_uuid,VM.get_record") || !strings.Contains(got, "VM.get_by_uuid,VM.remove_from_other_config") {
+	if got := strings.Join(methods, ","); !strings.Contains(got, "VM.get_by_uuid,VM.get_record") || !strings.Contains(got, "VM.get_by_uuid,VM.get_other_config,VM.remove_from_other_config,VM.add_to_other_config") {
 		t.Fatalf("methods=%s", got)
 	}
 }
@@ -1546,6 +1660,8 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 		switch method {
 		case "VM.get_by_uuid":
 			writeXMLRPCString(t, w, "OpaqueRef:vm")
+		case "VM.get_is_a_template":
+			writeXMLRPCString(t, w, "false")
 		case "VM.get_record":
 			writeXMLRPCVMRecord(t, w, "cbx_lease")
 		case "VM.get_guest_metrics":
@@ -1630,6 +1746,32 @@ func TestDeleteServerRefusesDestroyWhenMetadataLookupFails(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	if got := strings.Join(methods, ","); got != "VM.get_record" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestDeleteServerRefusesUnmanagedTemplateBeforeDiskCleanup(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_record":
+			writeXMLRPCUnmanagedVMRecord(t, w)
+		case "VM.get_guest_metrics":
+			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+		case "VM.get_is_a_template", "VM.get_VBDs", "VDI.destroy", "VM.destroy":
+			t.Fatalf("%s must not run for unmanaged template", method)
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.DeleteServer(context.Background(), "OpaqueRef:user-template"); err == nil || !strings.Contains(err.Error(), "refusing to delete non-Crabbox") {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Join(methods, ","); got != "VM.get_record,VM.get_guest_metrics" {
 		t.Fatalf("methods=%s", got)
 	}
 }
@@ -2265,6 +2407,30 @@ func writeXMLRPCVMRecords(t *testing.T, w http.ResponseWriter) {
 </struct></value></param></params></methodResponse>`
 	_, err := w.Write([]byte(response))
 	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeXMLRPCManagedTemplateRecords(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	labels := "crabbox=true\ncreated_by=crabbox\nprovider=xcp-ng\nlease=cbx_recovery\nslug=recovery\nstate=provisioning\n"
+	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
+<member><name>OpaqueRef:managed-template-copy</name><value><struct>
+<member><name>uuid</name><value><string>managed-template-uuid</string></value></member>
+<member><name>name_label</name><value><string>crabbox-recovery</string></value></member>
+<member><name>power_state</name><value><string>Halted</string></value></member>
+<member><name>is_a_template</name><value><boolean>1</boolean></value></member>
+<member><name>other_config</name><value><struct><member><name>crabbox:labels</name><value><string>` + labels + `</string></value></member></struct></value></member>
+</struct></value></member>
+<member><name>OpaqueRef:unmanaged-template</name><value><struct>
+<member><name>uuid</name><value><string>unmanaged-template-uuid</string></value></member>
+<member><name>name_label</name><value><string>user-template</string></value></member>
+<member><name>power_state</name><value><string>Halted</string></value></member>
+<member><name>is_a_template</name><value><boolean>1</boolean></value></member>
+<member><name>other_config</name><value><struct></struct></value></member>
+</struct></value></member>
+</struct></value></param></params></methodResponse>`
+	if _, err := w.Write([]byte(response)); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -108,7 +108,7 @@ func (f *fakeLifecycleClient) CloneVM(_ context.Context, req xcpNgCloneRequest) 
 	f.record("clone")
 	f.mutated = true
 	if err := f.fail("clone"); err != nil {
-		return xapiVM{}, err
+		return f.cloneVM, err
 	}
 	vm := f.cloneVM
 	if vm.Ref == "" {
@@ -467,6 +467,8 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 		errOn:       map[string]error{"guest-ip": errors.New("guest tools missing")},
 	}
 	backend := newTestBackend(t, fake)
+	var removedKeys []string
+	removeStoredTestboxKey = func(leaseID string) { removedKeys = append(removedKeys, leaseID) }
 	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"}); err == nil {
 		t.Fatal("expected guest IP failure")
 	}
@@ -475,6 +477,72 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 	}
 	if len(fake.deletedCD) != 2 || fake.deletedCD[0].VDIRef != "OpaqueRef:vdi" || fake.deletedCD[1].VDIRef != "OpaqueRef:vdi" {
 		t.Fatalf("deleted config drives=%#v", fake.deletedCD)
+	}
+	if !reflect.DeepEqual(removedKeys, []string{"cbx_testlease", "cbx_testlease"}) {
+		t.Fatalf("removed keys=%v", removedKeys)
+	}
+}
+
+func TestAcquireRetainsKeyWhenVMRollbackFails(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		drive:       xcpNgConfigDrive{VDIRef: "OpaqueRef:vdi", VBDRef: "OpaqueRef:vbd", Name: "drive"},
+		errOn: map[string]error{
+			"guest-ip": errors.New("guest tools missing"),
+			"delete":   errors.New("xapi delete failed"),
+		},
+	}
+	backend := newTestBackend(t, fake)
+	var removedKeys []string
+	removeStoredTestboxKey = func(leaseID string) { removedKeys = append(removedKeys, leaseID) }
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"}); err == nil || !strings.Contains(err.Error(), "xapi delete failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(removedKeys) != 0 {
+		t.Fatalf("removed keys for retained VM=%v", removedKeys)
+	}
+	if got := countCalls(fake.calls, "clone"); got != 1 {
+		t.Fatalf("clone calls=%d want no retry after retained VM, calls=%v", got, fake.calls)
+	}
+}
+
+func TestAcquireRemovesKeyWhenPlacementFailsBeforeVMCreation(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+		errOn:       map[string]error{"resolve-network": errors.New("network unavailable")},
+	}
+	backend := newTestBackend(t, fake)
+	var removedKeys []string
+	removeStoredTestboxKey = func(leaseID string) { removedKeys = append(removedKeys, leaseID) }
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"}); err == nil {
+		t.Fatal("expected placement failure")
+	}
+	if !reflect.DeepEqual(removedKeys, []string{"cbx_testlease"}) {
+		t.Fatalf("removed keys=%v", removedKeys)
+	}
+}
+
+func TestAcquireSurfacesRetainedVMWhenCloneRollbackFails(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+		cloneVM: xapiVM{
+			Ref:    "OpaqueRef:retained-copy",
+			Labels: map[string]string{"lease": "cbx_testlease"},
+		},
+		errOn: map[string]error{"clone": errors.New("clone rollback failed")},
+	}
+	backend := newTestBackend(t, fake)
+	var removedKeys []string
+	removeStoredTestboxKey = func(leaseID string) { removedKeys = append(removedKeys, leaseID) }
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"}); err == nil ||
+		!strings.Contains(err.Error(), "OpaqueRef:retained-copy") ||
+		!strings.Contains(err.Error(), "manual cleanup") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(removedKeys) != 0 {
+		t.Fatalf("removed keys for retained VM=%v", removedKeys)
 	}
 }
 
@@ -614,6 +682,7 @@ func TestReleaseRemovesStoredKey(t *testing.T) {
 	managed := crabboxServer(xcpNgTestVMUUID, "cbx_release", "ready", time.Now().Add(time.Hour))
 	fake := &fakeLifecycleClient{getServer: map[string]Server{"cbx_release": managed}}
 	backend := newTestBackend(t, fake)
+	removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(leaseID) }
 	keyPath, err := core.TestboxKeyPath("cbx_release")
 	if err != nil {
 		t.Fatal(err)
@@ -645,11 +714,18 @@ func TestCleanupIsMetadataAndExpiryGated(t *testing.T) {
 	backend.Cfg.XCPNg.SR = ""
 	backend.Cfg.XCPNg.SRUUID = ""
 	backend.RT.Clock = fixedClock{t: now}
+	var removedClaims []string
+	var removedKeys []string
+	removeLeaseClaim = func(leaseID string) { removedClaims = append(removedClaims, leaseID) }
+	removeStoredTestboxKey = func(leaseID string) { removedKeys = append(removedKeys, leaseID) }
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(fake.deleted, []string{"OpaqueRef:expired"}) {
 		t.Fatalf("deleted=%v", fake.deleted)
+	}
+	if !reflect.DeepEqual(removedClaims, []string{"cbx_expired"}) || !reflect.DeepEqual(removedKeys, []string{"cbx_expired"}) {
+		t.Fatalf("removed claims=%v keys=%v", removedClaims, removedKeys)
 	}
 }
 
@@ -1255,6 +1331,7 @@ func newTestBackend(t *testing.T, fake *fakeLifecycleClient) *leaseBackend {
 	oldBootstrapTimeout := bootstrapWaitTimeout
 	oldPollInterval := guestIPPollInterval
 	oldRemove := removeLeaseClaim
+	oldRemoveStoredKey := removeStoredTestboxKey
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
 	newLeaseID = func() string { return "cbx_testlease" }
 	ensureTestboxKeyForConfig = func(Config, string) (string, string, error) {
@@ -1264,6 +1341,7 @@ func newTestBackend(t *testing.T, fake *fakeLifecycleClient) *leaseBackend {
 	bootstrapWaitTimeout = func(Config) time.Duration { return 10 * time.Millisecond }
 	guestIPPollInterval = time.Millisecond
 	removeLeaseClaim = func(string) {}
+	removeStoredTestboxKey = func(string) {}
 	t.Cleanup(func() {
 		newLifecycleClient = oldClient
 		newLeaseID = oldLeaseID
@@ -1272,6 +1350,7 @@ func newTestBackend(t *testing.T, fake *fakeLifecycleClient) *leaseBackend {
 		bootstrapWaitTimeout = oldBootstrapTimeout
 		guestIPPollInterval = oldPollInterval
 		removeLeaseClaim = oldRemove
+		removeStoredTestboxKey = oldRemoveStoredKey
 	})
 	cfg := testConfig()
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: &bytes.Buffer{}}).(*leaseBackend)

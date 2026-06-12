@@ -125,7 +125,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTa
 	})
 }
 
-func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (lease LeaseTarget, err error) {
 	if err := validateXCPNgProvisioningConfig(xcpNgProviderConfig(b.Cfg)); err != nil {
 		return LeaseTarget{}, err
 	}
@@ -149,6 +149,12 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	retainKey := false
+	defer func() {
+		if !retainKey {
+			removeStoredTestboxKey(leaseID)
+		}
+	}()
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
 	cfg.ServerType = xcpNgServerTypeForConfig(cfg)
@@ -163,24 +169,37 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		leaseID, slug, resolved.templateRef.value(), keep)
 	server, configDrive, vmRef, err := b.createAndBoot(ctx, client, cfg, resolved, leaseID, slug, publicKey, keep, labels)
 	if err != nil {
+		retainKey = server.CloudID != ""
+		if retainKey {
+			return LeaseTarget{}, fmt.Errorf("%w; retained xcp-ng VM requires manual cleanup: %s", err, server.CloudID)
+		}
 		return LeaseTarget{}, err
 	}
 	ip, err := b.waitForGuestIPv4(ctx, client, vmRef, bootstrapWaitTimeout(cfg))
 	if err != nil {
-		b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
-		return LeaseTarget{}, err
+		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
+		retainKey = vmRetained
+		if vmRetained {
+			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after guest IP failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
+		}
+		return LeaseTarget{}, errors.Join(err, cleanupErr)
 	}
 	server.PublicNet.IPv4.IP = ip
 	target := sshTargetFromConfig(cfg, ip)
 	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
-		b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
-		return LeaseTarget{}, err
+		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
+		retainKey = vmRetained
+		if vmRetained {
+			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after SSH bootstrap failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
+		}
+		return LeaseTarget{}, errors.Join(err, cleanupErr)
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", currentTime(b.RT).UTC())
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set xcp-ng labels: %v\n", err)
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s ip=%s\n", leaseID, server.DisplayID(), ip)
+	retainKey = true
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
@@ -229,22 +248,34 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 		Labels:      labels,
 	})
 	if err != nil {
+		if vm.Ref != "" {
+			return xcpNgVMToServer(vm, labels, ""), xcpNgConfigDrive{}, xapiRef(vm.Ref), err
+		}
 		return Server{}, xcpNgConfigDrive{}, "", err
 	}
 	server := xcpNgVMToServer(vm, labels, "")
 	payload, err := newCloudInitPayload(cfg, leaseID, slug, publicKey)
 	if err != nil {
-		b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
-		return Server{}, xcpNgConfigDrive{}, "", err
+		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
+		if vmRetained {
+			return server, xcpNgConfigDrive{}, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
+		}
+		return Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
 	}
 	configDrive, err := client.AttachConfigDrive(ctx, xcpNgConfigDriveRequest{VMRef: xapiRef(vm.Ref), SRRef: placement.srRef, LeaseID: leaseID, Slug: slug, Payload: payload, Labels: labels})
 	if err != nil {
-		b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
-		return Server{}, xcpNgConfigDrive{}, "", err
+		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
+		if vmRetained {
+			return server, xcpNgConfigDrive{}, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
+		}
+		return Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
 	}
 	if err := client.StartVM(ctx, xapiRef(vm.Ref)); err != nil {
-		b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
-		return Server{}, xcpNgConfigDrive{}, "", err
+		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
+		if vmRetained {
+			return server, configDrive, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
+		}
+		return Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
 	}
 	return server, configDrive, xapiRef(vm.Ref), nil
 }
@@ -283,17 +314,21 @@ func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleCli
 	}
 }
 
-func (b *leaseBackend) cleanupFailedLease(ctx context.Context, client lifecycleClient, vmID string, drive xcpNgConfigDrive) {
+func (b *leaseBackend) cleanupFailedLease(ctx context.Context, client lifecycleClient, vmID string, drive xcpNgConfigDrive) (bool, error) {
+	var cleanupErr error
 	if drive.VBDRef != "" || drive.VDIRef != "" {
 		if err := client.DeleteConfigDrive(ctx, drive); err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup xcp-ng config-drive: %v\n", err)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup xcp-ng config-drive: %w", err))
 		}
 	}
 	if vmID != "" {
 		if err := client.DeleteServer(ctx, vmID); err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup xcp-ng vm: %v\n", err)
+			return true, errors.Join(cleanupErr, fmt.Errorf("cleanup xcp-ng vm: %w", err))
 		}
 	}
+	return false, cleanupErr
 }
 
 func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -389,7 +424,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		return err
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
-	core.RemoveStoredTestboxKey(req.Lease.LeaseID)
+	removeStoredTestboxKey(req.Lease.LeaseID)
 	return nil
 }
 
@@ -436,6 +471,11 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 			return err
+		}
+		leaseID := strings.TrimSpace(server.Labels["lease"])
+		if leaseID != "" {
+			removeLeaseClaim(leaseID)
+			removeStoredTestboxKey(leaseID)
 		}
 	}
 	return nil
@@ -673,6 +713,7 @@ var findServerByAlias = func(servers []Server, id string) (Server, string, error
 	return core.FindServerByAlias(servers, id)
 }
 var removeLeaseClaim = func(leaseID string) { core.RemoveLeaseClaim(leaseID) }
+var removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(leaseID) }
 var exit = func(code int, format string, args ...any) core.ExitError { return core.Exit(code, format, args...) }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
