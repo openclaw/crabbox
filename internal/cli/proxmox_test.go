@@ -174,6 +174,16 @@ func TestProxmoxDoctorReadinessClassifiesPermissionGaps(t *testing.T) {
 	}
 }
 
+func TestProxmoxSafeErrorRedactsFullAPITokenHeader(t *testing.T) {
+	got := proxmoxSafeError(errors.New("proxy echoed Authorization: PVEAPIToken=runner@pve!crabbox=super-secret-token while checking /version"))
+	if strings.Contains(got, "runner@pve!crabbox") || strings.Contains(got, "super-secret-token") {
+		t.Fatalf("safe error leaked token material: %q", got)
+	}
+	if !strings.Contains(got, "PVEAPIToken=<redacted>") {
+		t.Fatalf("safe error missing redaction marker: %q", got)
+	}
+}
+
 func TestProxmoxDoctorReadinessRejectsInactiveBridge(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

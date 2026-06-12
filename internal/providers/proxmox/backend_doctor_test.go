@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,26 @@ func TestProxmoxDoctorReportsReadinessChecksWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestProxmoxAcquireRejectsMissingTemplateBeforeClientWork(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	clientCalls := 0
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		clientCalls++
+		return &fakeProxmoxDoctorClient{}, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root"}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if _, err := backend.Acquire(context.Background(), AcquireRequest{}); err == nil || !strings.Contains(err.Error(), "proxmox templateId is required") {
+		t.Fatalf("Acquire error=%v, want missing templateId", err)
+	}
+	if clientCalls != 0 {
+		t.Fatalf("newClient calls=%d, want 0 before template validation", clientCalls)
+	}
+}
+
 func TestProxmoxAcquirePollsUntilServerIPIsAvailable(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeProxmoxDoctorClient{}
@@ -146,7 +167,7 @@ func TestProxmoxAcquirePollsUntilServerIPIsAvailable(t *testing.T) {
 	proxmoxIPPollInterval = time.Millisecond
 	t.Cleanup(func() { proxmoxIPPollInterval = oldPoll })
 
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root"}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root", Proxmox: core.ProxmoxConfig{TemplateID: 9400}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
 	target, err := backend.Acquire(context.Background(), AcquireRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +201,7 @@ func TestProxmoxAcquireInitializesNilLabels(t *testing.T) {
 	}
 	t.Cleanup(func() { waitForSSHReadyFunc = oldWait })
 
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root"}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root", Proxmox: core.ProxmoxConfig{TemplateID: 9400}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
 	target, err := backend.Acquire(context.Background(), AcquireRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +231,7 @@ func TestProxmoxAcquireSSHFailureRemovesStoredKeyAfterDelete(t *testing.T) {
 	}
 	t.Cleanup(func() { waitForSSHReadyFunc = oldWait })
 
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root"}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root", Proxmox: core.ProxmoxConfig{TemplateID: 9400}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
 	if _, err := backend.Acquire(context.Background(), AcquireRequest{}); err == nil {
 		t.Fatal("expected ssh readiness failure")
 	}
@@ -240,7 +261,7 @@ func TestProxmoxAcquirePreservesStoredKeyWhenDeleteFails(t *testing.T) {
 	}
 	t.Cleanup(func() { waitForSSHReadyFunc = oldWait })
 
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root"}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root", Proxmox: core.ProxmoxConfig{TemplateID: 9400}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
 	if _, err := backend.Acquire(context.Background(), AcquireRequest{}); err == nil {
 		t.Fatal("expected ssh readiness failure")
 	}

@@ -33,14 +33,18 @@ case "$1" in
     printf '[{"provider":"proxmox","name":"crabbox-test","note":"/tmp/private/api.md"}]\\n'
     ;;
   warmup)
+    if [[ "\${FAKE_CRABBOX_FAIL_WARMUP:-0}" == "1" ]]; then
+      printf 'warmup failed before lease creation\\n' >&2
+      exit 1
+    fi
     printf 'leased cbx_test123 slug=proxmox-live-smoke provider=proxmox server=100 type=template-9400 ip=192.0.2.10 idle_timeout=30m expires=later\\n'
     printf 'ready ssh=crabbox@192.0.2.10:22 network=public workroot=/work/crabbox\\n'
     ;;
   status)
-    printf '{"id":"cbx_test123","provider":"proxmox","state":"ready","ready":true}\\n'
+    printf '{"id":"cbx_test123","provider":"proxmox","state":"ready","host":"192.0.2.10","sshKey":"/Users/tester/Library/Application Support/crabbox/testboxes/cbx_test123/id_ed25519","ready":true}\\n'
     ;;
   ssh)
-    printf 'ssh -i /tmp/key crabbox@192.0.2.10\\n'
+    printf 'ssh -i /tmp/crabbox-ssh-test/key crabbox@192.0.2.10\\n'
     ;;
   stop)
     printf 'released lease=cbx_test123 server=100\\n'
@@ -97,9 +101,12 @@ test("preflight mode is read-only and redacts local proof logs", () => {
 		fs.readFileSync(path.join(fake.proof, "doctor.redacted.log"), "utf8"),
 		fs.readFileSync(path.join(fake.proof, "list-before.redacted.log"), "utf8"),
 		fs.readFileSync(path.join(fake.proof, "node-ssh-inventory.redacted.log"), "utf8"),
+		fs.readFileSync(path.join(fake.proof, "summary.redacted.log"), "utf8"),
 	].join("\n");
 	assert.doesNotMatch(redacted, /super-secret-token|crabbox@pve!ci|pve\.secret|api\.md/);
+	assert.doesNotMatch(redacted, new RegExp(fake.proof.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.match(redacted, /<proxmox-token-secret>|<proxmox-token-id>|<proxmox-api-url>|<credential-file>/);
+	assert.match(redacted, /log=<proof-dir>\/doctor\.redacted\.log/);
 });
 
 test("live mode runs lifecycle and dry-run cleanup before optional cleanup", () => {
@@ -127,4 +134,38 @@ test("live mode runs lifecycle and dry-run cleanup before optional cleanup", () 
 	assert.ok(calls.indexOf("stop --provider proxmox --id cbx_test123") > -1);
 	assert.ok(dryRunIndex > -1, "dry-run cleanup should run");
 	assert.ok(cleanupIndex > dryRunIndex, "real cleanup should run after dry-run cleanup");
+	const redacted = [
+		fs.readFileSync(path.join(fake.proof, "warmup.redacted.log"), "utf8"),
+		fs.readFileSync(path.join(fake.proof, "status.redacted.log"), "utf8"),
+		fs.readFileSync(path.join(fake.proof, "ssh-command.redacted.log"), "utf8"),
+		fs.readFileSync(path.join(fake.proof, "summary.redacted.log"), "utf8"),
+	].join("\n");
+	assert.doesNotMatch(redacted, /192\.0\.2\.10|\/Users\/tester|Application Support|\/tmp\/crabbox-ssh-test/);
+	assert.doesNotMatch(redacted, new RegExp(fake.proof.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	assert.match(redacted, /<ip>|<local-home-path>|<local-temp-path>/);
+	assert.match(redacted, /classification=live_proof_complete proof_dir=<proof-dir>/);
+});
+
+test("live mode does not stop or cleanup when warmup fails before lease ownership", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_FAIL_WARMUP: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /warmup_failed_no_owned_lease/);
+	assert.match(result.stdout, /classification=environment_blocked/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke --keep$/m);
+	assert.match(calls, /^list --provider proxmox --json$/m);
+	assert.doesNotMatch(calls, /^status |^ssh |^stop |^cleanup /m);
 });

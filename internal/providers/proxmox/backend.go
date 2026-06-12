@@ -57,6 +57,9 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTa
 }
 
 func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+	if b.Cfg.Proxmox.TemplateID <= 0 {
+		return LeaseTarget{}, exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
+	}
 	client, err := newClient(b.Cfg)
 	if err != nil {
 		return LeaseTarget{}, err

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ type ProxmoxReadinessCheck struct {
 var (
 	proxmoxRunSSHQuietWithOptions = runSSHQuietWithOptions
 	proxmoxRunSSHInputQuiet       = runSSHInputQuiet
+	proxmoxAPITokenPattern        = regexp.MustCompile(`PVEAPIToken=[^[:space:]]+`)
 )
 
 type ProxmoxError struct {
@@ -466,7 +468,7 @@ func proxmoxSafeError(err error) string {
 		return ""
 	}
 	text := err.Error()
-	text = strings.ReplaceAll(text, "PVEAPIToken=", "PVEAPIToken=<redacted>")
+	text = proxmoxAPITokenPattern.ReplaceAllString(text, "PVEAPIToken=<redacted>")
 	return strings.Join(strings.Fields(text), "_")
 }
 

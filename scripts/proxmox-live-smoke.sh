@@ -73,15 +73,25 @@ redact_stream() {
       $token_id = $ENV{"CRABBOX_PROXMOX_TOKEN_ID"} // "";
       $api_url = $ENV{"CRABBOX_PROXMOX_API_URL"} // "";
       $inventory_host = $ENV{"CRABBOX_PROXMOX_SSH_INVENTORY_HOST"} // "";
+      $proof_dir = $ENV{"CRABBOX_PROXMOX_LIVE_SMOKE_DIR"} // "";
+      $bin = $ENV{"CRABBOX_BIN"} // "";
     }
     s/\Q$token_secret\E/<proxmox-token-secret>/g if length($token_secret);
     s/\Q$token_id\E/<proxmox-token-id>/g if length($token_id);
     s/\Q$api_url\E/<proxmox-api-url>/g if length($api_url);
     s/\Q$inventory_host\E/<proxmox-ssh-host>/g if length($inventory_host);
+    s/\Q$proof_dir\E/<proof-dir>/g if length($proof_dir);
+    s/\Q$bin\E/<crabbox-bin>/g if length($bin) && $bin =~ m#/#;
     s/PVEAPIToken=[^[:space:]]+/PVEAPIToken=<redacted>/g;
-    s#/(?:Users|home)/[^[:space:]'"'"'"]+#~#g;
+    s#/(?:Users|home)/[^'"'"'"\n]+#<local-home-path>#g;
+    s#/tmp/crabbox-[^[:space:]'"'"'"]+#<local-temp-path>#g;
+    s#(?:\b\d{1,3}\.){3}\d{1,3}\b#<ip>#g;
     s/\b(?:api|tokenid|proxmox)\.md\b/<credential-file>/g;
   '
+}
+
+summary_log_path() {
+  printf '<proof-dir>/%s' "$(basename "$1")"
 }
 
 run_step() {
@@ -100,9 +110,9 @@ run_step() {
 
   redact_stream <"$raw" >"$redacted"
   if [[ "$status" -eq 0 ]]; then
-    printf 'step=%s status=pass log=%s\n' "$name" "$redacted" | tee -a "$summary"
+    printf 'step=%s status=pass log=%s\n' "$name" "$(summary_log_path "$redacted")" | tee -a "$summary"
   else
-    printf 'step=%s status=fail exit=%s log=%s\n' "$name" "$status" "$redacted" | tee -a "$summary"
+    printf 'step=%s status=fail exit=%s log=%s\n' "$name" "$status" "$(summary_log_path "$redacted")" | tee -a "$summary"
   fi
   return "$status"
 }
@@ -128,9 +138,6 @@ lease_id=""
 extract_lease_id() {
   local raw="$proof_dir/warmup.raw.log"
   lease_id="$(sed -n 's/^leased \([^[:space:]]*\).*/\1/p' "$raw" | tail -1)"
-  if [[ -z "$lease_id" ]]; then
-    lease_id="$slug"
-  fi
 }
 
 failure=0
@@ -138,7 +145,7 @@ failure=0
 run_step doctor "$bin" doctor --provider proxmox --json || failure=1
 if [[ -f "$proof_dir/doctor.raw.log" ]]; then
   validate_doctor_json || {
-    echo "step=doctor-json status=fail log=$proof_dir/doctor.redacted.log" | tee -a "$summary"
+    echo "step=doctor-json status=fail log=$(summary_log_path "$proof_dir/doctor.redacted.log")" | tee -a "$summary"
     failure=1
   }
 fi
@@ -148,35 +155,42 @@ run_node_inventory || failure=1
 
 if [[ "$live" != "1" ]]; then
   echo "classification=external_user_owned reason=CRABBOX_PROXMOX_LIVE_SMOKE not set to 1; no mutating lease proof attempted" | tee -a "$summary"
-  echo "proof_dir=$proof_dir"
+  echo "proof_dir=<proof-dir>"
   exit "$failure"
 fi
 
-run_step warmup "$bin" warmup --provider proxmox --slug "$slug" --keep || failure=1
-extract_lease_id
+warmup_status=0
+run_step warmup "$bin" warmup --provider proxmox --slug "$slug" --keep || warmup_status=$?
+if [[ "$warmup_status" -ne 0 ]]; then
+  echo "step=lifecycle status=skip reason=warmup_failed_no_owned_lease" | tee -a "$summary"
+  failure=1
+else
+  extract_lease_id
+fi
 
-if [[ -n "$lease_id" ]]; then
+if [[ "$warmup_status" -eq 0 && -n "$lease_id" ]]; then
   run_step status "$bin" status --provider proxmox --id "$lease_id" --json || failure=1
   run_step ssh-command "$bin" ssh --provider proxmox --id "$lease_id" || failure=1
   run_step stop "$bin" stop --provider proxmox --id "$lease_id" || failure=1
+  run_step cleanup-dry-run "$bin" cleanup --provider proxmox --dry-run || failure=1
+  if [[ "$allow_cleanup" == "1" ]]; then
+    run_step cleanup "$bin" cleanup --provider proxmox || failure=1
+  else
+    echo "step=cleanup status=skip reason=CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP not set to 1 after dry-run" | tee -a "$summary"
+  fi
 else
-  echo "step=lease-id status=fail reason=warmup output did not include a lease id" | tee -a "$summary"
-  failure=1
-fi
-
-run_step cleanup-dry-run "$bin" cleanup --provider proxmox --dry-run || failure=1
-if [[ "$allow_cleanup" == "1" ]]; then
-  run_step cleanup "$bin" cleanup --provider proxmox || failure=1
-else
-  echo "step=cleanup status=skip reason=CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP not set to 1 after dry-run" | tee -a "$summary"
+  if [[ "$warmup_status" -eq 0 ]]; then
+    echo "step=lease-id status=fail reason=warmup output did not include an owned lease id" | tee -a "$summary"
+    failure=1
+  fi
 fi
 run_step list-after "$bin" list --provider proxmox --json || failure=1
 
 if [[ "$failure" -eq 0 ]]; then
-  echo "classification=live_proof_complete proof_dir=$proof_dir" | tee -a "$summary"
+  echo "classification=live_proof_complete proof_dir=<proof-dir>" | tee -a "$summary"
 else
-  echo "classification=environment_blocked proof_dir=$proof_dir" | tee -a "$summary"
+  echo "classification=environment_blocked proof_dir=<proof-dir>" | tee -a "$summary"
 fi
 
-echo "proof_dir=$proof_dir"
+echo "proof_dir=<proof-dir>"
 exit "$failure"
