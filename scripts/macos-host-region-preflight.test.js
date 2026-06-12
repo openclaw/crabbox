@@ -29,6 +29,10 @@ for ((i = 1; i <= $#; i++)); do
   fi
 done
 
+if [[ "\${CRABBOX_FAKE_STDERR_DIAGNOSTICS:-}" == "1" ]]; then
+  printf 'warning: diagnostic for %s %s\\n' "$region" "$type" >&2
+fi
+
 if [[ "$1" == "admin" && ( "$2" == "mac-hosts" || "$2" == "hosts" ) ]]; then
   case "$3" in
     list)
@@ -114,6 +118,26 @@ test("macOS host region preflight selects an existing host without paid allocati
   assert.equal(summary.selectedRegion, "us-east-1");
   assert.equal(summary.selectedInstanceType, "mac2.metal");
   assert.equal(summary.existingHost, "h-existing");
+});
+
+test("macOS host region preflight parses stdout JSON when commands emit stderr diagnostics", async () => {
+  const run = await setupRun();
+  const result = await runPreflight({
+    CRABBOX_BIN: run.fake,
+    CRABBOX_MACOS_REGIONS: "us-east-1",
+    CRABBOX_FAKE_EXISTING_REGION: "us-east-1",
+    CRABBOX_FAKE_STDERR_DIAGNOSTICS: "1",
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.result, "ready-existing-host");
+  assert.equal(summary.selectedRegion, "us-east-1");
+  assert.equal(summary.existingHost, "h-existing");
+  assert.equal(summary.regions[0].list.ok, true);
+  assert.match(summary.regions[0].list.stdout, /h-existing/);
+  assert.match(summary.regions[0].list.stderr, /warning: diagnostic/);
+  assert.equal(summary.regions[0].list.parseError, null);
 });
 
 test("macOS host region preflight falls back to mac1 when no mac2 host is ready", async () => {

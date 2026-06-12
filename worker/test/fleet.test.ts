@@ -7119,6 +7119,7 @@ describe("fleet identity", () => {
       owner: "peter@example.com",
       org: "openclaw",
       auth: "bearer",
+      admin: false,
     });
   });
 
@@ -7137,6 +7138,28 @@ describe("fleet identity", () => {
       owner: "friend@example.com",
       org: "openclaw",
       auth: "github",
+      admin: false,
+    });
+  });
+
+  it("reports forwarded GitHub token expiry when present", async () => {
+    const fleet = testFleet();
+    const response = await fleet.fetch(
+      request("GET", "/v1/whoami", {
+        headers: {
+          "x-crabbox-auth": "github",
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-token-expires-at": "2026-12-05T00:00:00.000Z",
+        },
+      }),
+    );
+    expect(await response.json()).toEqual({
+      owner: "friend@example.com",
+      org: "openclaw",
+      auth: "github",
+      admin: false,
+      tokenExpiresAt: "2026-12-05T00:00:00.000Z",
     });
   });
 
@@ -7146,6 +7169,145 @@ describe("fleet identity", () => {
     expect(response.status).toBe(403);
     const macHosts = await fleet.fetch(request("GET", "/v1/admin/mac-hosts"));
     expect(macHosts.status).toBe(403);
+  });
+
+  it("renders provider traffic lights on the admin portal page", async () => {
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_aws_admin",
+      testLease({
+        id: "cbx_aws_admin",
+        slug: "aws-admin",
+        provider: "aws",
+        owner: "alice@example.com",
+        org: "example-org",
+        serverType: "c7a.large",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_azure_admin",
+      testLease({
+        id: "cbx_azure_admin",
+        slug: "azure-admin",
+        provider: "azure",
+        owner: "bob@example.com",
+        org: "example-org",
+        serverType: "Standard_D2ads_v6",
+        state: "failed",
+      }),
+    );
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        servers: [testMachine({ provider: "aws", cloudID: "i-000000000001" })],
+      }),
+      hetzner: fakeProvider(undefined, {
+        provider: "hetzner",
+        onList: async () => {
+          throw new Error("hetzner GET /ssh_keys: http 401: token invalid");
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("GET", "/portal/admin", {
+        headers: {
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "admin@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain("provider health");
+    expect(body).toContain("4 supported");
+    expect(body).toContain("users");
+    expect(body).toContain('href="/portal/admin/users"');
+    expect(body).not.toContain("all leases");
+    expect(body).toContain("attention");
+    expect(body).toContain("provider-favicon");
+    expect(body).toContain("/v1/providers/aws/readiness");
+    expect(body).toContain("disabled>machines</button>");
+    expect(body).toContain("/portal/admin/leases?provider=aws");
+    expect(body).toContain("AWS");
+    expect(body).toContain("Azure");
+    expect(body).toContain("GCP");
+    expect(body).toContain("Hetzner");
+    expect(body).not.toContain("Blacksmith");
+    expect(body).toContain("GCP_PROJECT_ID");
+    expect(body).not.toContain("alice@example.com");
+    expect(body).not.toContain("aws-admin");
+    expect(body).not.toContain("azure-admin");
+    expect(body).toContain('data-tone="ok"');
+    expect(body).toContain('data-tone="bad"');
+    expect(body).toContain('data-tone="disabled"');
+    expect(body).toContain("token invalid");
+
+    const leasesPage = await fleet.fetch(
+      request("GET", "/portal/admin/leases?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const leasesBody = await leasesPage.text();
+    expect(leasesPage.status).toBe(200);
+    expect(leasesBody).toContain("AWS leases");
+    expect(leasesBody).toContain("all providers");
+    expect(leasesBody).toContain("aws-admin");
+    expect(leasesBody).not.toContain("azure-admin");
+    expect(leasesBody).toContain("admin-eject");
+    expect(leasesBody).toContain("Emergency release aws-admin");
+    expect(leasesBody).toContain(
+      "/portal/leases/cbx_aws_admin/release?return=%2Fportal%2Fadmin%2Fleases%3Fprovider%3Daws",
+    );
+
+    const usersPage = await fleet.fetch(
+      request("GET", "/portal/admin/users", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const usersBody = await usersPage.text();
+    expect(usersPage.status).toBe(200);
+    expect(usersBody).toContain("bob@example.com");
+    expect(usersBody).not.toContain("all leases");
+
+    const portal = await fleet.fetch(
+      request("GET", "/portal", {
+        headers: {
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "vincentkoc@ieee.org",
+          "x-crabbox-org": "openclaw",
+        },
+      }),
+    );
+    const portalBody = await portal.text();
+    expect(portalBody).toContain('href="/portal/admin"');
+    expect(portalBody).toContain("<span>admin</span>");
+
+    const filtered = await fleet.fetch(
+      request("GET", "/v1/admin/leases?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const filteredBody = (await filtered.json()) as { leases: LeaseRecord[] };
+    expect(filteredBody.leases.map((lease) => lease.provider)).toEqual(["aws"]);
+
+    const release = await fleet.fetch(
+      request(
+        "POST",
+        "/portal/leases/cbx_aws_admin/release?return=%2Fportal%2Fadmin%2Fleases%3Fprovider%3Daws",
+        { headers: { "x-crabbox-admin": "true" } },
+      ),
+    );
+    expect(release.status).toBe(303);
+    expect(release.headers.get("location")).toBe("/portal/admin/leases?provider=aws");
+  });
+
+  it("requires admin access for the admin portal page", async () => {
+    const fleet = testFleet();
+    const response = await fleet.fetch(request("GET", "/portal/admin"));
+    expect(response.status).toBe(403);
   });
 
   it("audits expired AWS leases against cloud state", async () => {
@@ -7450,6 +7612,7 @@ describe("fleet identity", () => {
     const body = (await poll.json()) as {
       status: string;
       token?: string;
+      tokenExpiresAt?: string;
       owner?: string;
       org?: string;
       login?: string;
@@ -7461,6 +7624,38 @@ describe("fleet identity", () => {
       login: "friend",
     });
     expect(body.token).toMatch(/^cbxu_/);
+    expect(body.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("honors configured GitHub user token TTL", async () => {
+    const { fleet, loginID, state, pollSecret } = await startGitHubLogin({
+      CRABBOX_USER_TOKEN_TTL_SECONDS: "7200",
+    });
+    vi.stubGlobal("fetch", githubFetchMock({ member: true }));
+
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(200);
+
+    const poll = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: {
+          loginID,
+          pollSecret,
+        },
+      }),
+    );
+    expect(poll.status).toBe(200);
+    const body = (await poll.json()) as {
+      status: string;
+      token?: string;
+      tokenExpiresAt?: string;
+    };
+    expect(body.status).toBe("complete");
+    expect(body.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const payload = decodeUserTokenPayload(body.token ?? "");
+    expect(payload.exp - payload.iat).toBe(7200);
   });
 
   it("falls back to the default org when allowed org config is empty", async () => {
@@ -7779,6 +7974,7 @@ function fakeProvider(
     market?: string;
     attempts?: ProvisioningAttempt[];
     servers?: ProviderMachine[];
+    onList?: () => Promise<ProviderMachine[]> | ProviderMachine[];
     onCreateImage?: (
       instanceID: string,
       name: string,
@@ -7839,6 +8035,9 @@ function fakeProvider(
       storage = nextStorage;
     },
     async listCrabboxServers() {
+      if (result.onList) {
+        return await result.onList();
+      }
       return result.servers ?? [];
     },
     async getServer(id: string) {
@@ -8608,4 +8807,11 @@ function request(
 async function sha256HexForTest(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function decodeUserTokenPayload(token: string): { exp: number; iat: number } {
+  expect(token).toMatch(/^cbxu_/);
+  const [payload] = token.slice("cbxu_".length).split(".");
+  const decoded = Buffer.from(payload, "base64url").toString("utf8");
+  return JSON.parse(decoded) as { exp: number; iat: number };
 }

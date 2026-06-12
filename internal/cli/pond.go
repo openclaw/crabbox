@@ -184,17 +184,8 @@ func pondDynamicTailscaleTagAllowed(cfg Config) bool {
 // providerCapableOfTailscale reports whether the named provider advertises
 // FeatureTailscale in the registered provider spec.
 func providerCapableOfTailscale(provider string) bool {
-	return providerCapabilities(provider).Tailscale
-}
-
-// pondHasTailscaleCapableProvider returns true when at least one claim in
-// the named pond belongs to a provider that advertises FeatureTailscale.
-// Used by doctor to decide whether to run ACL verification when the
-// operator's default provider (cfg.Provider) does not support Tailscale
-// but the pond includes mixed-provider members that do.
-func pondHasTailscaleCapableProvider(pond string) bool {
-	_, hasTailscale := pondClaimProviderSummary(pond)
-	return hasTailscale
+	caps := providerCapabilities(provider)
+	return caps.Tailscale || caps.TailscaleEgress
 }
 
 func pondClaimProviderSummary(pond string) (bool, bool) {
@@ -213,29 +204,44 @@ func pondClaimProviderSummary(pond string) (bool, bool) {
 			continue
 		}
 		hasClaims = true
-		if providerCapableOfTailscale(claim.Provider) {
+		caps := providerCapabilities(claim.Provider)
+		if (caps.Tailscale || caps.TailscaleEgress) && (!caps.URLBridge || claimHasTailscaleMetadata(claim)) {
 			hasTailscale = true
 		}
 	}
 	return hasClaims, hasTailscale
 }
 
+func claimHasTailscaleMetadata(claim leaseClaim) bool {
+	return claim.TailscaleIPv4 != "" ||
+		claim.TailscaleFQDN != "" ||
+		claim.TailscaleHostname != "" ||
+		len(claim.TailscaleTags) > 0 ||
+		claim.TailscaleLoginURL != "" ||
+		claim.TailscaleExitNode != "" ||
+		claim.TailscaleExitLAN ||
+		labelBool(claim.Labels["tailscale"]) ||
+		strings.TrimSpace(claim.Labels["tailscale_state"]) != ""
+}
+
 // ProviderCapabilities is the per-provider truth about which pond transport
 // planes are *physically* possible on its leases. Each plane is independent —
 // some providers advertise more than one (Hetzner / Azure / GCP support both
-// the Tailscale peer mesh AND the operator-side SSH-mesh; Islo is URL-only
-// today). Older code that asked "which one transport does this provider use"
+// the Tailscale peer mesh and the operator-side SSH-mesh). Islo separately
+// advertises URL ingress plus outbound-only userspace Tailscale access. Older
+// code that asked "which one transport does this provider use"
 // (providerTransportClass) is now a thin Primary() picker; the capability set
 // is the source of truth and the `pond peers` + `pond connect` paths fan out
-// across whichever planes the operator (or default preference) actually wants.
+// across whichever dialable planes the operator actually wants.
 //
 // Capabilities are derived from the provider's own FeatureSet, so a provider
 // opts in to a transport plane by declaring the feature, not by being added
 // to a static table.
 type ProviderCapabilities struct {
-	Tailscale bool // peer mesh via tailnet (cloud-init Tailscale daemon + ACL tag)
-	SSHMesh   bool // operator-side `ssh -L` against the lease's SSH endpoint
-	URLBridge bool // native HTTPS endpoint surface (shares, preview URLs, deployments)
+	Tailscale       bool // bidirectional tailnet peer plane
+	TailscaleEgress bool // outbound-only userspace tailnet access
+	SSHMesh         bool // operator-side `ssh -L` against the lease's SSH endpoint
+	URLBridge       bool // native HTTPS endpoint surface (shares, preview URLs, deployments)
 }
 
 // providerCapabilities returns the capability set for the named provider.
@@ -243,11 +249,14 @@ type ProviderCapabilities struct {
 // into a transport plane by declaring the right Feature.
 func providerCapabilities(provider string) ProviderCapabilities {
 	if p, err := ProviderFor(provider); err == nil {
-		features := p.Spec().Features
+		spec := p.Spec()
+		features := spec.Features
+		tailscale := featureSetHas(features, FeatureTailscale)
 		return ProviderCapabilities{
-			Tailscale: featureSetHas(features, FeatureTailscale),
-			SSHMesh:   featureSetHas(features, FeatureSSH),
-			URLBridge: featureSetHas(features, FeatureURLBridge),
+			Tailscale:       tailscale && !spec.TailscaleEgressOnly,
+			TailscaleEgress: tailscale && spec.TailscaleEgressOnly,
+			SSHMesh:         featureSetHas(features, FeatureSSH),
+			URLBridge:       featureSetHas(features, FeatureURLBridge),
 		}
 	}
 	return ProviderCapabilities{}

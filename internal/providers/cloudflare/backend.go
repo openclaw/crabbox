@@ -108,10 +108,12 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 		acquired = true
 	} else {
-		leaseID, sandboxID, slug, err = b.resolveSandboxID(req.ID, req.Repo.Root, req.Reclaim)
+		var instanceType string
+		leaseID, sandboxID, slug, instanceType, err = b.resolveSandboxID(req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
+		client.useInstanceType(instanceType)
 	}
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
@@ -119,7 +121,9 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			if !shouldStop {
 				return
 			}
-			if err := client.destroySandbox(context.Background(), sandboxID); err != nil {
+			cleanupCtx, cancel := cloudflareCleanupContext()
+			defer cancel()
+			if err := client.destroySandbox(cleanupCtx, sandboxID); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %s destroy failed for %s: %v\n", providerName, sandboxID, err)
 				return
 			}
@@ -240,7 +244,10 @@ func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []localCla
 		return nil, err
 	}
 	servers := make([]Server, 0, len(claims))
+	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
+		client.instanceType = defaultInstanceType
+		client.useInstanceType(claim.instanceType())
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
@@ -261,10 +268,11 @@ func (b *cloudflareBackend) Status(ctx context.Context, req StatusRequest) (Stat
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, sandboxID, slug, err := b.resolveSandboxID(req.ID, "", false)
+	leaseID, sandboxID, slug, instanceType, err := b.resolveSandboxID(req.ID, "", false)
 	if err != nil {
 		return StatusView{}, err
 	}
+	client.useInstanceType(instanceType)
 	deadline := b.now().Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
 		deadline = b.now().Add(5 * time.Minute)
@@ -298,10 +306,11 @@ func (b *cloudflareBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, err := b.resolveSandboxID(req.ID, "", false)
+	leaseID, sandboxID, _, instanceType, err := b.resolveSandboxID(req.ID, "", false)
 	if err != nil {
 		return err
 	}
+	client.useInstanceType(instanceType)
 	if err := client.destroySandbox(ctx, sandboxID); err != nil {
 		if cloudflareNotFoundError(err) {
 			removeLeaseClaim(leaseID)
@@ -325,7 +334,10 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 		return err
 	}
 	removed := 0
+	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
+		client.instanceType = defaultInstanceType
+		client.useInstanceType(claim.instanceType())
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
@@ -382,7 +394,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 		"lease":         leaseID,
 		"slug":          slug,
 		"repo":          repo.Name,
-		"instance_type": b.cfg.ServerType,
+		"instance_type": client.instanceType,
 	}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
 		ID:                 leaseID,
@@ -390,7 +402,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 		Slug:               slug,
 		Repo:               repo.Name,
 		Workdir:            workdir,
-		InstanceType:       b.cfg.ServerType,
+		InstanceType:       client.instanceType,
 		TTLSeconds:         durationSecondsCeil(b.cfg.TTL),
 		IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout),
 		Labels:             labels,
@@ -398,31 +410,36 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if err != nil {
 		return "", cloudflareContainer{}, "", err
 	}
-	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.destroySandbox(context.Background(), sandbox.ID)
+	if err := claimLeaseForRepoProviderPondLabels(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim, labels); err != nil {
+		cleanupCtx, cancel := cloudflareCleanupContext()
+		cleanupErr := client.destroySandbox(cleanupCtx, sandbox.ID)
+		cancel()
+		if cleanupErr != nil {
+			return "", cloudflareContainer{}, "", fmt.Errorf("%w; cleanup failed for %s sandbox %s: %v", err, providerName, sandbox.ID, cleanupErr)
+		}
 		return "", cloudflareContainer{}, "", err
 	}
 	return leaseID, sandbox, slug, nil
 }
 
-func (b *cloudflareBackend) resolveSandboxID(identifier, repoRoot string, reclaim bool) (string, string, string, error) {
+func (b *cloudflareBackend) resolveSandboxID(identifier, repoRoot string, reclaim bool) (string, string, string, string, error) {
 	claim, ok, err := resolveLeaseClaimForProvider(identifier, providerName)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	if ok {
 		if repoRoot != "" {
 			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
-				return "", "", "", err
+				return "", "", "", "", err
 			}
 		}
-		return claim.LeaseID, claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), nil
+		return claim.LeaseID, claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), cloudflareClaimInstanceType(claim), nil
 	}
 	value := strings.TrimSpace(identifier)
 	if value == "" {
-		return "", "", "", exit(2, "%s id is required", providerName)
+		return "", "", "", "", exit(2, "%s id is required", providerName)
 	}
-	return value, value, newLeaseSlug(value), nil
+	return value, value, newLeaseSlug(value), "", nil
 }
 
 func buildCloudflareCommand(command []string, shellMode bool) (string, error) {
@@ -553,9 +570,22 @@ func (b *cloudflareBackend) now() time.Time {
 }
 
 type localClaim struct {
-	LeaseID  string `json:"leaseID"`
-	Slug     string `json:"slug,omitempty"`
-	Provider string `json:"provider,omitempty"`
+	LeaseID      string            `json:"leaseID"`
+	Slug         string            `json:"slug,omitempty"`
+	Provider     string            `json:"provider,omitempty"`
+	InstanceType string            `json:"instanceType,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+}
+
+func (c localClaim) instanceType() string {
+	if c.InstanceType != "" {
+		return c.InstanceType
+	}
+	return c.Labels["instance_type"]
+}
+
+func cloudflareClaimInstanceType(claim LeaseClaim) string {
+	return claim.Labels["instance_type"]
 }
 
 func localCloudflareClaims() ([]localClaim, error) {

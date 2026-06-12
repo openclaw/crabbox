@@ -193,24 +193,38 @@ if [[ ! -x "$CRABBOX_BIN" ]]; then
   exit 2
 fi
 
-log="$(mktemp)"
+warmup_dir="$(mktemp -d)"
+log="$warmup_dir/warmup.err"
+warmup_pipe="$warmup_dir/warmup.err.pipe"
 lease_id=""
 cleanup() {
   if [[ -n "$lease_id" ]]; then
     (cd "$CRABBOX_LIVE_REPO" && "$CRABBOX_BIN" stop "$lease_id") || true
   fi
-  rm -f "$log"
+  rm -rf "$warmup_dir"
 }
 trap cleanup EXIT
 
+warmup_status=0
+mkfifo "$warmup_pipe"
+tee "$log" <"$warmup_pipe" >&2 &
+tee_pid="$!"
 (
   cd "$CRABBOX_LIVE_REPO"
   "$CRABBOX_BIN" warmup --provider aws --ttl 20m --idle-timeout 6m --reclaim --timing-json
-) 2> >(tee "$log" >&2)
+) 2>"$warmup_pipe" || warmup_status=$?
+rm -f "$warmup_pipe"
+wait "$tee_pid"
+if [[ "$warmup_status" != "0" ]]; then
+  exit "$warmup_status"
+fi
 
-lease_id="$(
+if ! lease_id="$(
   node -e 'const fs=require("fs"); for (const line of fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).reverse()) { try { const json=JSON.parse(line); if (json.leaseId) { console.log(json.leaseId); process.exit(0); } } catch {} } process.exit(1);' "$log"
-)"
+)"; then
+  printf 'warmup succeeded but no leaseId could be parsed from timing output; a 20m AWS smoke lease may need manual cleanup\n' >&2
+  exit 1
+fi
 printf 'aws deploy smoke lease=%s\n' "$lease_id"
 
 (

@@ -9,6 +9,12 @@ fi
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cb="${CRABBOX_BIN:-$root/bin/crabbox}"
 repo="${CRABBOX_LIVE_REPO:-$PWD}"
+case "$cb" in
+  */*)
+    cb_dir="$(cd "$(dirname "$cb")" && pwd)"
+    cb="$cb_dir/$(basename "$cb")"
+    ;;
+esac
 
 if [[ -z "${CRABBOX_WANDB_API_KEY:-${WANDB_API_KEY:-}}" ]]; then
   echo "wandb smoke requires CRABBOX_WANDB_API_KEY or WANDB_API_KEY" >&2

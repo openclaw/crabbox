@@ -69,10 +69,6 @@ func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, s
 	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
-func newLeaseID() string {
-	return core.NewLeaseID()
-}
-
 func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }
@@ -111,10 +107,6 @@ func leadingEnvAssignment(command []string) bool {
 
 func shellScriptFromArgv(command []string) string {
 	return core.ShellScriptFromArgv(command)
-}
-
-func shellQuote(value string) string {
-	return core.ShellQuote(value)
 }
 
 func blank(value, fallback string) string {

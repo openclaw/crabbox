@@ -48,14 +48,14 @@ independently.
 Every authenticated route requires a `Authorization: Bearer <token>` header. The Worker
 matches the token in this precedence (`worker/src/auth.ts`):
 
-1. **Admin token** — equals `CRABBOX_ADMIN_TOKEN`. Grants admin. The only way to reach
-   admin routes.
+1. **Admin token** — equals `CRABBOX_ADMIN_TOKEN`. Grants admin.
 2. **Shared token** — equals `CRABBOX_SHARED_TOKEN`. Authorized but not admin; this is
    normal trusted automation.
 3. **Signed user token** — a token with the `cbxu_` prefix, an HMAC-SHA256 signature over a
    base64url payload, verified with `CRABBOX_SESSION_SECRET` (falling back to
-   `CRABBOX_SHARED_TOKEN`). Minted by `crabbox login`, authorized but never admin, with a
-   default 30-day expiry.
+   `CRABBOX_SHARED_TOKEN`). Minted by `crabbox login`, with a default 180-day expiry.
+   User tokens are non-admin unless their GitHub email or login matches
+   `CRABBOX_GITHUB_ADMIN_OWNERS` or `CRABBOX_GITHUB_ADMIN_LOGINS`.
 
 Anything else returns `401 unauthorized`.
 
@@ -122,7 +122,10 @@ CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
+CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated GitHub verified emails with admin
+CRABBOX_GITHUB_ADMIN_LOGINS      # optional; comma-separated GitHub logins with admin
 CRABBOX_SESSION_SECRET           # signs user tokens; falls back to CRABBOX_SHARED_TOKEN
+CRABBOX_USER_TOKEN_TTL_SECONDS   # optional; default 15552000 (180 days), clamped to 1h-365d
 ```
 
 ## Sending Cloudflare Access credentials from the CLI

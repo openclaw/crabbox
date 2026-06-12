@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -560,6 +561,56 @@ func TestBlacksmithKeptRunWritesLeaseOutput(t *testing.T) {
 	}
 }
 
+func TestBlacksmithActionsURLExtractionNormalizesProse(t *testing.T) {
+	tests := []struct {
+		name    string
+		text    string
+		wantURL string
+		wantID  string
+	}{
+		{
+			name:    "parenthesized sentence",
+			text:    "run: (https://github.com/example-org/my-app/actions/runs/123456).",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/123456",
+			wantID:  "123456",
+		},
+		{
+			name:    "markdown link",
+			text:    "[run](https://github.com/example-org/my-app/actions/runs/222333)",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/222333",
+			wantID:  "222333",
+		},
+		{
+			name:    "query string",
+			text:    "https://github.com/example-org/my-app/actions/runs/987654321?check_suite_focus=true.",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/987654321?check_suite_focus=true",
+			wantID:  "987654321",
+		},
+		{
+			name:    "attempt suffix",
+			text:    "https://github.com/example-org/my-app/actions/runs/123456/attempts/1",
+			wantURL: "https://github.com/example-org/my-app/actions/runs/123456/attempts/1",
+			wantID:  "123456",
+		},
+		{
+			name: "reject nonnumeric run id",
+			text: "https://github.com/example-org/my-app/actions/runs/123abc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotURL := firstBlacksmithActionsURL(tt.text)
+			if gotURL != tt.wantURL {
+				t.Fatalf("url=%q, want %q", gotURL, tt.wantURL)
+			}
+			gotID := blacksmithActionsRunID(gotURL)
+			if gotID != tt.wantID {
+				t.Fatalf("runID=%q, want %q", gotID, tt.wantID)
+			}
+		})
+	}
+}
+
 func TestBlacksmithReusedRunWritesLeaseOutput(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -713,6 +764,281 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 	}
 }
 
+func TestBlacksmithCollectRunArtifactsWritesBoundedArchive(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
+			if req.Stdout != nil {
+				_, _ = req.Stdout.Write([]byte("required artifact reports/manifest.json matched=1\n"))
+				_, _ = req.Stdout.Write([]byte(core.DelegatedRunArtifactBeginMarker + "\n"))
+				_, _ = req.Stdout.Write([]byte(base64.StdEncoding.EncodeToString(archive)))
+				_, _ = req.Stdout.Write([]byte("\n" + core.DelegatedRunArtifactEndMarker + "\n"))
+			}
+			return LocalCommandResult{}, nil
+		}
+		return LocalCommandResult{}, nil
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := newTestBlacksmithBackend(cfg, runner)
+	result, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
+		RunReq: core.RunRequest{
+			Repo:                  core.Repo{Root: repo},
+			ArtifactGlobs:         []string{"reports/**"},
+			RequiredArtifactGlobs: []string{"reports/manifest.json"},
+		},
+		Result:   core.RunResult{LeaseID: "tbx_artifacts"},
+		MaxFiles: 16,
+		MaxBytes: int64(len(archive) + 128),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, "required artifact reports/manifest.json matched=1") {
+		t.Fatalf("output=%q", result.Output)
+	}
+	if len(result.Artifacts) != 1 {
+		t.Fatalf("artifacts=%#v", result.Artifacts)
+	}
+	artifact := result.Artifacts[0]
+	if artifact.Kind != "artifact-glob" || artifact.Bytes != len(archive) {
+		t.Fatalf("artifact=%#v", artifact)
+	}
+	got, err := os.ReadFile(artifact.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
+	}
+	if len(runner.calls) != 1 || !strings.Contains(runner.calls[0][len(runner.calls[0])-1], core.DelegatedRunArtifactBeginMarker) {
+		t.Fatalf("runner calls=%#v", runner.calls)
+	}
+}
+
+func TestBlacksmithCollectRunArtifactsBoundsCommandOutput(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	const maxBytes int64 = 64
+	oversized := strings.Repeat("x", int(blacksmithArtifactOutputCaptureLimit(maxBytes)+1024))
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" && req.Stdout != nil {
+			if !req.DisableOutputCapture {
+				t.Fatalf("artifact collection should disable command-runner output capture")
+			}
+			_, _ = req.Stdout.Write([]byte(oversized))
+		}
+		return LocalCommandResult{}, nil
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := newTestBlacksmithBackend(cfg, runner)
+	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
+		RunReq: core.RunRequest{
+			Repo:          core.Repo{Root: repo},
+			ArtifactGlobs: []string{"reports/**"},
+		},
+		Result:   core.RunResult{LeaseID: "tbx_artifacts"},
+		MaxFiles: 16,
+		MaxBytes: maxBytes,
+	})
+	if err == nil || !strings.Contains(err.Error(), "artifact output too large before archive validation") {
+		t.Fatalf("err=%v, want bounded output error", err)
+	}
+}
+
+func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
+	runCalls := 0
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
+			return LocalCommandResult{Stdout: "ready tbx_artifacts\n"}, nil
+		}
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
+			runCalls++
+			if runCalls == 2 && req.Stdout != nil {
+				_, _ = req.Stdout.Write([]byte("required artifact reports/manifest.json matched=1\n"))
+				_, _ = req.Stdout.Write([]byte(core.DelegatedRunArtifactBeginMarker + "\n"))
+				_, _ = req.Stdout.Write([]byte(base64.StdEncoding.EncodeToString(archive)))
+				_, _ = req.Stdout.Write([]byte("\n" + core.DelegatedRunArtifactEndMarker + "\n"))
+			}
+			return LocalCommandResult{}, nil
+		}
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
+			return LocalCommandResult{}, nil
+		}
+		return LocalCommandResult{}, nil
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := newTestBlacksmithBackend(cfg, runner)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:                  Repo{Root: repo},
+		Command:               []string{"true"},
+		ArtifactGlobs:         []string{"reports/**"},
+		RequiredArtifactGlobs: []string{"reports/manifest.json"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Artifacts) != 1 {
+		t.Fatalf("artifacts=%#v", result.Artifacts)
+	}
+	if len(runner.calls) != 5 {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+	if runner.calls[0][1] != "list" || runner.calls[1][1] != "warmup" || runner.calls[2][1] != "run" || runner.calls[3][1] != "run" || runner.calls[4][1] != "stop" {
+		t.Fatalf("unexpected call order: %#v", runner.calls)
+	}
+	if !strings.Contains(runner.calls[3][len(runner.calls[3])-1], core.DelegatedRunArtifactBeginMarker) {
+		t.Fatalf("second run was not artifact collection: %#v", runner.calls[3])
+	}
+}
+
+func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Chdir(repo)
+	runCalls := 0
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
+			return LocalCommandResult{Stdout: "ready tbx_artifactfail\n"}, nil
+		}
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
+			runCalls++
+			if runCalls == 2 {
+				if req.Stderr != nil {
+					_, _ = req.Stderr.Write([]byte("missing required artifact reports/manifest.json\n"))
+				}
+				return LocalCommandResult{ExitCode: 8}, errors.New("artifact missing")
+			}
+			return LocalCommandResult{}, nil
+		}
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
+			t.Fatalf("stop should not run after artifact failure with keep-on-failure: %#v", req.Args)
+		}
+		return LocalCommandResult{}, nil
+	}}
+	var stderr bytes.Buffer
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+	}
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:                  Repo{Root: repo},
+		Command:               []string{"true"},
+		RequiredArtifactGlobs: []string{"reports/manifest.json"},
+		KeepOnFailure:         true,
+	})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%v want artifact exit 7", err)
+	}
+	if len(runner.calls) != 4 {
+		t.Fatalf("blacksmith calls=%d want list/warmup/run/artifact-run without stop: %#v", len(runner.calls), runner.calls)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want kept after artifact failure", result.Session)
+	}
+	got := stderr.String()
+	for _, want := range []string{"blacksmith artifact retrieval failed", "missing required artifact reports/manifest.json", "blacksmith run summary", "exit=7", "failure-bundle local=", "keep-on-failure: kept lease=tbx_artifactfail"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestBlacksmithExtractArtifactArchiveRejectsMissingEnvelope(t *testing.T) {
+	_, _, err := blacksmithExtractArtifactArchive("no marker", core.DelegatedRunArtifactDefaultMaxBytes)
+	if err == nil || !strings.Contains(err.Error(), "did not return a bounded artifact archive") {
+		t.Fatalf("err=%v, want missing envelope", err)
+	}
+}
+
+func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T) {
+	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
+	output := strings.Join([]string{
+		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
+		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
+		core.DelegatedRunArtifactBeginMarker,
+		base64.StdEncoding.EncodeToString(archive),
+		core.DelegatedRunArtifactEndMarker,
+	}, "\n")
+	got, clean, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
+	}
+	for _, want := range []string{
+		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
+		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
+	} {
+		if !strings.Contains(clean, want) {
+			t.Fatalf("clean output missing %q:\n%s", want, clean)
+		}
+	}
+}
+
+func TestBlacksmithExtractArtifactArchiveAllowsExactMaxWithPadding(t *testing.T) {
+	archive := bytes.Repeat([]byte("x"), 64)
+	output := strings.Join([]string{
+		core.DelegatedRunArtifactBeginMarker,
+		base64.StdEncoding.EncodeToString(archive),
+		core.DelegatedRunArtifactEndMarker,
+	}, "\n")
+	got, _, err := blacksmithExtractArtifactArchive(output, int64(len(archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
+	}
+}
+
+func makeTarGz(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, content := range files {
+		data := []byte(content)
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(data))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -834,6 +1160,40 @@ func TestBlacksmithRunTerminatesSyncStall(t *testing.T) {
 	}
 }
 
+func TestBlacksmithCollectRunArtifactsTerminatesSyncStall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS", "1")
+	if _, _, err := ensureTestboxKey("tbx_artifactstall"); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  baseConfig(),
+		rt: Runtime{
+			Stdout: io.Discard,
+			Stderr: &stderr,
+			Clock:  testClock{},
+			Exec:   blockingSyncRunner{},
+		},
+	}
+	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
+		RunReq: core.RunRequest{
+			ArtifactGlobs: []string{"reports/**"},
+		},
+		Result: core.RunResult{LeaseID: "tbx_artifactstall"},
+	})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 124 {
+		t.Fatalf("err=%v want exit 124", err)
+	}
+	if !strings.Contains(stderr.String(), "during artifact retrieval") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
 func TestBlacksmithSyncTrackerMatchesCurrentMarkers(t *testing.T) {
 	start := time.Unix(100, 0)
 	tracker := &blacksmithSyncTracker{}
@@ -911,6 +1271,32 @@ func TestBlacksmithStatusWaitTimeoutMentionsQueuedState(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error=%q, want %q", err.Error(), want)
 		}
+	}
+}
+
+func TestBlacksmithStatusWaitReturnsOnContextCancellation(t *testing.T) {
+	originalDelay := blacksmithStatusPollDelay
+	blacksmithStatusPollDelay = 500 * time.Millisecond
+	t.Cleanup(func() { blacksmithStatusPollDelay = originalDelay })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+		cancel()
+		return LocalCommandResult{
+			Stdout: "tbx_123 queued openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
+		}, nil
+	}}
+	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	started := time.Now()
+	_, err := backend.Status(ctx, StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: time.Minute})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Status err=%v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 200*time.Millisecond {
+		t.Fatalf("Status returned after %s, want prompt cancellation", elapsed)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("runner calls=%d, want one status poll before cancellation", len(runner.calls))
 	}
 }
 

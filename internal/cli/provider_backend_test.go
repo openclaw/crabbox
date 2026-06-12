@@ -31,12 +31,14 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		canonical string
 	}{
 		{name: "hetzner", canonical: "hetzner"},
+		{name: "digitalocean", canonical: "digitalocean"},
 		{name: "aws", canonical: "aws"},
 		{name: "azure", canonical: "azure"},
 		{name: "azure-dynamic-sessions", canonical: "azure-dynamic-sessions"},
 		{name: "gcp", canonical: "gcp"},
 		{name: "google", canonical: "gcp"},
 		{name: "google-cloud", canonical: "gcp"},
+		{name: "incus", canonical: "incus"},
 		{name: "proxmox", canonical: "proxmox"},
 		{name: "xcp-ng", canonical: "xcp-ng"},
 		{name: "ssh", canonical: "ssh"},
@@ -49,6 +51,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "blacksmith-testbox", canonical: "blacksmith-testbox"},
 		{name: "namespace", canonical: "namespace-devbox"},
 		{name: "namespace-devbox", canonical: "namespace-devbox"},
+		{name: "morph", canonical: "morph"},
 		{name: "daytona", canonical: "daytona"},
 		{name: "islo", canonical: "islo"},
 		{name: "e2b", canonical: "e2b"},
@@ -74,9 +77,10 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 	}
 }
 
-func TestProviderHelpAllIncludesWandb(t *testing.T) {
-	if !strings.Contains(providerHelpAll(), "wandb") {
-		t.Fatalf("providerHelpAll() = %q, want wandb", providerHelpAll())
+func TestProviderHelpAllIncludesWandbAndMorph(t *testing.T) {
+	all := providerHelpAll()
+	if !strings.Contains(all, "wandb") || !strings.Contains(all, "morph") {
+		t.Fatalf("providerHelpAll() = %q, want wandb and morph", all)
 	}
 	if strings.Contains(providerHelpSSH(), "azure-dynamic-sessions") {
 		t.Fatalf("providerHelpSSH() = %q, want only ssh-capable providers", providerHelpSSH())
@@ -278,6 +282,31 @@ func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.WorkRoot != "/workspaces/test" {
 		t.Fatalf("namespace flags not applied: %#v", cfg.Namespace)
+	}
+}
+
+func TestProviderFlagsApplyMorphWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "morph",
+		"--morph-api-url", "https://morph.example.test",
+		"--morph-snapshot", "snapshot_123",
+		"--morph-work-root", "/tmp/morph-work",
+		"--morph-delete-on-release",
+		"--morph-wake-on-ssh=false",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot_123" || cfg.Morph.WorkRoot != "/tmp/morph-work" || cfg.WorkRoot != "/tmp/morph-work" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("morph flags not applied: %#v workRoot=%q", cfg.Morph, cfg.WorkRoot)
 	}
 }
 
@@ -639,6 +668,85 @@ func TestLeaseCreateFlagsReapplyXCPNgDefaultsAfterProviderOverride(t *testing.T)
 	}
 }
 
+func TestLeaseCreateFlagsReapplyDigitalOceanTargetAfterProviderOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		target     string
+		hyperVRoot string
+		hyperVUser string
+		sourcePort string
+		modeFlag   string
+		wantErr    string
+		wantTarget string
+		wantMode   string
+		wantRoot   string
+		wantUser   string
+		wantPort   string
+	}{
+		{name: "implicit target", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "provider settings", hyperVRoot: `D:\work`, hyperVUser: "Administrator", sourcePort: "2202", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit Windows mode", modeFlag: windowsModeWSL2, wantErr: "windows.mode is only valid with target=windows", wantTarget: targetLinux, wantMode: windowsModeWSL2, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit target alias", target: "ubuntu", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit Linux target with provider work root", target: targetLinux, hyperVRoot: `D:\work`, wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit target", target: targetWindows, modeFlag: windowsModeWSL2, wantErr: "supports target=linux only", wantTarget: targetWindows, wantMode: windowsModeWSL2, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defaults := baseConfig()
+			defaults.Provider = "hyperv"
+			if tt.hyperVRoot != "" {
+				defaults.HyperV.WorkRoot = tt.hyperVRoot
+			}
+			if tt.hyperVUser != "" {
+				defaults.HyperV.User = tt.hyperVUser
+			}
+			if err := applyProviderConfigDefaults(&defaults); err != nil {
+				t.Fatal(err)
+			}
+			if tt.sourcePort != "" {
+				defaults.SSHPort = tt.sourcePort
+			}
+			if tt.target != "" {
+				defaults.TargetOS = tt.target
+				MarkTargetExplicit(&defaults)
+			}
+
+			fs := newFlagSet("test", io.Discard)
+			values := registerLeaseCreateFlags(fs, defaults)
+			args := []string{"--provider", "digitalocean"}
+			if tt.modeFlag != "" {
+				args = append(args, "--windows-mode", tt.modeFlag)
+			}
+			if err := parseFlags(fs, args); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaults
+			err := applyLeaseCreateFlags(&cfg, fs, values)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TargetOS != tt.wantTarget {
+				t.Fatalf("target=%q want %q", cfg.TargetOS, tt.wantTarget)
+			}
+			if cfg.WindowsMode != tt.wantMode {
+				t.Fatalf("windows mode=%q want %q", cfg.WindowsMode, tt.wantMode)
+			}
+			if cfg.WorkRoot != tt.wantRoot {
+				t.Fatalf("work root=%q want %q", cfg.WorkRoot, tt.wantRoot)
+			}
+			if cfg.SSHUser != tt.wantUser {
+				t.Fatalf("SSH user=%q want %q", cfg.SSHUser, tt.wantUser)
+			}
+			if cfg.SSHPort != tt.wantPort {
+				t.Fatalf("SSH port=%q want %q", cfg.SSHPort, tt.wantPort)
+			}
+		})
+	}
+}
+
 func TestLeaseCreateFlagsDeriveGCPTypeForAlias(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
@@ -791,6 +899,12 @@ func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 		{name: "modal type", args: []string{"--provider", "modal", "--type", "large"}},
 		{name: "sprites class", args: []string{"--provider", "sprites", "--class", "standard"}},
 		{name: "sprites type", args: []string{"--provider", "sprites", "--type", "large"}},
+		{name: "opencomputer class", args: []string{"--provider", "opencomputer", "--class", "standard"}},
+		{name: "opencomputer type", args: []string{"--provider", "opencomputer", "--type", "large"}},
+		{name: "opencomputer alias class", args: []string{"--provider", "oc", "--class", "standard"}},
+		{name: "opencomputer alias type", args: []string{"--provider", "open-computer", "--type", "large"}},
+		{name: "opencomputer mixed-case class", args: []string{"--provider", "OpenComputer", "--class", "standard"}},
+		{name: "opencomputer spaced alias type", args: []string{"--provider", " OC ", "--type", "large"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newFlagSet("test", io.Discard)
@@ -835,6 +949,13 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	}
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/manifest.json"}}); err == nil {
 		t.Fatal("archive sync provider should reject --require-artifact")
+	}
+	spec.Features = append(spec.Features, FeatureRunArtifacts)
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/manifest.json"}}); err != nil {
+		t.Fatalf("delegated artifact provider should allow --require-artifact: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ArtifactGlobs: []string{"reports/data/**"}}); err != nil {
+		t.Fatalf("delegated artifact provider should allow --artifact-glob: %v", err)
 	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{SyncOnly: true}); err == nil {
 		t.Fatal("plain delegated provider should reject --sync-only")
@@ -949,6 +1070,34 @@ func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.Sprites.APIURL != "https://sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/work" {
 		t.Fatalf("sprites flags not applied: %#v", cfg.Sprites)
+	}
+}
+
+func TestProviderFlagsApplyIncusWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "incus",
+		"--incus-instance-type", "vm",
+		"--incus-image", "images:ubuntu/24.04/cloud",
+		"--incus-user", "ubuntu",
+		"--incus-work-root", "/workspace/incus",
+		"--incus-proxy-listen-port", "2201",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Incus.InstanceType != "virtual-machine" || cfg.Incus.User != "ubuntu" || cfg.Incus.WorkRoot != "/workspace/incus" {
+		t.Fatalf("incus flags not applied: %#v", cfg.Incus)
+	}
+	if cfg.SSHPort != "2201" || cfg.WorkRoot != "/workspace/incus" || cfg.ServerType != "virtual-machine:images:ubuntu/24.04/cloud" {
+		t.Fatalf("derived incus config wrong: sshPort=%q workRoot=%q serverType=%q", cfg.SSHPort, cfg.WorkRoot, cfg.ServerType)
 	}
 }
 

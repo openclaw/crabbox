@@ -38,6 +38,7 @@ Read when:
 - [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.
 - [Authoring a provider](provider-authoring.md): step-by-step guide to writing a new provider.
 - [XCP-ng](../providers/xcp-ng.md): direct XCP-ng provider on dedicated x86_64 pool hardware. XCP-ng itself can host Linux, Windows, and BSD guests; Crabbox normal leases use Linux templates, with separate Windows x86_64/x64 ISO E2E coverage.
+- [Incus local E2E testbed](../providers/incus.md): local Apple Silicon runbook and smoke contract for the future `incus` adapter.
 
 Provider deep-dives that live here in `features/`:
 
@@ -46,7 +47,7 @@ Provider deep-dives that live here in `features/`:
 - [Hetzner](hetzner.md): Linux-only managed Hetzner behavior, classes, and cleanup.
 - [Blacksmith Testbox](blacksmith-testbox.md): delegated Testbox runner behavior.
 - [Namespace Devbox](namespace-devbox.md): Namespace Devbox SSH leases with Crabbox sync/run.
-- [Namespace Devbox setup](namespace-devbox-setup.md): CLI install, auth token profile, and live checks.
+- [Namespace Devbox setup](namespace-devbox-setup.md): CLI install, browser authentication, and live checks.
 - [Semaphore](semaphore.md): Semaphore CI job leases with Crabbox SSH sync/run.
 - [Sprites](sprites.md): Sprites microVM SSH leases through `sprite proxy`.
 - [Daytona](daytona.md): Daytona SDK/toolbox sandbox leases with optional short-lived SSH access.

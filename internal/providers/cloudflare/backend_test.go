@@ -27,6 +27,9 @@ func TestCloudflareProviderSpec(t *testing.T) {
 	if !hasCloudflareFeature(spec.Features, "archive-sync") || !hasCloudflareFeature(spec.Features, "cleanup") {
 		t.Fatalf("spec.Features = %#v, want archive-sync and cleanup", spec.Features)
 	}
+	if hasCloudflareFeature(spec.Features, "url-bridge") {
+		t.Fatalf("spec.Features = %#v, should not advertise unsupported URL bridge", spec.Features)
+	}
 	if aliases := (Provider{}).Aliases(); len(aliases) != 1 || aliases[0] != "cf" {
 		t.Fatalf("aliases = %#v, want [cf]", aliases)
 	}
@@ -126,6 +129,29 @@ func TestCloudflareClientNormalizesBaseURL(t *testing.T) {
 	}
 	if client.baseURL != "https://runner.example.com/base" {
 		t.Fatalf("baseURL = %q, want normalized base URL", client.baseURL)
+	}
+}
+
+func TestCloudflareClientUsesBoundedDefaultTransport(t *testing.T) {
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = "http://127.0.0.1:8787"
+	cfg.Cloudflare.Token = "token"
+	client, err := newCloudflareClient(cfg, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http == nil || client.http == http.DefaultClient {
+		t.Fatalf("default http client=%#v, want bounded private client", client.http)
+	}
+	if client.http.Timeout != 0 {
+		t.Fatalf("whole-response timeout=%s, want caller context to govern streams", client.http.Timeout)
+	}
+	transport, ok := client.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T, want *http.Transport", client.http.Transport)
+	}
+	if transport.ResponseHeaderTimeout != cloudflareDefaultResponseHeaderTimeout {
+		t.Fatalf("response header timeout=%s, want %s", transport.ResponseHeaderTimeout, cloudflareDefaultResponseHeaderTimeout)
 	}
 }
 
@@ -339,11 +365,19 @@ func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Name: "my-app", Root: t.TempDir()}, false, ""); err != nil {
+	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Name: "my-app", Root: t.TempDir()}, false, "")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got.InstanceType != "standard-4" {
 		t.Fatalf("instance type = %q, want standard-4", got.InstanceType)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(slug, providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim for %s ok=%t err=%v", slug, ok, err)
+	}
+	if claim.LeaseID != leaseID || claim.Labels["instance_type"] != "standard-4" {
+		t.Fatalf("claim lease=%q labels=%#v, want instance_type=standard-4", claim.LeaseID, claim.Labels)
 	}
 }
 
@@ -382,6 +416,35 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 	}
 	if states["blue-lobster"] != "healthy" || states["red-lobster"] != "missing" {
 		t.Fatalf("states = %#v, want refreshed healthy and missing", states)
+	}
+}
+
+func TestCloudflareStatusUsesClaimedInstanceType(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := claimLeaseForRepoProviderPondLabels("cbx_lite", "blue-lobster", providerName, "", t.TempDir(), time.Hour, false, map[string]string{"instance_type": "lite"}); err != nil {
+		t.Fatal(err)
+	}
+	var gotInstanceType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sandboxes/cbx_lite" {
+			http.NotFound(w, r)
+			return
+		}
+		gotInstanceType = r.URL.Query().Get("instanceType")
+		_, _ = fmt.Fprint(w, `{"id":"cbx_lite","state":"healthy","workdir":"/workspace/repo","instanceType":"lite"}`)
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName, ServerType: "standard-4"}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard}}
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "blue-lobster"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ID != "cbx_lite" || gotInstanceType != "lite" {
+		t.Fatalf("view=%#v instanceType=%q, want claimed lite sandbox", view, gotInstanceType)
 	}
 }
 
@@ -568,6 +631,67 @@ func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 	}
 }
 
+func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	withCloudflareCleanupTimeout(t, 20*time.Millisecond)
+	var createdID string
+	execCalls := 0
+	deleteSeen := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			var req createSandboxRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			createdID = req.ID
+			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
+			execCalls++
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
+			deleteSeen <- struct{}{}
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	var stderr bytes.Buffer
+	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
+	start := time.Now()
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"true"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	if execCalls != 2 {
+		t.Fatalf("exec calls=%d, want prepare and command", execCalls)
+	}
+	select {
+	case <-deleteSeen:
+	default:
+		t.Fatal("destroy was not attempted")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "warning: cloudflare destroy failed for "+createdID+":") || !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr=%q, want destroy timeout warning", stderr.String())
+	}
+}
+
 func TestCloudflareClientUploadSendsContentLength(t *testing.T) {
 	var gotLength int64
 	var gotPath string
@@ -643,6 +767,13 @@ func TestDurationCeil(t *testing.T) {
 	}
 }
 
+func withCloudflareCleanupTimeout(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	original := cloudflareCleanupTimeout
+	cloudflareCleanupTimeout = timeout
+	t.Cleanup(func() { cloudflareCleanupTimeout = original })
+}
+
 func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repoA := t.TempDir()
@@ -651,10 +782,10 @@ func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := cloudflareBackend{}
-	if _, _, _, err := backend.resolveSandboxID("blue-lobster", repoB, false); err == nil || !strings.Contains(err.Error(), "use --reclaim") {
+	if _, _, _, _, err := backend.resolveSandboxID("blue-lobster", repoB, false); err == nil || !strings.Contains(err.Error(), "use --reclaim") {
 		t.Fatalf("resolve without reclaim err=%v, want reclaim guard", err)
 	}
-	leaseID, sandboxID, slug, err := backend.resolveSandboxID("blue-lobster", repoB, true)
+	leaseID, sandboxID, slug, _, err := backend.resolveSandboxID("blue-lobster", repoB, true)
 	if err != nil {
 		t.Fatal(err)
 	}

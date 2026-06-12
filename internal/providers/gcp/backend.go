@@ -82,10 +82,29 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	rollback := true
+	rollbackCloudID := server.CloudID
+	rollbackClient := client
+	defer func() {
+		if !rollback || strings.TrimSpace(rollbackCloudID) == "" {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cleanupClient, cleanupClientErr := newGCPClient(cleanupCtx, cfg)
+		if cleanupClientErr != nil {
+			fmt.Fprintf(b.RT.Stderr, "warning: create gcp cleanup client for %s: %v\n", rollbackCloudID, cleanupClientErr)
+			cleanupClient = rollbackClient
+		}
+		if err := cleanupClient.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "warning: cleanup gcp server %s after acquire failure: %v\n", rollbackCloudID, err)
+		}
+	}()
 	client, err = newGCPClient(ctx, cfg)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	rollbackClient = client
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s zone=%s\n", leaseID, server.DisplayID(), cfg.ServerType, cfg.GCPZone)
 	server, err = client.WaitForServerIP(ctx, server.CloudID)
 	if err != nil {
@@ -93,10 +112,10 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	}
 	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
-		_ = client.DeleteServer(context.Background(), server.CloudID)
 		return LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
+	rollback = false
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set labels: %v\n", err)
 	}

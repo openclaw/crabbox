@@ -7,6 +7,10 @@ node_formula="${CRABBOX_MACOS_NODE_FORMULA:-node@24}"
 python_formula="${CRABBOX_MACOS_PYTHON_FORMULA:-python@3.13}"
 require_xcode="${CRABBOX_MACOS_REQUIRE_XCODE:-0}"
 xcode_developer_dir="${CRABBOX_MACOS_XCODE_DEVELOPER_DIR:-}"
+force_links="${CRABBOX_MACOS_FORCE_LINKS:-0}"
+homebrew_install_commit="280cbc9adffcbdef15dd1c9d991ef2d1dd7cfc9c"
+homebrew_install_sha256="f3e91784ffeda32bc397de7acc1154724cc47522a459c9ac656cca176eeba457"
+homebrew_install_url="https://raw.githubusercontent.com/Homebrew/install/${homebrew_install_commit}/install.sh"
 default_formulas=(
   git
   git-lfs
@@ -29,6 +33,15 @@ default_formulas=(
 
 log() {
   printf 'macos-tools: %s\n' "$*" >&2
+}
+
+die() {
+  log "$*"
+  exit 1
+}
+
+shell_single_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 select_full_xcode() {
@@ -84,19 +97,23 @@ require_developer_tools() {
 }
 
 install_homebrew() {
-  local arch prefix
+  local arch installer prefix
   arch="$(uname -m)"
   if [[ "$arch" == "arm64" ]]; then
     prefix="/opt/homebrew"
   else
     prefix="/usr/local"
   fi
-  if [[ "$prefix" != "/usr/local" && -L /usr/local/bin/brew ]]; then
-    sudo rm -f /usr/local/bin/brew
-  fi
   if [[ ! -x "$prefix/bin/brew" ]]; then
     log "installing Homebrew into $prefix"
-    NONINTERACTIVE=1 CI=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    if ! installer="$(download_verified_homebrew_installer)"; then
+      return 1
+    fi
+    if ! NONINTERACTIVE=1 CI=1 /bin/bash "$installer"; then
+      rm -f "$installer"
+      return 1
+    fi
+    rm -f "$installer"
   fi
   export PATH="$prefix/bin:$prefix/sbin:/usr/local/bin:$PATH"
   if ! command -v brew >/dev/null 2>&1; then
@@ -104,6 +121,22 @@ install_homebrew() {
     return 1
   fi
   log "homebrew: $(brew --prefix)"
+}
+
+download_verified_homebrew_installer() {
+  local dest
+  command -v curl >/dev/null 2>&1 || die "missing required command: curl"
+  command -v shasum >/dev/null 2>&1 || die "missing required command: shasum"
+  dest="$(mktemp)"
+  if ! curl -fsSL --retry 3 --output "$dest" "$homebrew_install_url"; then
+    rm -f "$dest"
+    return 1
+  fi
+  if ! printf '%s  %s\n' "$homebrew_install_sha256" "$dest" | shasum -a 256 -c - >/dev/null; then
+    rm -f "$dest"
+    return 1
+  fi
+  printf '%s\n' "$dest"
 }
 
 install_formula() {
@@ -116,10 +149,17 @@ install_formula() {
 
 install_formulas() {
   local formulas=("${default_formulas[@]}")
-  local formula
+  local formula parts
   if [[ -n "${CRABBOX_MACOS_BREW_FORMULAS:-}" ]]; then
-    # shellcheck disable=SC2206
-    formulas=(${CRABBOX_MACOS_BREW_FORMULAS})
+    if [[ "$CRABBOX_MACOS_BREW_FORMULAS" == *$'\n'* ]]; then
+      formulas=()
+      while IFS= read -r formula; do
+        read -r -a parts <<<"$formula"
+        formulas+=("${parts[@]}")
+      done <<<"$CRABBOX_MACOS_BREW_FORMULAS"
+    else
+      read -r -a formulas <<<"$CRABBOX_MACOS_BREW_FORMULAS"
+    fi
   fi
   if [[ "$brew_update" == "1" ]]; then
     HOMEBREW_NO_INSTALL_CLEANUP=1 brew update
@@ -163,21 +203,59 @@ tool_path() {
 link_tool() {
   local name="$1"
   shift
-  local src
+  local dest src tmp
   src="$(tool_path "$name" "$@")"
+  dest="/usr/local/bin/$name"
+  if [[ "$src" == "$dest" ]]; then
+    return 0
+  fi
   sudo mkdir -p /usr/local/bin
-  sudo ln -sf "$src" "/usr/local/bin/$name"
+  if [[ -L "$dest" && "$(readlink "$dest")" == "$src" ]]; then
+    return 0
+  fi
+  if [[ ( -e "$dest" || -L "$dest" ) && "$force_links" != "1" ]]; then
+    die "refusing to replace existing $dest; set CRABBOX_MACOS_FORCE_LINKS=1 to override"
+  fi
+  tmp="$(mktemp -d)"
+  ln -s "$src" "$tmp/$name"
+  sudo mv -f "$tmp/$name" "$dest"
+  rmdir "$tmp"
 }
 
 install_brew_wrapper() {
   local brew_path="$1"
+  local dest=/usr/local/bin/brew
+  local quoted_brew tmp
   if [[ "$(dirname "$brew_path")" == "/usr/local/bin" ]]; then
     return 0
   fi
   sudo mkdir -p /usr/local/bin
-  sudo rm -f /usr/local/bin/brew
-  printf '#!/bin/sh\nexec %s "$@"\n' "$brew_path" | sudo tee /usr/local/bin/brew >/dev/null
-  sudo chmod 0755 /usr/local/bin/brew
+  if [[ -L "$dest" && "$(readlink "$dest")" == "$brew_path" ]]; then
+    return 0
+  fi
+  if [[ -f "$dest" ]] && grep -qx '# crabbox-managed brew wrapper' "$dest"; then
+    :
+  elif is_legacy_brew_wrapper "$dest" "$brew_path"; then
+    :
+  elif [[ ( -e "$dest" || -L "$dest" ) && "$force_links" != "1" ]]; then
+    die "refusing to replace existing $dest; set CRABBOX_MACOS_FORCE_LINKS=1 to override"
+  fi
+  quoted_brew="$(shell_single_quote "$brew_path")"
+  tmp="$(mktemp)"
+  printf '#!/bin/sh\n# crabbox-managed brew wrapper\nexec %s "$@"\n' "$quoted_brew" >"$tmp"
+  chmod 0755 "$tmp"
+  sudo install -o root -g wheel -m 0755 "$tmp" "$dest"
+  rm -f "$tmp"
+}
+
+is_legacy_brew_wrapper() {
+  local path="$1"
+  local brew_path="$2"
+  local expected line
+  [[ -f "$path" ]] || return 1
+  expected="exec ${brew_path} \"\$@\""
+  line="$(sed -n '2p' "$path")"
+  [[ "$line" == "$expected" ]]
 }
 
 install_node_and_pnpm() {
@@ -249,6 +327,11 @@ print_versions() {
   corepack --version
   pnpm --version
 }
+
+if [[ "${CRABBOX_MACOS_SOURCE_ONLY:-0}" == "1" ]]; then
+  # shellcheck disable=SC2317
+  return 0 2>/dev/null || exit 0
+fi
 
 require_developer_tools
 install_homebrew

@@ -14,9 +14,9 @@ import (
 // requires public per-sandbox ingress, so cloudflare is explicitly
 // unsupported rather than silently broken.
 //
-// The adapter still satisfies core.BridgeProvider so the resolver tags the
-// peer as `BridgeState="unsupported"`, which surfaces the gap to callers via
-// `crabbox pond peers` instead of pretending the peer has no targets yet.
+// The adapter still satisfies core.BridgeProvider so explicit bridge calls fail
+// with the same honest "unsupported" signal if this provider is ever routed
+// through the bridge path.
 
 // PublishPeer reports that Cloudflare does not participate in the bridge plane.
 func (b *cloudflareBackend) PublishPeer(ctx context.Context, leaseID string, port int, ttl time.Duration) (core.BridgePeerTarget, error) {

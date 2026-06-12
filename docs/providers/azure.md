@@ -96,7 +96,9 @@ from the environment.
 Set `architecture: arm64` or pass `--arch arm64` for Linux ARM leases. Crabbox
 then switches class fallback to Azure Cobalt Dpsv6/Dpdsv6 sizes and uses the
 matching Ubuntu ARM64 Marketplace image unless `azure.image` is explicitly set.
-ARM64 is not supported for native Windows, WSL2, or macOS targets.
+Native Windows ARM64 leases also use Azure Cobalt VM sizes and require an
+explicit ARM64 Windows Marketplace or custom image. Azure Windows ARM64 WSL2 is
+not supported because those VM sizes do not support nested virtualization.
 
 `azure.network` selects which IP the CLI uses for SSH: `public` (default) uses the
 VM public IP, `private` uses the NIC private IP from the vnet. Use `private` when
@@ -128,6 +130,7 @@ CRABBOX_AZURE_BACKEND            # vm | dynamic-sessions
 CRABBOX_AZURE_LOCATION
 CRABBOX_AZURE_RESOURCE_GROUP
 CRABBOX_AZURE_IMAGE
+CRABBOX_AZURE_WINDOWS_ARM64_IMAGE
 CRABBOX_AZURE_OS_DISK            # managed | ephemeral | ephemeral-preview | auto
 CRABBOX_AZURE_VNET
 CRABBOX_AZURE_SUBNET
@@ -182,6 +185,9 @@ Brokered leases reuse the same Azure service-principal secrets on the Worker:
 disk mode, and SSH CIDR defaults through the `CRABBOX_AZURE_*` env vars on the
 Worker. A lease request may override only `azureLocation`, `azureImage`, and
 `azureOSDisk`.
+Set `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the Worker when brokered Azure
+Windows ARM64 leases need a default ARM64 Windows image without changing the
+global `CRABBOX_AZURE_IMAGE` fallback used by existing custom-image leases.
 
 Set `CRABBOX_AZURE_REGIONS` on the Worker for Azure-specific capacity fallback;
 `CRABBOX_CAPACITY_REGIONS` remains the AWS region fallback list.
@@ -295,8 +301,11 @@ Azure does not provision macOS through this provider. Use [AWS](aws.md) or
 - `crabbox stop --provider azure <name>` only acts on VMs that carry `crabbox=true`
   (and either no `provider` tag or `provider=azure`). A manually named VM in the
   resource group will not be deleted by Crabbox.
-- The default SSH NSG rule allows `0.0.0.0/0` when `azure.sshCIDRs` is empty. Set
-  explicit CIDRs for any production-adjacent setup.
+- When `azure.sshCIDRs` is empty on the public network path, direct Azure
+  provisioning detects the operator's outbound IPv4 and creates a `/32` SSH
+  rule. If a shared NSG already has a different managed SSH CIDR, set
+  `CRABBOX_AZURE_SSH_CIDRS` explicitly to replace or extend it. Private-network
+  leases also require explicit VPN/VNet source CIDRs.
 - Azure costs are not hardcoded in Crabbox. Set `CRABBOX_COST_RATES_JSON` when you
   need exact Azure cost guardrails.
 - Azure native Windows uses a Custom Script Extension because Windows custom data

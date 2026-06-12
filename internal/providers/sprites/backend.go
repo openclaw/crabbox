@@ -112,22 +112,24 @@ func (b *spritesBackend) Acquire(ctx context.Context, req AcquireRequest) (Lease
 	if sprite.Name == "" {
 		sprite.Name = name
 	}
+	cleanupFailedAcquire := func() {
+		if req.Keep {
+			return
+		}
+		if err := b.client.DeleteSprite(context.Background(), sprite.Name); err == nil {
+			removeStoredTestboxKey(leaseID)
+		}
+	}
 	lease, err := b.prepareLease(ctx, sprite, leaseID, slug, req.Keep, keyPath, publicKey)
 	if err != nil {
-		if !req.Keep {
-			_ = b.client.DeleteSprite(context.Background(), name)
-		}
-		removeStoredTestboxKey(leaseID)
+		cleanupFailedAcquire()
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProvider(leaseID, slug, spritesProvider, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.client.DeleteSprite(context.Background(), name)
-		}
-		removeStoredTestboxKey(leaseID)
+		cleanupFailedAcquire()
 		return LeaseTarget{}, err
 	}
-	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s sprite=%s state=ready\n", leaseID, name)
+	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s sprite=%s state=ready\n", leaseID, sprite.Name)
 	return lease, nil
 }
 
@@ -191,9 +193,20 @@ func (b *spritesBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseReque
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {
 		var err error
-		name, _, _, err = b.resolveSpriteName(ctx, req.Lease.LeaseID, true)
+		name, _, _, err = b.resolveSpriteName(ctx, req.Lease.LeaseID, false)
 		if err != nil {
 			return err
+		}
+	}
+	if ok, err := spritesLeaseHasClaim(req.Lease.LeaseID); err != nil {
+		return err
+	} else if !ok {
+		sprite, err := b.client.GetSprite(ctx, name)
+		if err != nil {
+			return spritesError("get sprite", err)
+		}
+		if !isCrabboxSprite(sprite) {
+			return exit(4, "sprite %q is not Crabbox-managed; use --reclaim to adopt it before release", name)
 		}
 	}
 	if err := b.client.DeleteSprite(ctx, name); err != nil {
@@ -311,6 +324,9 @@ func (b *spritesBackend) resolveSpriteName(ctx context.Context, identifier strin
 	}
 	if sprite, err := b.client.GetSprite(ctx, spriteIdentifier); err == nil {
 		if !isCrabboxSprite(sprite) && !reclaim {
+			if isLegacyCrabboxSpriteName(sprite) {
+				return "", "", "", exit(4, "sprite %q uses a legacy Crabbox name but has no Crabbox labels; use --reclaim to adopt it", spriteIdentifier)
+			}
 			return "", "", "", exit(4, "sprite %q is not Crabbox-managed; use --reclaim to adopt it", spriteIdentifier)
 		}
 		leaseID := spritesLeaseID(sprite)
@@ -332,6 +348,18 @@ func spriteNameFromClaim(claim LeaseClaim) (string, bool) {
 		return leaseProviderName(claim.LeaseID, claim.Slug), true
 	}
 	return "", false
+}
+
+func spritesLeaseHasClaim(leaseID string) (bool, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return false, nil
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		return false, err
+	}
+	return claim.Provider == "" || claim.Provider == spritesProvider, nil
 }
 
 func (b *spritesBackend) findSpriteByLease(ctx context.Context, leaseID string) (spritesInfo, error) {

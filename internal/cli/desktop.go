@@ -64,7 +64,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		return err
 	}
 	if *webvnc && (isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider)) {
-		return exit(2, "desktop launch --webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases")
+		return exit(2, "desktop launch --webvnc is unavailable for provider=%s", cfg.Provider)
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")
@@ -283,7 +283,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		}
 	}
 	if path := strings.TrimSpace(*screenshot); path != "" {
-		if err := captureDesktopScreenshot(ctx, target, path); err != nil {
+		if err := captureDesktopScreenshot(ctx, cfg, target, path); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "screenshot: %s\n", path)
@@ -491,7 +491,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "metadata: %s\n", metadataPath)
 	screenshotPath := filepath.Join(dir, "screenshot.png")
-	if err := captureDesktopScreenshot(ctx, target, screenshotPath); err != nil {
+	if err := captureDesktopScreenshot(ctx, cfg, target, screenshotPath); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "screenshot: %s\n", screenshotPath)

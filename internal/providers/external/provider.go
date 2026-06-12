@@ -43,6 +43,18 @@ func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
 	return nil
 }
 
+func (Provider) CommandRoutingArgs(cfg core.Config, leaseID string) []string {
+	path := strings.TrimSpace(cfg.External.RoutingFile)
+	if path == "" {
+		var err error
+		path, err = core.ExternalRoutingPath(leaseID)
+		if err != nil {
+			return nil
+		}
+	}
+	return []string{"--external-routing-file", path}
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)

@@ -3,11 +3,15 @@ package sprites
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestSpritesSSHTargetUsesSpriteProxy(t *testing.T) {
@@ -34,6 +38,16 @@ func TestSpritesLabelsRoundTripLeaseAndSlug(t *testing.T) {
 	}
 }
 
+func TestCrabboxSpriteOwnershipRequiresLabels(t *testing.T) {
+	sprite := spritesInfo{Name: "crabbox-handmade"}
+	if isCrabboxSprite(sprite) {
+		t.Fatal("prefix-only sprite should not be treated as Crabbox-owned")
+	}
+	if !isLegacyCrabboxSpriteName(sprite) {
+		t.Fatal("expected legacy Crabbox name recognition")
+	}
+}
+
 func TestCleanSpritesWorkRootRejectsBroadPaths(t *testing.T) {
 	for _, path := range []string{"/", "/home", "/home/sprite", "/tmp", "relative"} {
 		if err := cleanSpritesWorkRoot(path); err == nil {
@@ -55,6 +69,29 @@ func TestResolveSpriteNameAcceptsSprPrefix(t *testing.T) {
 	}
 	if name != "crabbox-blue-lobster-12345678" || leaseID != "cbx_abcdef123456" || slug != "blue-lobster" {
 		t.Fatalf("name=%q lease=%q slug=%q", name, leaseID, slug)
+	}
+}
+
+func TestResolveSpriteNameRejectsPrefixOnlyWithoutReclaim(t *testing.T) {
+	backend := &spritesBackend{client: &fakeSpritesAPI{
+		get: spritesInfo{Name: "crabbox-handmade"},
+	}}
+	_, _, _, err := backend.resolveSpriteName(context.Background(), "crabbox-handmade", false)
+	if err == nil || !strings.Contains(err.Error(), "has no Crabbox labels") {
+		t.Fatalf("err=%v, want prefix-only reclaim error", err)
+	}
+}
+
+func TestResolveSpriteNameAcceptsPrefixOnlyWithReclaim(t *testing.T) {
+	backend := &spritesBackend{client: &fakeSpritesAPI{
+		get: spritesInfo{Name: "crabbox-handmade"},
+	}}
+	name, leaseID, _, err := backend.resolveSpriteName(context.Background(), "crabbox-handmade", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "crabbox-handmade" || leaseID != "spr_crabbox-handmade" {
+		t.Fatalf("name=%q lease=%q", name, leaseID)
 	}
 }
 
@@ -132,6 +169,77 @@ func TestResolveReleaseOnlySkipsSpriteCLIAndBootstrap(t *testing.T) {
 	}
 	if _, ok, err := resolveLeaseClaim("unhealthy"); err != nil || ok {
 		t.Fatalf("claim still resolves ok=%t err=%v", ok, err)
+	}
+}
+
+func TestReleaseLeaseRejectsUnclaimedPrefixOnlySprite(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeSpritesAPI{get: spritesInfo{Name: "crabbox-handmade"}}
+	backend := &spritesBackend{client: api}
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
+		Lease: LeaseTarget{
+			LeaseID: "spr_crabbox-handmade",
+			Server:  Server{Name: "crabbox-handmade"},
+		},
+		Force: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
+		t.Fatalf("ReleaseLease err=%v, want unmanaged sprite error", err)
+	}
+	if api.deleted != "" {
+		t.Fatalf("deleted prefix-only sprite %q", api.deleted)
+	}
+}
+
+func TestAcquireKeepFailurePreservesRetainedSpriteKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeSpritesAPI{}
+	runner := &recordingRunner{failContains: "exec -s", err: errors.New("bootstrap failed")}
+	backend := &spritesBackend{
+		cfg:    Config{Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		client: api,
+	}
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "bootstrap failed") {
+		t.Fatalf("Acquire err=%v, want bootstrap failure", err)
+	}
+	if api.deleted != "" {
+		t.Fatalf("kept failed acquire should not delete sprite, deleted=%q", api.deleted)
+	}
+	leaseID := spritesLeaseID(spritesInfo{Labels: api.createdLabels})
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("kept Sprite SSH key missing: %v", err)
+	}
+	t.Cleanup(func() { core.RemoveStoredTestboxKey(leaseID) })
+}
+
+func TestAcquireFailureDeletesReturnedSpriteName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeSpritesAPI{create: spritesInfo{Name: "canonical-sprite"}}
+	runner := &recordingRunner{failContains: "exec -s", err: errors.New("bootstrap failed")}
+	backend := &spritesBackend{
+		cfg:    Config{Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		client: api,
+	}
+
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "bootstrap failed") {
+		t.Fatalf("Acquire err=%v, want bootstrap failure", err)
+	}
+	if api.createdName == api.deleted {
+		t.Fatalf("test did not exercise renamed sprite; created=%q deleted=%q", api.createdName, api.deleted)
+	}
+	if api.deleted != "canonical-sprite" {
+		t.Fatalf("deleted=%q, want returned sprite name", api.deleted)
 	}
 }
 
@@ -273,21 +381,43 @@ func TestSpritesBootstrapInstallsFullSyncToolchain(t *testing.T) {
 }
 
 type recordingRunner struct {
-	calls []string
+	calls        []string
+	failContains string
+	err          error
 }
 
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
-	r.calls = append(r.calls, strings.Join(append([]string{req.Name}, req.Args...), " "))
+	call := strings.Join(append([]string{req.Name}, req.Args...), " ")
+	r.calls = append(r.calls, call)
+	if r.failContains != "" && strings.Contains(call, r.failContains) {
+		err := r.err
+		if err == nil {
+			err = errors.New("command failed")
+		}
+		return LocalCommandResult{ExitCode: 1, Stderr: err.Error()}, err
+	}
 	return LocalCommandResult{}, nil
 }
 
 type fakeSpritesAPI struct {
-	get     spritesInfo
-	deleted string
+	create        spritesInfo
+	get           spritesInfo
+	createdName   string
+	createdLabels []string
+	deleted       string
 }
 
-func (f *fakeSpritesAPI) CreateSprite(context.Context, string, []string) (spritesInfo, error) {
-	return spritesInfo{}, nil
+func (f *fakeSpritesAPI) CreateSprite(_ context.Context, name string, labels []string) (spritesInfo, error) {
+	f.createdName = name
+	f.createdLabels = labels
+	if f.create.Name != "" || len(f.create.Labels) > 0 || f.create.ID != "" {
+		sprite := f.create
+		if len(sprite.Labels) == 0 {
+			sprite.Labels = labels
+		}
+		return sprite, nil
+	}
+	return spritesInfo{Name: name, Labels: labels}, nil
 }
 
 func (f *fakeSpritesAPI) GetSprite(context.Context, string) (spritesInfo, error) {

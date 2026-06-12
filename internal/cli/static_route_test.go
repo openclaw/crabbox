@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +46,37 @@ func TestAutoRouteStaticLeaseRestoresHostFromStaticClaim(t *testing.T) {
 	}
 	if cfg.Static.User != "builder" || cfg.Static.Port != "2202" || cfg.Static.WorkRoot != "/Users/builder/project" || cfg.TargetOS != targetMacOS {
 		t.Fatalf("static route details not restored: %#v", cfg.Static)
+	}
+}
+
+func TestAutoRouteStaticLeaseRestoresFriendlySlugClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claimed := baseConfig()
+	claimed.Provider = staticProvider
+	claimed.Static.Host = "friendly.example.com"
+	claimed.Static.User = "builder"
+	claimed.Static.Port = "2202"
+	claimed.Static.WorkRoot = "/work/friendly"
+	claimed.TargetOS = targetMacOS
+	if err := claimLeaseForRepoConfig("static_friendly-example-com", "friendly-slug", claimed, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	registerTargetFlags(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := autoRouteStaticLease(&cfg, fs, "friendly-slug"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != staticProvider || cfg.Static.ID != "static_friendly-example-com" || cfg.Static.Name != "friendly-slug" {
+		t.Fatalf("static identity not restored: provider=%q id=%q name=%q", cfg.Provider, cfg.Static.ID, cfg.Static.Name)
+	}
+	if cfg.Static.Host != "friendly.example.com" || cfg.Static.User != "builder" || cfg.Static.Port != "2202" || cfg.Static.WorkRoot != "/work/friendly" || cfg.TargetOS != targetMacOS {
+		t.Fatalf("friendly static route details not restored: cfg=%#v static=%#v", cfg, cfg.Static)
 	}
 }
 
@@ -147,6 +180,37 @@ func TestAutoRouteStaticLeaseRespectsExplicitProviderFlag(t *testing.T) {
 	}
 	if cfg.Static.Host != "" {
 		t.Fatalf("static.host=%q, want empty (non-ssh provider)", cfg.Static.Host)
+	}
+}
+
+func TestAutoRouteStaticLeaseSkipsClaimScanForExplicitNonStaticProvider(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := filepath.Join(dir, "claims")
+	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claimsDir, "broken.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	registerTargetFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "hetzner"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := autoRouteStaticLease(&cfg, fs, "friendly-slug"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "hetzner" {
+		t.Fatalf("provider=%q, want hetzner", cfg.Provider)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,13 @@ func testRuntime(httpClient *http.Client) core.Runtime {
 		Clock:  testClock{},
 		HTTP:   httpClient,
 	}
+}
+
+func withWaitForRunningPollInterval(t *testing.T, interval time.Duration) {
+	t.Helper()
+	old := waitForRunningPollInterval
+	waitForRunningPollInterval = interval
+	t.Cleanup(func() { waitForRunningPollInterval = old })
 }
 
 // --- Provider registration ---
@@ -177,6 +185,9 @@ func TestNormalizeSemaphoreHost(t *testing.T) {
 		{name: "strips trailing slash", input: "myorg.semaphoreci.com/", want: "myorg.semaphoreci.com"},
 		{name: "https url", input: "https://myorg.semaphoreci.com/", want: "myorg.semaphoreci.com"},
 		{name: "host with port", input: "https://myorg.semaphoreci.com:443", want: "myorg.semaphoreci.com:443"},
+		{name: "rejects plaintext url", input: "http://myorg.semaphoreci.com", wantErr: "not an API URL"},
+		{name: "rejects explicit userinfo", input: "https://user:pass@attacker.example", wantErr: "not an API URL"},
+		{name: "rejects bare userinfo confusion", input: "trusted.example@attacker.example", wantErr: "not an API URL"},
 		{name: "rejects api path", input: "https://myorg.semaphoreci.com/api/v1alpha", wantErr: "not an API URL"},
 		{name: "rejects query", input: "https://myorg.semaphoreci.com?token=secret", wantErr: "not an API URL"},
 		{name: "rejects path without scheme", input: "myorg.semaphoreci.com/api/v1alpha", wantErr: "not an API URL"},
@@ -299,6 +310,96 @@ func TestGetJobStatus(t *testing.T) {
 	}
 	if status.SSHPort != 40010 {
 		t.Errorf("port = %d", status.SSHPort)
+	}
+}
+
+func TestWaitForRunningReturnsPermanentStatusErrors(t *testing.T) {
+	withWaitForRunningPollInterval(t, 0)
+	for _, tt := range []struct {
+		name      string
+		status    int
+		body      string
+		wantError string
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, body: "bad token", wantError: "returned 401"},
+		{name: "not found", status: http.StatusNotFound, body: "missing", wantError: "returned 404"},
+		{name: "malformed json", status: http.StatusOK, body: "{", wantError: "unexpected end of JSON input"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			host := strings.TrimPrefix(server.URL, "https://")
+			client := &apiClient{host: host, token: "tok", http: server.Client()}
+
+			_, _, err := client.WaitForRunning(context.Background(), "job-123", func() {})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("err=%v, want %q", err, tt.wantError)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d want 1 permanent failure", calls)
+			}
+		})
+	}
+}
+
+func TestWaitForRunningRetriesTransientStatusError(t *testing.T) {
+	withWaitForRunningPollInterval(t, 0)
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, "temporary")
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"metadata": map[string]string{"name": "crabbox testbox"},
+			"status": map[string]any{
+				"state": "RUNNING",
+				"agent": map[string]any{
+					"ip": "1.2.3.4",
+					"ports": []map[string]any{
+						{"name": "ssh", "number": 40010},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "https://")
+	client := &apiClient{host: host, token: "tok", http: server.Client()}
+
+	ip, port, err := client.WaitForRunning(context.Background(), "job-123", func() {})
+	if err != nil {
+		t.Fatalf("WaitForRunning err=%v", err)
+	}
+	if ip != "1.2.3.4" || port != 40010 {
+		t.Fatalf("target=%s:%d want 1.2.3.4:40010", ip, port)
+	}
+	if calls != 2 {
+		t.Fatalf("calls=%d want 2", calls)
+	}
+}
+
+func TestRetryableJobStatusErrorUsesPollingContext(t *testing.T) {
+	if !retryableJobStatusError(context.Background(), context.DeadlineExceeded) {
+		t.Fatal("per-request deadline should be retryable while polling context is active")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if retryableJobStatusError(ctx, context.DeadlineExceeded) {
+		t.Fatal("deadline should not be retryable after polling context is canceled")
+	}
+	if retryableJobStatusError(context.Background(), &semaphoreAPIError{StatusCode: http.StatusUnauthorized}) {
+		t.Fatal("401 should not be retryable")
+	}
+	if !retryableJobStatusError(context.Background(), &semaphoreAPIError{StatusCode: http.StatusTooManyRequests}) {
+		t.Fatal("429 should be retryable")
 	}
 }
 
@@ -459,12 +560,270 @@ func TestResolveByJobIDRejectsNonCrabboxJob(t *testing.T) {
 		client: &apiClient{host: host, token: "tok", http: server.Client()},
 	}
 
-	_, err := backend.resolveByJobID(context.Background(), "job-123")
+	_, err := backend.resolveByJobID(context.Background(), "job-123", false, false)
 	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
 		t.Fatalf("resolve error = %v, want Crabbox-managed rejection", err)
 	}
 	if debugKeyHit {
 		t.Fatal("debug SSH key endpoint should not be called for non-Crabbox jobs")
+	}
+}
+
+func TestResolveByJobIDRejectsIncompleteSSHTarget(t *testing.T) {
+	tests := []struct {
+		name  string
+		ip    string
+		ports []map[string]any
+	}{
+		{
+			name:  "empty ip",
+			ip:    "",
+			ports: []map[string]any{{"name": "ssh", "number": 40010}},
+		},
+		{
+			name:  "missing ssh port",
+			ip:    "1.2.3.4",
+			ports: []map[string]any{{"name": "http", "number": 80}},
+		},
+		{
+			name:  "zero ssh port",
+			ip:    "1.2.3.4",
+			ports: []map[string]any{{"name": "ssh", "number": 0}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			debugKeyHit := false
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+					json.NewEncoder(w).Encode(map[string]any{
+						"metadata": map[string]string{
+							"name": "crabbox testbox blue-lobster",
+						},
+						"status": map[string]any{
+							"state": "RUNNING",
+							"agent": map[string]any{
+								"ip":    tt.ip,
+								"ports": tt.ports,
+							},
+						},
+					})
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+					debugKeyHit = true
+				}
+				w.WriteHeader(404)
+			}))
+			defer server.Close()
+
+			host := strings.TrimPrefix(server.URL, "https://")
+			backend := &semaphoreBackend{
+				spec:   Provider{}.Spec(),
+				cfg:    testConfig(host),
+				rt:     testRuntime(server.Client()),
+				client: &apiClient{host: host, token: "tok", http: server.Client()},
+			}
+
+			_, err := backend.resolveByJobID(context.Background(), "job-123", false, false)
+			if err == nil || !strings.Contains(err.Error(), "SSH endpoint is not ready") {
+				t.Fatalf("resolve error = %v, want SSH endpoint readiness error", err)
+			}
+			if debugKeyHit {
+				t.Fatal("debug SSH key endpoint should not be called before SSH endpoint is ready")
+			}
+		})
+	}
+}
+
+func TestResolveByJobIDReleaseOnlyAllowsIncompleteSSHTarget(t *testing.T) {
+	debugKeyHit := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{
+					"name": "crabbox testbox blue-lobster",
+				},
+				"status": map[string]any{
+					"state": "RUNNING",
+					"agent": map[string]any{
+						"ip":    "",
+						"ports": []map[string]any{},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+			debugKeyHit = true
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	target, err := backend.resolveByJobID(context.Background(), "job-123", true, false)
+	if err != nil {
+		t.Fatalf("resolve release-only: %v", err)
+	}
+	if target.LeaseID != "sem_job-123" || target.Server.CloudID != "job-123" || target.SSH.Host != "" {
+		t.Fatalf("target=%#v, want release-only identity without SSH target", target)
+	}
+	if debugKeyHit {
+		t.Fatal("debug SSH key endpoint should not be called for release-only resolution")
+	}
+}
+
+func TestResolveByJobIDReleaseOnlySkipsReadySSHTarget(t *testing.T) {
+	debugKeyHit := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{
+					"name": "crabbox testbox blue-lobster",
+				},
+				"status": map[string]any{
+					"state": "RUNNING",
+					"agent": map[string]any{
+						"ip": "1.2.3.4",
+						"ports": []map[string]any{
+							{"name": "ssh", "number": 40010},
+						},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+			debugKeyHit = true
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	target, err := backend.resolveByJobID(context.Background(), "job-123", true, false)
+	if err != nil {
+		t.Fatalf("resolve release-only: %v", err)
+	}
+	if target.LeaseID != "sem_job-123" || target.Server.PublicNet.IPv4.IP != "1.2.3.4" || target.SSH.Host != "" {
+		t.Fatalf("target=%#v, want release-only server identity without SSH target", target)
+	}
+	if debugKeyHit {
+		t.Fatal("debug SSH key endpoint should not be called for release-only resolution")
+	}
+}
+
+func TestResolveStatusOnlyAllowsIncompleteSSHTarget(t *testing.T) {
+	debugKeyHit := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{
+					"name": "crabbox testbox blue-lobster",
+				},
+				"status": map[string]any{
+					"state": "RUNNING",
+					"agent": map[string]any{
+						"ip":    "",
+						"ports": []map[string]any{},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+			debugKeyHit = true
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "https://")
+	backend := &semaphoreBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testConfig(host),
+		rt:     testRuntime(server.Client()),
+		client: &apiClient{host: host, token: "tok", http: server.Client()},
+	}
+
+	target, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "sem_job-123", StatusOnly: true})
+	if err != nil {
+		t.Fatalf("resolve status-only: %v", err)
+	}
+	if target.LeaseID != "sem_job-123" || target.SSH.Host != "" {
+		t.Fatalf("target=%#v, want status-only identity without SSH target", target)
+	}
+	if debugKeyHit {
+		t.Fatal("debug SSH key endpoint should not be called for status-only resolution")
+	}
+}
+
+func TestResolveStatusKeepsReadySSHTarget(t *testing.T) {
+	for _, readyProbe := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ready_probe_%t", readyProbe), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			debugKeyHit := false
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {
+					json.NewEncoder(w).Encode(map[string]any{
+						"metadata": map[string]string{
+							"name": "crabbox testbox blue-lobster",
+						},
+						"status": map[string]any{
+							"state": "RUNNING",
+							"agent": map[string]any{
+								"ip": "1.2.3.4",
+								"ports": []map[string]any{
+									{"name": "ssh", "number": 40010},
+								},
+							},
+						},
+					})
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/debug_ssh_key") {
+					debugKeyHit = true
+					json.NewEncoder(w).Encode(map[string]string{"key": "test-private-key"})
+					return
+				}
+				w.WriteHeader(404)
+			}))
+			defer server.Close()
+
+			host := strings.TrimPrefix(server.URL, "https://")
+			backend := &semaphoreBackend{
+				spec:   Provider{}.Spec(),
+				cfg:    testConfig(host),
+				rt:     testRuntime(server.Client()),
+				client: &apiClient{host: host, token: "tok", http: server.Client()},
+			}
+
+			target, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "sem_job-123", StatusOnly: true, ReadyProbe: readyProbe})
+			if err != nil {
+				t.Fatalf("resolve status: %v", err)
+			}
+			if target.SSH.Host != "1.2.3.4" || target.SSH.Port != "40010" {
+				t.Fatalf("ssh target=%#v, want ready SSH target", target.SSH)
+			}
+			if !debugKeyHit {
+				t.Fatal("debug SSH key endpoint should be called for ready status resolution")
+			}
+		})
 	}
 }
 

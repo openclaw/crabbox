@@ -77,7 +77,7 @@ broker:
 
 provider: aws            # default provider when --provider is unset
 target: linux            # default target OS: linux | macos | windows
-architecture: amd64      # amd64 | arm64; arm64 is Linux-only on AWS/Azure
+architecture: amd64      # amd64 | arm64; arm64 supports Linux on AWS/Azure and native Windows on Azure
 os: ubuntu:26.04         # OS image; resolved to per-provider images for linux
 windows:
   mode: normal           # normal | wsl2 when target=windows
@@ -290,6 +290,27 @@ port `8787`. Auth uses `az account get-access-token --resource
 https://dynamicsessions.io` unless `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` is
 set.
 
+### Anthropic Sandbox Runtime
+
+```yaml
+provider: anthropic-sandbox-runtime
+anthropicSandboxRuntime:
+  cliPath: srt
+  settings: "" # empty means Anthropic Sandbox Runtime default ~/.srt-settings.json
+  debug: false
+```
+
+`anthropic-sandbox-runtime` is a local one-shot delegated-run provider. It
+shells out to Anthropic Sandbox Runtime with
+`srt [--debug] [--settings <path>] -c <command>`. Use
+`--anthropic-sandbox-runtime-cli`, `--anthropic-sandbox-runtime-settings`, and
+`--anthropic-sandbox-runtime-debug` for command-line overrides, or
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI`,
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS`, and
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG` for environment overrides. Crabbox
+validates the provider config keys; Anthropic Sandbox Runtime validates its own
+settings JSON and enforcement policy.
+
 ### Hetzner
 
 Hetzner credentials and image come from broker-side config. Repos do not need a
@@ -438,6 +459,33 @@ Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
 the container.
 
+### Apple VZ
+
+```yaml
+provider: apple-vz
+appleVZ:
+  # Optional for normal Homebrew/release installs.
+  helperPath: /custom/path/crabbox-apple-vz-helper
+  image: https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img
+  imageSHA256: 5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b
+  user: crabbox
+  workRoot: /work/crabbox
+  cpus: 4
+  memoryMiB: 8192
+  diskGiB: 30
+```
+
+`provider: applevz` is an alias for `apple-vz`. The backend drives a small
+local helper that boots a headless Linux VM with Apple's
+`Virtualization.framework`, then exposes guest SSH through a host-local proxy so
+Crabbox can use the normal SSH sync and run path. The image default follows the
+portable `osImage` selector unless `appleVZ.image` is set explicitly. Default
+remote images include pinned SHA-256 checksums; custom remote image URLs must
+set `appleVZ.imageSHA256`, while local image paths may omit it. Apple Silicon
+Homebrew bottles and release archives install the helper beside `crabbox`;
+`helperPath` is only needed for a custom or source-built helper. The effective
+architecture defaults to `arm64`, and explicit `amd64` is rejected.
+
 ### Multipass
 
 ```yaml
@@ -512,6 +560,8 @@ placeholders, applies it with `kubectl`, and starts it with `virtctl`.
 
 ### External provider
 
+Protocol adapter:
+
 ```yaml
 provider: external
 external:
@@ -530,6 +580,47 @@ operation and returns one JSON response on stdout. This keeps internal control
 plane logic outside Crabbox while preserving normal SSH sync, rsync, WebVNC,
 and command execution. Crabbox writes private per-lease routing state for
 generated stop commands; `routingFile` is normally set only by those commands.
+
+Declarative CLI:
+
+```yaml
+provider: external
+external:
+  lifecycle:
+    acquire:
+      steps:
+        - [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
+        - [devboxctl, setup, "{{resourceName}}"]
+      rollbackOnFailure: true
+      env:
+        DEVBOX_TOKEN: "{{env.DEVBOX_TOKEN}}"
+    list:
+      argv: [devboxctl, list, --format, json]
+      output: json-name-array
+      namePrefix: "cbx-"
+    release:
+      argv: [devboxctl, rm, --yes, "{{resourceName}}"]
+  connection:
+    resourceName: "{{leaseIdSlug}}"
+    cloudId: devboxes/{{resourceName}}
+    serverType: "{{config.size}}"
+    ssh:
+      user: "{{env.DEVBOX_USER}}"
+      host: "{{resourceName}}"
+      sshConfigProxy: true
+  config:
+    size: cpu16
+  workRoot: /home/developer/crabbox
+```
+
+Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
+not shell commands. Acquire steps can opt into release cleanup with
+`rollbackOnFailure: true`. Put credentials in an operation `env:` map, not in
+`argv` or `steps`; environment-derived argv values require the explicit
+`allowEnvArgv: true` compatibility opt-in, and environment-derived resource
+names require `connection.allowEnvResourceName: true`. See
+[External Provider](../providers/external.md) for placeholders, output
+semantics, inventory formats, routing behavior, and security guidance.
 
 ### Daytona
 

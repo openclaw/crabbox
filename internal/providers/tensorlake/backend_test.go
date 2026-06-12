@@ -38,6 +38,9 @@ func TestProviderSpec(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want [{linux}]", spec.Targets)
 	}
+	if spec.Features.Has(core.FeatureURLBridge) {
+		t.Fatalf("features=%#v should not advertise unsupported URL bridge", spec.Features)
+	}
 }
 
 func TestProviderForResolvesNameAndAliases(t *testing.T) {
@@ -246,6 +249,71 @@ func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
 	if _, _, _, err := resolveLeaseID("", "", false, 0); err == nil {
 		t.Fatalf("expected error for empty id")
 	}
+}
+
+func TestStatusReturnsDescribeErrorWithoutWait(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tlsbx_statusmissing123"
+	if err := claimLeaseForRepoProvider(leaseID, "status-missing", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx describe": {stderr: "sandbox not found\n", exitCode: 1},
+	}, nil)
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-missing"})
+	if err == nil || !strings.Contains(err.Error(), "tensorlake sbx describe") || !strings.Contains(err.Error(), "sandbox not found") {
+		t.Fatalf("Status err=%v, want describe failure", err)
+	}
+}
+
+func TestStatusWaitTimeoutIncludesDescribeError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tlsbx_statuswait123"
+	if err := claimLeaseForRepoProvider(leaseID, "status-wait", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx describe": {stderr: "auth denied\n", exitCode: 1},
+	}, nil)
+	rt := newTestRuntime(runner)
+	rt.Clock = &stepClock{now: time.Unix(0, 0), step: time.Second}
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-wait", Wait: true, WaitTimeout: time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") || !strings.Contains(err.Error(), "auth denied") {
+		t.Fatalf("Status err=%v, want timeout with describe failure", err)
+	}
+}
+
+func TestStatusWaitContextExpiryIncludesDescribeError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "tlsbx_statusctx123"
+	if err := claimLeaseForRepoProvider(leaseID, "status-context", providerName, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx describe": {stderr: "auth denied\n", exitCode: 1},
+	}, nil)
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := backend.Status(ctx, StatusRequest{ID: "status-context", Wait: true, WaitTimeout: time.Minute})
+	if err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "auth denied") {
+		t.Fatalf("Status err=%v, want context cancellation with describe failure", err)
+	}
+}
+
+type stepClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *stepClock) Now() time.Time {
+	c.now = c.now.Add(c.step)
+	return c.now
 }
 
 func TestNewSandboxNameUsesRepoName(t *testing.T) {
@@ -490,6 +558,80 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	var ee ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {
 		t.Fatalf("err=%v want ExitError code=7", err)
+	}
+}
+
+func TestTensorlakeDeleteSyncDoesNotRemoveWorkspaceBeforeUpload(t *testing.T) {
+	repoRoot := newGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repoRoot, "hello.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := newRunner(
+		map[string]scriptedReply{
+			"sbx create":    {stdout: "syncdelete012345678\n"},
+			"sbx cp":        {exitCode: 7, err: errors.New("upload failed")},
+			"sbx terminate": {stdout: "syncdelete012345678\n"},
+		},
+		nil,
+	)
+	cfg := newTestConfig()
+	cfg.Sync.Delete = true
+	backend := NewTensorlakeBackend(Provider{}.Spec(), cfg, newTestRuntime(runner)).(*tensorlakeBackend)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: repoRoot},
+		Command: []string{"echo", "ok"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "upload failed") {
+		t.Fatalf("err=%v, want upload failure", err)
+	}
+	prepare := findCallN(runner, "sbx exec", 0)
+	if prepare == nil {
+		t.Fatal("missing prepare command")
+	}
+	prepareText := strings.Join(prepare.Args, " ")
+	if strings.Contains(prepareText, "rm -rf") {
+		t.Fatalf("prepare deleted workspace before upload: %v", prepare.Args)
+	}
+	if !strings.Contains(prepareText, "mkdir -p") {
+		t.Fatalf("prepare should still create workspace: %v", prepare.Args)
+	}
+	if verbs := callVerbs(runner); !reflect.DeepEqual(verbs, []string{"sbx create", "sbx exec", "sbx cp", "sbx terminate"}) {
+		t.Fatalf("verbs=%v", verbs)
+	}
+}
+
+func TestTensorlakeDeleteSyncExtractStagesBeforeReplacingWorkspace(t *testing.T) {
+	cmd := tensorlakeExtractArchiveCommand("/workspace/crabbox", "/tmp/archive.tgz", true)
+	tarAt := strings.Index(cmd, "tar -xzf '/tmp/archive.tgz'")
+	replaceAt := strings.Index(cmd, "mv '/workspace/crabbox' '/workspace/.crabbox-backup-")
+	if tarAt < 0 || replaceAt < 0 {
+		t.Fatalf("command missing staged extract or replacement: %s", cmd)
+	}
+	if replaceAt < tarAt {
+		t.Fatalf("workspace is replaced before archive extraction: %s", cmd)
+	}
+	if strings.Contains(cmd[:tarAt], "rm -rf '/workspace/crabbox'") {
+		t.Fatalf("workspace deleted before archive extraction: %s", cmd)
+	}
+	if !strings.Contains(cmd, "rm -f '/tmp/archive.tgz'") {
+		t.Fatalf("command should clean remote archive: %s", cmd)
+	}
+}
+
+func TestTensorlakeExtractArchiveCommandPreservesExtractStatus(t *testing.T) {
+	cmd := tensorlakeExtractArchiveCommand("/workspace/crabbox", "/tmp/archive.tgz", false)
+	for _, want := range []string{
+		"tar -xzf '/tmp/archive.tgz' -C '/workspace/crabbox'",
+		"; crabbox_status=$?;",
+		"; rm -f '/tmp/archive.tgz';",
+		"; exit \"$crabbox_status\"",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("command missing %q: %s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "rm -f '/tmp/archive.tgz' exit") {
+		t.Fatalf("cleanup and exit are not separated: %s", cmd)
 	}
 }
 

@@ -11,10 +11,12 @@ import (
 )
 
 type externalRoutingState struct {
-	Command  string         `json:"command"`
-	Args     []string       `json:"args,omitempty"`
-	Config   map[string]any `json:"config,omitempty"`
-	WorkRoot string         `json:"workRoot,omitempty"`
+	Command    string                   `json:"command,omitempty"`
+	Args       []string                 `json:"args,omitempty"`
+	Config     map[string]any           `json:"config,omitempty"`
+	Lifecycle  ExternalLifecycleConfig  `json:"lifecycle,omitempty"`
+	Connection ExternalConnectionConfig `json:"connection,omitempty"`
+	WorkRoot   string                   `json:"workRoot,omitempty"`
 }
 
 func ExternalRoutingPath(leaseID string) (string, error) {
@@ -37,10 +39,12 @@ func PersistExternalRouting(leaseID string, cfg ExternalConfig) (string, error) 
 		return "", err
 	}
 	data, err := json.MarshalIndent(externalRoutingState{
-		Command:  cfg.Command,
-		Args:     append([]string(nil), cfg.Args...),
-		Config:   cfg.Config,
-		WorkRoot: cfg.WorkRoot,
+		Command:    cfg.Command,
+		Args:       append([]string(nil), cfg.Args...),
+		Config:     cfg.Config,
+		Lifecycle:  cfg.Lifecycle,
+		Connection: cfg.Connection,
+		WorkRoot:   cfg.WorkRoot,
 	}, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("encode external routing: %w", err)
@@ -93,6 +97,8 @@ func LoadExternalRouting(path string) (ExternalConfig, error) {
 		Command:     state.Command,
 		Args:        append([]string(nil), state.Args...),
 		Config:      state.Config,
+		Lifecycle:   state.Lifecycle,
+		Connection:  state.Connection,
 		WorkRoot:    state.WorkRoot,
 		RoutingFile: path,
 	}, nil

@@ -3,9 +3,11 @@
 package islo
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -86,4 +88,113 @@ func TestLiveIsloStatusClassification(t *testing.T) {
 		}
 	}
 	t.Logf("live Islo status histogram: %v", hist)
+}
+
+// TestLiveIsloPauseResumeLifecycle creates a real sandbox and proves the
+// provider lifecycle end to end. It is separately opt-in because it mutates
+// paid provider state.
+//
+//	CRABBOX_LIVE_ISLO_PAUSE_RESUME=1 ISLO_API_KEY=... \
+//	  go test -tags smoke -run TestLiveIsloPauseResumeLifecycle -v ./internal/providers/islo
+func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("live Islo pause/resume skipped in -short mode")
+	}
+	if os.Getenv("CRABBOX_LIVE_ISLO_PAUSE_RESUME") != "1" {
+		t.Skip("CRABBOX_LIVE_ISLO_PAUSE_RESUME=1 not set")
+	}
+	apiKey := strings.TrimSpace(os.Getenv("ISLO_API_KEY"))
+	if apiKey == "" {
+		t.Skip("ISLO_API_KEY not set; skipping live Islo pause/resume")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	cfg := Config{}
+	cfg.Islo.APIKey = apiKey
+	cfg.Islo.BaseURL = blank(strings.TrimSpace(os.Getenv("ISLO_BASE_URL")), "https://api.islo.dev")
+	cfg.Islo.Image = blank(strings.TrimSpace(os.Getenv("CRABBOX_LIVE_ISLO_IMAGE")), "docker.io/library/ubuntu:26.04")
+	cfg.Islo.Workdir = "crabbox-live"
+	cfg.Islo.VCPUs = 1
+	cfg.Islo.MemoryMB = 1024
+	cfg.Islo.DiskGB = 10
+
+	var stdout, stderr bytes.Buffer
+	backend := NewIsloBackend(Provider{}.Spec(), cfg, Runtime{
+		HTTP:   &http.Client{Timeout: 30 * time.Second},
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}).(*isloBackend)
+	repo := Repo{Name: "pause-resume-live", Root: t.TempDir()}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := backend.Warmup(ctx, WarmupRequest{Repo: repo, Keep: true}); err != nil {
+		t.Fatalf("warmup: %v\n%s", err, stderr.String())
+	}
+	match := regexp.MustCompile(`(?m)^leased ([^ ]+) `).FindStringSubmatch(stdout.String())
+	if len(match) != 2 {
+		t.Fatalf("warmup lease not found in output: %q", stdout.String())
+	}
+	leaseID := match[1]
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		if err := backend.Stop(cleanupCtx, StopRequest{ID: leaseID}); err != nil {
+			t.Logf("cleanup stop failed: %v", err)
+		}
+	}()
+
+	if err := backend.Pause(ctx, PauseRequest{ID: leaseID}); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	waitForLiveIsloState(t, ctx, backend, leaseID, "paused")
+	if _, ok, err := resolveLeaseClaim(leaseID); err != nil || !ok {
+		t.Fatalf("claim after pause ok=%v err=%v", ok, err)
+	}
+
+	if err := backend.Resume(ctx, ResumeRequest{ID: leaseID}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	status, err := backend.Status(ctx, StatusRequest{ID: leaseID, Wait: true, WaitTimeout: 2 * time.Minute})
+	if err != nil {
+		t.Fatalf("status after resume: %v", err)
+	}
+	if !status.Ready || status.State != "running" {
+		t.Fatalf("status after resume=%#v", status)
+	}
+
+	stdout.Reset()
+	result, err := backend.Run(ctx, RunRequest{
+		Repo:    repo,
+		ID:      leaseID,
+		Keep:    true,
+		NoSync:  true,
+		Command: []string{"printf", "crabbox-islo-resume-ok"},
+	})
+	if err != nil {
+		t.Fatalf("run after resume: %v\n%s", err, stderr.String())
+	}
+	if result.ExitCode != 0 || !strings.Contains(stdout.String(), "crabbox-islo-resume-ok") {
+		t.Fatalf("run result=%#v stdout=%q", result, stdout.String())
+	}
+}
+
+func waitForLiveIsloState(t *testing.T, ctx context.Context, backend *isloBackend, leaseID, want string) {
+	t.Helper()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		status, err := backend.Status(ctx, StatusRequest{ID: leaseID})
+		if err != nil {
+			t.Fatalf("status waiting for %s: %v", want, err)
+		}
+		if status.State == want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("waiting for state=%s: %v", want, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }

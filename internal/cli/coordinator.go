@@ -159,9 +159,11 @@ type CoordinatorUsageResponse struct {
 }
 
 type CoordinatorWhoami struct {
-	Owner string `json:"owner"`
-	Org   string `json:"org"`
-	Auth  string `json:"auth"`
+	Owner          string `json:"owner"`
+	Org            string `json:"org"`
+	Auth           string `json:"auth"`
+	Admin          bool   `json:"admin,omitempty"`
+	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
 }
 
 type CoordinatorProviderReadiness struct {
@@ -271,13 +273,14 @@ type CoordinatorGitHubLoginStart struct {
 }
 
 type CoordinatorGitHubLoginPoll struct {
-	Status   string `json:"status"`
-	Token    string `json:"token,omitempty"`
-	Owner    string `json:"owner,omitempty"`
-	Org      string `json:"org,omitempty"`
-	Login    string `json:"login,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Status         string `json:"status"`
+	Token          string `json:"token,omitempty"`
+	Owner          string `json:"owner,omitempty"`
+	Org            string `json:"org,omitempty"`
+	Login          string `json:"login,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type CoordinatorWebVNCTicket struct {
@@ -1797,19 +1800,4 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 
 func coordinatorLeaseHostID(lease CoordinatorLease) string {
 	return firstNonBlank(lease.HostID, lease.HostIDCompat)
-}
-
-func (a App) touchCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, leaseID string) {
-	if leaseID == "" {
-		return
-	}
-	coord, ok, err := newCoordinatorClient(cfg)
-	if err != nil || !ok {
-		return
-	}
-	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	if _, err := coord.TouchLease(callCtx, leaseID); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", leaseID, err)
-	}
 }

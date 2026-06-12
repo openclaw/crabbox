@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,30 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 	}
 	if cfg.WorkRoot != "/home/tester/crabbox" {
 		t.Fatalf("work root=%q", cfg.WorkRoot)
+	}
+}
+
+func TestCommandRoutingArgsPreservesEffectiveConfig(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.KubeVirt.Kubeconfig = "/tmp/kube config"
+	cfg.KubeVirt.Template = "/tmp/vm.yaml"
+	cfg.KubeVirt.SSHKey = "/tmp/id_ed25519"
+	cfg.KubeVirt.SSHPublicKey = "/tmp/id_ed25519.pub"
+	cfg.KubeVirt.DeleteOnRelease = false
+	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	for _, want := range []string{
+		"--kubevirt-kubectl\nkubectl-custom",
+		"--kubevirt-context\ntest-context",
+		"--kubevirt-namespace\ntest-ns",
+		"--kubevirt-kubeconfig\n/tmp/kube config",
+		"--kubevirt-template\n/tmp/vm.yaml",
+		"--kubevirt-ssh-key\n/tmp/id_ed25519",
+		"--kubevirt-ssh-public-key\n/tmp/id_ed25519.pub",
+		"--kubevirt-delete-on-release=false",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("routing args missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -291,11 +316,15 @@ func TestProxyCommandUsesVirtctlControlPlaneForwarding(t *testing.T) {
 		"'--kubeconfig' '/tmp/kube config'",
 		"'--context' 'test-context'",
 		"'--namespace' 'test-ns'",
-		"'port-forward' '--stdio=true' 'vm/crabbox-test-deadbeef/test-ns' '%p'",
+		"'port-forward' '--stdio=true' 'vm/crabbox-test-deadbeef' '%p'",
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("proxy command %q missing %q", command, want)
 		}
+	}
+	wantParts := []string{"virtctl-custom", "--kubeconfig", "/tmp/kube config", "--context", "test-context", "--namespace", "test-ns", "port-forward", "--stdio=true", "vm/crabbox-test-deadbeef", "%p"}
+	if got := backend.proxyCommandParts("crabbox-test-deadbeef"); !reflect.DeepEqual(got, wantParts) {
+		t.Fatalf("proxy command parts=%v want %v", got, wantParts)
 	}
 	target := backend.sshTarget("crabbox-test-deadbeef", "/tmp/id_test")
 	if !target.SSHConfigProxy || target.ProxyCommand == "" || target.Port != "2222" {

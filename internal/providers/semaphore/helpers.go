@@ -76,14 +76,18 @@ func normalizeSemaphoreHost(value string) (string, error) {
 		if err != nil || u.Host == "" {
 			return "", fmt.Errorf("invalid semaphore host %q", value)
 		}
-		if u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
+		if u.Scheme != "https" || u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
 			return "", fmt.Errorf("semaphore host %q must be a host name, not an API URL", value)
 		}
 		raw = u.Host
 	}
 	host := strings.TrimRight(raw, "/")
-	if strings.ContainsAny(host, "/?#") {
+	if strings.ContainsAny(host, "/?#@") {
 		return "", fmt.Errorf("semaphore host %q must be a host name, not an API URL", value)
+	}
+	u, err := url.Parse("https://" + host)
+	if err != nil || u.Host == "" || u.Host != host || u.User != nil || u.Hostname() == "" || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("invalid semaphore host %q", value)
 	}
 	return host, nil
 }

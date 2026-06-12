@@ -17,8 +17,9 @@ aws_guard_select_profile_for_account() {
   local checked_profiles=0
   local candidate_account=""
   local candidate_profile=""
+  local profiles=""
 
-  if candidate_account="$(aws_guard_account_for_profile "" 2>/dev/null)"; then
+  if candidate_account="$(aws_guard_account_for_profile "" 2>/dev/null)" && [[ -n "$candidate_account" ]]; then
     checked_profiles=$((checked_profiles + 1))
     printf 'checked_profile=default-credentials account=%s\n' "$candidate_account" >&2
     if [[ "$candidate_account" == "$coordinator_account" ]]; then
@@ -30,10 +31,14 @@ aws_guard_select_profile_for_account() {
   fi
 
   if [[ "$selected_default" != "1" ]]; then
+    if ! profiles="$(aws configure list-profiles 2>/dev/null)"; then
+      printf 'refusing to %s: failed to enumerate local AWS profiles\n' "$refusal_action" >&2
+      return 1
+    fi
     while IFS= read -r candidate_profile; do
       [[ -n "$candidate_profile" ]] || continue
       checked_profiles=$((checked_profiles + 1))
-      if candidate_account="$(aws_guard_account_for_profile "$candidate_profile" 2>/dev/null)"; then
+      if candidate_account="$(aws_guard_account_for_profile "$candidate_profile" 2>/dev/null)" && [[ -n "$candidate_account" ]]; then
         printf 'checked_profile=%s account=%s\n' "$candidate_profile" "$candidate_account" >&2
         if [[ "$candidate_account" == "$coordinator_account" ]]; then
           selected_profile="$candidate_profile"
@@ -42,7 +47,7 @@ aws_guard_select_profile_for_account() {
       else
         printf 'checked_profile=%s status=unusable\n' "$candidate_profile" >&2
       fi
-    done < <(aws configure list-profiles)
+    done < <(printf '%s\n' "$profiles")
   fi
 
   if [[ -z "$selected_profile" && "$selected_default" != "1" ]]; then
@@ -62,7 +67,14 @@ aws_guard_account_for_selected_profile() {
   local refusal_action="$3"
   local local_account
 
-  local_account="$(aws_guard_account_for_profile "$profile_name")"
+  if ! local_account="$(aws_guard_account_for_profile "$profile_name")"; then
+    printf 'refusing to %s: failed to read local AWS caller identity\n' "$refusal_action" >&2
+    return 1
+  fi
+  if [[ -z "$local_account" ]]; then
+    printf 'refusing to %s: local AWS caller identity returned an empty account\n' "$refusal_action" >&2
+    return 1
+  fi
   if [[ -n "$coordinator_account" && "$local_account" != "$coordinator_account" ]]; then
     printf 'refusing to %s: local AWS account %s does not match coordinator account %s\n' "$refusal_action" "$local_account" "$coordinator_account" >&2
     return 1

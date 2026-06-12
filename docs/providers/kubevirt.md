@@ -9,7 +9,7 @@ Crabbox applies a `VirtualMachine` manifest, starts and stops it with `virtctl`,
 and reaches guest SSH through:
 
 ```text
-virtctl port-forward --stdio=true vm/<name>/<namespace> %p
+virtctl --namespace <namespace> port-forward --stdio=true vm/<name> %p
 ```
 
 That ProxyCommand is used by normal SSH, rsync, command execution, and native

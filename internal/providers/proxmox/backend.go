@@ -85,16 +85,19 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	if server.PublicNet.IPv4.IP == "" {
 		cloudID := server.CloudID
-		server, err = client.GetServer(ctx, server.CloudID)
+		server, err = b.waitForServerIP(ctx, client, cloudID, bootstrapWaitTimeout(cfg))
 		if err != nil {
 			_ = client.DeleteServer(context.Background(), cloudID)
 			return LeaseTarget{}, err
 		}
 	}
 	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
+	if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
 		_ = client.DeleteServer(context.Background(), server.CloudID)
 		return LeaseTarget{}, err
+	}
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
 	}
 	server.Labels["state"] = "ready"
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
@@ -102,6 +105,27 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s node=%s ip=%s\n", leaseID, server.DisplayID(), cfg.Proxmox.Node, server.PublicNet.IPv4.IP)
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b *leaseBackend) waitForServerIP(ctx context.Context, client proxmoxClient, cloudID string, timeout time.Duration) (Server, error) {
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(proxmoxIPPollInterval)
+	defer ticker.Stop()
+	for {
+		server, err := client.GetServer(deadlineCtx, cloudID)
+		if err != nil {
+			return Server{}, err
+		}
+		if server.PublicNet.IPv4.IP != "" {
+			return server, nil
+		}
+		select {
+		case <-deadlineCtx.Done():
+			return Server{}, deadlineCtx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -175,10 +199,11 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	if id == "" {
 		id = req.Lease.LeaseID
 	}
+	leaseID := proxmoxClaimLeaseID(req.Lease.Server, req.Lease.LeaseID)
 	if err := client.DeleteServer(ctx, id); err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
+	removeLeaseClaim(leaseID)
 	return nil
 }
 
@@ -217,8 +242,25 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 			return err
 		}
+		removeLeaseClaim(proxmoxClaimLabelLeaseID(server))
 	}
 	return nil
+}
+
+func proxmoxClaimLeaseID(server Server, fallback string) string {
+	if leaseID := proxmoxClaimLabelLeaseID(server); leaseID != "" {
+		return leaseID
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func proxmoxClaimLabelLeaseID(server Server) string {
+	if server.Labels != nil {
+		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
+			return leaseID
+		}
+	}
+	return ""
 }
 
 var newClient = func(cfg Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }
@@ -240,6 +282,11 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
+
+var waitForSSHReadyFunc = waitForSSHReady
+
+var proxmoxIPPollInterval = 2 * time.Second
+
 func bootstrapWaitTimeout(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)

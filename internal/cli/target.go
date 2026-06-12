@@ -36,17 +36,21 @@ func normalizeTargetConfig(cfg *Config) {
 	if cfg.Provider == "aws" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.SSHUser == baseConfig().SSHUser {
 		cfg.SSHUser = "Administrator"
 	}
-	if cfg.Static.User != "" && cfg.SSHUser == baseConfig().SSHUser {
-		cfg.SSHUser = cfg.Static.User
+	if isStaticProvider(cfg.Provider) {
+		if cfg.Static.User != "" && cfg.SSHUser == baseConfig().SSHUser {
+			cfg.SSHUser = cfg.Static.User
+		}
 	}
 	if isDefaultWorkRoot(cfg.WorkRoot) {
 		cfg.WorkRoot = defaultWorkRootForTarget(cfg.TargetOS, cfg.WindowsMode)
 	}
-	if cfg.Static.Port != "" && cfg.SSHPort == baseConfig().SSHPort {
-		cfg.SSHPort = cfg.Static.Port
-	}
-	if cfg.Static.WorkRoot != "" {
-		cfg.WorkRoot = cfg.Static.WorkRoot
+	if isStaticProvider(cfg.Provider) {
+		if cfg.Static.Port != "" && cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = cfg.Static.Port
+		}
+		if cfg.Static.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Static.WorkRoot
+		}
 	}
 	if (cfg.Provider == "namespace-devbox" || cfg.Provider == "namespace") && isDefaultWorkRoot(cfg.WorkRoot) && cfg.Namespace.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Namespace.WorkRoot
@@ -124,15 +128,29 @@ func validateProviderTarget(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Architecture == ArchitectureARM64 {
-		if cfg.TargetOS != targetLinux {
-			return exit(2, "architecture=arm64 currently supports target=linux only")
+	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
+		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
+	}
+	if (provider.Name() == "tart" || provider.Name() == "apple-vz") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
+	}
+	if effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
+		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vz" {
+			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, or provider=apple-vz")
 		}
-		if provider.Name() != "azure" && provider.Name() != "aws" {
-			return exit(2, "architecture=arm64 currently supports provider=azure or provider=aws")
+		if cfg.TargetOS != targetLinux &&
+			!(provider.Name() == "azure" && cfg.TargetOS == targetWindows) &&
+			!(provider.Name() == "tart" && cfg.TargetOS == targetMacOS) {
+			return exit(2, "architecture=arm64 currently supports target=linux, provider=azure target=windows, or provider=tart target=macos only")
+		}
+		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 {
+			return exit(2, "provider=azure target=windows architecture=arm64 supports windows.mode=normal only; windows.mode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support")
+		}
+		if provider.Name() == "azure" && cfg.TargetOS == targetWindows && !azureWindowsARM64HasExplicitImage(cfg) {
+			return exit(2, "provider=azure target=windows architecture=arm64 requires azure.image or CRABBOX_AZURE_IMAGE with an ARM64 Windows image; the built-in Windows default is x64")
 		}
 	}
-	if cfg.TargetOS == targetLinux && strings.TrimSpace(cfg.ServerType) != "" {
+	if (cfg.TargetOS == targetLinux || (provider.Name() == "azure" && cfg.TargetOS == targetWindows)) && strings.TrimSpace(cfg.ServerType) != "" {
 		switch provider.Name() {
 		case "aws":
 			if err := validateArchitectureServerType("AWS instance type", cfg, awsInstanceTypeIsARM64(cfg.ServerType)); err != nil {
@@ -198,10 +216,6 @@ func providerSpecSupportsTarget(spec ProviderSpec, targetOS, windowsMode string)
 	return false
 }
 
-func unsupportedManagedTargetMessage(provider, target string) string {
-	return unsupportedManagedTargetMessageForConfig(provider, Config{TargetOS: target, WindowsMode: windowsModeNormal})
-}
-
 func unsupportedManagedTargetMessageForConfig(provider string, cfg Config) string {
 	target := cfg.TargetOS
 	if provider == "azure" {
@@ -244,8 +258,16 @@ const staticLeaseIDPrefix = "static_"
 // and restores the original static host from the local claim when the caller
 // did not already pass --static-host.
 func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
-	suffix, ok := strings.CutPrefix(strings.TrimSpace(id), staticLeaseIDPrefix)
-	if !ok || suffix == "" {
+	id = strings.TrimSpace(id)
+	suffix, hasStaticPrefix := strings.CutPrefix(id, staticLeaseIDPrefix)
+	if flagWasSet(fs, "provider") && !isStaticProvider(cfg.Provider) {
+		return nil
+	}
+	claim, hasClaim, err := staticLeaseClaim(id)
+	if err != nil {
+		return err
+	}
+	if (!hasStaticPrefix || suffix == "") && !hasClaim {
 		return nil
 	}
 	if !flagWasSet(fs, "provider") {
@@ -254,11 +276,8 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if !isStaticProvider(cfg.Provider) {
 		return nil
 	}
-	claim, ok, err := staticLeaseClaim(id)
-	if err != nil {
-		return err
-	}
-	if ok {
+	if hasClaim {
+		restoreStaticClaimIdentity(cfg, claim)
 		restoreStaticClaimTarget(cfg, fs, claim)
 	}
 	normalizeTargetConfig(cfg)
@@ -271,6 +290,15 @@ func staticLeaseClaim(id string) (leaseClaim, bool, error) {
 		return leaseClaim{}, false, err
 	}
 	return claim, true, nil
+}
+
+func restoreStaticClaimIdentity(cfg *Config, claim leaseClaim) {
+	if strings.TrimSpace(claim.LeaseID) != "" {
+		cfg.Static.ID = strings.TrimSpace(claim.LeaseID)
+	}
+	if strings.TrimSpace(claim.Slug) != "" {
+		cfg.Static.Name = strings.TrimSpace(claim.Slug)
+	}
 }
 
 func restoreStaticClaimTarget(cfg *Config, fs *flag.FlagSet, claim leaseClaim) {
@@ -300,10 +328,6 @@ func isWindowsNativeTarget(target SSHTarget) bool {
 
 func isWindowsWSL2Target(target SSHTarget) bool {
 	return target.TargetOS == targetWindows && target.WindowsMode == windowsModeWSL2
-}
-
-func isPOSIXTarget(target SSHTarget) bool {
-	return !isWindowsNativeTarget(target)
 }
 
 func remoteJoin(cfg Config, parts ...string) string {

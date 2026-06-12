@@ -13,8 +13,9 @@ import (
 // BridgePeer is the cross-provider shape returned by `crabbox pond peers`.
 // One row per pond member, regardless of which plane carries that member:
 //
-//   - Tailscale-capable managed Linux providers (Hetzner / Azure / GCP)
-//     surface with Transport="tailnet" and Endpoint=tailnet IPv4/FQDN.
+//   - Bidirectional Tailscale providers surface with Transport="tailnet" and
+//     Endpoint=tailnet IPv4/FQDN. Outbound-only userspace integrations such as
+//     Islo keep their dialable URL transport and report Tailscale in Note.
 //   - SSH-lease providers (exe.dev / RunPod / Daytona / Sprites / Namespace /
 //     Semaphore) surface with Transport="ssh" and Endpoint=ssh://host:port.
 //   - Delegated-with-URL providers (Islo, E2B, Modal, Cloudflare, Railway,
@@ -61,6 +62,11 @@ const (
 	TransportPending = "pending"
 )
 
+var (
+	ErrTailnetPeerUnavailable           = errors.New("tailnet peer unavailable")
+	ErrTailnetPeerValidationUnavailable = errors.New("tailnet peer validation unavailable")
+)
+
 // BridgePeerTarget is a single externally reachable HTTPS endpoint published
 // for a sandbox port. Different providers will populate it from different
 // native primitives (islo shares, modal web endpoints, e2b previews, …); the
@@ -95,6 +101,12 @@ type BridgeProvider interface {
 	ListPeerTargets(ctx context.Context, leaseID string) ([]BridgePeerTarget, error)
 }
 
+// TailnetPeerValidator lets dual-plane delegated providers revalidate a local
+// tailnet claim before it is advertised as reachable.
+type TailnetPeerValidator interface {
+	ValidateTailnetPeer(ctx context.Context, leaseID string) (TailscaleMetadata, error)
+}
+
 // pondPeersFlags holds the parsed flags for `crabbox pond peers`. It is
 // extracted so the command can be unit tested without touching the global
 // flag set.
@@ -104,67 +116,6 @@ type pondPeersFlags struct {
 	JSON      bool
 	SharePort int
 	ShareTTL  time.Duration
-}
-
-func (a App) pond(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		a.pondHelp()
-		return exit(2, "missing pond subcommand")
-	}
-	switch args[0] {
-	case "peers":
-		return a.pondPeers(ctx, args[1:])
-	case "connect":
-		return a.pondConnect(ctx, args[1:])
-	case "disconnect":
-		return a.pondDisconnect(ctx, args[1:])
-	case "release":
-		return a.pondRelease(ctx, args[1:])
-	case "-h", "--help", "help":
-		a.pondHelp()
-		return nil
-	default:
-		a.pondHelp()
-		return exit(2, "unknown pond subcommand %q", args[0])
-	}
-}
-
-func (a App) pondHelp() {
-	fmt.Fprintln(a.Stdout, `Pond — cross-provider peer discovery and lifecycle.
-
-Usage:
-  crabbox pond peers   --pond <name> [flags]
-  crabbox pond connect <name> [flags]
-  crabbox pond disconnect <name>
-  crabbox pond release <name>
-
-Subcommands:
-  peers   List every peer in the named pond, regardless of provider.
-  connect Open operator-side SSH forwards for exposed pond ports.
-  disconnect Stop daemonized SSH forwards started by connect --export.
-  release Stop every lease in the named pond and remove their claims.
-
-Flags for `+"`pond peers`"+`:
-  --pond <name>          Required. Pond label to resolve.
-  --provider <name>      Restrict to a single provider (default: all delegated
-                         providers in the pond).
-  --json                 Emit machine-readable JSON instead of text.
-  --share-port <port>    Publish a per-peer public URL for this port (idempotent).
-  --share-ttl <duration> TTL for shares created with --share-port (default 24h).
-
-Examples:
-  crabbox pond peers --pond alpha
-  crabbox pond peers --pond alpha --provider islo
-  crabbox pond peers --pond alpha --json
-  crabbox pond peers --pond alpha --share-port 8080 --json
-  crabbox pond release alpha
-
-The bridge plane is HTTP-only by design: peers are reachable via the per-
-provider native ingress (islo shares, e2b sandbox previews, railway deploy
-URLs, …). Non-HTTP protocols are out of scope — use the Tailscale plane for
-arbitrary TCP/UDP. Providers that do not expose a per-sandbox HTTPS ingress
-(modal, cloudflare, tensorlake) are honestly reported as unsupported instead
-of pretending to bridge.`)
 }
 
 func (a App) pondPeers(ctx context.Context, args []string) error {
@@ -340,6 +291,7 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 			if !allProviders {
 				return nil, err
 			}
+			peers = append(peers, providerPeers...)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -367,9 +319,9 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 //
 // The transport class is determined per-provider:
 //
-//   - tailnet — managed Linux providers (AWS / Azure / GCP / Hetzner /
-//     Proxmox / Static SSH). The resolver does not invoke a bridge backend
-//     at all for these; the endpoint is read straight off the claim sidecar
+//   - tailnet — bidirectional providers that recorded a tailnet endpoint on
+//     their claim. The resolver does not invoke a bridge backend for tailnet
+//     endpoints; the endpoint is read straight off the claim sidecar
 //     (TailscaleIPv4 / TailscaleFQDN), and missing endpoints surface as
 //     transport=pending with an honest note.
 //   - ssh — SSH-lease providers (exe.dev / RunPod / Daytona / Sprites /
@@ -384,28 +336,73 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider string, claims []leaseClaim, flags pondPeersFlags) ([]BridgePeer, error) {
 	class := providerTransportClass(provider)
 	peers := make([]BridgePeer, 0, len(claims))
+	var deferredBridgeErr error
 	var bridge BridgeProvider
 	bridgeLoaded := false
+	var bridgeLoadErr error
 	for _, claim := range claims {
 		peer := bridgePeerFromClaim(claim, class)
-		if peer.Transport == TransportURL {
+		caps := providerCapabilities(claim.Provider)
+		urlCapable := caps.URLBridge
+		useBridge := peer.Transport == TransportURL || urlCapable
+		if useBridge {
 			if !bridgeLoaded {
-				b, err := loadBridgeProvider(provider, rt)
-				if err != nil {
-					return nil, err
-				}
-				bridge = b
 				bridgeLoaded = true
+				bridge, bridgeLoadErr = loadBridgeProvider(provider, rt)
+			}
+			if (caps.Tailscale || caps.TailscaleEgress) && claimHasTailscaleMetadata(claim) && bridgeLoadErr == nil {
+				if validator, ok := bridge.(TailnetPeerValidator); ok {
+					meta, validateErr := validator.ValidateTailnetPeer(ctx, claim.LeaseID)
+					if validateErr != nil {
+						if !errors.Is(validateErr, ErrTailnetPeerValidationUnavailable) {
+							clearLeaseClaimTailscaleFields(&claim)
+						}
+						peer = bridgePeerFromClaim(claim, class)
+						peer.Note = fmt.Sprintf("tailnet validation failed: %v", validateErr)
+					} else {
+						setLeaseClaimTailscale(&claim, meta.IPv4, meta.FQDN)
+						peer = bridgePeerFromClaim(claim, class)
+						if peer.Transport == TransportTailnet {
+							peer.Endpoint = firstNonEmpty(meta.IPv4, meta.FQDN, meta.Hostname)
+						}
+					}
+				}
+			}
+			urlPrimary := peer.Transport == TransportURL
+			secondaryRead := !urlPrimary && flags.SharePort == 0
+			if bridgeLoadErr != nil {
+				if secondaryRead {
+					if peer.Transport == TransportTailnet {
+						peer.Note = fmt.Sprintf("tailnet validation unavailable: %v", bridgeLoadErr)
+					}
+					peers = append(peers, peer)
+					continue
+				}
+				if flags.SharePort == 0 {
+					peer.BridgeState = "error"
+					peer.Transport = TransportNone
+					peer.Note = fmt.Sprintf("bridge lookup failed for provider %s: %v", peer.Provider, bridgeLoadErr)
+					peers = append(peers, peer)
+					deferredBridgeErr = bridgeLoadErr
+					continue
+				}
+				return nil, bridgeLoadErr
 			}
 			// We invoke the bridge backend when the caller asked us to mint
 			// a share (--share-port) or when no canonical endpoint is yet
 			// recorded on the claim. Skipping the lookup when an endpoint
 			// is already known keeps `pond peers` cheap for read-only
 			// listings on already-published shares.
-			needBridge := flags.SharePort > 0 || peer.Endpoint == ""
+			needBridge := flags.SharePort > 0 || (urlPrimary && peer.Endpoint == "") || (!urlPrimary && urlCapable)
 			if bridge == nil && needBridge {
+				if secondaryRead {
+					peers = append(peers, peer)
+					continue
+				}
 				peer.BridgeState = "unsupported-provider"
-				peer.Transport = TransportNone
+				if urlPrimary {
+					peer.Transport = TransportNone
+				}
 				peer.Note = fmt.Sprintf("no bridge adapter for provider %s", peer.Provider)
 				peers = append(peers, peer)
 				continue
@@ -416,7 +413,9 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 					if perr != nil {
 						if errors.Is(perr, ErrBridgeNotImplemented) {
 							peer.BridgeState = "unsupported"
-							peer.Transport = TransportNone
+							if urlPrimary {
+								peer.Transport = TransportNone
+							}
 							peer.Note = fmt.Sprintf("bridge adapter for provider %s reports unsupported", peer.Provider)
 							peers = append(peers, peer)
 							continue
@@ -430,11 +429,27 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 				} else {
 					targets, lerr := bridge.ListPeerTargets(ctx, claim.LeaseID)
 					if lerr != nil {
+						if secondaryRead {
+							peer.BridgeState = "error"
+							peer.Note = fmt.Sprintf("list secondary bridge targets failed: %v", lerr)
+							peers = append(peers, peer)
+							continue
+						}
 						if errors.Is(lerr, ErrBridgeNotImplemented) {
 							peer.BridgeState = "unsupported"
-							peer.Transport = TransportNone
+							if urlPrimary {
+								peer.Transport = TransportNone
+							}
 							peer.Note = fmt.Sprintf("bridge adapter for provider %s reports unsupported", peer.Provider)
 							peers = append(peers, peer)
+							continue
+						}
+						if flags.SharePort == 0 {
+							peer.BridgeState = "error"
+							peer.Transport = TransportNone
+							peer.Note = fmt.Sprintf("list bridge targets failed: %v", lerr)
+							peers = append(peers, peer)
+							deferredBridgeErr = fmt.Errorf("list peer targets %s: %w", claim.LeaseID, lerr)
 							continue
 						}
 						return nil, fmt.Errorf("list peer targets %s: %w", claim.LeaseID, lerr)
@@ -448,7 +463,22 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 		}
 		peers = append(peers, peer)
 	}
+	if deferredBridgeErr != nil && !hasResolvedPrimary(peers) {
+		return peers, deferredBridgeErr
+	}
 	return peers, nil
+}
+
+func hasResolvedPrimary(peers []BridgePeer) bool {
+	for _, peer := range peers {
+		if peer.Transport == TransportTailnet || peer.Transport == TransportSSH {
+			return true
+		}
+		if peer.Transport == TransportURL && (peer.Endpoint != "" || len(peer.Targets) > 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // bridgePeerFromClaim turns a single lease claim into the unified peer row.
@@ -456,18 +486,32 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 // the provider once for the fan-out path); the rest of the row is filled in
 // from the claim sidecar without any provider API calls.
 func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
+	caps := providerCapabilities(claim.Provider)
 	peer := BridgePeer{
 		Slug:       claim.Slug,
 		LeaseID:    claim.LeaseID,
 		Provider:   claim.Provider,
 		Pond:       claim.Pond,
 		Labels:     cloneStringMap(claim.Labels),
-		Transports: providerCapabilities(claim.Provider).Available(),
+		Transports: caps.Available(),
+	}
+	if caps.TailscaleEgress && claimHasTailscaleMetadata(claim) {
+		peer.Note = "tailnet available for outbound proxy traffic only"
 	}
 	switch class {
 	case TransportTailnet:
 		endpoint := firstNonEmpty(claim.TailscaleIPv4, claim.TailscaleFQDN)
 		if endpoint == "" {
+			// The provider is tailnet-primary but this lease has no tailnet
+			// endpoint recorded. For providers that ALSO advertise the URL
+			// bridge (e.g. islo, which only records a tailnet IP when the lease
+			// was warmed with --tailscale), fall back to the bridge plane
+			// instead of stranding the member as "pending".
+			if providerCapabilities(claim.Provider).URLBridge {
+				peer.Transport = TransportURL
+				peer.Endpoint = claim.BridgeURL
+				return peer
+			}
 			peer.Transport = TransportPending
 			peer.Note = "tailnet endpoint not yet recorded for this lease"
 			return peer
@@ -495,11 +539,11 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 		if isBlacksmithProvider(claim.Provider) {
 			peer.Note = "blacksmith owns connectivity"
 		} else {
-			peer.Note = fmt.Sprintf("no bridge adapter for provider %s", claim.Provider)
+			peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", claim.Provider)
 		}
 	default:
 		peer.Transport = TransportNone
-		peer.Note = fmt.Sprintf("no bridge adapter for provider %s", claim.Provider)
+		peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", claim.Provider)
 	}
 	return peer
 }

@@ -105,20 +105,19 @@ A delegated backend must reject run/sync options that Crabbox cannot honor
 without a Crabbox-managed SSH target:
 
 ```go
-if err := cli.RejectDelegatedSyncOptions(providerName, req); err != nil {
+if err := cli.RejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
 	return RunResult{}, err
 }
 ```
 
 Providers that declare `FeatureArchiveSync` (an archive upload of the checkout)
-can use `cli.RejectDelegatedSyncOptionsForSpec(spec, req)` so that `--sync-only`
-and `--force-sync-large` are allowed while the rest stay rejected. Both helpers
-reject checksum sync, full resync, local stdout/stderr captures, capture-on-fail,
-downloads, artifact globs, uploaded scripts, env helpers, `--stop-after`, fresh
-PR checkouts, and `--emit-proof` (unless the provider declares `FeatureRunProof`).
-Do not pretend a delegated provider is SSH-like unless it has a stable SSH
-contract. If Crabbox cannot run rsync and remote commands itself, use
-`DelegatedRunBackend`.
+can declare that feature in `spec` so `--sync-only` and `--force-sync-large`
+are allowed while the rest stay rejected. The helper rejects checksum sync,
+full resync, local stdout/stderr captures, capture-on-fail, downloads, artifact
+globs, uploaded scripts, env helpers, `--stop-after`, fresh PR checkouts, and
+`--emit-proof` (unless the provider declares `FeatureRunProof`). Do not pretend
+a delegated provider is SSH-like unless it has a stable SSH contract. If
+Crabbox cannot run rsync and remote commands itself, use `DelegatedRunBackend`.
 
 ### Optional interfaces
 
@@ -133,6 +132,20 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 ```
+
+Pause and resume are optional:
+
+```go
+type PausableBackend interface {
+	Backend
+
+	Pause(ctx context.Context, req PauseRequest) error
+	Resume(ctx context.Context, req ResumeRequest) error
+}
+```
+
+Declare `FeaturePauseResume` when implementing this interface so
+`crabbox providers` exposes the capability.
 
 List JSON compatibility is optional:
 
@@ -201,6 +214,7 @@ internal/providers/ssh                  # static / BYO SSH backend
 internal/providers/daytona              # Daytona SSH lease + delegated SDK backend
 internal/providers/kubevirt             # generic KubeVirt SSH backend
 internal/providers/external             # executable provider protocol
+internal/providers/tenki                # Tenki sandbox SSH backend
 internal/providers/namespace            # Namespace devbox SSH backend
 internal/providers/semaphore            # Semaphore SSH lease backend
 internal/providers/sprites              # Sprites SSH backend
@@ -211,6 +225,7 @@ internal/providers/blacksmith           # Blacksmith Testbox delegated backend
 internal/providers/e2b                  # E2B delegated backend
 internal/providers/islo                 # Islo delegated backend
 internal/providers/modal                # Modal delegated backend
+internal/providers/opencomputer         # OpenComputer delegated backend
 internal/providers/tensorlake           # Tensorlake delegated backend
 internal/providers/upstashbox           # Upstash Box delegated backend
 internal/providers/cloudflare           # Cloudflare Containers delegated backend

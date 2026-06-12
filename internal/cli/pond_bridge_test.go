@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -42,8 +43,19 @@ type fakeBridgeProvider struct {
 	listed    map[string][]BridgePeerTarget
 	published map[string]BridgePeerTarget
 	listErr   error
+	listErrs  map[string]error
 	pubErr    error
 	calls     int
+}
+
+type fakeTailnetBridgeProvider struct {
+	*fakeBridgeProvider
+	meta        TailscaleMetadata
+	validateErr error
+}
+
+func (f *fakeTailnetBridgeProvider) ValidateTailnetPeer(context.Context, string) (TailscaleMetadata, error) {
+	return f.meta, f.validateErr
 }
 
 func (f *fakeBridgeProvider) PublishPeer(_ context.Context, leaseID string, port int, _ time.Duration) (BridgePeerTarget, error) {
@@ -58,6 +70,9 @@ func (f *fakeBridgeProvider) PublishPeer(_ context.Context, leaseID string, port
 
 func (f *fakeBridgeProvider) ListPeerTargets(_ context.Context, leaseID string) ([]BridgePeerTarget, error) {
 	f.calls++
+	if err := f.listErrs[leaseID]; err != nil {
+		return nil, err
+	}
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -68,6 +83,12 @@ func withTempClaims(t *testing.T, claims []leaseClaim) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
 	for _, claim := range claims {
 		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, claim.Provider, claim.ProviderScope, claim.Pond, claim.RepoRoot, 30*time.Minute, false); err != nil {
 			t.Fatalf("seed claim %s: %v", claim.LeaseID, err)
@@ -144,6 +165,220 @@ func TestResolvePondPeersPublishesShare(t *testing.T) {
 	}
 }
 
+func TestResolvePondPeersPublishesShareForOutboundTailnet(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
+	fake := &fakeBridgeProvider{
+		published: map[string]BridgePeerTarget{
+			"isb_w": {URL: "https://abc.share.islo.dev", ShareID: "shr_w"},
+		},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{SharePort: 8080, ShareTTL: time.Hour})
+	if err != nil {
+		t.Fatalf("resolvePondPeers: %v", err)
+	}
+	if len(peers) != 1 || len(peers[0].Targets) != 1 {
+		t.Fatalf("expected 1 URL peer with 1 target, got %#v", peers)
+	}
+	if peers[0].Transport != TransportURL || peers[0].Endpoint != "https://abc.share.islo.dev" {
+		t.Fatalf("outbound tailnet must not replace URL primary: %#v", peers[0])
+	}
+	if len(peers[0].Transports) != 1 || peers[0].Transports[0] != TransportURL || !strings.Contains(peers[0].Note, "outbound proxy") {
+		t.Fatalf("unexpected dialable transport surface: %#v", peers[0])
+	}
+	if peers[0].Targets[0].Port != 8080 || peers[0].Targets[0].URL == "" {
+		t.Fatalf("publish should have set port=8080 and URL: %#v", peers[0].Targets[0])
+	}
+	if fake.calls != 1 {
+		t.Fatalf("expected 1 fake call, got %d", fake.calls)
+	}
+}
+
+func TestResolvePondPeersListsSharesForOutboundTailnet(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	fake := &fakeBridgeProvider{
+		listed: map[string][]BridgePeerTarget{
+			"isb_w": {{Port: 8080, URL: "https://abc.share.islo.dev", ShareID: "shr_w"}},
+		},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("resolvePondPeers: %v", err)
+	}
+	if len(peers) != 1 || len(peers[0].Targets) != 1 {
+		t.Fatalf("expected 1 URL peer with its existing target, got %#v", peers)
+	}
+	if peers[0].Transport != TransportURL || peers[0].Endpoint != "https://abc.share.islo.dev" {
+		t.Fatalf("outbound tailnet must not replace URL primary: %#v", peers[0])
+	}
+	if peers[0].Targets[0].URL != "https://abc.share.islo.dev" {
+		t.Fatalf("existing target missing: %#v", peers[0].Targets)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("expected 1 fake call, got %d", fake.calls)
+	}
+}
+
+func TestResolvePondPeersReturnsBridgeLoadErrorForOutboundTailnet(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) {
+		return nil, errors.New("missing Islo API key")
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err == nil || !strings.Contains(err.Error(), "missing Islo API key") {
+		t.Fatalf("expected primary URL bridge load error, got peers=%#v err=%v", peers, err)
+	}
+	if peers != nil {
+		t.Fatalf("single-provider resolution should fail without partial output: %#v", peers)
+	}
+}
+
+func TestResolvePondPeersReturnsErrorWhenAllOutboundTailnetURLsFail(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_tailnet", Slug: "tailnet", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_url", Slug: "url", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_tailnet", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+	fake := &fakeBridgeProvider{listErr: errors.New("Islo API unavailable")}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err == nil || !strings.Contains(err.Error(), "Islo API unavailable") {
+		t.Fatalf("expected primary URL failure, got peers=%#v err=%v", peers, err)
+	}
+	if peers != nil {
+		t.Fatalf("single-provider resolution should fail without partial output: %#v", peers)
+	}
+}
+
+func TestResolvePondPeersKeepsHealthyURLPeerWhenURLMemberFails(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_healthy", Slug: "healthy", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_failed", Slug: "failed", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	fake := &fakeBridgeProvider{
+		listed: map[string][]BridgePeerTarget{
+			"isb_healthy": {{Port: 8080, URL: "https://healthy.share.islo.dev"}},
+		},
+		listErrs: map[string]error{
+			"isb_failed": errors.New("Islo API unavailable"),
+		},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("failed URL member must not discard healthy URL peer: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("expected healthy and degraded members, got %#v", peers)
+	}
+	bySlug := map[string]BridgePeer{}
+	for _, peer := range peers {
+		bySlug[peer.Slug] = peer
+	}
+	if got := bySlug["healthy"]; got.Transport != TransportURL || got.Endpoint != "https://healthy.share.islo.dev" {
+		t.Fatalf("healthy URL peer missing: %#v", got)
+	}
+	if got := bySlug["failed"]; got.Transport != TransportNone || got.BridgeState != "error" {
+		t.Fatalf("failed URL peer should degrade in place: %#v", got)
+	}
+}
+
+func TestResolvePondPeersFallsBackWhenTailnetValidationFails(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
+	fake := &fakeTailnetBridgeProvider{
+		fakeBridgeProvider: &fakeBridgeProvider{listed: map[string][]BridgePeerTarget{
+			"isb_w": {{Port: 8080, URL: "https://abc.share.islo.dev"}},
+		}},
+		validateErr: errors.New("daemon unavailable"),
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Transport != TransportURL || peers[0].Endpoint != "https://abc.share.islo.dev" {
+		t.Fatalf("expected URL fallback after failed tailnet validation, got %#v", peers)
+	}
+	for _, key := range []string{"tailscale", "tailscale_state", "tailscale_ipv4", "tailscale_fqdn"} {
+		if peers[0].Labels[key] != "" {
+			t.Fatalf("URL fallback retained stale %s label: %#v", key, peers[0])
+		}
+	}
+}
+
+func TestResolvePondPeersReturnsBridgeErrorWhenAllTailnetClaimsAreStale(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { setLeaseClaimTailscale(c, "100.64.7.7", "") })
+	fake := &fakeTailnetBridgeProvider{
+		fakeBridgeProvider: &fakeBridgeProvider{listErr: errors.New("Islo API unavailable")},
+		validateErr:        errors.New("daemon unavailable"),
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	if _, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{}); err == nil {
+		t.Fatal("expected bridge error after the only tailnet claim failed validation")
+	}
+}
+
+func TestResolvePondPeersRevalidatesPersistedTailnetEnrollment(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_w", func(c *leaseClaim) { c.TailscaleHostname = "node-a" })
+	fake := &fakeTailnetBridgeProvider{
+		fakeBridgeProvider: &fakeBridgeProvider{listed: map[string][]BridgePeerTarget{
+			"isb_w": {{Port: 8080, URL: "https://abc.share.islo.dev"}},
+		}},
+		meta: TailscaleMetadata{Enabled: true, IPv4: "100.64.7.8", State: "ready"},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Transport != TransportURL || peers[0].Endpoint != "https://abc.share.islo.dev" || peers[0].Labels["tailscale_ipv4"] != "100.64.7.8" {
+		t.Fatalf("validated endpoint and labels disagree: %#v", peers)
+	}
+}
+
 func TestResolvePondPeersUnknownProvider(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_w", Slug: "w", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
@@ -167,19 +402,22 @@ func TestResolvePondPeersUnknownProvider(t *testing.T) {
 
 func TestResolvePondPeersExplicitlyUnsupportedAdapter(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
-		{LeaseID: "cbx_modal", Slug: "fn", Provider: "modal", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_islo", Slug: "fn", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
 	})
 	fake := &fakeBridgeProvider{listErr: ErrBridgeNotImplemented}
 	prev := loadBridgeProviderFunc
 	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
 	t.Cleanup(func() { loadBridgeProviderFunc = prev })
 
-	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "modal", pondPeersFlags{})
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{})
 	if err != nil {
 		t.Fatalf("resolvePondPeers: %v", err)
 	}
 	if len(peers) != 1 || peers[0].BridgeState != "unsupported" {
 		t.Fatalf("expected ErrBridgeNotImplemented to surface as BridgeState=unsupported, got %#v", peers)
+	}
+	if peers[0].Transport != TransportNone {
+		t.Fatalf("transport=%q want none", peers[0].Transport)
 	}
 	if len(peers[0].Targets) != 0 {
 		t.Fatalf("expected no targets when adapter reports unsupported, got %#v", peers[0].Targets)
@@ -188,14 +426,14 @@ func TestResolvePondPeersExplicitlyUnsupportedAdapter(t *testing.T) {
 
 func TestResolvePondPeersExplicitlyUnsupportedPublish(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
-		{LeaseID: "cbx_cf", Slug: "edge", Provider: "cloudflare", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_islo", Slug: "edge", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
 	})
 	fake := &fakeBridgeProvider{pubErr: ErrBridgeNotImplemented}
 	prev := loadBridgeProviderFunc
 	loadBridgeProviderFunc = func(string, Runtime) (BridgeProvider, error) { return fake, nil }
 	t.Cleanup(func() { loadBridgeProviderFunc = prev })
 
-	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "cloudflare", pondPeersFlags{SharePort: 8080, ShareTTL: time.Hour})
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "islo", pondPeersFlags{SharePort: 8080, ShareTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("resolvePondPeers: %v", err)
 	}
@@ -215,9 +453,8 @@ func TestResolvePondPeersMultiProviderFanOut(t *testing.T) {
 	// resolvePondPeers picks the right backend per provider rather than
 	// applying one backend uniformly.
 	adapters := map[string]*fakeBridgeProvider{
-		"islo":  {listed: map[string][]BridgePeerTarget{"isb_islo1": {{Port: 80, URL: "https://islo-a.share.islo.dev"}}}},
-		"e2b":   {listed: map[string][]BridgePeerTarget{"cbx_e2b1": {{Port: 8080, URL: "https://8080-sbx.e2b.app"}}}},
-		"modal": {listErr: ErrBridgeNotImplemented},
+		"islo": {listed: map[string][]BridgePeerTarget{"isb_islo1": {{Port: 80, URL: "https://islo-a.share.islo.dev"}}}},
+		"e2b":  {listed: map[string][]BridgePeerTarget{"cbx_e2b1": {{Port: 8080, URL: "https://8080-sbx.e2b.app"}}}},
 	}
 	prev := loadBridgeProviderFunc
 	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
@@ -247,12 +484,19 @@ func TestResolvePondPeersMultiProviderFanOut(t *testing.T) {
 	if got := byProvider["e2b"].Targets; len(got) != 1 || got[0].URL == "" {
 		t.Fatalf("e2b peer should have its target, got %#v", got)
 	}
-	if state := byProvider["modal"].BridgeState; state != "unsupported" {
-		t.Fatalf("modal peer should report unsupported, got %q", state)
+	modal := byProvider["modal"]
+	if modal.Transport != TransportNone {
+		t.Fatalf("modal transport=%q want none", modal.Transport)
+	}
+	if modal.BridgeState != "" {
+		t.Fatalf("modal peer should not enter bridge path, got state %q", modal.BridgeState)
+	}
+	if modal.Note != "no advertised pond transport for provider modal" {
+		t.Fatalf("modal note=%q", modal.Note)
 	}
 }
 
-func TestResolvePondPeersMultiProviderFanOutSkipsFailedProvider(t *testing.T) {
+func TestResolvePondPeersMultiProviderFanOutKeepsFailedProviderRow(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_e2b1", Slug: "e2b-a", Provider: "e2b", Pond: "demo", RepoRoot: "/r"},
 		{LeaseID: "isb_islo1", Slug: "islo-a", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
@@ -275,11 +519,18 @@ func TestResolvePondPeersMultiProviderFanOutSkipsFailedProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvePondPeers should keep healthy providers when one fails: %v", err)
 	}
-	if len(peers) != 1 {
-		t.Fatalf("expected only the healthy e2b peer, got %d: %#v", len(peers), peers)
+	if len(peers) != 2 {
+		t.Fatalf("expected healthy and degraded peers, got %d: %#v", len(peers), peers)
 	}
-	if peers[0].Provider != "e2b" || len(peers[0].Targets) != 1 || peers[0].Targets[0].URL == "" {
-		t.Fatalf("expected healthy e2b peer with target, got %#v", peers[0])
+	byProvider := map[string]BridgePeer{}
+	for _, peer := range peers {
+		byProvider[peer.Provider] = peer
+	}
+	if got := byProvider["e2b"]; len(got.Targets) != 1 || got.Targets[0].URL == "" {
+		t.Fatalf("expected healthy e2b peer with target, got %#v", got)
+	}
+	if got := byProvider["islo"]; got.Transport != TransportNone || got.BridgeState != "error" {
+		t.Fatalf("expected degraded islo peer, got %#v", got)
 	}
 }
 
@@ -457,6 +708,111 @@ func TestPondPeersIncludesManagedLinuxWithTailnetTransport(t *testing.T) {
 	}
 	if peers[0].Endpoint != "100.64.1.3" {
 		t.Fatalf("endpoint=%q want 100.64.1.3", peers[0].Endpoint)
+	}
+}
+
+// TestPondPeersMixesIsloBridgeAndTailnetMembers proves the headline pond
+// promise: a single pond can hold an Islo URL-bridge member and a Tailscale
+// mesh member at the same time, and one `pond peers` fan-out renders both with
+// the correct plane each — the Islo member as a URL-bridge peer (its share URL
+// resolved through the bridge adapter) and the Hetzner member as a tailnet peer
+// (its 100.x IPv4, with the bridge adapter never consulted for it). This is the
+// "does islo as a pond work with tailscale" question stated as a regression.
+func TestPondPeersMixesIsloBridgeAndTailnetMembers(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_islo1", Slug: "sandbox", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "cbx_web", Slug: "web", Provider: "hetzner", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "cbx_web", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.1.3" })
+
+	fake := &fakeBridgeProvider{
+		listed: map[string][]BridgePeerTarget{
+			"isb_islo1": {{Port: 8080, URL: "https://sandbox.share.islo.dev", ShareID: "shr_islo"}},
+		},
+	}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
+		if provider != "islo" {
+			// The tailnet member must never reach the bridge adapter.
+			t.Fatalf("bridge adapter consulted for non-islo provider %q", provider)
+		}
+		return fake, nil
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("resolvePondPeers: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 peers (islo + hetzner), got %d: %#v", len(peers), peers)
+	}
+	byProvider := map[string]BridgePeer{}
+	for _, p := range peers {
+		byProvider[p.Provider] = p
+	}
+
+	islo, ok := byProvider["islo"]
+	if !ok {
+		t.Fatalf("islo member missing: %#v", peers)
+	}
+	if islo.Transport != TransportURL {
+		t.Fatalf("islo transport=%q want %q", islo.Transport, TransportURL)
+	}
+	if len(islo.Targets) != 1 || islo.Targets[0].URL != "https://sandbox.share.islo.dev" {
+		t.Fatalf("islo member should carry its share URL, got %#v", islo.Targets)
+	}
+
+	hetzner, ok := byProvider["hetzner"]
+	if !ok {
+		t.Fatalf("hetzner member missing: %#v", peers)
+	}
+	if hetzner.Transport != TransportTailnet {
+		t.Fatalf("hetzner transport=%q want %q", hetzner.Transport, TransportTailnet)
+	}
+	if hetzner.Endpoint != "100.64.1.3" {
+		t.Fatalf("hetzner endpoint=%q want 100.64.1.3", hetzner.Endpoint)
+	}
+}
+
+// TestPondPeersIsloKeepsURLPrimaryForOutboundTailnet proves that Islo's
+// userspace Tailscale capability does not advertise an inbound peer endpoint.
+func TestPondPeersIsloKeepsURLPrimaryForOutboundTailnet(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_meshed", Slug: "node-a", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+		{LeaseID: "isb_plain", Slug: "node-b", Provider: "islo", Pond: "demo", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_meshed", func(c *leaseClaim) { c.TailscaleIPv4 = "100.64.7.7" })
+
+	fake := &fakeBridgeProvider{listed: map[string][]BridgePeerTarget{
+		"isb_meshed": {{Port: 8080, URL: "https://node-a.share.islo.dev"}},
+		"isb_plain":  {{Port: 8080, URL: "https://node-b.share.islo.dev"}},
+	}}
+	prev := loadBridgeProviderFunc
+	loadBridgeProviderFunc = func(provider string, _ Runtime) (BridgeProvider, error) {
+		if provider != "islo" {
+			t.Fatalf("unexpected provider %q", provider)
+		}
+		return fake, nil
+	}
+	t.Cleanup(func() { loadBridgeProviderFunc = prev })
+
+	peers, err := resolvePondPeers(context.Background(), Runtime{}, "demo", "", pondPeersFlags{})
+	if err != nil {
+		t.Fatalf("resolvePondPeers: %v", err)
+	}
+	by := map[string]BridgePeer{}
+	for _, p := range peers {
+		by[p.Slug] = p
+	}
+	if got := by["node-a"]; got.Transport != TransportURL || got.Endpoint != "https://node-a.share.islo.dev" {
+		t.Fatalf("joined islo member should retain URL primary transport, got %#v", got)
+	}
+	if got := by["node-b"]; got.Transport != TransportURL || got.Endpoint != "https://node-b.share.islo.dev" {
+		t.Fatalf("plain islo member should fall back to url, got transport=%q endpoint=%q", got.Transport, got.Endpoint)
+	}
+	if got := by["node-a"]; len(got.Transports) != 1 || got.Transports[0] != TransportURL || !strings.Contains(got.Note, "outbound proxy") {
+		t.Fatalf("islo should advertise only its dialable URL transport: %#v", got)
 	}
 }
 

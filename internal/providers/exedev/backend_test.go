@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type exeDevRecordingRunner struct {
@@ -114,6 +115,75 @@ func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 	}
 }
 
+func TestExeDevAcquireReportsRollbackFailureAfterPrepareFailure(t *testing.T) {
+	primaryErr := errors.New("ssh not ready")
+	oldWait := waitForSSHReady
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return primaryErr
+	}
+	t.Cleanup(func() { waitForSSHReady = oldWait })
+	runner := newExeDevAcquireRollbackRunner()
+	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
+	assertExeDevRollbackFailure(t, err, primaryErr, runner)
+}
+
+func TestExeDevAcquireReportsRollbackFailureAfterClaimFailure(t *testing.T) {
+	primaryErr := errors.New("claim failed")
+	oldWait := waitForSSHReady
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	t.Cleanup(func() { waitForSSHReady = oldWait })
+	oldClaim := claimLeaseForRepoProvider
+	claimLeaseForRepoProvider = func(string, string, string, string, time.Duration, bool) error {
+		return primaryErr
+	}
+	t.Cleanup(func() { claimLeaseForRepoProvider = oldClaim })
+	runner := newExeDevAcquireRollbackRunner()
+	backend := &exeDevLeaseBackend{cfg: Config{}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}})
+	assertExeDevRollbackFailure(t, err, primaryErr, runner)
+}
+
+func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {
+	return &exeDevRecordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		cmd := strings.Join(req.Args, " ")
+		switch {
+		case strings.Contains(cmd, "ls --l --json --a"):
+			return LocalCommandResult{Stdout: `{"vms":[]}`}, nil
+		case strings.Contains(cmd, " new "):
+			return LocalCommandResult{Stdout: `{"vm_name":"created-vm","ssh_dest":"created-vm.exe.xyz","status":"running"}`}, nil
+		case strings.Contains(cmd, " rm "):
+			return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
+		default:
+			return LocalCommandResult{}, nil
+		}
+	}}
+}
+
+func assertExeDevRollbackFailure(t *testing.T, err error, primary error, runner *exeDevRecordingRunner) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("Acquire succeeded, want rollback failure")
+	}
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("err=%#v, want rendered ExitError code 1", err)
+	}
+	for _, want := range []string{"exe.dev cleanup failed for VM", "manual cleanup: crabbox stop --provider exe-dev --id", "exit status 1", primary.Error()} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("exit message=%q missing %q", exitErr.Message, want)
+		}
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call.Args, " "), " rm ") {
+			return
+		}
+	}
+	t.Fatalf("rollback did not call rm: %#v", runner.calls)
+}
+
 func TestExeDevDefaultsPreserveCustomTopLevelWorkRoot(t *testing.T) {
 	cfg := Config{WorkRoot: "/custom/crabbox"}
 	applyExeDevDefaults(&cfg)
@@ -136,6 +206,77 @@ func TestExeDevControlSurfacesJSONError(t *testing.T) {
 	_, err := backend.controlOutput(context.Background(), []string{"new", "--json"})
 	if err == nil || !strings.Contains(err.Error(), "active plan required") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestExeDevControlRejectsSSHOptionLikeHost(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "-oProxyCommand=sh"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err == nil || !strings.Contains(err.Error(), "invalid exe.dev control host") {
+		t.Fatalf("err=%v, want invalid control host", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("ssh should not run for invalid host, calls=%v", runner.calls)
+	}
+}
+
+func TestExeDevControlHostUsesSeparatePortArgument(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@control.example:2222"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "-p", "2222", "alice@control.example", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
+	}
+}
+
+func TestExeDevControlHostPreservesBareIPv6Destination(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@2001:db8::10"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "alice@2001:db8::10", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
+	}
+}
+
+func TestExeDevControlHostAcceptsBracketedIPv6Port(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@[2001:db8::10]:2222"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "-p", "2222", "alice@2001:db8::10", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
+	}
+}
+
+func TestExeDevControlHostPreservesScopedIPv6Destination(t *testing.T) {
+	runner := &exeDevRecordingRunner{}
+	backend := &exeDevLeaseBackend{cfg: Config{ExeDev: ExeDevConfig{ControlHost: "alice@fe80::1%eth0"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	if _, err := backend.controlOutput(context.Background(), []string{"ls", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(runner.calls))
+	}
+	want := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "alice@fe80::1%eth0", "ls --json"}
+	if !reflect.DeepEqual(runner.calls[0].Args, want) {
+		t.Fatalf("args=%v want %v", runner.calls[0].Args, want)
 	}
 }
 

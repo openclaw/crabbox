@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -44,7 +43,7 @@ func (a App) login(ctx context.Context, args []string) error {
 }
 
 func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, jsonOut bool) error {
-	data, err := io.ReadAll(os.Stdin)
+	data, err := io.ReadAll(a.input())
 	if err != nil {
 		return exit(2, "read broker token: %v", err)
 	}
@@ -156,14 +155,22 @@ func (a App) finishLogin(ctx context.Context, coord *CoordinatorClient, path str
 		return err
 	}
 	if jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(map[string]any{
+		view := map[string]any{
 			"config":   path,
 			"broker":   cfg.Coordinator,
 			"provider": cfg.Provider,
 			"identity": who,
-		})
+		}
+		if who.TokenExpiresAt != "" {
+			view["tokenExpiresAt"] = who.TokenExpiresAt
+		}
+		return json.NewEncoder(a.Stdout).Encode(view)
 	}
-	fmt.Fprintf(a.Stdout, "logged in broker=%s provider=%s user=%s org=%s config=%s\n", cfg.Coordinator, cfg.Provider, who.Owner, who.Org, path)
+	expires := ""
+	if who.TokenExpiresAt != "" {
+		expires = " token_expires=" + who.TokenExpiresAt
+	}
+	fmt.Fprintf(a.Stdout, "logged in broker=%s provider=%s user=%s org=%s%s config=%s\n", cfg.Coordinator, cfg.Provider, who.Owner, who.Org, expires, path)
 	return nil
 }
 

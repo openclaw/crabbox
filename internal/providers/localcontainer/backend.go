@@ -23,6 +23,7 @@ const (
 	sshPort             = "2222"
 	workRootMarkerName  = ".crabbox-local-container-work-root"
 	dockerSocketInGuest = "/var/run/docker.sock"
+	rollbackTimeout     = 10 * time.Second
 )
 
 type backend struct {
@@ -68,6 +69,9 @@ func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
+	if err := validateCheckpointFork(ctx, cfg); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	leaseID := core.NewLeaseID()
 	containers, err := b.listContainers(ctx)
 	if err != nil {
@@ -94,34 +98,43 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	cfg.SSHKey = keyPath
 	name := core.LeaseProviderName(leaseID, slug)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s runtime=%s image=%s keep=%v\n", providerName, leaseID, slug, cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, req.Keep)
-	containerID, err := b.createContainer(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
+	containerID, bootstrapDir, err := b.createContainer(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
 	if err != nil {
+		if req.Keep && containerID != "" {
+			cleanupKey = false
+		}
 		return core.LeaseTarget{}, err
+	}
+	if req.Keep {
+		cleanupKey = false
+	}
+	cleanupContainer := func() {
+		if req.Keep {
+			return
+		}
+		if err := b.removeContainer(context.Background(), containerID); err != nil {
+			return
+		}
+		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+			_ = os.RemoveAll(bootstrapDir)
+		}
 	}
 	container, err := b.inspectContainer(ctx, containerID)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
 	lease, err := b.prepareLease(ctx, cfg, container, leaseID, slug, true)
 	if err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+	if err := core.ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
-	if err := core.UpdateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
-		if !req.Keep {
-			_ = b.removeContainer(context.Background(), containerID)
-		}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+		cleanupContainer()
 		return core.LeaseTarget{}, err
 	}
 	cleanupKey = false
@@ -130,11 +143,18 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
-	cfg := b.configForRun()
 	container, leaseID, slug, err := b.resolveContainer(ctx, req.ID)
 	if err != nil {
+		if req.ReleaseOnly && isExitCode(err, 4) {
+			if lease, ok, releaseErr := b.resolveMissingClaimForRelease(ctx, req.ID); releaseErr != nil {
+				return core.LeaseTarget{}, releaseErr
+			} else if ok {
+				return lease, nil
+			}
+		}
 		return core.LeaseTarget{}, err
 	}
+	cfg := b.configForRun()
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromContainer(container, cfg), LeaseID: leaseID}, nil
 	}
@@ -180,8 +200,25 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	lease := req.Lease
+	appliedScope, err := b.applyCheckpointScopeLabels(ctx, lease.Server.Labels)
+	if err != nil {
+		return err
+	}
+	if !appliedScope {
+		identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"])
+		if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+			return err
+		} else if ok {
+			if _, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+				return err
+			}
+		}
+	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
+		if b.releaseMissingClaim(lease) {
+			return nil
+		}
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
 		if err != nil {
 			return err
@@ -196,6 +233,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return core.Exit(2, "provider=%s release requires a container id", providerName)
 	}
 	hostLeaseRoot := hostLeaseWorkRoot(lease)
+	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
 	if err := b.removeContainer(ctx, id); err != nil {
 		return err
 	}
@@ -203,12 +241,111 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if hostLeaseRoot != "" {
 		cleanupErr = os.RemoveAll(hostLeaseRoot)
 	}
+	if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+		if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
+			cleanupErr = err
+		}
+	}
 	core.RemoveLeaseClaim(lease.LeaseID)
 	core.RemoveStoredTestboxKey(lease.LeaseID)
 	if cleanupErr != nil {
 		return core.Exit(2, "remove local-container host work root %s: %v", hostLeaseRoot, cleanupErr)
 	}
 	return nil
+}
+
+func (b *backend) releaseMissingClaim(lease core.LeaseTarget) bool {
+	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
+	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
+		return false
+	}
+	if lease.Server.Labels["missing_container"] != "1" {
+		return false
+	}
+	core.RemoveLeaseClaim(leaseID)
+	core.RemoveStoredTestboxKey(leaseID)
+	return true
+}
+
+func (b *backend) resolveMissingClaimForRelease(ctx context.Context, identifier string) (core.LeaseTarget, bool, error) {
+	claim, ok, err := localContainerClaimByIDOrSlug(identifier)
+	if err != nil || !ok {
+		return core.LeaseTarget{}, false, err
+	}
+	if _, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+		return core.LeaseTarget{}, false, err
+	}
+	if !b.claimMatchesCurrentScope(ctx, claim) {
+		return core.LeaseTarget{}, false, nil
+	}
+	labels := map[string]string{
+		"lease":             claim.LeaseID,
+		"slug":              claim.Slug,
+		"provider":          providerName,
+		"missing_container": "1",
+	}
+	for key, value := range claim.Labels {
+		if strings.TrimSpace(value) != "" {
+			labels[key] = value
+		}
+	}
+	return core.LeaseTarget{
+		LeaseID: claim.LeaseID,
+		Server: core.Server{
+			Provider: providerName,
+			Name:     core.LeaseProviderName(claim.LeaseID, claim.Slug),
+			Status:   "missing",
+			Labels:   labels,
+		},
+	}, true, nil
+}
+
+func localContainerClaimByIDOrSlug(identifier string) (core.LeaseClaim, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return core.LeaseClaim{}, false, nil
+	}
+	exactClaim, err := core.ReadLeaseClaim(identifier)
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	if exactClaim.LeaseID == identifier && exactClaim.Provider == providerName {
+		return exactClaim, true, nil
+	}
+	normalized := core.NormalizeLeaseSlug(identifier)
+	if normalized == "" {
+		return core.LeaseClaim{}, false, nil
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	var matches []core.LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider == providerName && core.NormalizeLeaseSlug(claim.Slug) == normalized {
+			matches = append(matches, claim)
+		}
+	}
+	if len(matches) > 1 {
+		return core.LeaseClaim{}, false, core.Exit(2, "local-container slug %s is ambiguous across %d lease claims; use a lease id", identifier, len(matches))
+	}
+	if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	return core.LeaseClaim{}, false, nil
+}
+
+func (b *backend) claimMatchesCurrentScope(ctx context.Context, claim core.LeaseClaim) bool {
+	claimScope := strings.TrimSpace(claim.ProviderScope)
+	if claimScope == "" {
+		return true
+	}
+	return claimScope == strings.TrimSpace(b.claimScope(ctx))
+}
+
+func isExitCode(err error, code int) bool {
+	var exit core.ExitError
+	return core.AsExitError(err, &exit) && exit.Code == code
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -255,6 +392,12 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if hostLeaseRoot != "" {
 			cleanupErr = os.RemoveAll(hostLeaseRoot)
 		}
+		bootstrapDir := strings.TrimSpace(server.Labels["bootstrap_dir"])
+		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+			if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
+				cleanupErr = err
+			}
+		}
 		if leaseID != "" {
 			core.RemoveLeaseClaim(leaseID)
 			core.RemoveStoredTestboxKey(leaseID)
@@ -298,7 +441,9 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	}
 	original := server.Labels
 	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"container_id", "docker_socket", "host_work_root", "image", "runtime", "runtime_context", "ssh_port", "ssh_user", "work_root"} {
+	preservedKeys := []string{"bootstrap_dir", "container_id", "docker_socket", "host_work_root", "image", "runtime", "runtime_context", "ssh_port", "ssh_user", "work_root"}
+	preservedKeys = append(preservedKeys, checkpointScopeMetadataKeys...)
+	for _, key := range preservedKeys {
 		if value := strings.TrimSpace(original[key]); value != "" {
 			server.Labels[key] = value
 		}
@@ -373,13 +518,28 @@ func applyDefaults(cfg *core.Config) {
 	cfg.SSHUser = cfg.LocalContainer.User
 	cfg.SSHPort = sshPort
 	cfg.WorkRoot = cfg.LocalContainer.WorkRoot
-	cfg.ServerType = cfg.LocalContainer.Image
+	cfg.ServerType = localContainerDisplayImage(*cfg)
 }
 
-func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, error) {
+func localContainerDisplayImage(cfg core.Config) string {
+	if name := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataForkName]); name != "" {
+		return name
+	}
+	return cfg.LocalContainer.Image
+}
+
+func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, string, error) {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["runtime"] = cfg.LocalContainer.Runtime
-	labels["image"] = cfg.LocalContainer.Image
+	labels["image"] = localContainerDisplayImage(cfg)
+	for _, key := range checkpointScopeMetadataKeys {
+		if value := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[key]); value != "" {
+			labels[key] = value
+		}
+	}
+	if contextName := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataContext]); contextName != "" {
+		labels["runtime_context"] = contextName
+	}
 	labels["ssh_user"] = cfg.LocalContainer.User
 	labels["ssh_port"] = sshPort
 	labels["docker_socket"] = boolEnv(cfg.LocalContainer.DockerSocket)
@@ -389,10 +549,17 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		hostWorkRoot, containerWorkRoot = dockerSocketWorkRoots(cfg)
 		labels["host_work_root"] = hostWorkRoot
 	}
+	hostLeaseWorkRoot := ""
+	cleanupHostLeaseWorkRoot := false
+	defer func() {
+		if cleanupHostLeaseWorkRoot && hostLeaseWorkRoot != "" {
+			_ = os.RemoveAll(hostLeaseWorkRoot)
+		}
+	}()
 	labels["work_root"] = containerWorkRoot
 	cacheVolumeMounts, err := localContainerCacheVolumeMounts(cfg.Cache.Volumes)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	args := []string{
 		"run", "-d",
@@ -424,22 +591,30 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	}
 	if cfg.LocalContainer.DockerSocket {
 		if err := os.MkdirAll(hostWorkRoot, 0o755); err != nil {
-			return "", core.Exit(2, "create local-container host work root %s: %v", hostWorkRoot, err)
+			return "", "", core.Exit(2, "create local-container host work root %s: %v", hostWorkRoot, err)
 		}
 		if err := markLocalContainerWorkRoot(hostWorkRoot); err != nil {
-			return "", core.Exit(2, "mark local-container host work root %s: %v", hostWorkRoot, err)
+			return "", "", core.Exit(2, "mark local-container host work root %s: %v", hostWorkRoot, err)
 		}
 		leaseWorkRoot := filepath.Join(hostWorkRoot, leaseID)
-		if err := os.MkdirAll(leaseWorkRoot, 0o777); err != nil {
-			return "", core.Exit(2, "create local-container host lease work root %s: %v", leaseWorkRoot, err)
+		hostLeaseWorkRoot = leaseWorkRoot
+		leaseWorkRootPreexisting := true
+		if _, err := os.Lstat(leaseWorkRoot); os.IsNotExist(err) {
+			leaseWorkRootPreexisting = false
+		} else if err != nil {
+			return "", "", core.Exit(2, "stat local-container host lease work root %s: %v", leaseWorkRoot, err)
 		}
+		if err := os.MkdirAll(leaseWorkRoot, 0o777); err != nil {
+			return "", "", core.Exit(2, "create local-container host lease work root %s: %v", leaseWorkRoot, err)
+		}
+		cleanupHostLeaseWorkRoot = !leaseWorkRootPreexisting
 		if err := os.Chmod(leaseWorkRoot, 0o777); err != nil {
-			return "", core.Exit(2, "make local-container host lease work root writable %s: %v", leaseWorkRoot, err)
+			return "", "", core.Exit(2, "make local-container host lease work root writable %s: %v", leaseWorkRoot, err)
 		}
 		args = append(args, "-v", hostWorkRoot+":"+containerWorkRoot)
 		socketPath, err := b.dockerSocketMountPath(ctx)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
 		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
@@ -449,29 +624,64 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	for _, mount := range cacheVolumeMounts {
 		args = append(args, "-v", mount)
 	}
-	bootstrapFile, err := os.CreateTemp("", "crabbox-bootstrap-*.sh")
+	bootstrapDir, err := os.MkdirTemp("", "crabbox-bootstrap-*")
 	if err != nil {
-		return "", core.Exit(2, "create bootstrap script file: %v", err)
+		return "", "", core.Exit(2, "create bootstrap script directory: %v", err)
 	}
-	defer os.Remove(bootstrapFile.Name())
-	if _, err := bootstrapFile.WriteString(bootstrapScript); err != nil {
-		bootstrapFile.Close()
-		return "", core.Exit(2, "write bootstrap script: %v", err)
+	bootstrapPath := filepath.Join(bootstrapDir, "bootstrap.sh")
+	if err := os.WriteFile(bootstrapPath, []byte(bootstrapScript), 0o644); err != nil {
+		os.RemoveAll(bootstrapDir)
+		return "", "", core.Exit(2, "write bootstrap script: %v", err)
 	}
-	if err := bootstrapFile.Close(); err != nil {
-		return "", core.Exit(2, "close bootstrap script: %v", err)
-	}
-	args = append(args, "-v", bootstrapFile.Name()+":/tmp/crabbox-bootstrap.sh:ro")
-	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "/tmp/crabbox-bootstrap.sh")
+	args = append(args, "--label", "bootstrap_dir="+bootstrapDir)
+	args = append(args, "-v", bootstrapDir+":/tmp/crabbox-bootstrap:ro")
+	args = append(args, cfg.LocalContainer.Image, "/bin/sh", "/tmp/crabbox-bootstrap/bootstrap.sh")
 	result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
-		return "", commandError("container run", result, err)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
+		if owned && keep {
+			cleanupHostLeaseWorkRoot = false
+			return containerID, bootstrapDir, commandError("container run", result, err)
+		}
+		if owned {
+			if removeErr := b.removeContainer(cleanupCtx, containerID); removeErr == nil {
+				os.RemoveAll(bootstrapDir)
+			} else {
+				cleanupHostLeaseWorkRoot = false
+			}
+		} else if inspectErr == nil {
+			os.RemoveAll(bootstrapDir)
+		} else {
+			cleanupHostLeaseWorkRoot = false
+		}
+		return "", "", commandError("container run", result, err)
 	}
 	id := strings.TrimSpace(result.Stdout)
 	if id == "" {
-		return "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
+		if owned {
+			cleanupHostLeaseWorkRoot = false
+			return containerID, bootstrapDir, nil
+		}
+		if inspectErr == nil {
+			os.RemoveAll(bootstrapDir)
+		} else if !keep {
+			if removeErr := b.removeContainer(cleanupCtx, name); removeErr == nil {
+				os.RemoveAll(bootstrapDir)
+			} else {
+				cleanupHostLeaseWorkRoot = false
+			}
+		} else {
+			cleanupHostLeaseWorkRoot = false
+		}
+		return "", "", core.Exit(2, "%s run did not return a container id", cfg.LocalContainer.Runtime)
 	}
-	return id, nil
+	cleanupHostLeaseWorkRoot = false
+	return id, bootstrapDir, nil
 }
 
 func localContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string, error) {
@@ -705,26 +915,83 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	if identifier == "" {
 		return inspectContainer{}, "", "", core.Exit(2, "provider=%s requires --id <lease-id-or-slug-or-container>", providerName)
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
+	exactClaim, err := core.ReadLeaseClaim(identifier)
+	if err != nil {
 		return inspectContainer{}, "", "", err
-	} else if ok {
-		return b.findContainerForClaim(ctx, claim)
 	}
-	containers, err := b.listContainers(ctx)
+	if exactClaim.LeaseID == identifier && exactClaim.Provider == providerName {
+		if _, err := b.applyCheckpointScopeLabels(ctx, exactClaim.Labels); err != nil {
+			return inspectContainer{}, "", "", err
+		}
+		return b.findContainerForClaim(ctx, exactClaim)
+	}
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return inspectContainer{}, "", "", err
 	}
 	normalized := core.NormalizeLeaseSlug(identifier)
+	slugClaims := make([]core.LeaseClaim, 0, 1)
+	for i := range claims {
+		claim := claims[i]
+		if claim.Provider != providerName {
+			continue
+		}
+		if normalized != "" && core.NormalizeLeaseSlug(claim.Slug) == normalized {
+			slugClaims = append(slugClaims, claim)
+		}
+	}
+	if len(slugClaims) > 1 {
+		return inspectContainer{}, "", "", core.Exit(2, "local-container slug %s is ambiguous across %d lease claims; use a lease id", identifier, len(slugClaims))
+	}
+	containers, listErr := b.listContainers(ctx)
 	for _, container := range containers {
 		labels := container.Config.Labels
 		leaseID := labels["lease"]
 		slug := labels["slug"]
 		name := strings.TrimPrefix(container.Name, "/")
 		if container.ID == identifier || shortID(container.ID) == identifier || name == identifier || leaseID == identifier || (normalized != "" && core.NormalizeLeaseSlug(slug) == normalized) {
+			if len(slugClaims) == 1 && slugClaims[0].LeaseID != leaseID {
+				return inspectContainer{}, "", "", core.Exit(2, "local-container slug %s matches ambient lease %s and scoped lease %s; use a lease id", identifier, leaseID, slugClaims[0].LeaseID)
+			}
+			if len(slugClaims) == 1 {
+				claim := slugClaims[0]
+				if applied, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+					return inspectContainer{}, "", "", err
+				} else if applied {
+					return b.findContainerForClaim(ctx, claim)
+				}
+			}
 			return container, leaseID, slug, nil
 		}
 	}
+	if len(slugClaims) == 1 {
+		claim := slugClaims[0]
+		if _, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+			return inspectContainer{}, "", "", err
+		}
+		return b.findContainerForClaim(ctx, claim)
+	}
+	if listErr != nil {
+		return inspectContainer{}, "", "", listErr
+	}
 	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", identifier)
+}
+
+func (b *backend) applyCheckpointScopeLabels(ctx context.Context, labels map[string]string) (bool, error) {
+	metadata := checkpointScopeMetadataFromLabels(labels)
+	if len(metadata) == 0 {
+		return false, nil
+	}
+	scope := checkpointScopeFromMetadata(metadata, b.cfg.LocalContainer.Runtime)
+	if err := validateCheckpointScope(ctx, scope); err != nil {
+		return false, err
+	}
+	b.cfg.LocalContainer.CheckpointMetadata = metadata
+	if runtimeName := strings.TrimSpace(metadata[checkpointMetadataRuntime]); runtimeName != "" {
+		b.cfg.LocalContainer.Runtime = runtimeName
+		core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	}
+	return true, nil
 }
 
 func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseClaim) (inspectContainer, string, string, error) {
@@ -738,12 +1005,6 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 			return container, labels["lease"], labels["slug"], nil
 		}
 	}
-	for _, container := range containers {
-		labels := container.Config.Labels
-		if claim.Slug != "" && core.NormalizeLeaseSlug(labels["slug"]) == core.NormalizeLeaseSlug(claim.Slug) {
-			return container, labels["lease"], labels["slug"], nil
-		}
-	}
 	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", firstNonBlank(claim.Slug, claim.LeaseID))
 }
 
@@ -753,6 +1014,29 @@ func (b *backend) removeContainer(ctx context.Context, id string) error {
 		return commandError("container remove", result, err)
 	}
 	return nil
+}
+
+func (b *backend) ownedContainerID(ctx context.Context, leaseID, bootstrapDir string) (string, bool, error) {
+	result, err := b.docker(ctx, []string{"ps", "-aq", "--filter", "label=lease=" + leaseID}, nil, nil)
+	if err != nil {
+		return "", false, err
+	}
+	for _, id := range strings.Fields(result.Stdout) {
+		container, err := b.inspectContainer(ctx, id)
+		if err != nil {
+			return "", false, err
+		}
+		labels := container.Config.Labels
+		if labels["lease"] != leaseID || labels["bootstrap_dir"] != bootstrapDir {
+			continue
+		}
+		containerID := strings.TrimSpace(container.ID)
+		if containerID == "" {
+			containerID = id
+		}
+		return containerID, true, nil
+	}
+	return "", false, nil
 }
 
 func (b *backend) runtimeInfo(ctx context.Context) (string, string) {
@@ -777,6 +1061,14 @@ func (b *backend) runtimeContext(ctx context.Context, runtimeName string) string
 
 func (b *backend) claimScope(ctx context.Context) string {
 	cfg := b.configForRun()
+	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
+		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
+		contextName := scope.Context
+		if contextName == "" && scope.Host != "" {
+			contextName = "default"
+		}
+		return localContainerClaimScope(scope.Runtime, contextName, scope.Host)
+	}
 	return localContainerClaimScope(
 		cfg.LocalContainer.Runtime,
 		b.runtimeContext(ctx, cfg.LocalContainer.Runtime),
@@ -846,9 +1138,18 @@ func localContainerClaimExpired(claim core.LeaseClaim, now time.Time) bool {
 
 func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
 	cfg := b.configForRun()
+	var env []string
+	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
+		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
+		if scope.Context != "" {
+			args = append([]string{"--context", scope.Context}, args...)
+		}
+		env = checkpointEnvForScope(scope)
+	}
 	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   cfg.LocalContainer.Runtime,
 		Args:   args,
+		Env:    env,
 		Stdout: stdout,
 		Stderr: stderr,
 	})
@@ -857,6 +1158,9 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 func (b *backend) serverFromContainer(container inspectContainer, cfg core.Config) core.Server {
 	labels := map[string]string{}
 	for key, value := range container.Config.Labels {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
 		labels[key] = value
 	}
 	labels["container_id"] = shortID(container.ID)
@@ -981,6 +1285,19 @@ func safeLocalContainerLeaseID(leaseID string) bool {
 		return false
 	}
 	return true
+}
+
+func trustedBootstrapDir(dir string) bool {
+	dir = filepath.Clean(dir)
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	base := filepath.Base(dir)
+	if !strings.HasPrefix(base, "crabbox-bootstrap-") {
+		return false
+	}
+	parent := filepath.Dir(dir)
+	return parent == filepath.Clean(os.TempDir())
 }
 
 func trustedLocalContainerWorkRoot(root string) bool {

@@ -14,9 +14,10 @@ import (
 // owned by Tensorlake's central API.
 //
 // As with modal and cloudflare, the adapter implements core.BridgeProvider
-// only to return core.ErrBridgeNotImplemented so the resolver flags the peer
-// with BridgeState="unsupported" instead of silently emitting an empty Targets
-// slice that callers could misread as "no shares yet".
+// only to return core.ErrBridgeNotImplemented. If this provider is ever
+// explicitly routed through the bridge path, callers get a clear unsupported
+// signal instead of a silently empty Targets slice that could be misread as "no
+// shares yet".
 
 // PublishPeer reports that Tensorlake does not participate in the bridge plane.
 func (b *tensorlakeBackend) PublishPeer(ctx context.Context, leaseID string, port int, ttl time.Duration) (core.BridgePeerTarget, error) {

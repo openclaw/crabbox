@@ -168,31 +168,31 @@ func (c *HetznerClient) ListCrabboxServers(ctx context.Context) ([]Server, error
 	return res.Servers, err
 }
 
-func (c *HetznerClient) EnsureSSHKey(ctx context.Context, name, publicKey string) (SSHKey, error) {
+func (c *HetznerClient) EnsureSSHKey(ctx context.Context, name, publicKey string) (SSHKey, bool, error) {
 	var list struct {
 		SSHKeys []SSHKey `json:"ssh_keys"`
 	}
 	q := url.Values{}
 	q.Set("name", name)
 	if err := c.do(ctx, http.MethodGet, "/ssh_keys?"+q.Encode(), nil, &list); err != nil {
-		return SSHKey{}, err
+		return SSHKey{}, false, err
 	}
 	for _, key := range list.SSHKeys {
 		if key.Name == name {
 			if strings.TrimSpace(key.PublicKey) != strings.TrimSpace(publicKey) {
-				return SSHKey{}, exit(3, "hetzner ssh key %q exists with different public key", name)
+				return SSHKey{}, false, exit(3, "hetzner ssh key %q exists with different public key", name)
 			}
-			return key, nil
+			return key, false, nil
 		}
 	}
 	q = url.Values{}
 	q.Set("per_page", "100")
 	if err := c.do(ctx, http.MethodGet, "/ssh_keys?"+q.Encode(), nil, &list); err != nil {
-		return SSHKey{}, err
+		return SSHKey{}, false, err
 	}
 	for _, key := range list.SSHKeys {
 		if strings.TrimSpace(key.PublicKey) == strings.TrimSpace(publicKey) {
-			return key, nil
+			return key, false, nil
 		}
 	}
 
@@ -208,9 +208,9 @@ func (c *HetznerClient) EnsureSSHKey(ctx context.Context, name, publicKey string
 		SSHKey SSHKey `json:"ssh_key"`
 	}
 	if err := c.do(ctx, http.MethodPost, "/ssh_keys", body, &created); err != nil {
-		return SSHKey{}, err
+		return SSHKey{}, false, err
 	}
-	return created.SSHKey, nil
+	return created.SSHKey, true, nil
 }
 
 func (c *HetznerClient) DeleteSSHKey(ctx context.Context, name string) error {

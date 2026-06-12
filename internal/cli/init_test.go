@@ -48,6 +48,9 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	}
 	for _, want := range []string{
 		"crabbox_job:",
+		"CRABBOX_ID: ${{ inputs.crabbox_id }}",
+		"CRABBOX_JOB: ${{ inputs.crabbox_job }}",
+		"CRABBOX_KEEP_ALIVE_MINUTES: ${{ inputs.crabbox_keep_alive_minutes }}",
 		"ENV_FILE=${env_file}",
 		"SERVICES_FILE=${services_file}",
 		"GITHUB_JOB",
@@ -55,6 +58,16 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	} {
 		if !strings.Contains(string(workflow), want) {
 			t.Fatalf("workflow missing %q:\n%s", want, workflow)
+		}
+	}
+	for _, blocked := range []string{
+		`job="${{ inputs.crabbox_job }}"`,
+		`${{ inputs.crabbox_id }}.env`,
+		`minutes="${{ inputs.crabbox_keep_alive_minutes }}"`,
+		`${{ inputs.crabbox_id }}.stop`,
+	} {
+		if strings.Contains(string(workflow), blocked) {
+			t.Fatalf("workflow contains unsafe interpolation %q:\n%s", blocked, workflow)
 		}
 	}
 	config, err := os.ReadFile(filepath.Join(dir, ".crabbox.yaml"))

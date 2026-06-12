@@ -18,6 +18,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openClient := fs.Bool("open", false, "open the VNC client locally")
 	hostManaged := fs.Bool("host-managed", false, "allow opening host-managed static VNC")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -26,6 +27,9 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	setIDFromFirstArg(fs, id)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if isBlacksmithProvider(cfg.Provider) {
@@ -168,7 +172,6 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 
 func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {
 	args := []string{
-		"-o", "IdentitiesOnly=yes",
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
@@ -180,7 +183,7 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 		"-p", target.Port,
 	}
 	if target.Key != "" {
-		args = append([]string{"-i", target.Key}, args...)
+		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
 	}
 	if target.ProxyCommand != "" {
 		args = append(args, "-o", "ProxyCommand="+target.ProxyCommand)

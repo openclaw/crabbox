@@ -64,6 +64,10 @@ func ProxmoxServerTypeForConfig(cfg Config) string {
 	return proxmoxServerTypeForConfig(cfg)
 }
 
+func IncusServerTypeForConfig(cfg Config) string {
+	return incusServerTypeForConfig(cfg)
+}
+
 func Exit(code int, format string, args ...any) ExitError {
 	return exit(code, format, args...)
 }
@@ -80,6 +84,10 @@ func ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot s
 	return claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func AppendDirectPondTailscaleTag(cfg *Config) {
+	appendPondTailscaleTag(cfg, true)
+}
+
 // ClaimLeaseForRepoProviderPond is the pond-aware variant exposed for
 // delegated providers that need to persist the pond label in the local claim
 // sidecar (delegated providers do not own a provider-side label store).
@@ -94,6 +102,22 @@ func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, cacheVolumes []string) error {
+	return claimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, cacheVolumes)
+}
+
+func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget) error {
+	return claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target)
+}
+
+func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
+}
+
+func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
 func ResolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	return resolveLeaseClaim(identifier)
 }
@@ -102,8 +126,29 @@ func ResolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool
 	return resolveLeaseClaimForProvider(identifier, provider)
 }
 
+func ResolveLeaseClaimForProviderWithExact(identifier, provider string) (LeaseClaim, bool, bool, error) {
+	return resolveLeaseClaimForProviderWithExact(identifier, provider)
+}
+
+func ResolveLeaseClaimForProviderCloudID(cloudID, provider string) (LeaseClaim, bool, error) {
+	return resolveLeaseClaimForProviderCloudID(cloudID, provider)
+}
+
+func LeaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
+	return leaseClaimMatchesIdentifier(claim, identifier)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
+}
+
+func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return removeLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {
+	_, err := azureSSHCIDRsForRules(ctx, cfg, nil)
+	return err
 }
 
 func UpdateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
@@ -114,12 +159,51 @@ func UpdateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
+func UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
+}
+
+func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
+	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
+}
+
+// UpdateLeaseClaimTailscale records a tailnet endpoint (IPv4 and/or FQDN) on an
+// existing claim. Used by delegated-run providers that join the tailnet
+// out-of-band rather than through a Crabbox-managed SSH lease.
+func UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
+	return updateLeaseClaimTailscale(leaseID, ipv4, fqdn)
+}
+
+func UpdateLeaseClaimTailscaleSettings(leaseID, hostname string, tags []string, loginURL, exitNode string, exitLAN bool) error {
+	return updateLeaseClaimTailscaleSettings(leaseID, hostname, tags, loginURL, exitNode, exitLAN)
+}
+
+func ClearLeaseClaimTailscale(leaseID string) error {
+	return clearLeaseClaimTailscale(leaseID)
+}
+
 func ListLeaseClaims() ([]LeaseClaim, error) {
 	return listLeaseClaims()
 }
 
+func ListLeaseClaimsWithPrefix(prefix string) ([]LeaseClaim, error) {
+	return listLeaseClaimsWithPrefix(prefix)
+}
+
 func ReadLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return readLeaseClaim(leaseID)
+}
+
+func ReadLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
+	return readLeaseClaimWithPresence(leaseID)
+}
+
+func OSImageWasExplicit(cfg Config) bool {
+	return cfg.osImageExplicit
+}
+
+func CrabboxStateDir() (string, error) {
+	return crabboxStateDir()
 }
 
 func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
@@ -152,6 +236,10 @@ func SlugWithCollisionSuffix(base, seed string) string {
 
 func NormalizeLeaseSlug(value string) string {
 	return normalizeLeaseSlug(value)
+}
+
+func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
+	return renderTailscaleHostname(template, leaseID, slug, provider)
 }
 
 func LeaseProviderName(leaseID, slug string) string {
@@ -211,6 +299,7 @@ const (
 	CheckpointKindGCP              = checkpointKindGCP
 	CheckpointKindGCPDisk          = checkpointKindGCPDisk
 	CheckpointKindParallels        = checkpointKindParallels
+	CheckpointKindDockerCommit     = checkpointKindDockerCommit
 	CheckpointStrategyImage        = checkpointStrategyImage
 	CheckpointStrategyDiskSnapshot = checkpointStrategyDiskSnapshot
 )

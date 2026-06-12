@@ -203,13 +203,28 @@ jobs:
           if [ -f go.mod ]; then go mod download; fi
       - name: Mark Crabbox ready
         shell: bash
+        env:
+          CRABBOX_ID: ${{ inputs.crabbox_id }}
+          CRABBOX_JOB: ${{ inputs.crabbox_job }}
         run: |
-          job="${{ inputs.crabbox_job }}"
+          case "$CRABBOX_ID" in
+            ""|*[!A-Za-z0-9_-]*)
+              echo "::error::crabbox_id must match [A-Za-z0-9_-]+"
+              exit 2
+              ;;
+          esac
+          case "$CRABBOX_JOB" in
+            *$'\n'*|*$'\r'*)
+              echo "::error::crabbox_job must not contain line breaks"
+              exit 2
+              ;;
+          esac
+          job="$CRABBOX_JOB"
           if [ -z "$job" ]; then job=hydrate; fi
           mkdir -p "$HOME/.crabbox/actions"
-          state="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env"
-          env_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env.sh"
-          services_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.services"
+          state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
+          env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
+          services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
           write_export() {
             key="$1"
             value="${!key-}"
@@ -240,12 +255,21 @@ jobs:
           mv "$tmp" "$state"
       - name: Keep Crabbox job alive
         shell: bash
+        env:
+          CRABBOX_ID: ${{ inputs.crabbox_id }}
+          CRABBOX_KEEP_ALIVE_MINUTES: ${{ inputs.crabbox_keep_alive_minutes }}
         run: |
-          minutes="${{ inputs.crabbox_keep_alive_minutes }}"
+          case "$CRABBOX_ID" in
+            ""|*[!A-Za-z0-9_-]*)
+              echo "::error::crabbox_id must match [A-Za-z0-9_-]+"
+              exit 2
+              ;;
+          esac
+          minutes="$CRABBOX_KEEP_ALIVE_MINUTES"
           case "$minutes" in
             ''|*[!0-9]*) minutes=90 ;;
           esac
-          stop="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.stop"
+          stop="$HOME/.crabbox/actions/${CRABBOX_ID}.stop"
           deadline=$(( $(date +%s) + minutes * 60 ))
           while [ "$(date +%s)" -lt "$deadline" ]; do
             if [ -f "$stop" ]; then

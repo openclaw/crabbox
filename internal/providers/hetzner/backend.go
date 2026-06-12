@@ -2,9 +2,10 @@ package hetzner
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"os"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -26,10 +27,22 @@ type LeaseTarget = core.LeaseTarget
 type Server = core.Server
 type SSHTarget = core.SSHTarget
 
+const providerName = "hetzner"
+
+type hetznerClient interface {
+	ListCrabboxServers(context.Context) ([]Server, error)
+	EnsureSSHKey(context.Context, string, string) (core.SSHKey, bool, error)
+	CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error)
+	GetServer(context.Context, int64) (Server, error)
+	DeleteServer(context.Context, int64) error
+	DeleteSSHKey(context.Context, string) error
+	SetLabels(context.Context, int64, map[string]string) error
+}
+
 type hetznerLeaseBackend struct{ shared.DirectSSHBackend }
 
 func NewHetznerLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
-	cfg.Provider = "hetzner"
+	cfg.Provider = providerName
 	return &hetznerLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer}}
 }
 
@@ -39,7 +52,7 @@ func (b *hetznerLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (
 	})
 }
 
-func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (target LeaseTarget, err error) {
 	if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
 		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
 	}
@@ -63,12 +76,27 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
+	rollbackKey := ""
+	rollbackKeyCreated := false
+	var rollbackServer Server
+	rollbackServerCreated := false
+	committed := false
+	defer func() {
+		if err == nil || committed {
+			return
+		}
+		if cleanupErr := rollbackHetznerAcquire(client, rollbackServer, rollbackServerCreated, rollbackKey, rollbackKeyCreated); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("hetzner cleanup failed: %w", cleanupErr))
+		}
+	}()
 	if cfg.ProviderKey != "" {
-		providerKey, err := client.EnsureSSHKey(ctx, cfg.ProviderKey, publicKey)
+		providerKey, created, err := client.EnsureSSHKey(ctx, cfg.ProviderKey, publicKey)
 		if err != nil {
 			return LeaseTarget{}, err
 		}
 		cfg.ProviderKey = providerKey.Name
+		rollbackKey = providerKey.Name
+		rollbackKeyCreated = created
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=hetzner lease=%s slug=%s class=%s preferred_type=%s location=%s keep=%v\n", leaseID, slug, cfg.Class, cfg.ServerType, cfg.Location, keep)
 	server, cfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
@@ -77,21 +105,24 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	rollbackServer = server
+	rollbackServerCreated = true
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%d type=%s\n", leaseID, server.ID, cfg.ServerType)
 	server, err = waitForServerIP(ctx, client, server.ID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
-		_ = deleteServer(context.Background(), cfg, server)
+	rollbackServer = server
+	ssh := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+	if err := waitForSSHReady(ctx, &ssh, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
 		return LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
 	if err := client.SetLabels(ctx, server.ID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set labels: %v\n", err)
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	committed = true
+	return LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
 }
 
 func (b *hetznerLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -102,6 +133,9 @@ func (b *hetznerLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 	if serverID, ok := parseServerID(req.ID); ok {
 		server, err := client.GetServer(ctx, serverID)
 		if err != nil {
+			return LeaseTarget{}, err
+		}
+		if err := validateHetznerServerOwnership(server); err != nil {
 			return LeaseTarget{}, err
 		}
 		leaseID := blank(server.Labels["lease"], req.ID)
@@ -116,6 +150,9 @@ func (b *hetznerLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
+		if err := validateHetznerServerOwnership(server); err != nil {
+			return LeaseTarget{}, err
+		}
 		target := sshTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 		useStoredTestboxKey(&target, leaseID)
 		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
@@ -143,10 +180,13 @@ func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) 
 }
 
 func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
-	if err := deleteServer(ctx, b.Cfg, req.Lease.Server); err != nil {
+	serverGone, err := deleteServerForRelease(ctx, b.Cfg, req.Lease.Server)
+	if err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
+	if serverGone {
+		removeLeaseClaim(req.Lease.LeaseID)
+	}
 	return nil
 }
 
@@ -172,35 +212,62 @@ func acquireAttemptsRetry(rt Runtime, keep bool, acquire func() (LeaseTarget, er
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
-func newHetznerClient() (*core.HetznerClient, error) { return core.NewHetznerClient() }
-func newLeaseID() string                             { return core.NewLeaseID() }
 func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(id, requested, servers)
-}
-func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
-	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
-}
-func providerKeyForLease(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
-func waitForServerIP(ctx context.Context, client *core.HetznerClient, id int64) (Server, error) {
-	return core.WaitForServerIP(ctx, client, id)
 }
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
-func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
-	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
-}
-func bootstrapWaitTimeout(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 func deleteServer(ctx context.Context, cfg Config, server Server) error {
+	_, err := deleteServerForRelease(ctx, cfg, server)
+	return err
+}
+func deleteServerForRelease(ctx context.Context, cfg Config, server Server) (bool, error) {
+	if err := validateHetznerServerOwnership(server); err != nil {
+		return false, err
+	}
 	client, err := newHetznerClient()
 	if err != nil {
-		return err
+		return false, err
+	}
+	return deleteServerWithClient(ctx, client, server, true)
+}
+func deleteServerWithClient(ctx context.Context, client hetznerClient, server Server, deleteKey bool) (bool, error) {
+	if err := validateHetznerServerOwnership(server); err != nil {
+		return false, err
 	}
 	if err := client.DeleteServer(ctx, server.ID); err != nil {
+		if !hetznerServerAlreadyAbsent(err, server.ID) {
+			return false, err
+		}
+	}
+	if keyName := core.ServerProviderKey(server); deleteKey && core.ValidCrabboxProviderKey(keyName) {
+		return true, client.DeleteSSHKey(ctx, keyName)
+	}
+	return true, nil
+}
+func hetznerServerAlreadyAbsent(err error, serverID int64) bool {
+	return strings.HasPrefix(err.Error(), fmt.Sprintf("hetzner DELETE /servers/%d: http 404:", serverID))
+}
+func validateHetznerServerOwnership(server Server) error {
+	if server.Labels == nil ||
+		server.Labels["crabbox"] != "true" ||
+		server.Labels["created_by"] != "crabbox" ||
+		(server.Labels["provider"] != "" && server.Labels["provider"] != providerName) ||
+		server.Labels["lease"] == "" {
+		return exit(2, "refusing to operate on non-Crabbox Hetzner server: %s", server.DisplayID())
+	}
+	return nil
+}
+func rollbackHetznerAcquire(client hetznerClient, server Server, serverCreated bool, keyName string, keyCreated bool) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if serverCreated {
+		_, err := deleteServerWithClient(cleanupCtx, client, server, keyCreated)
 		return err
 	}
-	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
-		return client.DeleteSSHKey(ctx, keyName)
+	if keyCreated && core.ValidCrabboxProviderKey(keyName) {
+		return client.DeleteSSHKey(cleanupCtx, keyName)
 	}
 	return nil
 }
@@ -217,3 +284,19 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }
 func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
+
+var (
+	newHetznerClient          = func() (hetznerClient, error) { return core.NewHetznerClient() }
+	newLeaseID                = core.NewLeaseID
+	ensureTestboxKeyForConfig = core.EnsureTestboxKeyForConfig
+	providerKeyForLease       = core.ProviderKeyForLease
+	waitForSSHReady           = core.WaitForSSHReady
+	bootstrapWaitTimeout      = core.BootstrapWaitTimeout
+	waitForServerIP           = func(ctx context.Context, client hetznerClient, id int64) (Server, error) {
+		concrete, ok := client.(*core.HetznerClient)
+		if !ok {
+			return Server{}, exit(2, "hetzner IP wait requires a Hetzner client")
+		}
+		return core.WaitForServerIP(ctx, concrete, id)
+	}
+)

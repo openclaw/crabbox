@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,12 +18,14 @@ type Config struct {
 	Profile                       string
 	Provider                      string
 	TargetOS                      string
+	targetExplicit                bool
 	Architecture                  string
 	architectureExplicit          bool
 	OSImage                       string
 	osImageExplicit               bool
 	osImageProviderDefaults       string
 	WindowsMode                   string
+	explicitWindowsMode           string
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool
@@ -39,6 +42,7 @@ type Config struct {
 	HostID                        string
 	Access                        AccessConfig
 	Location                      string
+	locationExplicit              bool
 	Image                         string
 	imageExplicit                 bool
 	AWSRegion                     string
@@ -84,16 +88,22 @@ type Config struct {
 	GCPRootGB                     int64
 	gcpRootGBExplicit             bool
 	GCPServiceAccount             string
+	DigitalOcean                  DigitalOceanConfig
+	digitalOceanImageExplicit     bool
+	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	XCPNg                         XCPNgConfig
 	Parallels                     ParallelsConfig
 	parallelsTemplateApplied      bool
 	SSHUser                       string
+	explicitSSHUser               string
 	SSHKey                        string
 	SSHPort                       string
+	explicitSSHPort               string
 	SSHFallbackPorts              []string
 	ProviderKey                   string
 	WorkRoot                      string
+	explicitWorkRoot              string
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	Sync                          SyncConfig
@@ -105,6 +115,7 @@ type Config struct {
 	KubeVirt                      KubeVirtConfig
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
+	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
 	ExeDev                        ExeDevConfig
@@ -113,8 +124,11 @@ type Config struct {
 	Wandb                         WandbConfig
 	Islo                          IsloConfig
 	isloImageExplicit             bool
+	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
+	OpenComputer                  OpenComputerConfig
 	DockerSandbox                 DockerSandboxConfig
+	AnthropicSRT                  AnthropicSRTConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
 	AsciiBox                      AsciiBoxConfig
@@ -126,8 +140,21 @@ type Config struct {
 	localContainerImageExplicit   bool
 	AppleContainer                AppleContainerConfig
 	appleContainerImageExplicit   bool
+	AppleVZ                       AppleVZConfig
+	appleVZImageExplicit          bool
+	appleVZImageSHA256Explicit    bool
+	appleVZCPUsExplicit           bool
+	appleVZMemoryExplicit         bool
+	appleVZDiskExplicit           bool
+	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
+	Tart                          TartConfig
+	tartImageExplicit             bool
+	tartDiskExplicit              bool
+	tartCPUsExplicit              bool
+	tartMemoryExplicit            bool
+	HyperV                        HyperVConfig
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
 	Results                       ResultsConfig
@@ -165,6 +192,13 @@ type CapacityConfig struct {
 	Regions           []string
 	AvailabilityZones []string
 	Hints             bool
+}
+
+type DigitalOceanConfig struct {
+	Region   string
+	Image    string
+	VPCUUID  string
+	SSHCIDRs []string
 }
 
 type ActionsConfig struct {
@@ -206,8 +240,52 @@ type ExternalConfig struct {
 	Command     string
 	Args        []string
 	Config      map[string]any
+	Lifecycle   ExternalLifecycleConfig
+	Connection  ExternalConnectionConfig
 	WorkRoot    string
 	RoutingFile string
+}
+
+type ExternalLifecycleConfig struct {
+	Doctor  ExternalLifecycleOperation `yaml:"doctor,omitempty" json:"doctor,omitempty"`
+	Acquire ExternalLifecycleOperation `yaml:"acquire,omitempty" json:"acquire,omitempty"`
+	Resolve ExternalLifecycleOperation `yaml:"resolve,omitempty" json:"resolve,omitempty"`
+	List    ExternalLifecycleOperation `yaml:"list,omitempty" json:"list,omitempty"`
+	Release ExternalLifecycleOperation `yaml:"release,omitempty" json:"release,omitempty"`
+	Touch   ExternalLifecycleOperation `yaml:"touch,omitempty" json:"touch,omitempty"`
+	Cleanup ExternalLifecycleOperation `yaml:"cleanup,omitempty" json:"cleanup,omitempty"`
+}
+
+type ExternalLifecycleOperation struct {
+	Argv              []string          `yaml:"argv,omitempty" json:"argv,omitempty"`
+	Steps             [][]string        `yaml:"steps,omitempty" json:"steps,omitempty"`
+	Env               map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	AllowEnvArgv      bool              `yaml:"allowEnvArgv,omitempty" json:"allowEnvArgv,omitempty"`
+	Output            string            `yaml:"output,omitempty" json:"output,omitempty"`
+	NamePrefix        string            `yaml:"namePrefix,omitempty" json:"namePrefix,omitempty"`
+	RollbackOnFailure bool              `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
+}
+
+type ExternalConnectionConfig struct {
+	ResourceName         string                      `yaml:"resourceName,omitempty" json:"resourceName,omitempty"`
+	AllowEnvResourceName bool                        `yaml:"allowEnvResourceName,omitempty" json:"allowEnvResourceName,omitempty"`
+	CloudID              string                      `yaml:"cloudId,omitempty" json:"cloudId,omitempty"`
+	ServerType           string                      `yaml:"serverType,omitempty" json:"serverType,omitempty"`
+	Labels               map[string]string           `yaml:"labels,omitempty" json:"labels,omitempty"`
+	SSH                  ExternalSSHConnectionConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
+}
+
+type ExternalSSHConnectionConfig struct {
+	User            string   `yaml:"user,omitempty" json:"user,omitempty"`
+	Host            string   `yaml:"host,omitempty" json:"host,omitempty"`
+	Key             string   `yaml:"key,omitempty" json:"key,omitempty"`
+	Port            string   `yaml:"port,omitempty" json:"port,omitempty"`
+	FallbackPorts   []string `yaml:"fallbackPorts,omitempty" json:"fallbackPorts,omitempty"`
+	ReadyCheck      string   `yaml:"readyCheck,omitempty" json:"readyCheck,omitempty"`
+	AuthSecret      bool     `yaml:"authSecret,omitempty" json:"authSecret,omitempty"`
+	NoControlMaster bool     `yaml:"noControlMaster,omitempty" json:"noControlMaster,omitempty"`
+	SSHConfigProxy  bool     `yaml:"sshConfigProxy,omitempty" json:"sshConfigProxy,omitempty"`
+	ProxyCommand    string   `yaml:"proxyCommand,omitempty" json:"proxyCommand,omitempty"`
 }
 
 type NamespaceConfig struct {
@@ -219,6 +297,16 @@ type NamespaceConfig struct {
 	AutoStopIdleTimeout time.Duration
 	WorkRoot            string
 	DeleteOnRelease     bool
+}
+
+type MorphConfig struct {
+	APIKey          string
+	APIURL          string
+	Snapshot        string
+	SSHGatewayHost  string
+	WorkRoot        string
+	DeleteOnRelease bool
+	WakeOnSSH       bool
 }
 
 type DaytonaConfig struct {
@@ -319,6 +407,20 @@ type IsloConfig struct {
 	DiskGB         int
 }
 
+type TenkiConfig struct {
+	CLIPath   string
+	Endpoint  string
+	Gateway   string
+	Workspace string
+	Project   string
+	Image     string
+	Snapshot  string
+	WorkRoot  string
+	CPUs      int
+	MemoryMB  int
+	DiskGB    int
+}
+
 type TensorlakeConfig struct {
 	APIKey         string
 	APIURL         string
@@ -336,6 +438,22 @@ type TensorlakeConfig struct {
 	NoInternet     bool
 }
 
+// OpenComputerConfig configures the delegated OpenComputer provider, which
+// talks to the OpenComputer REST API. The API key is intentionally absent: it
+// is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
+// or the `oc` CLI config (`oc config set api-key`), and sent only in the
+// X-API-Key header — never persisted in Crabbox config or placed on argv.
+type OpenComputerConfig struct {
+	APIURL          string
+	Workdir         string
+	CPU             int
+	MemoryMB        int
+	TimeoutSecs     int
+	ExecTimeoutSecs int
+	Burst           bool
+	ForgetMissing   bool
+}
+
 type DockerSandboxConfig struct {
 	CLIPath         string
 	Agent           string
@@ -347,6 +465,12 @@ type DockerSandboxConfig struct {
 	ExtraWorkspaces []string
 	MCP             []string
 	Kit             []string
+}
+
+type AnthropicSRTConfig struct {
+	CLIPath  string
+	Settings string
+	Debug    bool
 }
 
 type ModalConfig struct {
@@ -407,6 +531,27 @@ type XCPNgConfig struct {
 	User         string
 	WorkRoot     string
 	InsecureTLS  bool
+}
+
+type IncusConfig struct {
+	Remote            string
+	Project           string
+	Address           string
+	Socket            string
+	InstanceType      string
+	Image             string
+	Profile           string
+	User              string
+	WorkRoot          string
+	DeleteOnRelease   bool
+	StartTimeout      time.Duration
+	LaunchPort        string
+	ProxyListenHost   string
+	ProxyListenPort   string
+	ProxyDevice       string
+	TLSServerCert     string
+	InsecureTLS       bool
+	RemoteImageServer string
 }
 
 type ParallelsConfig struct {
@@ -470,14 +615,15 @@ type SpritesConfig struct {
 }
 
 type LocalContainerConfig struct {
-	Runtime      string
-	Image        string
-	User         string
-	WorkRoot     string
-	CPUs         int
-	Memory       string
-	Network      string
-	DockerSocket bool
+	Runtime            string
+	Image              string
+	User               string
+	WorkRoot           string
+	CPUs               int
+	Memory             string
+	Network            string
+	DockerSocket       bool
+	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
 
 type AppleContainerConfig struct {
@@ -490,6 +636,31 @@ type AppleContainerConfig struct {
 	ExtraRunArgs []string
 }
 
+type AppleVZConfig struct {
+	HelperPath  string
+	Image       string
+	ImageSHA256 string
+	User        string
+	WorkRoot    string
+	CPUs        int
+	MemoryMiB   int
+	DiskGiB     int
+}
+
+type MXCConfig struct {
+	CLIPath           string
+	Version           string
+	Containment       string
+	Network           string
+	ReadOnlyPaths     []string
+	ReadWritePaths    []string
+	AllowedHosts      []string
+	BlockedHosts      []string
+	AllowDACLMutation bool
+	AllowWindowsUI    bool
+	Experimental      bool
+}
+
 type MultipassConfig struct {
 	CLIPath       string
 	Image         string
@@ -499,6 +670,27 @@ type MultipassConfig struct {
 	Memory        string
 	Disk          string
 	LaunchTimeout time.Duration
+}
+
+type TartConfig struct {
+	Image    string
+	User     string
+	Password string
+	WorkRoot string
+	CPUs     int
+	Memory   int
+	Disk     int
+}
+
+type HyperVConfig struct {
+	Image         string
+	User          string
+	WorkRoot      string
+	CPUs          int
+	Memory        int
+	Switch        string
+	GuestPassword string
+	InitPassword  bool
 }
 
 type StaticConfig struct {
@@ -759,13 +951,6 @@ func loadConfig() (Config, error) {
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		return Config{}, err
 	}
-	if provider, err := ProviderFor(cfg.Provider); err != nil {
-		return Config{}, err
-	} else if validator, ok := provider.(ProviderConfigValidator); ok {
-		if err := validator.ValidateConfig(cfg); err != nil {
-			return Config{}, err
-		}
-	}
 	normalizeTargetConfig(&cfg)
 	if err := validateTargetConfig(cfg); err != nil {
 		return Config{}, err
@@ -798,6 +983,59 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.OSImage = normalized
 	}
 	applyOSImageProviderDefaults(cfg, false)
+	if cfg.Provider == "digitalocean" {
+		if cfg.DigitalOcean.Region == "" {
+			cfg.DigitalOcean.Region = "nyc3"
+		}
+		if cfg.osImageExplicit && !cfg.digitalOceanImageExplicit {
+			if cfg.OSImage == "ubuntu:24.04" {
+				cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+			} else {
+				cfg.DigitalOcean.Image = ""
+			}
+		} else if cfg.DigitalOcean.Image == "" {
+			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = baseConfig().SSHUser
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = baseConfig().SSHPort
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
+	if cfg.Provider == "hyperv" {
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetWindows
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.HyperV.User != "" {
+			cfg.SSHUser = cfg.HyperV.User
+		}
+		if cfg.HyperV.WorkRoot != "" {
+			cfg.WorkRoot = cfg.HyperV.WorkRoot
+		}
+		cfg.SSHPort = "22"
+		return nil
+	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		if cfg.ExeDev.User != "" {
 			cfg.SSHUser = cfg.ExeDev.User
@@ -820,6 +1058,65 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		if cfg.TargetOS == "" {
 			cfg.TargetOS = targetLinux
+		}
+		return nil
+	}
+	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
+		if cfg.Tart.User != "" {
+			cfg.SSHUser = cfg.Tart.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Tart.WorkRoot != "" {
+			cfg.WorkRoot = cfg.Tart.WorkRoot
+		}
+		if !IsTargetExplicit(cfg) && (cfg.TargetOS == "" || cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetMacOS
+		}
+		if !cfg.ServerTypeExplicit && cfg.Tart.Image != "" {
+			cfg.ServerType = cfg.Tart.Image
+		}
+		return nil
+	}
+	if cfg.Provider == "apple-vz" || cfg.Provider == "applevz" {
+		if cfg.AppleVZ.User != "" {
+			cfg.SSHUser = cfg.AppleVZ.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		base := baseConfig()
+		if cfg.AppleVZ.WorkRoot != "" && (IsDefaultWorkRoot(cfg.WorkRoot) || cfg.AppleVZ.WorkRoot != base.AppleVZ.WorkRoot) {
+			cfg.WorkRoot = cfg.AppleVZ.WorkRoot
+		}
+		if cfg.TargetOS == "" {
+			cfg.TargetOS = targetLinux
+		}
+		if !cfg.ServerTypeExplicit && cfg.AppleVZ.Image != "" {
+			cfg.ServerType = redactRemoteURL(cfg.AppleVZ.Image)
+		}
+		return nil
+	}
+	if cfg.Provider == "incus" {
+		base := baseConfig()
+		if cfg.Incus.User != "" && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser || cfg.Incus.User != base.Incus.User) {
+			cfg.SSHUser = cfg.Incus.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
+			cfg.SSHPort = blank(cfg.Incus.ProxyListenPort, "22")
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Incus.WorkRoot != "" && (isDefaultWorkRoot(cfg.WorkRoot) || cfg.Incus.WorkRoot != base.Incus.WorkRoot) {
+			cfg.WorkRoot = cfg.Incus.WorkRoot
+		}
+		if cfg.TargetOS == "" {
+			cfg.TargetOS = targetLinux
+		}
+		if !cfg.ServerTypeExplicit {
+			cfg.ServerType = incusServerTypeForConfig(*cfg)
 		}
 		return nil
 	}
@@ -870,6 +1167,14 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if err != nil {
 		return
 	}
+	appleVZImage, err := osImageDefaultAppleVZImage(cfg.OSImage)
+	if err != nil {
+		return
+	}
+	appleVZSHA256, err := osImageDefaultAppleVZSHA256(cfg.OSImage)
+	if err != nil {
+		return
+	}
 	base := baseConfig()
 	wasOSDefault := cfg.osImageProviderDefaults != ""
 	if force || cfg.Image == "" || (!cfg.imageExplicit && (cfg.Image == base.Image || wasOSDefault)) {
@@ -889,6 +1194,12 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	}
 	if force || cfg.AppleContainer.Image == "" || (!cfg.appleContainerImageExplicit && (cfg.AppleContainer.Image == base.AppleContainer.Image || wasOSDefault)) {
 		cfg.AppleContainer.Image = containerImage
+	}
+	if force || cfg.AppleVZ.Image == "" || (!cfg.appleVZImageExplicit && (cfg.AppleVZ.Image == base.AppleVZ.Image || wasOSDefault)) {
+		cfg.AppleVZ.Image = appleVZImage
+	}
+	if !cfg.appleVZImageSHA256Explicit && (force || (cfg.AppleVZ.ImageSHA256 == "" && cfg.AppleVZ.Image == appleVZImage) || (!cfg.appleVZImageExplicit && (cfg.AppleVZ.ImageSHA256 == "" || wasOSDefault))) {
+		cfg.AppleVZ.ImageSHA256 = appleVZSHA256
 	}
 	if force || cfg.Multipass.Image == "" || (!cfg.multipassImageExplicit && (cfg.Multipass.Image == base.Multipass.Image || wasOSDefault)) {
 		cfg.Multipass.Image = multipassImage
@@ -916,8 +1227,101 @@ func MarkAppleContainerImageExplicit(cfg *Config) {
 	cfg.appleContainerImageExplicit = true
 }
 
+func AppleContainerImageExplicit(cfg Config) bool {
+	return cfg.appleContainerImageExplicit
+}
+
+func MarkAppleVZImageExplicit(cfg *Config) {
+	cfg.appleVZImageExplicit = true
+	cfg.appleVZImageSHA256Explicit = false
+}
+
+func AppleVZImageExplicit(cfg Config) bool {
+	return cfg.appleVZImageExplicit
+}
+
+func MarkAppleVZImageSHA256Explicit(cfg *Config) {
+	cfg.appleVZImageSHA256Explicit = true
+}
+
+func AppleVZCPUsExplicit(cfg Config) bool {
+	return cfg.appleVZCPUsExplicit
+}
+
+func MarkAppleVZCPUsExplicit(cfg *Config) {
+	cfg.appleVZCPUsExplicit = true
+}
+
+func AppleVZMemoryExplicit(cfg Config) bool {
+	return cfg.appleVZMemoryExplicit
+}
+
+func MarkAppleVZMemoryExplicit(cfg *Config) {
+	cfg.appleVZMemoryExplicit = true
+}
+
+func AppleVZDiskExplicit(cfg Config) bool {
+	return cfg.appleVZDiskExplicit
+}
+
+func MarkAppleVZDiskExplicit(cfg *Config) {
+	cfg.appleVZDiskExplicit = true
+}
+
 func MarkMultipassImageExplicit(cfg *Config) {
 	cfg.multipassImageExplicit = true
+}
+
+func MarkTartImageExplicit(cfg *Config) {
+	cfg.tartImageExplicit = true
+}
+
+func IsTartDiskExplicit(cfg *Config) bool {
+	return cfg.tartDiskExplicit
+}
+
+func MarkTartDiskExplicit(cfg *Config) {
+	cfg.tartDiskExplicit = true
+}
+
+func IsTartCPUsExplicit(cfg *Config) bool {
+	return cfg.tartCPUsExplicit
+}
+
+func MarkTartCPUsExplicit(cfg *Config) {
+	cfg.tartCPUsExplicit = true
+}
+
+func IsTartMemoryExplicit(cfg *Config) bool {
+	return cfg.tartMemoryExplicit
+}
+
+func MarkTartMemoryExplicit(cfg *Config) {
+	cfg.tartMemoryExplicit = true
+}
+
+func IsTargetExplicit(cfg *Config) bool {
+	return cfg.targetExplicit
+}
+
+func MarkTargetExplicit(cfg *Config) {
+	cfg.targetExplicit = true
+}
+
+func IsSSHUserExplicit(cfg *Config) bool {
+	return cfg.explicitSSHUser != ""
+}
+
+func MarkSSHUserExplicit(cfg *Config) {
+	cfg.explicitSSHUser = cfg.SSHUser
+}
+
+func IsSSHPortExplicit(cfg *Config) bool {
+	return cfg.explicitSSHPort != ""
+}
+
+func MarkSSHPortExplicit(cfg *Config) {
+	cfg.explicitSSHPort = cfg.SSHPort
 }
 
 func baseConfig() Config {
@@ -960,11 +1364,24 @@ func baseConfig() Config {
 			Workdir:     "/workspace/crabbox",
 			TimeoutSecs: 1800,
 		},
-		GCPZone:          "europe-west2-a",
-		GCPImage:         gcpImage,
-		GCPNetwork:       "default",
-		GCPTags:          []string{"crabbox-ssh"},
-		GCPRootGB:        400,
+		GCPZone:    "europe-west2-a",
+		GCPImage:   gcpImage,
+		GCPNetwork: "default",
+		GCPTags:    []string{"crabbox-ssh"},
+		GCPRootGB:  400,
+		Incus: IncusConfig{
+			Remote:          "local",
+			Project:         "",
+			InstanceType:    "container",
+			Image:           "images:ubuntu/24.04/cloud",
+			User:            "crabbox",
+			WorkRoot:        defaultPOSIXWorkRoot,
+			DeleteOnRelease: true,
+			StartTimeout:    10 * time.Minute,
+			LaunchPort:      "22",
+			ProxyListenHost: "127.0.0.1",
+			ProxyDevice:     "crabbox-ssh",
+		},
 		SSHUser:          "crabbox",
 		SSHKey:           sshKey,
 		SSHPort:          "2222",
@@ -1012,6 +1429,12 @@ func baseConfig() Config {
 			WorkRoot:            "/workspaces/crabbox",
 			AutoStopIdleTimeout: 30 * time.Minute,
 		},
+		Morph: MorphConfig{
+			APIURL:         "https://cloud.morph.so",
+			SSHGatewayHost: "ssh.cloud.morph.so",
+			WorkRoot:       "/tmp/crabbox",
+			WakeOnSSH:      true,
+		},
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
 			User:             "daytona",
@@ -1050,6 +1473,10 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
+		Tenki: TenkiConfig{
+			CLIPath:  "tenki",
+			WorkRoot: "/home/tenki/crabbox",
+		},
 		Tensorlake: TensorlakeConfig{
 			APIURL:   "https://api.tensorlake.ai",
 			CLIPath:  "tensorlake",
@@ -1058,9 +1485,20 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
+		OpenComputer: OpenComputerConfig{
+			// APIURL is intentionally unset here so the `oc` config file's
+			// api_url is honored before the built-in default; the provider
+			// applies the default (https://app.opencomputer.dev) as the final
+			// fallback in newOCAPIClient.
+			Workdir:         "/workspace/crabbox",
+			ExecTimeoutSecs: 3600,
+		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
+		},
+		AnthropicSRT: AnthropicSRTConfig{
+			CLIPath: "srt",
 		},
 		Modal: ModalConfig{
 			App:     "crabbox",
@@ -1112,6 +1550,21 @@ func baseConfig() Config {
 			User:     "crabbox",
 			WorkRoot: "/work/crabbox",
 		},
+		AppleVZ: AppleVZConfig{
+			Image:       osImageSpecs[osImage].AppleVZImage,
+			ImageSHA256: osImageSpecs[osImage].AppleVZSHA256,
+			User:        "crabbox",
+			WorkRoot:    "/work/crabbox",
+			CPUs:        4,
+			MemoryMiB:   8192,
+			DiskGiB:     30,
+		},
+		MXC: MXCConfig{
+			CLIPath:     "wxc-exec.exe",
+			Version:     "0.6.0-alpha",
+			Containment: "processcontainer",
+			Network:     "block",
+		},
 		Multipass: MultipassConfig{
 			CLIPath:       "multipass",
 			Image:         multipassImage,
@@ -1121,6 +1574,20 @@ func baseConfig() Config {
 			Memory:        "8G",
 			Disk:          "30G",
 			LaunchTimeout: 20 * time.Minute,
+		},
+		Tart: TartConfig{
+			Image:    "ghcr.io/cirruslabs/macos-sequoia-base:latest",
+			User:     "admin",
+			WorkRoot: "/Users/admin/crabbox",
+			CPUs:     4,
+			Memory:   8192,
+		},
+		HyperV: HyperVConfig{
+			User:     "crabbox",
+			WorkRoot: defaultWindowsWorkRoot,
+			CPUs:     4,
+			Memory:   8192,
+			Switch:   "Default Switch",
 		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
@@ -1157,10 +1624,12 @@ type fileConfig struct {
 	HostID               string                             `yaml:"hostId,omitempty"`
 	Broker               *fileBrokerConfig                  `yaml:"broker,omitempty"`
 	Hetzner              *fileHetznerConfig                 `yaml:"hetzner,omitempty"`
+	DigitalOcean         *fileDigitalOceanConfig            `yaml:"digitalocean,omitempty"`
 	AWS                  *fileAWSConfig                     `yaml:"aws,omitempty"`
 	Azure                *fileAzureConfig                   `yaml:"azure,omitempty"`
 	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
 	GCP                  *fileGCPConfig                     `yaml:"gcp,omitempty"`
+	Incus                *fileIncusConfig                   `yaml:"incus,omitempty"`
 	Proxmox              *fileProxmoxConfig                 `yaml:"proxmox,omitempty"`
 	XCPNg                *fileXCPNgConfig                   `yaml:"xcpNg,omitempty"`
 	Parallels            *fileParallelsConfig               `yaml:"parallels,omitempty"`
@@ -1174,6 +1643,7 @@ type fileConfig struct {
 	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
 	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
+	Morph                *fileMorphConfig                   `yaml:"morph,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
 	ExeDev               *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
@@ -1181,8 +1651,11 @@ type fileConfig struct {
 	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
+	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
+	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
+	AnthropicSRT         *fileAnthropicSRTConfig            `yaml:"anthropicSandboxRuntime,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
@@ -1191,7 +1664,11 @@ type fileConfig struct {
 	Sprites              *fileSpritesConfig                 `yaml:"sprites,omitempty"`
 	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
 	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
+	AppleVZ              *fileAppleVZConfig                 `yaml:"appleVZ,omitempty"`
+	MXC                  *fileMXCConfig                     `yaml:"mxc,omitempty"`
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
+	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
+	HyperV               *fileHyperVConfig                  `yaml:"hyperv,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -1228,6 +1705,13 @@ type fileHetznerConfig struct {
 	Location string `yaml:"location,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	SSHKey   string `yaml:"sshKey,omitempty"`
+}
+
+type fileDigitalOceanConfig struct {
+	Region   string   `yaml:"region,omitempty"`
+	Image    string   `yaml:"image,omitempty"`
+	VPCUUID  string   `yaml:"vpc,omitempty"`
+	SSHCIDRs []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -1267,6 +1751,27 @@ type fileGCPConfig struct {
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 	RootGB         int64    `yaml:"rootGB,omitempty"`
 	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
+}
+
+type fileIncusConfig struct {
+	Remote            string `yaml:"remote,omitempty"`
+	Project           string `yaml:"project,omitempty"`
+	Address           string `yaml:"address,omitempty"`
+	Socket            string `yaml:"socket,omitempty"`
+	InstanceType      string `yaml:"instanceType,omitempty"`
+	Image             string `yaml:"image,omitempty"`
+	Profile           string `yaml:"profile,omitempty"`
+	User              string `yaml:"user,omitempty"`
+	WorkRoot          string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease   *bool  `yaml:"deleteOnRelease,omitempty"`
+	StartTimeout      string `yaml:"startTimeout,omitempty"`
+	LaunchPort        string `yaml:"launchPort,omitempty"`
+	ProxyListenHost   string `yaml:"proxyListenHost,omitempty"`
+	ProxyListenPort   string `yaml:"proxyListenPort,omitempty"`
+	ProxyDevice       string `yaml:"proxyDevice,omitempty"`
+	TLSServerCert     string `yaml:"tlsServerCert,omitempty"`
+	InsecureTLS       *bool  `yaml:"insecureTLS,omitempty"`
+	RemoteImageServer string `yaml:"remoteImageServer,omitempty"`
 }
 
 type fileProxmoxConfig struct {
@@ -1423,11 +1928,13 @@ type fileKubeVirtConfig struct {
 }
 
 type fileExternalConfig struct {
-	Command     string         `yaml:"command,omitempty"`
-	Args        []string       `yaml:"args,omitempty"`
-	Config      map[string]any `yaml:"config,omitempty"`
-	WorkRoot    string         `yaml:"workRoot,omitempty"`
-	RoutingFile string         `yaml:"routingFile,omitempty"`
+	Command     string                    `yaml:"command,omitempty"`
+	Args        []string                  `yaml:"args,omitempty"`
+	Config      map[string]any            `yaml:"config,omitempty"`
+	Lifecycle   *ExternalLifecycleConfig  `yaml:"lifecycle,omitempty"`
+	Connection  *ExternalConnectionConfig `yaml:"connection,omitempty"`
+	WorkRoot    string                    `yaml:"workRoot,omitempty"`
+	RoutingFile string                    `yaml:"routingFile,omitempty"`
 }
 
 type fileNamespaceConfig struct {
@@ -1439,6 +1946,16 @@ type fileNamespaceConfig struct {
 	AutoStopIdleTimeout string `yaml:"autoStopIdleTimeout,omitempty"`
 	WorkRoot            string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
+type fileMorphConfig struct {
+	APIKey          string `yaml:"apiKey,omitempty"`
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	Snapshot        string `yaml:"snapshot,omitempty"`
+	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+	WakeOnSSH       *bool  `yaml:"wakeOnSSH,omitempty"`
 }
 
 type fileDaytonaConfig struct {
@@ -1513,6 +2030,20 @@ type fileIsloConfig struct {
 	DiskGB         int    `yaml:"diskGB,omitempty"`
 }
 
+type fileTenkiConfig struct {
+	CLIPath   string `yaml:"cliPath,omitempty"`
+	Endpoint  string `yaml:"endpoint,omitempty"`
+	Gateway   string `yaml:"gateway,omitempty"`
+	Workspace string `yaml:"workspace,omitempty"`
+	Project   string `yaml:"project,omitempty"`
+	Image     string `yaml:"image,omitempty"`
+	Snapshot  string `yaml:"snapshot,omitempty"`
+	WorkRoot  string `yaml:"workRoot,omitempty"`
+	CPUs      int    `yaml:"cpus,omitempty"`
+	MemoryMB  int    `yaml:"memoryMB,omitempty"`
+	DiskGB    int    `yaml:"diskGB,omitempty"`
+}
+
 type fileTensorlakeConfig struct {
 	APIURL         string  `yaml:"apiUrl,omitempty"`
 	CLIPath        string  `yaml:"cliPath,omitempty"`
@@ -1529,6 +2060,15 @@ type fileTensorlakeConfig struct {
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
+type fileOpenComputerConfig struct {
+	Workdir         string `yaml:"workdir,omitempty"`
+	CPU             *int   `yaml:"cpu,omitempty"`
+	MemoryMB        *int   `yaml:"memoryMB,omitempty"`
+	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
+	Burst           *bool  `yaml:"burst,omitempty"`
+}
+
 type fileDockerSandboxConfig struct {
 	CLIPath         string    `yaml:"cliPath,omitempty"`
 	Agent           string    `yaml:"agent,omitempty"`
@@ -1540,6 +2080,12 @@ type fileDockerSandboxConfig struct {
 	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
 	MCP             *[]string `yaml:"mcp,omitempty"`
 	Kit             *[]string `yaml:"kit,omitempty"`
+}
+
+type fileAnthropicSRTConfig struct {
+	CLIPath  string  `yaml:"cliPath,omitempty"`
+	Settings *string `yaml:"settings,omitempty"`
+	Debug    *bool   `yaml:"debug,omitempty"`
 }
 
 type fileModalConfig struct {
@@ -1619,6 +2165,31 @@ type fileAppleContainerConfig struct {
 	ExtraRunArgs []string `yaml:"extraRunArgs,omitempty"`
 }
 
+type fileAppleVZConfig struct {
+	HelperPath  string `yaml:"helperPath,omitempty"`
+	Image       string `yaml:"image,omitempty"`
+	ImageSHA256 string `yaml:"imageSHA256,omitempty"`
+	User        string `yaml:"user,omitempty"`
+	WorkRoot    string `yaml:"workRoot,omitempty"`
+	CPUs        *int   `yaml:"cpus,omitempty"`
+	MemoryMiB   *int   `yaml:"memoryMiB,omitempty"`
+	DiskGiB     *int   `yaml:"diskGiB,omitempty"`
+}
+
+type fileMXCConfig struct {
+	CLIPath           string   `yaml:"cliPath,omitempty"`
+	Version           string   `yaml:"version,omitempty"`
+	Containment       string   `yaml:"containment,omitempty"`
+	Network           string   `yaml:"network,omitempty"`
+	ReadOnlyPaths     []string `yaml:"readOnlyPaths,omitempty"`
+	ReadWritePaths    []string `yaml:"readWritePaths,omitempty"`
+	AllowedHosts      []string `yaml:"allowedHosts,omitempty"`
+	BlockedHosts      []string `yaml:"blockedHosts,omitempty"`
+	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
+	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
+	Experimental      *bool    `yaml:"experimental,omitempty"`
+}
+
 type fileMultipassConfig struct {
 	CLIPath       string `yaml:"cliPath,omitempty"`
 	Image         string `yaml:"image,omitempty"`
@@ -1628,6 +2199,27 @@ type fileMultipassConfig struct {
 	Memory        string `yaml:"memory,omitempty"`
 	Disk          string `yaml:"disk,omitempty"`
 	LaunchTimeout string `yaml:"launchTimeout,omitempty"`
+}
+
+type fileTartConfig struct {
+	Image    string `yaml:"image,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	Password string `yaml:"password,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
+	CPUs     *int   `yaml:"cpus,omitempty"`
+	Memory   *int   `yaml:"memory,omitempty"`
+	Disk     *int   `yaml:"disk,omitempty"`
+}
+
+type fileHyperVConfig struct {
+	Image         string `yaml:"image,omitempty"`
+	User          string `yaml:"user,omitempty"`
+	WorkRoot      string `yaml:"workRoot,omitempty"`
+	CPUs          int    `yaml:"cpus,omitempty"`
+	Memory        int    `yaml:"memory,omitempty"`
+	Switch        string `yaml:"switch,omitempty"`
+	GuestPassword string `yaml:"guestPassword,omitempty"`
+	InitPassword  *bool  `yaml:"initPassword,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -1930,9 +2522,11 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Target != "" {
 		cfg.TargetOS = file.Target
+		cfg.targetExplicit = true
 	}
 	if file.TargetOS != "" {
 		cfg.TargetOS = file.TargetOS
+		cfg.targetExplicit = true
 	}
 	if file.Architecture != "" {
 		cfg.Architecture = file.Architecture
@@ -1948,6 +2542,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.Windows != nil && file.Windows.Mode != "" {
 		cfg.WindowsMode = file.Windows.Mode
+		cfg.explicitWindowsMode = file.Windows.Mode
 	}
 	if file.Desktop != nil {
 		cfg.Desktop = *file.Desktop
@@ -2008,6 +2603,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.Hetzner != nil {
 		if file.Hetzner.Location != "" {
 			cfg.Location = file.Hetzner.Location
+			cfg.locationExplicit = true
 		}
 		if file.Hetzner.Image != "" {
 			cfg.Image = file.Hetzner.Image
@@ -2015,6 +2611,21 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Hetzner.SSHKey != "" {
 			cfg.ProviderKey = file.Hetzner.SSHKey
+		}
+	}
+	if file.DigitalOcean != nil {
+		if file.DigitalOcean.Region != "" {
+			cfg.DigitalOcean.Region = file.DigitalOcean.Region
+		}
+		if file.DigitalOcean.Image != "" {
+			cfg.DigitalOcean.Image = file.DigitalOcean.Image
+			cfg.digitalOceanImageExplicit = true
+		}
+		if file.DigitalOcean.VPCUUID != "" {
+			cfg.DigitalOcean.VPCUUID = file.DigitalOcean.VPCUUID
+		}
+		if len(file.DigitalOcean.SSHCIDRs) > 0 {
+			cfg.DigitalOcean.SSHCIDRs = file.DigitalOcean.SSHCIDRs
 		}
 	}
 	if file.AWS != nil {
@@ -2139,6 +2750,62 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.GCP.ServiceAccount != "" {
 			cfg.GCPServiceAccount = file.GCP.ServiceAccount
+		}
+	}
+	if file.Incus != nil {
+		if file.Incus.Remote != "" {
+			cfg.Incus.Remote = file.Incus.Remote
+		}
+		if file.Incus.Project != "" {
+			cfg.Incus.Project = file.Incus.Project
+		}
+		if file.Incus.Address != "" {
+			cfg.Incus.Address = file.Incus.Address
+		}
+		if file.Incus.Socket != "" {
+			cfg.Incus.Socket = expandUserPath(file.Incus.Socket)
+		}
+		if file.Incus.InstanceType != "" {
+			cfg.Incus.InstanceType = file.Incus.InstanceType
+		}
+		if file.Incus.Image != "" {
+			cfg.Incus.Image = file.Incus.Image
+		}
+		if file.Incus.Profile != "" {
+			cfg.Incus.Profile = file.Incus.Profile
+		}
+		if file.Incus.User != "" {
+			cfg.Incus.User = file.Incus.User
+		}
+		if file.Incus.WorkRoot != "" {
+			cfg.Incus.WorkRoot = file.Incus.WorkRoot
+		}
+		if file.Incus.DeleteOnRelease != nil {
+			cfg.Incus.DeleteOnRelease = *file.Incus.DeleteOnRelease
+		}
+		if file.Incus.StartTimeout != "" {
+			applyLeaseDuration(&cfg.Incus.StartTimeout, file.Incus.StartTimeout)
+		}
+		if file.Incus.LaunchPort != "" {
+			cfg.Incus.LaunchPort = file.Incus.LaunchPort
+		}
+		if file.Incus.ProxyListenHost != "" {
+			cfg.Incus.ProxyListenHost = file.Incus.ProxyListenHost
+		}
+		if file.Incus.ProxyListenPort != "" {
+			cfg.Incus.ProxyListenPort = file.Incus.ProxyListenPort
+		}
+		if file.Incus.ProxyDevice != "" {
+			cfg.Incus.ProxyDevice = file.Incus.ProxyDevice
+		}
+		if file.Incus.TLSServerCert != "" {
+			cfg.Incus.TLSServerCert = expandUserPath(file.Incus.TLSServerCert)
+		}
+		if file.Incus.InsecureTLS != nil {
+			cfg.Incus.InsecureTLS = *file.Incus.InsecureTLS
+		}
+		if file.Incus.RemoteImageServer != "" {
+			cfg.Incus.RemoteImageServer = file.Incus.RemoteImageServer
 		}
 	}
 	if file.Proxmox != nil {
@@ -2280,12 +2947,14 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	if file.SSH != nil {
 		if file.SSH.User != "" {
 			cfg.SSHUser = file.SSH.User
+			MarkSSHUserExplicit(cfg)
 		}
 		if file.SSH.Key != "" {
 			cfg.SSHKey = expandUserPath(file.SSH.Key)
 		}
 		if file.SSH.Port != "" {
 			cfg.SSHPort = file.SSH.Port
+			MarkSSHPortExplicit(cfg)
 		}
 		if file.SSH.FallbackPorts != nil {
 			cfg.SSHFallbackPorts = normalizeList(*file.SSH.FallbackPorts)
@@ -2293,6 +2962,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 	}
 	if file.WorkRoot != "" {
 		cfg.WorkRoot = file.WorkRoot
+		cfg.explicitWorkRoot = file.WorkRoot
 	}
 	applyLeaseDuration(&cfg.TTL, file.TTL)
 	applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout)
@@ -2459,6 +3129,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.External.Config != nil {
 			cfg.External.Config = file.External.Config
 		}
+		if file.External.Lifecycle != nil {
+			cfg.External.Lifecycle = *file.External.Lifecycle
+		}
+		if file.External.Connection != nil {
+			cfg.External.Connection = *file.External.Connection
+		}
 		if file.External.WorkRoot != "" {
 			cfg.External.WorkRoot = file.External.WorkRoot
 		}
@@ -2488,6 +3164,29 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Namespace.DeleteOnRelease != nil {
 			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
+		}
+	}
+	if file.Morph != nil {
+		if file.Morph.APIKey != "" {
+			cfg.Morph.APIKey = file.Morph.APIKey
+		}
+		if file.Morph.APIURL != "" {
+			cfg.Morph.APIURL = file.Morph.APIURL
+		}
+		if file.Morph.Snapshot != "" {
+			cfg.Morph.Snapshot = file.Morph.Snapshot
+		}
+		if file.Morph.SSHGatewayHost != "" {
+			cfg.Morph.SSHGatewayHost = file.Morph.SSHGatewayHost
+		}
+		if file.Morph.WorkRoot != "" {
+			cfg.Morph.WorkRoot = file.Morph.WorkRoot
+		}
+		if file.Morph.DeleteOnRelease != nil {
+			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
+		}
+		if file.Morph.WakeOnSSH != nil {
+			cfg.Morph.WakeOnSSH = *file.Morph.WakeOnSSH
 		}
 	}
 	if file.Daytona != nil {
@@ -2634,6 +3333,41 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
 		}
 	}
+	if file.Tenki != nil {
+		if file.Tenki.CLIPath != "" {
+			cfg.Tenki.CLIPath = file.Tenki.CLIPath
+		}
+		if file.Tenki.Endpoint != "" {
+			cfg.Tenki.Endpoint = file.Tenki.Endpoint
+		}
+		if file.Tenki.Gateway != "" {
+			cfg.Tenki.Gateway = file.Tenki.Gateway
+		}
+		if file.Tenki.Workspace != "" {
+			cfg.Tenki.Workspace = file.Tenki.Workspace
+		}
+		if file.Tenki.Project != "" {
+			cfg.Tenki.Project = file.Tenki.Project
+		}
+		if file.Tenki.Image != "" {
+			cfg.Tenki.Image = file.Tenki.Image
+		}
+		if file.Tenki.Snapshot != "" {
+			cfg.Tenki.Snapshot = file.Tenki.Snapshot
+		}
+		if file.Tenki.WorkRoot != "" {
+			cfg.Tenki.WorkRoot = file.Tenki.WorkRoot
+		}
+		if file.Tenki.CPUs > 0 {
+			cfg.Tenki.CPUs = file.Tenki.CPUs
+		}
+		if file.Tenki.MemoryMB > 0 {
+			cfg.Tenki.MemoryMB = file.Tenki.MemoryMB
+		}
+		if file.Tenki.DiskGB > 0 {
+			cfg.Tenki.DiskGB = file.Tenki.DiskGB
+		}
+	}
 	if file.Tensorlake != nil {
 		if file.Tensorlake.APIURL != "" {
 			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
@@ -2675,6 +3409,26 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
 		}
 	}
+	if file.OpenComputer != nil {
+		if file.OpenComputer.Workdir != "" {
+			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
+		}
+		if file.OpenComputer.CPU != nil {
+			cfg.OpenComputer.CPU = *file.OpenComputer.CPU
+		}
+		if file.OpenComputer.MemoryMB != nil {
+			cfg.OpenComputer.MemoryMB = *file.OpenComputer.MemoryMB
+		}
+		if file.OpenComputer.TimeoutSecs != nil {
+			cfg.OpenComputer.TimeoutSecs = *file.OpenComputer.TimeoutSecs
+		}
+		if file.OpenComputer.ExecTimeoutSecs != nil {
+			cfg.OpenComputer.ExecTimeoutSecs = *file.OpenComputer.ExecTimeoutSecs
+		}
+		if file.OpenComputer.Burst != nil {
+			cfg.OpenComputer.Burst = *file.OpenComputer.Burst
+		}
+	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
 			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
@@ -2708,6 +3462,17 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.DockerSandbox.Kit != nil {
 			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
+		}
+	}
+	if file.AnthropicSRT != nil {
+		if file.AnthropicSRT.CLIPath != "" {
+			cfg.AnthropicSRT.CLIPath = file.AnthropicSRT.CLIPath
+		}
+		if file.AnthropicSRT.Settings != nil {
+			cfg.AnthropicSRT.Settings = *file.AnthropicSRT.Settings
+		}
+		if file.AnthropicSRT.Debug != nil {
+			cfg.AnthropicSRT.Debug = *file.AnthropicSRT.Debug
 		}
 	}
 	if file.Modal != nil {
@@ -2833,6 +3598,74 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
 		}
 	}
+	if file.AppleVZ != nil {
+		if file.AppleVZ.HelperPath != "" {
+			cfg.AppleVZ.HelperPath = file.AppleVZ.HelperPath
+		}
+		if file.AppleVZ.Image != "" {
+			cfg.AppleVZ.Image = file.AppleVZ.Image
+			cfg.AppleVZ.ImageSHA256 = ""
+			cfg.appleVZImageExplicit = true
+			cfg.appleVZImageSHA256Explicit = false
+		}
+		if file.AppleVZ.ImageSHA256 != "" {
+			cfg.AppleVZ.ImageSHA256 = file.AppleVZ.ImageSHA256
+			cfg.appleVZImageSHA256Explicit = true
+		}
+		if file.AppleVZ.User != "" {
+			cfg.AppleVZ.User = file.AppleVZ.User
+		}
+		if file.AppleVZ.WorkRoot != "" {
+			cfg.AppleVZ.WorkRoot = file.AppleVZ.WorkRoot
+		}
+		if file.AppleVZ.CPUs != nil {
+			cfg.AppleVZ.CPUs = *file.AppleVZ.CPUs
+			cfg.appleVZCPUsExplicit = true
+		}
+		if file.AppleVZ.MemoryMiB != nil {
+			cfg.AppleVZ.MemoryMiB = *file.AppleVZ.MemoryMiB
+			cfg.appleVZMemoryExplicit = true
+		}
+		if file.AppleVZ.DiskGiB != nil {
+			cfg.AppleVZ.DiskGiB = *file.AppleVZ.DiskGiB
+			cfg.appleVZDiskExplicit = true
+		}
+	}
+	if file.MXC != nil {
+		if file.MXC.CLIPath != "" {
+			cfg.MXC.CLIPath = file.MXC.CLIPath
+		}
+		if file.MXC.Version != "" {
+			cfg.MXC.Version = file.MXC.Version
+		}
+		if file.MXC.Containment != "" {
+			cfg.MXC.Containment = file.MXC.Containment
+		}
+		if file.MXC.Network != "" {
+			cfg.MXC.Network = file.MXC.Network
+		}
+		if file.MXC.ReadOnlyPaths != nil {
+			cfg.MXC.ReadOnlyPaths = append([]string(nil), file.MXC.ReadOnlyPaths...)
+		}
+		if file.MXC.ReadWritePaths != nil {
+			cfg.MXC.ReadWritePaths = append([]string(nil), file.MXC.ReadWritePaths...)
+		}
+		if file.MXC.AllowedHosts != nil {
+			cfg.MXC.AllowedHosts = append([]string(nil), file.MXC.AllowedHosts...)
+		}
+		if file.MXC.BlockedHosts != nil {
+			cfg.MXC.BlockedHosts = append([]string(nil), file.MXC.BlockedHosts...)
+		}
+		if file.MXC.AllowDACLMutation != nil {
+			cfg.MXC.AllowDACLMutation = *file.MXC.AllowDACLMutation
+		}
+		if file.MXC.AllowWindowsUI != nil {
+			cfg.MXC.AllowWindowsUI = *file.MXC.AllowWindowsUI
+		}
+		if file.MXC.Experimental != nil {
+			cfg.MXC.Experimental = *file.MXC.Experimental
+		}
+	}
 	if file.Multipass != nil {
 		if file.Multipass.CLIPath != "" {
 			cfg.Multipass.CLIPath = file.Multipass.CLIPath
@@ -2858,6 +3691,59 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Multipass.LaunchTimeout != "" {
 			applyLeaseDuration(&cfg.Multipass.LaunchTimeout, file.Multipass.LaunchTimeout)
+		}
+	}
+	if file.Tart != nil {
+		if file.Tart.Image != "" {
+			cfg.Tart.Image = file.Tart.Image
+			cfg.tartImageExplicit = true
+		}
+		if file.Tart.User != "" {
+			cfg.Tart.User = file.Tart.User
+		}
+		if file.Tart.Password != "" {
+			cfg.Tart.Password = file.Tart.Password
+		}
+		if file.Tart.WorkRoot != "" {
+			cfg.Tart.WorkRoot = file.Tart.WorkRoot
+		}
+		if file.Tart.CPUs != nil {
+			cfg.Tart.CPUs = *file.Tart.CPUs
+			cfg.tartCPUsExplicit = true
+		}
+		if file.Tart.Memory != nil {
+			cfg.Tart.Memory = *file.Tart.Memory
+			cfg.tartMemoryExplicit = true
+		}
+		if file.Tart.Disk != nil {
+			cfg.Tart.Disk = *file.Tart.Disk
+			cfg.tartDiskExplicit = true
+		}
+	}
+	if file.HyperV != nil {
+		if file.HyperV.Image != "" {
+			cfg.HyperV.Image = file.HyperV.Image
+		}
+		if file.HyperV.User != "" {
+			cfg.HyperV.User = file.HyperV.User
+		}
+		if file.HyperV.WorkRoot != "" {
+			cfg.HyperV.WorkRoot = file.HyperV.WorkRoot
+		}
+		if file.HyperV.CPUs > 0 {
+			cfg.HyperV.CPUs = file.HyperV.CPUs
+		}
+		if file.HyperV.Memory > 0 {
+			cfg.HyperV.Memory = file.HyperV.Memory
+		}
+		if file.HyperV.Switch != "" {
+			cfg.HyperV.Switch = file.HyperV.Switch
+		}
+		if file.HyperV.GuestPassword != "" {
+			cfg.HyperV.GuestPassword = file.HyperV.GuestPassword
+		}
+		if file.HyperV.InitPassword != nil {
+			cfg.HyperV.InitPassword = *file.HyperV.InitPassword
 		}
 	}
 	if file.Tailscale != nil {
@@ -3236,7 +4122,13 @@ func applyLeaseDuration(target *time.Duration, value string) {
 func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
-	cfg.TargetOS = getenv("CRABBOX_TARGET", getenv("CRABBOX_TARGET_OS", cfg.TargetOS))
+	if t := os.Getenv("CRABBOX_TARGET"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	} else if t := os.Getenv("CRABBOX_TARGET_OS"); t != "" {
+		cfg.TargetOS = t
+		cfg.targetExplicit = true
+	}
 	if arch := os.Getenv("CRABBOX_ARCH"); arch != "" {
 		cfg.Architecture = arch
 		cfg.architectureExplicit = true
@@ -3249,7 +4141,10 @@ func applyEnv(cfg *Config) error {
 			applyOSImageProviderDefaults(cfg, false)
 		}
 	}
-	cfg.WindowsMode = getenv("CRABBOX_WINDOWS_MODE", cfg.WindowsMode)
+	if windowsMode := os.Getenv("CRABBOX_WINDOWS_MODE"); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+		cfg.explicitWindowsMode = windowsMode
+	}
 	if value, ok := getenvBool("CRABBOX_DESKTOP"); ok {
 		cfg.Desktop = value
 	}
@@ -3275,7 +4170,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Access.ClientID = getenv("CRABBOX_ACCESS_CLIENT_ID", getenv("CF_ACCESS_CLIENT_ID", cfg.Access.ClientID))
 	cfg.Access.ClientSecret = getenv("CRABBOX_ACCESS_CLIENT_SECRET", getenv("CF_ACCESS_CLIENT_SECRET", cfg.Access.ClientSecret))
 	cfg.Access.Token = getenv("CRABBOX_ACCESS_TOKEN", getenv("CF_ACCESS_TOKEN", cfg.Access.Token))
-	cfg.Location = getenv("CRABBOX_HETZNER_LOCATION", cfg.Location)
+	if location := os.Getenv("CRABBOX_HETZNER_LOCATION"); location != "" {
+		cfg.Location = location
+		cfg.locationExplicit = true
+	}
 	if image := os.Getenv("CRABBOX_HETZNER_IMAGE"); image != "" {
 		cfg.Image = image
 		cfg.imageExplicit = true
@@ -3352,12 +4250,45 @@ func applyEnv(cfg *Config) error {
 		cfg.gcpRootGBExplicit = true
 	}
 	cfg.GCPServiceAccount = getenv("CRABBOX_GCP_SERVICE_ACCOUNT", cfg.GCPServiceAccount)
+	cfg.Incus.Remote = getenv("CRABBOX_INCUS_REMOTE", cfg.Incus.Remote)
+	cfg.Incus.Project = getenv("CRABBOX_INCUS_PROJECT", cfg.Incus.Project)
+	cfg.Incus.Address = getenv("CRABBOX_INCUS_ADDRESS", cfg.Incus.Address)
+	cfg.Incus.Socket = expandUserPath(getenv("CRABBOX_INCUS_SOCKET", cfg.Incus.Socket))
+	cfg.Incus.InstanceType = getenv("CRABBOX_INCUS_INSTANCE_TYPE", cfg.Incus.InstanceType)
+	cfg.Incus.Image = getenv("CRABBOX_INCUS_IMAGE", cfg.Incus.Image)
+	cfg.Incus.Profile = getenv("CRABBOX_INCUS_PROFILE", cfg.Incus.Profile)
+	cfg.Incus.User = getenv("CRABBOX_INCUS_USER", cfg.Incus.User)
+	cfg.Incus.WorkRoot = getenv("CRABBOX_INCUS_WORK_ROOT", cfg.Incus.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_INCUS_DELETE_ON_RELEASE"); ok {
+		cfg.Incus.DeleteOnRelease = value
+	}
+	if timeout := os.Getenv("CRABBOX_INCUS_START_TIMEOUT"); timeout != "" {
+		applyLeaseDuration(&cfg.Incus.StartTimeout, timeout)
+	}
+	cfg.Incus.LaunchPort = getenv("CRABBOX_INCUS_LAUNCH_PORT", cfg.Incus.LaunchPort)
+	cfg.Incus.ProxyListenHost = getenv("CRABBOX_INCUS_PROXY_LISTEN_HOST", cfg.Incus.ProxyListenHost)
+	cfg.Incus.ProxyListenPort = getenv("CRABBOX_INCUS_PROXY_LISTEN_PORT", cfg.Incus.ProxyListenPort)
+	cfg.Incus.ProxyDevice = getenv("CRABBOX_INCUS_PROXY_DEVICE", cfg.Incus.ProxyDevice)
+	cfg.Incus.TLSServerCert = expandUserPath(getenv("CRABBOX_INCUS_TLS_SERVER_CERT", cfg.Incus.TLSServerCert))
+	if value, ok := getenvBool("CRABBOX_INCUS_INSECURE_TLS"); ok {
+		cfg.Incus.InsecureTLS = value
+	}
+	cfg.Incus.RemoteImageServer = getenv("CRABBOX_INCUS_REMOTE_IMAGE_SERVER", cfg.Incus.RemoteImageServer)
 	if tags := os.Getenv("CRABBOX_GCP_TAGS"); tags != "" {
 		cfg.GCPTags = splitCommaList(tags)
 		cfg.gcpTagsExplicit = true
 	}
 	if cidrs := os.Getenv("CRABBOX_GCP_SSH_CIDRS"); cidrs != "" {
 		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
+	}
+	cfg.DigitalOcean.Region = getenv("CRABBOX_DIGITALOCEAN_REGION", cfg.DigitalOcean.Region)
+	if image := os.Getenv("CRABBOX_DIGITALOCEAN_IMAGE"); image != "" {
+		cfg.DigitalOcean.Image = image
+		cfg.digitalOceanImageExplicit = true
+	}
+	cfg.DigitalOcean.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.DigitalOcean.VPCUUID)
+	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {
+		cfg.DigitalOcean.SSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
 	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)
@@ -3405,14 +4336,23 @@ func applyEnv(cfg *Config) error {
 	if startupTimeout := os.Getenv("CRABBOX_PARALLELS_STARTUP_TIMEOUT"); startupTimeout != "" {
 		applyLeaseDuration(&cfg.Parallels.StartupTimeout, startupTimeout)
 	}
-	cfg.SSHUser = getenv("CRABBOX_SSH_USER", cfg.SSHUser)
+	if sshUser := os.Getenv("CRABBOX_SSH_USER"); sshUser != "" {
+		cfg.SSHUser = sshUser
+		MarkSSHUserExplicit(cfg)
+	}
 	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
-	cfg.SSHPort = getenv("CRABBOX_SSH_PORT", cfg.SSHPort)
+	if sshPort := os.Getenv("CRABBOX_SSH_PORT"); sshPort != "" {
+		cfg.SSHPort = sshPort
+		MarkSSHPortExplicit(cfg)
+	}
 	if ports, ok := getenvList("CRABBOX_SSH_FALLBACK_PORTS"); ok {
 		cfg.SSHFallbackPorts = ports
 	}
 	cfg.ProviderKey = getenv("CRABBOX_HETZNER_SSH_KEY", cfg.ProviderKey)
-	cfg.WorkRoot = getenv("CRABBOX_WORK_ROOT", cfg.WorkRoot)
+	if workRoot := os.Getenv("CRABBOX_WORK_ROOT"); workRoot != "" {
+		cfg.WorkRoot = workRoot
+		cfg.explicitWorkRoot = workRoot
+	}
 	if ttl := os.Getenv("CRABBOX_TTL"); ttl != "" {
 		applyLeaseDuration(&cfg.TTL, ttl)
 	}
@@ -3465,6 +4405,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Namespace.WorkRoot = getenv("CRABBOX_NAMESPACE_WORK_ROOT", cfg.Namespace.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
 		cfg.Namespace.DeleteOnRelease = value
+	}
+	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
+	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
+	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
+	cfg.Morph.SSHGatewayHost = getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", cfg.Morph.SSHGatewayHost)
+	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
+		cfg.Morph.DeleteOnRelease = value
+	}
+	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
+		cfg.Morph.WakeOnSSH = value
 	}
 	cfg.Daytona.APIKey = getenv("CRABBOX_DAYTONA_API_KEY", getenv("DAYTONA_API_KEY", cfg.Daytona.APIKey))
 	cfg.Daytona.JWTToken = getenv("CRABBOX_DAYTONA_JWT_TOKEN", getenv("DAYTONA_JWT_TOKEN", cfg.Daytona.JWTToken))
@@ -3523,6 +4474,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
 	cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
 	cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+	cfg.Tenki.CLIPath = getenv("CRABBOX_TENKI_CLI", getenv("TENKI_CLI", cfg.Tenki.CLIPath))
+	cfg.Tenki.Endpoint = getenv("CRABBOX_TENKI_ENDPOINT", getenv("TENKI_ENDPOINT", cfg.Tenki.Endpoint))
+	cfg.Tenki.Gateway = getenv("CRABBOX_TENKI_GATEWAY", getenv("TENKI_GATEWAY", cfg.Tenki.Gateway))
+	cfg.Tenki.Workspace = getenv("CRABBOX_TENKI_WORKSPACE", cfg.Tenki.Workspace)
+	cfg.Tenki.Project = getenv("CRABBOX_TENKI_PROJECT", cfg.Tenki.Project)
+	cfg.Tenki.Image = getenv("CRABBOX_TENKI_IMAGE", cfg.Tenki.Image)
+	cfg.Tenki.Snapshot = getenv("CRABBOX_TENKI_SNAPSHOT", cfg.Tenki.Snapshot)
+	cfg.Tenki.WorkRoot = getenv("CRABBOX_TENKI_WORK_ROOT", cfg.Tenki.WorkRoot)
+	cfg.Tenki.CPUs = getenvInt("CRABBOX_TENKI_CPUS", cfg.Tenki.CPUs)
+	cfg.Tenki.MemoryMB = getenvInt("CRABBOX_TENKI_MEMORY_MB", cfg.Tenki.MemoryMB)
+	cfg.Tenki.DiskGB = getenvInt("CRABBOX_TENKI_DISK_GB", cfg.Tenki.DiskGB)
 	cfg.Tensorlake.APIKey = getenv("CRABBOX_TENSORLAKE_API_KEY", getenv("TENSORLAKE_API_KEY", cfg.Tensorlake.APIKey))
 	cfg.Tensorlake.APIURL = getenv("CRABBOX_TENSORLAKE_API_URL", getenv("TENSORLAKE_API_URL", cfg.Tensorlake.APIURL))
 	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)
@@ -3538,6 +4500,15 @@ func applyEnv(cfg *Config) error {
 	cfg.Tensorlake.TimeoutSecs = getenvInt("CRABBOX_TENSORLAKE_TIMEOUT_SECS", cfg.Tensorlake.TimeoutSecs)
 	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
 		cfg.Tensorlake.NoInternet = v
+	}
+	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
+	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
+	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
+	cfg.OpenComputer.MemoryMB = getenvInt("CRABBOX_OPENCOMPUTER_MEMORY_MB", cfg.OpenComputer.MemoryMB)
+	cfg.OpenComputer.TimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", cfg.OpenComputer.TimeoutSecs)
+	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
+	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
+		cfg.OpenComputer.Burst = v
 	}
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
@@ -3562,6 +4533,11 @@ func applyEnv(cfg *Config) error {
 	}
 	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
 		cfg.DockerSandbox.Kit = values
+	}
+	cfg.AnthropicSRT.CLIPath = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", cfg.AnthropicSRT.CLIPath)
+	cfg.AnthropicSRT.Settings = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", cfg.AnthropicSRT.Settings)
+	if value, ok := getenvBool("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG"); ok {
+		cfg.AnthropicSRT.Debug = value
 	}
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
@@ -3619,6 +4595,68 @@ func applyEnv(cfg *Config) error {
 	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
 		cfg.AppleContainer.ExtraRunArgs = extra
 	}
+	cfg.AppleVZ.HelperPath = getenv("CRABBOX_APPLE_VZ_HELPER", cfg.AppleVZ.HelperPath)
+	if image := os.Getenv("CRABBOX_APPLE_VZ_IMAGE"); image != "" {
+		cfg.AppleVZ.Image = image
+		cfg.AppleVZ.ImageSHA256 = ""
+		cfg.appleVZImageExplicit = true
+		cfg.appleVZImageSHA256Explicit = false
+	}
+	if checksum := os.Getenv("CRABBOX_APPLE_VZ_IMAGE_SHA256"); checksum != "" {
+		cfg.AppleVZ.ImageSHA256 = checksum
+		cfg.appleVZImageSHA256Explicit = true
+	}
+	cfg.AppleVZ.User = getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVZ.User)
+	cfg.AppleVZ.WorkRoot = getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVZ.WorkRoot)
+	if rawCPUs := os.Getenv("CRABBOX_APPLE_VZ_CPUS"); rawCPUs != "" {
+		cpus, err := strconv.Atoi(strings.TrimSpace(rawCPUs))
+		if err != nil {
+			return fmt.Errorf("CRABBOX_APPLE_VZ_CPUS must be an integer: %w", err)
+		}
+		cfg.AppleVZ.CPUs = cpus
+		cfg.appleVZCPUsExplicit = true
+	}
+	if rawMemory := os.Getenv("CRABBOX_APPLE_VZ_MEMORY"); rawMemory != "" {
+		memoryMiB, err := strconv.Atoi(strings.TrimSpace(rawMemory))
+		if err != nil {
+			return fmt.Errorf("CRABBOX_APPLE_VZ_MEMORY must be an integer: %w", err)
+		}
+		cfg.AppleVZ.MemoryMiB = memoryMiB
+		cfg.appleVZMemoryExplicit = true
+	}
+	if rawDisk := os.Getenv("CRABBOX_APPLE_VZ_DISK"); rawDisk != "" {
+		diskGiB, err := strconv.Atoi(strings.TrimSpace(rawDisk))
+		if err != nil {
+			return fmt.Errorf("CRABBOX_APPLE_VZ_DISK must be an integer: %w", err)
+		}
+		cfg.AppleVZ.DiskGiB = diskGiB
+		cfg.appleVZDiskExplicit = true
+	}
+	cfg.MXC.CLIPath = getenv("CRABBOX_MXC_CLI", cfg.MXC.CLIPath)
+	cfg.MXC.Version = getenv("CRABBOX_MXC_VERSION", cfg.MXC.Version)
+	cfg.MXC.Containment = getenv("CRABBOX_MXC_CONTAINMENT", cfg.MXC.Containment)
+	cfg.MXC.Network = getenv("CRABBOX_MXC_NETWORK", cfg.MXC.Network)
+	if value := os.Getenv("CRABBOX_MXC_READONLY_PATHS"); value != "" {
+		cfg.MXC.ReadOnlyPaths = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_READWRITE_PATHS"); value != "" {
+		cfg.MXC.ReadWritePaths = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_ALLOWED_HOSTS"); value != "" {
+		cfg.MXC.AllowedHosts = splitCommaList(value)
+	}
+	if value := os.Getenv("CRABBOX_MXC_BLOCKED_HOSTS"); value != "" {
+		cfg.MXC.BlockedHosts = splitCommaList(value)
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_DACL_MUTATION"); ok {
+		cfg.MXC.AllowDACLMutation = value
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_WINDOWS_UI"); ok {
+		cfg.MXC.AllowWindowsUI = value
+	}
+	if value, ok := getenvBool("CRABBOX_MXC_EXPERIMENTAL"); ok {
+		cfg.MXC.Experimental = value
+	}
 	cfg.Multipass.CLIPath = getenv("CRABBOX_MULTIPASS_CLI", cfg.Multipass.CLIPath)
 	if image := os.Getenv("CRABBOX_MULTIPASS_IMAGE"); image != "" {
 		cfg.Multipass.Image = image
@@ -3631,6 +4669,35 @@ func applyEnv(cfg *Config) error {
 	cfg.Multipass.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Multipass.Disk)
 	if timeout := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); timeout != "" {
 		applyLeaseDuration(&cfg.Multipass.LaunchTimeout, timeout)
+	}
+	if image := os.Getenv("CRABBOX_TART_IMAGE"); image != "" {
+		cfg.Tart.Image = image
+		cfg.tartImageExplicit = true
+	}
+	cfg.Tart.User = getenv("CRABBOX_TART_USER", cfg.Tart.User)
+	cfg.Tart.Password = getenv("CRABBOX_TART_PASSWORD", cfg.Tart.Password)
+	cfg.Tart.WorkRoot = getenv("CRABBOX_TART_WORK_ROOT", cfg.Tart.WorkRoot)
+	if v := os.Getenv("CRABBOX_TART_CPUS"); v != "" {
+		cfg.Tart.CPUs = getenvInt("CRABBOX_TART_CPUS", cfg.Tart.CPUs)
+		cfg.tartCPUsExplicit = true
+	}
+	if v := os.Getenv("CRABBOX_TART_MEMORY"); v != "" {
+		cfg.Tart.Memory = getenvInt("CRABBOX_TART_MEMORY", cfg.Tart.Memory)
+		cfg.tartMemoryExplicit = true
+	}
+	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
+		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
+		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
+	}
+	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
+	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
+	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)
+	cfg.HyperV.CPUs = getenvInt("CRABBOX_HYPERV_CPUS", cfg.HyperV.CPUs)
+	cfg.HyperV.Memory = getenvInt("CRABBOX_HYPERV_MEMORY", cfg.HyperV.Memory)
+	cfg.HyperV.Switch = getenv("CRABBOX_HYPERV_SWITCH", cfg.HyperV.Switch)
+	cfg.HyperV.GuestPassword = getenv("CRABBOX_HYPERV_GUEST_PASSWORD", cfg.HyperV.GuestPassword)
+	if value, ok := getenvBool("CRABBOX_HYPERV_INIT_PASSWORD"); ok {
+		cfg.HyperV.InitPassword = value
 	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
@@ -3750,6 +4817,22 @@ func expandUserPath(path string) string {
 	return path
 }
 
+func redactRemoteURL(value string) string {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	if err != nil {
+		lower := strings.ToLower(value)
+		if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+			return "<remote-image>"
+		}
+		return value
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return value
+	}
+	return "<remote-image>"
+}
+
 func serverTypeForClass(class string) string {
 	return serverTypeCandidatesForClass(class)[0]
 }
@@ -3797,6 +4880,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "proxmox" {
 		return proxmoxServerTypeForConfig(cfg)
 	}
+	if cfg.Provider == "incus" {
+		return incusServerTypeForConfig(cfg)
+	}
 	if cfg.Provider == "parallels" {
 		return parallelsServerTypeForConfig(cfg)
 	}
@@ -3843,10 +4929,24 @@ func serverTypeForProviderClass(provider, class string) string {
 	if provider == "proxmox" {
 		return "template"
 	}
+	if provider == "incus" {
+		return "container"
+	}
 	if provider == "parallels" {
 		return "template"
 	}
 	return serverTypeForClass(class)
+}
+
+func incusServerTypeForConfig(cfg Config) string {
+	instanceType := strings.ToLower(strings.TrimSpace(cfg.Incus.InstanceType))
+	if instanceType == "" {
+		instanceType = "container"
+	}
+	if image := strings.TrimSpace(cfg.Incus.Image); image != "" {
+		return instanceType + ":" + image
+	}
+	return instanceType
 }
 
 func proxmoxServerTypeForConfig(cfg Config) string {

@@ -26,7 +26,7 @@ func rejectIsloSyncOptions(req RunRequest) error {
 	return nil
 }
 
-func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name string, req RunRequest) ([]timingPhase, time.Duration, error) {
+func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name string, req RunRequest, user string) ([]timingPhase, time.Duration, error) {
 	start := b.now()
 	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
@@ -48,7 +48,7 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 		return nil, 0, err
 	}
 	prepareStarted := b.now()
-	if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
+	if err := b.prepareWorkspace(ctx, client, name, workspace, user); err != nil {
 		return nil, 0, err
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
@@ -66,11 +66,20 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 	}
 	if err := client.UploadArchive(ctx, name, workspace, struct{ io.Reader }{archive}); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: islo archive API upload failed; falling back to exec upload: %v\n", err)
+		if user != "" {
+			if ownershipErr := b.restoreWorkspaceOwnership(ctx, client, name, workspace, user); ownershipErr != nil {
+				return nil, 0, ownershipErr
+			}
+		}
 		if _, seekErr := archive.Seek(0, 0); seekErr != nil {
 			return nil, 0, fmt.Errorf("islo rewind archive for fallback: %w", seekErr)
 		}
-		if fallbackErr := b.uploadArchiveViaExec(ctx, client, name, workspace, archive); fallbackErr != nil {
+		if fallbackErr := b.uploadArchiveViaExec(ctx, client, name, workspace, archive, user); fallbackErr != nil {
 			return nil, 0, fallbackErr
+		}
+	} else if user != "" {
+		if err := b.restoreWorkspaceOwnership(ctx, client, name, workspace, user); err != nil {
+			return nil, 0, err
 		}
 	}
 	uploadDuration := b.now().Sub(uploadStarted)
@@ -85,28 +94,54 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 	}, total, nil
 }
 
-func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name, workspace string) error {
+func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name, workspace, user string) error {
 	command := "mkdir -p " + shellQuote(workspace)
 	if b.cfg.Sync.Delete {
 		command = "rm -rf " + shellQuote(workspace) + " && " + command
 	}
-	return b.execShell(ctx, client, name, command, io.Discard)
+	return b.execShellAs(ctx, client, name, command, user, io.Discard)
 }
 
-func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, name, workspace string, archive io.Reader) error {
+func (b *isloBackend) repairWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace string) error {
+	return b.execShellAs(ctx, client, name, isloWorkspaceOwnershipRepairCommand(workspace), isloAdminUser, io.Discard)
+}
+
+func isloWorkspaceOwnershipRepairCommand(workspace string) string {
+	return strings.Join([]string{
+		"set -e",
+		"mkdir -p " + shellQuote(workspace),
+		"chown -R " + shellQuote(isloWorkloadUser+":"+isloWorkloadUser) + " " + shellQuote(workspace),
+	}, "\n")
+}
+
+func (b *isloBackend) restoreWorkspaceOwnership(ctx context.Context, client isloAPI, name, workspace, user string) error {
+	command := "chown -R " + shellQuote(user+":"+user) + " " + shellQuote(workspace)
+	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
+}
+
+func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, name, workspace string, archive io.Reader, user string) error {
 	suffix := isloRandomSuffix()
 	remoteB64 := path.Join("/tmp", "crabbox-"+suffix+".tgz.b64")
 	remoteArchive := path.Join("/tmp", "crabbox-"+suffix+".tgz")
-	if err := b.execShell(ctx, client, name, "rm -f "+shellQuote(remoteB64)+" "+shellQuote(remoteArchive), io.Discard); err != nil {
+	cleanup := "rm -f " + shellQuote(remoteB64) + " " + shellQuote(remoteArchive)
+	if err := b.execShellAs(ctx, client, name, cleanup, user, io.Discard); err != nil {
 		return err
 	}
+	cleanupRemote := true
+	defer func() {
+		if cleanupRemote {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer cancel()
+			_ = b.execShellAs(cleanupCtx, client, name, cleanup, user, io.Discard)
+		}
+	}()
 	buf := make([]byte, 48*1024)
 	for {
 		n, readErr := archive.Read(buf)
 		if n > 0 {
 			chunk := base64.StdEncoding.EncodeToString(buf[:n])
 			command := "printf %s " + shellQuote(chunk) + " >> " + shellQuote(remoteB64)
-			if err := b.execShell(ctx, client, name, command, io.Discard); err != nil {
+			if err := b.execShellAs(ctx, client, name, command, user, io.Discard); err != nil {
 				return err
 			}
 		}
@@ -117,7 +152,11 @@ func (b *isloBackend) uploadArchiveViaExec(ctx context.Context, client isloAPI, 
 			return fmt.Errorf("islo read archive for fallback upload: %w", readErr)
 		}
 	}
-	return b.execShell(ctx, client, name, isloFallbackExtractCommand(remoteB64, remoteArchive, workspace), io.Discard)
+	if err := b.execShellAs(ctx, client, name, isloFallbackExtractCommand(remoteB64, remoteArchive, workspace), user, io.Discard); err != nil {
+		return err
+	}
+	cleanupRemote = false
+	return nil
 }
 
 func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) string {
@@ -129,8 +168,12 @@ func isloFallbackExtractCommand(remoteB64, remoteArchive, workspace string) stri
 	return extract + "; status=$?; " + cleanup + "; exit $status"
 }
 
-func (b *isloBackend) execShell(ctx context.Context, client isloAPI, name, command string, stdout io.Writer) error {
-	code, err := client.ExecStream(ctx, name, &gosdk.ExecRequest{Command: []string{"bash", "-lc", command}}, stdout, b.rt.Stderr)
+func (b *isloBackend) execShellAs(ctx context.Context, client isloAPI, name, command, user string, stdout io.Writer) error {
+	req := &gosdk.ExecRequest{Command: []string{"bash", "-lc", command}}
+	if user != "" {
+		req.User = stringValue(user)
+	}
+	code, err := client.ExecStream(ctx, name, req, stdout, b.rt.Stderr)
 	if err != nil {
 		return fmt.Errorf("islo exec %q: %w", command, err)
 	}

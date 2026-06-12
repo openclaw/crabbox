@@ -138,8 +138,8 @@ local `tensorlake` process argv.
 - Crabbox sync: yes — gzipped tar uploaded via `tensorlake sbx cp` and extracted
   in-sandbox.
 - Provider sync: no separate Tensorlake sync command.
-- URL bridge: yes — the provider advertises the url-bridge capability for
-  reaching services running inside the sandbox.
+- URL bridge: no — Tensorlake does not expose a per-sandbox ingress URL through
+  Crabbox today.
 - Desktop / browser / code: no Crabbox VNC or code-server surface.
 - Actions hydration: no.
 - Coordinator: no — Tensorlake always runs direct from the CLI and never goes

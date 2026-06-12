@@ -12,20 +12,24 @@ function writeExecutable(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
+function prepareSmokeRepo(dir) {
+  const tempRoot = path.join(dir, "repo");
+  const tempScripts = path.join(tempRoot, "scripts");
+  const smokeScript = path.join(tempScripts, "live-docker-sandbox-smoke.sh");
+  fs.mkdirSync(tempScripts, { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "scripts", "live-docker-sandbox-smoke.sh"), smokeScript);
+  fs.chmodSync(smokeScript, 0o755);
+  return { tempRoot, smokeScript };
+}
+
 test("live docker sandbox smoke honors configured alternate sbx path", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-sbx-smoke-"));
   const bin = path.join(dir, "bin");
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const fakeSbx = path.join(dir, "fake-sbx");
   const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
   fs.mkdirSync(bin);
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(
-    path.join(repoRoot, "scripts", "live-docker-sandbox-smoke.sh"),
-    path.join(tempScripts, "live-docker-sandbox-smoke.sh"),
-  );
-  fs.chmodSync(path.join(tempScripts, "live-docker-sandbox-smoke.sh"), 0o755);
 
   writeExecutable(
     fakeSbx,
@@ -51,13 +55,20 @@ if [[ "$1" == "doctor" ]]; then
   fi
   printf 'ok      sbx_version provider=docker-sandbox version=sbx client fake\n'
 fi
+if [[ "$1" == "warmup" ]]; then
+  printf '%s\n' "$5" >"${slugFile}"
+fi
+if [[ "$1" == "list" ]]; then
+  slug="$(cat "${slugFile}")"
+  printf '[{"name":"sandbox","labels":{"slug":"%s"}}]\\n' "$slug"
+fi
 exit 0
 EOF
 chmod +x bin/crabbox
 `,
   );
 
-  const result = spawnSync("bash", [path.join(tempScripts, "live-docker-sandbox-smoke.sh")], {
+  const result = spawnSync("bash", [smokeScript], {
     cwd: tempRoot,
     env: {
       ...process.env,
@@ -82,9 +93,150 @@ chmod +x bin/crabbox
   assert.match(seen[5], /^stop --provider docker-sandbox docker-sandbox-smoke-\d{14}-\d+$/);
 });
 
+test("live docker sandbox smoke stops a sandbox after partial warmup failure", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-warmup-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const stopped = path.join(dir, "stopped.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "doctor --provider docker-sandbox" ]]; then
+  printf 'ok      sbx_version provider=docker-sandbox version=sbx client fake\n'
+  exit 0
+fi
+if [[ "$1" == "warmup" ]]; then
+  printf 'created sandbox before failing\n' >&2
+  exit 37
+fi
+if [[ "$1" == "stop" ]]; then
+  printf '%s\n' "$4" >>"${stopped}"
+  exit 0
+fi
+printf 'unexpected crabbox args: %s\n' "$*" >&2
+exit 99
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      HOME: process.env.HOME ?? dir,
+      TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=environment_blocked/);
+  assert.match(result.stderr, /created sandbox before failing/);
+  assert.match(fs.readFileSync(stopped, "utf8"), /^docker-sandbox-smoke-\d{14}-\d+\n$/);
+});
+
+for (const testCase of [
+  {
+    name: "invalid list JSON",
+    listOutput: "not-json",
+    stderrPattern: /classification=validation_failed/,
+  },
+  {
+    name: "list JSON without warmed slug",
+    listOutput: "[]",
+    stderrPattern: /list JSON did not include slug/,
+  },
+]) {
+  test(`live docker sandbox smoke rejects ${testCase.name}`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-list-"));
+    const binDir = path.join(dir, "bin");
+    const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+    const stopped = path.join(dir, "stopped.log");
+    fs.mkdirSync(binDir, { recursive: true });
+
+    writeExecutable(
+      path.join(binDir, "go"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "doctor --provider docker-sandbox" ]]; then
+  printf 'ok      sbx_version provider=docker-sandbox version=sbx client fake\n'
+  exit 0
+fi
+if [[ "$1" == "warmup" ]]; then
+  exit 0
+fi
+if [[ "$1" == "run" ]]; then
+  exit 0
+fi
+if [[ "$1" == "list" ]]; then
+  cat <<'JSON'
+${testCase.listOutput}
+JSON
+  exit 0
+fi
+if [[ "$1" == "stop" ]]; then
+  printf '%s\n' "$4" >>"${stopped}"
+  exit 0
+fi
+printf 'unexpected crabbox args: %s\n' "$*" >&2
+exit 99
+SCRIPT
+chmod +x "$out"
+`,
+    );
+
+    const result = spawnSync("bash", [smokeScript], {
+      cwd: tempRoot,
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        HOME: process.env.HOME ?? dir,
+        TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+      },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, testCase.stderrPattern);
+    assert.match(fs.readFileSync(stopped, "utf8"), /^docker-sandbox-smoke-\d{14}-\d+\n$/);
+  });
+}
+
 test("live docker sandbox smoke classifies provider preflight failures", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-"));
   const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   fs.mkdirSync(binDir, { recursive: true });
 
   writeExecutable(
@@ -115,8 +267,8 @@ chmod +x "$out"
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-docker-sandbox-smoke.sh"], {
-    cwd: repoRoot,
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
     env: {
       ...process.env,
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -135,6 +287,7 @@ chmod +x "$out"
 test("live docker sandbox smoke classifies quota-like provider blockers", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-quota-"));
   const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   fs.mkdirSync(binDir, { recursive: true });
 
   writeExecutable(
@@ -165,8 +318,8 @@ chmod +x "$out"
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-docker-sandbox-smoke.sh"], {
-    cwd: repoRoot,
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
     env: {
       ...process.env,
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,

@@ -412,21 +412,25 @@ func (c *railwayClient) StopDeployment(ctx context.Context, deploymentID string)
 	return nil
 }
 
-// railwayListServicesPageSize bounds the number of projects (and the services
-// inside each project) returned by ListServices so a long-lived token does not
-// pull megabytes of unrelated metadata in a single call. Railway's GraphQL
-// connections accept `first: Int` on the projects edge as well as on the
-// nested services edge; if a future schema rev drops support there, the inner
-// `first:` argument becomes inert and we fall back to a client-side cap below.
+// railwayListServicesPageSize bounds each Railway GraphQL connection page so a
+// long-lived token does not pull megabytes of unrelated metadata in one call.
 const railwayListServicesPageSize = 50
 
-const projectsQuery = `query crabboxProjects($first: Int) {
-  projects(first: $first) {
+const projectsQuery = `query crabboxProjects($first: Int!, $after: String, $serviceFirst: Int!) {
+  projects(first: $first, after: $after) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
     edges {
       node {
         id
         name
-        services(first: $first) {
+        services(first: $serviceFirst) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
           edges {
             node {
               id
@@ -439,45 +443,134 @@ const projectsQuery = `query crabboxProjects($first: Int) {
   }
 }`
 
+const projectServicesQuery = `query crabboxProjectServices($projectId: String!, $first: Int!, $after: String) {
+  project(id: $projectId) {
+    services(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      edges {
+        node {
+          id
+          name
+        }
+      }
+    }
+  }
+}`
+
+type railwayPageInfo struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
+}
+
+type railwayServiceConnection struct {
+	PageInfo railwayPageInfo `json:"pageInfo"`
+	Edges    []struct {
+		Node struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"node"`
+	} `json:"edges"`
+}
+
 func (c *railwayClient) ListServices(ctx context.Context) ([]railwayService, error) {
-	var out struct {
-		Projects struct {
-			Edges []struct {
-				Node struct {
-					ID       string `json:"id"`
-					Name     string `json:"name"`
-					Services struct {
-						Edges []struct {
-							Node struct {
-								ID   string `json:"id"`
-								Name string `json:"name"`
-							} `json:"node"`
-						} `json:"edges"`
-					} `json:"services"`
-				} `json:"node"`
-			} `json:"edges"`
-		} `json:"projects"`
-	}
-	if err := c.do(ctx, projectsQuery, map[string]any{"first": railwayListServicesPageSize}, &out); err != nil {
-		return nil, err
-	}
 	var services []railwayService
-	for _, p := range out.Projects.Edges {
-		for _, s := range p.Node.Services.Edges {
-			services = append(services, railwayService{
-				ID:        s.Node.ID,
-				Name:      s.Node.Name,
-				ProjectID: p.Node.ID,
-			})
-			// Client-side cap: defends against a Railway schema rev that ignores
-			// `first:` on the services connection, which would otherwise let a
-			// single project flood the result.
-			if len(services) >= railwayListServicesPageSize*railwayListServicesPageSize {
-				return services, nil
+	var projectAfter string
+	for {
+		var out struct {
+			Projects struct {
+				PageInfo railwayPageInfo `json:"pageInfo"`
+				Edges    []struct {
+					Node struct {
+						ID       string                   `json:"id"`
+						Name     string                   `json:"name"`
+						Services railwayServiceConnection `json:"services"`
+					} `json:"node"`
+				} `json:"edges"`
+			} `json:"projects"`
+		}
+		vars := map[string]any{
+			"first":        railwayListServicesPageSize,
+			"serviceFirst": railwayListServicesPageSize,
+		}
+		if projectAfter != "" {
+			vars["after"] = projectAfter
+		}
+		if err := c.do(ctx, projectsQuery, vars, &out); err != nil {
+			return nil, err
+		}
+		for _, p := range out.Projects.Edges {
+			services = appendRailwayServices(services, p.Node.ID, p.Node.Services)
+			if p.Node.Services.PageInfo.HasNextPage {
+				if p.Node.Services.PageInfo.EndCursor == "" {
+					return nil, fmt.Errorf("railway services pagination for project %s missing endCursor", p.Node.ID)
+				}
+				more, err := c.listProjectServices(ctx, p.Node.ID, p.Node.Services.PageInfo.EndCursor)
+				if err != nil {
+					return nil, err
+				}
+				services = append(services, more...)
 			}
 		}
+		if !out.Projects.PageInfo.HasNextPage {
+			return services, nil
+		}
+		if out.Projects.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("railway projects pagination missing endCursor")
+		}
+		if out.Projects.PageInfo.EndCursor == projectAfter {
+			return nil, fmt.Errorf("railway projects pagination did not advance")
+		}
+		projectAfter = out.Projects.PageInfo.EndCursor
+	}
+}
+
+func (c *railwayClient) listProjectServices(ctx context.Context, projectID, after string) ([]railwayService, error) {
+	var services []railwayService
+	for after != "" {
+		var out struct {
+			Project *struct {
+				Services railwayServiceConnection `json:"services"`
+			} `json:"project"`
+		}
+		vars := map[string]any{
+			"projectId": projectID,
+			"first":     railwayListServicesPageSize,
+			"after":     after,
+		}
+		if err := c.do(ctx, projectServicesQuery, vars, &out); err != nil {
+			return nil, err
+		}
+		if out.Project == nil {
+			return nil, fmt.Errorf("railway project %s not found while paginating services", projectID)
+		}
+		services = appendRailwayServices(services, projectID, out.Project.Services)
+		if !out.Project.Services.PageInfo.HasNextPage {
+			return services, nil
+		}
+		next := out.Project.Services.PageInfo.EndCursor
+		if next == "" {
+			return nil, fmt.Errorf("railway services pagination for project %s missing endCursor", projectID)
+		}
+		if next == after {
+			return nil, fmt.Errorf("railway services pagination for project %s did not advance", projectID)
+		}
+		after = next
 	}
 	return services, nil
+}
+
+func appendRailwayServices(dst []railwayService, projectID string, conn railwayServiceConnection) []railwayService {
+	for _, s := range conn.Edges {
+		dst = append(dst, railwayService{
+			ID:        s.Node.ID,
+			Name:      s.Node.Name,
+			ProjectID: projectID,
+		})
+	}
+	return dst
 }
 
 const serviceQuery = `query crabboxService($id: String!) {

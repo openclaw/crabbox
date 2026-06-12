@@ -34,6 +34,10 @@ if [[ "$1 $2 $3" == "admin providers policy" ]]; then
   exit 0
 fi
 if [[ "$1 $2 $3" == "admin hosts quota" ]]; then
+  if [[ "\${CRABBOX_FAKE_QUOTA_SPACED_ZERO:-0}" == "1" ]]; then
+    printf '[ { "serviceCode" : "ec2", "quotaCode" : "L-5D8DADF5", "quotaName" : "Running Dedicated mac2 Hosts", "value" : 0.0, "adjustable" : true, "unit" : "None" } ]\\n'
+    exit 0
+  fi
   value="\${CRABBOX_FAKE_QUOTA_VALUE:-0}"
   printf '[{"serviceCode":"ec2","quotaCode":"L-5D8DADF5","quotaName":"Running Dedicated mac2 Hosts","value":%s,"adjustable":true,"unit":"None"}]\\n' "$value"
   exit 0
@@ -123,6 +127,33 @@ function runAudit(ctx, env = {}) {
   });
 }
 
+function shellArgs(command) {
+  const result = spawn("bash", ["-c", `eval "set -- ${command}"; printf '<%s>\\n' "$@"`], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    result.stdout.setEncoding("utf8");
+    result.stderr.setEncoding("utf8");
+    result.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    result.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    result.on("error", reject);
+    result.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `shell parse exited ${code}`));
+        return;
+      }
+      resolve(stdout.trim().split("\n").map((line) => line.slice(1, -1)));
+    });
+  });
+}
+
 test("macOS coordinator remediation audit records IAM, quota, and local profile blockers", async () => {
   const ctx = await setup("123456789012");
   const result = await runAudit(ctx, {
@@ -154,6 +185,44 @@ test("macOS coordinator remediation audit records IAM, quota, and local profile 
 	assert.equal(summary.evidence.providerIdentity.stdout, "evidence/provider-identity.out");
 	assert.equal(summary.evidence.macHostDryRun.status, 0);
 	assert.match(summary.evidence.macHostDryRun.stdoutText, /UnauthorizedOperation/);
+});
+
+test("macOS coordinator remediation audit shell-quotes generated remediation commands", async () => {
+	const ctx = await setup("123456789012");
+	const profile = "auto; echo injected";
+	const displayCommand = "scripts/apply helper.sh";
+	const result = await runAudit(ctx, {
+		CRABBOX_FAKE_AWS_ACCOUNT: "999999999999",
+		CRABBOX_MACOS_REMEDIATION_PROFILE: profile,
+		CRABBOX_MACOS_IAM_APPLY_DISPLAY_COMMAND: displayCommand,
+	});
+
+	assert.equal(result.code, 1, result.stdout + result.stderr);
+	const summary = JSON.parse(await readFile(path.join(ctx.artifacts, "summary.json"), "utf8"));
+	const command = summary.remediation.commands.find((value) => value.startsWith("scripts/apply\\ helper.sh "));
+	assert.ok(command, "expected IAM remediation command");
+	assert.deepEqual(await shellArgs(command), [
+		displayCommand,
+		"--identity",
+		"provider-identity.json",
+		"--policy",
+		"macos-image-policy.json",
+		"--profile",
+		profile,
+	]);
+});
+
+test("macOS coordinator remediation audit classifies spaced zero quota JSON as quota blocker", async () => {
+	const ctx = await setup("123456789012");
+	const result = await runAudit(ctx, {
+		CRABBOX_FAKE_DRY_OK: "1",
+		CRABBOX_FAKE_QUOTA_SPACED_ZERO: "1",
+	});
+
+	assert.equal(result.code, 1, result.stdout + result.stderr);
+	const summary = JSON.parse(await readFile(path.join(ctx.artifacts, "summary.json"), "utf8"));
+	assert.ok(summary.blockers.includes("host-quota"));
+	assert.equal(summary.blockers.includes("host-quota-visibility"), false);
 });
 
 test("macOS coordinator remediation audit reports ready when dry-run, quota, and account guard pass", async () => {

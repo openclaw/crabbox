@@ -9,11 +9,13 @@ import (
 	"time"
 )
 
+var detectOutboundIPv4CIDRFunc = detectOutboundIPv4CIDR
+
 func ensureAWSSSHCIDRs(ctx context.Context, cfg *Config) {
 	if cfg.Provider != "aws" || len(cfg.AWSSSHCIDRs) > 0 {
 		return
 	}
-	cidr, err := detectOutboundIPv4CIDR(ctx)
+	cidr, err := detectOutboundIPv4CIDRFunc(ctx)
 	if err != nil || cidr == "" {
 		return
 	}

@@ -56,9 +56,11 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona           CRABBOX_LIVE_REPO=/path/
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox  CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore         CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=sprites           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tenki CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=kubevirt CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_KUBEVIRT_TEMPLATE=/path/to/vm.yaml scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=external CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_EXTERNAL_COMMAND=/path/to/provider scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-digitalocean-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -70,9 +72,11 @@ Per-provider smoke prerequisites:
 - **Daytona** — `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or `daytona.snapshot`.
 - **Namespace** — the authenticated `devbox` CLI on `PATH`.
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
+- **Tenki** — the authenticated `tenki` CLI on `PATH`; run `tenki login` and complete the browser flow.
 - **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.
 - **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
 - **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY` (from `wandb login`). `scripts/wandb-smoke.sh` is a coordinator-free, wandb-only gate.
+- **DigitalOcean** — `DIGITALOCEAN_TOKEN` with account-read, Droplet, image-read, SSH key, and tag scopes. `scripts/live-digitalocean-smoke.sh` is coordinator-free, requires an empty Crabbox-owned inventory, creates a small short-lived Droplet, verifies status and execution, and prints a final cleanup classification.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 
@@ -86,6 +90,10 @@ rm -f "$tmp"
 ```
 
 Use `--provider aws` with AWS SDK credentials for the direct AWS equivalent.
+Use `scripts/live-digitalocean-smoke.sh` for the repeatable direct DigitalOcean
+equivalent; it builds `bin/crabbox`, creates a guarded `digitalocean` scratch
+config, and verifies the Crabbox-owned inventory is empty before create and
+after stop/cleanup.
 
 ## Deployment
 
@@ -256,10 +264,9 @@ After AWS credential or account rotation, scan old provider accounts directly fo
 
 ```sh
 scripts/aws-crabbox-orphan-audit.sh --profile old-crabbox-account
-scripts/aws-crabbox-orphan-audit.sh --profile old-crabbox-account --terminate
 ```
 
-The audit is read-only by default. It skips `keep=true` instances, protects active coordinator leases by lease tag or EC2 instance ID, and applies the same grace window as the broker sweep before reporting stale labels. `--terminate` refuses to run if active coordinator leases cannot be loaded or may be truncated.
+The audit is read-only. It skips `keep=true` instances, protects active coordinator leases by lease tag or EC2 instance ID, and applies the same grace window as the broker sweep before reporting stale labels. The script intentionally refuses `--terminate`: a local AWS scan cannot atomically lock coordinator lease state before deleting an instance. For broker-owned accounts, use the coordinator AWS orphan sweep below. For rotated legacy accounts, treat the JSON output as investigation evidence and delete through an explicit operator or infrastructure workflow only after confirming no active coordinator can still claim the instance.
 
 Direct-provider cleanup is only for debug mode without a coordinator:
 
@@ -359,8 +366,9 @@ Cost is an estimate for compute leases, not an invoice. See [Cost and Usage](fea
 
 Before tagging a release:
 
+- Rebase release preparation on the current `main`, restore the full changelog from the latest tag if concurrent work regressed it, and verify every published version remains represented.
 - Reorder `CHANGELOG.md` with the user-facing changes first, date the release section, and keep contributor thanks / co-author notes intact.
-- Update package metadata that carries the project version, including `worker/package.json` and `worker/package-lock.json`.
+- Update every package metadata file that carries the project version. The current release surface is `worker/package.json` plus both root package entries in `worker/package-lock.json`; the removed root plugin package must not be recreated.
 - `go vet ./...`
 - `go test -race ./...`
 - `scripts/test-go-modules.sh`

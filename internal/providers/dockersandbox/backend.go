@@ -163,6 +163,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		result.Session.Kept = !shouldStop
+		if exitCode != 0 {
+			return result, exit(exitCode, "docker-sandbox run failed: %v", runErr)
+		}
 		return result, exit(1, "docker-sandbox run failed: %v", runErr)
 	}
 	if exitCode != 0 {
@@ -422,14 +425,21 @@ func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, rec
 	leaseID := leasePrefix + sandboxName
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		_ = cli.remove(context.Background(), sandboxName)
-		return "", "", "", err
+		return "", "", "", b.removeCreatedSandboxAfterClaimFailure(cli, sandboxName, err)
 	}
 	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = cli.remove(context.Background(), sandboxName)
-		return "", "", "", err
+		return "", "", "", b.removeCreatedSandboxAfterClaimFailure(cli, sandboxName, err)
 	}
 	return leaseID, sandboxName, slug, nil
+}
+
+func (b *backend) removeCreatedSandboxAfterClaimFailure(cli *sbxCLI, sandboxName string, primaryErr error) error {
+	if cleanupErr := cli.remove(context.Background(), sandboxName); cleanupErr != nil {
+		leakErr := fmt.Errorf("cleanup docker-sandbox sandbox %s after claim setup failure: %w; run `sbx rm --force %s` to retry cleanup", sandboxName, cleanupErr, sandboxName)
+		fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
+		return errors.Join(primaryErr, leakErr)
+	}
+	return primaryErr
 }
 
 func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {

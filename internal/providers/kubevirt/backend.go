@@ -591,14 +591,18 @@ func (b *leaseBackend) sshTarget(name, keyPath string) core.SSHTarget {
 }
 
 func (b *leaseBackend) proxyCommand(name string) string {
-	parts := []string{b.cfg.KubeVirt.Virtctl}
-	parts = append(parts, b.kubeArgs()...)
-	parts = append(parts, "port-forward", "--stdio=true", "vm/"+name+"/"+b.cfg.KubeVirt.Namespace, "%p")
+	parts := b.proxyCommandParts(name)
 	quoted := make([]string, 0, len(parts))
 	for _, part := range parts {
 		quoted = append(quoted, core.ShellQuote(part))
 	}
 	return strings.Join(quoted, " ")
+}
+
+func (b *leaseBackend) proxyCommandParts(name string) []string {
+	parts := []string{b.cfg.KubeVirt.Virtctl}
+	parts = append(parts, b.kubeArgs()...)
+	return append(parts, "port-forward", "--stdio=true", "vm/"+name, "%p")
 }
 
 func (b *leaseBackend) server(name, leaseID, slug string, keep bool) core.Server {

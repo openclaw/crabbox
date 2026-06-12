@@ -343,8 +343,7 @@ summary.
    ```
    `RejectDelegatedSyncOptionsForSpec` reads `Spec().Features`, so declaring
    `FeatureArchiveSync`, `FeatureRunProof`, etc. relaxes the matching
-   rejections. (`core.RejectDelegatedSyncOptions(name, req)` is the
-   feature-less variant.)
+   rejections. Pass a spec without those features for the strict behavior.
 2. acquire a resource or resolve an existing id/slug;
 3. claim or reclaim the resource for the calling repo;
 4. stream provider output through `rt.Stdout` and `rt.Stderr`;

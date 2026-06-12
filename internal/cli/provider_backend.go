@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -32,6 +34,23 @@ type ProviderConfigValidator interface {
 
 type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
+}
+
+type LeaseClaimEndpointPreparer interface {
+	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
+}
+
+type ProviderCommandRoutingArgs interface {
+	CommandRoutingArgs(cfg Config, leaseID string) []string
+}
+
+type DesktopCredentials struct {
+	Username string
+	Password string
+}
+
+type DesktopCredentialProvider interface {
+	DesktopCredentials(cfg Config, target SSHTarget) (DesktopCredentials, bool)
 }
 
 type ProviderServerTypeProvider interface {
@@ -62,6 +81,11 @@ type SSHLeaseBackend interface {
 	Touch(ctx context.Context, req TouchRequest) (Server, error)
 }
 
+type TailscaleMetadataBackend interface {
+	Backend
+	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
+}
+
 type DelegatedRunBackend interface {
 	Backend
 	Warmup(ctx context.Context, req WarmupRequest) error
@@ -69,6 +93,11 @@ type DelegatedRunBackend interface {
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	Status(ctx context.Context, req StatusRequest) (StatusView, error)
 	Stop(ctx context.Context, req StopRequest) error
+}
+
+type DelegatedRunArtifactBackend interface {
+	Backend
+	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
 }
 
 type PortsRequest struct {
@@ -102,6 +131,16 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 
+// PausableBackend is implemented by providers that can pause a lease, freeing
+// remote compute while preserving its state, and resume it later. It is
+// optional: the `pause`/`resume` commands report a clear error for providers
+// that do not implement it.
+type PausableBackend interface {
+	Backend
+	Pause(ctx context.Context, req PauseRequest) error
+	Resume(ctx context.Context, req ResumeRequest) error
+}
+
 type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
@@ -113,19 +152,79 @@ type NativeCheckpointCapability struct {
 }
 
 type NativeCheckpointRequest struct {
-	Config   Config
-	Server   Server
-	Target   SSHTarget
-	Strategy string
+	Config           Config
+	Server           Server
+	Target           SSHTarget
+	Strategy         string
+	StrategyExplicit bool
 }
 
 type NativeCheckpointProvider interface {
 	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
 }
 
+type NativeCheckpointImage struct {
+	ID         string
+	Name       string
+	State      string
+	Provider   string
+	Kind       string
+	Region     string
+	ResourceID string
+	Direct     bool
+}
+
+type NativeCheckpointCreateRequest struct {
+	Config      Config
+	Server      Server
+	Target      SSHTarget
+	LeaseID     string
+	Name        string
+	RepoName    string
+	Workdir     string
+	Strategy    string
+	NoReboot    bool
+	Wait        bool
+	WaitTimeout time.Duration
+	Stderr      io.Writer
+}
+
+type NativeCheckpointCreateResult struct {
+	Image    NativeCheckpointImage
+	Metadata map[string]string
+}
+
+type NativeCheckpointWorkdirRequest struct {
+	Config   Config
+	Server   Server
+	LeaseID  string
+	RepoName string
+	Override string
+}
+
+type NativeCheckpointResourceRequest struct {
+	Config   Config
+	Image    NativeCheckpointImage
+	Metadata map[string]string
+}
+
+type NativeCheckpointVerifyResult struct {
+	ProviderState string
+	NextAction    string
+	Error         string
+}
+
+type NativeCheckpointLifecycleProvider interface {
+	NativeCheckpointWorkdir(req NativeCheckpointWorkdirRequest) string
+	CreateNativeCheckpoint(ctx context.Context, req NativeCheckpointCreateRequest) (NativeCheckpointCreateResult, error)
+	VerifyNativeCheckpoint(ctx context.Context, req NativeCheckpointResourceRequest) (NativeCheckpointVerifyResult, error)
+	DeleteNativeCheckpoint(ctx context.Context, req NativeCheckpointResourceRequest) error
+}
+
 type NativeCheckpointForkRecord struct {
 	Kind        string
 	ImageID     string
+	Name        string
 	Resource    string
 	Region      string
 	Project     string
@@ -134,6 +233,7 @@ type NativeCheckpointForkRecord struct {
 	TargetOS    string
 	WindowsMode string
 	ServerType  string
+	Metadata    map[string]string
 }
 
 type NativeCheckpointForkRequest struct {
@@ -160,13 +260,17 @@ type ProviderSpec struct {
 	Targets     []TargetSpec
 	Features    FeatureSet
 	Coordinator CoordinatorMode
+	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
+	// not a bidirectional peer endpoint.
+	TailscaleEgressOnly bool
 }
 
 type ProviderKind string
 
 const (
-	ProviderKindSSHLease     ProviderKind = "ssh-lease"
-	ProviderKindDelegatedRun ProviderKind = "delegated-run"
+	ProviderKindSSHLease       ProviderKind = "ssh-lease"
+	ProviderKindDelegatedRun   ProviderKind = "delegated-run"
+	ProviderKindServiceControl ProviderKind = "service-control"
 )
 
 type CoordinatorMode string
@@ -184,22 +288,24 @@ type TargetSpec struct {
 type Feature string
 
 const (
-	FeatureSSH         Feature = "ssh"
-	FeatureCrabboxSync Feature = "crabbox-sync"
-	FeatureArchiveSync Feature = "archive-sync"
-	FeatureCleanup     Feature = "cleanup"
-	FeatureDesktop     Feature = "desktop"
-	FeatureBrowser     Feature = "browser"
-	FeatureCode        Feature = "code"
-	FeatureTailscale   Feature = "tailscale"
-	FeatureURLBridge   Feature = "url-bridge"
-	FeatureCheckpoint  Feature = "workspace-checkpoint"
-	FeatureFork        Feature = "workspace-fork"
-	FeatureRestore     Feature = "workspace-restore"
-	FeatureSnapshot    Feature = "provider-snapshot"
-	FeatureCacheVolume Feature = "cache-volume"
-	FeatureRunProof    Feature = "run-proof"
-	FeatureRunSession  Feature = "run-session"
+	FeatureSSH          Feature = "ssh"
+	FeatureCrabboxSync  Feature = "crabbox-sync"
+	FeatureArchiveSync  Feature = "archive-sync"
+	FeatureCleanup      Feature = "cleanup"
+	FeatureDesktop      Feature = "desktop"
+	FeatureBrowser      Feature = "browser"
+	FeatureCode         Feature = "code"
+	FeatureTailscale    Feature = "tailscale"
+	FeatureURLBridge    Feature = "url-bridge"
+	FeatureCheckpoint   Feature = "workspace-checkpoint"
+	FeatureFork         Feature = "workspace-fork"
+	FeatureRestore      Feature = "workspace-restore"
+	FeatureSnapshot     Feature = "provider-snapshot"
+	FeatureCacheVolume  Feature = "cache-volume"
+	FeatureRunProof     Feature = "run-proof"
+	FeatureRunSession   Feature = "run-session"
+	FeatureRunArtifacts Feature = "run-artifacts"
+	FeaturePauseResume  Feature = "pause-resume"
 )
 
 type FeatureSet []Feature
@@ -234,13 +340,15 @@ type CommandRunner interface {
 }
 
 type LocalCommandRequest struct {
-	Name   string
-	Args   []string
-	Env    []string
-	Dir    string
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Name                 string
+	Args                 []string
+	Env                  []string
+	Dir                  string
+	Stdin                io.Reader
+	Stdout               io.Writer
+	Stderr               io.Writer
+	DisableOutputCapture bool
+	CancelGracePeriod    time.Duration
 }
 
 type LocalCommandResult struct {
@@ -285,20 +393,46 @@ type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	if req.CancelGracePeriod > 0 {
+		cmd.Cancel = func() error {
+			err := cmd.Process.Signal(os.Interrupt)
+			if errors.Is(err, os.ErrProcessDone) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		cmd.WaitDelay = req.CancelGracePeriod
+	}
 	cmd.Env = req.Env
 	cmd.Dir = req.Dir
 	cmd.Stdin = req.Stdin
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if req.Stdout != nil {
-		cmd.Stdout = io.MultiWriter(req.Stdout, &stdout)
+		if req.DisableOutputCapture {
+			cmd.Stdout = req.Stdout
+		} else {
+			cmd.Stdout = io.MultiWriter(req.Stdout, &stdout)
+		}
 	} else {
-		cmd.Stdout = &stdout
+		if req.DisableOutputCapture {
+			cmd.Stdout = io.Discard
+		} else {
+			cmd.Stdout = &stdout
+		}
 	}
 	if req.Stderr != nil {
-		cmd.Stderr = io.MultiWriter(req.Stderr, &stderr)
+		if req.DisableOutputCapture {
+			cmd.Stderr = req.Stderr
+		} else {
+			cmd.Stderr = io.MultiWriter(req.Stderr, &stderr)
+		}
 	} else {
-		cmd.Stderr = &stderr
+		if req.DisableOutputCapture {
+			cmd.Stderr = io.Discard
+		} else {
+			cmd.Stderr = &stderr
+		}
 	}
 	err := cmd.Run()
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
@@ -345,6 +479,8 @@ type ResolveRequest struct {
 	ID          string
 	Reclaim     bool
 	ReleaseOnly bool
+	StatusOnly  bool
+	ReadyProbe  bool
 }
 
 type ReleaseLeaseRequest struct {
@@ -424,6 +560,16 @@ type StopRequest struct {
 	ID      string
 }
 
+type PauseRequest struct {
+	Options LeaseOptions
+	ID      string
+}
+
+type ResumeRequest struct {
+	Options LeaseOptions
+	ID      string
+}
+
 type CleanupRequest struct {
 	Options LeaseOptions
 	DryRun  bool
@@ -442,6 +588,18 @@ type RunResult struct {
 	LogExcerpt    string
 	ActionsURL    string
 	Artifacts     []RunArtifact
+}
+
+type DelegatedRunArtifactRequest struct {
+	RunReq   RunRequest
+	Result   RunResult
+	MaxFiles int
+	MaxBytes int64
+}
+
+type DelegatedRunArtifactResult struct {
+	Artifacts []RunArtifact
+	Output    string
 }
 
 type RunSessionHandle struct {
@@ -605,6 +763,29 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	}
 	cfg.Provider = after.Name()
 	return after.ApplyFlags(cfg, fs, values[after.Name()])
+}
+
+func validateProviderConfig(cfg Config) error {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if validator, ok := provider.(ProviderConfigValidator); ok {
+		return validator.ValidateConfig(cfg)
+	}
+	return nil
+}
+
+func providerCommandRoutingArgs(cfg Config, leaseID string) []string {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return nil
+	}
+	router, ok := provider.(ProviderCommandRoutingArgs)
+	if !ok {
+		return nil
+	}
+	return router.CommandRoutingArgs(cfg, leaseID)
 }
 
 func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFlagValues) (bool, error) {
@@ -792,10 +973,11 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if len(req.Downloads) > 0 {
 		return exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
-	if len(req.ArtifactGlobs) > 0 {
+	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
+	if len(req.ArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
-	if len(req.RequiredArtifactGlobs) > 0 {
+	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
 	}
 	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
@@ -811,14 +993,6 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 		return exit(2, "%s delegates sync; --fresh-pr is not supported", provider)
 	}
 	return nil
-}
-
-func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return rejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: provider}, req)
-}
-
-func RejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return rejectDelegatedSyncOptions(provider, req)
 }
 
 func RejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {

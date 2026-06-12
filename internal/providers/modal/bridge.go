@@ -15,10 +15,9 @@ import (
 // out of scope for https://github.com/openclaw/crabbox/pull/136.
 //
 // So the modal adapter implements core.BridgeProvider only to return
-// core.ErrBridgeNotImplemented. The pond bridge resolver maps that error to
-// BridgeState="unsupported" on the peer, which is honest reporting: callers
-// see modal peers listed in the pond with a clear "no bridge plane for this
-// provider" signal instead of a silently empty Targets slice.
+// core.ErrBridgeNotImplemented. If this provider is ever explicitly routed
+// through the bridge path, callers get a clear "unsupported" signal instead of
+// a silently empty Targets slice.
 
 // PublishPeer reports that Modal does not participate in the bridge plane.
 func (b *modalBackend) PublishPeer(ctx context.Context, leaseID string, port int, ttl time.Duration) (core.BridgePeerTarget, error) {

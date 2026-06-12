@@ -111,10 +111,8 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 - Desktop / browser / code: no.
 - Actions hydration: no.
 - Coordinator (broker): no — Modal always runs direct from the CLI.
-- URL bridge / pond: Modal declares the bridge feature but does not yet expose a
-  per-sandbox ingress URL, so it reports `unsupported` when listed in a pond.
-  Modal peers appear in pond output with that clear signal rather than empty
-  targets.
+- URL bridge / pond: no advertised URL bridge. Modal does not expose a
+  per-sandbox ingress URL through Crabbox today.
 
 ## Gotchas
 

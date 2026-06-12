@@ -60,8 +60,12 @@ large     Standard_D96ads_v6, Standard_D96ds_v6, then D/F 64- and 48-vCPU fallba
 beast     Standard_D192ds_v6, Standard_D128ds_v6, then D/F 96- and 64-vCPU fallbacks
 ```
 
-Linux ARM64 classes use Azure Cobalt Dpsv6/Dpdsv6 candidates and ARM64 Ubuntu
-Marketplace images:
+ARM64 classes use Azure Cobalt Dpsv6/Dpdsv6 candidates. Linux ARM64 also uses
+ARM64 Ubuntu Marketplace images. Windows ARM64 is native Windows only because
+Azure Cobalt ARM64 sizes do not support the nested virtualization WSL2 needs;
+it requires `azure.image` / `CRABBOX_AZURE_IMAGE` on the request, or
+`CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the Worker, to name an ARM64 Windows
+Marketplace or custom image because the built-in Windows default is x64:
 
 ```text
 standard  Standard_D32pds_v6, Standard_D32ps_v6, then 16-vCPU fallbacks
@@ -70,8 +74,8 @@ large     Standard_D96pds_v6, Standard_D96ps_v6, then 64/48-vCPU fallbacks
 beast     Standard_D96pds_v6, Standard_D96ps_v6, then 64-vCPU fallbacks
 ```
 
-Native Windows and WSL2 use a smaller scale, and the default candidates support
-the nested virtualization WSL2 needs:
+Native Windows and WSL2 amd64 use a smaller scale, and the default candidates
+support the nested virtualization WSL2 needs:
 
 ```text
 standard  Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, then Standard_D2as_v6
@@ -152,6 +156,7 @@ CRABBOX_AZURE_CLIENT_ID
 CRABBOX_AZURE_LOCATION
 CRABBOX_AZURE_RESOURCE_GROUP
 CRABBOX_AZURE_IMAGE
+CRABBOX_AZURE_WINDOWS_ARM64_IMAGE
 CRABBOX_AZURE_OS_DISK
 CRABBOX_AZURE_VNET
 CRABBOX_AZURE_SUBNET
@@ -194,9 +199,13 @@ The default location is `eastus`. The default Linux image is
 `MicrosoftWindowsServer:windowsserver2022:2022-datacenter-smalldisk-g2:latest`.
 With `architecture: arm64` or `--arch arm64`, Linux defaults switch to
 `Canonical:ubuntu-26_04-lts:server-arm64:latest` or the matching
-`ubuntu-24_04-lts:server-arm64` image when `--os ubuntu:24.04` is set.
+`ubuntu-24_04-lts:server-arm64` image when `--os ubuntu:24.04` is set. Windows
+ARM64 uses ARM64 VM sizes with the selected Windows Marketplace or custom image.
 Set `azure.image` / `CRABBOX_AZURE_IMAGE` as a `Publisher:Offer:SKU:Version`
-reference to override.
+reference to override. In brokered mode, use
+`CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the Worker to provide the default ARM64
+Windows image without changing the global Azure image fallback for Linux or
+AMD64 Windows leases.
 
 ## VPN / Private Network
 

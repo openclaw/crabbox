@@ -94,19 +94,45 @@ func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCL
 }
 
 func (b *tensorlakeBackend) prepareWorkspace(ctx context.Context, cli *tensorlakeCLI, sandboxID, workdir string) error {
-	command := "mkdir -p " + shellQuote(workdir)
-	if b.cfg.Sync.Delete {
-		command = "rm -rf " + shellQuote(workdir) + " && " + command
-	}
-	return cli.execShell(ctx, sandboxID, command)
+	return cli.execShell(ctx, sandboxID, "mkdir -p "+shellQuote(workdir))
 }
 
 func (b *tensorlakeBackend) extractRemoteArchive(ctx context.Context, cli *tensorlakeCLI, sandboxID, remoteArchive, workdir string) error {
-	cmd := strings.Join([]string{
-		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workdir),
-		"rm -f " + shellQuote(remoteArchive),
-	}, " && ")
-	return cli.execShell(ctx, sandboxID, cmd)
+	return cli.execShell(ctx, sandboxID, tensorlakeExtractArchiveCommand(workdir, remoteArchive, b.cfg.Sync.Delete))
+}
+
+func tensorlakeExtractArchiveCommand(workdir, remoteArchive string, deleteExisting bool) string {
+	if !deleteExisting {
+		return strings.Join([]string{
+			"mkdir -p " + shellQuote(workdir) + " && tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workdir),
+			"crabbox_status=$?",
+			"rm -f " + shellQuote(remoteArchive),
+			"exit \"$crabbox_status\"",
+		}, "; ")
+	}
+	parent := path.Dir(workdir)
+	tmp := path.Join(parent, ".crabbox-sync-"+randomSuffix())
+	backup := path.Join(parent, ".crabbox-backup-"+randomSuffix())
+	steps := []string{
+		"(",
+		"rm -rf " + shellQuote(tmp) + " " + shellQuote(backup) + " &&",
+		"mkdir -p " + shellQuote(tmp) + " &&",
+		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(tmp) + " &&",
+		"if [ -e " + shellQuote(workdir) + " ]; then mv " + shellQuote(workdir) + " " + shellQuote(backup) + "; fi &&",
+		"if mv " + shellQuote(tmp) + " " + shellQuote(workdir) + "; then",
+		"rm -rf " + shellQuote(backup) + ";",
+		"else",
+		"crabbox_swap_status=$?;",
+		"if [ -e " + shellQuote(backup) + " ]; then mv " + shellQuote(backup) + " " + shellQuote(workdir) + " || true; fi;",
+		"exit \"$crabbox_swap_status\";",
+		"fi",
+		");",
+		"crabbox_status=$?;",
+		"rm -rf " + shellQuote(tmp) + ";",
+		"rm -f " + shellQuote(remoteArchive) + ";",
+		"exit \"$crabbox_status\"",
+	}
+	return strings.Join(steps, " ")
 }
 
 func createTensorlakeSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {

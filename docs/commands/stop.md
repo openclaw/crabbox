@@ -59,16 +59,21 @@ The action `stop` takes depends on how the lease was created:
   configured broker) — releases the lease through the broker and prints
   `released lease=<id> server=<id>`. If the lease cannot be inspected first,
   `stop` warns and still attempts the release by ID.
-- **Direct cloud and local providers** — delete the backing server and print
-  `deleted lease=<id> server=<id> name=<name>` (some providers print a
-  provider-specific release message instead).
+- **Direct cloud and local providers** — usually delete the backing server and
+  print `deleted lease=<id> server=<id> name=<name>`, but retain-capable
+  providers such as `namespace-devbox`, `kubevirt`, and `incus` stop instead
+  when their `*.deleteOnRelease` setting is `false` (some providers print a
+  provider-specific release message instead, for example
+  `stopped lease=<id> instance=<name> retained=true` for retained Incus
+  instances).
 - **Delegated runners** — call the provider's own teardown for the resolved
   sandbox.
 
 For `provider=docker-sandbox`, `crabbox stop` intentionally keeps Crabbox's
 cross-provider cleanup meaning. Use [`ports`](ports.md) and [`cp`](cp.md) for
-non-destructive post-create workflows on a running sandbox. A separate
-pause/resume command is deferred.
+non-destructive post-create workflows on a running sandbox. The separate
+[`pause`](pause.md) and [`resume`](resume.md) commands are provider-dependent
+and are not supported by Docker Sandbox.
 
 Where applicable, `stop` makes a best-effort attempt to stop GitHub
 [Actions hydration](../features/actions-hydration.md) on the host before
@@ -98,7 +103,6 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --e2b-api-url <url>                      E2B API URL
 --e2b-domain <domain>                    E2B sandbox domain
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
---azure-dynamic-sessions-pool <name>     Azure Dynamic Sessions pool
 ```
 
 Run `crabbox stop --help` for the full, provider-aware flag list, and

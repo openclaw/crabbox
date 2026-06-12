@@ -4,15 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
+	"io"
 	"math"
+	"strings"
 )
 
 func init() {
 	RegisterProvider(testHetznerProvider{})
+	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
 	RegisterProvider(testGCPProvider{})
+	RegisterProvider(testIncusProvider{})
 	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testXCPNgProvider{})
 	RegisterProvider(testStaticSSHProvider{})
@@ -20,6 +25,7 @@ func init() {
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
+	RegisterProvider(testMorphProvider{})
 	RegisterProvider(testDaytonaProvider{})
 	RegisterProvider(testIsloProvider{})
 	RegisterProvider(testE2BProvider{})
@@ -27,10 +33,14 @@ func init() {
 	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
+	RegisterProvider(testAppleVZProvider{})
 	RegisterProvider(testDockerSandboxProvider{})
 	RegisterProvider(testMultipassProvider{})
+	RegisterProvider(testTartProvider{})
+	RegisterProvider(testHyperVProvider{})
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
+	RegisterProvider(testServiceControlProvider{})
 }
 
 type testAzureProvider struct{}
@@ -196,6 +206,30 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testDigitalOceanProvider struct{}
+
+func (testDigitalOceanProvider) Name() string      { return "digitalocean" }
+func (testDigitalOceanProvider) Aliases() []string { return nil }
+func (testDigitalOceanProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "digitalocean",
+		Family:      "digitalocean",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testDigitalOceanProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
+func (testDigitalOceanProvider) ServerTypeForClass(string) string  { return "s-1vcpu-1gb" }
+func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
@@ -369,6 +403,73 @@ func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpoin
 }
 
 type testProxmoxProvider struct{}
+
+type testIncusProvider struct{}
+
+func (testIncusProvider) Name() string      { return "incus" }
+func (testIncusProvider) Aliases() []string { return nil }
+func (testIncusProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "incus",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testIncusProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testIncusFlagValues{
+		InstanceType:    fs.String("incus-instance-type", defaults.Incus.InstanceType, "Incus instance type"),
+		Image:           fs.String("incus-image", defaults.Incus.Image, "Incus image"),
+		User:            fs.String("incus-user", defaults.Incus.User, "Incus SSH user"),
+		WorkRoot:        fs.String("incus-work-root", defaults.Incus.WorkRoot, "Incus work root"),
+		ProxyListenPort: fs.String("incus-proxy-listen-port", defaults.Incus.ProxyListenPort, "Incus proxy listen port"),
+	}
+}
+func (testIncusProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testIncusFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "incus-instance-type") {
+		switch strings.ToLower(strings.TrimSpace(*v.InstanceType)) {
+		case "vm", "virtual-machine", "virtual_machine":
+			cfg.Incus.InstanceType = "virtual-machine"
+		default:
+			cfg.Incus.InstanceType = strings.ToLower(strings.TrimSpace(*v.InstanceType))
+		}
+		cfg.ServerType = incusServerTypeForConfig(*cfg)
+	}
+	if flagWasSet(fs, "incus-image") {
+		cfg.Incus.Image = *v.Image
+		cfg.ServerType = incusServerTypeForConfig(*cfg)
+	}
+	if flagWasSet(fs, "incus-user") {
+		cfg.Incus.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "incus-work-root") {
+		cfg.Incus.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "incus-proxy-listen-port") {
+		cfg.Incus.ProxyListenPort = *v.ProxyListenPort
+		cfg.SSHPort = blank(*v.ProxyListenPort, cfg.SSHPort)
+	}
+	return nil
+}
+func (p testIncusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testIncusFlagValues struct {
+	InstanceType    *string
+	Image           *string
+	User            *string
+	WorkRoot        *string
+	ProxyListenPort *string
+}
 
 func (testProxmoxProvider) Name() string      { return "proxmox" }
 func (testProxmoxProvider) Aliases() []string { return nil }
@@ -750,6 +851,83 @@ type testNamespaceFlagValues struct {
 	WorkRoot *string
 }
 
+type testMorphProvider struct{}
+
+func (testMorphProvider) Name() string      { return "morph" }
+func (testMorphProvider) Aliases() []string { return nil }
+func (testMorphProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "morph",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testMorphFlagValues struct {
+	APIURL          *string
+	Snapshot        *string
+	WorkRoot        *string
+	DeleteOnRelease *bool
+	WakeOnSSH       *bool
+}
+
+func (testMorphProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testMorphFlagValues{
+		APIURL:          fs.String("morph-api-url", defaults.Morph.APIURL, "Morph API URL"),
+		Snapshot:        fs.String("morph-snapshot", defaults.Morph.Snapshot, "Morph snapshot"),
+		WorkRoot:        fs.String("morph-work-root", defaults.Morph.WorkRoot, "Morph work root"),
+		DeleteOnRelease: fs.Bool("morph-delete-on-release", defaults.Morph.DeleteOnRelease, "Morph delete on release"),
+		WakeOnSSH:       fs.Bool("morph-wake-on-ssh", defaults.Morph.WakeOnSSH, "Morph wake on ssh"),
+	}
+}
+
+func (testMorphProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if cfg.Provider == "morph" {
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=morph")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+		}
+		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
+			return exit(2, "provider=morph supports target=linux only")
+		}
+	}
+	v, ok := values.(testMorphFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "morph-api-url") {
+		cfg.Morph.APIURL = *v.APIURL
+	}
+	if flagWasSet(fs, "morph-snapshot") {
+		cfg.Morph.Snapshot = *v.Snapshot
+	}
+	if flagWasSet(fs, "morph-work-root") {
+		cfg.Morph.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "morph-delete-on-release") {
+		cfg.Morph.DeleteOnRelease = *v.DeleteOnRelease
+	}
+	if flagWasSet(fs, "morph-wake-on-ssh") {
+		cfg.Morph.WakeOnSSH = *v.WakeOnSSH
+	}
+	return nil
+}
+
+func (testMorphProvider) ServerTypeForConfig(cfg Config) string {
+	return firstNonBlank(cfg.Morph.Snapshot, "snapshot")
+}
+
+func (testMorphProvider) ServerTypeForClass(string) string { return "snapshot" }
+
+func (p testMorphProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 func (testDaytonaProvider) Name() string      { return "daytona" }
 func (testDaytonaProvider) Aliases() []string { return nil }
 func (testDaytonaProvider) Spec() ProviderSpec {
@@ -809,11 +987,12 @@ func (testIsloProvider) Name() string      { return "islo" }
 func (testIsloProvider) Aliases() []string { return nil }
 func (testIsloProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "islo",
-		Kind:        ProviderKindDelegatedRun,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureURLBridge},
-		Coordinator: CoordinatorNever,
+		Name:                "islo",
+		Kind:                ProviderKindDelegatedRun,
+		Targets:             []TargetSpec{{OS: targetLinux}},
+		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume},
+		Coordinator:         CoordinatorNever,
+		TailscaleEgressOnly: true,
 	}
 }
 
@@ -848,7 +1027,10 @@ func (testIsloProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	return nil
 }
 func (p testIsloProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDelegatedBackend{spec: p.Spec()}, nil
+	return testIsloBackend{
+		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
+		stderr:               rt.Stderr,
+	}, nil
 }
 
 type testE2BProvider struct{}
@@ -910,7 +1092,7 @@ func (testModalProvider) Spec() ProviderSpec {
 		Name:        "modal",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureArchiveSync, FeatureURLBridge},
+		Features:    FeatureSet{FeatureArchiveSync},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -969,7 +1151,7 @@ func (testCloudflareProvider) Spec() ProviderSpec {
 		Name:        "cloudflare",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup, FeatureURLBridge},
+		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -1052,7 +1234,7 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -1118,6 +1300,91 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	return nil
 }
 func (p testLocalContainerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
+	if req.Server.CloudID == "" || req.StrategyExplicit {
+		return NativeCheckpointCapability{}, false
+	}
+	return NativeCheckpointCapability{Kind: checkpointKindDockerCommit, Direct: true}, true
+}
+
+type testAppleVZProvider struct{}
+
+func (testAppleVZProvider) Name() string { return "apple-vz" }
+func (testAppleVZProvider) Aliases() []string {
+	return []string{"applevz"}
+}
+func (testAppleVZProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "apple-vz",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testAppleVZFlagValues struct {
+	HelperPath  *string
+	Image       *string
+	ImageSHA256 *string
+	User        *string
+	WorkRoot    *string
+	CPUs        *int
+	MemoryMiB   *int
+	DiskGiB     *int
+}
+
+func (testAppleVZProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testAppleVZFlagValues{
+		HelperPath:  fs.String("apple-vz-helper", defaults.AppleVZ.HelperPath, "apple-vz helper"),
+		Image:       fs.String("apple-vz-image", defaults.AppleVZ.Image, "apple-vz image"),
+		ImageSHA256: fs.String("apple-vz-image-sha256", defaults.AppleVZ.ImageSHA256, "apple-vz image sha256"),
+		User:        fs.String("apple-vz-user", defaults.AppleVZ.User, "apple-vz user"),
+		WorkRoot:    fs.String("apple-vz-work-root", defaults.AppleVZ.WorkRoot, "apple-vz work root"),
+		CPUs:        fs.Int("apple-vz-cpus", defaults.AppleVZ.CPUs, "apple-vz CPUs"),
+		MemoryMiB:   fs.Int("apple-vz-memory", defaults.AppleVZ.MemoryMiB, "apple-vz memory MiB"),
+		DiskGiB:     fs.Int("apple-vz-disk", defaults.AppleVZ.DiskGiB, "apple-vz disk GiB"),
+	}
+}
+func (testAppleVZProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testAppleVZFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "apple-vz-helper") {
+		cfg.AppleVZ.HelperPath = *v.HelperPath
+	}
+	if flagWasSet(fs, "apple-vz-image") {
+		cfg.AppleVZ.Image = *v.Image
+		cfg.AppleVZ.ImageSHA256 = ""
+		cfg.appleVZImageExplicit = true
+	}
+	if flagWasSet(fs, "apple-vz-image-sha256") {
+		cfg.AppleVZ.ImageSHA256 = *v.ImageSHA256
+	}
+	if flagWasSet(fs, "apple-vz-user") {
+		cfg.AppleVZ.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "apple-vz-work-root") {
+		cfg.AppleVZ.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "apple-vz-cpus") {
+		cfg.AppleVZ.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "apple-vz-memory") {
+		cfg.AppleVZ.MemoryMiB = *v.MemoryMiB
+	}
+	if flagWasSet(fs, "apple-vz-disk") {
+		cfg.AppleVZ.DiskGiB = *v.DiskGiB
+	}
+	return nil
+}
+func (p testAppleVZProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
@@ -1204,6 +1471,118 @@ func (p testMultipassProvider) Configure(cfg Config, rt Runtime) (Backend, error
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
+type testTartProvider struct{}
+
+func (testTartProvider) Name() string { return "tart" }
+func (testTartProvider) Aliases() []string {
+	return []string{"local-tart", "macos-vm"}
+}
+func (testTartProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "tart",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetMacOS}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testTartFlagValues struct {
+	Image  *string
+	CPUs   *int
+	Memory *int
+	Disk   *int
+}
+
+func (testTartProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testTartFlagValues{
+		Image:  fs.String("tart-image", defaults.Tart.Image, "tart base image"),
+		CPUs:   fs.Int("tart-cpu", defaults.Tart.CPUs, "tart CPUs"),
+		Memory: fs.Int("tart-memory", defaults.Tart.Memory, "tart memory MB"),
+		Disk:   fs.Int("tart-disk", defaults.Tart.Disk, "tart disk GB"),
+	}
+}
+func (testTartProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testTartFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "tart-image") {
+		cfg.Tart.Image = *v.Image
+		cfg.tartImageExplicit = true
+	}
+	if flagWasSet(fs, "tart-cpu") {
+		cfg.Tart.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "tart-memory") {
+		cfg.Tart.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "tart-disk") {
+		cfg.Tart.Disk = *v.Disk
+	}
+	if cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
+		cfg.Provider = "tart"
+	}
+	return nil
+}
+func (p testTartProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testHyperVProvider struct{}
+
+func (testHyperVProvider) Name() string      { return "hyperv" }
+func (testHyperVProvider) Aliases() []string { return nil }
+func (testHyperVProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "hyperv",
+		Family:      "local-vm",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+
+type testHyperVFlagValues struct {
+	Image  *string
+	CPUs   *int
+	Memory *int
+	Switch *string
+}
+
+func (testHyperVProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testHyperVFlagValues{
+		Image:  fs.String("hyperv-image", defaults.HyperV.Image, "Hyper-V image"),
+		CPUs:   fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "Hyper-V CPUs"),
+		Memory: fs.Int("hyperv-memory", defaults.HyperV.Memory, "Hyper-V memory MB"),
+		Switch: fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V switch"),
+	}
+}
+func (testHyperVProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testHyperVFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "hyperv-image") {
+		cfg.HyperV.Image = *v.Image
+	}
+	if flagWasSet(fs, "hyperv-cpu") {
+		cfg.HyperV.CPUs = *v.CPUs
+	}
+	if flagWasSet(fs, "hyperv-memory") {
+		cfg.HyperV.Memory = *v.Memory
+	}
+	if flagWasSet(fs, "hyperv-switch") {
+		cfg.HyperV.Switch = *v.Switch
+	}
+	return nil
+}
+func (p testHyperVProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 type testDockerSandboxProvider struct{}
 
 func (testDockerSandboxProvider) Name() string      { return "docker-sandbox" }
@@ -1245,6 +1624,48 @@ type testDelegatedBackend struct {
 	portsOutput string
 	copyErr     error
 }
+
+type testIsloBackend struct {
+	testDelegatedBackend
+	stderr io.Writer
+}
+
+func (b testIsloBackend) Pause(_ context.Context, req PauseRequest) error {
+	fmt.Fprintf(b.stderr, "paused id=%s\n", req.ID)
+	return nil
+}
+
+func (b testIsloBackend) Resume(_ context.Context, req ResumeRequest) error {
+	fmt.Fprintf(b.stderr, "resumed id=%s\n", req.ID)
+	return nil
+}
+
+type testServiceControlProvider struct{}
+
+func (testServiceControlProvider) Name() string      { return "service-control-test" }
+func (testServiceControlProvider) Aliases() []string { return nil }
+func (testServiceControlProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "service-control-test",
+		Family:      "service-control-test",
+		Kind:        ProviderKindServiceControl,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testServiceControlProvider) RegisterFlags(*flag.FlagSet, Config) any { return nil }
+func (testServiceControlProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testServiceControlProvider) Configure(Config, Runtime) (Backend, error) {
+	return testServiceControlBackend{spec: p.Spec()}, nil
+}
+
+type testServiceControlBackend struct {
+	spec ProviderSpec
+}
+
+func (b testServiceControlBackend) Spec() ProviderSpec { return b.spec }
 
 func (b testDelegatedBackend) Spec() ProviderSpec { return b.spec }
 func (b testDelegatedBackend) Warmup(context.Context, WarmupRequest) error {

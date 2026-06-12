@@ -296,7 +296,13 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 		return "", modalSandbox{}, "", exit(5, "modal create sandbox returned no sandbox id")
 	}
 	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.Terminate(context.Background(), sandbox.ID)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if cleanupErr := client.Terminate(cleanupCtx, sandbox.ID); cleanupErr != nil {
+			leakErr := fmt.Errorf("cleanup modal sandbox %s after claim failure: %w; run `crabbox stop --provider modal --id %s` to retry cleanup", sandbox.ID, cleanupErr, sandbox.ID)
+			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
+			return "", modalSandbox{}, "", errors.Join(err, leakErr)
+		}
 		return "", modalSandbox{}, "", err
 	}
 	return leaseID, sandbox, slug, nil
@@ -345,12 +351,24 @@ func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id
 		if err != nil {
 			return "", "", "", err
 		}
-		return id, sandbox.ID, modalSlug(id, sandbox), nil
+		slug := modalSlug(id, sandbox)
+		if repoRoot != "" {
+			if err := claimLeaseForRepoProvider(id, slug, providerName, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
+				return "", "", "", err
+			}
+		}
+		return id, sandbox.ID, slug, nil
 	}
 	sandbox, err := client.GetSandbox(ctx, id)
 	if err == nil && isCrabboxModalSandbox(sandbox) {
 		leaseID := modalLeaseID(sandbox)
-		return leaseID, sandbox.ID, modalSlug(leaseID, sandbox), nil
+		slug := modalSlug(leaseID, sandbox)
+		if repoRoot != "" {
+			if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
+				return "", "", "", err
+			}
+		}
+		return leaseID, sandbox.ID, slug, nil
 	}
 	if err != nil && !isModalNotFoundError(err) {
 		return "", "", "", modalError("get sandbox", err)

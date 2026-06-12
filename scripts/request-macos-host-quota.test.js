@@ -10,7 +10,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const quotaScript = path.join(scriptDir, "request-macos-host-quota.sh");
 
-async function setup(account = "123456789012", quotaValue = 0, adjustable = true) {
+async function setup(account = "123456789012", quotaValue = 0, adjustable = true, quotaEntries = null) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "crabbox-quota-request-test-"));
   const bin = path.join(dir, "bin");
   const log = path.join(dir, "aws.log");
@@ -64,16 +64,18 @@ exit 2
   );
   await writeFile(
     quota,
-    JSON.stringify([
-      {
-        serviceCode: "ec2",
-        quotaCode: "L-5D8DADF5",
-        quotaName: "Running Dedicated mac2 Hosts",
-        value: quotaValue,
-        adjustable,
-        unit: "None",
-      },
-    ]),
+    JSON.stringify(
+      quotaEntries ?? [
+        {
+          serviceCode: "ec2",
+          quotaCode: "L-5D8DADF5",
+          quotaName: "Running Dedicated mac2 Hosts",
+          value: quotaValue,
+          adjustable,
+          unit: "None",
+        },
+      ],
+    ),
   );
   return { dir, bin, log, identity, quota };
 }
@@ -130,6 +132,60 @@ test("quota request helper submits only with --apply and account guard", async (
   const log = await readFile(ctx.log, "utf8");
   assert.match(log, /--profile prod sts get-caller-identity --query Account --output text/);
   assert.match(log, /--profile prod service-quotas request-service-quota-increase --service-code ec2 --quota-code L-5D8DADF5 --desired-value 1 --region eu-west-1/);
+});
+
+test("quota request helper ignores unrelated quotas before requesting", async () => {
+  const ctx = await setup("123456789012", 0, true, [
+    {
+      serviceCode: "vpc",
+      quotaCode: "L-UNRELATED",
+      quotaName: "VPCs per Region",
+      value: 0,
+      adjustable: true,
+      unit: "None",
+    },
+    {
+      serviceCode: "ec2",
+      quotaCode: "L-5D8DADF5",
+      quotaName: "Running Dedicated mac2 Hosts",
+      value: 0,
+      adjustable: true,
+      unit: "None",
+    },
+  ]);
+  const result = await runQuota(ctx, ["--identity", ctx.identity, "--profile", "prod", "--apply"]);
+
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  const log = await readFile(ctx.log, "utf8");
+  assert.match(log, /request-service-quota-increase --service-code ec2 --quota-code L-5D8DADF5/);
+  assert.doesNotMatch(log, /L-UNRELATED/);
+});
+
+test("quota request helper refuses ambiguous Mac host quota files", async () => {
+  const ctx = await setup("123456789012", 0, true, [
+    {
+      serviceCode: "ec2",
+      quotaCode: "L-5D8DADF5",
+      quotaName: "Running Dedicated mac2 Hosts",
+      value: 0,
+      adjustable: true,
+      unit: "None",
+    },
+    {
+      serviceCode: "ec2",
+      quotaCode: "L-A8448DC5",
+      quotaName: "Running Dedicated mac1 Hosts",
+      value: 0,
+      adjustable: true,
+      unit: "None",
+    },
+  ]);
+  const result = await runQuota(ctx, ["--identity", ctx.identity, "--profile", "prod", "--apply"]);
+
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /multiple EC2 Mac host quotas/);
+  const log = await readFile(ctx.log, "utf8").catch(() => "");
+  assert.doesNotMatch(log, /request-service-quota-increase/);
 });
 
 test("quota request helper auto-selects a matching profile", async () => {

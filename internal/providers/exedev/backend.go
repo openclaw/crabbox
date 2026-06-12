@@ -3,8 +3,10 @@ package exedev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -45,13 +47,13 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	lease, err := b.prepareLease(ctx, cfg, vm, leaseID, slug, req.Keep, true)
 	if err != nil {
 		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
+			err = b.rollbackCreatedVM(name, err)
 		}
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
+			err = b.rollbackCreatedVM(name, err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -334,9 +336,122 @@ func (b *exeDevLeaseBackend) controlOutput(ctx context.Context, args []string) (
 }
 
 func (b *exeDevLeaseBackend) control(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
-	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", strings.TrimSpace(b.configForRun().ExeDev.ControlHost)}
+	dest, port, err := exeDevControlDestination(b.configForRun().ExeDev.ControlHost)
+	if err != nil {
+		return LocalCommandResult{}, err
+	}
+	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"}
+	if port != "" {
+		sshArgs = append(sshArgs, "-p", port)
+	}
+	sshArgs = append(sshArgs, dest)
 	sshArgs = append(sshArgs, shellQuoteArgs(args))
 	return b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "ssh", Args: sshArgs, Stdout: stdout, Stderr: stderr})
+}
+
+func (b *exeDevLeaseBackend) rollbackCreatedVM(name string, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := b.deleteVM(cleanupCtx, name); err != nil {
+		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: crabbox stop --provider exe-dev --id %s: %v", cause, name, name, err)
+	}
+	return cause
+}
+
+func exitCodeForError(err error) int {
+	var exitErr ExitError
+	if errors.As(err, &exitErr) && exitErr.Code != 0 {
+		return exitErr.Code
+	}
+	return 1
+}
+
+func exeDevControlDestination(value string) (string, string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", "", exit(2, "provider=%s requires exe.dev control host", providerName)
+	}
+	if strings.Contains(raw, "://") || strings.HasPrefix(raw, "-") || strings.ContainsAny(raw, "/?#") || containsSpaceOrControl(raw) {
+		return "", "", exit(2, "invalid exe.dev control host: %q", value)
+	}
+	user := ""
+	hostPort := raw
+	if strings.Count(raw, "@") > 1 {
+		return "", "", exit(2, "invalid exe.dev control host: %q", value)
+	}
+	if before, after, ok := strings.Cut(raw, "@"); ok {
+		if before == "" || strings.HasPrefix(before, "-") || strings.ContainsAny(before, ":@") {
+			return "", "", exit(2, "invalid exe.dev control host: %q", value)
+		}
+		user = before
+		hostPort = after
+	}
+	host := hostPort
+	port := ""
+	if strings.HasPrefix(hostPort, "[") {
+		end := strings.Index(hostPort, "]")
+		if end < 0 {
+			return "", "", exit(2, "invalid exe.dev control host: %q", value)
+		}
+		host = hostPort[1:end]
+		rest := hostPort[end+1:]
+		if rest != "" {
+			if !strings.HasPrefix(rest, ":") || rest == ":" {
+				return "", "", exit(2, "invalid exe.dev control host: %q", value)
+			}
+			port = strings.TrimPrefix(rest, ":")
+		}
+		if !validExeDevControlIPHost(host) {
+			return "", "", exit(2, "invalid exe.dev control host: %q", value)
+		}
+	} else if strings.Count(hostPort, ":") == 1 {
+		before, after, _ := strings.Cut(hostPort, ":")
+		host, port = before, after
+	} else if strings.Contains(hostPort, ":") {
+		if !validExeDevControlIPHost(hostPort) {
+			return "", "", exit(2, "invalid exe.dev control host: %q", value)
+		}
+	}
+	if host == "" || strings.HasPrefix(host, "-") || strings.ContainsAny(host, "/?#@") || containsSpaceOrControl(host) {
+		return "", "", exit(2, "invalid exe.dev control host: %q", value)
+	}
+	if strings.Contains(host, "%") && !validExeDevControlIPHost(host) {
+		return "", "", exit(2, "invalid exe.dev control host: %q", value)
+	}
+	if port != "" {
+		p, err := strconv.Atoi(port)
+		if err != nil || p <= 0 || p > 65535 {
+			return "", "", exit(2, "invalid exe.dev control host port: %q", value)
+		}
+	}
+	dest := host
+	if user != "" {
+		dest = user + "@" + host
+	}
+	return dest, port, nil
+}
+
+func validExeDevControlIPHost(host string) bool {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	addr, zone, ok := strings.Cut(host, "%")
+	if !ok || addr == "" || zone == "" || net.ParseIP(addr) == nil || !strings.Contains(addr, ":") {
+		return false
+	}
+	if strings.HasPrefix(zone, "-") || strings.ContainsAny(zone, "/%?#@[]:") || containsSpaceOrControl(zone) {
+		return false
+	}
+	return true
+}
+
+func containsSpaceOrControl(value string) bool {
+	for _, r := range value {
+		if r <= 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func commandExitCode(result LocalCommandResult) int {

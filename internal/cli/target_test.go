@@ -122,6 +122,123 @@ func TestValidateProviderTargetAllowsAzureWindowsModes(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetAllowsAzureWindowsARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "azure"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	cfg.ServerType = "Standard_D32pds_v6"
+	cfg.ServerTypeExplicit = true
+	cfg.AzureImage = "Contoso:windows-arm64:server:latest"
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetAllowsTartMacOSARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.TargetOS = targetMacOS
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetRejectsTartExplicitAMD64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.TargetOS = targetMacOS
+	cfg.Architecture = ArchitectureAMD64
+	cfg.architectureExplicit = true
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "supports architecture=arm64 only") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetDefaultsAppleVZToARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "apple-vz"
+	cfg.TargetOS = targetLinux
+	if got := effectiveArchitectureForConfig(cfg); got != ArchitectureARM64 {
+		t.Fatalf("effective architecture=%q want arm64", got)
+	}
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetAllowsAppleVZExplicitARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "apple-vz"
+	cfg.TargetOS = targetLinux
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetRejectsAppleVZExplicitAMD64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "apple-vz"
+	cfg.TargetOS = targetLinux
+	cfg.Architecture = ArchitectureAMD64
+	cfg.architectureExplicit = true
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "supports architecture=arm64 only") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetRejectsAzureWindowsARM64WSL2(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "azure"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	cfg.ServerType = "Standard_D32pds_v6"
+	cfg.ServerTypeExplicit = true
+	cfg.AzureImage = "Contoso:windows-arm64:server:latest"
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "supports windows.mode=normal only") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetRejectsAzureWindowsARM64WithoutExplicitImage(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "azure"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	cfg.ServerType = "Standard_D32pds_v6"
+	cfg.ServerTypeExplicit = true
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "requires azure.image") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetRejectsAWSWindowsARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "provider=azure target=windows") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestValidateRequestedCapabilitiesAllowsAzureWindowsDesktop(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "azure"
