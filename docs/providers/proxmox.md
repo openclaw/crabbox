@@ -42,6 +42,7 @@ proxmox
 The configured template must be a Linux QEMU VM template with:
 
 - a cloud-init drive configured;
+- a NIC attached to an active bridge when `proxmox.bridge` is not set;
 - the QEMU guest agent installed and enabled;
 - DHCP networking (or an equivalent IP config the guest agent can report);
 - outbound package access for `apt-get`;
@@ -366,7 +367,8 @@ or `/cluster/nextid`, then rerun `crabbox doctor --provider proxmox --json`.
 The VM started but the guest agent did not report a usable IPv4 address. Install
 and enable `qemu-guest-agent` in the template, then check DHCP, bridge
 selection, and VLANs. If you override `--proxmox-bridge`, make sure the template
-NIC can boot on that bridge.
+NIC can boot on that bridge. If no bridge override is configured, doctor
+requires the template NIC to reference an active Proxmox bridge.
 
 `timeout waiting for proxmox ssh bootstrap transport`
 

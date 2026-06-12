@@ -919,6 +919,7 @@ func TestProxmoxCleanupPollsAmbiguousDeleteRequestUntilVMDisappears(t *testing.T
 func TestProxmoxReleaseRemovesClaimAndStoredKeyAfterDelete(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
 	leaseID := "cbx_proxmox_release"
 	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
@@ -933,7 +934,7 @@ func TestProxmoxReleaseRemovesClaimAndStoredKeyAfterDelete(t *testing.T) {
 	}
 	t.Cleanup(func() { newClient = oldClient })
 
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
 	req := ReleaseLeaseRequest{Lease: LeaseTarget{
 		LeaseID: leaseID,
 		Server:  expiredProxmoxServer("101", leaseID),
@@ -953,6 +954,7 @@ func TestProxmoxReleaseRemovesClaimAndStoredKeyAfterDelete(t *testing.T) {
 func TestProxmoxReleasePreservesLocalResidueWhenDeleteFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
 	leaseID := "cbx_proxmox_release_fail"
 	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
@@ -967,7 +969,7 @@ func TestProxmoxReleasePreservesLocalResidueWhenDeleteFails(t *testing.T) {
 	}
 	t.Cleanup(func() { newClient = oldClient })
 
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
 	req := ReleaseLeaseRequest{Lease: LeaseTarget{
 		LeaseID: leaseID,
 		Server:  expiredProxmoxServer("101", leaseID),
@@ -984,6 +986,7 @@ func TestProxmoxReleasePreservesLocalResidueWhenDeleteFails(t *testing.T) {
 func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
 	leaseID := "cbx_proxmox_release_duplicate"
 	first := expiredProxmoxServer("101", leaseID)
 	first.Provider = "proxmox"
@@ -1002,7 +1005,7 @@ func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing
 	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
 	t.Cleanup(func() { newClient = oldClient })
 
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
 	req := ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: first}}
 	if err := backend.ReleaseLease(context.Background(), req); err != nil {
 		t.Fatal(err)
@@ -1021,7 +1024,7 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	leaseID := "cbx_proxmox_release_inventory_failure"
 	server := expiredProxmoxServer("101", leaseID)
 	server.Provider = "proxmox"
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
@@ -1041,6 +1044,9 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok || claim.CloudID != "101" {
 		t.Fatalf("claim=%#v ok=%t err=%v, want preserved until duplicate reconciliation", claim, ok, err)
+	}
+	if claim.ProviderScope != core.ProviderClaimScope("proxmox", cfg) {
+		t.Fatalf("claim scope=%q, want legacy claim backfilled before deletion", claim.ProviderScope)
 	}
 	assertStoredTestboxKeyExists(t, leaseID)
 	if !strings.Contains(stderr.String(), "reason=inventory_refresh_failed") {

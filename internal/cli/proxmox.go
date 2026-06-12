@@ -307,34 +307,90 @@ func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) Pro
 	if err := c.doRequired(ctx, http.MethodGet, path, nil, &networks); err != nil {
 		return c.proxmoxFailedReadiness("bridge", path, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
 	}
-	if cfg.Proxmox.Bridge == "" {
+	bridges := []string{strings.TrimSpace(cfg.Proxmox.Bridge)}
+	source := "config"
+	if bridges[0] == "" {
+		source = "template"
+		if cfg.Proxmox.TemplateID <= 0 {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "bridge",
+				Message: "bridge=missing class=config hint=set_proxmox_bridge_or_template_network",
+				Details: map[string]string{"bridge": "missing", "class": "config", "hint": "set_proxmox_bridge_or_template_network"},
+			}
+		}
+		configPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), cfg.Proxmox.TemplateID)
+		var config map[string]any
+		if err := c.doRequired(ctx, http.MethodGet, configPath, nil, &config); err != nil {
+			return c.proxmoxFailedReadiness("bridge", configPath, err, map[string]string{"bridge": "template"})
+		}
+		bridges = proxmoxTemplateBridges(config)
+	}
+	if len(bridges) == 0 {
 		return ProxmoxReadinessCheck{
-			Status:  "ok",
+			Status:  "failed",
 			Check:   "bridge",
-			Message: fmt.Sprintf("bridge=any count=%d", len(networks)),
-			Details: map[string]string{"bridge": "any", "count": strconv.Itoa(len(networks)), "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+			Message: fmt.Sprintf("bridge=missing class=missing_resource hint=set_proxmox_bridge_or_template_network templateId=%d", cfg.Proxmox.TemplateID),
+			Details: map[string]string{"bridge": "missing", "class": "missing_resource", "hint": "set_proxmox_bridge_or_template_network", "templateId": strconv.Itoa(cfg.Proxmox.TemplateID)},
 		}
 	}
+	var firstFailure ProxmoxReadinessCheck
+	for _, bridge := range bridges {
+		check := c.proxmoxBridgeCheck(ctx, path, cfg.Proxmox.Node, bridge, networks)
+		check.Details["source"] = source
+		if check.Status == "ok" {
+			return check
+		}
+		if firstFailure.Check == "" {
+			firstFailure = check
+		}
+	}
+	return firstFailure
+}
+
+func (c *ProxmoxClient) proxmoxBridgeCheck(ctx context.Context, path, node, bridge string, networks []proxmoxNetwork) ProxmoxReadinessCheck {
 	for _, network := range networks {
-		if network.Iface != cfg.Proxmox.Bridge {
-			continue
+		if network.Iface == bridge {
+			return proxmoxBridgeReadiness(bridge, network, "/nodes/"+node+"/network")
 		}
-		return proxmoxBridgeReadiness(cfg.Proxmox.Bridge, network, "/nodes/"+cfg.Proxmox.Node+"/network")
 	}
-	interfacePath := path + "/" + url.PathEscape(cfg.Proxmox.Bridge)
+	interfacePath := path + "/" + url.PathEscape(bridge)
 	var network proxmoxNetwork
 	if err := c.doRequired(ctx, http.MethodGet, interfacePath, nil, &network); err != nil {
 		if !IsProxmoxNotFound(err) {
-			return c.proxmoxFailedReadiness("bridge", interfacePath, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
+			return c.proxmoxFailedReadiness("bridge", interfacePath, err, map[string]string{"bridge": bridge})
 		}
 		return ProxmoxReadinessCheck{
 			Status:  "failed",
 			Check:   "bridge",
-			Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge", cfg.Proxmox.Bridge),
-			Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+			Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge", bridge),
+			Details: map[string]string{"bridge": bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "endpoint": "/nodes/" + node + "/network"},
 		}
 	}
-	return proxmoxBridgeReadiness(cfg.Proxmox.Bridge, network, "/nodes/"+cfg.Proxmox.Node+"/network/"+cfg.Proxmox.Bridge)
+	return proxmoxBridgeReadiness(bridge, network, "/nodes/"+node+"/network/"+bridge)
+}
+
+func proxmoxTemplateBridges(config map[string]any) []string {
+	var bridges []string
+	seen := map[string]bool{}
+	for key, value := range config {
+		if !strings.HasPrefix(strings.ToLower(key), "net") {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			continue
+		}
+		for _, item := range strings.Split(text, ",") {
+			name, bridge, found := strings.Cut(item, "=")
+			bridge = strings.TrimSpace(bridge)
+			if found && strings.EqualFold(strings.TrimSpace(name), "bridge") && bridge != "" && !seen[bridge] {
+				seen[bridge] = true
+				bridges = append(bridges, bridge)
+			}
+		}
+	}
+	return bridges
 }
 
 func proxmoxBridgeReadiness(bridge string, network proxmoxNetwork, endpoint string) ProxmoxReadinessCheck {

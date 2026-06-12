@@ -250,6 +250,62 @@ func TestProxmoxDoctorReadinessAcceptsOVSBridge(t *testing.T) {
 	}
 }
 
+func TestProxmoxDoctorReadinessRequiresUsableTemplateBridgeWhenUnset(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     map[string]any
+		networks   []any
+		wantStatus string
+		wantBridge string
+	}{
+		{
+			name:       "missing template nic",
+			config:     map[string]any{"ide2": "local-lvm:cloudinit"},
+			networks:   []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1}},
+			wantStatus: "failed",
+			wantBridge: "missing",
+		},
+		{
+			name:       "active template bridge",
+			config:     map[string]any{"ide2": "local-lvm:cloudinit", "net0": "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0"},
+			networks:   []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1}},
+			wantStatus: "ok",
+			wantBridge: "vmbr0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api2/json/nodes/pve1/network":
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": tc.networks})
+				case "/api2/json/nodes/pve1/qemu/9400/config":
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": tc.config})
+				default:
+					t.Fatalf("unexpected %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			cfg := baseConfig()
+			cfg.Proxmox.APIURL = server.URL
+			cfg.Proxmox.TokenID = "runner@pve!crabbox"
+			cfg.Proxmox.TokenSecret = "secret"
+			cfg.Proxmox.Node = "pve1"
+			cfg.Proxmox.TemplateID = 9400
+			cfg.Proxmox.Bridge = ""
+			client, err := NewProxmoxClient(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := client.proxmoxNetworkCheck(context.Background(), cfg)
+			if check.Status != tc.wantStatus || check.Details["bridge"] != tc.wantBridge {
+				t.Fatalf("check=%#v", check)
+			}
+		})
+	}
+}
+
 func TestProxmoxDoctorReadinessClassifiesACLHiddenBridgeAsPermission(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

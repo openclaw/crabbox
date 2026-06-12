@@ -297,6 +297,9 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	}
 	leaseID := proxmoxClaimLeaseID(req.Lease.Server, req.Lease.LeaseID)
 	if req.Lease.Server.HostID != proxmoxReleaseAbsentMarker {
+		if err := b.backfillReleaseClaimScope(leaseID, id, req.Lease.Server); err != nil {
+			return err
+		}
 		if err := client.DeleteServer(ctx, id); err != nil && !core.IsProxmoxNotFound(err) {
 			return err
 		}
@@ -316,6 +319,29 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	}
 	removeCleanupLeaseResidue(ctx, client, deleted, remaining, b.Cfg, b.RT.Stderr)
 	return nil
+}
+
+func (b *leaseBackend) backfillReleaseClaimScope(leaseID, cloudID string, server Server) error {
+	if leaseID == "" || proxmoxClaimLabelLeaseID(server) != leaseID {
+		return nil
+	}
+	claim, found, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if !found || strings.TrimSpace(claim.ProviderScope) != "" {
+		return nil
+	}
+	if claim.Provider != "proxmox" || (claim.CloudID != "" && claim.CloudID != cloudID) {
+		return nil
+	}
+	scope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))
+	if scope == "" {
+		return exit(2, "cannot safely release legacy Proxmox claim lease=%s without configured cluster scope", leaseID)
+	}
+	replacement := claim
+	replacement.ProviderScope = scope
+	return core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, replacement)
 }
 
 func (b *leaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
