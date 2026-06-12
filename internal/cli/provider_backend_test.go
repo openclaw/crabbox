@@ -77,6 +77,15 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestLeaseOptionsFromConfigCanonicalizesProviderScope(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "google-cloud"
+	cfg.GCPProject = "project-a"
+	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != "project:project-a" {
+		t.Fatalf("provider scope=%q", scope)
+	}
+}
+
 func TestProviderHelpAllIncludesDelegatedProviders(t *testing.T) {
 	help := providerHelpAll()
 	for _, provider := range []string{"freestyle", "morph", "wandb"} {

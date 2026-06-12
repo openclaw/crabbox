@@ -64,6 +64,7 @@ var claimLeaseTargetForRepoConfigIfUnchanged = func(leaseID, slug string, cfg Co
 }
 
 var updateLeaseClaimEndpointIfUnchangedAfter = core.UpdateLeaseClaimEndpointIfUnchangedAfter
+var replaceLeaseClaimIfUnchanged = core.ReplaceLeaseClaimIfUnchanged
 
 func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
 	return core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)

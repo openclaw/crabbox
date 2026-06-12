@@ -44,6 +44,10 @@ func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 
 func (b *leaseBackend) Spec() ProviderSpec { return b.spec }
 
+func (b *leaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	return useStoredTestboxKey(&target.SSH, leaseID, sshKeyExplicit(&b.cfg))
+}
+
 func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease LeaseTarget, err error) {
 	cfg := b.configForRun()
 	if err := validateHostingerWorkRoot(cfg); err != nil {
@@ -286,7 +290,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 	return lease, nil
 }
 
-func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
 	cfg := b.configForRun()
 	if err := validateHostingerWorkRoot(cfg); err != nil {
 		return LeaseTarget{}, err
@@ -334,8 +338,18 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		}
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
-	var repoClaim LeaseClaim
+	var previousClaim, repoClaim, rollbackExpectedClaim LeaseClaim
+	var rollbackRepoClaim bool
 	adoptionPending := false
+	defer func() {
+		if err == nil || !rollbackRepoClaim {
+			return
+		}
+		restored := hostingerOwnershipRollbackClaim(rollbackExpectedClaim, previousClaim)
+		if restoreErr := replaceLeaseClaimIfUnchanged(leaseID, rollbackExpectedClaim, restored); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Hostinger lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
 	if req.Repo.Root != "" {
 		claimServer, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
@@ -345,6 +359,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		if err != nil {
 			return LeaseTarget{}, err
 		}
+		previousClaim = expected
 		adoptionPending = !hostingerClaimOwned(expected, expectedExists, vm.IDString())
 		if adoptionPending {
 			claimServer.Labels[hostingerAdoptionPendingLabel] = "true"
@@ -353,6 +368,8 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		if err != nil {
 			return LeaseTarget{}, err
 		}
+		rollbackExpectedClaim = repoClaim
+		rollbackRepoClaim = !adoptionPending
 		removeHostingerRecoveryRecord(leaseID)
 		vm, err = client.GetVM(ctx, vm.IDString())
 		if err != nil {
@@ -361,30 +378,48 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	}
 	started := false
 	var restartClaim LeaseClaim
+	rollbackStarted := func(id string, cause error) error {
+		stoppedClaim, rollbackErr := b.rollbackStartedVM(client, id, restartClaim, cfg, cause)
+		if rollbackRepoClaim {
+			if stoppedClaim.LeaseID == "" {
+				rollbackRepoClaim = false
+			} else {
+				rollbackExpectedClaim = stoppedClaim
+			}
+		}
+		return rollbackErr
+	}
 	if vm.Stopped() {
 		vmID := vm.IDString()
 		restartClaim, err = b.updateClaimState(leaseID, cfg, "provisioning", true)
 		if err != nil {
 			return LeaseTarget{}, fmt.Errorf("prepare hostinger restart lease=%s: %w", leaseID, err)
 		}
+		if rollbackRepoClaim {
+			rollbackExpectedClaim = restartClaim
+		}
 		if err := client.StartVM(ctx, vmID); err != nil {
-			if _, claimErr := b.updateClaimStateIfUnchanged(restartClaim, cfg, "stopped", false); claimErr != nil {
+			stoppedClaim, claimErr := b.updateClaimStateIfUnchanged(restartClaim, cfg, "stopped", false)
+			if claimErr != nil {
 				return LeaseTarget{}, exit(1, "hostinger start vps %s failed: %v; claim update failed: %v", vmID, err, claimErr)
+			}
+			if rollbackRepoClaim {
+				rollbackExpectedClaim = stoppedClaim
 			}
 			return LeaseTarget{}, exit(1, "hostinger start vps %s failed: %v", vmID, err)
 		}
 		started = true
 		vm, err = b.waitForVM(ctx, client, vmID)
 		if err != nil {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vmID, restartClaim, cfg, err)
+			return LeaseTarget{}, rollbackStarted(vmID, err)
 		}
 	} else if !vm.Ready() {
 		return LeaseTarget{}, exit(5, "hostinger vps %s is not runnable; state=%s", vm.IDString(), firstNonBlank(vm.State, vm.Status, "unknown"))
 	}
-	lease, err := b.leaseFromVM(cfg, vm, leaseID, slug, true)
+	lease, err = b.leaseFromVM(cfg, vm, leaseID, slug, true)
 	if err != nil {
 		if started {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+			return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -393,14 +428,14 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		transport := lease.SSH
 		transport.ReadyCheck = "true"
 		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "restart", bootstrapWaitTimeout(cfg)); err != nil {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+			return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 		}
 		sshValidated = true
 	}
 	if req.Prepare && !b.skipSSHWait {
 		if err := b.ensureBootstrap(ctx, cfg, lease, "resolve"); err != nil {
 			if started {
-				return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+				return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 			}
 			return LeaseTarget{}, err
 		}
@@ -411,7 +446,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		transport.ReadyCheck = "true"
 		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "adoption", bootstrapWaitTimeout(cfg)); err != nil {
 			if started {
-				return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+				return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 			}
 			return LeaseTarget{}, err
 		}
@@ -429,12 +464,39 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		}
 		if _, err := updateLeaseClaimEndpointIfUnchanged(expected.LeaseID, expected, server, lease.SSH); err != nil {
 			if started {
-				return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+				return LeaseTarget{}, rollbackStarted(vm.IDString(), err)
 			}
 			return LeaseTarget{}, err
 		}
+		rollbackRepoClaim = false
 	}
 	return lease, nil
+}
+
+func hostingerOwnershipRollbackClaim(current, previous LeaseClaim) LeaseClaim {
+	restored := previous
+	restored.Labels = make(map[string]string, len(previous.Labels))
+	for key, value := range previous.Labels {
+		restored.Labels[key] = value
+	}
+	restored.TailscaleTags = append([]string(nil), previous.TailscaleTags...)
+	restored.CacheVolumes = append([]string(nil), previous.CacheVolumes...)
+	restored.CloudID = current.CloudID
+	restored.TailscaleIPv4 = current.TailscaleIPv4
+	restored.TailscaleFQDN = current.TailscaleFQDN
+	restored.SSHHost = current.SSHHost
+	restored.SSHPort = current.SSHPort
+	restored.BridgeURL = current.BridgeURL
+	if current.Labels["state"] != previous.Labels["state"] {
+		for _, key := range []string{"state", "created_at", "last_touched_at", "expires_at"} {
+			if value, ok := current.Labels[key]; ok {
+				restored.Labels[key] = value
+			} else {
+				delete(restored.Labels, key)
+			}
+		}
+	}
+	return restored
 }
 
 func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -1180,10 +1242,13 @@ func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, i
 	if err := client.StopVM(stopCtx, id); err != nil {
 		return exit(1, "hostinger stop vps %s failed: %v", id, err)
 	}
-	lastState := ""
+	lastState := "unknown"
 	for {
 		vm, err := client.GetVM(stopCtx, id)
 		if err != nil {
+			if errors.Is(stopCtx.Err(), context.DeadlineExceeded) {
+				return exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+			}
 			return exit(1, "hostinger confirm stopped vps %s failed: %v", id, err)
 		}
 		lastState = firstNonBlank(vm.State, vm.Status, "unknown")
@@ -1244,15 +1309,16 @@ func (b *leaseBackend) configForLeaseClaim(cfg Config, leaseID string) (Config, 
 	return cfg, nil
 }
 
-func (b *leaseBackend) rollbackStartedVM(client hostingerAPI, id string, claim LeaseClaim, cfg Config, cause error) error {
+func (b *leaseBackend) rollbackStartedVM(client hostingerAPI, id string, claim LeaseClaim, cfg Config, cause error) (LeaseClaim, error) {
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	labels := touchDirectLeaseLabels(claim.Labels, cfg, "stopped", time.Now().UTC())
 	server := Server{CloudID: id, Provider: providerName, Status: "stopped", Labels: labels}
-	if _, err := b.stopClaimedVM(rollbackCtx, client, claim, id, server); err != nil {
-		return fmt.Errorf("%w; restart rollback skipped: %v", cause, err)
+	updated, err := b.stopClaimedVM(rollbackCtx, client, claim, id, server)
+	if err != nil {
+		return LeaseClaim{}, fmt.Errorf("%w; restart rollback skipped: %v", cause, err)
 	}
-	return fmt.Errorf("%w; restart rollback=stopped", cause)
+	return updated, fmt.Errorf("%w; restart rollback=stopped", cause)
 }
 
 func (b *leaseBackend) ensureBootstrap(ctx context.Context, cfg Config, lease LeaseTarget, phase string) error {

@@ -85,6 +85,10 @@ type SSHLeaseBackend interface {
 	Touch(ctx context.Context, req TouchRequest) (Server, error)
 }
 
+type ResolvedLeaseTargetRebinder interface {
+	RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error
+}
+
 type TailscaleMetadataBackend interface {
 	Backend
 	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
@@ -465,6 +469,7 @@ type LeaseOptions struct {
 	WindowsMode   string
 	Class         string
 	Pond          string
+	ProviderScope string
 	ServerType    string
 	IdleTimeout   time.Duration
 	TTL           time.Duration
@@ -926,6 +931,7 @@ func leaseOptionsFromConfig(cfg Config) LeaseOptions {
 		WindowsMode:   cfg.WindowsMode,
 		Class:         cfg.Class,
 		Pond:          normalizePondName(cfg.Pond),
+		ProviderScope: providerClaimScope(canonicalClaimProvider(cfg.Provider), cfg),
 		ServerType:    cfg.ServerType,
 		IdleTimeout:   cfg.IdleTimeout,
 		TTL:           cfg.TTL,

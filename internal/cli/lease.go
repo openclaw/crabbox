@@ -104,6 +104,10 @@ func useStoredTestboxKey(target *SSHTarget, leaseID string) {
 	}
 }
 
+func UseStoredTestboxKey(target *SSHTarget, leaseID string) {
+	useStoredTestboxKey(target, leaseID)
+}
+
 func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
 	if oldLeaseID == "" || newLeaseID == "" || oldLeaseID == newLeaseID {
 		return nil

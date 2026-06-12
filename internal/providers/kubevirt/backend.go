@@ -21,6 +21,13 @@ type leaseBackend struct {
 
 func (b *leaseBackend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *leaseBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	if strings.TrimSpace(b.cfg.KubeVirt.SSHKey) == "" {
+		core.UseStoredTestboxKey(&target.SSH, leaseID)
+	}
+	return nil
+}
+
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	if err := validateAcquireConfig(b.cfg); err != nil {
 		return core.LeaseTarget{}, err

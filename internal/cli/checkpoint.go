@@ -116,7 +116,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	workdir := strings.TrimSpace(*workdirOverride)
@@ -645,7 +645,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 		return err
 	}
 	workdir := checkpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir, workdirOverrideValue)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, *clear); err != nil {

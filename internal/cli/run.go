@@ -583,7 +583,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	if *leaseIDFlag != "" {
 		var lease LeaseTarget
-		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
+		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
 			applyResolvedLeaseConfig(&cfg, server, &target)
@@ -666,7 +666,11 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim || borrowedPool != nil); err != nil {
+	claimLease := a.claimLeaseTargetForRepoAndRegister
+	if *leaseIDFlag != "" {
+		claimLease = a.claimResolvedLeaseTargetForRepoAndRegister
+	}
+	if err := claimLease(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim || borrowedPool != nil); err != nil {
 		return recordFailure(err)
 	}
 	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, acquired && *keep)

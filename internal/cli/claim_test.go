@@ -246,6 +246,41 @@ func TestConditionalRepoClaimCanBeRestored(t *testing.T) {
 	}
 }
 
+func TestReplaceLeaseClaimIfUnchangedPreservesSelectedRuntimeState(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_replace123456"
+	running := Server{
+		Provider: "aws",
+		CloudID:  "i-replace",
+		Labels:   map[string]string{"provider": "aws", "state": "running"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "replace", Config{Provider: "aws"}, running, SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo-b", time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	current, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := cloneLeaseClaim(current)
+	replacement.RepoRoot = "/repo-a"
+	replacement.Labels["state"] = "stopped"
+	replacement.SSHHost = ""
+	replacement.SSHPort = 0
+	if err := replaceLeaseClaimIfUnchanged(leaseID, current, replacement); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.RepoRoot != "/repo-a" || replaced.Labels["state"] != "stopped" || replaced.SSHHost != "" {
+		t.Fatalf("replaced=%#v", replaced)
+	}
+	if err := replaceLeaseClaimIfUnchanged(leaseID, current, replacement); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale replacement err=%v", err)
+	}
+}
+
 func TestConditionalClaimCreateRejectsExistingEmptyFile(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_emptyclaim123"
@@ -745,6 +780,33 @@ func TestClaimLeaseForRepoProviderScopePondCacheVolumesStoresInitialClaim(t *tes
 	}
 	if len(claim.CacheVolumes) != 0 {
 		t.Fatalf("cache volumes not cleared on reclaim: %#v", claim.CacheVolumes)
+	}
+}
+
+func TestClaimLeaseForRepoConfigIfUnchangedPreservesEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	leaseID := "cbx_owneronly123"
+	server := Server{
+		CloudID:  "i-owner-only",
+		Provider: "aws",
+		Labels:   map[string]string{"provider": "aws", "slug": "owner-only", "state": "ready"},
+	}
+	target := SSHTarget{Host: "192.0.2.130", Port: "22"}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "owner-only", cfg, server, target, "/repo-a", time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	expected, expectedExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !expectedExists {
+		t.Fatalf("claim=%#v exists=%v err=%v", expected, expectedExists, err)
+	}
+	claimed, err := claimLeaseForRepoConfigIfUnchanged(leaseID, "owner-only", cfg, "/repo-b", time.Hour, true, expected, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.RepoRoot != "/repo-b" || claimed.SSHHost != target.Host || claimed.SSHPort != 22 {
+		t.Fatalf("claim=%#v", claimed)
 	}
 }
 

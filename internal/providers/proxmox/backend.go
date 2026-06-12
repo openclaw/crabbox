@@ -46,7 +46,7 @@ func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	if cfg.Proxmox.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Proxmox.WorkRoot
 	}
-	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
+	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

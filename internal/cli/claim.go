@@ -53,6 +53,39 @@ func (e invalidLeaseClaimIDError) Error() string {
 	return "invalid lease claim id " + strconv.Quote(e.id)
 }
 
+type leaseClaimsSnapshot struct {
+	claims  []leaseClaim
+	invalid map[string]error
+}
+
+func snapshotLeaseClaims() (leaseClaimsSnapshot, error) {
+	dir, err := crabboxStateDir()
+	if err != nil {
+		return leaseClaimsSnapshot{}, err
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "claims"))
+	if errors.Is(err, os.ErrNotExist) {
+		return leaseClaimsSnapshot{}, nil
+	}
+	if err != nil {
+		return leaseClaimsSnapshot{}, exit(2, "read claims directory: %v", err)
+	}
+	snapshot := leaseClaimsSnapshot{invalid: make(map[string]error)}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		leaseID := strings.TrimSuffix(entry.Name(), ".json")
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			snapshot.invalid[leaseID] = err
+			continue
+		}
+		snapshot.claims = append(snapshot.claims, claim)
+	}
+	return snapshot, nil
+}
+
 func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return claimLeaseForRepoProvider(leaseID, slug, "", repoRoot, idleTimeout, reclaim)
 }
@@ -271,6 +304,18 @@ func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, 
 	return updated, err
 }
 
+func claimLeaseForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	provider, staticDetails := claimProviderDetailsForConfig(cfg)
+	var updated leaseClaim
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		setCacheVolumes: true,
+		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
+		guard:           unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
+		result:          &updated,
+	})
+	return updated, err
+}
+
 func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
 	if leaseID == "" {
 		return nil
@@ -290,7 +335,7 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 }
 
 func prepareLeaseClaimEndpoint(existing leaseClaim, providerName, slug string, server Server, allowProviderMetadata bool) (Server, error) {
-	provider, err := ProviderFor(existing.Provider)
+	provider, err := ProviderFor(firstNonBlank(existing.Provider, providerName))
 	if err != nil {
 		return Server{}, exit(2, "lease %s claim has unavailable provider %q", existing.LeaseID, existing.Provider)
 	}
@@ -906,6 +951,26 @@ func restoreLeaseClaimIfUnchanged(leaseID string, current, previous leaseClaim, 
 			return err
 		}
 		return writeLeaseClaimAtomic(path, cloneLeaseClaim(previous))
+	})
+}
+
+func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClaim) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
+			return err
+		}
+		return writeLeaseClaimAtomic(path, cloneLeaseClaim(replacement))
 	})
 }
 

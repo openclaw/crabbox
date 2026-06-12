@@ -164,6 +164,10 @@ func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, 
 	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }
 
+func ReplaceLeaseClaimIfUnchanged(leaseID string, current, replacement LeaseClaim) error {
+	return replaceLeaseClaimIfUnchanged(leaseID, current, replacement)
+}
+
 func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {
 	_, err := azureSSHCIDRsForRules(ctx, cfg, nil)
 	return err

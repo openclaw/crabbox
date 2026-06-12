@@ -41,7 +41,7 @@ type azureClient interface {
 
 func NewAzureLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "azure"
-	return &azureLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer}}
+	return &azureLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer, StoredLeaseKeys: true}}
 }
 
 func (b *azureLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

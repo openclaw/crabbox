@@ -9,13 +9,21 @@ import (
 )
 
 type DirectSSHBackend struct {
-	SpecValue core.ProviderSpec
-	Cfg       core.Config
-	RT        core.Runtime
-	Delete    func(context.Context, core.Config, core.Server) error
+	SpecValue       core.ProviderSpec
+	Cfg             core.Config
+	RT              core.Runtime
+	Delete          func(context.Context, core.Config, core.Server) error
+	StoredLeaseKeys bool
 }
 
 func (b *DirectSSHBackend) Spec() core.ProviderSpec { return b.SpecValue }
+
+func (b *DirectSSHBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	if b.StoredLeaseKeys {
+		core.UseStoredTestboxKey(&target.SSH, leaseID)
+	}
+	return nil
+}
 
 func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupRequest, servers []core.Server) error {
 	now := time.Now().UTC()

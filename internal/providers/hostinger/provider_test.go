@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1403,6 +1404,55 @@ func TestResolveRequiresStoredSSHKeyOrExplicitAlternate(t *testing.T) {
 	}
 }
 
+func TestResolveRestoresOwnedClaimWhenRefreshFails(t *testing.T) {
+	isolateHostingerTestState(t)
+	leaseID := "cbx_restore123456"
+	repoA := filepath.Join(t.TempDir(), "repo-a")
+	repoB := filepath.Join(t.TempDir(), "repo-b")
+	vm := hostingerVM{
+		ID:       "vm-restore",
+		Hostname: "crabbox-restore-restore123456",
+		State:    "running",
+		IPv4:     hostingerIPAddresses{"203.0.113.92"},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHKey = "/tmp/hostinger-explicit-key"
+	cfg.Hostinger.APIToken = "token"
+	applyDefaults(&cfg)
+	cfg.Pond = "alpha"
+	server := hostingerServer(vm, leaseID, "restore", cfg, true)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "restore", cfg, server, core.SSHTarget{}, repoA, time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	previous, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("previous=%#v ok=%v err=%v", previous, ok, err)
+	}
+
+	api := &fakeAPI{
+		vms:          []hostingerVM{vm},
+		getErrAtCall: 2,
+		getErr:       errors.New("refresh unavailable"),
+	}
+	cfg.Pond = "beta"
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+	backend.skipSSHWait = true
+	_, err = backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:      leaseID,
+		Repo:    core.Repo{Root: repoB},
+		Reclaim: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "refresh claimed vps") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	restored, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if claimErr != nil || !ok || !reflect.DeepEqual(restored, previous) {
+		t.Fatalf("restored=%#v previous=%#v ok=%v err=%v", restored, previous, ok, claimErr)
+	}
+}
+
 func TestResolveRestoresStoredSSHConfiguration(t *testing.T) {
 	isolateHostingerTestState(t)
 	vm := hostingerVM{
@@ -1637,6 +1687,132 @@ func TestResolveDoesNotRollbackRestartAfterClaimChanges(t *testing.T) {
 	}
 }
 
+func TestResolvePreservesProvisioningClaimWhenRestartStopFails(t *testing.T) {
+	isolateHostingerTestState(t)
+	leaseID := "cbx_stopfail123456"
+	repoA := filepath.Join(t.TempDir(), "repo-a")
+	repoB := filepath.Join(t.TempDir(), "repo-b")
+	cfg := core.Config{
+		Provider:    providerName,
+		SSHKey:      "/tmp/test-key",
+		IdleTimeout: time.Hour,
+		Hostinger: core.HostingerConfig{
+			APIToken: "token",
+		},
+	}
+	vm := hostingerVM{ID: "vm-stop-fail", Hostname: "crabbox-stopfail-stopfail123456", State: "stopped"}
+	server := hostingerServer(vm, leaseID, "stopfail", cfg, true)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stopfail", cfg, server, core.SSHTarget{}, repoA, time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{
+		vms:     []hostingerVM{vm},
+		stopErr: errors.New("stop unavailable"),
+	}
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+
+	ctx, cancel := context.WithCancel(context.Background())
+	oldRunSSHQuiet := hostingerRunSSHQuiet
+	oldWaitForSSHReady := hostingerWaitForSSHReady
+	oldSleep := hostingerSleep
+	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+		cancel()
+		return errors.New("bootstrap failed")
+	}
+	hostingerSleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		hostingerRunSSHQuiet = oldRunSSHQuiet
+		hostingerWaitForSSHReady = oldWaitForSSHReady
+		hostingerSleep = oldSleep
+	})
+
+	_, err := backend.Resolve(ctx, core.ResolveRequest{
+		ID:      leaseID,
+		Repo:    core.Repo{Root: repoB},
+		Reclaim: true,
+		Prepare: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "restart rollback skipped") || !strings.Contains(err.Error(), "stop unavailable") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	if claim.RepoRoot != repoB || claim.Labels["state"] != "provisioning" {
+		t.Fatalf("failed stop restored stale claim: %#v", claim)
+	}
+	if len(api.vms) != 1 || !api.vms[0].Ready() {
+		t.Fatalf("VM state=%#v", api.vms)
+	}
+}
+
+func TestResolveRestoresOwnershipWithoutStaleRunningState(t *testing.T) {
+	isolateHostingerTestState(t)
+	leaseID := "cbx_stalerun123456"
+	repoA := filepath.Join(t.TempDir(), "repo-a")
+	repoB := filepath.Join(t.TempDir(), "repo-b")
+	cfg := core.Config{
+		Provider:    providerName,
+		SSHKey:      "/tmp/test-key",
+		IdleTimeout: time.Hour,
+		Hostinger: core.HostingerConfig{
+			APIToken: "token",
+		},
+	}
+	vm := hostingerVM{ID: "vm-stale-running", Hostname: "crabbox-stalerun-stalerun123456", State: "stopped"}
+	server := hostingerServer(vm, leaseID, "stalerun", cfg, true)
+	server.Labels["state"] = "running"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stalerun", cfg, server, core.SSHTarget{Host: "203.0.113.99", Port: "22"}, repoA, time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	api := &fakeAPI{vms: []hostingerVM{vm}}
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+
+	ctx, cancel := context.WithCancel(context.Background())
+	oldRunSSHQuiet := hostingerRunSSHQuiet
+	oldWaitForSSHReady := hostingerWaitForSSHReady
+	oldSleep := hostingerSleep
+	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+		cancel()
+		return errors.New("bootstrap failed")
+	}
+	hostingerSleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		hostingerRunSSHQuiet = oldRunSSHQuiet
+		hostingerWaitForSSHReady = oldWaitForSSHReady
+		hostingerSleep = oldSleep
+	})
+
+	_, err := backend.Resolve(ctx, core.ResolveRequest{
+		ID:      leaseID,
+		Repo:    core.Repo{Root: repoB},
+		Reclaim: true,
+		Prepare: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "restart rollback=stopped") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	if claim.RepoRoot != repoA || claim.Labels["state"] != "stopped" || claim.SSHHost != "" {
+		t.Fatalf("restored claim=%#v", claim)
+	}
+	if len(api.vms) != 1 || !api.vms[0].Stopped() {
+		t.Fatalf("VM state=%#v", api.vms)
+	}
+}
+
 func TestResolveRefreshesExpiredClaimBeforeRestart(t *testing.T) {
 	isolateHostingerTestState(t)
 	repoRoot := t.TempDir()
@@ -1836,8 +2012,9 @@ func TestReleaseRetainsClaimUntilStopConfirmed(t *testing.T) {
 		t.Fatal(keyErr)
 	}
 	api := &fakeAPI{
-		vms:               []hostingerVM{{ID: "vm-running", Hostname: "crabbox-blue-abcdef123456", State: "running", IPv4: hostingerIPAddresses{"203.0.113.60"}}},
-		stopLeavesRunning: true,
+		vms:                     []hostingerVM{{ID: "vm-running", Hostname: "crabbox-blue-abcdef123456", State: "running", IPv4: hostingerIPAddresses{"203.0.113.60"}}},
+		stopLeavesRunning:       true,
+		getWaitForContextAtCall: 2,
 	}
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
 	backend.client = api
@@ -2377,7 +2554,11 @@ type fakeAPI struct {
 	stopCalls               int
 	stopped                 []string
 	stopLeavesRunning       bool
+	stopErr                 error
 	getSequence             []hostingerVM
+	getErrAtCall            int
+	getErr                  error
+	getWaitForContextAtCall int
 }
 
 func (f *fakeAPI) ListCatalog(context.Context) ([]hostingerCatalogItem, error) {
@@ -2425,8 +2606,15 @@ func (f *fakeAPI) ListVMs(context.Context) ([]hostingerVM, error) {
 	return append([]hostingerVM(nil), f.vms...), nil
 }
 
-func (f *fakeAPI) GetVM(_ context.Context, id string) (hostingerVM, error) {
+func (f *fakeAPI) GetVM(ctx context.Context, id string) (hostingerVM, error) {
 	f.getCalls++
+	if f.getWaitForContextAtCall > 0 && f.getCalls == f.getWaitForContextAtCall {
+		<-ctx.Done()
+		return hostingerVM{}, ctx.Err()
+	}
+	if f.getErrAtCall > 0 && f.getCalls == f.getErrAtCall {
+		return hostingerVM{}, f.getErr
+	}
 	if len(f.getSequence) > 0 {
 		vm := f.getSequence[0]
 		f.getSequence = f.getSequence[1:]
@@ -2487,6 +2675,9 @@ func (f *fakeAPI) StartVM(_ context.Context, id string) error {
 func (f *fakeAPI) StopVM(_ context.Context, id string) error {
 	f.stopCalls++
 	f.stopped = append(f.stopped, id)
+	if f.stopErr != nil {
+		return f.stopErr
+	}
 	if f.stopLeavesRunning {
 		return nil
 	}

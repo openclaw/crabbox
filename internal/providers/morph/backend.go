@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -111,6 +112,11 @@ func NewMorphBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 }
 
 func (b *morphLeaseBackend) Spec() ProviderSpec { return b.spec }
+
+func (b *morphLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
 
 func (b *morphLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
 	cfg := b.configForRun()

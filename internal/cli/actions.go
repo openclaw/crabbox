@@ -109,7 +109,21 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := claimLeaseForRepoConfig(leaseID, slug, cfg, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	expectedClaim, expectedClaimExists, err := resolvedLeaseClaimSnapshot(leaseID, server)
+	if err != nil {
+		return err
+	}
+	ownedClaim, err := claimLeaseForRepoConfigIfUnchanged(
+		leaseID,
+		slug,
+		cfg,
+		repo.Root,
+		cfg.IdleTimeout,
+		*reclaim,
+		expectedClaim,
+		expectedClaimExists,
+	)
+	if err != nil {
 		return err
 	}
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
@@ -123,9 +137,10 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if err := waitForSSHReady(ctx, &target, a.Stderr, "actions hydrate", 2*time.Minute); err != nil {
 		return err
 	}
-	if err := updateLeaseClaimEndpoint(leaseID, server, target); err != nil {
+	if _, err := updateLeaseClaimEndpointIfUnchanged(leaseID, ownedClaim, server, target); err != nil {
 		return err
 	}
+	a.registerCoordinatorLeaseBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID})
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
@@ -283,7 +298,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, slug, cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, slug, cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

@@ -46,7 +46,7 @@ func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	if cfg.SSHPort == "" {
 		cfg.SSHPort = "22"
 	}
-	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
+	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

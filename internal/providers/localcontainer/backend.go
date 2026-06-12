@@ -68,6 +68,11 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
+
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
 	if err := validateCheckpointFork(ctx, cfg); err != nil {

@@ -23,6 +23,13 @@ type coordinatorLeaseBackend struct {
 
 func (b *coordinatorLeaseBackend) Spec() ProviderSpec { return b.spec }
 
+func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	if rebinder, ok := b.direct.(ResolvedLeaseTargetRebinder); ok {
+		return rebinder.RebindResolvedLeaseTarget(target, leaseID)
+	}
+	return nil
+}
+
 func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	return acquireAttemptsRetry(b.rt, req.Keep, func() (LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
