@@ -66,7 +66,9 @@ environment variables only.
 
 `FREESTYLE_API_URL`, `CRABBOX_FREESTYLE_API_URL`, or `freestyle.apiUrl` in the
 user config can override the default `https://api.freestyle.sh`. Repository
-config cannot override this credential destination.
+config cannot override this credential destination. Custom endpoints must use
+HTTPS, except for loopback development URLs. Crabbox refuses cross-origin
+redirects so the bearer token cannot be forwarded to another origin.
 
 ## Config
 

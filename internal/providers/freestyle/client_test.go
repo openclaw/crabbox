@@ -5,8 +5,78 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestValidateFreestyleAPIURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{name: "https", raw: "HTTPS://API.FREESTYLE.SH:443/", want: "https://api.freestyle.sh"},
+		{name: "loopback", raw: "http://127.0.0.1:8080/api/", want: "http://127.0.0.1:8080/api"},
+		{name: "localhost", raw: "http://localhost:8080", want: "http://localhost:8080"},
+		{name: "remote http", raw: "http://api.freestyle.sh", wantErr: "must use HTTPS"},
+		{name: "relative", raw: "/api", wantErr: "absolute HTTPS URL"},
+		{name: "userinfo", raw: "https://user:pass@api.freestyle.sh", wantErr: "must not contain userinfo"},
+		{name: "query", raw: "https://api.freestyle.sh?token=secret", wantErr: "must not contain userinfo"},
+		{name: "fragment", raw: "https://api.freestyle.sh/#secret", wantErr: "must not contain userinfo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateFreestyleAPIURL(tt.raw)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateFreestyleAPIURL(%q) err=%v, want %q", tt.raw, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("validateFreestyleAPIURL(%q)=%q want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFreestyleClientRefusesCrossOriginRedirect(t *testing.T) {
+	var attackerRequests int
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerRequests++
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("authorization leaked to redirect target: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer attacker.Close()
+
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL+"/stolen", http.StatusFound)
+	}))
+	defer trusted.Close()
+
+	api, err := newFreestyleClient(Config{
+		Freestyle: FreestyleConfig{
+			APIKey: "test-key",
+			APIURL: trusted.URL,
+		},
+	}, Runtime{HTTP: trusted.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.ListVMs(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("ListVMs err=%v, want cross-origin redirect refusal", err)
+	}
+	if attackerRequests != 0 {
+		t.Fatalf("redirect target received %d requests", attackerRequests)
+	}
+}
 
 func TestFreestyleFileOperationsUseFilesPathPrefix(t *testing.T) {
 	const (

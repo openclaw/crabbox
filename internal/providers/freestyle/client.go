@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -76,7 +78,10 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=freestyle requires FREESTYLE_API_KEY")
 	}
-	apiURL := strings.TrimRight(blank(cfg.Freestyle.APIURL, "https://api.freestyle.sh"), "/")
+	apiURL, err := validateFreestyleAPIURL(blank(cfg.Freestyle.APIURL, "https://api.freestyle.sh"))
+	if err != nil {
+		return nil, err
+	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -84,8 +89,85 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	return &freestyleHTTPClient{
 		apiKey:     apiKey,
 		apiURL:     apiURL,
-		httpClient: httpClient,
+		httpClient: secureFreestyleHTTPClient(httpClient, apiURL),
 	}, nil
+}
+
+func validateFreestyleAPIURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return "", exit(2, "provider=freestyle API URL must be an absolute HTTPS URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", exit(2, "provider=freestyle API URL must not contain userinfo, query parameters, or a fragment")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isFreestyleLoopbackHost(parsed.Hostname())) {
+		return "", exit(2, "provider=freestyle API URL must use HTTPS except for loopback development endpoints")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	} else {
+		parsed.Host = host
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func isFreestyleLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func secureFreestyleHTTPClient(source *http.Client, apiURL string) *http.Client {
+	client := *source
+	trusted, _ := url.Parse(apiURL)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameFreestyleOrigin(trusted, req.URL) {
+			return fmt.Errorf("freestyle refused cross-origin redirect to %s", req.URL.Redacted())
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameFreestyleOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveFreestylePort(a) == effectiveFreestylePort(b)
+}
+
+func effectiveFreestylePort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func (c *freestyleHTTPClient) do(ctx context.Context, method, urlPath string, body io.Reader) (*http.Response, error) {

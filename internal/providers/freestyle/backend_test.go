@@ -166,10 +166,11 @@ func TestResolveFreestyleLeaseIDRejectsUnclaimedRawSandbox(t *testing.T) {
 		Name:  "personal-vm",
 		State: "running",
 	}}
-	if _, _, err := resolveFreestyleLeaseID(context.Background(), client, "random-vm-id", "", false); err == nil {
+	backend := &freestyleBackend{}
+	if _, _, err := backend.resolveLeaseID(context.Background(), client, "random-vm-id", "", false); err == nil {
 		t.Fatal("expected raw non-Crabbox vm to be rejected")
 	}
-	if _, _, err := resolveFreestyleLeaseID(context.Background(), client, "fsb_vm123", "", false); err == nil {
+	if _, _, err := backend.resolveLeaseID(context.Background(), client, "fsb_vm123", "", false); err == nil {
 		t.Fatal("expected unclaimed Freestyle vm to be rejected")
 	}
 }
@@ -180,12 +181,40 @@ func TestResolveFreestyleLeaseIDAcceptsCrabboxSandbox(t *testing.T) {
 		Name:  "crabbox-repo-abc123",
 		State: "running",
 	}}
-	leaseID, name, err := resolveFreestyleLeaseID(context.Background(), client, "fsb_vm123", "", false)
+	backend := &freestyleBackend{}
+	leaseID, name, err := backend.resolveLeaseID(context.Background(), client, "fsb_vm123", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if leaseID != "fsb_vm123" || name != "vm123" {
 		t.Fatalf("lease=%q name=%q", leaseID, name)
+	}
+}
+
+func TestResolveFreestyleLeaseIDClaimsRawSandboxForRepo(t *testing.T) {
+	client := &fakeFreestyleClient{getVM: freestyleVM{
+		ID:    "vm123",
+		Name:  "crabbox-repo-abc123",
+		State: "running",
+	}}
+	oldClaim := claimLeaseForRepoProviderPond
+	var gotLeaseID, gotSlug, gotProvider, gotPond, gotRepo string
+	var gotIdle time.Duration
+	var gotReclaim bool
+	claimLeaseForRepoProviderPond = func(leaseID, slug, provider, pond, repo string, idle time.Duration, reclaim bool) error {
+		gotLeaseID, gotSlug, gotProvider, gotPond, gotRepo = leaseID, slug, provider, pond, repo
+		gotIdle, gotReclaim = idle, reclaim
+		return nil
+	}
+	t.Cleanup(func() { claimLeaseForRepoProviderPond = oldClaim })
+
+	repoRoot := t.TempDir()
+	backend := &freestyleBackend{cfg: Config{Pond: "demo", IdleTimeout: 7 * time.Minute}}
+	if _, _, err := backend.resolveLeaseID(context.Background(), client, "fsb_vm123", repoRoot, true); err != nil {
+		t.Fatal(err)
+	}
+	if gotLeaseID != "fsb_vm123" || gotSlug == "" || gotProvider != freestyleProvider || gotPond != "demo" || gotRepo != repoRoot || gotIdle != 7*time.Minute || !gotReclaim {
+		t.Fatalf("claim args lease=%q slug=%q provider=%q pond=%q repo=%q idle=%s reclaim=%v", gotLeaseID, gotSlug, gotProvider, gotPond, gotRepo, gotIdle, gotReclaim)
 	}
 }
 
@@ -246,6 +275,72 @@ func TestFreestyleRunRejectsMissingCommand(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing command") {
 		t.Fatalf("Run err=%v, want missing command", err)
+	}
+	if client.createReq != nil || len(client.deleteIDs) != 0 {
+		t.Fatalf("missing command created or deleted a VM: create=%#v delete=%#v", client.createReq, client.deleteIDs)
+	}
+}
+
+func TestFreestyleRunCleansNewSandboxAfterPrepareFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeFreestyleClient{createID: "vm123", execErrAt: 1}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { newFreestyleClient = oldClient })
+
+	backend := &freestyleBackend{
+		spec: Provider{}.Spec(),
+		cfg:  Config{Freestyle: FreestyleConfig{}},
+		rt:   Runtime{Stderr: io.Discard},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exec failed") {
+		t.Fatalf("Run err=%v, want prepare failure", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm123" {
+		t.Fatalf("deleteIDs=%#v want vm123", client.deleteIDs)
+	}
+}
+
+func TestFreestyleRunKeepsNewSandboxAfterPrepareFailureWhenRequested(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeFreestyleClient{createID: "vm123", execErrAt: 1}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { newFreestyleClient = oldClient })
+
+	var stderr bytes.Buffer
+	backend := &freestyleBackend{
+		spec: Provider{}.Spec(),
+		cfg: Config{
+			IdleTimeout: 5 * time.Minute,
+			TTL:         time.Hour,
+			Freestyle:   FreestyleConfig{},
+		},
+		rt: Runtime{Stderr: &stderr},
+	}
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:          Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:        true,
+		KeepOnFailure: true,
+		Command:       []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exec failed") {
+		t.Fatalf("Run err=%v, want prepare failure", err)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("deleteIDs=%#v want kept VM", client.deleteIDs)
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=fsb_vm123") {
+		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
 	}
 }
 
