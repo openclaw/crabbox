@@ -134,6 +134,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"runpod",
 		"anthropic-sandbox-runtime",
 		"semaphore",
+		"smolvm",
 		"sprites",
 		"ssh",
 		"tart",

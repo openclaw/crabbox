@@ -38,7 +38,7 @@ SSH-lease providers further differ by how they reach the cloud:
   tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
-  `azure-dynamic-sessions`, `docker-sandbox`). `anthropic-sandbox-runtime` is
+  `azure-dynamic-sessions`, `docker-sandbox`, `smolvm`). `anthropic-sandbox-runtime` is
   the local macOS/Linux delegated-run exception: Anthropic's `srt` executes on
   the current machine while still owning sync/run policy end to end.
 
@@ -106,6 +106,7 @@ the built-in adapter needs a separate local smoke contract.
 | [OpenSandbox](opensandbox.md) — `opensandbox` | Linux |
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
 | [Anthropic Sandbox Runtime](anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux |
+| [SmolVM](smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`) | Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
 | [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |

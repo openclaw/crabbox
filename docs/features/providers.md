@@ -125,6 +125,7 @@ islo                    Islo sandboxes
 modal                   Modal Sandboxes
 opencomputer            OpenComputer Linux VMs
 anthropic-sandbox-runtime Anthropic Sandbox Runtime through the local srt CLI
+smolvm                  Smol Machines microVM sandboxes (delegated via smolfleet)
 tensorlake              Tensorlake Firecracker sandboxes
 upstash-box             Upstash sandboxes
 blacksmith-testbox      Blacksmith CI test runner (proof/session)
@@ -178,6 +179,7 @@ railway                 Railway service status and stop controls
 - [OpenComputer](../providers/opencomputer.md): delegated OpenComputer Linux VM execution through the OpenComputer REST API.
 - [Tensorlake](../providers/tensorlake.md): delegated Tensorlake Firecracker sandbox execution.
 - [Upstash Box](../providers/upstash-box.md): delegated Upstash sandbox execution.
+- [SmolVM](../providers/smolvm.md): delegated Smol Machines microVM execution via smolfleet.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Blacksmith CI runner.
 - [Weights & Biases](../providers/wandb.md): delegated W&B run sandbox execution.
 - [Provider backends](../provider-backends.md): guide for adding a new provider/backend/plugin.
