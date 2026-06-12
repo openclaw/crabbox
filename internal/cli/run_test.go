@@ -2425,3 +2425,56 @@ func TestApplyResolvedServerConfigRestoresLocalContainerSocketConfig(t *testing.
 		t.Fatal("restored socket config should use no-times sync")
 	}
 }
+
+func TestApplyResolvedServerConfigRestoresTargetAndWorkRoot(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.TargetOS = targetMacOS
+	cfg.WindowsMode = windowsModeNormal
+	server := Server{Labels: map[string]string{
+		"target":       targetWindows,
+		"windows_mode": windowsModeWSL2,
+		"work_root":    `D:\crabbox`,
+	}}
+
+	applyResolvedServerConfig(&cfg, server)
+
+	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeWSL2 || cfg.WorkRoot != `D:\crabbox` {
+		t.Fatalf("resolved config=%#v", cfg)
+	}
+}
+
+func TestApplyResolvedLeaseConfigPrefersStoredLabelsAndUpdatesTarget(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	target := SSHTarget{TargetOS: targetLinux, User: cfg.SSHUser}
+	server := Server{Labels: map[string]string{
+		"target":       targetWindows,
+		"windows_mode": windowsModeWSL2,
+		"work_root":    "/work/crabbox",
+	}}
+
+	applyResolvedLeaseConfig(&cfg, server, &target)
+
+	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeWSL2 || cfg.WorkRoot != "/work/crabbox" || cfg.SSHUser != "Administrator" {
+		t.Fatalf("resolved config=%#v", cfg)
+	}
+	if target.TargetOS != targetWindows || target.WindowsMode != windowsModeWSL2 || target.User != "Administrator" {
+		t.Fatalf("resolved target=%#v", target)
+	}
+}
+
+func TestApplyResolvedLeaseConfigPreservesProviderTargetUser(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	target := SSHTarget{TargetOS: targetLinux, User: "image-admin"}
+	server := Server{Labels: map[string]string{
+		"target":       targetWindows,
+		"windows_mode": windowsModeWSL2,
+	}}
+
+	applyResolvedLeaseConfig(&cfg, server, &target)
+
+	if target.User != "image-admin" {
+		t.Fatalf("resolved target user=%q, want provider user", target.User)
+	}
+}

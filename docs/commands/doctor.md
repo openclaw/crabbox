@@ -10,6 +10,7 @@ sequences or CI smoke jobs.
 crabbox doctor
 crabbox doctor --provider aws
 crabbox doctor --provider hetzner --target linux
+crabbox doctor --provider xcp-ng --json
 crabbox doctor --provider ssh --target windows --windows-mode normal --static-host win-dev.local
 crabbox doctor --id swift-crab
 crabbox doctor --profile live-qa --id swift-crab
@@ -60,7 +61,9 @@ Provider readiness validates the selected provider without creating a lease.
   template, next-id, and inventory endpoints separately so authenticated but
   under-authorized API tokens produce actionable failed checks. Direct AWS also
   checks EC2 vCPU quotas. GCP uses an aggregated Compute Engine inventory query
-  across zones.
+  across zones. XCP-ng opens a XAPI
+  session and lists Crabbox-managed leases without creating, changing, or
+  deleting VMs.
 - Delegated providers run their own direct readiness check where available; for
   example Cloudflare validates the configured runner URL and bearer token
   against the runner readiness API. Blacksmith Testbox reports runtime as

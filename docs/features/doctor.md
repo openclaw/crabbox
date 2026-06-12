@@ -121,6 +121,10 @@ provider timeout. Examples:
   proof of runner readiness.
 - Blacksmith Testbox reports runtime as provider-hydrated because GitHub Actions
   hydration is owned by Testbox.
+- XCP-ng opens a XAPI session, resolves configured placement resources
+  (template, storage repository, network, and host), lists Crabbox-managed
+  leases, and reports `mutation=false`; incomplete `xcpNg.*` config fails
+  before any inventory call.
 
 Direct checks carry stable detail fields such as `timeout`, `api`, and
 `mutation` so scripts can tell what was probed.

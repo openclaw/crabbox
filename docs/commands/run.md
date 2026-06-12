@@ -400,6 +400,13 @@ For AWS one-shot leases, `--market` overrides `capacity.market` for this run.
 Explicit `--type` keeps exact-type semantics; Crabbox reports why that type
 failed rather than falling back to a different size.
 
+XCP-ng one-shot leases use the SSH-run path on Linux only. The provider clones
+the configured template with config-drive cloud-init, so `--script`,
+`--env-from-profile`, `--capture-stdout`, `--download`, and the other SSH-run
+features work after the VM is ready. Run `crabbox doctor --provider xcp-ng
+--json` before live runs, and keep `CRABBOX_XCP_NG_PASSWORD` in env or private
+config rather than argv.
+
 Azure one-shot leases use managed `StandardSSD_LRS` OS disks by default so they
 can become native checkpoint sources. Use `--azure-os-disk ephemeral` only for
 stateless leases that do not need native Azure checkpoint/fork support;

@@ -38,6 +38,7 @@ type Config struct {
 	ServerTypeExplicit            bool
 	Coordinator                   string
 	BrokerMode                    BrokerMode
+	brokerProvider                string
 	BrokerAutoWebVNC              bool
 	CoordToken                    string
 	CoordAdminToken               string
@@ -94,6 +95,7 @@ type Config struct {
 	digitalOceanImageExplicit     bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
+	XCPNg                         XCPNgConfig
 	Parallels                     ParallelsConfig
 	parallelsTemplateApplied      bool
 	SSHUser                       string
@@ -129,6 +131,7 @@ type Config struct {
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
+	OpenSandbox                   OpenSandboxConfig
 	DockerSandbox                 DockerSandboxConfig
 	AnthropicSRT                  AnthropicSRTConfig
 	Modal                         ModalConfig
@@ -464,6 +467,25 @@ type OpenComputerConfig struct {
 	ForgetMissing   bool
 }
 
+// OpenSandboxConfig configures the delegated OpenSandbox provider. The API key
+// is intentionally absent: it is read at runtime from
+// CRABBOX_OPENSANDBOX_API_KEY / OPEN_SANDBOX_API_KEY and sent only in request
+// headers, never persisted in Crabbox config or placed on argv.
+type OpenSandboxConfig struct {
+	APIURL          string
+	Image           string
+	Workdir         string
+	CPU             string
+	Memory          string
+	TimeoutSecs     int
+	ExecTimeoutSecs int
+	PlatformOS      string
+	PlatformArch    string
+	SecureAccess    bool
+	UseServerProxy  bool
+	ForgetMissing   bool
+}
+
 type DockerSandboxConfig struct {
 	CLIPath         string
 	Agent           string
@@ -525,6 +547,22 @@ type ProxmoxConfig struct {
 	WorkRoot    string
 	FullClone   bool
 	InsecureTLS bool
+}
+
+type XCPNgConfig struct {
+	APIURL       string
+	Username     string
+	Password     string
+	Template     string
+	TemplateUUID string
+	SR           string
+	SRUUID       string
+	Network      string
+	NetworkUUID  string
+	Host         string
+	User         string
+	WorkRoot     string
+	InsecureTLS  bool
 }
 
 type IncusConfig struct {
@@ -936,6 +974,10 @@ func defaultConfig() Config {
 }
 
 func loadConfig() (Config, error) {
+	return loadConfigWithOverrides("", "")
+}
+
+func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
 		freestyleAPIURL := cfg.Freestyle.APIURL
@@ -948,6 +990,13 @@ func loadConfig() (Config, error) {
 	}
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
+	}
+	if coordinator = strings.TrimSpace(coordinator); coordinator != "" {
+		cfg.Coordinator = coordinator
+	}
+	if provider = strings.TrimSpace(provider); provider != "" {
+		cfg.Provider = provider
+		cfg.brokerProvider = ""
 	}
 	if err := normalizeBrokerConfig(&cfg); err != nil {
 		return Config{}, err
@@ -973,20 +1022,28 @@ func loadConfig() (Config, error) {
 }
 
 func normalizeBrokerConfig(cfg *Config) error {
-	mode := BrokerMode(strings.ToLower(strings.TrimSpace(string(cfg.BrokerMode))))
+	mode, err := normalizeBrokerMode(string(cfg.BrokerMode))
+	if err != nil {
+		return err
+	}
+	cfg.BrokerMode = mode
+	if mode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) == "" {
+		return exit(2, "broker.mode=registered requires broker.url or coordinator")
+	}
+	return nil
+}
+
+func normalizeBrokerMode(value string) (BrokerMode, error) {
+	mode := BrokerMode(strings.ToLower(strings.TrimSpace(value)))
 	if mode == "" {
 		mode = BrokerModeManaged
 	}
 	switch mode {
 	case BrokerModeManaged, BrokerModeRegistered:
-		cfg.BrokerMode = mode
+		return mode, nil
 	default:
-		return exit(2, "broker.mode must be managed or registered")
+		return "", exit(2, "broker.mode must be managed or registered")
 	}
-	if mode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) == "" {
-		return exit(2, "broker.mode=registered requires broker.url or coordinator")
-	}
-	return nil
 }
 
 func canonicalizeConfigProvider(cfg *Config) {
@@ -1146,6 +1203,15 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return nil
 	}
 	if cfg.Provider != "proxmox" {
+		if cfg.Provider == "xcp-ng" {
+			if cfg.XCPNg.User != "" {
+				cfg.SSHUser = cfg.XCPNg.User
+			}
+			if cfg.XCPNg.WorkRoot != "" {
+				cfg.WorkRoot = cfg.XCPNg.WorkRoot
+			}
+			return nil
+		}
 		if cfg.Provider != "parallels" {
 			return nil
 		}
@@ -1515,6 +1581,18 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 3600,
 		},
+		OpenSandbox: OpenSandboxConfig{
+			// APIURL is intentionally unset here so repository YAML cannot
+			// redirect a shell-provided API key. The provider requires an
+			// explicit trusted endpoint from flags or environment.
+			Image:           "ubuntu:24.04",
+			Workdir:         "/workspace/crabbox",
+			CPU:             "1",
+			Memory:          "2Gi",
+			ExecTimeoutSecs: 600,
+			PlatformOS:      "linux",
+			PlatformArch:    "amd64",
+		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -1546,6 +1624,10 @@ func baseConfig() Config {
 			User:      "crabbox",
 			WorkRoot:  defaultPOSIXWorkRoot,
 			FullClone: true,
+		},
+		XCPNg: XCPNgConfig{
+			User:     "crabbox",
+			WorkRoot: defaultPOSIXWorkRoot,
 		},
 		Parallels: ParallelsConfig{
 			CloneMode:      "linked",
@@ -1649,6 +1731,7 @@ type fileConfig struct {
 	GCP                  *fileGCPConfig                     `yaml:"gcp,omitempty"`
 	Incus                *fileIncusConfig                   `yaml:"incus,omitempty"`
 	Proxmox              *fileProxmoxConfig                 `yaml:"proxmox,omitempty"`
+	XCPNg                *fileXCPNgConfig                   `yaml:"xcpNg,omitempty"`
 	Parallels            *fileParallelsConfig               `yaml:"parallels,omitempty"`
 	SSH                  *fileSSHConfig                     `yaml:"ssh,omitempty"`
 	Sync                 *fileSyncConfig                    `yaml:"sync,omitempty"`
@@ -1672,6 +1755,7 @@ type fileConfig struct {
 	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
+	OpenSandbox          *fileOpenSandboxConfig             `yaml:"openSandbox,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	AnthropicSRT         *fileAnthropicSRTConfig            `yaml:"anthropicSandboxRuntime,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
@@ -1807,6 +1891,22 @@ type fileProxmoxConfig struct {
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	FullClone   *bool  `yaml:"fullClone,omitempty"`
 	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
+}
+
+type fileXCPNgConfig struct {
+	APIURL       string `yaml:"apiUrl,omitempty"`
+	Username     string `yaml:"username,omitempty"`
+	Password     string `yaml:"password,omitempty"`
+	Template     string `yaml:"template,omitempty"`
+	TemplateUUID string `yaml:"templateUuid,omitempty"`
+	SR           string `yaml:"sr,omitempty"`
+	SRUUID       string `yaml:"srUuid,omitempty"`
+	Network      string `yaml:"network,omitempty"`
+	NetworkUUID  string `yaml:"networkUuid,omitempty"`
+	Host         string `yaml:"host,omitempty"`
+	User         string `yaml:"user,omitempty"`
+	WorkRoot     string `yaml:"workRoot,omitempty"`
+	InsecureTLS  *bool  `yaml:"insecureTLS,omitempty"`
 }
 
 type fileParallelsConfig struct {
@@ -2078,6 +2178,19 @@ type fileOpenComputerConfig struct {
 	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
 	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
 	Burst           *bool  `yaml:"burst,omitempty"`
+}
+
+type fileOpenSandboxConfig struct {
+	Image           *string `yaml:"image,omitempty"`
+	Workdir         *string `yaml:"workdir,omitempty"`
+	CPU             *string `yaml:"cpu,omitempty"`
+	Memory          *string `yaml:"memory,omitempty"`
+	TimeoutSecs     *int    `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
+	PlatformOS      *string `yaml:"platformOS,omitempty"`
+	PlatformArch    *string `yaml:"platformArch,omitempty"`
+	SecureAccess    *bool   `yaml:"secureAccess,omitempty"`
+	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -2528,15 +2641,28 @@ func applyConfigFile(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	return applyFileConfig(cfg, file)
+	return applyFileConfigWithTrust(cfg, file, trustedConfigPath(path))
 }
 
 func applyFileConfig(cfg *Config, file fileConfig) error {
+	return applyFileConfigWithTrust(cfg, file, true)
+}
+
+func trustedConfigPath(path string) bool {
+	if explicit := strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")); explicit != "" {
+		return filepath.Clean(path) == filepath.Clean(explicit)
+	}
+	userPath := userConfigPath()
+	return userPath != "" && filepath.Clean(path) == filepath.Clean(userPath)
+}
+
+func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
 	if file.Profile != "" {
 		cfg.Profile = file.Profile
 	}
 	if file.Provider != "" {
 		cfg.Provider = file.Provider
+		cfg.brokerProvider = ""
 	}
 	if file.Target != "" {
 		cfg.TargetOS = file.Target
@@ -2611,6 +2737,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Broker.Provider != "" {
 			cfg.Provider = file.Broker.Provider
+			cfg.brokerProvider = file.Broker.Provider
 		}
 		if file.Broker.Access != nil {
 			if file.Broker.Access.ClientID != "" {
@@ -2868,6 +2995,67 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Proxmox.InsecureTLS != nil {
 			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
+		}
+	}
+	if file.XCPNg != nil {
+		// Project config is repository-controlled. Do not let it redirect
+		// inherited user or environment credentials to another XAPI endpoint.
+		if trusted && file.XCPNg.APIURL != "" {
+			cfg.XCPNg.APIURL = file.XCPNg.APIURL
+		}
+		if file.XCPNg.Username != "" {
+			cfg.XCPNg.Username = file.XCPNg.Username
+		}
+		if file.XCPNg.Password != "" {
+			cfg.XCPNg.Password = file.XCPNg.Password
+		}
+		if file.XCPNg.Template != "" {
+			cfg.XCPNg.Template = file.XCPNg.Template
+			if file.XCPNg.TemplateUUID == "" {
+				cfg.XCPNg.TemplateUUID = ""
+			}
+		}
+		if file.XCPNg.TemplateUUID != "" {
+			cfg.XCPNg.TemplateUUID = file.XCPNg.TemplateUUID
+			if file.XCPNg.Template == "" {
+				cfg.XCPNg.Template = ""
+			}
+		}
+		if file.XCPNg.SR != "" {
+			cfg.XCPNg.SR = file.XCPNg.SR
+			if file.XCPNg.SRUUID == "" {
+				cfg.XCPNg.SRUUID = ""
+			}
+		}
+		if file.XCPNg.SRUUID != "" {
+			cfg.XCPNg.SRUUID = file.XCPNg.SRUUID
+			if file.XCPNg.SR == "" {
+				cfg.XCPNg.SR = ""
+			}
+		}
+		if file.XCPNg.Network != "" {
+			cfg.XCPNg.Network = file.XCPNg.Network
+			if file.XCPNg.NetworkUUID == "" {
+				cfg.XCPNg.NetworkUUID = ""
+			}
+		}
+		if file.XCPNg.NetworkUUID != "" {
+			cfg.XCPNg.NetworkUUID = file.XCPNg.NetworkUUID
+			if file.XCPNg.Network == "" {
+				cfg.XCPNg.Network = ""
+			}
+		}
+		if file.XCPNg.Host != "" {
+			cfg.XCPNg.Host = file.XCPNg.Host
+		}
+		if file.XCPNg.User != "" {
+			cfg.XCPNg.User = file.XCPNg.User
+		}
+		if file.XCPNg.WorkRoot != "" {
+			cfg.XCPNg.WorkRoot = file.XCPNg.WorkRoot
+		}
+		if trusted && file.XCPNg.InsecureTLS != nil {
+			cfg.XCPNg.InsecureTLS = *file.XCPNg.InsecureTLS
 		}
 	}
 	if file.Parallels != nil {
@@ -3424,6 +3612,44 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.OpenComputer.Burst != nil {
 			cfg.OpenComputer.Burst = *file.OpenComputer.Burst
+		}
+	}
+	if file.OpenSandbox != nil {
+		if file.OpenSandbox.Image != nil {
+			cfg.OpenSandbox.Image = *file.OpenSandbox.Image
+		}
+		if file.OpenSandbox.Workdir != nil {
+			cfg.OpenSandbox.Workdir = *file.OpenSandbox.Workdir
+		}
+		if file.OpenSandbox.CPU != nil {
+			cfg.OpenSandbox.CPU = *file.OpenSandbox.CPU
+		}
+		if file.OpenSandbox.Memory != nil {
+			cfg.OpenSandbox.Memory = *file.OpenSandbox.Memory
+		}
+		if file.OpenSandbox.TimeoutSecs != nil {
+			if *file.OpenSandbox.TimeoutSecs < 0 {
+				return exit(2, "opensandbox timeoutSecs must be non-negative")
+			}
+			cfg.OpenSandbox.TimeoutSecs = *file.OpenSandbox.TimeoutSecs
+		}
+		if file.OpenSandbox.ExecTimeoutSecs != nil {
+			if *file.OpenSandbox.ExecTimeoutSecs < 0 {
+				return exit(2, "opensandbox execTimeoutSecs must be non-negative")
+			}
+			cfg.OpenSandbox.ExecTimeoutSecs = *file.OpenSandbox.ExecTimeoutSecs
+		}
+		if file.OpenSandbox.PlatformOS != nil {
+			cfg.OpenSandbox.PlatformOS = *file.OpenSandbox.PlatformOS
+		}
+		if file.OpenSandbox.PlatformArch != nil {
+			cfg.OpenSandbox.PlatformArch = *file.OpenSandbox.PlatformArch
+		}
+		if file.OpenSandbox.SecureAccess != nil {
+			cfg.OpenSandbox.SecureAccess = *file.OpenSandbox.SecureAccess
+		}
+		if file.OpenSandbox.UseServerProxy != nil {
+			cfg.OpenSandbox.UseServerProxy = *file.OpenSandbox.UseServerProxy
 		}
 	}
 	if file.DockerSandbox != nil {
@@ -4118,7 +4344,10 @@ func applyLeaseDuration(target *time.Duration, value string) {
 
 func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
-	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
+	if provider := os.Getenv("CRABBOX_PROVIDER"); provider != "" {
+		cfg.Provider = provider
+		cfg.brokerProvider = ""
+	}
 	if t := os.Getenv("CRABBOX_TARGET"); t != "" {
 		cfg.TargetOS = t
 		cfg.targetExplicit = true
@@ -4306,6 +4535,54 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := getenvBool("CRABBOX_PROXMOX_INSECURE_TLS"); ok {
 		cfg.Proxmox.InsecureTLS = value
+	}
+	cfg.XCPNg.APIURL = getenv("CRABBOX_XCP_NG_API_URL", cfg.XCPNg.APIURL)
+	cfg.XCPNg.Username = getenv("CRABBOX_XCP_NG_USERNAME", cfg.XCPNg.Username)
+	cfg.XCPNg.Password = getenv("CRABBOX_XCP_NG_PASSWORD", cfg.XCPNg.Password)
+	xcpNgTemplate, xcpNgTemplateUUID := os.Getenv("CRABBOX_XCP_NG_TEMPLATE"), os.Getenv("CRABBOX_XCP_NG_TEMPLATE_UUID")
+	if xcpNgTemplate != "" {
+		cfg.XCPNg.Template = xcpNgTemplate
+		if xcpNgTemplateUUID == "" {
+			cfg.XCPNg.TemplateUUID = ""
+		}
+	}
+	if xcpNgTemplateUUID != "" {
+		cfg.XCPNg.TemplateUUID = xcpNgTemplateUUID
+		if xcpNgTemplate == "" {
+			cfg.XCPNg.Template = ""
+		}
+	}
+	xcpNgSR, xcpNgSRUUID := os.Getenv("CRABBOX_XCP_NG_SR"), os.Getenv("CRABBOX_XCP_NG_SR_UUID")
+	if xcpNgSR != "" {
+		cfg.XCPNg.SR = xcpNgSR
+		if xcpNgSRUUID == "" {
+			cfg.XCPNg.SRUUID = ""
+		}
+	}
+	if xcpNgSRUUID != "" {
+		cfg.XCPNg.SRUUID = xcpNgSRUUID
+		if xcpNgSR == "" {
+			cfg.XCPNg.SR = ""
+		}
+	}
+	xcpNgNetwork, xcpNgNetworkUUID := os.Getenv("CRABBOX_XCP_NG_NETWORK"), os.Getenv("CRABBOX_XCP_NG_NETWORK_UUID")
+	if xcpNgNetwork != "" {
+		cfg.XCPNg.Network = xcpNgNetwork
+		if xcpNgNetworkUUID == "" {
+			cfg.XCPNg.NetworkUUID = ""
+		}
+	}
+	if xcpNgNetworkUUID != "" {
+		cfg.XCPNg.NetworkUUID = xcpNgNetworkUUID
+		if xcpNgNetwork == "" {
+			cfg.XCPNg.Network = ""
+		}
+	}
+	cfg.XCPNg.Host = getenv("CRABBOX_XCP_NG_HOST", cfg.XCPNg.Host)
+	cfg.XCPNg.User = getenv("CRABBOX_XCP_NG_USER", cfg.XCPNg.User)
+	cfg.XCPNg.WorkRoot = getenv("CRABBOX_XCP_NG_WORK_ROOT", cfg.XCPNg.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_XCP_NG_INSECURE_TLS"); ok {
+		cfg.XCPNg.InsecureTLS = value
 	}
 	cfg.Parallels.Source = getenv("CRABBOX_PARALLELS_SOURCE", cfg.Parallels.Source)
 	cfg.Parallels.SourceID = getenv("CRABBOX_PARALLELS_SOURCE_ID", cfg.Parallels.SourceID)
@@ -4500,6 +4777,28 @@ func applyEnv(cfg *Config) error {
 	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
 	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
 		cfg.OpenComputer.Burst = v
+	}
+	cfg.OpenSandbox.APIURL = getenv("CRABBOX_OPENSANDBOX_API_URL", getenv("OPEN_SANDBOX_API_URL", cfg.OpenSandbox.APIURL))
+	cfg.OpenSandbox.Image = getenv("CRABBOX_OPENSANDBOX_IMAGE", cfg.OpenSandbox.Image)
+	cfg.OpenSandbox.Workdir = getenv("CRABBOX_OPENSANDBOX_WORKDIR", cfg.OpenSandbox.Workdir)
+	cfg.OpenSandbox.CPU = getenv("CRABBOX_OPENSANDBOX_CPU", cfg.OpenSandbox.CPU)
+	cfg.OpenSandbox.Memory = getenv("CRABBOX_OPENSANDBOX_MEMORY", cfg.OpenSandbox.Memory)
+	var err error
+	cfg.OpenSandbox.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", cfg.OpenSandbox.TimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.OpenSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", cfg.OpenSandbox.ExecTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.OpenSandbox.PlatformOS = getenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", cfg.OpenSandbox.PlatformOS)
+	cfg.OpenSandbox.PlatformArch = getenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", cfg.OpenSandbox.PlatformArch)
+	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_SECURE_ACCESS"); ok {
+		cfg.OpenSandbox.SecureAccess = v
+	}
+	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
+		cfg.OpenSandbox.UseServerProxy = v
 	}
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)
@@ -5300,6 +5599,21 @@ func getenvInt(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func getenvNonNegativeInt(name string, fallback int) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, exit(2, "%s must be an integer", name)
+	}
+	if parsed < 0 {
+		return 0, exit(2, "%s must be non-negative", name)
+	}
+	return parsed, nil
 }
 
 func getenvInt32(name string, fallback int32) int32 {

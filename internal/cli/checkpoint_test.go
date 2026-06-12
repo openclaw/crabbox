@@ -171,6 +171,40 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	}
 }
 
+func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_restore_windows_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339), Workdir: "/work/cbx_old/my-app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseID := "cbx_windows_dryrun"
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	server := Server{Provider: "aws", CloudID: "i-windows", Labels: map[string]string{
+		"provider":     "aws",
+		"target":       targetWindows,
+		"windows_mode": windowsModeNormal,
+		"work_root":    `C:\crabbox`,
+	}}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointRestore(context.Background(), []string{record.ID, "--id", leaseID, "--provider", "aws", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), `workdir=C:\crabbox\`+leaseID+`\crabbox`) {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
 // TestCheckpointRestoreDockerCommitDoesNotPointAtFork is the round-10 regression:
 func TestCheckpointRestoreDockerCommitPointsAtFork(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -520,6 +554,20 @@ func TestDefaultCheckpointRestoreWorkdirUsesTargetLease(t *testing.T) {
 	got := defaultCheckpointRestoreWorkdir(cfg, "cbx_new", "my-app", "/work/cbx_old/my-app")
 	if got != "/work/cbx_new/my-app" {
 		t.Fatalf("restore workdir = %q, want target lease workdir", got)
+	}
+}
+
+func TestCheckpointRestoreWorkdirUsesResolvedLeaseConfig(t *testing.T) {
+	cfg := defaultConfig()
+	applyResolvedServerConfig(&cfg, Server{Labels: map[string]string{
+		"target":       targetWindows,
+		"windows_mode": windowsModeNormal,
+		"work_root":    `C:\crabbox`,
+	}})
+
+	got := checkpointRestoreWorkdir(cfg, "cbx_new", "my-app", "/work/cbx_old/my-app", "")
+	if got != `C:\crabbox\cbx_new\my-app` {
+		t.Fatalf("restore workdir = %q, want resolved Windows lease workdir", got)
 	}
 }
 

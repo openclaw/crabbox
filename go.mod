@@ -13,6 +13,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources v1.2.0
 	github.com/Code-Hex/vz/v3 v3.7.1
 	github.com/alecthomas/kong v1.15.0
+	github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.2
 	github.com/aws/aws-sdk-go-v2 v1.41.9
 	github.com/aws/aws-sdk-go-v2/config v1.32.20
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.19

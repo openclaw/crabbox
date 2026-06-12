@@ -12,6 +12,10 @@ func BaseConfig() Config {
 	return baseConfig()
 }
 
+func LoadConfig() (Config, error) {
+	return loadConfig()
+}
+
 func NormalizeTargetConfig(cfg *Config) {
 	normalizeTargetConfig(cfg)
 }
@@ -277,6 +281,10 @@ func ProbeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 
 func PowershellCommand(script string) string {
 	return powershellCommand(script)
+}
+
+func WindowsBootstrapPowerShell(cfg Config, publicKey string) string {
+	return windowsBootstrapPowerShell(cfg, publicKey)
 }
 
 func ValidCrabboxProviderKey(value string) bool {

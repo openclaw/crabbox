@@ -40,6 +40,138 @@ func TestConfigSetBrokerRegisteredMode(t *testing.T) {
 	}
 }
 
+func TestConfigSetBrokerRegisteredModeAcceptsDirectProvider(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{
+		"--url", "https://broker.example.test",
+		"--provider", "xcp-ng",
+		"--mode", "registered",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Provider != "xcp-ng" || file.Broker == nil || file.Broker.Provider != "xcp-ng" {
+		t.Fatalf("config=%#v", file)
+	}
+}
+
+func TestConfigSetBrokerRegisteredModeRejectsUnknownProvider(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err := app.configSetBroker([]string{
+		"--url", "https://broker.example.test",
+		"--provider", "missing-provider",
+		"--mode", "registered",
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("config should not be written, stat err=%v", statErr)
+	}
+}
+
+func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("broker:\n  url: https://old.example.test\n  mode: Registered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{
+		"--url", "https://new.example.test",
+		"--provider", "xcp-ng",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Broker == nil || file.Broker.Mode != "Registered" || file.Broker.Provider != "xcp-ng" {
+		t.Fatalf("config=%#v", file)
+	}
+}
+
+func TestConfigSetBrokerRejectsPersistedDirectProviderWhenSwitchingToManaged(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	original := "provider: xcp-ng\nbroker:\n  url: https://old.example.test\n  mode: registered\n  provider: xcp-ng\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err := app.configSetBroker([]string{
+		"--url", "https://new.example.test",
+		"--mode", "managed",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
+		t.Fatalf("err=%v, want managed provider rejection", err)
+	}
+	data, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != original {
+		t.Fatalf("config changed after rejection:\n%s", data)
+	}
+}
+
+func TestConfigSetBrokerDoesNotPromoteTopLevelProviderWhenOmitted(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("provider: xcp-ng\nbroker:\n  url: https://old.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{"--url", "https://new.example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Provider != "xcp-ng" || file.Broker == nil || file.Broker.Provider != "" {
+		t.Fatalf("config=%#v", file)
+	}
+}
+
 func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -74,6 +206,25 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	}
 	if strings.Join(got.Run.PreflightTools, ",") != "node,bun" {
 		t.Fatalf("json run.preflightTools=%v", got.Run.PreflightTools)
+	}
+}
+
+func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	err := app.configSetBroker([]string{"--url", "https://broker.example.test", "--provider", "xcp-ng"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
+		t.Fatalf("err=%v, want brokered provider rejection", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("config file exists after rejected provider: %v", statErr)
 	}
 }
 
@@ -362,6 +513,236 @@ func TestConfigShowIncludesSyncInclude(t *testing.T) {
 	}
 	if len(got.Sync.Include) != 2 || got.Sync.Include[0] != "src" || got.Sync.Include[1] != "scripts" {
 		t.Fatalf("config show json sync.include = %#v, want [src scripts]", got.Sync.Include)
+	}
+}
+
+func TestConfigShowIncludesXCPNgWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := []byte(`xcpNg:
+  apiUrl: https://xcp-ng.example.test
+  username: root
+  password: xcp-ng-secret
+  template: ubuntu-template
+  templateUuid: tpl-0001
+  sr: default-sr
+  srUuid: sr-0001
+  network: pool-network
+  networkUuid: net-0001
+  host: host-0001
+  user: runner
+  workRoot: /work/xcp-ng
+  insecureTLS: true
+`)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	wantText := "xcp_ng api_url=https://xcp-ng.example.test username=root template=ubuntu-template template_uuid=tpl-0001 sr=default-sr sr_uuid=sr-0001 network=pool-network network_uuid=net-0001 host=host-0001 user=runner work_root=/work/xcp-ng insecure_tls=true auth=configured"
+	if !strings.Contains(text, wantText) {
+		t.Fatalf("config show missing xcp-ng summary: %q", text)
+	}
+	if strings.Contains(text, "xcp-ng-secret") {
+		t.Fatalf("config show leaked XCP-ng password: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		XCPNg struct {
+			APIURL       string `json:"apiUrl"`
+			Username     string `json:"username"`
+			Auth         string `json:"auth"`
+			Template     string `json:"template"`
+			TemplateUUID string `json:"templateUuid"`
+			SR           string `json:"sr"`
+			SRUUID       string `json:"srUuid"`
+			Network      string `json:"network"`
+			NetworkUUID  string `json:"networkUuid"`
+			Host         string `json:"host"`
+			User         string `json:"user"`
+			WorkRoot     string `json:"workRoot"`
+			InsecureTLS  bool   `json:"insecureTLS"`
+		} `json:"xcpNg"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.XCPNg.APIURL != "https://xcp-ng.example.test" || got.XCPNg.Username != "root" || got.XCPNg.Auth != "configured" || got.XCPNg.Template != "ubuntu-template" || got.XCPNg.TemplateUUID != "tpl-0001" || got.XCPNg.SR != "default-sr" || got.XCPNg.SRUUID != "sr-0001" || got.XCPNg.Network != "pool-network" || got.XCPNg.NetworkUUID != "net-0001" || got.XCPNg.Host != "host-0001" || got.XCPNg.User != "runner" || got.XCPNg.WorkRoot != "/work/xcp-ng" || !got.XCPNg.InsecureTLS {
+		t.Fatalf("unexpected xcp-ng json: %#v", got.XCPNg)
+	}
+	if strings.Contains(stdout.String(), "xcp-ng-secret") {
+		t.Fatalf("config show json leaked XCP-ng password: %q", stdout.String())
+	}
+}
+
+func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := []byte(`xcpNg:
+  apiUrl: https://pool-user:pool-pass@xcp-ng.example.test/path?view=1
+  username: root
+  password: xcp-ng-secret
+`)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	wantURL := "https://<redacted>@xcp-ng.example.test/path?view=1"
+	if !strings.Contains(text, "xcp_ng api_url="+wantURL) {
+		t.Fatalf("config show text missing redacted XCP-ng API URL: %q", text)
+	}
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config show text leaked %q: %q", secret, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		XCPNg struct {
+			APIURL string `json:"apiUrl"`
+			Auth   string `json:"auth"`
+		} `json:"xcpNg"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.XCPNg.APIURL != wantURL || got.XCPNg.Auth != "configured" {
+		t.Fatalf("unexpected xcp-ng json: %#v", got.XCPNg)
+	}
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show json leaked %q: %q", secret, stdout.String())
+		}
+	}
+}
+
+func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := []byte(`xcpNg:
+  apiUrl: pool-user:pool-pass@xcp-ng.example.test/path?view=1
+  username: root
+  password: xcp-ng-secret
+`)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	wantURL := "<redacted>@xcp-ng.example.test/path?view=1"
+	if !strings.Contains(text, "xcp_ng api_url="+wantURL) {
+		t.Fatalf("config show text missing redacted scheme-less XCP-ng API URL: %q", text)
+	}
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config show text leaked %q: %q", secret, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		XCPNg struct {
+			APIURL string `json:"apiUrl"`
+			Auth   string `json:"auth"`
+		} `json:"xcpNg"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.XCPNg.APIURL != wantURL || got.XCPNg.Auth != "configured" {
+		t.Fatalf("unexpected xcp-ng json: %#v", got.XCPNg)
+	}
+	for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass", "xcp-ng-secret"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show json leaked %q: %q", secret, stdout.String())
+		}
+	}
+}
+
+func TestRedactedConfigURLRedactsUserinfoOnMalformedURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"full URL with bad escape in host", "https://pool-user:pool-pass@%zz"},
+		{"full URL with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz"},
+		{"full URL with bad port", "https://pool-user:pool-pass@xcp-ng.example.test:abc"},
+		{"full URL with extra at in password", "https://pool-user:pool@pass@%zz"},
+		{"full URL with slash in password", "https://pool-user:pool/pass@host/%zz"},
+		{"full URL with query delimiter in password", "https://pool-user:pool?pass@host/%zz"},
+		{"full URL with fragment delimiter in password", "https://pool-user:pool#pass@host/%zz"},
+		{"scheme-less URL with bad escape in host", "pool-user:pool-pass@%zz"},
+		{"scheme-less URL with extra at in password", "pool-user:pool@pass@%zz"},
+		{"scheme-less URL with bad escape in path", "pool-user:pool-pass@%zz/path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactedConfigURL(tc.raw)
+			for _, secret := range []string{"pool-user", "pool-pass", "pool/pass", "pool?pass", "pool#pass", "pool@pass", "pool-user:pool-pass"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("redacted URL leaked %q for %q: %s", secret, tc.raw, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"full URL with bad escape in host", "https://pool-user:pool-pass@%zz"},
+		{"full URL with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz"},
+		{"scheme-less URL with bad escape in host", "pool-user:pool-pass@%zz"},
+		{"scheme-less URL with bad escape in path", "pool-user:pool-pass@%zz/path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := routingSafeURL(tc.raw)
+			for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass"} {
+				if strings.Contains(got, secret) {
+					t.Fatalf("routing URL leaked %q for %q: %s", secret, tc.raw, got)
+				}
+			}
+		})
 	}
 }
 

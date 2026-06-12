@@ -175,9 +175,17 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	providerDef, err := ProviderFor(cfg.Provider)
-	if err != nil {
-		return err
+	var providerDef Provider
+	if resolvedDoctorID == "" {
+		providerDef, err = validateProviderTargetSupport(cfg)
+		if err != nil {
+			return err
+		}
+	} else {
+		providerDef, err = ProviderFor(cfg.Provider)
+		if err != nil {
+			return err
+		}
 	}
 	for _, tool := range doctorLocalTools(providerDef.Spec()) {
 		path, err := exec.LookPath(tool)

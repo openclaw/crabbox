@@ -69,7 +69,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
 	if err != nil {
 		return err
 	}
@@ -215,7 +215,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		command = command[1:]
 	}
 	command = trimCommandSeparator(command)
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
 	if err != nil {
 		return err
 	}
@@ -407,7 +407,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		command = command[1:]
 	}
 	command = trimCommandSeparator(command)
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
 	if err != nil {
 		return err
 	}

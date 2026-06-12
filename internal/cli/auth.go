@@ -18,18 +18,34 @@ import (
 func (a App) login(ctx context.Context, args []string) error {
 	fs := newFlagSet("login", a.Stderr)
 	brokerURL := fs.String("url", "", "broker URL")
-	provider := fs.String("provider", "", "default brokered provider: hetzner, aws, azure, or gcp")
+	provider := fs.String("provider", "", "provider for managed or registered leases")
 	tokenStdin := fs.Bool("token-stdin", false, "read broker token from stdin")
 	noBrowser := fs.Bool("no-browser", false, "print GitHub login URL instead of opening a browser")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	urlWasExplicit := strings.TrimSpace(*brokerURL) != ""
+	cfg, err := loadConfigWithOverrides(*brokerURL, *provider)
+	if err != nil {
+		return err
+	}
+	brokerMode := cfg.BrokerMode
 	if *brokerURL == "" {
-		if cfg, err := loadConfig(); err == nil {
-			*brokerURL = cfg.Coordinator
-			if *provider == "" {
-				*provider = cfg.Provider
+		*brokerURL = cfg.Coordinator
+	}
+	if *provider == "" {
+		if cfg.brokerProvider != "" {
+			candidate, candidateErr := validateBrokerProviderForMode(cfg.brokerProvider, string(brokerMode))
+			if candidateErr != nil {
+				return candidateErr
+			}
+			if !urlWasExplicit {
+				*provider = candidate
+			}
+		} else if !urlWasExplicit {
+			if candidate, candidateErr := validateBrokerProviderForMode(cfg.Provider, string(brokerMode)); candidateErr == nil {
+				*provider = candidate
 			}
 		}
 	}
@@ -37,12 +53,12 @@ func (a App) login(ctx context.Context, args []string) error {
 		return exit(2, "crabbox login requires --url <broker-url> or a configured broker URL")
 	}
 	if *tokenStdin {
-		return a.loginWithToken(ctx, *brokerURL, *provider, *jsonOut)
+		return a.loginWithToken(ctx, *brokerURL, *provider, brokerMode, *jsonOut)
 	}
-	return a.loginWithGitHub(ctx, *brokerURL, *provider, *noBrowser, *jsonOut)
+	return a.loginWithGitHub(ctx, *brokerURL, *provider, brokerMode, *noBrowser, *jsonOut)
 }
 
-func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, jsonOut bool) error {
+func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, brokerMode BrokerMode, jsonOut bool) error {
 	data, err := io.ReadAll(a.input())
 	if err != nil {
 		return exit(2, "read broker token: %v", err)
@@ -51,7 +67,7 @@ func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, jso
 	if token == "" {
 		return exit(2, "broker token from stdin is empty")
 	}
-	path, cfg, err := writeBrokerLogin(brokerURL, token, provider)
+	path, cfg, err := writeBrokerLogin(brokerURL, token, provider, brokerMode)
 	if err != nil {
 		return err
 	}
@@ -65,13 +81,13 @@ func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, jso
 	return a.finishLogin(ctx, coord, path, cfg, jsonOut)
 }
 
-func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, noBrowser, jsonOut bool) error {
+func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, brokerMode BrokerMode, noBrowser, jsonOut bool) error {
 	pollSecret, err := randomHex(32)
 	if err != nil {
 		return err
 	}
 	pollSecretHash := sha256Hex(pollSecret)
-	client, err := coordinatorClientForLogin(brokerURL)
+	client, err := coordinatorClientForLogin(brokerURL, provider)
 	if err != nil {
 		return err
 	}
@@ -81,7 +97,7 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, no
 	}
 	if canonicalBrokerURL, ok := canonicalBrokerURLFromLoginURL(start.URL); ok && !sameBrokerURL(brokerURL, canonicalBrokerURL) {
 		brokerURL = canonicalBrokerURL
-		client, err = coordinatorClientForLogin(brokerURL)
+		client, err = coordinatorClientForLogin(brokerURL, provider)
 		if err != nil {
 			return err
 		}
@@ -120,7 +136,7 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, no
 			if provider == "" {
 				provider = poll.Provider
 			}
-			path, cfg, err := writeBrokerLogin(brokerURL, poll.Token, provider)
+			path, cfg, err := writeBrokerLogin(brokerURL, poll.Token, provider, brokerMode)
 			if err != nil {
 				return err
 			}
@@ -174,12 +190,11 @@ func (a App) finishLogin(ctx context.Context, coord *CoordinatorClient, path str
 	return nil
 }
 
-func coordinatorClientForLogin(brokerURL string) (*CoordinatorClient, error) {
-	cfg, err := loadConfig()
+func coordinatorClientForLogin(brokerURL, provider string) (*CoordinatorClient, error) {
+	cfg, err := loadConfigWithOverrides(brokerURL, provider)
 	if err != nil {
 		return nil, err
 	}
-	cfg.Coordinator = brokerURL
 	cfg.CoordToken = ""
 	coord, ok, err := newCoordinatorClient(cfg)
 	if err != nil {
@@ -312,7 +327,7 @@ func (a App) whoami(ctx context.Context, args []string) error {
 	return nil
 }
 
-func writeBrokerLogin(brokerURL, token, provider string) (string, Config, error) {
+func writeBrokerLogin(brokerURL, token, provider string, brokerMode BrokerMode) (string, Config, error) {
 	path := writableConfigPath()
 	if path == "" {
 		return "", Config{}, exit(2, "user config directory is unavailable")
@@ -326,9 +341,14 @@ func writeBrokerLogin(brokerURL, token, provider string) (string, Config, error)
 	}
 	file.Broker.URL = brokerURL
 	file.Broker.Token = token
-	if provider != "" {
-		file.Broker.Provider = provider
-		file.Provider = provider
+	file.Broker.Mode = string(brokerMode)
+	brokerProvider, err := validateBrokerProviderForMode(provider, string(brokerMode))
+	if err != nil {
+		return "", Config{}, err
+	}
+	if brokerProvider != "" {
+		file.Broker.Provider = brokerProvider
+		file.Provider = brokerProvider
 	}
 	written, err := writeUserFileConfig(file)
 	if err != nil {

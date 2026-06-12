@@ -137,7 +137,7 @@ func isHelpArg(arg string) bool {
 }
 
 func (a App) printHelp() {
-	fmt.Fprintln(a.Stdout, `Crabbox leases remote test boxes, syncs your dirty checkout, runs commands, and cleans up.
+	fmt.Fprintf(a.Stdout, `Crabbox leases remote test boxes, syncs your dirty checkout, runs commands, and cleans up.
 
 Usage:
   crabbox <command> [flags]
@@ -283,7 +283,7 @@ Environment:
   CRABBOX_ACCESS_CLIENT_ID     Cloudflare Access service token client ID
   CRABBOX_ACCESS_CLIENT_SECRET Cloudflare Access service token client secret
   CRABBOX_ACCESS_TOKEN         Cloudflare Access JWT for protected routes
-  CRABBOX_PROVIDER             hetzner, aws, azure, azure-dynamic-sessions, gcp, proxmox, parallels, ssh, exe-dev, blacksmith-testbox, namespace-devbox, semaphore, daytona, morph, islo, e2b, modal, sprites, runpod, or cloudflare
+  CRABBOX_PROVIDER             %s
   CRABBOX_TARGET               linux, macos, or windows
   CRABBOX_WINDOWS_MODE         normal or wsl2
   CRABBOX_DESKTOP              Provision or require desktop/VNC capability
@@ -314,7 +314,7 @@ Aliases:
   crabbox machine cleanup      Alias for cleanup
 
 Docs:
-  docs/commands/README.md`)
+  docs/commands/README.md`, providerHelpEnvValues())
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {

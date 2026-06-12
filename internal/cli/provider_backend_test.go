@@ -40,6 +40,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "google-cloud", canonical: "gcp"},
 		{name: "incus", canonical: "incus"},
 		{name: "proxmox", canonical: "proxmox"},
+		{name: "xcp-ng", canonical: "xcp-ng"},
 		{name: "ssh", canonical: "ssh"},
 		{name: "static", canonical: "ssh"},
 		{name: "static-ssh", canonical: "ssh"},
@@ -212,6 +213,15 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
 	if err != nil {
 		t.Fatalf("load proxmox backend: %v", err)
+	}
+	if _, ok := backend.(SSHLeaseBackend); !ok {
+		t.Fatalf("backend=%T, want ssh lease backend", backend)
+	}
+
+	cfg.Provider = "xcp-ng"
+	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load xcp-ng backend: %v", err)
 	}
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		t.Fatalf("backend=%T, want ssh lease backend", backend)
@@ -424,6 +434,47 @@ func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestProviderFlagsApplyXCPNgWithoutPasswordFlag(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if fs.Lookup("xcp-ng-password") != nil {
+		t.Fatal("xcp-ng password must not be registered as an argv flag")
+	}
+	if err := parseFlags(fs, []string{
+		"--provider", "xcp-ng",
+		"--xcp-ng-api-url", "https://xcp-ng.example.test",
+		"--xcp-ng-username", "root",
+		"--xcp-ng-template", "ubuntu-template",
+		"--xcp-ng-template-uuid", "tpl-0001",
+		"--xcp-ng-sr", "default-sr",
+		"--xcp-ng-sr-uuid", "sr-0001",
+		"--xcp-ng-network", "pool-network",
+		"--xcp-ng-network-uuid", "net-0001",
+		"--xcp-ng-host", "host-0001",
+		"--xcp-ng-user", "runner",
+		"--xcp-ng-work-root", "/work/xcp-ng",
+		"--xcp-ng-insecure-tls",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Template != "ubuntu-template" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "default-sr" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "pool-network" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("xcp-ng flags not applied: %#v", cfg.XCPNg)
+	}
+	if cfg.XCPNg.Password != "" {
+		t.Fatalf("xcp-ng password unexpectedly set from flags: %q", cfg.XCPNg.Password)
+	}
+	if cfg.ServerType != "template-tpl-0001" {
+		t.Fatalf("server type=%q want template-tpl-0001", cfg.ServerType)
+	}
+}
+
 func TestLeaseCreateFlagsApplySelectedProviderFlags(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
@@ -608,6 +659,34 @@ func TestLeaseCreateFlagsReapplyProxmoxDefaultsAfterProviderOverride(t *testing.
 	}
 }
 
+func TestLeaseCreateFlagsReapplyXCPNgDefaultsAfterProviderOverride(t *testing.T) {
+	defaults := baseConfig()
+	defaults.Provider = "hetzner"
+	defaults.XCPNg.Template = "Ubuntu Ready"
+	defaults.XCPNg.User = "runner"
+	defaults.XCPNg.WorkRoot = "/work/xcp-ng"
+	defaults.ServerType = serverTypeForConfig(defaults)
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "xcp-ng"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "runner" {
+		t.Fatalf("ssh user=%q want xcp-ng default", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/work/xcp-ng" {
+		t.Fatalf("work root=%q want xcp-ng default", cfg.WorkRoot)
+	}
+	if cfg.ServerType != "template-ubuntu-ready" {
+		t.Fatalf("server type=%q want template-ubuntu-ready", cfg.ServerType)
+	}
+}
+
 func TestLeaseCreateFlagsReapplyDigitalOceanTargetAfterProviderOverride(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -737,6 +816,91 @@ proxmox:
 	}
 	if cfg.ServerType != "template-9000" {
 		t.Fatalf("server type=%q want template-9000", cfg.ServerType)
+	}
+}
+
+func TestLoadLeaseTargetConfigRejectsUnsupportedProviderTarget(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: xcp-ng
+xcpNg:
+  apiUrl: https://xcp.example.test
+  username: root
+  password: secret
+  template: ubuntu
+  sr: local
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{"--target", "macos"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadLeaseTargetConfig(fs, "xcp-ng", targetFlags, networkFlags, leaseTargetConfigOptions{})
+	if err == nil || !strings.Contains(err.Error(), "provider=xcp-ng managed provisioning supports target=linux only") {
+		t.Fatalf("err=%v, want xcp-ng target validation", err)
+	}
+}
+
+func TestLoadLeaseTargetConfigAllowsExistingLeaseDespiteUnsupportedProvisioningTarget(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: xcp-ng
+target: macos
+xcpNg:
+  apiUrl: https://xcp.example.test
+  username: root
+  password: secret
+  template: ubuntu
+  sr: local
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadLeaseTargetConfig(fs, "xcp-ng", targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "cbx_existing"})
+	if err != nil {
+		t.Fatalf("loadLeaseTargetConfig existing lease: %v", err)
+	}
+}
+
+func TestLoadLeaseTargetConfigAllowsAWSMacOSWithoutProvisioningHost(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_HOST_ID", "")
+	t.Setenv("CRABBOX_AWS_MAC_HOST_ID", "")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	if err := os.WriteFile(configPath, []byte(`provider: aws
+aws:
+  region: us-east-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{"--target", "macos"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, "aws", targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "i-1234567890abcdef0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS || cfg.Provider != "aws" {
+		t.Fatalf("cfg provider=%q target=%q", cfg.Provider, cfg.TargetOS)
 	}
 }
 

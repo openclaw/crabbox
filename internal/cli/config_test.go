@@ -82,6 +82,20 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_E2B_TEMPLATE",
 		"CRABBOX_E2B_WORKDIR",
 		"CRABBOX_E2B_USER",
+		"CRABBOX_OPENSANDBOX_API_URL",
+		"OPEN_SANDBOX_API_URL",
+		"CRABBOX_OPENSANDBOX_API_KEY",
+		"OPEN_SANDBOX_API_KEY",
+		"CRABBOX_OPENSANDBOX_IMAGE",
+		"CRABBOX_OPENSANDBOX_WORKDIR",
+		"CRABBOX_OPENSANDBOX_CPU",
+		"CRABBOX_OPENSANDBOX_MEMORY",
+		"CRABBOX_OPENSANDBOX_TIMEOUT_SECS",
+		"CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS",
+		"CRABBOX_OPENSANDBOX_PLATFORM_OS",
+		"CRABBOX_OPENSANDBOX_PLATFORM_ARCH",
+		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
+		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
 		"CRABBOX_ISLO_API_KEY",
 		"ISLO_API_KEY",
 		"CRABBOX_ISLO_BASE_URL",
@@ -1414,6 +1428,84 @@ func TestRepoConfigClearsInheritedCacheVolumes(t *testing.T) {
 	}
 }
 
+func TestRepoConfigCannotRedirectInheritedXCPNgCredentials(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	userConfig := "provider: xcp-ng\nxcpNg:\n  apiUrl: https://trusted.example.test\n  username: root\n  password: user-secret\n"
+	if err := os.WriteFile(userPath, []byte(userConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := "xcpNg:\n  apiUrl: https://attacker.example.test\n  insecureTls: true\n  template: project-template\n"
+	if err := os.WriteFile(".crabbox.yaml", []byte(projectConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.APIURL != "https://trusted.example.test" || cfg.XCPNg.InsecureTLS {
+		t.Fatalf("project config changed trusted connection: %#v", cfg.XCPNg)
+	}
+	if cfg.XCPNg.Password != "user-secret" || cfg.XCPNg.Template != "project-template" {
+		t.Fatalf("unexpected merged xcp-ng config: %#v", cfg.XCPNg)
+	}
+}
+
+func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.XCPNg.TemplateUUID = "old-template-uuid"
+	cfg.XCPNg.SRUUID = "old-sr-uuid"
+	cfg.XCPNg.NetworkUUID = "old-network-uuid"
+	if err := applyFileConfig(&cfg, fileConfig{XCPNg: &fileXCPNgConfig{
+		Template: "new-template",
+		SR:       "new-sr",
+		Network:  "new-network",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
+		t.Fatalf("file names did not clear inherited UUIDs: %#v", cfg.XCPNg)
+	}
+
+	cfg.XCPNg.TemplateUUID = "old-template-uuid"
+	cfg.XCPNg.SRUUID = "old-sr-uuid"
+	cfg.XCPNg.NetworkUUID = "old-network-uuid"
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE", "env-template")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE_UUID", "")
+	t.Setenv("CRABBOX_XCP_NG_SR", "env-sr")
+	t.Setenv("CRABBOX_XCP_NG_SR_UUID", "")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK", "env-network")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK_UUID", "")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
+		t.Fatalf("environment names did not clear inherited UUIDs: %#v", cfg.XCPNg)
+	}
+}
+
 func TestRepoConfigCannotOverrideFreestyleAPIURL(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -1760,6 +1852,18 @@ openComputer:
   memoryMB: 16384
   timeoutSecs: 600
   execTimeoutSecs: 7200
+openSandbox:
+  apiUrl: https://opensandbox-file-ignored.example.test
+  image: docker.io/library/python:3.12
+  workdir: /workspace/osb-test
+  cpu: "2"
+  memory: 4Gi
+  timeoutSecs: 900
+  execTimeoutSecs: 1800
+  platformOS: linux
+  platformArch: arm64
+  secureAccess: true
+  useServerProxy: true
 cloudflare:
   apiUrl: https://cloudflare.example.test
   token: cloudflare-token
@@ -1776,6 +1880,20 @@ proxmox:
   user: runner
   workRoot: /work/proxmox
   fullClone: false
+  insecureTLS: true
+xcpNg:
+  apiUrl: https://xcp-ng.example.test
+  username: root
+  password: xcp-ng-secret
+  template: ubuntu-template
+  templateUuid: tpl-0001
+  sr: default-sr
+  srUuid: sr-0001
+  network: pool-network
+  networkUuid: net-0001
+  host: host-0001
+  user: runner
+  workRoot: /work/xcp-ng
   insecureTLS: true
 semaphore:
   host: semaphore.example.test
@@ -1930,11 +2048,17 @@ ssh:
 	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
 		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)
 	}
+	if cfg.OpenSandbox.APIURL != "" || cfg.OpenSandbox.Image != "docker.io/library/python:3.12" || cfg.OpenSandbox.Workdir != "/workspace/osb-test" || cfg.OpenSandbox.CPU != "2" || cfg.OpenSandbox.Memory != "4Gi" || cfg.OpenSandbox.TimeoutSecs != 900 || cfg.OpenSandbox.ExecTimeoutSecs != 1800 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "arm64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
+		t.Fatalf("opensandbox config not loaded safely: %#v", cfg.OpenSandbox)
+	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
 		t.Fatalf("cloudflare config not loaded: %#v", cfg.Cloudflare)
 	}
 	if cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.TokenID != "crabbox@pve!test" || cfg.Proxmox.TokenSecret != "proxmox-secret" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.Proxmox.Storage != "local-lvm" || cfg.Proxmox.Pool != "crabbox" || cfg.Proxmox.Bridge != "vmbr1" || cfg.Proxmox.User != "runner" || cfg.Proxmox.WorkRoot != "/work/proxmox" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("proxmox config not loaded: %#v", cfg.Proxmox)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Password != "xcp-ng-secret" || cfg.XCPNg.Template != "ubuntu-template" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "default-sr" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "pool-network" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.XCPNg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("xcpNg config not loaded: %#v", cfg.XCPNg)
 	}
 	if cfg.Semaphore.Host != "semaphore.example.test" || cfg.Semaphore.Token != "semaphore-token" || cfg.Semaphore.Project != "crabbox" || cfg.Semaphore.Machine != "f1-standard-4" || cfg.Semaphore.OSImage != "ubuntu2404" || cfg.Semaphore.IdleTimeout != "15m" {
 		t.Fatalf("semaphore config not loaded: %#v", cfg.Semaphore)
@@ -2284,6 +2408,18 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_OPENCOMPUTER_MEMORY_MB", "12288")
 	t.Setenv("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", "1200")
 	t.Setenv("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", "2400")
+	t.Setenv("OPEN_SANDBOX_API_URL", "https://opensandbox-file.example")
+	t.Setenv("CRABBOX_OPENSANDBOX_API_URL", "https://opensandbox-env.example")
+	t.Setenv("CRABBOX_OPENSANDBOX_IMAGE", "ubuntu:osb-env")
+	t.Setenv("CRABBOX_OPENSANDBOX_WORKDIR", "/workspace/osb-env")
+	t.Setenv("CRABBOX_OPENSANDBOX_CPU", "750m")
+	t.Setenv("CRABBOX_OPENSANDBOX_MEMORY", "1536Mi")
+	t.Setenv("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "123")
+	t.Setenv("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", "456")
+	t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", "linux")
+	t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", "amd64")
+	t.Setenv("CRABBOX_OPENSANDBOX_SECURE_ACCESS", "true")
+	t.Setenv("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY", "true")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
 	t.Setenv("CRABBOX_CLOUDFLARE_WORKDIR", "/workspace/cloudflare-env")
@@ -2299,6 +2435,19 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_PROXMOX_WORK_ROOT", "/work/proxmox-env")
 	t.Setenv("CRABBOX_PROXMOX_FULL_CLONE", "false")
 	t.Setenv("CRABBOX_PROXMOX_INSECURE_TLS", "true")
+	t.Setenv("CRABBOX_XCP_NG_API_URL", "https://xcp-ng-env.example.test")
+	t.Setenv("CRABBOX_XCP_NG_USERNAME", "root-env")
+	t.Setenv("CRABBOX_XCP_NG_PASSWORD", "xcp-ng-env-secret")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE", "template-env")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE_UUID", "tpl-env")
+	t.Setenv("CRABBOX_XCP_NG_SR", "sr-env")
+	t.Setenv("CRABBOX_XCP_NG_SR_UUID", "sr-uuid-env")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK", "network-env")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK_UUID", "network-uuid-env")
+	t.Setenv("CRABBOX_XCP_NG_HOST", "host-env")
+	t.Setenv("CRABBOX_XCP_NG_USER", "runner-xcp-env")
+	t.Setenv("CRABBOX_XCP_NG_WORK_ROOT", "/work/xcp-ng-env")
+	t.Setenv("CRABBOX_XCP_NG_INSECURE_TLS", "true")
 	t.Setenv("SEMAPHORE_HOST", "semaphore-file.example.test")
 	t.Setenv("CRABBOX_SEMAPHORE_HOST", "semaphore-env.example.test")
 	t.Setenv("SEMAPHORE_API_TOKEN", "semaphore-token-file")
@@ -2444,11 +2593,17 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
 		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
 	}
+	if cfg.OpenSandbox.APIURL != "https://opensandbox-env.example" || cfg.OpenSandbox.Image != "ubuntu:osb-env" || cfg.OpenSandbox.Workdir != "/workspace/osb-env" || cfg.OpenSandbox.CPU != "750m" || cfg.OpenSandbox.Memory != "1536Mi" || cfg.OpenSandbox.TimeoutSecs != 123 || cfg.OpenSandbox.ExecTimeoutSecs != 456 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "amd64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
+		t.Fatalf("unexpected opensandbox env: %#v", cfg.OpenSandbox)
+	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {
 		t.Fatalf("unexpected cloudflare env: %#v", cfg.Cloudflare)
 	}
 	if cfg.Proxmox.APIURL != "https://pve-env.example:8006" || cfg.Proxmox.TokenID != "runner@pve!env" || cfg.Proxmox.TokenSecret != "proxmox-env-secret" || cfg.Proxmox.Node != "pve-env" || cfg.Proxmox.TemplateID != 9100 || cfg.Proxmox.Storage != "ceph-env" || cfg.Proxmox.Pool != "pool-env" || cfg.Proxmox.Bridge != "vmbr2" || cfg.Proxmox.User != "runner-env" || cfg.Proxmox.WorkRoot != "/work/proxmox-env" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("unexpected proxmox env: %#v", cfg.Proxmox)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng-env.example.test" || cfg.XCPNg.Username != "root-env" || cfg.XCPNg.Password != "xcp-ng-env-secret" || cfg.XCPNg.Template != "template-env" || cfg.XCPNg.TemplateUUID != "tpl-env" || cfg.XCPNg.SR != "sr-env" || cfg.XCPNg.SRUUID != "sr-uuid-env" || cfg.XCPNg.Network != "network-env" || cfg.XCPNg.NetworkUUID != "network-uuid-env" || cfg.XCPNg.Host != "host-env" || cfg.XCPNg.User != "runner-xcp-env" || cfg.XCPNg.WorkRoot != "/work/xcp-ng-env" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("unexpected xcp-ng env: %#v", cfg.XCPNg)
 	}
 	if cfg.Semaphore.Host != "semaphore-env.example.test" || cfg.Semaphore.Token != "semaphore-token-env" || cfg.Semaphore.Project != "semaphore-project-env" || cfg.Semaphore.Machine != "f1-standard-env" || cfg.Semaphore.OSImage != "ubuntu-env" || cfg.Semaphore.IdleTimeout != "22m" {
 		t.Fatalf("unexpected semaphore env: %#v", cfg.Semaphore)
@@ -2485,6 +2640,19 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if len(cfg.Run.PreflightTools) != 3 || cfg.Run.PreflightTools[1] != "bun" {
 		t.Fatalf("unexpected preflight tools: %#v", cfg.Run.PreflightTools)
+	}
+}
+
+func TestApplyEnvRejectsNegativeOpenSandboxTimeouts(t *testing.T) {
+	for _, name := range []string{"CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "-1")
+			cfg := baseConfig()
+			err := applyEnv(&cfg)
+			if err == nil || !strings.Contains(err.Error(), name+" must be non-negative") {
+				t.Fatalf("err=%v, want negative timeout rejection", err)
+			}
+		})
 	}
 }
 

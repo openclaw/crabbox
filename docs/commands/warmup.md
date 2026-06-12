@@ -130,6 +130,20 @@ Managed Hetzner provisioning supports Linux only. For managed Windows, use
 `--provider aws --target windows` or `--provider azure --target windows`; for an
 existing Hetzner Windows host, use `--provider ssh --target windows`.
 
+### xcp-ng
+
+`--provider xcp-ng` copies a configured Linux template to the selected SR with
+`VM.copy`, calls `VM.provision`, attaches a per-lease FAT16 `CIDATA`
+config-drive image, waits for XCP-ng guest metrics to report an IPv4 address,
+and then uses the normal SSH bootstrap. If `xcpNg.network` or
+`xcpNg.networkUuid` is set, Crabbox moves all template VIFs to that network, so
+single-NIC templates are the safest default. Run
+`crabbox doctor --provider xcp-ng --json` first; it is non-mutating and reports
+`mutation=false`. A template name or UUID, storage repository, API URL,
+username, and password must come from config or environment before warmup can
+create a lease. Keep the XAPI endpoint on a management network or VPN, prefer
+trusted certificates, and treat `--xcp-ng-insecure-tls` as private-lab only.
+
 ### aws — Windows
 
 `--provider aws --target windows --windows-mode normal --desktop` creates a real

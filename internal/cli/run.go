@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -585,6 +586,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			applyResolvedLeaseConfig(&cfg, server, &target)
 			if borrowedPool != nil {
 				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
 			}
@@ -1667,6 +1669,43 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if cfg.Proxmox.InsecureTLS {
 			args = append(args, "--proxmox-insecure-tls")
 		}
+	case "xcp-ng":
+		if strings.TrimSpace(cfg.XCPNg.APIURL) != "" {
+			args = append(args, "--xcp-ng-api-url", routingSafeURL(cfg.XCPNg.APIURL))
+		}
+		if strings.TrimSpace(cfg.XCPNg.Username) != "" {
+			args = append(args, "--xcp-ng-username", cfg.XCPNg.Username)
+		}
+		if strings.TrimSpace(cfg.XCPNg.Template) != "" {
+			args = append(args, "--xcp-ng-template", cfg.XCPNg.Template)
+		}
+		if strings.TrimSpace(cfg.XCPNg.TemplateUUID) != "" {
+			args = append(args, "--xcp-ng-template-uuid", cfg.XCPNg.TemplateUUID)
+		}
+		if strings.TrimSpace(cfg.XCPNg.SR) != "" {
+			args = append(args, "--xcp-ng-sr", cfg.XCPNg.SR)
+		}
+		if strings.TrimSpace(cfg.XCPNg.SRUUID) != "" {
+			args = append(args, "--xcp-ng-sr-uuid", cfg.XCPNg.SRUUID)
+		}
+		if strings.TrimSpace(cfg.XCPNg.Network) != "" {
+			args = append(args, "--xcp-ng-network", cfg.XCPNg.Network)
+		}
+		if strings.TrimSpace(cfg.XCPNg.NetworkUUID) != "" {
+			args = append(args, "--xcp-ng-network-uuid", cfg.XCPNg.NetworkUUID)
+		}
+		if strings.TrimSpace(cfg.XCPNg.Host) != "" {
+			args = append(args, "--xcp-ng-host", cfg.XCPNg.Host)
+		}
+		if strings.TrimSpace(cfg.XCPNg.User) != "" {
+			args = append(args, "--xcp-ng-user", cfg.XCPNg.User)
+		}
+		if strings.TrimSpace(cfg.XCPNg.WorkRoot) != "" {
+			args = append(args, "--xcp-ng-work-root", cfg.XCPNg.WorkRoot)
+		}
+		if cfg.XCPNg.InsecureTLS {
+			args = append(args, "--xcp-ng-insecure-tls")
+		}
 	case "namespace", "namespace-devbox":
 		if strings.TrimSpace(cfg.Namespace.Site) != "" {
 			args = append(args, "--namespace-site", cfg.Namespace.Site)
@@ -1739,6 +1778,33 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		}
 	}
 	return args
+}
+
+func routingSafeURL(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return value
+	}
+	addedScheme := false
+	parseValue := raw
+	if !strings.Contains(parseValue, "://") {
+		parseValue = "https://" + parseValue
+		addedScheme = true
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil {
+		return sanitizedMalformedConfigURL(parseValue, addedScheme)
+	}
+	if u.User == nil {
+		return value
+	}
+	safe := *u
+	safe.User = nil
+	out := safe.String()
+	if addedScheme {
+		out = strings.TrimPrefix(out, "https://")
+	}
+	return out
 }
 
 type runTimings struct {
@@ -2288,6 +2354,15 @@ func applyResolvedServerConfig(cfg *Config, server Server) {
 	if root := server.Labels["work_root"]; root != "" {
 		cfg.WorkRoot = root
 	}
+	if targetOS := strings.TrimSpace(server.Labels["target"]); targetOS != "" {
+		cfg.TargetOS = targetOS
+	}
+	if windowsMode := strings.TrimSpace(server.Labels["windows_mode"]); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+	} else if cfg.TargetOS != targetWindows {
+		cfg.WindowsMode = ""
+	}
+	normalizeTargetConfig(cfg)
 	if cfg.Provider == "local-container" || server.Provider == "local-container" {
 		if root := server.Labels["work_root"]; root != "" {
 			cfg.LocalContainer.WorkRoot = root
@@ -2368,7 +2443,8 @@ func isBootstrapWaitError(err error) bool {
 	var exitErr ExitError
 	return AsExitError(err, &exitErr) &&
 		exitErr.Code == 5 &&
-		strings.Contains(exitErr.Message, "timed out waiting for SSH")
+		(strings.Contains(exitErr.Message, "timed out waiting for SSH") ||
+			strings.Contains(exitErr.Message, "timed out waiting for XCP-ng guest IPv4"))
 }
 
 func IsBootstrapWaitError(err error) bool {

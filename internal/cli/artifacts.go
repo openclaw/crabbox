@@ -148,7 +148,7 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 	if err := requireLeaseID(*id, "crabbox artifacts collect --id <lease-id-or-slug> [--output <dir>]", cfg); err != nil {
 		return err
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
 	if err != nil {
 		return err
 	}

@@ -94,7 +94,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if !useCoordinator || coord == nil || coord.Token == "" {
 		return exit(2, "code requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, true)
 	if err != nil {
 		return err
 	}

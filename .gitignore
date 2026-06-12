@@ -10,6 +10,9 @@ node_modules/
 *.test
 coverage.out
 /crabbox
+.gomu_history.json
+mutation-report.*
+reports/mutation/
 
 # Local env files: never commit API keys, tokens, or user secrets.
 *.env

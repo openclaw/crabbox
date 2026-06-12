@@ -31,6 +31,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/mxc"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
 	_ "github.com/openclaw/crabbox/internal/providers/opencomputer"
+	_ "github.com/openclaw/crabbox/internal/providers/opensandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/railway"
@@ -43,4 +44,5 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/tensorlake"
 	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
 	_ "github.com/openclaw/crabbox/internal/providers/wandb"
+	_ "github.com/openclaw/crabbox/internal/providers/xcpng"
 )

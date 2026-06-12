@@ -65,6 +65,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Hetzner](hetzner.md) — `hetzner` | Linux · brokered |
 | [DigitalOcean](digitalocean.md) — `digitalocean` | Linux · direct |
 | [Proxmox](proxmox.md) — `proxmox` | Linux · direct |
+| [XCP-ng](xcp-ng.md) — `xcp-ng` | Linux · direct |
 | [Incus](incus.md) — `incus` | Linux · direct |
 | [Parallels](parallels.md) — `parallels` | Linux, macOS, Windows · direct |
 | [Static SSH](ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · static |
@@ -101,6 +102,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Modal](modal.md) — `modal` | Linux |
 | [Microsoft Execution Containers](mxc.md) — `mxc` (`execution-container`) | Windows |
 | [OpenComputer](opencomputer.md) — `opencomputer` (`oc`, `open-computer`) | Linux |
+| [OpenSandbox](opensandbox.md) — `opensandbox` | Linux |
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
 | [Anthropic Sandbox Runtime](anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
@@ -121,11 +123,23 @@ reports.
 - Docker Sandbox is a delegated-run provider driven by the standalone `sbx`
   CLI. It has no aliases, so `docker`, `container`, and `local-docker` remain
   Local Container aliases.
+- OpenSandbox is a delegated-run provider using the OpenSandbox Go SDK for
+  lifecycle, file upload, and execd command execution. It has no aliases in v1,
+  so `osb` remains reserved.
 - Anthropic Sandbox Runtime is a local one-shot delegated-run provider driven
   by the standalone `srt` CLI. It has no SSH lease, no persistent lifecycle,
   and no remote sync surface.
 - ASCII Box is an SSH-lease provider. Crabbox uses the documented `box --json`
   CLI for lifecycle/status/delete, then runs normal sync and commands over SSH.
+- XCP-ng is a direct SSH-lease provider for a self-hosted XCP-ng pool on
+  dedicated 64-bit x86 server-class hardware. XCP-ng itself can host Linux,
+  Windows, and BSD guests, but Crabbox's current `xcp-ng` adapter provisions
+  normal leases from Linux templates only. Crabbox talks to XAPI from the CLI,
+  uses `VM.copy` plus `VM.provision`, injects cloud-init through a FAT16
+  `CIDATA` config drive, optionally moves all VIFs to the configured network,
+  and uses guest metrics for IPv4 discovery. See the provider page for the
+  separate Windows x86_64/x64 ISO E2E harness, and use the Tart provider on
+  Apple hardware for macOS VM workflows.
 - `incus` is a direct Linux SSH-lease provider that stores Crabbox ownership and
   expiry metadata in Incus `user.crabbox.*` instance config keys. Real Apple
   Silicon smoke still follows the separate local testbed contract documented on

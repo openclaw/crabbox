@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -291,6 +292,21 @@ func configShowView(cfg Config) map[string]any {
 			"fullClone":   cfg.Proxmox.FullClone,
 			"insecureTLS": cfg.Proxmox.InsecureTLS,
 		},
+		"xcpNg": map[string]any{
+			"apiUrl":       redactedConfigURL(cfg.XCPNg.APIURL),
+			"username":     cfg.XCPNg.Username,
+			"auth":         tokenState(cfg.XCPNg.Password),
+			"template":     cfg.XCPNg.Template,
+			"templateUuid": cfg.XCPNg.TemplateUUID,
+			"sr":           cfg.XCPNg.SR,
+			"srUuid":       cfg.XCPNg.SRUUID,
+			"network":      cfg.XCPNg.Network,
+			"networkUuid":  cfg.XCPNg.NetworkUUID,
+			"host":         cfg.XCPNg.Host,
+			"user":         cfg.XCPNg.User,
+			"workRoot":     cfg.XCPNg.WorkRoot,
+			"insecureTLS":  cfg.XCPNg.InsecureTLS,
+		},
 		"parallels": map[string]any{
 			"template":         cfg.Parallels.Template,
 			"source":           cfg.Parallels.Source,
@@ -351,7 +367,56 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(cfg.AzureDynamicSessions.Endpoint, "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)
 	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "proxmox api_url=%s node=%s template_id=%d storage=%s pool=%s bridge=%s user=%s work_root=%s full_clone=%t auth=%s\n", blank(cfg.Proxmox.APIURL, "-"), blank(cfg.Proxmox.Node, "-"), cfg.Proxmox.TemplateID, blank(cfg.Proxmox.Storage, "-"), blank(cfg.Proxmox.Pool, "-"), blank(cfg.Proxmox.Bridge, "-"), cfg.Proxmox.User, cfg.Proxmox.WorkRoot, cfg.Proxmox.FullClone, tokenState(cfg.Proxmox.TokenSecret))
+	fmt.Fprintf(w, "xcp_ng api_url=%s username=%s template=%s template_uuid=%s sr=%s sr_uuid=%s network=%s network_uuid=%s host=%s user=%s work_root=%s insecure_tls=%t auth=%s\n", blank(redactedConfigURL(cfg.XCPNg.APIURL), "-"), blank(cfg.XCPNg.Username, "-"), blank(cfg.XCPNg.Template, "-"), blank(cfg.XCPNg.TemplateUUID, "-"), blank(cfg.XCPNg.SR, "-"), blank(cfg.XCPNg.SRUUID, "-"), blank(cfg.XCPNg.Network, "-"), blank(cfg.XCPNg.NetworkUUID, "-"), blank(cfg.XCPNg.Host, "-"), cfg.XCPNg.User, cfg.XCPNg.WorkRoot, cfg.XCPNg.InsecureTLS, tokenState(cfg.XCPNg.Password))
 	fmt.Fprintf(w, "parallels template=%s source=%s source_id=%s snapshot=%s snapshot_id=%s clone_mode=%s host=%s user=%s work_root=%s startup_timeout=%s templates=%d hosts=%d\n", blank(cfg.Parallels.Template, "-"), blank(cfg.Parallels.Source, "-"), blank(cfg.Parallels.SourceID, "-"), blank(cfg.Parallels.SourceSnapshot, "-"), blank(cfg.Parallels.SourceSnapshotID, "-"), cfg.Parallels.CloneMode, blank(cfg.Parallels.Host, "local"), cfg.Parallels.User, cfg.Parallels.WorkRoot, cfg.Parallels.StartupTimeout, len(cfg.Parallels.Templates), len(cfg.Parallels.Hosts))
+}
+
+func redactedConfigURL(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return value
+	}
+	addedScheme := false
+	parseValue := raw
+	if !strings.Contains(parseValue, "://") {
+		parseValue = "https://" + parseValue
+		addedScheme = true
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil {
+		return sanitizedMalformedConfigURL(parseValue, addedScheme)
+	}
+	if u.User == nil {
+		return value
+	}
+	redacted := *u
+	redacted.User = url.User("<redacted>")
+	out := strings.ReplaceAll(redacted.String(), "%3Credacted%3E", "<redacted>")
+	if addedScheme {
+		out = strings.TrimPrefix(out, "https://")
+	}
+	return out
+}
+
+// sanitizedMalformedConfigURL strips any userinfo from a malformed URL so
+// url.Parse error messages and downstream diagnostics cannot echo the
+// original credentials.
+func sanitizedMalformedConfigURL(parseValue string, addedScheme bool) string {
+	sanitized := parseValue
+	if i := strings.Index(sanitized, "://"); i >= 0 {
+		rest := sanitized[i+3:]
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			sanitized = sanitized[:i+3] + rest[at+1:]
+		}
+	} else {
+		if at := strings.LastIndex(sanitized, "@"); at >= 0 {
+			sanitized = sanitized[at+1:]
+		}
+	}
+	if addedScheme {
+		sanitized = strings.TrimPrefix(sanitized, "https://")
+	}
+	return sanitized
 }
 
 func jobConfigViews(jobs map[string]JobConfig) map[string]any {
@@ -432,6 +497,30 @@ func (a App) configSetBroker(args []string) error {
 	if *mode != "" && *mode != string(BrokerModeManaged) && *mode != string(BrokerModeRegistered) {
 		return exit(2, "--mode must be managed or registered")
 	}
+	path := writableConfigPath()
+	if path == "" {
+		return exit(2, "user config directory is unavailable")
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		return err
+	}
+	if file.Broker == nil {
+		file.Broker = &fileBrokerConfig{}
+	}
+	effectiveMode, err := normalizeBrokerMode(blank(*mode, file.Broker.Mode))
+	if err != nil {
+		return err
+	}
+	explicitProvider := strings.TrimSpace(*provider)
+	validationProvider := explicitProvider
+	if validationProvider == "" {
+		validationProvider = strings.TrimSpace(file.Broker.Provider)
+	}
+	brokerProvider, err := validateBrokerProviderForMode(validationProvider, string(effectiveMode))
+	if err != nil {
+		return err
+	}
 	var token string
 	if *tokenStdin {
 		data, err := io.ReadAll(os.Stdin)
@@ -454,17 +543,6 @@ func (a App) configSetBroker(args []string) error {
 			return exit(2, "broker admin token from stdin is empty")
 		}
 	}
-	path := writableConfigPath()
-	if path == "" {
-		return exit(2, "user config directory is unavailable")
-	}
-	file, err := readFileConfig(path)
-	if err != nil {
-		return err
-	}
-	if file.Broker == nil {
-		file.Broker = &fileBrokerConfig{}
-	}
 	file.Broker.URL = *url
 	if *mode != "" {
 		file.Broker.Mode = *mode
@@ -478,9 +556,9 @@ func (a App) configSetBroker(args []string) error {
 	if adminToken != "" {
 		file.Broker.AdminToken = adminToken
 	}
-	if *provider != "" {
-		file.Broker.Provider = *provider
-		file.Provider = *provider
+	if explicitProvider != "" && brokerProvider != "" {
+		file.Broker.Provider = brokerProvider
+		file.Provider = brokerProvider
 	}
 	written, err := writeUserFileConfig(file)
 	if err != nil {
@@ -488,6 +566,40 @@ func (a App) configSetBroker(args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "wrote %s broker=%s mode=%s auth=%s admin_auth=%s\n", written, *url, blank(file.Broker.Mode, string(BrokerModeManaged)), tokenState(file.Broker.Token), tokenState(file.Broker.AdminToken))
 	return nil
+}
+
+func validateBrokerProvider(provider string) (string, error) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return "", nil
+	}
+	resolved, err := ProviderFor(provider)
+	if err != nil {
+		return "", err
+	}
+	spec := resolved.Spec()
+	if spec.Coordinator != CoordinatorSupported {
+		return "", exit(2, "provider %q cannot be used with a broker; supported broker providers are aws, azure, gcp, and hetzner", provider)
+	}
+	return resolved.Name(), nil
+}
+
+func validateBrokerProviderForMode(provider, mode string) (string, error) {
+	provider = strings.TrimSpace(provider)
+	if mode != string(BrokerModeRegistered) {
+		return validateBrokerProvider(provider)
+	}
+	if provider == "" {
+		return "", nil
+	}
+	if normalizeProviderName(provider) == "external" {
+		return "external", nil
+	}
+	resolved, err := ProviderFor(provider)
+	if err != nil {
+		return "", err
+	}
+	return resolved.Name(), nil
 }
 
 func tokenState(token string) string {

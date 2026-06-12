@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestWriteBrokerLoginStoresTokenInUserConfig(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
 	t.Setenv("CRABBOX_PROVIDER", "")
 
-	path, cfg, err := writeBrokerLogin("https://crabbox.example.test", "secret", "aws")
+	path, cfg, err := writeBrokerLogin("https://crabbox.example.test", "secret", "aws", BrokerModeManaged)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestWriteBrokerLoginHonorsExplicitConfigPath(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
 	t.Setenv("CRABBOX_PROVIDER", "")
 
-	path, cfg, err := writeBrokerLogin("https://crabbox.example.test", "secret", "aws")
+	path, cfg, err := writeBrokerLogin("https://crabbox.example.test", "secret", "aws", BrokerModeManaged)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +54,277 @@ func TestWriteBrokerLoginHonorsExplicitConfigPath(t *testing.T) {
 	}
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" {
 		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestWriteBrokerLoginRejectsDirectOnlyProvider(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	_, _, err := writeBrokerLogin("https://crabbox.example.test", "secret", "xcp-ng", BrokerModeManaged)
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
+		t.Fatalf("err=%v, want brokered provider rejection", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("config file exists after rejected provider: %v", statErr)
+	}
+}
+
+func TestWriteBrokerLoginAcceptsDirectProviderInRegisteredMode(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("broker:\n  mode: registered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, cfg, err := writeBrokerLogin("https://crabbox.example.test", "secret", "xcp-ng", BrokerModeRegistered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BrokerMode != BrokerModeRegistered || cfg.Provider != "xcp-ng" || cfg.CoordToken != "secret" {
+		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestLoginRejectsInvalidConfigBeforeWriting(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	original := "broker:\n  mode: invalid\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+		Stdin:  strings.NewReader("stdin-session-token\n"),
+	}
+	err := app.login(context.Background(), []string{
+		"--url", "https://crabbox.example.test",
+		"--provider", "aws",
+		"--token-stdin",
+	})
+	if err == nil || !strings.Contains(err.Error(), "broker.mode must be managed or registered") {
+		t.Fatalf("err=%v", err)
+	}
+	data, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != original {
+		t.Fatalf("config changed after rejection:\n%s", data)
+	}
+}
+
+func TestLoginExplicitProviderOverridesInvalidStoredProvider(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("provider: typo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+			Owner: "friend@example.com",
+			Org:   "example-org",
+			Auth:  "token",
+		})
+	}))
+	defer server.Close()
+
+	app := App{
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+		Stdin:  strings.NewReader("stdin-session-token\n"),
+	}
+	if err := app.login(context.Background(), []string{
+		"--url", server.URL,
+		"--provider", "aws",
+		"--token-stdin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "aws" || cfg.Coordinator != server.URL || cfg.CoordToken != "stdin-session-token" {
+		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestLoginAppliesExplicitURLBeforeRegisteredModeValidation(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("broker:\n  mode: Registered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+			Owner: "friend@example.com",
+			Org:   "example-org",
+			Auth:  "token",
+		})
+	}))
+	defer server.Close()
+
+	app := App{
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+		Stdin:  strings.NewReader("stdin-session-token\n"),
+	}
+	if err := app.login(context.Background(), []string{
+		"--url", server.URL,
+		"--token-stdin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BrokerMode != BrokerModeRegistered || cfg.Coordinator != server.URL || cfg.CoordToken != "stdin-session-token" {
+		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestLoginWithExplicitURLDoesNotUseTopLevelDirectProvider(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("provider: xcp-ng\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+			Owner: "friend@example.com",
+			Org:   "example-org",
+			Auth:  "token",
+		})
+	}))
+	defer server.Close()
+
+	app := App{
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+		Stdin:  strings.NewReader("stdin-session-token\n"),
+	}
+	if err := app.login(context.Background(), []string{
+		"--url", server.URL,
+		"--token-stdin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Provider != "xcp-ng" || file.Broker == nil || file.Broker.Provider != "" {
+		t.Fatalf("config=%#v", file)
+	}
+}
+
+func TestLoginRejectsIncompatiblePersistedBrokerProvider(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	original := "broker:\n  url: https://broker.example.test\n  mode: managed\n  provider: xcp-ng\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+		Stdin:  strings.NewReader("stdin-session-token\n"),
+	}
+	err := app.login(context.Background(), []string{"--token-stdin"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
+		t.Fatalf("err=%v", err)
+	}
+	data, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != original {
+		t.Fatalf("config changed after rejection:\n%s", data)
+	}
+}
+
+func TestCoordinatorClientForLoginAppliesURLBeforeRegisteredModeValidation(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("broker:\n  mode: registered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	client, err := coordinatorClientForLogin(server.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client == nil || client.BaseURL != server.URL {
+		t.Fatalf("client=%#v", client)
 	}
 }
 
@@ -210,6 +482,49 @@ func TestLoginWithTokenReadsAppStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Coordinator != server.URL || cfg.CoordToken != "stdin-session-token" || cfg.Provider != "aws" {
+		t.Fatalf("unexpected config: %#v", cfg)
+	}
+}
+
+func TestLoginWithTokenUsesEffectiveRegisteredMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/whoami" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(CoordinatorWhoami{
+			Owner: "friend@example.com",
+			Org:   "example-org",
+			Auth:  "token",
+		})
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_MODE", "Registered")
+	t.Setenv("CRABBOX_PROVIDER", "xcp-ng")
+
+	app := App{
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+		Stdin:  strings.NewReader("stdin-session-token\n"),
+	}
+	if err := app.login(context.Background(), []string{"--token-stdin"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_MODE", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BrokerMode != BrokerModeRegistered || cfg.Provider != "xcp-ng" || cfg.CoordToken != "stdin-session-token" {
 		t.Fatalf("unexpected config: %#v", cfg)
 	}
 }

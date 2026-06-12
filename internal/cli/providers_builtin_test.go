@@ -19,6 +19,7 @@ func init() {
 	RegisterProvider(testGCPProvider{})
 	RegisterProvider(testIncusProvider{})
 	RegisterProvider(testProxmoxProvider{})
+	RegisterProvider(testXCPNgProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
@@ -531,6 +532,116 @@ type testProxmoxFlagValues struct {
 	User        *string
 	WorkRoot    *string
 	InsecureTLS *bool
+}
+
+type testXCPNgProvider struct{}
+
+func (testXCPNgProvider) Name() string      { return "xcp-ng" }
+func (testXCPNgProvider) Aliases() []string { return nil }
+func (testXCPNgProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "xcp-ng",
+		Family:      "xcp-ng",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testXCPNgProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testXCPNgFlagValues{
+		APIURL:       fs.String("xcp-ng-api-url", defaults.XCPNg.APIURL, "XCP-ng API URL"),
+		Username:     fs.String("xcp-ng-username", defaults.XCPNg.Username, "XCP-ng API username"),
+		Template:     fs.String("xcp-ng-template", defaults.XCPNg.Template, "XCP-ng template name"),
+		TemplateUUID: fs.String("xcp-ng-template-uuid", defaults.XCPNg.TemplateUUID, "XCP-ng template UUID"),
+		SR:           fs.String("xcp-ng-sr", defaults.XCPNg.SR, "XCP-ng storage repository name"),
+		SRUUID:       fs.String("xcp-ng-sr-uuid", defaults.XCPNg.SRUUID, "XCP-ng storage repository UUID"),
+		Network:      fs.String("xcp-ng-network", defaults.XCPNg.Network, "XCP-ng network name"),
+		NetworkUUID:  fs.String("xcp-ng-network-uuid", defaults.XCPNg.NetworkUUID, "XCP-ng network UUID"),
+		Host:         fs.String("xcp-ng-host", defaults.XCPNg.Host, "XCP-ng host"),
+		User:         fs.String("xcp-ng-user", defaults.XCPNg.User, "XCP-ng VM user"),
+		WorkRoot:     fs.String("xcp-ng-work-root", defaults.XCPNg.WorkRoot, "XCP-ng VM work root"),
+		InsecureTLS:  fs.Bool("xcp-ng-insecure-tls", defaults.XCPNg.InsecureTLS, "allow self-signed XCP-ng TLS certificates"),
+	}
+}
+func (testXCPNgProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testXCPNgFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "xcp-ng-api-url") {
+		cfg.XCPNg.APIURL = *v.APIURL
+	}
+	if flagWasSet(fs, "xcp-ng-username") {
+		cfg.XCPNg.Username = *v.Username
+	}
+	if flagWasSet(fs, "xcp-ng-template") {
+		cfg.XCPNg.Template = *v.Template
+		cfg.ServerType = xcpNgTestServerTypeForConfig(*cfg)
+	}
+	if flagWasSet(fs, "xcp-ng-template-uuid") {
+		cfg.XCPNg.TemplateUUID = *v.TemplateUUID
+		cfg.ServerType = xcpNgTestServerTypeForConfig(*cfg)
+	}
+	if flagWasSet(fs, "xcp-ng-sr") {
+		cfg.XCPNg.SR = *v.SR
+	}
+	if flagWasSet(fs, "xcp-ng-sr-uuid") {
+		cfg.XCPNg.SRUUID = *v.SRUUID
+	}
+	if flagWasSet(fs, "xcp-ng-network") {
+		cfg.XCPNg.Network = *v.Network
+	}
+	if flagWasSet(fs, "xcp-ng-network-uuid") {
+		cfg.XCPNg.NetworkUUID = *v.NetworkUUID
+	}
+	if flagWasSet(fs, "xcp-ng-host") {
+		cfg.XCPNg.Host = *v.Host
+	}
+	if flagWasSet(fs, "xcp-ng-user") {
+		cfg.XCPNg.User = *v.User
+		cfg.SSHUser = *v.User
+	}
+	if flagWasSet(fs, "xcp-ng-work-root") {
+		cfg.XCPNg.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "xcp-ng-insecure-tls") {
+		cfg.XCPNg.InsecureTLS = *v.InsecureTLS
+	}
+	return nil
+}
+func (testXCPNgProvider) ServerTypeForConfig(cfg Config) string {
+	return xcpNgTestServerTypeForConfig(cfg)
+}
+func (testXCPNgProvider) ServerTypeForClass(string) string { return "template" }
+func (p testXCPNgProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testXCPNgFlagValues struct {
+	APIURL       *string
+	Username     *string
+	Template     *string
+	TemplateUUID *string
+	SR           *string
+	SRUUID       *string
+	Network      *string
+	NetworkUUID  *string
+	Host         *string
+	User         *string
+	WorkRoot     *string
+	InsecureTLS  *bool
+}
+
+func xcpNgTestServerTypeForConfig(cfg Config) string {
+	if cfg.XCPNg.TemplateUUID != "" {
+		return "template-" + cfg.XCPNg.TemplateUUID
+	}
+	if cfg.XCPNg.Template != "" {
+		return "template-" + normalizeLeaseSlug(cfg.XCPNg.Template)
+	}
+	return "template"
 }
 
 type testStaticSSHProvider struct{}

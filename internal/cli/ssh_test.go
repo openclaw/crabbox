@@ -1376,6 +1376,9 @@ func TestIsBootstrapWaitError(t *testing.T) {
 	if !isBootstrapWaitError(exit(5, "timed out waiting for SSH on 203.0.113.10 during bootstrap")) {
 		t.Fatal("expected SSH timeout to be retryable")
 	}
+	if !isBootstrapWaitError(exit(5, "timed out waiting for XCP-ng guest IPv4")) {
+		t.Fatal("expected XCP-ng guest IPv4 timeout to be retryable")
+	}
 	if isBootstrapWaitError(exit(6, "rsync failed")) {
 		t.Fatal("sync failure must not be treated as retryable bootstrap")
 	}

@@ -86,6 +86,7 @@ ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 digitalocean     DigitalOcean Droplets                    Linux
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
+xcp-ng           Self-hosted XCP-ng pool over XAPI        Linux (normal leases)
 incus            Incus containers or VMs over SSH         Linux
 local-container  Local Docker-compatible containers       Linux
 apple-vz         Apple Virtualization.framework Linux VM  Linux ARM64
@@ -99,6 +100,12 @@ runpod           RunPod GPU pods (public SSH)             Linux
 semaphore        Semaphore CI jobs                        Linux
 sprites          Sprites microVMs through sprite proxy    Linux
 ```
+
+XCP-ng pools for Crabbox run on dedicated 64-bit x86 server-class hardware.
+XCP-ng itself can host Linux, Windows, and BSD guests, but Crabbox's current
+`xcp-ng` lease flow provisions Linux templates only. The separate XCP-ng ISO
+E2E harness also covers Windows x86_64/x64 installer media. Use the Tart
+provider on Apple hardware for macOS VM workflows.
 
 ## Delegated-run providers
 
@@ -144,6 +151,7 @@ railway                 Railway service status and stop controls
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
+- [XCP-ng](../providers/xcp-ng.md): direct XCP-ng provider on dedicated x86_64 pool hardware. Crabbox normal leases use Linux templates; the separate ISO E2E harness also covers Windows x86_64/x64 installers.
 - [Incus](../providers/incus.md): direct Incus Linux SSH leases plus an opt-in Apple Silicon / local live smoke contract.
 - [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
 - [Apple VZ](../providers/apple-vz.md): local Linux VMs through Apple's `Virtualization.framework`.

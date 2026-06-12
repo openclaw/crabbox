@@ -363,6 +363,77 @@ proxmox:
 Put `tokenSecret` in a private config file or use
 `CRABBOX_PROXMOX_TOKEN_SECRET`; do not pass it as a command-line flag.
 
+### XCP-ng
+
+```yaml
+provider: xcp-ng
+target: linux
+xcpNg:
+  apiUrl: https://xcp-pool.example.test
+  username: crabbox@example.test
+  password: <api-password>
+  template: crabbox-ubuntu-2404
+  templateUuid: ""
+  sr: default-sr
+  srUuid: ""
+  network: pool-network
+  networkUuid: ""
+  host: ""
+  user: crabbox
+  workRoot: /work/crabbox
+  insecureTLS: false
+```
+
+`apiUrl`, `username`, `password`, and either `sr` or `srUuid` are required for
+XCP-ng doctor and lifecycle commands. `template` or `templateUuid` is required
+before `warmup` or `run` can create a lease. The password must come from private
+config or `CRABBOX_XCP_NG_PASSWORD`; there is intentionally no
+XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
+returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
+For credential safety, repository-local `crabbox.yaml` and `.crabbox.yaml`
+files cannot override `apiUrl` or `insecureTLS`; set those in user config, an
+explicit `CRABBOX_CONFIG` file, or environment variables.
+
+`target: linux` describes the current Crabbox lease surface, not an XCP-ng
+hypervisor limitation. XCP-ng itself can host Linux, Windows, and BSD guests on
+dedicated 64-bit x86 server-class hardware, but Crabbox's normal `xcp-ng` flow
+provisions Linux templates only. The separate XCP-ng ISO E2E harness also
+covers Windows x86_64/x64 installer media. Use the Tart provider on Apple
+hardware for macOS VM workflows.
+
+`network`, `networkUuid`, and `host` are optional placement hints. When
+`network` or `networkUuid` is set, Crabbox moves all VIFs on the copied VM to
+that network. Prefer a single-NIC template for Crabbox-managed VMs, or leave
+both unset when the template's existing network topology should be preserved.
+
+The current SR-backed lifecycle uses `VM.copy`, then `VM.provision`, and then
+attaches a FAT16 `CIDATA` config-drive image. Keep `apiUrl` on an
+administrator-only management network or VPN, prefer trusted certificates, and
+limit `insecureTLS` to private lab environments.
+
+Environment overrides:
+
+```text
+CRABBOX_XCP_NG_API_URL
+CRABBOX_XCP_NG_USERNAME
+CRABBOX_XCP_NG_PASSWORD
+CRABBOX_XCP_NG_TEMPLATE
+CRABBOX_XCP_NG_TEMPLATE_UUID
+CRABBOX_XCP_NG_SR
+CRABBOX_XCP_NG_SR_UUID
+CRABBOX_XCP_NG_NETWORK
+CRABBOX_XCP_NG_NETWORK_UUID
+CRABBOX_XCP_NG_GUEST_CIDR
+CRABBOX_XCP_NG_HOST
+CRABBOX_XCP_NG_USER
+CRABBOX_XCP_NG_WORK_ROOT
+CRABBOX_XCP_NG_INSECURE_TLS
+```
+
+Set `CRABBOX_XCP_NG_GUEST_CIDR` to an IPv4 `/24` or narrower range attached
+to the local runner only when guest tools cannot report an address and active
+MAC discovery is required. Crabbox never sweeps all local interfaces.
+
 ### Static SSH
 
 ```yaml

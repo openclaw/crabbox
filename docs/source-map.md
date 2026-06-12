@@ -73,6 +73,7 @@ SSH-lease providers:
 - DigitalOcean Droplets: `internal/providers/digitalocean`, with config glue in `internal/cli/config.go`
 - Parallels (macOS VM host): `internal/providers/parallels`, with CLI helpers in `internal/cli/parallels.go`
 - Proxmox VE: `internal/providers/proxmox`, with CLI helpers in `internal/cli/proxmox.go`
+- XCP-ng (`xcp-ng`): `internal/providers/xcpng`
 - Incus: `internal/providers/incus`
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
 - Local Docker container: `internal/providers/localcontainer`
