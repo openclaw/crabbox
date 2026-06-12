@@ -120,6 +120,10 @@ func ClaimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, 
 	return claimLeaseTargetForConfig(leaseID, slug, cfg, server, target, idleTimeout)
 }
 
+func ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, server, target, idleTimeout, expected, expectedExists)
+}
+
 func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }

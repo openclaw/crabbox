@@ -518,8 +518,17 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", server.Name, err)
 		}
-		if err := updateLeaseClaimEndpoint(lease.LeaseID, lease.Server, lease.SSH); err != nil {
+		claim, claimed, err := resolveLeaseClaim(lease.LeaseID)
+		if err != nil {
 			return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, err)
+		}
+		if claimed {
+			if claimEndpointInactiveState(claim.Labels["state"]) {
+				return nil, fmt.Errorf("refresh %s claim endpoint: lease %s became inactive during resolve", server.Name, lease.LeaseID)
+			}
+			if _, err := updateLeaseClaimEndpointIfUnchanged(lease.LeaseID, claim, lease.Server, lease.SSH); err != nil {
+				return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, err)
+			}
 		}
 		if name == "" {
 			name = lease.LeaseID

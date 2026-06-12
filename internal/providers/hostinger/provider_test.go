@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -983,16 +984,16 @@ func TestAcquireRecoversAfterPendingClaimWriteFailure(t *testing.T) {
 	backend.client = api
 	backend.skipSSHWait = true
 
-	oldClaim := claimLeaseTargetForRepoConfig
+	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
 	claimCalls := 0
-	claimLeaseTargetForRepoConfig = func(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	claimLeaseTargetForRepoConfigIfUnchanged = func(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 		claimCalls++
 		if claimCalls == 1 {
-			return errors.New("claim storage unavailable")
+			return LeaseClaim{}, errors.New("claim storage unavailable")
 		}
-		return oldClaim(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
+		return oldClaim(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 	}
-	t.Cleanup(func() { claimLeaseTargetForRepoConfig = oldClaim })
+	t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
 
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
@@ -1029,16 +1030,16 @@ func TestAcquireClaimFailureRetainsRecoverableLeaseKeyMapping(t *testing.T) {
 	backend.client = api
 	backend.skipSSHWait = true
 
-	oldClaim := claimLeaseTargetForRepoConfig
-	claimLeaseTargetForRepoConfig = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool) error {
-		return errors.New("claim storage unavailable")
+	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
+	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
+		return LeaseClaim{}, errors.New("claim storage unavailable")
 	}
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "recover",
 	})
-	claimLeaseTargetForRepoConfig = oldClaim
-	t.Cleanup(func() { claimLeaseTargetForRepoConfig = oldClaim })
+	claimLeaseTargetForRepoConfigIfUnchanged = oldClaim
+	t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
 	if err == nil || !strings.Contains(err.Error(), "persist hostinger paid VPS claim") {
 		t.Fatalf("Acquire err=%v", err)
 	}
@@ -1117,11 +1118,11 @@ func TestAcquireRetainsKeyWhenPendingClaimAndRecoveryFail(t *testing.T) {
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
 	backend.client = api
 
-	oldClaim := claimLeaseTargetForRepoConfig
-	claimLeaseTargetForRepoConfig = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool) error {
-		return errors.New("claim storage unavailable")
+	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
+	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, Config, Server, SSHTarget, string, time.Duration, bool, LeaseClaim, bool) (LeaseClaim, error) {
+		return LeaseClaim{}, errors.New("claim storage unavailable")
 	}
-	t.Cleanup(func() { claimLeaseTargetForRepoConfig = oldClaim })
+	t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
 	oldTimeout := hostingerPurchaseRecoveryTimeout
 	hostingerPurchaseRecoveryTimeout = time.Nanosecond
 	t.Cleanup(func() { hostingerPurchaseRecoveryTimeout = oldTimeout })
@@ -1200,7 +1201,7 @@ func TestAcquireFailureStopsPaidVPSButRetainsRecoveryState(t *testing.T) {
 	}
 }
 
-func TestAcquireFailureStopsPaidVPSEvenWhenClaimDisappears(t *testing.T) {
+func TestAcquireFailureDoesNotStopPaidVPSWhenClaimDisappears(t *testing.T) {
 	isolateHostingerTestState(t)
 	api := &fakeAPI{}
 	cfg := core.Config{Hostinger: core.HostingerConfig{
@@ -1234,10 +1235,10 @@ func TestAcquireFailureStopsPaidVPSEvenWhenClaimDisappears(t *testing.T) {
 	})
 
 	_, err := backend.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "missing-claim"})
-	if err == nil || !strings.Contains(err.Error(), "rollback=stopped") {
+	if err == nil || !strings.Contains(err.Error(), "stop-skipped") || !strings.Contains(err.Error(), "claim changed; retry") {
 		t.Fatalf("Acquire err=%v", err)
 	}
-	if api.stopCalls != 1 || api.stopped[0] != "vm-new" {
+	if api.stopCalls != 0 {
 		t.Fatalf("stops=%v", api.stopped)
 	}
 }
@@ -1465,6 +1466,68 @@ func TestResolveRollsBackRestartWhenPreparationFails(t *testing.T) {
 	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil || len(claims) != 1 || claims[0].Labels["state"] != "stopped" {
 		t.Fatalf("rollback claims=%#v err=%v", claims, claimErr)
+	}
+}
+
+func TestResolveDoesNotRollbackRestartAfterClaimChanges(t *testing.T) {
+	isolateHostingerTestState(t)
+	api := &fakeAPI{
+		vms: []hostingerVM{{ID: "vm-stopped", Hostname: "crabbox-blue-abcdef123456", State: "stopped"}},
+	}
+	cfg := core.Config{
+		Provider: providerName,
+		Hostinger: core.HostingerConfig{
+			APIToken: "token",
+		},
+	}
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+
+	ctx, cancel := context.WithCancel(context.Background())
+	oldRunSSHQuiet := hostingerRunSSHQuiet
+	oldWaitForSSHReady := hostingerWaitForSSHReady
+	oldSleep := hostingerSleep
+	hostingerWaitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return nil
+	}
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+		claims, err := core.ListLeaseClaims()
+		if err != nil || len(claims) != 1 {
+			return fmt.Errorf("claims=%#v err=%v", claims, err)
+		}
+		labels := make(map[string]string, len(claims[0].Labels))
+		for key, value := range claims[0].Labels {
+			labels[key] = value
+		}
+		labels["state"] = "running"
+		labels["expires_at"] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claims[0].LeaseID, claims[0], labels); err != nil {
+			return err
+		}
+		cancel()
+		return errors.New("bootstrap failed")
+	}
+	hostingerSleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		hostingerRunSSHQuiet = oldRunSSHQuiet
+		hostingerWaitForSSHReady = oldWaitForSSHReady
+		hostingerSleep = oldSleep
+	})
+
+	_, err := backend.Resolve(ctx, core.ResolveRequest{
+		ID:      "vm-stopped",
+		Repo:    core.Repo{Root: t.TempDir()},
+		Prepare: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "restart rollback skipped") || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+	if api.startCalls != 1 || api.stopCalls != 0 || len(api.vms) != 1 || !api.vms[0].Ready() {
+		t.Fatalf("starts=%v stops=%v vms=%#v", api.started, api.stopped, api.vms)
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil || len(claims) != 1 || claims[0].Labels["state"] != "running" {
+		t.Fatalf("claims=%#v err=%v", claims, claimErr)
 	}
 }
 

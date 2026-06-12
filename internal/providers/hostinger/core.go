@@ -63,6 +63,13 @@ var claimLeaseTargetForRepoConfig = func(leaseID, slug string, cfg Config, serve
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
 
+var claimLeaseTargetForRepoConfigIfUnchanged = func(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	if repoRoot == "" {
+		return core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, server, target, idleTimeout, expected, expectedExists)
+	}
+	return core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
 var updateLeaseClaimEndpointIfUnchangedAfter = core.UpdateLeaseClaimEndpointIfUnchangedAfter
 
 func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {

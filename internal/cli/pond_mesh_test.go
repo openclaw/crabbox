@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -498,7 +499,8 @@ func TestPondSSHTargetsByLeaseAllowsDuplicatePeerNames(t *testing.T) {
 }
 
 type pondMeshResolveRecordingBackend struct {
-	ids []string
+	ids          []string
+	afterResolve func(LeaseTarget)
 }
 
 func (b *pondMeshResolveRecordingBackend) Spec() ProviderSpec { return ProviderSpec{Name: "hetzner"} }
@@ -507,7 +509,7 @@ func (b *pondMeshResolveRecordingBackend) Acquire(context.Context, AcquireReques
 }
 func (b *pondMeshResolveRecordingBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
 	b.ids = append(b.ids, req.ID)
-	return LeaseTarget{
+	lease := LeaseTarget{
 		LeaseID: req.ID,
 		Server: Server{
 			CloudID:  req.ID,
@@ -516,7 +518,11 @@ func (b *pondMeshResolveRecordingBackend) Resolve(_ context.Context, req Resolve
 			Labels:   map[string]string{"provider": "hetzner", "lease": req.ID, "slug": req.ID, "state": "ready"},
 		},
 		SSH: SSHTarget{User: "ubuntu", Host: req.ID + ".example", Port: "22"},
-	}, nil
+	}
+	if b.afterResolve != nil {
+		b.afterResolve(lease)
+	}
+	return lease, nil
 }
 func (b *pondMeshResolveRecordingBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
@@ -557,6 +563,48 @@ func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
 		if err != nil || !ok || claim.SSHHost != leaseID+".example" || claim.SSHPort != 22 {
 			t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 		}
+	}
+}
+
+func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	leaseID := "cbx_web_stopped"
+	labels := map[string]string{
+		"provider":               "hetzner",
+		"lease":                  leaseID,
+		"slug":                   "web",
+		"state":                  "running",
+		pondLabelKey:             "alpha",
+		pondExposedPortsLabelKey: "8080",
+	}
+	server := Server{CloudID: "server-web", Provider: "hetzner", Name: "server-web", Labels: labels}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{Host: "old.example", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	var stopErr error
+	backend := &pondMeshResolveRecordingBackend{afterResolve: func(LeaseTarget) {
+		claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+		if err != nil || !ok {
+			stopErr = fmt.Errorf("resolve claim: ok=%t err=%v", ok, err)
+			return
+		}
+		stopped := server
+		stopped.Labels = cloneStringMap(server.Labels)
+		stopped.Labels["state"] = "stopped"
+		_, stopErr = updateLeaseClaimEndpointIfUnchanged(leaseID, claim, stopped, SSHTarget{})
+	}}
+	_, err := collectPondMembers(context.Background(), backend, Config{}, []Server{server}, "alpha")
+	if stopErr != nil {
+		t.Fatal(stopErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "became inactive during resolve") {
+		t.Fatalf("collectPondMembers err=%v", err)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+	if err != nil || !ok || claim.Labels["state"] != "stopped" || claim.SSHHost != "" || claim.SSHPort != 0 {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }
 

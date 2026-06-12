@@ -114,6 +114,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 	}
 	purchasedVMID := ""
 	claimPersisted := false
+	var rollbackClaim LeaseClaim
 	retainRecoveryKey := false
 	defer func() {
 		if err == nil {
@@ -128,32 +129,33 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		}
 		rollback := "retained"
 		if !req.Keep {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			stopErr := b.stopVMAndWait(stopCtx, client, purchasedVMID)
-			claimErr := error(nil)
-			if stopErr == nil && claimPersisted {
-				claim, ok, resolveErr := resolveLeaseClaimForProvider(leaseID, providerName)
-				if resolveErr != nil {
-					claimErr = resolveErr
-				} else if ok && (claim.CloudID == "" || claim.CloudID == purchasedVMID) {
-					server := Server{
-						CloudID:  purchasedVMID,
-						Provider: providerName,
-						Name:     hostname,
-						Status:   "stopped",
-						Labels:   hostingerStoppedClaimLabels(claim.Labels),
-					}
-					_, claimErr = updateLeaseClaimEndpointIfUnchanged(claim.LeaseID, claim, server, SSHTarget{})
+			if !claimPersisted {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				stopErr := b.stopVMAndWait(stopCtx, client, purchasedVMID)
+				cancel()
+				if stopErr == nil {
+					rollback = "stopped"
+				} else {
+					rollback = "stop-failed: " + stopErr.Error()
 				}
-			}
-			cancel()
-			if stopErr == nil {
-				rollback = "stopped"
-				if claimErr != nil {
-					rollback += "; claim-update-failed: " + claimErr.Error()
-				}
+			} else if rollbackClaim.LeaseID == "" {
+				rollback = "retained; claim-snapshot-unavailable"
 			} else {
-				rollback = "stop-failed: " + stopErr.Error()
+				stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				server := Server{
+					CloudID:  purchasedVMID,
+					Provider: providerName,
+					Name:     hostname,
+					Status:   "stopped",
+					Labels:   rollbackClaim.Labels,
+				}
+				_, stopErr := b.stopClaimedVM(stopCtx, client, rollbackClaim, purchasedVMID, server)
+				cancel()
+				if stopErr == nil {
+					rollback = "stopped"
+				} else {
+					rollback = "retained; stop-skipped: " + stopErr.Error()
+				}
 			}
 		}
 		err = exit(1, "hostinger VPS provisioning failed after purchase: lease=%s vm=%s rollback=%s billing=still-owned: %v", leaseID, purchasedVMID, rollback, err)
@@ -167,10 +169,12 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		server := hostingerServer(hostingerVM{Hostname: hostname, State: "provisioning"}, leaseID, slug, cfg, req.Keep)
 		server.Labels[hostingerRecoveryLabel] = hostingerRecoveryAmbiguous
 		server.Labels[hostingerRecoveryHostnameLabel] = hostname
-		if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		claim, err := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
+		if err != nil {
 			return exit(1, "persist hostinger ambiguous purchase recovery claim: %v", err)
 		}
 		claimPersisted = true
+		rollbackClaim = claim
 		return nil
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s hostname=%s item=%s template=%s data_center=%s keep=%v\n",
@@ -241,14 +245,18 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 	}
 	server := hostingerServer(vm, leaseID, slug, cfg, req.Keep)
 	if claimPersisted {
-		if err := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{}); err != nil {
-			return LeaseTarget{}, exit(1, "bind hostinger recovered VPS claim: %v", err)
+		updated, updateErr := updateLeaseClaimEndpointIfUnchanged(leaseID, rollbackClaim, server, SSHTarget{})
+		if updateErr != nil {
+			return LeaseTarget{}, exit(1, "bind hostinger recovered VPS claim: %v", updateErr)
 		}
+		rollbackClaim = updated
 	} else {
-		if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-			return LeaseTarget{}, exit(1, "persist hostinger paid VPS claim: %v", err)
+		claim, claimErr := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false)
+		if claimErr != nil {
+			return LeaseTarget{}, exit(1, "persist hostinger paid VPS claim: %v", claimErr)
 		}
 		claimPersisted = true
+		rollbackClaim = claim
 	}
 	removeHostingerRecoveryRecord(leaseID)
 	ready, waitErr := b.waitForVM(ctx, client, vm.IDString())
@@ -260,9 +268,11 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		return LeaseTarget{}, exit(1, "persist hostinger VPS endpoint: %v", err)
+	updated, updateErr := updateLeaseClaimEndpointIfUnchanged(leaseID, rollbackClaim, lease.Server, lease.SSH)
+	if updateErr != nil {
+		return LeaseTarget{}, exit(1, "persist hostinger VPS endpoint: %v", updateErr)
 	}
+	rollbackClaim = updated
 	if !b.skipSSHWait {
 		if err := b.ensureBootstrap(ctx, cfg, lease, "bootstrap"); err != nil {
 			return LeaseTarget{}, err
@@ -338,19 +348,23 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		}
 	}
 	started := false
+	var restartClaim LeaseClaim
 	if vm.Stopped() {
 		vmID := vm.IDString()
-		if err := b.updateClaimState(leaseID, cfg, "provisioning", true); err != nil {
+		restartClaim, err = b.updateClaimState(leaseID, cfg, "provisioning", true)
+		if err != nil {
 			return LeaseTarget{}, fmt.Errorf("prepare hostinger restart lease=%s: %w", leaseID, err)
 		}
 		if err := client.StartVM(ctx, vmID); err != nil {
-			_ = b.updateClaimState(leaseID, cfg, "stopped", false)
+			if _, claimErr := b.updateClaimStateIfUnchanged(restartClaim, cfg, "stopped", false); claimErr != nil {
+				return LeaseTarget{}, exit(1, "hostinger start vps %s failed: %v; claim update failed: %v", vmID, err, claimErr)
+			}
 			return LeaseTarget{}, exit(1, "hostinger start vps %s failed: %v", vmID, err)
 		}
 		started = true
 		vm, err = b.waitForVM(ctx, client, vmID)
 		if err != nil {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vmID, leaseID, cfg, err)
+			return LeaseTarget{}, b.rollbackStartedVM(client, vmID, restartClaim, cfg, err)
 		}
 	} else if !vm.Ready() {
 		return LeaseTarget{}, exit(5, "hostinger vps %s is not runnable; state=%s", vm.IDString(), firstNonBlank(vm.State, vm.Status, "unknown"))
@@ -358,7 +372,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	lease, err := b.leaseFromVM(cfg, vm, leaseID, slug, true)
 	if err != nil {
 		if started {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), leaseID, cfg, err)
+			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -366,20 +380,20 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		transport := lease.SSH
 		transport.ReadyCheck = "true"
 		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "restart", bootstrapWaitTimeout(cfg)); err != nil {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), leaseID, cfg, err)
+			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
 		}
 	}
 	if req.Prepare && !b.skipSSHWait {
 		if err := b.ensureBootstrap(ctx, cfg, lease, "resolve"); err != nil {
 			if started {
-				return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), leaseID, cfg, err)
+				return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
 			}
 			return LeaseTarget{}, err
 		}
 	}
 	if started {
-		if err := b.updateClaimState(leaseID, cfg, "running", false); err != nil {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), leaseID, cfg, err)
+		if _, err := b.updateClaimStateIfUnchanged(restartClaim, cfg, "running", false); err != nil {
+			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
 		}
 	}
 	return lease, nil
@@ -1082,14 +1096,18 @@ func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, i
 	}
 }
 
-func (b *leaseBackend) updateClaimState(leaseID string, cfg Config, state string, resetLifetime bool) error {
+func (b *leaseBackend) updateClaimState(leaseID string, cfg Config, state string, resetLifetime bool) (LeaseClaim, error) {
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil {
-		return err
+		return LeaseClaim{}, err
 	}
 	if !ok {
-		return exit(2, "hostinger lease %s has no local claim", leaseID)
+		return LeaseClaim{}, exit(2, "hostinger lease %s has no local claim", leaseID)
 	}
+	return b.updateClaimStateIfUnchanged(claim, cfg, state, resetLifetime)
+}
+
+func (b *leaseBackend) updateClaimStateIfUnchanged(claim LeaseClaim, cfg Config, state string, resetLifetime bool) (LeaseClaim, error) {
 	labels := claim.Labels
 	if resetLifetime {
 		labels = make(map[string]string, len(claim.Labels))
@@ -1100,8 +1118,7 @@ func (b *leaseBackend) updateClaimState(leaseID string, cfg Config, state string
 		delete(labels, "expires_at")
 	}
 	labels = touchDirectLeaseLabels(labels, cfg, state, time.Now().UTC())
-	_, err = updateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
-	return err
+	return updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
 }
 
 func (b *leaseBackend) configForLeaseClaim(cfg Config, leaseID string) (Config, error) {
@@ -1126,14 +1143,13 @@ func (b *leaseBackend) configForLeaseClaim(cfg Config, leaseID string) (Config, 
 	return cfg, nil
 }
 
-func (b *leaseBackend) rollbackStartedVM(client hostingerAPI, id, leaseID string, cfg Config, cause error) error {
+func (b *leaseBackend) rollbackStartedVM(client hostingerAPI, id string, claim LeaseClaim, cfg Config, cause error) error {
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := b.stopVMAndWait(rollbackCtx, client, id); err != nil {
-		return fmt.Errorf("%w; restart rollback failed: %v", cause, err)
-	}
-	if err := b.updateClaimState(leaseID, cfg, "stopped", false); err != nil {
-		return fmt.Errorf("%w; restart rollback=stopped; claim update failed: %v", cause, err)
+	labels := touchDirectLeaseLabels(claim.Labels, cfg, "stopped", time.Now().UTC())
+	server := Server{CloudID: id, Provider: providerName, Status: "stopped", Labels: labels}
+	if _, err := b.stopClaimedVM(rollbackCtx, client, claim, id, server); err != nil {
+		return fmt.Errorf("%w; restart rollback skipped: %v", cause, err)
 	}
 	return fmt.Errorf("%w; restart rollback=stopped", cause)
 }

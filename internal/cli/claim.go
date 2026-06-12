@@ -231,6 +231,22 @@ func claimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, 
 	})
 }
 
+func claimLeaseTargetForConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	provider, staticDetails := claimProviderDetailsForConfig(cfg)
+	var updated leaseClaim
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, "", idleTimeout, false, claimMetadata{
+		setCacheVolumes:    true,
+		cacheVolumes:       CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
+		setEndpoint:        true,
+		server:             server,
+		target:             target,
+		allowEmptyRepoRoot: true,
+		guard:              unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
+		result:             &updated,
+	})
+	return updated, err
+}
+
 func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
