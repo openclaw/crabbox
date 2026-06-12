@@ -101,6 +101,41 @@ func TestLinodeClientAccountID(t *testing.T) {
 	}
 }
 
+func TestLinodeClientUpdateTagsRequestShape(t *testing.T) {
+	var captured struct {
+		Method string
+		Path   string
+		Body   map[string]any
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.Method = r.Method
+		captured.Path = r.URL.RequestURI()
+		if err := json.NewDecoder(r.Body).Decode(&captured.Body); err != nil {
+			t.Fatal(err)
+		}
+		if r.Method != http.MethodPut || r.URL.Path != "/linode/instances/123" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	t.Setenv(tokenEnv, "token")
+	client, err := newLinodeClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	if err := client.UpdateLinodeTags(context.Background(), 123, []string{"crabbox", "crabbox:state:ready"}); err != nil {
+		t.Fatal(err)
+	}
+	tags, _ := captured.Body["tags"].([]any)
+	if captured.Method != http.MethodPut || captured.Path != "/linode/instances/123" || len(tags) != 2 || tags[1] != "crabbox:state:ready" {
+		t.Fatalf("captured=%#v", captured)
+	}
+}
+
 func TestLinodeClientPagination(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
