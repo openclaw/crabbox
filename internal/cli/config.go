@@ -93,6 +93,9 @@ type Config struct {
 	GCPServiceAccount             string
 	DigitalOcean                  DigitalOceanConfig
 	digitalOceanImageExplicit     bool
+	Linode                        LinodeConfig
+	linodeImageExplicit           bool
+	linodeTypeExplicit            bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	XCPNg                         XCPNgConfig
@@ -204,6 +207,14 @@ type DigitalOceanConfig struct {
 	Image    string
 	VPCUUID  string
 	SSHCIDRs []string
+}
+
+type LinodeConfig struct {
+	Region     string
+	Image      string
+	Type       string
+	FirewallID string
+	SSHCIDRs   []string
 }
 
 type ActionsConfig struct {
@@ -1104,6 +1115,48 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "linode" {
+		if cfg.Linode.Region == "" {
+			cfg.Linode.Region = "us-ord"
+		}
+		if cfg.osImageExplicit && !cfg.linodeImageExplicit {
+			if cfg.OSImage == "ubuntu:24.04" {
+				cfg.Linode.Image = "linode/ubuntu24.04"
+			} else {
+				cfg.Linode.Image = ""
+			}
+		} else if cfg.Linode.Image == "" {
+			cfg.Linode.Image = "linode/ubuntu24.04"
+		}
+		if cfg.Linode.Type == "" {
+			cfg.Linode.Type = "g6-standard-1"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = baseConfig().SSHUser
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = baseConfig().SSHPort
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
@@ -1241,7 +1294,7 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if normalizeTargetOS(cfg.TargetOS) != targetLinux {
 		return
 	}
-	hetznerImage, azureImage, gcpImage, isloImage, containerImage, err := osImageDefaultProviderImagesForArchitecture(cfg.OSImage, effectiveArchitectureForConfig(*cfg))
+	hetznerImage, azureImage, gcpImage, linodeImage, isloImage, containerImage, err := osImageDefaultProviderImagesForArchitecture(cfg.OSImage, effectiveArchitectureForConfig(*cfg))
 	if err != nil {
 		return
 	}
@@ -1267,6 +1320,9 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	}
 	if force || cfg.GCPImage == "" || (!cfg.gcpImageExplicit && (cfg.GCPImage == base.GCPImage || wasOSDefault)) {
 		cfg.GCPImage = gcpImage
+	}
+	if force || cfg.Linode.Image == "" || (!cfg.linodeImageExplicit && (cfg.Linode.Image == base.Linode.Image || wasOSDefault)) {
+		cfg.Linode.Image = linodeImage
 	}
 	if force || cfg.Islo.Image == "" || (!cfg.isloImageExplicit && (cfg.Islo.Image == base.Islo.Image || wasOSDefault)) {
 		cfg.Islo.Image = isloImage
@@ -1416,7 +1472,7 @@ func baseConfig() Config {
 	class := "beast"
 	provider := "hetzner"
 	osImage := defaultOSImage
-	hetznerImage, azureImage, gcpImage, isloImage, containerImage, _ := osImageDefaultProviderImages(osImage)
+	hetznerImage, azureImage, gcpImage, linodeImage, isloImage, containerImage, _ := osImageDefaultProviderImages(osImage)
 	multipassImage, _ := osImageDefaultMultipassImage(osImage)
 	return Config{
 		Profile:            "default",
@@ -1453,6 +1509,11 @@ func baseConfig() Config {
 		GCPNetwork: "default",
 		GCPTags:    []string{"crabbox-ssh"},
 		GCPRootGB:  400,
+		Linode: LinodeConfig{
+			Region: "us-ord",
+			Image:  linodeImage,
+			Type:   "g6-standard-1",
+		},
 		Incus: IncusConfig{
 			Remote:          "local",
 			Project:         "",
@@ -1725,6 +1786,7 @@ type fileConfig struct {
 	Broker               *fileBrokerConfig                  `yaml:"broker,omitempty"`
 	Hetzner              *fileHetznerConfig                 `yaml:"hetzner,omitempty"`
 	DigitalOcean         *fileDigitalOceanConfig            `yaml:"digitalocean,omitempty"`
+	Linode               *fileLinodeConfig                  `yaml:"linode,omitempty"`
 	AWS                  *fileAWSConfig                     `yaml:"aws,omitempty"`
 	Azure                *fileAzureConfig                   `yaml:"azure,omitempty"`
 	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
@@ -1816,6 +1878,14 @@ type fileDigitalOceanConfig struct {
 	Image    string   `yaml:"image,omitempty"`
 	VPCUUID  string   `yaml:"vpc,omitempty"`
 	SSHCIDRs []string `yaml:"sshCIDRs,omitempty"`
+}
+
+type fileLinodeConfig struct {
+	Region     string   `yaml:"region,omitempty"`
+	Image      string   `yaml:"image,omitempty"`
+	Type       string   `yaml:"type,omitempty"`
+	FirewallID string   `yaml:"firewall,omitempty"`
+	SSHCIDRs   []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -2777,6 +2847,25 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if len(file.DigitalOcean.SSHCIDRs) > 0 {
 			cfg.DigitalOcean.SSHCIDRs = file.DigitalOcean.SSHCIDRs
+		}
+	}
+	if file.Linode != nil {
+		if file.Linode.Region != "" {
+			cfg.Linode.Region = file.Linode.Region
+		}
+		if file.Linode.Image != "" {
+			cfg.Linode.Image = file.Linode.Image
+			cfg.linodeImageExplicit = true
+		}
+		if file.Linode.Type != "" {
+			cfg.Linode.Type = file.Linode.Type
+			cfg.linodeTypeExplicit = true
+		}
+		if file.Linode.FirewallID != "" {
+			cfg.Linode.FirewallID = file.Linode.FirewallID
+		}
+		if len(file.Linode.SSHCIDRs) > 0 {
+			cfg.Linode.SSHCIDRs = file.Linode.SSHCIDRs
 		}
 	}
 	if file.AWS != nil {
@@ -4519,6 +4608,19 @@ func applyEnv(cfg *Config) error {
 	cfg.DigitalOcean.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.DigitalOcean.VPCUUID)
 	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {
 		cfg.DigitalOcean.SSHCIDRs = splitCommaList(cidrs)
+	}
+	cfg.Linode.Region = getenv("CRABBOX_LINODE_REGION", cfg.Linode.Region)
+	if image := os.Getenv("CRABBOX_LINODE_IMAGE"); image != "" {
+		cfg.Linode.Image = image
+		cfg.linodeImageExplicit = true
+	}
+	if linodeType := os.Getenv("CRABBOX_LINODE_TYPE"); linodeType != "" {
+		cfg.Linode.Type = linodeType
+		cfg.linodeTypeExplicit = true
+	}
+	cfg.Linode.FirewallID = getenv("CRABBOX_LINODE_FIREWALL", cfg.Linode.FirewallID)
+	if cidrs := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); cidrs != "" {
+		cfg.Linode.SSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
 	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)
