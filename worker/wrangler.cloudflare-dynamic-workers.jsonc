@@ -10,6 +10,13 @@
       "binding": "LOADER",
     },
   ],
+  "kv_namespaces": [
+    {
+      "binding": "RUNS",
+      "id": "replace-with-cloudflare-dynamic-workers-runs-kv-namespace-id",
+      "preview_id": "replace-with-cloudflare-dynamic-workers-runs-preview-kv-namespace-id",
+    },
+  ],
   "observability": {
     "enabled": true,
   },

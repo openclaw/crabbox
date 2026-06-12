@@ -32,13 +32,15 @@ Containers and Linux command execution.
 - Wrangler authenticated for that account.
 - The deployed Crabbox Dynamic Workers loader from
   `worker/wrangler.cloudflare-dynamic-workers.jsonc`.
+- A Workers KV namespace bound as `RUNS` for durable run metadata used by
+  `status`, `list --refresh`, `stop`, and `cleanup`.
 - The Worker secret `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN`.
 - CLI-side `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL` and
   `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN`.
 
 The Worker entrypoint is `worker/src/cloudflare-dynamic-worker-runner.ts`. It is
 separate from the Cloudflare Containers runner and uses a `worker_loaders`
-binding named `LOADER`.
+binding named `LOADER` plus a Workers KV namespace binding named `RUNS`.
 
 ## Configuration
 
@@ -96,6 +98,15 @@ Set the loader bearer token as a Worker secret through stdin:
 printf '%s' "$CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN" \
   | npx wrangler secret put CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN \
       --config worker/wrangler.cloudflare-dynamic-workers.jsonc
+```
+
+Create a KV namespace for run metadata and replace the placeholder `RUNS`
+namespace IDs in `worker/wrangler.cloudflare-dynamic-workers.jsonc` before live
+deploy:
+
+```sh
+npx wrangler kv namespace create crabbox-cloudflare-dynamic-workers-runs
+npx wrangler kv namespace create crabbox-cloudflare-dynamic-workers-runs-preview --preview
 ```
 
 Deploy the Dynamic Workers loader:

@@ -2,6 +2,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 
 const runnerName = "cloudflare-dynamic-workers";
 const defaultCompatibilityDate = "2026-06-12";
+const runMetadataPrefix = "runs:";
 const supportedCacheModes = ["one-shot", "stable", "explicit"] as const;
 const supportedEgressModes = ["blocked", "intercept"] as const;
 
@@ -43,6 +44,7 @@ export class LogTailer extends WorkerEntrypoint<Env, TailProps> {
 
 type Env = {
   LOADER?: DynamicWorkerLoader;
+  RUNS?: KVNamespace;
   CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN?: string;
   CRABBOX_RUNNER_TOKEN?: string;
 };
@@ -165,7 +167,7 @@ export default {
     }
 
     if (url.pathname === "/v1/runs") {
-      if (request.method === "GET") return listRuns();
+      if (request.method === "GET") return listRuns(env);
       if (request.method === "POST") return createRun(request, env, ctx, url);
       return json({ error: "method not allowed" }, 405);
     }
@@ -177,9 +179,9 @@ export default {
     const action = match[2] ?? "";
     if (!cleanRunId(runId)) return json({ error: "run id is invalid" }, 400);
 
-    if (request.method === "GET" && action === "") return getRun(runId);
-    if (request.method === "GET" && action === "logs") return getRunLogs(runId);
-    if (request.method === "DELETE" && action === "") return stopRun(runId);
+    if (request.method === "GET" && action === "") return getRun(env, runId);
+    if (request.method === "GET" && action === "logs") return getRunLogs(env, runId);
+    if (request.method === "DELETE" && action === "") return stopRun(env, runId);
 
     return json({ error: "not found" }, 404);
   },
@@ -203,6 +205,7 @@ function readiness(env: Env): Response {
     runner: runnerName,
     loader: true,
     loaderBinding: true,
+    durableRunMetadata: Boolean(env.RUNS),
     compatibilityDate: defaultCompatibilityDate,
     egress: "blocked",
     defaultEgress: "blocked",
@@ -247,7 +250,7 @@ async function createRun(
     durationMs: 0,
     logs: [log],
   };
-  runStore.set(parsed.id, record);
+  await persistRun(env, record);
 
   try {
     const worker =
@@ -267,6 +270,7 @@ async function createRun(
       message: `run completed with HTTP ${result.status}`,
       time: record.completedAt,
     });
+    await persistRun(env, record);
     return json(runResponse(record));
   } catch (error) {
     const completedAt = Date.now();
@@ -279,30 +283,31 @@ async function createRun(
       message: "run failed",
       time: record.completedAt,
     });
+    await persistRun(env, record);
     return json(runResponse(record), 502);
   }
 }
 
-function listRuns(): Response {
+async function listRuns(env: Env): Promise<Response> {
   return json({
-    runs: [...runStore.values()].map((record) => runSummary(record)),
+    runs: (await storedRuns(env)).map((record) => runSummary(record)),
   });
 }
 
-function getRun(runId: string): Response {
-  const record = runStore.get(runId);
+async function getRun(env: Env, runId: string): Promise<Response> {
+  const record = await storedRun(env, runId);
   if (!record) return json({ error: "not found" }, 404);
   return json(runResponse(record));
 }
 
-function getRunLogs(runId: string): Response {
-  const record = runStore.get(runId);
+async function getRunLogs(env: Env, runId: string): Promise<Response> {
+  const record = await storedRun(env, runId);
   if (!record) return json({ error: "not found" }, 404);
   return json({ id: record.id, logs: record.logs });
 }
 
-function stopRun(runId: string): Response {
-  const record = runStore.get(runId);
+async function stopRun(env: Env, runId: string): Promise<Response> {
+  const record = await storedRun(env, runId);
   if (!record) return json({ error: "not found" }, 404);
 
   const stoppedAt = new Date().toISOString();
@@ -313,6 +318,7 @@ function stopRun(runId: string): Response {
     message: "run metadata stopped",
     time: stoppedAt,
   });
+  await persistRun(env, record);
   return json(runResponse(record));
 }
 
@@ -421,9 +427,6 @@ function parseRunRequest(body: Record<string, unknown>, url: URL): ParsedRunRequ
   const rawWorkerId = stringField(body, "workerId") ?? id;
   const workerId = cleanRunId(rawWorkerId);
   if (!workerId) return json({ error: "workerId is invalid" }, 400);
-  if (cacheMode === "explicit" && stringField(body, "workerId") === undefined) {
-    return json({ error: "workerId is required for explicit cache mode" }, 400);
-  }
 
   const egress = parseEgressMode(
     url.searchParams.get("egress") ?? stringField(body, "egress") ?? "blocked",
@@ -730,6 +733,45 @@ function runSummary(record: RunRecord): Record<string, unknown> {
     completedAt: record.completedAt,
     durationMs: record.durationMs,
   };
+}
+
+async function persistRun(env: Env, record: RunRecord): Promise<void> {
+  runStore.set(record.id, record);
+  if (!env.RUNS) return;
+  await env.RUNS.put(runMetadataKey(record.id), JSON.stringify(record));
+}
+
+async function storedRun(env: Env, runId: string): Promise<RunRecord | undefined> {
+  if (env.RUNS) {
+    const raw = await env.RUNS.get(runMetadataKey(runId));
+    if (raw) {
+      const parsed = JSON.parse(raw) as RunRecord;
+      runStore.set(parsed.id, parsed);
+      return parsed;
+    }
+  }
+  return runStore.get(runId);
+}
+
+async function storedRuns(env: Env): Promise<RunRecord[]> {
+  const records = new Map<string, RunRecord>();
+  for (const record of runStore.values()) records.set(record.id, record);
+  if (env.RUNS) {
+    const listed = await env.RUNS.list({ prefix: runMetadataPrefix });
+    await Promise.all(
+      listed.keys.map(async (key) => {
+        const raw = await env.RUNS?.get(key.name);
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as RunRecord;
+        records.set(parsed.id, parsed);
+      }),
+    );
+  }
+  return [...records.values()];
+}
+
+function runMetadataKey(runId: string): string {
+  return `${runMetadataPrefix}${runId}`;
 }
 
 function appendLog(runId: string, log: RunLog): void {

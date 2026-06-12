@@ -86,12 +86,39 @@ class MockLoader {
 
 type TestEnv = Parameters<typeof worker.fetch>[1] & {
   LOADER?: MockLoader;
+  RUNS?: MockKVNamespace;
 };
 
-function env(loader = new MockLoader()): TestEnv {
+class MockKVNamespace {
+  readonly values = new Map<string, string>();
+  readonly getCalls: string[] = [];
+  readonly putCalls: Array<{ key: string; value: string }> = [];
+  readonly listCalls: Array<{ prefix?: string }> = [];
+
+  async get(key: string): Promise<string | null> {
+    this.getCalls.push(key);
+    return this.values.get(key) ?? null;
+  }
+
+  async put(key: string, value: string): Promise<void> {
+    this.putCalls.push({ key, value });
+    this.values.set(key, value);
+  }
+
+  async list(options: { prefix?: string } = {}): Promise<{ keys: Array<{ name: string }> }> {
+    this.listCalls.push(options);
+    const keys = [...this.values.keys()]
+      .filter((key) => options.prefix === undefined || key.startsWith(options.prefix))
+      .map((name) => ({ name }));
+    return { keys };
+  }
+}
+
+function env(loader = new MockLoader(), runs?: MockKVNamespace): TestEnv {
   return {
     CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN: "runner-token",
     LOADER: loader,
+    RUNS: runs,
   };
 }
 
@@ -146,6 +173,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
       runner: "cloudflare-dynamic-workers",
       loader: true,
       loaderBinding: true,
+      durableRunMetadata: false,
       compatibilityDate: "2026-06-12",
       egress: "blocked",
       defaultEgress: "blocked",
@@ -301,6 +329,34 @@ describe("Cloudflare Dynamic Workers runner", () => {
     });
   });
 
+  it("uses the Go provider id as the explicit Dynamic Worker cache identity", async () => {
+    const loader = new MockLoader();
+    const response = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          id: "explicit-worker",
+          cacheMode: "explicit",
+          module: {
+            name: "worker.mjs",
+            source: "export default { fetch() { return new Response('explicit'); } };",
+          },
+        }),
+      }),
+      env(loader),
+      ctx(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      id: "explicit-worker",
+      workerId: "explicit-worker",
+      cacheMode: "explicit",
+      exitCode: 0,
+    });
+    expect(loader.getCalls).toEqual([{ id: "explicit-worker" }]);
+  });
+
   it("wires intercept egress through loader-owned gateway and tail bindings", async () => {
     const loader = new MockLoader();
     const gateway = { binding: "gateway" };
@@ -333,7 +389,8 @@ describe("Cloudflare Dynamic Workers runner", () => {
 
   it("stores status, logs, list metadata, and stop metadata", async () => {
     const loader = new MockLoader();
-    const testEnv = env(loader);
+    const runs = new MockKVNamespace();
+    const testEnv = env(loader, runs);
     const testCtx = ctx();
     const create = await worker.fetch(
       authedRequest("/v1/runs", {
@@ -344,8 +401,10 @@ describe("Cloudflare Dynamic Workers runner", () => {
       testCtx,
     );
     expect(create.status).toBe(200);
+    expect(runs.putCalls.map((call) => call.key)).toContain("runs:run_meta");
 
     const status = await worker.fetch(authedRequest("/v1/runs/run_meta"), testEnv, testCtx);
+    expect(runs.getCalls).toContain("runs:run_meta");
     await expect(status.json()).resolves.toMatchObject({
       id: "run_meta",
       status: "succeeded",
@@ -362,6 +421,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
     });
 
     const list = await worker.fetch(authedRequest("/v1/runs"), testEnv, testCtx);
+    expect(runs.listCalls).toEqual([{ prefix: "runs:" }]);
     const listBody = (await list.json()) as { runs: Array<{ id: string; status: string }> };
     expect(listBody.runs).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: "run_meta", status: "succeeded" })]),
@@ -376,6 +436,8 @@ describe("Cloudflare Dynamic Workers runner", () => {
       id: "run_meta",
       status: "stopped",
     });
+    const persisted = JSON.parse(runs.values.get("runs:run_meta") ?? "{}") as { state?: string };
+    expect(persisted.state).toBe("stopped");
   });
 
   it("returns stable errors for invalid and failed runs without leaking secrets", async () => {
@@ -422,6 +484,8 @@ describe("Cloudflare Dynamic Workers runner", () => {
     expect(config).toContain('"main": "src/cloudflare-dynamic-worker-runner.ts"');
     expect(config).toContain('"worker_loaders"');
     expect(config).toContain('"binding": "LOADER"');
+    expect(config).toContain('"kv_namespaces"');
+    expect(config).toContain('"binding": "RUNS"');
     expect(config).not.toContain('"containers"');
     expect(config).not.toContain('"durable_objects"');
   });
