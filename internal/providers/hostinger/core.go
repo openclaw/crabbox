@@ -128,6 +128,10 @@ func hostingerUserExplicit(cfg *Config) bool {
 	return core.IsHostingerUserExplicit(cfg)
 }
 
+func sshKeyExplicit(cfg *Config) bool {
+	return core.IsSSHKeyExplicit(cfg)
+}
+
 func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
 	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
 }
@@ -140,14 +144,20 @@ func removeStoredTestboxKey(leaseID string) {
 	core.RemoveStoredTestboxKey(leaseID)
 }
 
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
+func useStoredTestboxKey(target *SSHTarget, leaseID string, allowAlternate bool) error {
 	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
-		return
+		return err
 	}
 	if _, err := os.Stat(keyPath); err == nil {
 		target.Key = keyPath
+		return nil
+	} else if allowAlternate && target.Key != "" && os.IsNotExist(err) {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return exit(2, "inspect hostinger lease %s stored SSH key %s: %v", leaseID, keyPath, err)
 	}
+	return exit(2, "hostinger lease %s stored SSH key is missing; restore %s or configure an explicit SSH key", leaseID, keyPath)
 }
 
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {

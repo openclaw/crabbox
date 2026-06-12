@@ -1258,6 +1258,7 @@ func TestResolveStartsStoppedHostingerVMForSSHCommands(t *testing.T) {
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
 	backend.client = api
 	oldWaitForSSHReady := hostingerWaitForSSHReady
+	oldRunSSHQuiet := hostingerRunSSHQuiet
 	waitCalls := 0
 	hostingerWaitForSSHReady = func(_ context.Context, target *SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
 		waitCalls++
@@ -1266,7 +1267,11 @@ func TestResolveStartsStoppedHostingerVMForSSHCommands(t *testing.T) {
 		}
 		return nil
 	}
-	t.Cleanup(func() { hostingerWaitForSSHReady = oldWaitForSSHReady })
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error { return nil }
+	t.Cleanup(func() {
+		hostingerWaitForSSHReady = oldWaitForSSHReady
+		hostingerRunSSHQuiet = oldRunSSHQuiet
+	})
 
 	statusLease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "vm-stopped", StatusOnly: true})
 	if err != nil {
@@ -1289,6 +1294,17 @@ func TestResolveStartsStoppedHostingerVMForSSHCommands(t *testing.T) {
 	if readOnly.Server.Status != "stopped" || api.startCalls != 0 {
 		t.Fatalf("read-only resolve=%#v starts=%v", readOnly, api.started)
 	}
+	if err := core.ClaimLeaseTargetForConfig(readOnly.LeaseID, "blue", cfg, readOnly.Server, core.SSHTarget{}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "vm-stopped", Prepare: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.startCalls != 1 || api.started[0] != "vm-stopped" || prepared.SSH.Host == "" || waitCalls != 1 {
+		t.Fatalf("prepared=%#v starts=%v", prepared, api.started)
+	}
 
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{
 		ID:   "vm-stopped",
@@ -1297,8 +1313,47 @@ func TestResolveStartsStoppedHostingerVMForSSHCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if api.startCalls != 1 || api.started[0] != "vm-stopped" || lease.SSH.Host == "" || waitCalls != 1 {
+	if api.startCalls != 1 || lease.SSH.Host == "" || waitCalls != 1 {
 		t.Fatalf("lease=%#v starts=%v", lease, api.started)
+	}
+}
+
+func TestResolveRequiresStoredSSHKeyOrExplicitAlternate(t *testing.T) {
+	isolateHostingerTestState(t)
+	leaseID := "cbx_missingkey123"
+	vm := hostingerVM{
+		ID:       "vm-missing-key",
+		Hostname: "crabbox-missingkey-missingkey123",
+		State:    "running",
+		IPv4:     hostingerIPAddresses{"203.0.113.91"},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Hostinger.APIToken = "token"
+	applyDefaults(&cfg)
+	server := hostingerServer(vm, leaseID, "missingkey", cfg, true)
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "missingkey", cfg, server, core.SSHTarget{}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	api := &fakeAPI{vms: []hostingerVM{vm}}
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+	backend.skipSSHWait = true
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID}); err == nil || !strings.Contains(err.Error(), "stored SSH key is missing") {
+		t.Fatalf("Resolve err=%v", err)
+	}
+
+	cfg.SSHKey = "/tmp/hostinger-explicit-key"
+	alternateBackend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	alternateBackend.client = api
+	alternateBackend.skipSSHWait = true
+	lease, err := alternateBackend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Key != cfg.SSHKey {
+		t.Fatalf("SSH key=%q want %q", lease.SSH.Key, cfg.SSHKey)
 	}
 }
 
@@ -1327,6 +1382,9 @@ func TestResolveRestoresStoredSSHConfiguration(t *testing.T) {
 		core.SSHTarget{},
 		time.Hour,
 	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKey("cbx_abcdef123456"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1427,6 +1485,7 @@ func TestResolveRollsBackRestartWhenPreparationFails(t *testing.T) {
 	}
 	cfg := core.Config{
 		Provider: providerName,
+		SSHKey:   "/tmp/test-key",
 		Hostinger: core.HostingerConfig{
 			APIToken: "token",
 		},
@@ -1476,6 +1535,7 @@ func TestResolveDoesNotRollbackRestartAfterClaimChanges(t *testing.T) {
 	}
 	cfg := core.Config{
 		Provider: providerName,
+		SSHKey:   "/tmp/test-key",
 		Hostinger: core.HostingerConfig{
 			APIToken: "token",
 		},
@@ -1537,6 +1597,7 @@ func TestResolveRefreshesExpiredClaimBeforeRestart(t *testing.T) {
 	leaseID := "cbx_expired123456"
 	cfg := core.Config{
 		Provider:    providerName,
+		SSHKey:      "/tmp/test-key",
 		IdleTimeout: time.Hour,
 		Hostinger: core.HostingerConfig{
 			APIToken: "token",
@@ -1620,6 +1681,7 @@ func TestResolveChecksRepoClaimBeforeStartingVM(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	cfg := core.Config{
 		Provider: providerName,
+		SSHKey:   "/tmp/test-key",
 		Hostinger: core.HostingerConfig{
 			APIToken: "token",
 		},
@@ -1662,6 +1724,7 @@ func TestResolveRefreshesVMStateAfterClaim(t *testing.T) {
 	}
 	cfg := core.Config{
 		Provider: providerName,
+		SSHKey:   "/tmp/test-key",
 		Hostinger: core.HostingerConfig{
 			APIToken: "token",
 		},
@@ -1856,6 +1919,7 @@ func TestUnclaimedHostnameCollisionDoesNotRebindClaim(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
 	cfg := core.Config{
 		Provider: providerName,
+		SSHKey:   "/tmp/test-key",
 		Hostinger: core.HostingerConfig{
 			APIToken:       "token",
 			HostnamePrefix: "crabbox",

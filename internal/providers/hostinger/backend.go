@@ -1296,7 +1296,9 @@ func (b *leaseBackend) leaseFromVM(cfg Config, vm hostingerVM, leaseID, slug str
 		return LeaseTarget{}, err
 	}
 	target := sshTargetFromConfig(cfg, host)
-	useStoredTestboxKey(&target, leaseID)
+	if err := useStoredTestboxKey(&target, leaseID, sshKeyExplicit(&cfg)); err != nil {
+		return LeaseTarget{}, err
+	}
 	target.NetworkKind = networkPublic
 	target.ReadyCheck = hostingerReadyCheck(cfg)
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil

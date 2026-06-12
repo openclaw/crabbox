@@ -101,6 +101,7 @@ type Config struct {
 	SSHUser                       string
 	explicitSSHUser               string
 	SSHKey                        string
+	explicitSSHKey                string
 	SSHPort                       string
 	explicitSSHPort               string
 	SSHFallbackPorts              []string
@@ -1415,6 +1416,14 @@ func IsSSHUserExplicit(cfg *Config) bool {
 
 func MarkSSHUserExplicit(cfg *Config) {
 	cfg.explicitSSHUser = cfg.SSHUser
+}
+
+func IsSSHKeyExplicit(cfg *Config) bool {
+	return cfg != nil && cfg.SSHKey != "" && (cfg.explicitSSHKey != "" || cfg.SSHKey != baseConfig().SSHKey)
+}
+
+func MarkSSHKeyExplicit(cfg *Config) {
+	cfg.explicitSSHKey = cfg.SSHKey
 }
 
 func IsSSHPortExplicit(cfg *Config) bool {
@@ -3212,6 +3221,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.SSH.Key != "" {
 			cfg.SSHKey = expandUserPath(file.SSH.Key)
+			MarkSSHKeyExplicit(cfg)
 		}
 		if file.SSH.Port != "" {
 			cfg.SSHPort = file.SSH.Port
@@ -4738,7 +4748,10 @@ func applyEnv(cfg *Config) error {
 		cfg.SSHUser = sshUser
 		MarkSSHUserExplicit(cfg)
 	}
-	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
+	if sshKey := os.Getenv("CRABBOX_SSH_KEY"); sshKey != "" {
+		cfg.SSHKey = sshKey
+		MarkSSHKeyExplicit(cfg)
+	}
 	if sshPort := os.Getenv("CRABBOX_SSH_PORT"); sshPort != "" {
 		cfg.SSHPort = sshPort
 		MarkSSHPortExplicit(cfg)

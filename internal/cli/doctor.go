@@ -197,7 +197,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		record("ok", tool, path, map[string]string{"tool": tool, "path": path})
 	}
 	if resolvedDoctorID != "" {
-		_, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, resolvedDoctorID)
+		_, target, leaseID, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{ID: resolvedDoctorID, Prepare: true})
 		if err != nil {
 			if strings.TrimSpace(*fromRun) != "" {
 				record("skip", "remote", fmt.Sprintf("%s unavailable: %v", resolvedDoctorID, err), map[string]string{"id": resolvedDoctorID, "reason": "lease_unavailable"})
