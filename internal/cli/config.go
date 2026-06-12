@@ -4230,32 +4230,34 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.WindowsSandbox.Workdir != "" {
 			cfg.WindowsSandbox.Workdir = file.WindowsSandbox.Workdir
 		}
-		if file.WindowsSandbox.TempRoot != "" {
-			cfg.WindowsSandbox.TempRoot = expandUserPath(file.WindowsSandbox.TempRoot)
-		}
-		if file.WindowsSandbox.Networking != "" {
-			cfg.WindowsSandbox.Networking = file.WindowsSandbox.Networking
-		}
-		if file.WindowsSandbox.VGPU != "" {
-			cfg.WindowsSandbox.VGPU = file.WindowsSandbox.VGPU
-		}
-		if file.WindowsSandbox.Clipboard != "" {
-			cfg.WindowsSandbox.Clipboard = file.WindowsSandbox.Clipboard
-		}
-		if file.WindowsSandbox.ProtectedClient != "" {
-			cfg.WindowsSandbox.ProtectedClient = file.WindowsSandbox.ProtectedClient
-		}
-		if file.WindowsSandbox.AudioInput != "" {
-			cfg.WindowsSandbox.AudioInput = file.WindowsSandbox.AudioInput
-		}
-		if file.WindowsSandbox.VideoInput != "" {
-			cfg.WindowsSandbox.VideoInput = file.WindowsSandbox.VideoInput
-		}
-		if file.WindowsSandbox.PrinterRedirection != "" {
-			cfg.WindowsSandbox.PrinterRedirection = file.WindowsSandbox.PrinterRedirection
-		}
-		if file.WindowsSandbox.MemoryMB > 0 {
-			cfg.WindowsSandbox.MemoryMB = file.WindowsSandbox.MemoryMB
+		if trusted {
+			if file.WindowsSandbox.TempRoot != "" {
+				cfg.WindowsSandbox.TempRoot = expandUserPath(file.WindowsSandbox.TempRoot)
+			}
+			if file.WindowsSandbox.Networking != "" {
+				cfg.WindowsSandbox.Networking = file.WindowsSandbox.Networking
+			}
+			if file.WindowsSandbox.VGPU != "" {
+				cfg.WindowsSandbox.VGPU = file.WindowsSandbox.VGPU
+			}
+			if file.WindowsSandbox.Clipboard != "" {
+				cfg.WindowsSandbox.Clipboard = file.WindowsSandbox.Clipboard
+			}
+			if file.WindowsSandbox.ProtectedClient != "" {
+				cfg.WindowsSandbox.ProtectedClient = file.WindowsSandbox.ProtectedClient
+			}
+			if file.WindowsSandbox.AudioInput != "" {
+				cfg.WindowsSandbox.AudioInput = file.WindowsSandbox.AudioInput
+			}
+			if file.WindowsSandbox.VideoInput != "" {
+				cfg.WindowsSandbox.VideoInput = file.WindowsSandbox.VideoInput
+			}
+			if file.WindowsSandbox.PrinterRedirection != "" {
+				cfg.WindowsSandbox.PrinterRedirection = file.WindowsSandbox.PrinterRedirection
+			}
+			if file.WindowsSandbox.MemoryMB > 0 {
+				cfg.WindowsSandbox.MemoryMB = file.WindowsSandbox.MemoryMB
+			}
 		}
 	}
 	if file.Tailscale != nil {

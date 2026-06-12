@@ -117,12 +117,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	fmt.Fprintf(b.rt.Stderr, "provider=%s workdir=%s host_workspace=%s networking=%s vgpu=%s\n", providerName, cfg.WindowsSandbox.Workdir, run.hostWorkspace, cfg.WindowsSandbox.Networking, cfg.WindowsSandbox.VGPU)
 
 	commandStarted := b.now()
-	execResult, execErr := b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name:   "powershell.exe",
-		Args:   hostRunnerArgs(run, cfg, req),
-		Stdout: b.rt.Stdout,
-		Stderr: b.rt.Stderr,
-	})
+	execResult, execErr := b.runHostRunner(ctx, LocalCommandRequest{
+		Name:                 "powershell.exe",
+		Args:                 hostRunnerArgs(run, cfg, req),
+		Stdout:               b.rt.Stdout,
+		Stderr:               b.rt.Stderr,
+		DisableOutputCapture: true,
+	}, filepath.Join(run.hostControl, "cancel.txt"), req.Keep || req.KeepOnFailure)
 	commandDuration := b.now().Sub(commandStarted)
 	exitCode := execResult.ExitCode
 	if execErr != nil && exitCode == 0 {
@@ -299,7 +300,7 @@ func (b *backend) syncWorkspace(ctx context.Context, cfg Config, req RunRequest,
 		return nil, 0, err
 	}
 	manifestStarted := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes)
+	manifest, err := syncManifest(req.Repo.Root, excludes, cfg.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}
@@ -412,6 +413,77 @@ func hostRunnerArgs(run preparedRun, cfg Config, req RunRequest) []string {
 	return args
 }
 
+type localCommandOutcome struct {
+	result LocalCommandResult
+	err    error
+}
+
+func (b *backend) runHostRunner(ctx context.Context, command LocalCommandRequest, cancelPath string, keepOnCancel bool) (LocalCommandResult, error) {
+	runCtx, cancelRun := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRun()
+	done := make(chan localCommandOutcome, 1)
+	go func() {
+		result, err := b.rt.Exec.Run(runCtx, command)
+		done <- localCommandOutcome{result: result, err: err}
+	}()
+
+	select {
+	case outcome := <-done:
+		return outcome.result, outcome.err
+	case <-ctx.Done():
+		if err := os.WriteFile(cancelPath, []byte("cancel\r\n"), 0o600); err != nil {
+			cancelRun()
+			outcome := <-done
+			if !keepOnCancel {
+				b.stopCanceledSandbox(ctx)
+			}
+			outcome.result.ExitCode = 130
+			return outcome.result, fmt.Errorf("signal windows-sandbox cancellation: %w", err)
+		}
+
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop()
+		select {
+		case outcome := <-done:
+			outcome.result.ExitCode = 130
+			if outcome.err == nil {
+				outcome.err = ctx.Err()
+			}
+			return outcome.result, outcome.err
+		case <-timer.C:
+			cancelRun()
+			outcome := <-done
+			if !keepOnCancel {
+				b.stopCanceledSandbox(ctx)
+			}
+			outcome.result.ExitCode = 130
+			if outcome.err == nil {
+				outcome.err = ctx.Err()
+			}
+			return outcome.result, outcome.err
+		}
+	}
+}
+
+func (b *backend) stopCanceledSandbox(ctx context.Context) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	defer cancel()
+	result, err := b.rt.Exec.Run(cleanupCtx, LocalCommandRequest{
+		Name: "powershell.exe",
+		Args: []string{
+			"-NoProfile",
+			"-ExecutionPolicy",
+			"Bypass",
+			"-Command",
+			`Get-Process -Name WindowsSandbox,WindowsSandboxClient -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`,
+		},
+		DisableOutputCapture: true,
+	})
+	if err != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: stop canceled windows-sandbox session: %s\n", commandDetail(result, err))
+	}
+}
+
 func windowsSandboxConfigXML(cfg Config, run preparedRun) ([]byte, error) {
 	workdir, err := cleanWindowsSandboxPath(cfg.WindowsSandbox.Workdir)
 	if err != nil {
@@ -482,6 +554,7 @@ func sandboxRunScript(cfg Config, req RunRequest) (string, error) {
 	}
 	return strings.Join([]string{
 		"$ErrorActionPreference = 'Continue'",
+		"$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'",
 		"$stdout = 'C:\\crabbox-control\\stdout.log'",
 		"$stderr = 'C:\\crabbox-control\\stderr.log'",
 		"$exitFile = 'C:\\crabbox-control\\exit-code.txt'",
@@ -498,9 +571,11 @@ func sandboxRunScript(cfg Config, req RunRequest) (string, error) {
 		"  $_ | Out-File -FilePath $stderr -Append",
 		"  $exitCode = 1",
 		"}",
-		"Set-Content -LiteralPath $exitFile -Value $exitCode -Encoding ASCII",
 		"$keep = " + psBool(req.Keep),
 		"$keepOnFailure = " + psBool(req.KeepOnFailure),
+		"$canceled = Test-Path -LiteralPath 'C:\\crabbox-control\\cancel.txt'",
+		"if ($canceled -and $exitCode -eq 0) { $exitCode = 130 }",
+		"Set-Content -LiteralPath $exitFile -Value $exitCode -Encoding ASCII",
 		"if (-not $keep -and -not ($keepOnFailure -and $exitCode -ne 0)) {",
 		"  Start-Process -FilePath \"$env:WINDIR\\System32\\shutdown.exe\" -ArgumentList '/s','/t','0','/f' -WindowStyle Hidden",
 		"}",
@@ -553,6 +628,7 @@ $ErrorActionPreference = 'Stop'
 $stdout = Join-Path $ControlDir 'stdout.log'
 $stderr = Join-Path $ControlDir 'stderr.log'
 $exitFile = Join-Path $ControlDir 'exit-code.txt'
+$cancelFile = Join-Path $ControlDir 'cancel.txt'
 Remove-Item -LiteralPath $stdout,$stderr,$exitFile -Force -ErrorAction SilentlyContinue
 
 function Get-SandboxProcesses {
@@ -561,7 +637,7 @@ function Get-SandboxProcesses {
 
 $running = Get-SandboxProcesses
 if ($running) {
-  Write-Error 'Windows Sandbox is already running. Microsoft Windows Sandbox allows one instance at a time; close it before running Crabbox with provider=windows-sandbox.'
+  [Console]::Error.WriteLine('Windows Sandbox is already running. Microsoft Windows Sandbox allows one instance at a time; close it before running Crabbox with provider=windows-sandbox.')
   exit 2
 }
 
@@ -595,12 +671,27 @@ function Wait-SandboxSession([int]$TimeoutSeconds) {
 
 function Flush-Log([string]$Path, [ref]$Offset, [bool]$IsError) {
   if (-not (Test-Path -LiteralPath $Path)) { return }
-  $content = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
-  if ($null -eq $content) { return }
-  if ($content.Length -lt $Offset.Value) { $Offset.Value = 0 }
-  if ($content.Length -le $Offset.Value) { return }
-  $chunk = $content.Substring($Offset.Value)
-  $Offset.Value = $content.Length
+  try {
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+      if ($stream.Length -lt $Offset.Value) { $Offset.Value = 0 }
+      if ($stream.Length -le $Offset.Value) { return }
+      [void]$stream.Seek($Offset.Value, [System.IO.SeekOrigin]::Begin)
+      $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true, 4096, $true)
+      try {
+        $chunk = $reader.ReadToEnd()
+        $Offset.Value = $stream.Position
+      } finally {
+        $reader.Dispose()
+      }
+    } finally {
+      $stream.Dispose()
+    }
+  } catch [System.IO.IOException] {
+    return
+  } catch [System.UnauthorizedAccessException] {
+    return
+  }
   if ($IsError) {
     [Console]::Error.Write($chunk)
   } else {
@@ -614,6 +705,15 @@ while ($true) {
   $sandboxRunning = Get-SandboxProcesses
   if ($sandboxRunning) {
     $sandboxSeen = $true
+  }
+  if (Test-Path -LiteralPath $cancelFile) {
+    $keepOpen = $Keep.IsPresent -or $KeepOnFailure.IsPresent
+    if (-not $keepOpen) {
+      Stop-SandboxSession
+      Wait-SandboxSession 20
+    }
+    [Console]::Error.WriteLine('Windows Sandbox run canceled.')
+    exit 130
   }
   if (Test-Path -LiteralPath $exitFile) {
     Start-Sleep -Milliseconds 300
@@ -632,7 +732,7 @@ while ($true) {
     if (-not ($Keep.IsPresent -or $KeepOnFailure.IsPresent)) {
       Stop-SandboxSession
     }
-    Write-Error "Windows Sandbox timed out after ${TimeoutSeconds}s"
+    [Console]::Error.WriteLine("Windows Sandbox timed out after ${TimeoutSeconds}s")
     exit 124
   }
   if ($process -and $process.HasExited) {
@@ -644,7 +744,7 @@ while ($true) {
       if ((Get-Date) -gt $startupDeadline) {
         Flush-Log $stdout ([ref]$outOffset) $false
         Flush-Log $stderr ([ref]$errOffset) $true
-        Write-Error "Windows Sandbox launcher exited before any sandbox process was observed after ${startupGraceSeconds}s."
+        [Console]::Error.WriteLine("Windows Sandbox launcher exited before any sandbox process was observed after ${startupGraceSeconds}s.")
         exit 1
       }
       Start-Sleep -Milliseconds 500
@@ -657,7 +757,7 @@ while ($true) {
       continue
     }
     if (-not (Test-Path -LiteralPath $exitFile)) {
-      Write-Error 'Windows Sandbox closed before Crabbox received an exit code.'
+      [Console]::Error.WriteLine('Windows Sandbox closed before Crabbox received an exit code.')
       exit 1
     }
   }

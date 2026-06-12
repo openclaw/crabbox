@@ -93,3 +93,8 @@ Flags:
 
 Environment variables use the same names with a `CRABBOX_WINDOWS_SANDBOX_`
 prefix, for example `CRABBOX_WINDOWS_SANDBOX_NETWORKING=disable`.
+
+Host paths, device redirection, networking, vGPU, protected-client mode, and
+memory settings are accepted only from trusted user config, environment
+variables, or explicit flags. Repository-local config may set only the sandbox
+workdir; it cannot redirect host temporary files or loosen host sandbox policy.

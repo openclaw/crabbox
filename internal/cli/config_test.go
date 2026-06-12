@@ -1706,6 +1706,52 @@ func TestWindowsSandboxConfigDefaultsFileEnvAndProviderTarget(t *testing.T) {
 	}
 }
 
+func TestRepositoryConfigCannotLoosenWindowsSandboxHostPolicy(t *testing.T) {
+	cfg := baseConfig()
+	cfg.WindowsSandbox.TempRoot = `C:\trusted-temp`
+	cfg.WindowsSandbox.Networking = "Disable"
+	cfg.WindowsSandbox.VGPU = "Disable"
+	cfg.WindowsSandbox.Clipboard = "Disable"
+	cfg.WindowsSandbox.ProtectedClient = "Enable"
+	cfg.WindowsSandbox.AudioInput = "Disable"
+	cfg.WindowsSandbox.VideoInput = "Disable"
+	cfg.WindowsSandbox.PrinterRedirection = "Disable"
+	cfg.WindowsSandbox.MemoryMB = 4096
+
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		WindowsSandbox: &fileWindowsSandboxConfig{
+			Workdir:            `C:\repo-work`,
+			TempRoot:           `\\server\share`,
+			Networking:         "enable",
+			VGPU:               "enable",
+			Clipboard:          "enable",
+			ProtectedClient:    "disable",
+			AudioInput:         "enable",
+			VideoInput:         "enable",
+			PrinterRedirection: "enable",
+			MemoryMB:           65536,
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.WindowsSandbox.Workdir != `C:\repo-work` {
+		t.Fatalf("repository workdir=%q, want sandbox-local override", cfg.WindowsSandbox.Workdir)
+	}
+	if cfg.WindowsSandbox.TempRoot != `C:\trusted-temp` || cfg.WindowsSandbox.MemoryMB != 4096 {
+		t.Fatalf("repository config changed host resources: %#v", cfg.WindowsSandbox)
+	}
+	if cfg.WindowsSandbox.Networking != "Disable" ||
+		cfg.WindowsSandbox.VGPU != "Disable" ||
+		cfg.WindowsSandbox.Clipboard != "Disable" ||
+		cfg.WindowsSandbox.ProtectedClient != "Enable" ||
+		cfg.WindowsSandbox.AudioInput != "Disable" ||
+		cfg.WindowsSandbox.VideoInput != "Disable" ||
+		cfg.WindowsSandbox.PrinterRedirection != "Disable" {
+		t.Fatalf("repository config loosened sandbox policy: %#v", cfg.WindowsSandbox)
+	}
+}
+
 func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
