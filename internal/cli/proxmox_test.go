@@ -606,6 +606,26 @@ func TestProxmoxGuestIPv4FiltersNonRoutableInterfaces(t *testing.T) {
 	}
 }
 
+func TestProxmoxVMExistsInCluster(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api2/json/cluster/resources" || r.URL.Query().Get("type") != "vm" {
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"vmid": 101, "node": "pve2", "type": "qemu"},
+		}})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	if exists, err := client.VMExistsInCluster(context.Background(), "101"); err != nil || !exists {
+		t.Fatalf("exists=%t err=%v, want migrated VM found", exists, err)
+	}
+	if exists, err := client.VMExistsInCluster(context.Background(), "202"); err != nil || exists {
+		t.Fatalf("exists=%t err=%v, want VM absent", exists, err)
+	}
+}
+
 func TestProxmoxConfigureVMAcceptsNullSuccessData(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api2/json/nodes/pve1/qemu/101/config" {

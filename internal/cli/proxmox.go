@@ -609,6 +609,10 @@ type proxmoxVM struct {
 	Template int    `json:"template"`
 }
 
+type proxmoxClusterVM struct {
+	VMID proxmoxInt `json:"vmid"`
+}
+
 func (c *ProxmoxClient) listQEMU(ctx context.Context) ([]proxmoxVM, error) {
 	var vms []proxmoxVM
 	if err := c.doRequired(ctx, http.MethodGet, "/nodes/"+url.PathEscape(c.Node)+"/qemu", nil, &vms); err != nil {
@@ -639,6 +643,23 @@ func (c *ProxmoxClient) ListCrabboxServers(ctx context.Context) ([]Server, error
 		}
 	}
 	return servers, nil
+}
+
+func (c *ProxmoxClient) VMExistsInCluster(ctx context.Context, id string) (bool, error) {
+	vmid, err := strconv.Atoi(strings.TrimSpace(id))
+	if err != nil || vmid <= 0 {
+		return false, fmt.Errorf("invalid Proxmox VM identity %q", id)
+	}
+	var vms []proxmoxClusterVM
+	if err := c.doRequired(ctx, http.MethodGet, "/cluster/resources?type=vm", nil, &vms); err != nil {
+		return false, err
+	}
+	for _, vm := range vms {
+		if int(vm.VMID) == vmid {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {

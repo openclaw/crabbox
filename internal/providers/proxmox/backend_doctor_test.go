@@ -30,6 +30,8 @@ type fakeProxmoxDoctorClient struct {
 	getErrSequenceByID    map[string][]error
 	getCallsByID          map[string]int
 	getServerByID         map[string]Server
+	clusterExistsByID     map[string]bool
+	clusterExistsErr      error
 	setLabels             []map[string]string
 	readiness             []core.ProxmoxReadinessCheck
 	leaseIDs              []string
@@ -85,6 +87,13 @@ func (c *fakeProxmoxDoctorClient) GetServer(_ context.Context, id string) (Serve
 	server := Server{CloudID: "101", Labels: map[string]string{"lease": "cbx_test", "slug": "test"}}
 	server.PublicNet.IPv4.IP = "192.0.2.10"
 	return server, nil
+}
+
+func (c *fakeProxmoxDoctorClient) VMExistsInCluster(_ context.Context, id string) (bool, error) {
+	if c.clusterExistsErr != nil {
+		return false, c.clusterExistsErr
+	}
+	return c.clusterExistsByID[id], nil
 }
 
 func (c *fakeProxmoxDoctorClient) DeleteServer(_ context.Context, id string) error {
@@ -1008,10 +1017,11 @@ func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing
 func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
 	leaseID := "cbx_proxmox_release_inventory_failure"
 	server := expiredProxmoxServer("101", leaseID)
 	server.Provider = "proxmox"
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
@@ -1023,7 +1033,7 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	t.Cleanup(func() { newClient = oldClient })
 
 	var stderr strings.Builder
-	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*leaseBackend)
 	req := ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}
 	if err := backend.ReleaseLease(context.Background(), req); err == nil {
 		t.Fatal("expected inventory reconciliation failure")
@@ -1062,6 +1072,47 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 		t.Fatalf("claim ok=%t err=%v, want removed after successful retry reconciliation", ok, err)
 	}
 	assertStoredTestboxKeyRemoved(t, leaseID)
+}
+
+func TestProxmoxReleaseOnlyClaimRecoveryRequiresOriginalScopeAndClusterAbsence(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_scoped_absence"
+	claimed := expiredProxmoxServer("101", leaseID)
+	claimed.Provider = "proxmox"
+	original := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve-a.example.test:8006", Node: "pve1"}}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", original, claimed, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	notFound := &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"}
+	fake := &fakeProxmoxDoctorClient{getErrByID: map[string]error{"101": notFound}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	for name, changed := range map[string]Config{
+		"cluster": func() Config {
+			cfg := original
+			cfg.Proxmox.APIURL = "https://pve-b.example.test:8006"
+			return cfg
+		}(),
+		"node": func() Config {
+			cfg := original
+			cfg.Proxmox.Node = "pve2"
+			return cfg
+		}(),
+	} {
+		backend := NewLeaseBackend(Provider{}.Spec(), changed, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+		if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "unverified cluster scope") {
+			t.Fatalf("%s-changed resolve error=%v", name, err)
+		}
+	}
+
+	fake.clusterExistsByID = map[string]bool{"101": true}
+	backend := NewLeaseBackend(Provider{}.Spec(), original, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "still exists in the cluster") {
+		t.Fatalf("migrated-vm resolve error=%v", err)
+	}
 }
 
 func TestProxmoxReleaseOnlyClaimRecoveryRejectsReusedVMID(t *testing.T) {

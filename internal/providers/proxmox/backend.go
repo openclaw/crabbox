@@ -38,6 +38,7 @@ type proxmoxClient interface {
 	ListCrabboxServers(context.Context) ([]Server, error)
 	CreateServer(context.Context, Config, string, string, string, bool) (Server, error)
 	GetServer(context.Context, string) (Server, error)
+	VMExistsInCluster(context.Context, string) (bool, error)
 	DeleteServer(context.Context, string) error
 	SetLabels(context.Context, string, map[string]string) error
 }
@@ -209,6 +210,18 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 		return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
 	} else if !core.IsProxmoxNotFound(err) {
 		return LeaseTarget{}, err
+	}
+	claimScope := strings.TrimSpace(claim.ProviderScope)
+	currentScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))
+	if claimScope == "" || currentScope == "" || claimScope != currentScope {
+		return LeaseTarget{}, exit(2, "refusing to accept missing Proxmox VM %s from lease=%s with unverified cluster scope", cloudID, claim.LeaseID)
+	}
+	exists, err := client.VMExistsInCluster(ctx, cloudID)
+	if err != nil {
+		return LeaseTarget{}, fmt.Errorf("verify Proxmox VM %s cluster absence: %w", cloudID, err)
+	}
+	if exists {
+		return LeaseTarget{}, exit(2, "refusing to accept missing Proxmox VM %s from lease=%s because it still exists in the cluster", cloudID, claim.LeaseID)
 	}
 	labels := make(map[string]string, len(claim.Labels)+2)
 	for key, value := range claim.Labels {

@@ -152,6 +152,10 @@ func LeaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
 	return leaseClaimMatchesIdentifier(claim, identifier)
 }
 
+func ProviderClaimScope(provider string, cfg Config) string {
+	return providerClaimScope(canonicalClaimProvider(provider), cfg)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
 }
