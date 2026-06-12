@@ -61,11 +61,26 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "ovh-image") {
 		cfg.OVH.Image = *v.Image
+		core.SetOVHImageExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "ovh-flavor") {
 		cfg.OVH.Flavor = *v.Flavor
 	}
 	return nil
+}
+
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
+		return cfg.ServerType
+	}
+	if cfg.OVH.Flavor != "" {
+		return cfg.OVH.Flavor
+	}
+	return ovhServerTypeForClass(cfg.Class)
+}
+
+func (Provider) ServerTypeForClass(class string) string {
+	return ovhServerTypeForClass(class)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
@@ -74,4 +89,13 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
+}
+
+func ovhServerTypeForClass(class string) string {
+	switch class {
+	case "standard", "fast", "large", "beast":
+		return "b3-8"
+	default:
+		return "b3-8"
+	}
 }

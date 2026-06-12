@@ -554,6 +554,108 @@ func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestOVHConfigFileEnvAndDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "ovh",
+		OVH: &fileOVHConfig{
+			Endpoint:  "https://ca.api.ovhcloud.com/1.0",
+			ProjectID: "project-file",
+			Region:    "BHS5",
+			Image:     "Ubuntu 22.04",
+			Flavor:    "b3-16",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "ovh" || cfg.OVH.Endpoint != "https://ca.api.ovhcloud.com/1.0" || cfg.OVH.ProjectID != "project-file" || cfg.OVH.Region != "BHS5" || cfg.OVH.Image != "Ubuntu 22.04" || cfg.OVH.Flavor != "b3-16" {
+		t.Fatalf("file ovh config not applied: %#v", cfg.OVH)
+	}
+	if !cfg.ovhImageExplicit {
+		t.Fatal("file ovh image should mark ovh image explicit")
+	}
+
+	t.Setenv("OVH_ENDPOINT", "https://api.us.ovhcloud.com/1.0")
+	t.Setenv("CRABBOX_OVH_PROJECT_ID", "project-env")
+	t.Setenv("CRABBOX_OVH_REGION", "GRA11")
+	t.Setenv("CRABBOX_OVH_IMAGE", "Ubuntu 24.04")
+	t.Setenv("CRABBOX_OVH_FLAVOR", "b3-8")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.OVH.Endpoint != "https://api.us.ovhcloud.com/1.0" || cfg.OVH.ProjectID != "project-env" || cfg.OVH.Region != "GRA11" || cfg.OVH.Image != "Ubuntu 24.04" || cfg.OVH.Flavor != "b3-8" {
+		t.Fatalf("env ovh config not applied: %#v", cfg.OVH)
+	}
+	if !cfg.ovhImageExplicit {
+		t.Fatal("env ovh image should mark ovh image explicit")
+	}
+	cfg.OVH.Image = ""
+	cfg.OVH.Flavor = ""
+	cfg.ovhImageExplicit = false
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.OVH.Image != "Ubuntu 24.04" || cfg.OVH.Flavor != "b3-8" {
+		t.Fatalf("ovh defaults not applied: cfg=%#v ovh=%#v", cfg, cfg.OVH)
+	}
+	if cfg.ovhImageExplicit {
+		t.Fatal("default ovh image should not mark ovh image explicit")
+	}
+}
+
+func TestOVHConfigShowRedactsEnvCredentials(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("OVH_APPLICATION_KEY", "app-key-secret")
+	t.Setenv("OVH_APPLICATION_SECRET", "application-secret-value")
+	t.Setenv("OVH_CONSUMER_KEY", "consumer-key-value")
+	cfg := Config{
+		Provider: "ovh",
+		OVH: OVHConfig{
+			Endpoint:  "https://user:pass@api.us.ovhcloud.com/1.0",
+			ProjectID: "project-test",
+			Region:    "GRA11",
+			Image:     "Ubuntu 24.04",
+			Flavor:    "b3-8",
+		},
+	}
+	view := configShowView(cfg)["ovh"].(map[string]any)
+	rendered := fmt.Sprint(view)
+	for _, secret := range []string{"app-key-secret", "application-secret-value", "consumer-key-value", "user:pass"} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("config show leaked %q in %s", secret, rendered)
+		}
+	}
+	if view["auth"] != "configured" {
+		t.Fatalf("auth=%v, want configured", view["auth"])
+	}
+	t.Setenv("OVH_APPLICATION_SECRET", "")
+	t.Setenv("OVH_CONSUMER_KEY", "")
+	if got := configShowView(cfg)["ovh"].(map[string]any)["auth"]; got != "partial" {
+		t.Fatalf("partial auth=%v, want partial", got)
+	}
+}
+
+func TestRepoConfigCannotRedirectInheritedOVHCredentials(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.OVH.Endpoint = "https://api.us.ovhcloud.com/1.0"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		OVH: &fileOVHConfig{
+			Endpoint:  "https://attacker.example.test/1.0",
+			ProjectID: "project-from-repo",
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OVH.Endpoint != "https://api.us.ovhcloud.com/1.0" {
+		t.Fatalf("repo config redirected OVH endpoint: %#v", cfg.OVH)
+	}
+	if cfg.OVH.ProjectID != "project-from-repo" {
+		t.Fatalf("non-secret OVH project setting was not applied: %#v", cfg.OVH)
+	}
+}
+
 func TestDigitalOceanPortableOSSelection(t *testing.T) {
 	t.Run("supported selector maps to provider image", func(t *testing.T) {
 		cfg := baseConfig()

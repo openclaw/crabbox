@@ -48,4 +48,23 @@ func TestProviderFlagsApplyNonSecretConfig(t *testing.T) {
 	if cfg.OVH.Endpoint != "https://ca.api.ovhcloud.com/1.0" || cfg.OVH.ProjectID != "project-test" || cfg.OVH.Region != "GRA11" || cfg.OVH.Image != "image-test" || cfg.OVH.Flavor != "b3-16" {
 		t.Fatalf("ovh flags not applied: %#v", cfg.OVH)
 	}
+	if !core.OVHImageWasExplicit(cfg) {
+		t.Fatal("ovh image flag should mark ovh image explicit")
+	}
+}
+
+func TestProviderServerTypeForConfig(t *testing.T) {
+	provider := Provider{}
+	if got := provider.ServerTypeForClass("standard"); got != "b3-8" {
+		t.Fatalf("ServerTypeForClass standard=%q", got)
+	}
+	if got := provider.ServerTypeForConfig(core.Config{ServerType: "b3-16", ServerTypeExplicit: true, OVH: core.OVHConfig{Flavor: "b3-8"}}); got != "b3-16" {
+		t.Fatalf("explicit ServerTypeForConfig=%q", got)
+	}
+	if got := provider.ServerTypeForConfig(core.Config{OVH: core.OVHConfig{Flavor: "b3-16"}}); got != "b3-16" {
+		t.Fatalf("ovh flavor ServerTypeForConfig=%q", got)
+	}
+	if got := provider.ServerTypeForConfig(core.Config{Class: "beast"}); got != "b3-8" {
+		t.Fatalf("class fallback ServerTypeForConfig=%q", got)
+	}
 }

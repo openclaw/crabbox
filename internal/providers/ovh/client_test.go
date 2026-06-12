@@ -136,6 +136,73 @@ func TestClientReadOnlyDiscoveryMethods(t *testing.T) {
 	}
 }
 
+func TestClientMutatingLifecycleMethods(t *testing.T) {
+	var seen []string
+	var instanceBody InstanceCreateRequest
+	var keyBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.EscapedPath())
+		switch r.Method + " " + r.URL.Path {
+		case "POST /cloud/project/project-test/sshkey":
+			if err := json.NewDecoder(r.Body).Decode(&keyBody); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(SSHKey{ID: "key-id", Name: keyBody["name"], PublicKey: keyBody["publicKey"]})
+		case "DELETE /cloud/project/project-test/sshkey/key-id":
+			w.WriteHeader(http.StatusNoContent)
+		case "POST /cloud/project/project-test/instance":
+			if err := json.NewDecoder(r.Body).Decode(&instanceBody); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(Instance{ID: "instance-id", Name: instanceBody.Name, SSHKeyID: instanceBody.SSHKeyID})
+		case "DELETE /cloud/project/project-test/instance/instance-id":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	key, err := client.CreateSSHKey(context.Background(), "project-test", "crabbox-cbx-test", "ssh-ed25519 test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.ID != "key-id" || keyBody["name"] != "crabbox-cbx-test" || keyBody["publicKey"] != "ssh-ed25519 test" {
+		t.Fatalf("key=%#v body=%#v", key, keyBody)
+	}
+	created, err := client.CreateInstance(context.Background(), "project-test", InstanceCreateRequest{
+		Name:     "cbx-test",
+		Region:   "GRA11",
+		FlavorID: "flavor-id",
+		ImageID:  "image-id",
+		SSHKeyID: key.ID,
+		UserData: "#cloud-config",
+		Labels:   map[string]string{"provider": providerName},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "instance-id" || instanceBody.FlavorID != "flavor-id" || instanceBody.ImageID != "image-id" || instanceBody.SSHKeyID != "key-id" || instanceBody.Labels["provider"] != providerName {
+		t.Fatalf("created=%#v body=%#v", created, instanceBody)
+	}
+	if err := client.DeleteInstance(context.Background(), "project-test", "instance-id"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteSSHKey(context.Background(), "project-test", "key-id"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"POST /cloud/project/project-test/sshkey",
+		"POST /cloud/project/project-test/instance",
+		"DELETE /cloud/project/project-test/instance/instance-id",
+		"DELETE /cloud/project/project-test/sshkey/key-id",
+	}
+	if strings.Join(seen, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("seen=%v want=%v", seen, want)
+	}
+}
+
 func TestClientErrorRedactsSecrets(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app-secret consumer-key $1$0123456789012345678901234567890123456789", http.StatusForbidden)

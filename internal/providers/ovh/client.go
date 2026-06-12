@@ -99,15 +99,23 @@ type SSHKey struct {
 	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
+type IPAddress struct {
+	IP      string `json:"ip,omitempty"`
+	Version int    `json:"version,omitempty"`
+	Type    string `json:"type,omitempty"`
+}
+
 type Instance struct {
-	ID     string            `json:"id"`
-	Name   string            `json:"name"`
-	Status string            `json:"status,omitempty"`
-	Region string            `json:"region,omitempty"`
-	Flavor Flavor            `json:"flavor,omitempty"`
-	Image  Image             `json:"image,omitempty"`
-	Tags   []string          `json:"tags,omitempty"`
-	Labels map[string]string `json:"labels,omitempty"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Status      string            `json:"status,omitempty"`
+	Region      string            `json:"region,omitempty"`
+	Flavor      Flavor            `json:"flavor,omitempty"`
+	Image       Image             `json:"image,omitempty"`
+	SSHKeyID    string            `json:"sshKeyId,omitempty"`
+	IPAddresses []IPAddress       `json:"ipAddresses,omitempty"`
+	Tags        []string          `json:"tags,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
 }
 
 type API interface {
@@ -120,8 +128,22 @@ type API interface {
 	GetImage(context.Context, string, string) (Image, error)
 	ListSSHKeys(context.Context, string) ([]SSHKey, error)
 	GetSSHKey(context.Context, string, string) (SSHKey, error)
+	CreateSSHKey(context.Context, string, string, string) (SSHKey, error)
+	DeleteSSHKey(context.Context, string, string) error
 	ListInstances(context.Context, string) ([]Instance, error)
 	GetInstance(context.Context, string, string) (Instance, error)
+	CreateInstance(context.Context, string, InstanceCreateRequest) (Instance, error)
+	DeleteInstance(context.Context, string, string) error
+}
+
+type InstanceCreateRequest struct {
+	Name     string            `json:"name"`
+	Region   string            `json:"region"`
+	FlavorID string            `json:"flavorId"`
+	ImageID  string            `json:"imageId"`
+	SSHKeyID string            `json:"sshKeyId,omitempty"`
+	UserData string            `json:"userData,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
 }
 
 func newClient(cfg core.Config, rt core.Runtime) (*Client, error) {
@@ -230,6 +252,20 @@ func (c *Client) GetSSHKey(ctx context.Context, projectID, keyID string) (SSHKey
 	return out, err
 }
 
+func (c *Client) CreateSSHKey(ctx context.Context, projectID, name, publicKey string) (SSHKey, error) {
+	body := map[string]string{
+		"name":      name,
+		"publicKey": publicKey,
+	}
+	var out SSHKey
+	err := c.do(ctx, http.MethodPost, cloudPath(projectID, "sshkey"), body, &out)
+	return out, err
+}
+
+func (c *Client) DeleteSSHKey(ctx context.Context, projectID, keyID string) error {
+	return c.do(ctx, http.MethodDelete, cloudPath(projectID, "sshkey", keyID), nil, nil)
+}
+
 func (c *Client) ListInstances(ctx context.Context, projectID string) ([]Instance, error) {
 	var out []Instance
 	err := c.do(ctx, http.MethodGet, cloudPath(projectID, "instance"), nil, &out)
@@ -240,6 +276,16 @@ func (c *Client) GetInstance(ctx context.Context, projectID, instanceID string) 
 	var out Instance
 	err := c.do(ctx, http.MethodGet, cloudPath(projectID, "instance", instanceID), nil, &out)
 	return out, err
+}
+
+func (c *Client) CreateInstance(ctx context.Context, projectID string, body InstanceCreateRequest) (Instance, error) {
+	var out Instance
+	err := c.do(ctx, http.MethodPost, cloudPath(projectID, "instance"), body, &out)
+	return out, err
+}
+
+func (c *Client) DeleteInstance(ctx context.Context, projectID, instanceID string) error {
+	return c.do(ctx, http.MethodDelete, cloudPath(projectID, "instance", instanceID), nil, nil)
 }
 
 func (c *Client) do(ctx context.Context, method, requestPath string, body any, out any) error {

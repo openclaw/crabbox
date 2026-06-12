@@ -102,6 +102,7 @@ type Config struct {
 	linodeImageExplicit           bool
 	linodeTypeExplicit            bool
 	OVH                           OVHConfig
+	ovhImageExplicit              bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	XCPNg                         XCPNgConfig
@@ -3168,6 +3169,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.OVH.Image != "" {
 			cfg.OVH.Image = file.OVH.Image
+			cfg.ovhImageExplicit = true
 		}
 		if file.OVH.Flavor != "" {
 			cfg.OVH.Flavor = file.OVH.Flavor
@@ -5084,7 +5086,10 @@ func applyEnv(cfg *Config) error {
 	cfg.OVH.Endpoint = getenv("OVH_ENDPOINT", cfg.OVH.Endpoint)
 	cfg.OVH.ProjectID = getenv("CRABBOX_OVH_PROJECT_ID", cfg.OVH.ProjectID)
 	cfg.OVH.Region = getenv("CRABBOX_OVH_REGION", cfg.OVH.Region)
-	cfg.OVH.Image = getenv("CRABBOX_OVH_IMAGE", cfg.OVH.Image)
+	if image := os.Getenv("CRABBOX_OVH_IMAGE"); image != "" {
+		cfg.OVH.Image = image
+		cfg.ovhImageExplicit = true
+	}
 	cfg.OVH.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.OVH.Flavor)
 	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
 	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)

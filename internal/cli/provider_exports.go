@@ -242,6 +242,18 @@ func OSImageWasExplicit(cfg Config) bool {
 	return cfg.osImageExplicit
 }
 
+func SetOSImageExplicit(cfg *Config) {
+	cfg.osImageExplicit = true
+}
+
+func OVHImageWasExplicit(cfg Config) bool {
+	return cfg.ovhImageExplicit
+}
+
+func SetOVHImageExplicit(cfg *Config) {
+	cfg.ovhImageExplicit = true
+}
+
 func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
 }
