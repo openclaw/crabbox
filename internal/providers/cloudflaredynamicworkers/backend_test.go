@@ -155,6 +155,25 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	}
 }
 
+func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1").CloudflareDynamicWorkers
+	source := []byte("export default { fetch() { return new Response('ok') } }\n")
+	first := stableRunID(source, cfg, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
+	reordered := stableRunID(source, cfg, map[string]string{"FEATURE": "on", "TOKEN": "alpha"})
+	second := stableRunID(source, cfg, map[string]string{"TOKEN": "beta", "FEATURE": "on"})
+	empty := stableRunID(source, cfg, nil)
+
+	if first != reordered {
+		t.Fatalf("stable id should be independent of env map iteration order: %q != %q", first, reordered)
+	}
+	if first == second {
+		t.Fatal("stable id should change when forwarded env values change")
+	}
+	if first == empty {
+		t.Fatal("stable id should distinguish forwarded env from no forwarded env")
+	}
+}
+
 func TestRunExplicitCacheRequiresID(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	backend.cfg.CloudflareDynamicWorkers.CacheMode = "explicit"

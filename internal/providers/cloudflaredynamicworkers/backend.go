@@ -344,7 +344,7 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 		return leaseID, slug, true, err
 	}
 	if cacheMode == "stable" {
-		leaseID := stableRunID(req.Script.Data, b.cfg.CloudflareDynamicWorkers)
+		leaseID := stableRunID(req.Script.Data, b.cfg.CloudflareDynamicWorkers, req.Env)
 		return leaseID, newLeaseSlug(leaseID), false, nil
 	}
 	leaseID := ""
@@ -429,7 +429,7 @@ func writeRunOutput(stdout, stderr io.Writer, run runResponse) {
 	}
 }
 
-func stableRunID(source []byte, cfg CloudflareDynamicWorkersConfig) string {
+func stableRunID(source []byte, cfg CloudflareDynamicWorkersConfig, env map[string]string) string {
 	h := sha256.New()
 	_, _ = h.Write(source)
 	_, _ = h.Write([]byte{0})
@@ -441,6 +441,17 @@ func stableRunID(source []byte, cfg CloudflareDynamicWorkersConfig) string {
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(normalizeEgress(cfg.Egress)))
 	_, _ = h.Write([]byte(fmt.Sprintf("\x00%d\x00%d", cfg.CPUMs, cfg.Subrequests)))
+	envKeys := make([]string, 0, len(env))
+	for key := range env {
+		envKeys = append(envKeys, key)
+	}
+	sort.Strings(envKeys)
+	for _, key := range envKeys {
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(key))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(env[key]))
+	}
 	return "cfdw_" + hex.EncodeToString(h.Sum(nil))[:24]
 }
 
