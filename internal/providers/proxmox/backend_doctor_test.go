@@ -50,10 +50,11 @@ func (c *fakeProxmoxDoctorClient) ListCrabboxServers(context.Context) ([]Server,
 }
 
 func (c *fakeProxmoxDoctorClient) ListCrabboxServersCluster(context.Context) ([]Server, error) {
-	if c.clusterListErr != nil {
+	c.listCalls++
+	if c.clusterListErr != nil && (c.listCalls > 1 || len(c.servers) == 0) {
 		return nil, c.clusterListErr
 	}
-	if c.clusterServers != nil {
+	if c.clusterServers != nil && (c.listCalls > 1 || len(c.servers) == 0) {
 		return c.clusterServers, nil
 	}
 	return c.servers, c.listErr
@@ -378,6 +379,37 @@ func TestProxmoxAcquirePreservesStoredKeyWhenDeleteFails(t *testing.T) {
 	assertStoredTestboxKeyExists(t, fake.leaseIDs[0])
 }
 
+func TestProxmoxAcquirePreservesStoredKeyWhenVMClaimsToMigrateDuringCleanup(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	created := expiredProxmoxServer("101", "cbx_pending")
+	created.HostID = "pve1"
+	created.PublicNet.IPv4.IP = "192.0.2.10"
+	migrated := created
+	migrated.HostID = "pve2"
+	fake := &fakeProxmoxDoctorClient{created: created, clusterServers: []Server{migrated}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+	oldWait := waitForSSHReadyFunc
+	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return errors.New("ssh unavailable")
+	}
+	t.Cleanup(func() { waitForSSHReadyFunc = oldWait })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root", Proxmox: core.ProxmoxConfig{Node: "pve1", TemplateID: 9400}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if _, err := backend.Acquire(context.Background(), AcquireRequest{}); err == nil {
+		t.Fatal("expected ssh readiness failure")
+	}
+	if len(fake.deletedNodes) != 1 || fake.deletedNodes[0] != "pve1" {
+		t.Fatalf("deletedNodes=%v, want [pve1]", fake.deletedNodes)
+	}
+	if len(fake.leaseIDs) != 1 {
+		t.Fatalf("leaseIDs=%v, want one generated lease", fake.leaseIDs)
+	}
+	assertStoredTestboxKeyExists(t, fake.leaseIDs[0])
+}
+
 func TestProxmoxCleanupRemovesClaimAfterDelete(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -404,8 +436,8 @@ func TestProxmoxCleanupRemovesClaimAfterDelete(t *testing.T) {
 	if fake.deleteCalls != 1 {
 		t.Fatalf("deleteCalls=%d, want 1", fake.deleteCalls)
 	}
-	if fake.listCalls != 1 {
-		t.Fatalf("listCalls=%d, want one pre-delete inventory", fake.listCalls)
+	if fake.listCalls != 2 {
+		t.Fatalf("listCalls=%d, want pre-delete and reconciliation inventories", fake.listCalls)
 	}
 	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "101" {
 		t.Fatalf("deletedIDs=%v, want [101]", fake.deletedIDs)
@@ -945,8 +977,8 @@ func TestProxmoxCleanupReconcilesDeleteAcceptedBeforePollingFailure(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "task status timeout") {
 		t.Fatalf("cleanup error=%v, want polling failure", err)
 	}
-	if fake.listCalls != 1 || fake.getCalls != 1 {
-		t.Fatalf("listCalls=%d getCalls=%d, want one inventory and one authoritative verification", fake.listCalls, fake.getCalls)
+	if fake.listCalls != 2 || fake.getCalls != 1 {
+		t.Fatalf("listCalls=%d getCalls=%d, want pre-delete and reconciliation inventories plus one authoritative verification", fake.listCalls, fake.getCalls)
 	}
 	if _, ok, resolveErr := core.ResolveLeaseClaim(leaseID); resolveErr != nil || ok {
 		t.Fatalf("claim ok=%t err=%v, want removed after confirmed disappearance", ok, resolveErr)

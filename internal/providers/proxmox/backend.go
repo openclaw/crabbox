@@ -72,7 +72,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		return LeaseTarget{}, err
 	}
 	leaseID := newLeaseID()
-	servers, err := client.ListCrabboxServers(ctx)
+	servers, err := client.ListCrabboxServersCluster(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -96,19 +96,16 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	if server.PublicNet.IPv4.IP == "" {
 		cloudID := server.CloudID
+		hostID := server.HostID
 		server, err = b.waitForServerIP(ctx, client, cloudID, bootstrapWaitTimeout(cfg))
 		if err != nil {
-			if deleteErr := client.DeleteServer(context.Background(), cloudID); deleteErr == nil {
-				removeLocalLeaseResidue(leaseID)
-			}
+			b.cleanupFailedAcquire(client, Server{CloudID: cloudID, HostID: hostID}, leaseID)
 			return LeaseTarget{}, err
 		}
 	}
 	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
-		if deleteErr := client.DeleteServer(context.Background(), server.CloudID); deleteErr == nil {
-			removeLocalLeaseResidue(leaseID)
-		}
+		b.cleanupFailedAcquire(client, server, leaseID)
 		return LeaseTarget{}, err
 	}
 	if server.Labels == nil {
@@ -120,6 +117,24 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s node=%s ip=%s\n", leaseID, server.DisplayID(), cfg.Proxmox.Node, server.PublicNet.IPv4.IP)
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b *leaseBackend) cleanupFailedAcquire(client proxmoxClient, server Server, leaseID string) {
+	node := core.Blank(server.HostID, b.Cfg.Proxmox.Node)
+	if err := client.DeleteServerOnNode(context.Background(), node, server.CloudID); err != nil && !core.IsProxmoxNotFound(err) {
+		fmt.Fprintf(b.RT.Stderr, "warning: preserve failed Proxmox acquire residue lease=%s reason=delete_failed error=%v\n", leaseID, err)
+		return
+	}
+	exists, err := client.VMExistsInCluster(context.Background(), server.CloudID)
+	if err != nil {
+		fmt.Fprintf(b.RT.Stderr, "warning: preserve failed Proxmox acquire residue lease=%s reason=cluster_verification_failed error=%v\n", leaseID, err)
+		return
+	}
+	if exists {
+		fmt.Fprintf(b.RT.Stderr, "warning: preserve failed Proxmox acquire residue lease=%s reason=vm_still_exists\n", leaseID)
+		return
+	}
+	removeLocalLeaseResidue(leaseID)
 }
 
 func (b *leaseBackend) waitForServerIP(ctx context.Context, client proxmoxClient, cloudID string, timeout time.Duration) (Server, error) {
@@ -312,7 +327,7 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	if err != nil {
 		return nil, err
 	}
-	return client.ListCrabboxServers(ctx)
+	return client.ListCrabboxServersCluster(ctx)
 }
 
 func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -439,7 +454,8 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				break
 			}
 		}
-		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+		node := core.Blank(server.HostID, b.Cfg.Proxmox.Node)
+		if err := client.DeleteServerOnNode(ctx, node, server.CloudID); err != nil {
 			deleteErr = err
 			failed := server
 			failedDelete = &failed

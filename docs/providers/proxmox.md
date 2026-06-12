@@ -355,9 +355,12 @@ known wrapper credential filenames.
 8. Touch the lease labels during runs; on release, delete the VM (stop, then
    `DELETE ... ?purge=1`) unless the lease is kept.
 
-Cleanup reads the Crabbox labels from VM descriptions and only deletes expired,
-Crabbox-managed VMs (those named `crabbox-*` with `crabbox=true` and a matching
-`provider` label).
+List, release reconciliation, and cleanup use cluster-wide inventory and follow
+VMs that migrated away from the configured node. Cleanup reads the Crabbox
+labels from VM descriptions and only deletes expired, Crabbox-managed VMs
+(those named `crabbox-*` with `crabbox=true` and a matching `provider` label).
+Failed acquisition cleanup removes the per-lease SSH key only after confirming
+the VM is absent across the cluster.
 
 ## Troubleshooting
 
