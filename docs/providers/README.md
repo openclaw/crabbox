@@ -24,9 +24,10 @@ SSH-lease providers further differ by how they reach the cloud:
   normal shared-team path. Set with `config set-broker` and a broker URL
   (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same four providers without a configured broker, plus
-  cloud providers that never broker (e.g. `proxmox`, `runpod`, `namespace-devbox`,
-  `semaphore`, `sprites`, `exe-dev`, `daytona`, `morph`). The CLI talks to the provider
-  API itself and cleans up best-effort via provider labels.
+  cloud providers that never broker (e.g. `digitalocean`, `linode`, `proxmox`,
+  `runpod`, `namespace-devbox`, `semaphore`, `sprites`, `exe-dev`, `daytona`,
+  `morph`). The CLI talks to the provider API itself and cleans up best-effort
+  via provider labels.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
   provisioning, no cleanup.
 - **Local runtime** — `local-container` starts a labeled Linux container through
@@ -64,6 +65,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Google Cloud](gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered |
 | [Hetzner](hetzner.md) — `hetzner` | Linux · brokered |
 | [DigitalOcean](digitalocean.md) — `digitalocean` | Linux · direct |
+| [Linode](linode.md) — `linode` | Linux · direct |
 | [Proxmox](proxmox.md) — `proxmox` | Linux · direct |
 | [XCP-ng](xcp-ng.md) — `xcp-ng` | Linux · direct |
 | [Incus](incus.md) — `incus` | Linux · direct |
@@ -147,6 +149,10 @@ reports.
 - DigitalOcean is a direct-only Linux Droplet provider. It uses
   `DIGITALOCEAN_TOKEN`, per-lease SSH keys, and Crabbox-owned flat tags; it does
   not run through the Worker broker in Phase 1.
+- Linode is a direct-only Linux instance provider. It uses `LINODE_TOKEN`,
+  per-lease SSH keys, metadata user-data, optional attachment to an existing
+  firewall, and Crabbox-owned tags; it does not run through the Worker broker in
+  Phase 1.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,
@@ -161,6 +167,7 @@ reports.
 crabbox warmup --provider aws --class beast
 crabbox run --provider hetzner -- pnpm test
 crabbox run --provider digitalocean --type s-1vcpu-1gb -- pnpm test
+crabbox run --provider linode --type g6-standard-1 -- pnpm test
 crabbox run --provider docker -- pnpm test
 crabbox run --provider docker-sandbox -- go test ./...
 crabbox run --provider apple-vz -- go test ./...

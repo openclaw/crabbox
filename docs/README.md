@@ -133,6 +133,7 @@ Pick whichever matches your intent:
   Per-provider: [AWS](providers/aws.md), [Azure](providers/azure.md),
   [Azure Dynamic Sessions](providers/azure-dynamic-sessions.md),
   [Google Cloud](providers/gcp.md), [Hetzner](providers/hetzner.md),
+  [DigitalOcean](providers/digitalocean.md), [Linode](providers/linode.md),
   [Proxmox](providers/proxmox.md), [XCP-ng](providers/xcp-ng.md),
   [Incus](providers/incus.md), [Parallels](providers/parallels.md),
   [Local Container](providers/local-container.md),
