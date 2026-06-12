@@ -13,6 +13,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var aws *providerMatrixEntry
 	var incus *providerMatrixEntry
 	var digitalOcean *providerMatrixEntry
+	var linode *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
 			aws = &entries[i]
@@ -23,6 +24,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		if entries[i].Provider == "digitalocean" {
 			digitalOcean = &entries[i]
 		}
+		if entries[i].Provider == "linode" {
+			linode = &entries[i]
+		}
 	}
 	if aws == nil {
 		t.Fatal("aws provider not found")
@@ -32,6 +36,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if digitalOcean == nil {
 		t.Fatal("digitalocean provider not found")
+	}
+	if linode == nil {
+		t.Fatal("linode provider not found")
 	}
 	if aws.Kind != ProviderKindSSHLease {
 		t.Fatalf("aws kind=%q", aws.Kind)
@@ -61,6 +68,12 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsString(digitalOcean.Targets, targetLinux) {
 		t.Fatalf("digitalocean targets=%v", digitalOcean.Targets)
+	}
+	if linode.Kind != ProviderKindSSHLease || linode.Family != "linode" || linode.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("linode kind/family/coordinator=%q/%q/%q", linode.Kind, linode.Family, linode.Coordinator)
+	}
+	if !containsString(linode.Targets, targetLinux) {
+		t.Fatalf("linode targets=%v", linode.Targets)
 	}
 }
 
