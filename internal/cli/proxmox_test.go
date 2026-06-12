@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -55,6 +56,265 @@ func TestNewProxmoxClientStripsAPIPathAndUsesTokenAuth(t *testing.T) {
 	if auth != "PVEAPIToken=runner@pve!crabbox=secret" {
 		t.Fatalf("auth=%q", auth)
 	}
+}
+
+func TestProxmoxDoctorReadinessChecksNonMutatingPrerequisites(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if r.Method != http.MethodGet {
+			t.Fatalf("doctor readiness used mutating request: %s %s", r.Method, r.URL.String())
+		}
+		switch r.URL.Path {
+		case "/api2/json/version":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"version": "8.2.0"}})
+		case "/api2/json/nodes/pve1/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "online"}})
+		case "/api2/json/nodes/pve1/storage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"storage": "local-lvm", "active": 1, "enabled": 1}}})
+		case "/api2/json/nodes/pve1/network":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1}}})
+		case "/api2/json/nodes/pve1/qemu":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 9400, "name": "crabbox-template", "status": "stopped", "template": 1},
+				map[string]any{"vmid": 101, "name": "crabbox-blue-abcdef12", "status": "running", "template": 0},
+			}})
+		case "/api2/json/nodes/pve1/qemu/9400/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "crabbox-template", "ide2": "local-lvm:cloudinit"}})
+		case "/api2/json/cluster/nextid":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": "102"})
+		default:
+			t.Fatalf("unexpected readiness request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret-value"
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9400
+	cfg.Proxmox.Storage = "local-lvm"
+	cfg.Proxmox.Bridge = "vmbr0"
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks, err := client.DoctorReadiness(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := proxmoxChecksByName(checks)
+	for _, name := range []string{"auth", "node", "storage", "bridge", "template", "nextid", "inventory", "mutation"} {
+		check, ok := byName[name]
+		if !ok {
+			t.Fatalf("missing check %q in %#v", name, checks)
+		}
+		if check.Status != "ok" {
+			t.Fatalf("check %s status=%s message=%s", name, check.Status, check.Message)
+		}
+	}
+	if byName["inventory"].Details["leases"] != "1" || byName["inventory"].Details["mutation"] != "false" {
+		t.Fatalf("inventory details=%v", byName["inventory"].Details)
+	}
+	for _, call := range calls {
+		if strings.Contains(call, "/clone") || strings.Contains(call, "/status/start") || strings.Contains(call, "/status/stop") || strings.Contains(call, "DELETE ") {
+			t.Fatalf("doctor readiness called mutation endpoint: %v", calls)
+		}
+	}
+}
+
+func TestProxmoxDoctorReadinessClassifiesPermissionGaps(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/version":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"version": "8.2.0"}})
+		case "/api2/json/nodes/pve1/status":
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": "permission check failed (/nodes/pve1, Sys.Audit)"})
+		case "/api2/json/nodes/pve1/storage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"storage": "local-lvm", "active": 1, "enabled": 1}}})
+		case "/api2/json/nodes/pve1/network":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1}}})
+		case "/api2/json/nodes/pve1/qemu":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"vmid": 9400, "name": "tmpl", "template": 1}}})
+		case "/api2/json/nodes/pve1/qemu/9400/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "tmpl"}})
+		case "/api2/json/cluster/nextid":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "super-secret-token"
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9400
+	cfg.Proxmox.Storage = "local-lvm"
+	cfg.Proxmox.Bridge = "vmbr0"
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks, err := client.DoctorReadiness(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := proxmoxChecksByName(checks)["node"]
+	if node.Status != "failed" || node.Details["class"] != "permission" || node.Details["hint"] != "grant_proxmox_node_audit" {
+		t.Fatalf("node check=%#v", node)
+	}
+	if strings.Contains(node.Message, "super-secret-token") || strings.Contains(node.Details["error"], "super-secret-token") {
+		t.Fatalf("permission output leaked token secret: %#v", node)
+	}
+}
+
+func TestProxmoxDoctorReadinessRejectsInactiveBridge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/version":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"version": "8.2.0"}})
+		case "/api2/json/nodes/pve1/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "online"}})
+		case "/api2/json/nodes/pve1/storage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"storage": "local-lvm", "active": 1, "enabled": 1}}})
+		case "/api2/json/nodes/pve1/network":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 0}}})
+		case "/api2/json/nodes/pve1/qemu":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"vmid": 9400, "name": "tmpl", "template": 1}}})
+		case "/api2/json/nodes/pve1/qemu/9400/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "tmpl"}})
+		case "/api2/json/cluster/nextid":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9400
+	cfg.Proxmox.Storage = "local-lvm"
+	cfg.Proxmox.Bridge = "vmbr0"
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks, err := client.DoctorReadiness(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := proxmoxChecksByName(checks)["bridge"]
+	if bridge.Status != "failed" || bridge.Details["active"] != "0" || bridge.Details["hint"] != "activate_proxmox_bridge" {
+		t.Fatalf("bridge check=%#v", bridge)
+	}
+}
+
+func TestProxmoxDoctorReadinessReportsMissingTemplateIDAsCheck(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/version":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"version": "8.2.0"}})
+		case "/api2/json/nodes/pve1/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "online"}})
+		case "/api2/json/nodes/pve1/storage", "/api2/json/nodes/pve1/network", "/api2/json/nodes/pve1/qemu":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case "/api2/json/cluster/nextid":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 0
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks, err := client.DoctorReadiness(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := proxmoxChecksByName(checks)["template"]
+	if template.Status != "failed" || template.Details["class"] != "config" || template.Details["hint"] != "set_proxmox_template_id" {
+		t.Fatalf("template check=%#v", template)
+	}
+}
+
+func TestProxmoxDoRejectsMissingDataEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"unexpected": true})
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.do(context.Background(), http.MethodGet, "/version", nil, &map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "missing data envelope") {
+		t.Fatalf("err=%v, want missing data envelope", err)
+	}
+}
+
+func TestProxmoxDoAllowsNullDataEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": nil})
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.do(context.Background(), http.MethodPost, "/nodes/pve1/qemu/101/config", url.Values{}, &map[string]any{}); err != nil {
+		t.Fatalf("null data envelope should be accepted: %v", err)
+	}
+}
+
+func TestProxmoxReadinessErrorClassifiesTimeout(t *testing.T) {
+	if got := proxmoxReadinessErrorClass(context.DeadlineExceeded); got != "timeout" {
+		t.Fatalf("class=%q, want timeout", got)
+	}
+	if got := proxmoxReadinessErrorClass(&url.Error{Op: "Get", URL: "https://pve.example", Err: context.DeadlineExceeded}); got != "timeout" {
+		t.Fatalf("class=%q, want timeout", got)
+	}
+	if got := proxmoxReadinessErrorClass(errors.New("request timed out waiting for proxmox")); got != "timeout" {
+		t.Fatalf("class=%q, want timeout", got)
+	}
+}
+
+func proxmoxChecksByName(checks []ProxmoxReadinessCheck) map[string]ProxmoxReadinessCheck {
+	byName := make(map[string]ProxmoxReadinessCheck, len(checks))
+	for _, check := range checks {
+		byName[check.Check] = check
+	}
+	return byName
 }
 
 func TestProxmoxCreateServerFlow(t *testing.T) {

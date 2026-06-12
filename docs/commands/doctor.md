@@ -56,8 +56,11 @@ Provider readiness validates the selected provider without creating a lease.
 - Without a coordinator, providers that implement a direct doctor run their own
   non-mutating check (cheapest list or readiness API). These print stable fields
   such as `timeout=10s`, `api=list`, and `mutation=false` so scripts can tell
-  what was probed. Direct AWS also checks EC2 vCPU quotas. GCP uses an
-  aggregated Compute Engine inventory query across zones.
+  what was probed. Proxmox checks API auth, node status, storage, bridge,
+  template, next-id, and inventory endpoints separately so authenticated but
+  under-authorized API tokens produce actionable failed checks. Direct AWS also
+  checks EC2 vCPU quotas. GCP uses an aggregated Compute Engine inventory query
+  across zones.
 - Delegated providers run their own direct readiness check where available; for
   example Cloudflare validates the configured runner URL and bearer token
   against the runner readiness API. Blacksmith Testbox reports runtime as
@@ -65,7 +68,7 @@ Provider readiness validates the selected provider without creating a lease.
 - Providers with no direct doctor print `skip provider ... direct_doctor=unsupported`.
 
 The provider check is bounded to a 10s timeout. A failure adds a `class`
-(`timeout`, `tool`, `config`, `auth`, `network`, or `provider`) and a
+(`timeout`, `tool`, `config`, `auth`, `permission`, `network`, or `provider`) and a
 remediation `hint`:
 
 ```text

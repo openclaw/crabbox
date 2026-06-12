@@ -31,6 +31,7 @@ type SSHTarget = core.SSHTarget
 type leaseBackend struct{ shared.DirectSSHBackend }
 
 type proxmoxClient interface {
+	DoctorReadiness(context.Context, Config) ([]core.ProxmoxReadinessCheck, error)
 	ListCrabboxServers(context.Context) ([]Server, error)
 	CreateServer(context.Context, Config, string, string, string, bool) (Server, error)
 	GetServer(context.Context, string) (Server, error)
@@ -180,14 +181,24 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 }
 
 func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+	client, err := newClient(b.Cfg)
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	return core.DoctorResult{
-		Provider: "proxmox",
-		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)),
-	}, nil
+	checks, err := client.DoctorReadiness(ctx, b.Cfg)
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	result := core.DoctorResult{Provider: "proxmox", Checks: make([]core.DoctorCheck, 0, len(checks))}
+	for _, check := range checks {
+		result.Checks = append(result.Checks, core.DoctorCheck{
+			Status:  check.Status,
+			Check:   check.Check,
+			Message: check.Message,
+			Details: check.Details,
+		})
+	}
+	return result, nil
 }
 
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {

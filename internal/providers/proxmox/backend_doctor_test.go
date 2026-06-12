@@ -3,7 +3,6 @@ package proxmox
 import (
 	"context"
 	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +18,11 @@ type fakeProxmoxDoctorClient struct {
 	servers     []Server
 	created     Server
 	setLabels   []map[string]string
+	readiness   []core.ProxmoxReadinessCheck
+}
+
+func (c *fakeProxmoxDoctorClient) DoctorReadiness(context.Context, Config) ([]core.ProxmoxReadinessCheck, error) {
+	return c.readiness, nil
 }
 
 func (c *fakeProxmoxDoctorClient) ListCrabboxServers(context.Context) ([]Server, error) {
@@ -60,8 +64,17 @@ func (c *fakeProxmoxDoctorClient) SetLabels(_ context.Context, _ string, labels 
 	return nil
 }
 
-func TestProxmoxDoctorListsInventoryOnly(t *testing.T) {
-	fake := &fakeProxmoxDoctorClient{servers: []Server{{CloudID: "101"}}}
+func TestProxmoxDoctorReportsReadinessChecksWithoutMutation(t *testing.T) {
+	fake := &fakeProxmoxDoctorClient{readiness: []core.ProxmoxReadinessCheck{
+		{Status: "ok", Check: "auth", Message: "auth=ready endpoint=/version", Details: map[string]string{"auth": "ready", "endpoint": "/version"}},
+		{Status: "ok", Check: "node", Message: "node=pve endpoint=/nodes/pve/status", Details: map[string]string{"node": "pve", "endpoint": "/nodes/pve/status"}},
+		{Status: "ok", Check: "storage", Message: "storage=local-lvm active=1 enabled=1", Details: map[string]string{"storage": "local-lvm"}},
+		{Status: "ok", Check: "bridge", Message: "bridge=vmbr0 type=bridge", Details: map[string]string{"bridge": "vmbr0"}},
+		{Status: "ok", Check: "template", Message: "templateId=9000 template=ready", Details: map[string]string{"templateId": "9000"}},
+		{Status: "ok", Check: "nextid", Message: "nextid=101 endpoint=/cluster/nextid", Details: map[string]string{"nextid": "101"}},
+		{Status: "ok", Check: "inventory", Message: "api=list mutation=false leases=1 vms=2", Details: map[string]string{"api": "list", "mutation": "false", "leases": "1"}},
+		{Status: "ok", Check: "mutation", Message: "mutation=false", Details: map[string]string{"mutation": "false"}},
+	}}
 	old := newClient
 	newClient = func(Config) (proxmoxClient, error) {
 		return fake, nil
@@ -76,11 +89,25 @@ func TestProxmoxDoctorListsInventoryOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Provider != "proxmox" || !strings.Contains(result.Message, "inventory=ready api=list mutation=false leases=1 runtime=unchecked") {
+	if result.Provider != "proxmox" || len(result.Checks) != len(fake.readiness) {
 		t.Fatalf("result=%#v", result)
 	}
-	if fake.listCalls != 1 {
-		t.Fatalf("list calls=%d, want 1", fake.listCalls)
+	for _, want := range []string{"auth", "node", "storage", "bridge", "template", "nextid", "inventory", "mutation"} {
+		found := false
+		for _, check := range result.Checks {
+			if check.Check == want {
+				found = true
+				if check.Details["provider"] != "" {
+					t.Fatalf("backend should not pre-fill provider detail: %#v", check)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing check %q in %#v", want, result.Checks)
+		}
+	}
+	if fake.listCalls != 0 {
+		t.Fatalf("list calls=%d, want 0 through backend doctor", fake.listCalls)
 	}
 	if fake.mutated {
 		t.Fatal("doctor called a mutating Proxmox method")
