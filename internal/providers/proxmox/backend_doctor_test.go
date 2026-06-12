@@ -1051,8 +1051,12 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	if resolved.LeaseID != leaseID || resolved.Server.CloudID != "101" {
 		t.Fatalf("retry target=%#v", resolved)
 	}
+	deleteCalls := fake.deleteCalls
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatalf("retry release: %v", err)
+	}
+	if fake.deleteCalls != deleteCalls {
+		t.Fatalf("deleteCalls=%d, want absent target reconciliation without another delete", fake.deleteCalls)
 	}
 	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
 		t.Fatalf("claim ok=%t err=%v, want removed after successful retry reconciliation", ok, err)

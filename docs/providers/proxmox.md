@@ -303,7 +303,8 @@ to print the pasteable command, `stop`, `cleanup --dry-run`, and a final
 owned lease is released by `stop`, and the cleanup dry-run remains evidence that
 other Proxmox leases would not be changed by the proof. If warmup fails or its
 lease ID cannot be parsed, the script compares pre/post inventories and stops
-only one uniquely new lease with the requested slug.
+only one uniquely new lease with the requested slug or its provider-assigned
+collision suffix.
 
 Proof artifacts are written to `CRABBOX_PROXMOX_LIVE_SMOKE_DIR` when set, or a
 new system temporary directory otherwise. The directory and logs use owner-only

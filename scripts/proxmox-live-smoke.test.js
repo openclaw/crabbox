@@ -39,7 +39,11 @@ case "$1" in
     ;;
   list)
     if [[ -f "${leaseState}" ]]; then
-      printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"100","name":"crabbox-proxmox-live-smoke","labels":{"lease":"cbx_test123","slug":"proxmox-live-smoke","provider":"proxmox"}}]\\n'
+      created_slug="proxmox-live-smoke"
+      if [[ "\${FAKE_CRABBOX_SUFFIXED_SLUG:-0}" == "1" ]]; then
+        created_slug="proxmox-live-smoke-abcd"
+      fi
+      printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"100","name":"crabbox-proxmox-live-smoke","labels":{"lease":"cbx_test123","slug":"%s","provider":"proxmox"}}]\\n' "$created_slug"
     else
       printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"}]\\n'
     fi
@@ -213,6 +217,28 @@ test("live mode releases a uniquely created lease after warmup fails", () => {
 
 	assert.equal(result.status, 1);
 	assert.match(result.stdout, /reason=warmup_failed/);
+	assert.match(result.stdout, /status=attempt lease=cbx_test123/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
+	assert.equal(fs.existsSync(path.join(fake.dir, "lease.state")), false);
+});
+
+test("live mode reconciles a collision-suffixed lease slug", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_FAIL_WARMUP_WITH_LEASE: "1",
+			FAKE_CRABBOX_SUFFIXED_SLUG: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
 	assert.match(result.stdout, /status=attempt lease=cbx_test123/);
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);

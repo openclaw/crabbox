@@ -31,6 +31,8 @@ type SSHTarget = core.SSHTarget
 
 type leaseBackend struct{ shared.DirectSSHBackend }
 
+const proxmoxReleaseAbsentMarker = "proxmox-release-absent"
+
 type proxmoxClient interface {
 	DoctorReadiness(context.Context, Config) ([]core.ProxmoxReadinessCheck, error)
 	ListCrabboxServers(context.Context) ([]Server, error)
@@ -225,6 +227,7 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 		Server: Server{
 			CloudID:  cloudID,
 			Provider: "proxmox",
+			HostID:   proxmoxReleaseAbsentMarker,
 			ID:       vmid,
 			Name:     claim.Slug,
 			Labels:   labels,
@@ -280,8 +283,10 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		id = req.Lease.LeaseID
 	}
 	leaseID := proxmoxClaimLeaseID(req.Lease.Server, req.Lease.LeaseID)
-	if err := client.DeleteServer(ctx, id); err != nil && !core.IsProxmoxNotFound(err) {
-		return err
+	if req.Lease.Server.HostID != proxmoxReleaseAbsentMarker {
+		if err := client.DeleteServer(ctx, id); err != nil && !core.IsProxmoxNotFound(err) {
+			return err
+		}
 	}
 	remaining, err := client.ListCrabboxServers(ctx)
 	if err != nil {

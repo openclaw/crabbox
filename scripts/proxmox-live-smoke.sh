@@ -254,7 +254,7 @@ reconcile_new_smoke_lease() {
     return 1
   fi
   while IFS=$'\t' read -r candidate candidate_slug cloud_id; do
-    [[ "$candidate_slug" == "$slug" ]] || continue
+    [[ "$candidate_slug" == "$slug" || "$candidate_slug" == "$slug"-* ]] || continue
     if awk -F '\t' -v id="$cloud_id" '$3 == id { found = 1 } END { exit !found }' "$baseline_inventory"; then
       continue
     fi
