@@ -133,6 +133,20 @@ type CleanupBackend interface {
 }
 ```
 
+Pause and resume are optional:
+
+```go
+type PausableBackend interface {
+	Backend
+
+	Pause(ctx context.Context, req PauseRequest) error
+	Resume(ctx context.Context, req ResumeRequest) error
+}
+```
+
+Declare `FeaturePauseResume` when implementing this interface so
+`crabbox providers` exposes the capability.
+
 List JSON compatibility is optional:
 
 ```go

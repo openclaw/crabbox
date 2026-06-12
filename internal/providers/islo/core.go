@@ -42,6 +42,10 @@ func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }
 
+func renderTailscaleHostname(template, leaseID, slug, provider string) string {
+	return core.RenderTailscaleHostname(template, leaseID, slug, provider)
+}
+
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
@@ -58,12 +62,28 @@ func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot s
 	return core.ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func appendDirectPondTailscaleTag(cfg *Config) {
+	core.AppendDirectPondTailscaleTag(cfg)
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
+}
+
+func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
+	return core.UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn)
+}
+
+func updateLeaseClaimTailscaleSettings(leaseID, hostname string, tags []string, loginURL, exitNode string, exitLAN bool) error {
+	return core.UpdateLeaseClaimTailscaleSettings(leaseID, hostname, tags, loginURL, exitNode, exitLAN)
+}
+
+func clearLeaseClaimTailscale(leaseID string) error {
+	return core.ClearLeaseClaimTailscale(leaseID)
 }
 
 func syncExcludes(root string, cfg Config) ([]string, error) {

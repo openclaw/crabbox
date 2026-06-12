@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -32,6 +34,10 @@ type ProviderConfigValidator interface {
 
 type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
+}
+
+type LeaseClaimEndpointPreparer interface {
+	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
 }
 
 type ProviderCommandRoutingArgs interface {
@@ -73,6 +79,11 @@ type SSHLeaseBackend interface {
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
 	Touch(ctx context.Context, req TouchRequest) (Server, error)
+}
+
+type TailscaleMetadataBackend interface {
+	Backend
+	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
 }
 
 type DelegatedRunBackend interface {
@@ -118,6 +129,16 @@ type CopyBackend interface {
 type CleanupBackend interface {
 	Backend
 	Cleanup(ctx context.Context, req CleanupRequest) error
+}
+
+// PausableBackend is implemented by providers that can pause a lease, freeing
+// remote compute while preserving its state, and resume it later. It is
+// optional: the `pause`/`resume` commands report a clear error for providers
+// that do not implement it.
+type PausableBackend interface {
+	Backend
+	Pause(ctx context.Context, req PauseRequest) error
+	Resume(ctx context.Context, req ResumeRequest) error
 }
 
 type ReleaseLeaseReporter interface {
@@ -239,6 +260,9 @@ type ProviderSpec struct {
 	Targets     []TargetSpec
 	Features    FeatureSet
 	Coordinator CoordinatorMode
+	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
+	// not a bidirectional peer endpoint.
+	TailscaleEgressOnly bool
 }
 
 type ProviderKind string
@@ -281,6 +305,7 @@ const (
 	FeatureRunProof     Feature = "run-proof"
 	FeatureRunSession   Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeaturePauseResume  Feature = "pause-resume"
 )
 
 type FeatureSet []Feature
@@ -323,6 +348,7 @@ type LocalCommandRequest struct {
 	Stdout               io.Writer
 	Stderr               io.Writer
 	DisableOutputCapture bool
+	CancelGracePeriod    time.Duration
 }
 
 type LocalCommandResult struct {
@@ -367,6 +393,16 @@ type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	if req.CancelGracePeriod > 0 {
+		cmd.Cancel = func() error {
+			err := cmd.Process.Signal(os.Interrupt)
+			if errors.Is(err, os.ErrProcessDone) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		cmd.WaitDelay = req.CancelGracePeriod
+	}
 	cmd.Env = req.Env
 	cmd.Dir = req.Dir
 	cmd.Stdin = req.Stdin
@@ -520,6 +556,16 @@ type StatusRequest struct {
 }
 
 type StopRequest struct {
+	Options LeaseOptions
+	ID      string
+}
+
+type PauseRequest struct {
+	Options LeaseOptions
+	ID      string
+}
+
+type ResumeRequest struct {
 	Options LeaseOptions
 	ID      string
 }

@@ -70,8 +70,9 @@ Sessions backend with `azure.backend: dynamic-sessions` or
 
 When no coordinator is configured, these providers still work in **direct mode**:
 the CLI talks to the cloud API itself using local credentials (AWS SDK chain,
-Azure credentials, Google Application Default Credentials, or
-`HCLOUD_TOKEN`/`HETZNER_TOKEN`). Direct mode has no Durable Object alarm; cleanup
+Azure credentials, Google Application Default Credentials,
+`HCLOUD_TOKEN`/`HETZNER_TOKEN`, or `DIGITALOCEAN_TOKEN` for DigitalOcean).
+Direct mode has no Durable Object alarm; cleanup
 is best-effort through provider labels and manual `crabbox cleanup`. Prefer the
 brokered path when a broker is available.
 
@@ -82,10 +83,12 @@ sync/run/release path. None of them go through the Worker.
 
 ```text
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
+digitalocean     DigitalOcean Droplets                    Linux
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
 incus            Incus containers or VMs over SSH         Linux
 local-container  Local Docker-compatible containers       Linux
+apple-vz         Apple Virtualization.framework Linux VM  Linux ARM64
 multipass        Canonical Multipass local Ubuntu VMs     Linux
 daytona          Daytona sandboxes (short-lived SSH)      Linux
 exe-dev          exe.dev managed VMs (public SSH)         Linux
@@ -99,9 +102,10 @@ sprites          Sprites microVMs through sprite proxy    Linux
 
 ## Delegated-run providers
 
-These run the command inside a managed sandbox; Crabbox does not lease or SSH
-into a box. Local sync options (`--no-sync`, rsync flags) are rejected — the
-provider owns sync. All are Linux-only.
+These run the command inside a sandbox/proof runner; Crabbox does not lease or
+SSH into a box. Local sync options (`--no-sync`, rsync flags) are rejected - the
+provider owns sync. Most are Linux-only. `anthropic-sandbox-runtime` is local
+to the current macOS or Linux host.
 
 ```text
 cloudflare              Cloudflare Containers (Worker runtime)
@@ -112,6 +116,7 @@ freestyle               Freestyle VMs
 islo                    Islo sandboxes
 modal                   Modal Sandboxes
 opencomputer            OpenComputer Linux VMs
+anthropic-sandbox-runtime Anthropic Sandbox Runtime through the local srt CLI
 tensorlake              Tensorlake Firecracker sandboxes
 upstash-box             Upstash sandboxes
 blacksmith-testbox      Blacksmith CI test runner (proof/session)
@@ -135,11 +140,13 @@ railway                 Railway service status and stop controls
 - [Azure Dynamic Sessions](../providers/azure-dynamic-sessions.md): delegated Azure Container Apps sandbox execution.
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
+- [DigitalOcean](../providers/digitalocean.md): direct Linux Droplet leases.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
 - [Incus](../providers/incus.md): direct Incus Linux SSH leases plus an opt-in Apple Silicon / local live smoke contract.
 - [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
+- [Apple VZ](../providers/apple-vz.md): local Linux VMs through Apple's `Virtualization.framework`.
 - [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
 - [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
 - [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
@@ -153,6 +160,7 @@ railway                 Railway service status and stop controls
 - [Tenki](../providers/tenki.md): Tenki sandbox VM SSH leases through `tenki sandbox ssh-proxy`.
 - [Cloudflare](../providers/cloudflare.md): delegated Cloudflare Containers execution.
 - [Docker Sandbox](../providers/docker-sandbox.md): delegated Docker Sandbox execution through the standalone `sbx` CLI.
+- [Anthropic Sandbox Runtime](../providers/anthropic-sandbox-runtime.md): local one-shot delegated execution through `srt` on macOS/Linux.
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
 - [Freestyle](../providers/freestyle.md): delegated Freestyle VM execution.
@@ -221,6 +229,10 @@ An explicit `--type` is treated as an exact provider type request. If that type
 is rejected, Crabbox fails clearly instead of silently choosing a different
 instance type. Drop `--type` and use a class when you want fallback. See
 [Capacity and fallback](capacity-fallback.md) for the full fallback model.
+
+DigitalOcean maps every class to the smallest Phase 1 default size
+`s-1vcpu-1gb`. Use `--type <droplet-size-slug>` when you need a larger exact
+Droplet size.
 
 ## Brokered provider behavior
 

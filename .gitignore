@@ -8,7 +8,7 @@ node_modules/
 .wrangler/
 *.test
 coverage.out
-crabbox
+/crabbox
 
 # Local env files: never commit API keys, tokens, or user secrets.
 *.env

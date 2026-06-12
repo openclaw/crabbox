@@ -192,12 +192,14 @@ provider_smoke() {
 
   local provider="$1"
   shift
+  local CRABBOX_PROVIDER="$provider"
+  export CRABBOX_PROVIDER
   local lease=""
   local slug=""
   cleanup() {
     trap - RETURN ERR
     if [[ -n "$lease" ]]; then
-      stop_lease "$lease" "$slug"
+      stop_provider_lease "$provider" "$lease" "$slug"
       lease=""
       slug=""
     fi
@@ -212,14 +214,14 @@ provider_smoke() {
   test -n "$lease"
   test -n "$slug"
 
-  run_in_repo "$cb" status --id "$slug" --wait --wait-timeout 90s
-  run_in_repo "$cb" inspect --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
-  run_in_repo "$cb" ssh --id "$slug"
+  run_in_repo "$cb" status --provider "$provider" --id "$slug" --wait --wait-timeout 90s
+  run_in_repo "$cb" inspect --provider "$provider" --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  run_in_repo "$cb" ssh --provider "$provider" --id "$slug"
   run_in_repo "$cb" cache stats --id "$slug" --json | jq 'if type=="array" then {items:length,kinds:[.[].kind]} else {keys:keys} end'
 
   local runout
   # shellcheck disable=SC2016 # expanded by the remote shell.
-  capture_run runout run_in_repo "$cb" run --id "$slug" --shell -- "$live_command"
+  capture_run runout run_in_repo "$cb" run --provider "$provider" --id "$slug" --shell -- "$live_command"
   printf '%s\n' "$runout"
   local runid
   runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
@@ -227,7 +229,7 @@ provider_smoke() {
   if [[ -n "$runid" ]]; then
     run_in_repo "$cb" logs "$runid" | tail -80
   fi
-  stop_lease "$lease" "$slug"
+  stop_provider_lease "$provider" "$lease" "$slug"
   lease=""
 }
 
@@ -930,6 +932,25 @@ fi
 
 if has_provider incus; then
   incus_smoke
+fi
+
+if has_provider apple-vz || has_provider applevz; then
+  apple_vz_args=(--ttl 15m --idle-timeout 5m)
+  apple_vz_helper=""
+  if [[ -n "${CRABBOX_LIVE_APPLE_VZ_HELPER:-}" ]]; then
+    if [[ ! -x "$CRABBOX_LIVE_APPLE_VZ_HELPER" ]]; then
+      echo "CRABBOX_LIVE_APPLE_VZ_HELPER must point to an executable helper: $CRABBOX_LIVE_APPLE_VZ_HELPER" >&2
+      exit 2
+    fi
+    apple_vz_helper="$CRABBOX_LIVE_APPLE_VZ_HELPER"
+  elif [[ -x "$root/bin/crabbox-apple-vz-helper" ]]; then
+    apple_vz_helper="$root/bin/crabbox-apple-vz-helper"
+  fi
+  if [[ -n "$apple_vz_helper" ]]; then
+    CRABBOX_APPLE_VZ_HELPER="$apple_vz_helper" provider_smoke apple-vz "${apple_vz_args[@]}"
+  else
+    provider_smoke apple-vz "${apple_vz_args[@]}"
+  fi
 fi
 
 if has_provider kubevirt; then

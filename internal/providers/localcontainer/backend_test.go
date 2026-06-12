@@ -1494,6 +1494,78 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 	}
 }
 
+func TestReleaseOnlyResolveMissingContainerClaim(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	keyPath := writeLocalContainerClaimAndKey(t, "cbx_missing_release", "missing-release", localContainerClaimScope("docker", "default"))
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {},
+		commandKey([]string{"context", "show"}): {Stdout: "default\n"},
+	}}
+	b := testBackend(runner)
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "missing-release", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_missing_release" || lease.Server.Status != "missing" || lease.Server.Labels["missing_container"] != "1" {
+		t.Fatalf("unexpected release-only lease: %#v", lease)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_missing_release"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim still exists after release: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists after release: %v", err)
+	}
+}
+
+func TestResolveMissingContainerClaimStillFailsForNormalUse(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	_ = writeLocalContainerClaimAndKey(t, "cbx_missing_normal", "missing-normal", localContainerClaimScope("docker", "default"))
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {},
+	}}
+	b := testBackend(runner)
+
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "missing-normal"}); err == nil {
+		t.Fatal("normal resolve succeeded for missing container claim")
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_missing_normal"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "cbx_missing_normal" {
+		t.Fatalf("normal resolve removed claim: %#v", claim)
+	}
+}
+
+func TestReleaseOnlyResolveKeepsMissingClaimFromDifferentContext(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	keyPath := writeLocalContainerClaimAndKey(t, "cbx_missing_other", "missing-other", localContainerClaimScope("docker", "colima"))
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {},
+		commandKey([]string{"context", "show"}): {Stdout: "default\n"},
+	}}
+	b := testBackend(runner)
+
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "missing-other", ReleaseOnly: true}); err == nil {
+		t.Fatal("release-only resolve accepted claim from another Docker context")
+	}
+	if claim, err := core.ReadLeaseClaim("cbx_missing_other"); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "cbx_missing_other" {
+		t.Fatalf("foreign context claim was removed: %#v", claim)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("foreign context stored key was removed: %v", err)
+	}
+}
+
 func TestReleaseLeaseRemovesBootstrapDirAfterContainer(t *testing.T) {
 	bootstrapDir, err := os.MkdirTemp("", "crabbox-bootstrap-release-*")
 	if err != nil {
@@ -1695,12 +1767,19 @@ func TestCleanupRemovesClaimAfterHostWorkRootFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(leaseRoot, "repo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	probeRoot := filepath.Join(hostRoot, "permission-probe")
+	if err := os.MkdirAll(probeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(hostRoot, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		_ = os.Chmod(hostRoot, 0o700)
 	})
+	if err := os.RemoveAll(probeRoot); err == nil {
+		t.Skip("filesystem permissions do not block RemoveAll for this user")
+	}
 	created := time.Now().Add(-48 * time.Hour).Unix()
 	inspectJSON := `[{
 		"Id":"abcdef1234567890",

@@ -18,12 +18,13 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        "islo",
-		Family:      "islo",
-		Kind:        core.ProviderKindDelegatedRun,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureURLBridge, core.FeatureRunSession},
-		Coordinator: core.CoordinatorNever,
+		Name:                "islo",
+		Family:              "islo",
+		Kind:                core.ProviderKindDelegatedRun,
+		Targets:             []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:            core.FeatureSet{core.FeatureURLBridge, core.FeatureRunSession, core.FeatureTailscale, core.FeaturePauseResume},
+		Coordinator:         core.CoordinatorNever,
+		TailscaleEgressOnly: true,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
