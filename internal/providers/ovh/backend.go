@@ -436,7 +436,8 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	for i, server := range servers {
+	claimedServers := make([]core.LeaseView, 0, len(servers))
+	for _, server := range servers {
 		claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
 		if err != nil {
 			return fmt.Errorf("read ovh cleanup claim: %w", err)
@@ -455,9 +456,9 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		for key, value := range claim.Labels {
 			merged.Labels[key] = value
 		}
-		servers[i] = merged
+		claimedServers = append(claimedServers, merged)
 	}
-	return b.CleanupServers(ctx, req, servers)
+	return b.CleanupServers(ctx, req, claimedServers)
 }
 
 func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {

@@ -425,7 +425,11 @@ func TestCleanupDryRunAndExpiredOwnedOnly(t *testing.T) {
 	}
 	labels := fake.instances[0].Labels
 	labels["state"] = "released"
+	unclaimedLabels := copyLabels(labels)
+	unclaimedLabels["lease"] = "cbx_unclaimed"
+	unclaimedLabels["slug"] = "unclaimed"
 	fake.instances = append(fake.instances, Instance{ID: "foreign", Name: "crabbox-foreign", Labels: map[string]string{"crabbox": "true"}})
+	fake.instances = append(fake.instances, Instance{ID: "unclaimed", Name: core.LeaseProviderName("cbx_unclaimed", "unclaimed"), Labels: unclaimedLabels})
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
