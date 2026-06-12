@@ -279,7 +279,10 @@ func (b *namespaceLeaseBackend) commandOutput(ctx context.Context, args []string
 	if err != nil {
 		return "", ExitError{Code: result.ExitCode, Message: fmt.Sprintf("namespace devbox failed: %v: %s", err, strings.TrimSpace(result.Stdout+result.Stderr))}
 	}
-	return result.Stdout + result.Stderr, nil
+	if result.Stderr != "" && b.rt.Stderr != nil {
+		_, _ = io.WriteString(b.rt.Stderr, result.Stderr)
+	}
+	return result.Stdout, nil
 }
 
 func (b *namespaceLeaseBackend) runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {

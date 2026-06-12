@@ -210,10 +210,12 @@ visibility-only detail page.
 
 - `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
   Blacksmith owns sync.
-- `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
-  `--download`, and `--artifact-glob` are rejected because Blacksmith owns
-  command transport and remote artifact handling. Use `--emit-proof` for
-  PR-ready transcript proof.
+- `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures, and
+  `--download` are rejected because Blacksmith owns command transport and remote
+  file transport. Use `--emit-proof` for PR-ready transcript proof.
+- `--artifact-glob` and `--require-artifact` run through the Blacksmith adapter:
+  after command success, Crabbox asks the same Testbox to validate required
+  globs and stream one bounded local tarball under `.crabbox/runs/<lease>/`.
 - `--actions-runner` is rejected; Blacksmith owns runner hydration.
 - `--tailscale`, desktop helpers, screenshots, VNC, and `artifacts collect` are
   rejected because Blacksmith owns machine connectivity.

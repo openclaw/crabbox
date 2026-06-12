@@ -26,29 +26,24 @@ devbox login
 devbox auth check-login
 ```
 
-`devbox login` opens a browser. For headless or automation hosts, mint a token
-from the browser token page instead and export it where the CLI expects it,
-without printing it:
+`devbox login` opens a browser. For headless or automation hosts, request a
+workspace handoff URL and approve the login from an authenticated browser:
 
 ```sh
-open https://cloud.namespace.so/login/token
-
-cat >> ~/.profile <<'EOF'
-# Namespace devbox CLI auth
-export NAMESPACE_TOKEN='<token>'
-export NSCLOUD_TOKEN="$NAMESPACE_TOKEN"
-EOF
+devbox login --browser=false
 ```
 
-These are the Namespace CLI's own environment variables. Crabbox reads neither
-of them; it relies entirely on whatever auth state the `devbox` CLI resolves at
-invocation time.
-
-Confirm the profile exports both names without echoing the value:
+Open the printed URL, verify its code matches the terminal, and select the
+workspace to authorize. The CLI stores the resulting session in its platform
+user config directory. Do not copy the browser token-page value into a profile
+or the CLI's credential file.
 
 ```sh
-zsh -lc 'source ~/.profile; test -n "$NAMESPACE_TOKEN"; test "$NSCLOUD_TOKEN" = "$NAMESPACE_TOKEN"'
+devbox auth check-login
 ```
+
+Crabbox does not read or store Namespace credentials; it relies entirely on
+the auth state the `devbox` CLI resolves at invocation time.
 
 ## Live Check
 
@@ -109,5 +104,3 @@ Related docs:
 - [Namespace Devbox](namespace-devbox.md)
 - [Provider: Namespace Devbox](../providers/namespace-devbox.md)
 - [Providers](providers.md)
-</content>
-</invoke>

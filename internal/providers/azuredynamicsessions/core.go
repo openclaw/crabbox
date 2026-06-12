@@ -1,11 +1,13 @@
 package azuredynamicsessions
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -82,10 +84,6 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
-}
-
 func claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot, idleTimeout, reclaim)
 }
@@ -138,12 +136,16 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }
 
-func syncManifest(root string, excludes []string) (SyncManifest, error) {
-	return core.BuildSyncManifest(root, excludes)
+func syncManifest(root string, excludes, includes []string) (SyncManifest, error) {
+	return core.BuildSyncManifestFiltered(root, excludes, includes)
 }
 
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
+}
+
+func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }
 
 func summarizeJSON(data []byte) string {

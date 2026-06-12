@@ -1,7 +1,16 @@
-import type { ExternalRunnerRecord, LeaseRecord, RunEventRecord, RunRecord } from "./types";
+import type {
+  ExternalRunnerRecord,
+  LeaseRecord,
+  Provider,
+  RunEventRecord,
+  RunRecord,
+} from "./types";
+import { coordinatorProviderSpec } from "./types";
 
 const novncModuleURL = "/portal/assets/novnc/rfb.js";
 const copyIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`;
+const lockIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`;
+const ejectIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17h14"/><path d="m12 5 7 9H5z"/></svg>`;
 const serverIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/></svg>`;
 const dedicatedHostIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M7 7V4h10v3"/><rect x="5" y="7" width="14" height="13" rx="2"/><path d="M9 11h6M9 15h3"/></svg>`;
 const vncIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>`;
@@ -11,6 +20,14 @@ const themeMoonIcon = `<svg class="theme-icon-moon" viewBox="0 0 20 20" aria-hid
 const themeSunIcon = `<svg class="theme-icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4" fill="currentColor"/><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="14.4" y1="14.4" x2="15.8" y2="15.8"/><line x1="4.2" y1="15.8" x2="5.6" y2="14.4"/><line x1="14.4" y1="5.6" x2="15.8" y2="4.2"/></g></svg>`;
 const themeSystemIcon = `<svg class="theme-icon-system" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="10" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7 17h6M10 14v3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 const portalBrand = "🦀 crabbox";
+const genericProviderIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="m7 10 3 2-3 2M12 15h5"/></svg>`;
+const providerIcons: Record<string, string> = {
+  "blacksmith-testbox": `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v5H4z"/><path d="M4 13h16v5H4z"/><path d="M8 8.5h.01M8 15.5h.01M12 8.5h5M12 15.5h5"/></svg>`,
+  aws: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15.5c3.8 2.2 9.1 2.5 14.8.9"/><path d="M17.5 13.2 20 16l-3.7.7"/><path d="M7 8.5h10l1.8 4H5.2z"/></svg>`,
+  azure: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 17.5h9.2a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.5-1.6A4.8 4.8 0 0 0 7.5 17.5Z"/><path d="M9 13h6"/></svg>`,
+  gcp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17 3.5 12.5 9.5 2h5L20.5 12.5 18 17z"/><path d="M8.5 17h9.5M9.5 2l3 5.5M14.5 2l-3 5.5"/></svg>`,
+  hetzner: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`,
+};
 
 function themeToggleButton(): string {
   return `<button class="icon-btn theme-toggle" type="button" aria-label="Theme: system" aria-pressed="false" title="Theme: system" data-theme-toggle>${themeMoonIcon}${themeSunIcon}${themeSystemIcon}</button>`;
@@ -47,6 +64,55 @@ export interface PortalMacHostRecord {
   allocationTime?: string;
   lease?: LeaseRecord;
 }
+
+export interface PortalAdminProviderStatus {
+  provider: Provider;
+  status: "ok" | "warning" | "bad" | "disabled";
+  configured: boolean;
+  message: string;
+  missing: string[];
+  machineCount?: number;
+  activeLeases: number;
+  totalLeases: number;
+  users: number;
+  recentLeases: PortalAdminLeaseSummary[];
+  error?: string;
+}
+
+export interface PortalAdminLeaseSummary {
+  id: string;
+  slug?: string;
+  provider: string;
+  lifecycle?: LeaseRecord["lifecycle"];
+  state: LeaseRecord["state"];
+  target: string;
+  owner: string;
+  org: string;
+  class: string;
+  serverType: string;
+  host?: string;
+  createdAt: string;
+  expiresAt: string;
+  updatedAt: string;
+}
+
+export interface PortalAdminUserSummary {
+  owner: string;
+  orgs: string[];
+  activeLeases: number;
+  totalLeases: number;
+  providers: string[];
+  lastSeenAt: string;
+}
+
+export interface PortalAdminView {
+  generatedAt: string;
+  providers: PortalAdminProviderStatus[];
+  users: PortalAdminUserSummary[];
+  leases: PortalAdminLeaseSummary[];
+}
+
+export type PortalAdminTab = "health" | "leases" | "users";
 
 export function portalHome(
   leases: LeaseRecord[],
@@ -107,9 +173,10 @@ export function portalHome(
     "Crabbox Portal",
     `<main class="portal-shell">
       ${portalHeader({
-        meta: escapeHTML(new URL(request.url).host),
-        actions: `<a class="button secondary" href="/portal/logout">log out</a>`,
+        meta: `${escapeHTML(new URL(request.url).host)}${admin ? ` <span class="pill admin-pill">admin</span>` : ""}`,
+        actions: `${admin ? `<a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}<a class="button secondary" href="/portal/logout">log out</a>`,
       })}
+      ${admin ? portalAdminSummary({ owner, org, active: active.length, ended, runners: sortedRunners.length, system, providers: portalProviderSummary(sortedLeases, sortedRunners, macHosts) }) : ""}
       <section class="panel table-panel">
         <div class="section-head">
           <h2>leases</h2>
@@ -135,6 +202,285 @@ export function portalHome(
   );
 }
 
+export function portalAdmin(
+  view: PortalAdminView,
+  request: Request,
+  tab: PortalAdminTab = "health",
+): Response {
+  const { generatedAt, providers, users, leases } = view;
+  const url = new URL(request.url);
+  const owner = request.headers.get("x-crabbox-owner") || "";
+  const org = request.headers.get("x-crabbox-org") || "";
+  const ok = providers.filter((provider) => provider.status === "ok").length;
+  const warning = providers.filter((provider) => provider.status === "warning").length;
+  const bad = providers.filter((provider) => provider.status === "bad").length;
+  const disabled = providers.filter((provider) => provider.status === "disabled").length;
+  const activeLeases = leases.filter((lease) => lease.state === "active").length;
+  const failedLeases = leases.filter((lease) => lease.state === "failed").length;
+  const providerFilter = normalizeAdminProviderFilter(url.searchParams.get("provider"), providers);
+  const filteredLeases = providerFilter
+    ? leases.filter((lease) => lease.provider === providerFilter)
+    : leases;
+  const attention =
+    bad > 0 || failedLeases > 0
+      ? `${bad} bad provider${bad === 1 ? "" : "s"} / ${failedLeases} failed lease${failedLeases === 1 ? "" : "s"}`
+      : warning > 0
+        ? `${warning} provider warning${warning === 1 ? "" : "s"}`
+        : "clear";
+  const providerRows = providers.map((provider) => providerAdminRow(provider)).join("");
+  const userRows = users.map((user) => adminUserRow(user)).join("");
+  const leaseRows = filteredLeases.map((lease) => adminLeaseRow(lease, providerFilter)).join("");
+  const body =
+    tab === "users"
+      ? adminUsersPanel(users, userRows)
+      : tab === "leases"
+        ? adminLeasesPanel(providers, filteredLeases, leaseRows, providerFilter)
+        : adminHealthPanel(providers, providerRows);
+  return html(
+    "Crabbox Admin",
+    `<main class="portal-shell admin-shell">
+      ${portalHeader({
+        meta: `${escapeHTML(new URL(request.url).host)} <span class="pill admin-pill">admin</span>`,
+        actions: `
+          <a class="button secondary" href="/portal">leases</a>
+          <a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>
+          <a class="button secondary" href="/portal/logout">log out</a>
+        `,
+      })}
+      ${adminTabs(tab, providerFilter)}
+      <section class="admin-status-strip">
+        ${adminMetric("identity", `${owner || "unknown"} / ${org || "unknown"}`)}
+        ${adminMetric("attention", attention, bad > 0 || failedLeases > 0 ? "bad" : warning > 0 ? "warn" : "ok")}
+        ${adminMetric("providers", `${ok} ok / ${warning} warn / ${bad} bad / ${disabled} off`)}
+        ${adminMetric("leases", `${activeLeases} active / ${leases.length} total`)}
+        ${adminMetric("users", String(users.length))}
+        ${adminMetric("checked", shortTime(generatedAt))}
+      </section>
+      ${body}
+    </main>`,
+  );
+}
+
+function adminTabs(tab: PortalAdminTab, providerFilter: Provider | undefined): string {
+  const leaseHref = `/portal/admin/leases${providerFilter ? `?provider=${encodeURIComponent(providerFilter)}` : ""}`;
+  return `<nav class="admin-tabs" aria-label="Admin sections">
+    <a href="/portal/admin" data-active="${tab === "health"}">health</a>
+    <a href="${leaseHref}" data-active="${tab === "leases"}">leases</a>
+    <a href="/portal/admin/users" data-active="${tab === "users"}">users</a>
+  </nav>`;
+}
+
+function adminHealthPanel(providers: PortalAdminProviderStatus[], providerRows: string): string {
+  return `<section class="panel provider-panel">
+    <div class="section-head">
+      <h2>provider health</h2>
+      <span>${providers.length} supported</span>
+    </div>
+    <div class="provider-status-grid">${providerRows}</div>
+  </section>`;
+}
+
+function adminUsersPanel(users: PortalAdminUserSummary[], userRows: string): string {
+  return `<section class="panel table-panel admin-full-panel">
+    <div class="section-head">
+      <h2>users</h2>
+      <span>${users.length} owners</span>
+    </div>
+    <table class="admin-user-table" data-portal-table data-page-size="14" data-search-placeholder="search users">
+      <thead><tr><th>user</th><th>active</th><th>total</th><th>providers</th><th>last seen</th></tr></thead>
+      <tbody>${userRows || `<tr><td colspan="5" class="empty">no lease owners recorded</td></tr>`}</tbody>
+    </table>
+  </section>`;
+}
+
+function adminLeasesPanel(
+  providers: PortalAdminProviderStatus[],
+  leases: PortalAdminLeaseSummary[],
+  leaseRows: string,
+  providerFilter: Provider | undefined,
+): string {
+  const providerControls = [
+    `<a class="admin-filter-chip" data-active="${providerFilter === undefined}" href="/portal/admin/leases">all providers</a>`,
+    ...providers.map(
+      (provider) =>
+        `<a class="admin-filter-chip" data-active="${providerFilter === provider.provider}" data-provider="${escapeHTML(provider.provider)}" href="/portal/admin/leases?provider=${encodeURIComponent(provider.provider)}">${providerIcon(provider.provider)}<span>${escapeHTML(coordinatorProviderSpec(provider.provider).label)}</span></a>`,
+    ),
+  ].join("");
+  const title = providerFilter
+    ? `${coordinatorProviderSpec(providerFilter).label} leases`
+    : "all leases";
+  return `<section class="panel table-panel admin-full-panel">
+    <div class="section-head">
+      <h2>${escapeHTML(title)}</h2>
+      <span>${leases.length} shown</span>
+    </div>
+    <div class="admin-filter-row">${providerControls}</div>
+    <table class="admin-lease-table" data-portal-table data-page-size="16" data-search-placeholder="search leases" data-filter-buttons="active:active,provisioning:provisioning,failed:failed,ended:ended,all:all">
+      <thead>
+        <tr><th>lease</th><th>state</th><th>provider</th><th>owner</th><th>target</th><th>type</th><th>expires</th><th></th></tr>
+      </thead>
+      <tbody>${leaseRows || `<tr><td colspan="8" class="empty">no leases recorded</td></tr>`}</tbody>
+    </table>
+  </section>`;
+}
+
+function providerAdminRow(provider: PortalAdminProviderStatus): string {
+  const details = provider.error
+    ? provider.error
+    : provider.missing.length > 0
+      ? `missing ${provider.missing.join(", ")}`
+      : provider.message;
+  const machineCount = provider.machineCount === undefined ? "-" : String(provider.machineCount);
+  const readinessPath = `/v1/providers/${encodeURIComponent(provider.provider)}/readiness`;
+  const machinesPath = `/v1/pool?provider=${encodeURIComponent(provider.provider)}`;
+  const providerSpec = coordinatorProviderSpec(provider.provider);
+  const auditPath = providerSpec.adminAudit
+    ? `/v1/admin/lease-audit?provider=${encodeURIComponent(provider.provider)}`
+    : "";
+  const actions = provider.configured
+    ? [
+        `<a href="${readinessPath}">readiness</a>`,
+        `<a href="${machinesPath}">machines</a>`,
+        `<a href="/portal/admin/leases?provider=${encodeURIComponent(provider.provider)}">leases</a>`,
+        auditPath ? `<a href="${auditPath}">audit</a>` : "",
+      ]
+        .filter(Boolean)
+        .join("")
+    : [
+        `<button type="button" disabled>readiness</button>`,
+        `<button type="button" disabled>machines</button>`,
+        `<button type="button" disabled>leases</button>`,
+        auditPath ? `<button type="button" disabled>audit</button>` : "",
+      ]
+        .filter(Boolean)
+        .join("");
+  const tone =
+    provider.status === "bad"
+      ? "bad"
+      : provider.status === "warning"
+        ? "warn"
+        : provider.status === "ok"
+          ? "ok"
+          : "";
+  return `<article class="provider-status-card" data-tone="${provider.status}">
+    <div class="provider-status-head">
+      <span class="provider-favicon" data-provider="${escapeHTML(provider.provider)}">${providerIcon(provider.provider)}</span>
+      <div class="provider-status-title">
+        <strong>${escapeHTML(providerSpec.label)}</strong>
+        <span><span class="traffic-light" data-tone="${provider.status}" aria-label="${provider.status}"></span>${escapeHTML(provider.configured ? "configured" : "missing config")}</span>
+      </div>
+      <span class="pill"${tone ? ` data-tone="${tone}"` : ""}>${escapeHTML(provider.status)}</span>
+    </div>
+    <dl class="provider-status-meta">
+      <div><dt>config</dt><dd>${provider.configured ? "ready" : "missing"}</dd></div>
+      <div><dt>machines</dt><dd>${escapeHTML(machineCount)}</dd></div>
+      <div><dt>active</dt><dd>${provider.activeLeases}</dd></div>
+      <div><dt>users</dt><dd>${provider.users}</dd></div>
+    </dl>
+    <p>${escapeHTML(details)}</p>
+    <div class="provider-status-actions">${actions}</div>
+  </article>`;
+}
+
+function adminUserRow(user: PortalAdminUserSummary): string {
+  return `<tr data-filter-tags="${escapeHTML([user.owner, ...user.orgs, ...user.providers].join(" "))}">
+    <td><strong>${escapeHTML(user.owner || "unknown")}</strong><small>${escapeHTML(user.orgs.join(", ") || "no org")}</small></td>
+    <td>${user.activeLeases}</td>
+    <td>${user.totalLeases}</td>
+    <td>${escapeHTML(user.providers.join(", ") || "-")}</td>
+    ${timeCell(user.lastSeenAt)}
+  </tr>`;
+}
+
+function adminLeaseRow(
+  lease: PortalAdminLeaseSummary,
+  providerFilter: Provider | undefined,
+): string {
+  const stateGroup =
+    lease.state === "active" || lease.state === "provisioning" || lease.state === "failed"
+      ? lease.state
+      : "ended";
+  const returnPath = `/portal/admin/leases${providerFilter ? `?provider=${encodeURIComponent(providerFilter)}` : ""}`;
+  const canEject =
+    lease.state === "active" || lease.state === "provisioning" || lease.state === "failed";
+  const releaseLabel =
+    lease.lifecycle === "registered" ? "Remove registration" : "Emergency release";
+  return `<tr data-filter-tags="${escapeHTML([stateGroup, lease.state, lease.provider, lease.owner, lease.org, lease.target, lease.serverType].join(" "))}">
+    <td><a class="lease-link" href="/portal/leases/${encodeURIComponent(lease.id)}"><strong>${escapeHTML(lease.slug || lease.id)}</strong><small>${escapeHTML(lease.id)}</small></a></td>
+    <td><span class="pill" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span></td>
+    <td>${providerBadge(lease.provider)}</td>
+    <td><strong>${escapeHTML(lease.owner || "unknown")}</strong><small>${escapeHTML(lease.org || "no org")}</small></td>
+    <td>${targetBadge(lease.target)}</td>
+    <td>${escapeHTML(`${lease.class} / ${lease.serverType}`)}</td>
+    ${timeCell(lease.state === "active" || lease.state === "provisioning" ? lease.expiresAt : lease.updatedAt)}
+    <td>${canEject ? `<form class="admin-eject-form" method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release?return=${encodeURIComponent(returnPath)}"><button class="admin-eject" type="submit" title="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}" aria-label="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}">${ejectIcon}</button></form>` : ""}</td>
+  </tr>`;
+}
+
+function normalizeAdminProviderFilter(
+  value: string | null,
+  providers: PortalAdminProviderStatus[],
+): Provider | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return providers.some((provider) => provider.provider === normalized)
+    ? (normalized as Provider)
+    : undefined;
+}
+
+function portalAdminSummary(input: {
+  owner: string;
+  org: string;
+  active: number;
+  ended: number;
+  runners: number;
+  system: number;
+  providers: string;
+}): string {
+  return `<section class="panel admin-panel" data-admin-panel>
+    <div class="section-head">
+      <h2>admin mode</h2>
+      <span class="pill admin-pill">all scopes</span>
+    </div>
+    <div class="admin-grid">
+      ${adminMetric("identity", `${input.owner || "unknown"} / ${input.org || "unknown"}`)}
+      ${adminMetric("fleet", `${input.active} active / ${input.ended} ended`)}
+      ${adminMetric("system", `${input.system} external or other-owner`)}
+      ${adminMetric("providers", input.providers || "none")}
+    </div>
+    <div class="admin-actions">
+      <a class="button secondary" href="/v1/admin/leases">leases JSON</a>
+      <a class="button secondary" href="/v1/pool">pool JSON</a>
+      <a class="button secondary" href="/v1/usage?scope=all">usage JSON</a>
+    </div>
+  </section>`;
+}
+
+function adminMetric(label: string, value: string, tone = ""): string {
+  return `<div class="admin-metric"${tone ? ` data-tone="${escapeHTML(tone)}"` : ""}>
+    <span>${escapeHTML(label)}</span>
+    <strong>${escapeHTML(value)}</strong>
+  </div>`;
+}
+
+function portalProviderSummary(
+  leases: LeaseRecord[],
+  runners: ExternalRunnerRecord[],
+  macHosts: PortalMacHostRecord[],
+): string {
+  const counts = new Map<string, number>();
+  for (const provider of [
+    ...leases.map((lease) => lease.provider),
+    ...runners.map((runner) => runner.provider),
+    ...macHosts.map((host) => host.provider),
+  ]) {
+    counts.set(provider, (counts.get(provider) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(([provider, count]) => `${provider}:${count}`)
+    .join(" ");
+}
+
 export function portalLeaseDetail(
   lease: LeaseRecord,
   runs: RunRecord[],
@@ -144,6 +490,7 @@ export function portalLeaseDetail(
   const slug = lease.slug || lease.id;
   const target = lease.target || "linux";
   const active = lease.state === "active";
+  const registered = lease.lifecycle === "registered";
   const runRows = runs.length
     ? runs.map((run) => runRow(run)).join("")
     : `<tr><td colspan="8" class="empty">no recorded runs for this lease</td></tr>`;
@@ -179,7 +526,7 @@ export function portalLeaseDetail(
     `${slug} lease`,
     `<main class="portal-shell lease-shell">
       ${portalHeader({
-        meta: `${escapeHTML(slug)} · ${escapeHTML(lease.provider)} ${escapeHTML(target)} lease <span class="mono">${escapeHTML(lease.id)}</span>`,
+        meta: `${escapeHTML(slug)} · ${escapeHTML(lease.provider)} ${escapeHTML(target)} ${registered ? "registered " : ""}lease <span class="mono">${escapeHTML(lease.id)}</span>`,
         actions: `
           ${
             options.canManage
@@ -198,6 +545,7 @@ export function portalLeaseDetail(
           </div>
           <dl class="meta-grid">
             ${metaHTMLRow("provider", providerBadge(lease.provider))}
+            ${metaRow("lifecycle", registered ? "client managed" : "coordinator managed")}
             ${metaHTMLRow("target", targetBadge(target, lease.windowsMode))}
             ${metaRow("class", lease.class)}
             ${metaRow("host", lease.host || "pending")}
@@ -210,7 +558,7 @@ export function portalLeaseDetail(
           ${
             active && options.canManage
               ? `<form method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release" class="stop-form">
-                  <button class="button danger" type="submit">stop lease</button>
+                  <button class="button ${registered ? "secondary" : "danger"}" type="submit">${registered ? "remove registration" : "stop lease"}</button>
                 </form>`
               : ""
           }
@@ -2430,22 +2778,7 @@ function telemetryStorage(
 }
 
 function providerIcon(provider: string): string {
-  if (provider === "blacksmith-testbox") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v5H4z"/><path d="M4 13h16v5H4z"/><path d="M8 8.5h.01M8 15.5h.01M12 8.5h5M12 15.5h5"/></svg>`;
-  }
-  if (provider === "aws") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15.5c3.8 2.2 9.1 2.5 14.8.9"/><path d="M17.5 13.2 20 16l-3.7.7"/><path d="M7 8.5h10l1.8 4H5.2z"/></svg>`;
-  }
-  if (provider === "azure") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 17.5h9.2a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.5-1.6A4.8 4.8 0 0 0 7.5 17.5Z"/><path d="M9 13h6"/></svg>`;
-  }
-  if (provider === "gcp") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17 3.5 12.5 9.5 2h5L20.5 12.5 18 17z"/><path d="M8.5 17h9.5M9.5 2l3 5.5M14.5 2l-3 5.5"/></svg>`;
-  }
-  if (provider === "hetzner") {
-    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M8 8v8M16 8v8M8 12h8"/></svg>`;
-  }
-  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="m7 10 3 2-3 2M12 15h5"/></svg>`;
+  return providerIcons[provider] ?? genericProviderIcon;
 }
 
 function runnerStatusTone(status: string): string {
@@ -2590,6 +2923,66 @@ function html(
     .portal-header-meta p { font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .top p,.muted,.empty { color:var(--muted); }
     .panel { min-width:0; border:1px solid var(--line); border-radius:8px; background:var(--panel); overflow:hidden; }
+    .admin-panel { border-color:color-mix(in srgb, var(--accent) 30%, var(--line)); background:linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, var(--panel)), var(--panel)); }
+    .admin-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; background:var(--line-soft); border-bottom:1px solid var(--line); }
+    .admin-metric { min-width:0; padding:10px; background:var(--panel); }
+    .admin-metric span { display:block; margin-bottom:3px; color:var(--muted); font-size:10px; text-transform:uppercase; }
+    .admin-metric strong { display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+    .admin-actions { display:flex; gap:6px; flex-wrap:wrap; padding:8px 10px; background:color-mix(in srgb, var(--panel-2) 70%, transparent); }
+    .admin-shell { height:auto; min-height:100dvh; align-content:start; align-items:start; grid-template-rows:auto auto auto auto; overflow:visible; }
+    .admin-shell > * { width:100%; }
+    .admin-status-strip { display:grid; grid-template-columns:1.45fr 1.35fr repeat(4,minmax(0,.82fr)); gap:1px; border:1px solid var(--line); border-radius:8px; background:var(--line-soft); overflow:hidden; }
+    .admin-status-strip .admin-metric { min-height:54px; }
+    .admin-metric[data-tone="ok"] strong { color:var(--ok); }
+    .admin-metric[data-tone="warn"] strong { color:var(--warn); }
+    .admin-metric[data-tone="bad"] strong { color:var(--bad); }
+    .admin-tabs { display:flex; gap:1px; border:1px solid var(--line); border-radius:8px; background:var(--line-soft); overflow:hidden; }
+    .admin-tabs a { min-height:32px; display:inline-flex; align-items:center; justify-content:center; min-width:92px; padding:0 14px; background:var(--panel); color:var(--muted); text-decoration:none; font-size:12px; font-weight:800; text-transform:uppercase; }
+    .admin-tabs a[data-active="true"] { color:var(--fg); background:var(--panel-2); box-shadow:inset 0 -2px 0 var(--accent); }
+    .admin-tabs a:hover { color:var(--fg); background:var(--hover); }
+    .admin-kicker { color:var(--muted); font-size:10px; font-weight:800; text-transform:uppercase; }
+    .provider-status-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1px; background:var(--line-soft); }
+    .provider-status-card { min-width:0; display:grid; grid-template-rows:auto auto auto 1fr; gap:9px; padding:12px; background:var(--panel); border-top:2px solid transparent; }
+    .provider-status-card[data-tone="ok"] { border-top-color:var(--ok); }
+    .provider-status-card[data-tone="warning"] { border-top-color:var(--warn); }
+    .provider-status-card[data-tone="bad"] { border-top-color:var(--bad); }
+    .provider-status-card[data-tone="disabled"] { opacity:0.58; border-top-color:var(--line); }
+    .provider-status-head { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:9px; align-items:center; }
+    .provider-favicon { width:24px; height:24px; display:grid; place-items:center; border:1px solid var(--line); border-radius:6px; background:var(--panel-2); color:var(--icon); }
+    .provider-favicon svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .provider-favicon[data-provider="aws"] { color:#fbbf24; }
+    .provider-favicon[data-provider="azure"] { color:#60a5fa; }
+    .provider-favicon[data-provider="gcp"] { color:#34d399; }
+    .provider-favicon[data-provider="hetzner"] { color:#f87171; }
+    .provider-status-title { min-width:0; display:grid; gap:1px; }
+    .provider-status-title strong,.provider-status-title span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .provider-status-title > span { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px; }
+    .traffic-light { width:10px; height:10px; border-radius:50%; background:var(--muted); box-shadow:0 0 0 3px color-mix(in srgb, currentColor 16%, transparent); }
+    .traffic-light[data-tone="ok"] { color:var(--ok); background:var(--ok); }
+    .traffic-light[data-tone="warning"] { color:var(--warn); background:var(--warn); }
+    .traffic-light[data-tone="bad"] { color:var(--bad); background:var(--bad); }
+    .traffic-light[data-tone="disabled"] { color:var(--muted); background:var(--muted); }
+    .provider-status-meta { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px; margin:0; background:var(--line-soft); border:1px solid var(--line-soft); }
+    .provider-status-meta div { min-width:0; padding:7px 8px; background:var(--panel-2); }
+    .provider-status-meta dt { margin:0 0 2px; color:var(--muted); font-size:10px; text-transform:uppercase; }
+    .provider-status-meta dd { margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .provider-status-card p { margin:0; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+    .provider-status-actions { display:flex; gap:6px; flex-wrap:wrap; align-self:end; }
+    .provider-status-actions a,.provider-status-actions button { min-height:24px; display:inline-flex; align-items:center; padding:0 7px; border:1px solid var(--line); border-radius:6px; color:var(--muted); background:transparent; text-decoration:none; font-size:11px; font-weight:700; }
+    .provider-status-actions a:hover { color:var(--fg); background:var(--hover); border-color:var(--hover-line); }
+    .provider-status-actions button:disabled { opacity:0.55; cursor:not-allowed; }
+    .admin-full-panel { min-height:0; max-height:none; }
+    .admin-filter-row { display:flex; gap:6px; flex-wrap:wrap; padding:8px 10px; border-bottom:1px solid var(--line); background:var(--panel-2); }
+    .admin-filter-chip { min-height:26px; display:inline-flex; align-items:center; gap:6px; padding:0 9px; border:1px solid var(--line); border-radius:6px; color:var(--muted); text-decoration:none; font-size:12px; font-weight:700; }
+    .admin-filter-chip svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .admin-filter-chip[data-active="true"] { color:var(--fg); background:var(--hover-active); border-color:var(--hover-line); }
+    .admin-filter-chip:hover { color:var(--fg); background:var(--hover); }
+    .admin-user-table th:nth-child(2),.admin-user-table td:nth-child(2),.admin-user-table th:nth-child(3),.admin-user-table td:nth-child(3) { text-align:right; }
+    .admin-lease-table th:last-child,.admin-lease-table td:last-child { width:42px; text-align:right; }
+    .admin-eject-form { display:flex; justify-content:flex-end; }
+    .admin-eject { width:28px; height:28px; display:grid; place-items:center; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--subtle); cursor:pointer; }
+    .admin-eject:hover,.admin-eject:focus-visible { color:var(--bad); border-color:color-mix(in srgb, var(--bad) 45%, var(--line)); background:color-mix(in srgb, var(--bad) 12%, transparent); }
+    .admin-nav-link { gap:6px; }
     .section-head { display:flex; justify-content:space-between; align-items:center; min-height:34px; padding:7px 10px; border-bottom:1px solid var(--line); }
     .section-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; min-width:0; color:var(--muted); }
     .section-actions span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2655,6 +3048,7 @@ function html(
     .failure-list small { display:block; color:var(--muted); margin-top:2px; }
     .failure-list p { margin-top:8px; color:var(--danger-fg); }
     .pill { display:inline-flex; align-items:center; justify-content:center; min-height:22px; padding:0 7px; border-radius:999px; border:1px solid var(--line); color:var(--muted); background:var(--panel-2); font-size:11px; white-space:nowrap; }
+    .admin-pill { color:var(--accent-soft-fg); border-color:color-mix(in srgb, var(--accent) 42%, var(--line)); background:color-mix(in srgb, var(--accent) 12%, transparent); }
     .pill[data-tone="ok"],.pill[data-state="active"] { color:var(--ok); border-color:color-mix(in srgb, var(--ok) 35%, var(--line)); }
     .pill[data-tone="warn"] { color:var(--warn); border-color:color-mix(in srgb, var(--warn) 35%, var(--line)); }
     .pill[data-tone="bad"],.pill[data-state="released"],.pill[data-state="expired"] { color:var(--bad); border-color:color-mix(in srgb, var(--bad) 45%, var(--line)); }
@@ -2812,6 +3206,9 @@ function html(
     .command-row code { min-width:0; white-space:pre; }
     .error { margin-top:20vh; padding:24px; display:grid; gap:12px; }
     @media (max-width: 980px) {
+      .admin-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .admin-status-strip { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .admin-two-col { grid-template-columns:1fr; }
       .run-shell .detail-grid { grid-template-columns:1fr; }
       .run-shell .meta-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
       .run-telemetry-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -2845,6 +3242,9 @@ function html(
       .vnc-meta p .vnc-id { display:none; }
       .portal-actions { gap:6px; }
       .portal-actions .button { min-height:30px; padding:0 10px; }
+      .admin-grid { grid-template-columns:1fr; }
+      .admin-status-strip { grid-template-columns:1fr; }
+      .provider-lease-list li { grid-template-columns:1fr; align-items:start; }
       .vnc-share-dialog { width:calc(100vw - 20px); }
       .vnc-share-add { grid-template-columns:1fr; }
       .vnc-share-person,.vnc-share-access-row { grid-template-columns:32px minmax(0,1fr); }

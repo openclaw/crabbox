@@ -89,6 +89,23 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	return appendUniqueStrings(excludes, ignore...), nil
 }
 
+// syncIncludes returns the configured sync include (whitelist) patterns. When
+// empty the whole working tree is synced (minus excludes); when non-empty only
+// matching paths are synced.
+func syncIncludes(cfg Config) []string {
+	out := make([]string, 0, len(cfg.Sync.Includes))
+	for _, p := range cfg.Sync.Includes {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func syncGitSeedEnabled(cfg Config, repo Repo) bool {
+	return cfg.Sync.GitSeed && len(syncIncludes(cfg)) == 0 && remoteGitSeedCandidate(repo)
+}
+
 func SyncExcludes(root string, cfg Config) ([]string, error) {
 	return syncExcludes(root, cfg)
 }
@@ -128,10 +145,6 @@ func allowedEnv(allow []string) map[string]string {
 		}
 	}
 	return out
-}
-
-func AllowedEnv(allow []string) map[string]string {
-	return allowedEnv(allow)
 }
 
 func envAllowed(name string, allow []string) bool {
@@ -186,18 +199,6 @@ func defaultBaseRef(root string) string {
 	return ""
 }
 
-func syncFingerprint(repo Repo, cfg Config) (string, error) {
-	excludes, err := syncExcludes(repo.Root, cfg)
-	if err != nil {
-		return "", err
-	}
-	manifest, err := syncManifest(repo.Root, excludes)
-	if err != nil {
-		return "", err
-	}
-	return syncFingerprintForManifest(repo, cfg, manifest, excludes)
-}
-
 func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, excludes []string) (string, error) {
 	if repo.Head == "" {
 		return "", nil
@@ -245,6 +246,14 @@ type SyncManifest struct {
 }
 
 func syncManifest(root string, excludes []string) (SyncManifest, error) {
+	return syncManifestFiltered(root, excludes, nil)
+}
+
+// syncManifestFiltered builds the sync manifest applying excludes and, when
+// includes is non-empty, a whitelist: only paths matching an include pattern are
+// synced. This lets a job sync a few selected paths instead of the whole working
+// tree (e.g. sync just `src/` and `scripts/` out of a large repo).
+func syncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
 	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	cmd.Dir = root
 	out, err := cmd.Output()
@@ -255,7 +264,7 @@ func syncManifest(root string, excludes []string) (SyncManifest, error) {
 	manifest := SyncManifest{}
 	for _, rel := range splitNul(out) {
 		rel = filepath.ToSlash(rel)
-		if !safeRepoRel(rel) || pathExcluded(rel, excludes) || seen[rel] {
+		if !safeRepoRel(rel) || pathExcluded(rel, excludes) || !pathIncluded(rel, includes) || seen[rel] {
 			continue
 		}
 		full := filepath.Join(root, filepath.FromSlash(rel))
@@ -268,12 +277,12 @@ func syncManifest(root string, excludes []string) (SyncManifest, error) {
 		manifest.Bytes += info.Size()
 	}
 	sort.Strings(manifest.Files)
-	deleted, err := syncDeletedPaths(root, excludes)
+	deleted, err := syncDeletedPaths(root, excludes, includes)
 	if err != nil {
 		return SyncManifest{}, err
 	}
 	manifest.Deleted = filterDeletedPaths(deleted, seen)
-	changed, err := changedSyncPaths(root, excludes)
+	changed, err := changedSyncPaths(root, excludes, includes)
 	if err != nil {
 		return SyncManifest{}, err
 	}
@@ -281,8 +290,8 @@ func syncManifest(root string, excludes []string) (SyncManifest, error) {
 	return manifest, nil
 }
 
-func BuildSyncManifest(root string, excludes []string) (SyncManifest, error) {
-	return syncManifest(root, excludes)
+func BuildSyncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
+	return syncManifestFiltered(root, excludes, includes)
 }
 
 func (m SyncManifest) NUL() []byte {
@@ -303,7 +312,7 @@ func (m SyncManifest) DeletedNUL() []byte {
 	return b.Bytes()
 }
 
-func syncDeletedPaths(root string, excludes []string) ([]string, error) {
+func syncDeletedPaths(root string, excludes, includes []string) ([]string, error) {
 	sets := [][]string{}
 	for _, args := range [][]string{
 		{"ls-files", "--deleted", "-z"},
@@ -321,7 +330,7 @@ func syncDeletedPaths(root string, excludes []string) ([]string, error) {
 	for _, set := range sets {
 		for _, rel := range set {
 			rel = filepath.ToSlash(rel)
-			if !safeRepoRel(rel) || pathExcluded(rel, excludes) {
+			if !safeRepoRel(rel) || pathExcluded(rel, excludes) || !pathIncluded(rel, includes) {
 				continue
 			}
 			seen[rel] = true
@@ -475,7 +484,7 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f PiB", value/unit)
 }
 
-func changedSyncPaths(root string, excludes []string) ([]string, error) {
+func changedSyncPaths(root string, excludes, includes []string) ([]string, error) {
 	sets := [][]string{}
 	for _, args := range [][]string{
 		{"diff", "--name-only", "-z"},
@@ -494,7 +503,7 @@ func changedSyncPaths(root string, excludes []string) ([]string, error) {
 	for _, set := range sets {
 		for _, rel := range set {
 			rel = filepath.ToSlash(rel)
-			if rel == "" || pathExcluded(rel, excludes) {
+			if rel == "" || pathExcluded(rel, excludes) || !pathIncluded(rel, includes) {
 				continue
 			}
 			seen[rel] = true
@@ -554,6 +563,30 @@ func pathExcluded(rel string, excludes []string) bool {
 			if ok, _ := filepath.Match(exclude, prefix); ok {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// pathIncluded reports whether rel should be kept under a sync include
+// whitelist. Includes are root-relative: "src" keeps only the top-level src
+// tree, "package.json" keeps only that root file, and globs match the
+// root-relative path.
+func pathIncluded(rel string, includes []string) bool {
+	if len(includes) == 0 {
+		return true
+	}
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	for _, include := range includes {
+		include = strings.Trim(filepath.ToSlash(strings.TrimSpace(include)), "/")
+		if include == "" {
+			continue
+		}
+		if rel == include || strings.HasPrefix(rel, include+"/") {
+			return true
+		}
+		if ok, _ := filepath.Match(include, rel); ok {
+			return true
 		}
 	}
 	return false

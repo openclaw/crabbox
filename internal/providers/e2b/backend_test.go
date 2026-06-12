@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -264,6 +266,21 @@ func TestE2BClientCreateConnectListAndDeleteUseOfficialRESTShape(t *testing.T) {
 	}
 }
 
+func TestE2BUploadFileRejectsMalformedDomainBeforeProducer(t *testing.T) {
+	client := &e2bClient{apiKey: "e2b_test", domain: "%zz", httpClient: http.DefaultClient}
+	err := client.UploadFile(context.Background(), e2bSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
+	if err == nil {
+		t.Fatal("UploadFile err=nil, want malformed URL error")
+	}
+	runtime.Gosched()
+	time.Sleep(10 * time.Millisecond)
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	if bytes.Contains(buf[:n], []byte("github.com/openclaw/crabbox/internal/providers/e2b.(*e2bClient).UploadFile.func1")) {
+		t.Fatalf("multipart producer goroutine still running after malformed URL:\n%s", buf[:n])
+	}
+}
+
 func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -420,6 +437,44 @@ func TestE2BCreateSandboxCapsDefaultTTL(t *testing.T) {
 	}
 }
 
+func TestE2BCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
+	origClaim := claimLeaseForRepoProviderPond
+	claimLeaseForRepoProviderPond = func(_, _, _, _, _ string, _ time.Duration, _ bool) error {
+		return errors.New("claim write failed")
+	}
+	t.Cleanup(func() { claimLeaseForRepoProviderPond = origClaim })
+
+	client := &fakeE2BSyncClient{deleteErr: errors.New("delete failed")}
+	var stderr bytes.Buffer
+	backend := &e2bBackend{
+		cfg: Config{E2B: E2BConfig{Template: "base"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, false, "")
+	if err == nil {
+		t.Fatal("expected claim failure")
+	}
+	for _, want := range []string{
+		"claim write failed",
+		"cleanup e2b sandbox sbx_1",
+		"delete failed",
+		"crabbox stop --provider e2b --id sbx_1",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%v, want %q", err, want)
+		}
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "sbx_1" {
+		t.Fatalf("deleteIDs=%#v, want sbx_1", client.deleteIDs)
+	}
+	if !client.deleteDeadlineSet {
+		t.Fatal("delete cleanup did not use a bounded context")
+	}
+	if !strings.Contains(stderr.String(), "warning: cleanup e2b sandbox sbx_1") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
 func TestE2BSandboxToServerUsesMetadata(t *testing.T) {
 	server := e2bSandboxToServer(e2bSandbox{
 		SandboxID:  "sbx_1",
@@ -469,15 +524,18 @@ func TestE2BResolveSyntheticIDRequiresCrabboxMetadata(t *testing.T) {
 }
 
 type fakeE2BSyncClient struct {
-	commands     []string
-	users        []string
-	sandbox      e2bSandbox
-	createReq    e2bCreateSandboxRequest
-	createCalls  int
-	getErr       error
-	uploadPath   string
-	uploaded     bytes.Buffer
-	processCodes []int
+	commands          []string
+	users             []string
+	sandbox           e2bSandbox
+	createReq         e2bCreateSandboxRequest
+	createCalls       int
+	getErr            error
+	deleteIDs         []string
+	deleteErr         error
+	deleteDeadlineSet bool
+	uploadPath        string
+	uploaded          bytes.Buffer
+	processCodes      []int
 }
 
 func (f *fakeE2BSyncClient) CreateSandbox(_ context.Context, req e2bCreateSandboxRequest) (e2bSandbox, error) {
@@ -504,8 +562,13 @@ func (f *fakeE2BSyncClient) ListSandboxes(context.Context, map[string]string) ([
 	return nil, nil
 }
 
-func (f *fakeE2BSyncClient) DeleteSandbox(context.Context, string) error {
-	return nil
+func (f *fakeE2BSyncClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
+	f.deleteIDs = append(f.deleteIDs, sandboxID)
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		f.deleteDeadlineSet = remaining > 0 && remaining <= e2bCleanupTimeout
+	}
+	return f.deleteErr
 }
 
 func (f *fakeE2BSyncClient) UploadFile(_ context.Context, _ e2bSession, targetPath string, r io.Reader) error {

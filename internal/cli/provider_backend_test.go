@@ -31,13 +31,16 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		canonical string
 	}{
 		{name: "hetzner", canonical: "hetzner"},
+		{name: "digitalocean", canonical: "digitalocean"},
 		{name: "aws", canonical: "aws"},
 		{name: "azure", canonical: "azure"},
 		{name: "azure-dynamic-sessions", canonical: "azure-dynamic-sessions"},
 		{name: "gcp", canonical: "gcp"},
 		{name: "google", canonical: "gcp"},
 		{name: "google-cloud", canonical: "gcp"},
+		{name: "incus", canonical: "incus"},
 		{name: "proxmox", canonical: "proxmox"},
+		{name: "xcp-ng", canonical: "xcp-ng"},
 		{name: "ssh", canonical: "ssh"},
 		{name: "static", canonical: "ssh"},
 		{name: "static-ssh", canonical: "ssh"},
@@ -48,6 +51,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		{name: "blacksmith-testbox", canonical: "blacksmith-testbox"},
 		{name: "namespace", canonical: "namespace-devbox"},
 		{name: "namespace-devbox", canonical: "namespace-devbox"},
+		{name: "morph", canonical: "morph"},
 		{name: "daytona", canonical: "daytona"},
 		{name: "islo", canonical: "islo"},
 		{name: "e2b", canonical: "e2b"},
@@ -73,9 +77,12 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 	}
 }
 
-func TestProviderHelpAllIncludesWandb(t *testing.T) {
-	if !strings.Contains(providerHelpAll(), "wandb") {
-		t.Fatalf("providerHelpAll() = %q, want wandb", providerHelpAll())
+func TestProviderHelpAllIncludesDelegatedProviders(t *testing.T) {
+	help := providerHelpAll()
+	for _, provider := range []string{"freestyle", "morph", "wandb"} {
+		if !strings.Contains(help, provider) {
+			t.Fatalf("providerHelpAll() = %q, want %s", help, provider)
+		}
 	}
 	if strings.Contains(providerHelpSSH(), "azure-dynamic-sessions") {
 		t.Fatalf("providerHelpSSH() = %q, want only ssh-capable providers", providerHelpSSH())
@@ -211,6 +218,15 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 		t.Fatalf("backend=%T, want ssh lease backend", backend)
 	}
 
+	cfg.Provider = "xcp-ng"
+	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load xcp-ng backend: %v", err)
+	}
+	if _, ok := backend.(SSHLeaseBackend); !ok {
+		t.Fatalf("backend=%T, want ssh lease backend", backend)
+	}
+
 	cfg.Provider = "e2b"
 	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
 	if err != nil {
@@ -248,6 +264,23 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 }
 
+func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Coordinator = "https://coordinator.example"
+	cfg.BrokerMode = BrokerModeRegistered
+	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(*coordinatorLeaseBackend); ok {
+		t.Fatal("registered broker mode must not transfer lifecycle ownership to the coordinator")
+	}
+	if !shouldRegisterCoordinatorLease(cfg) {
+		t.Fatal("registered broker mode should register direct leases")
+	}
+}
+
 func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
@@ -268,6 +301,31 @@ func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.WorkRoot != "/workspaces/test" {
 		t.Fatalf("namespace flags not applied: %#v", cfg.Namespace)
+	}
+}
+
+func TestProviderFlagsApplyMorphWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "morph",
+		"--morph-api-url", "https://morph.example.test",
+		"--morph-snapshot", "snapshot_123",
+		"--morph-work-root", "/tmp/morph-work",
+		"--morph-delete-on-release",
+		"--morph-wake-on-ssh=false",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot_123" || cfg.Morph.WorkRoot != "/tmp/morph-work" || cfg.WorkRoot != "/tmp/morph-work" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("morph flags not applied: %#v workRoot=%q", cfg.Morph, cfg.WorkRoot)
 	}
 }
 
@@ -325,6 +383,30 @@ func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
 	}
 }
 
+func TestSSHCommandConfigAppliesProviderFlags(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("ssh", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	id := fs.String("id", "", "")
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "local-container",
+		"--local-container-runtime", "podman",
+		"--id", "example-podman",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadSSHCommandConfig(fs, *provider, providerFlags, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "local-container" || cfg.LocalContainer.Runtime != "podman" {
+		t.Fatalf("ssh config did not apply local-container runtime: provider=%s runtime=%s", cfg.Provider, cfg.LocalContainer.Runtime)
+	}
+}
+
 func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
@@ -351,6 +433,47 @@ func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 	}
 	if cfg.ServerType != "template-9000" {
 		t.Fatalf("server type=%q want template-9000", cfg.ServerType)
+	}
+}
+
+func TestProviderFlagsApplyXCPNgWithoutPasswordFlag(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if fs.Lookup("xcp-ng-password") != nil {
+		t.Fatal("xcp-ng password must not be registered as an argv flag")
+	}
+	if err := parseFlags(fs, []string{
+		"--provider", "xcp-ng",
+		"--xcp-ng-api-url", "https://xcp-ng.example.test",
+		"--xcp-ng-username", "root",
+		"--xcp-ng-template", "ubuntu-template",
+		"--xcp-ng-template-uuid", "tpl-0001",
+		"--xcp-ng-sr", "default-sr",
+		"--xcp-ng-sr-uuid", "sr-0001",
+		"--xcp-ng-network", "pool-network",
+		"--xcp-ng-network-uuid", "net-0001",
+		"--xcp-ng-host", "host-0001",
+		"--xcp-ng-user", "runner",
+		"--xcp-ng-work-root", "/work/xcp-ng",
+		"--xcp-ng-insecure-tls",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Template != "ubuntu-template" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "default-sr" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "pool-network" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("xcp-ng flags not applied: %#v", cfg.XCPNg)
+	}
+	if cfg.XCPNg.Password != "" {
+		t.Fatalf("xcp-ng password unexpectedly set from flags: %q", cfg.XCPNg.Password)
+	}
+	if cfg.ServerType != "template-tpl-0001" {
+		t.Fatalf("server type=%q want template-tpl-0001", cfg.ServerType)
 	}
 }
 
@@ -538,6 +661,113 @@ func TestLeaseCreateFlagsReapplyProxmoxDefaultsAfterProviderOverride(t *testing.
 	}
 }
 
+func TestLeaseCreateFlagsReapplyXCPNgDefaultsAfterProviderOverride(t *testing.T) {
+	defaults := baseConfig()
+	defaults.Provider = "hetzner"
+	defaults.XCPNg.Template = "Ubuntu Ready"
+	defaults.XCPNg.User = "runner"
+	defaults.XCPNg.WorkRoot = "/work/xcp-ng"
+	defaults.ServerType = serverTypeForConfig(defaults)
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "xcp-ng"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "runner" {
+		t.Fatalf("ssh user=%q want xcp-ng default", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/work/xcp-ng" {
+		t.Fatalf("work root=%q want xcp-ng default", cfg.WorkRoot)
+	}
+	if cfg.ServerType != "template-ubuntu-ready" {
+		t.Fatalf("server type=%q want template-ubuntu-ready", cfg.ServerType)
+	}
+}
+
+func TestLeaseCreateFlagsReapplyDigitalOceanTargetAfterProviderOverride(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		target     string
+		hyperVRoot string
+		hyperVUser string
+		sourcePort string
+		modeFlag   string
+		wantErr    string
+		wantTarget string
+		wantMode   string
+		wantRoot   string
+		wantUser   string
+		wantPort   string
+	}{
+		{name: "implicit target", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "provider settings", hyperVRoot: `D:\work`, hyperVUser: "Administrator", sourcePort: "2202", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit Windows mode", modeFlag: windowsModeWSL2, wantErr: "windows.mode is only valid with target=windows", wantTarget: targetLinux, wantMode: windowsModeWSL2, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit target alias", target: "ubuntu", wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit Linux target with provider work root", target: targetLinux, hyperVRoot: `D:\work`, wantTarget: targetLinux, wantMode: windowsModeNormal, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+		{name: "explicit target", target: targetWindows, modeFlag: windowsModeWSL2, wantErr: "supports target=linux only", wantTarget: targetWindows, wantMode: windowsModeWSL2, wantRoot: defaultPOSIXWorkRoot, wantUser: baseConfig().SSHUser, wantPort: baseConfig().SSHPort},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defaults := baseConfig()
+			defaults.Provider = "hyperv"
+			if tt.hyperVRoot != "" {
+				defaults.HyperV.WorkRoot = tt.hyperVRoot
+			}
+			if tt.hyperVUser != "" {
+				defaults.HyperV.User = tt.hyperVUser
+			}
+			if err := applyProviderConfigDefaults(&defaults); err != nil {
+				t.Fatal(err)
+			}
+			if tt.sourcePort != "" {
+				defaults.SSHPort = tt.sourcePort
+			}
+			if tt.target != "" {
+				defaults.TargetOS = tt.target
+				MarkTargetExplicit(&defaults)
+			}
+
+			fs := newFlagSet("test", io.Discard)
+			values := registerLeaseCreateFlags(fs, defaults)
+			args := []string{"--provider", "digitalocean"}
+			if tt.modeFlag != "" {
+				args = append(args, "--windows-mode", tt.modeFlag)
+			}
+			if err := parseFlags(fs, args); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaults
+			err := applyLeaseCreateFlags(&cfg, fs, values)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TargetOS != tt.wantTarget {
+				t.Fatalf("target=%q want %q", cfg.TargetOS, tt.wantTarget)
+			}
+			if cfg.WindowsMode != tt.wantMode {
+				t.Fatalf("windows mode=%q want %q", cfg.WindowsMode, tt.wantMode)
+			}
+			if cfg.WorkRoot != tt.wantRoot {
+				t.Fatalf("work root=%q want %q", cfg.WorkRoot, tt.wantRoot)
+			}
+			if cfg.SSHUser != tt.wantUser {
+				t.Fatalf("SSH user=%q want %q", cfg.SSHUser, tt.wantUser)
+			}
+			if cfg.SSHPort != tt.wantPort {
+				t.Fatalf("SSH port=%q want %q", cfg.SSHPort, tt.wantPort)
+			}
+		})
+	}
+}
+
 func TestLeaseCreateFlagsDeriveGCPTypeForAlias(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)
@@ -591,6 +821,91 @@ proxmox:
 	}
 }
 
+func TestLoadLeaseTargetConfigRejectsUnsupportedProviderTarget(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: xcp-ng
+xcpNg:
+  apiUrl: https://xcp.example.test
+  username: root
+  password: secret
+  template: ubuntu
+  sr: local
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{"--target", "macos"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadLeaseTargetConfig(fs, "xcp-ng", targetFlags, networkFlags, leaseTargetConfigOptions{})
+	if err == nil || !strings.Contains(err.Error(), "provider=xcp-ng managed provisioning supports target=linux only") {
+		t.Fatalf("err=%v, want xcp-ng target validation", err)
+	}
+}
+
+func TestLoadLeaseTargetConfigAllowsExistingLeaseDespiteUnsupportedProvisioningTarget(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: xcp-ng
+target: macos
+xcpNg:
+  apiUrl: https://xcp.example.test
+  username: root
+  password: secret
+  template: ubuntu
+  sr: local
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadLeaseTargetConfig(fs, "xcp-ng", targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "cbx_existing"})
+	if err != nil {
+		t.Fatalf("loadLeaseTargetConfig existing lease: %v", err)
+	}
+}
+
+func TestLoadLeaseTargetConfigAllowsAWSMacOSWithoutProvisioningHost(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_HOST_ID", "")
+	t.Setenv("CRABBOX_AWS_MAC_HOST_ID", "")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	if err := os.WriteFile(configPath, []byte(`provider: aws
+aws:
+  region: us-east-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := defaultConfig()
+	fs := newFlagSet("test", io.Discard)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{"--target", "macos"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, "aws", targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "i-1234567890abcdef0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS || cfg.Provider != "aws" {
+		t.Fatalf("cfg provider=%q target=%q", cfg.Provider, cfg.TargetOS)
+	}
+}
+
 func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 	defaults := baseConfig()
 	for _, tc := range []struct {
@@ -605,6 +920,12 @@ func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 		{name: "modal type", args: []string{"--provider", "modal", "--type", "large"}},
 		{name: "sprites class", args: []string{"--provider", "sprites", "--class", "standard"}},
 		{name: "sprites type", args: []string{"--provider", "sprites", "--type", "large"}},
+		{name: "opencomputer class", args: []string{"--provider", "opencomputer", "--class", "standard"}},
+		{name: "opencomputer type", args: []string{"--provider", "opencomputer", "--type", "large"}},
+		{name: "opencomputer alias class", args: []string{"--provider", "oc", "--class", "standard"}},
+		{name: "opencomputer alias type", args: []string{"--provider", "open-computer", "--type", "large"}},
+		{name: "opencomputer mixed-case class", args: []string{"--provider", "OpenComputer", "--class", "standard"}},
+		{name: "opencomputer spaced alias type", args: []string{"--provider", " OC ", "--type", "large"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newFlagSet("test", io.Discard)
@@ -646,6 +967,16 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	}
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ChecksumSync: true}); err == nil {
 		t.Fatal("archive sync provider should still reject --checksum")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/manifest.json"}}); err == nil {
+		t.Fatal("archive sync provider should reject --require-artifact")
+	}
+	spec.Features = append(spec.Features, FeatureRunArtifacts)
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{RequiredArtifactGlobs: []string{"reports/data/manifest.json"}}); err != nil {
+		t.Fatalf("delegated artifact provider should allow --require-artifact: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ArtifactGlobs: []string{"reports/data/**"}}); err != nil {
+		t.Fatalf("delegated artifact provider should allow --artifact-glob: %v", err)
 	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{SyncOnly: true}); err == nil {
 		t.Fatal("plain delegated provider should reject --sync-only")
@@ -760,6 +1091,34 @@ func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	}
 	if cfg.Sprites.APIURL != "https://sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/work" {
 		t.Fatalf("sprites flags not applied: %#v", cfg.Sprites)
+	}
+}
+
+func TestProviderFlagsApplyIncusWithoutCoreEdits(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "incus",
+		"--incus-instance-type", "vm",
+		"--incus-image", "images:ubuntu/24.04/cloud",
+		"--incus-user", "ubuntu",
+		"--incus-work-root", "/workspace/incus",
+		"--incus-proxy-listen-port", "2201",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Incus.InstanceType != "virtual-machine" || cfg.Incus.User != "ubuntu" || cfg.Incus.WorkRoot != "/workspace/incus" {
+		t.Fatalf("incus flags not applied: %#v", cfg.Incus)
+	}
+	if cfg.SSHPort != "2201" || cfg.WorkRoot != "/workspace/incus" || cfg.ServerType != "virtual-machine:images:ubuntu/24.04/cloud" {
+		t.Fatalf("derived incus config wrong: sshPort=%q workRoot=%q serverType=%q", cfg.SSHPort, cfg.WorkRoot, cfg.ServerType)
 	}
 }
 

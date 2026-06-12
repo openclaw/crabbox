@@ -30,12 +30,12 @@ func TestVersion(t *testing.T) {
 }
 
 func TestRemoteCommandQuotesWorkdirEnvAndArgs(t *testing.T) {
-	got := remoteCommand("/work/crabbox/cbx_1/openclaw", map[string]string{"NODE_OPTIONS": "--max-old-space-size=8192"}, []string{"pnpm", "check:changed"})
+	got := remoteCommand("/work/crabbox/cbx_1/my-app", map[string]string{"NODE_OPTIONS": "--max-old-space-size=8192"}, []string{"pnpm", "check:changed"})
 	for _, want := range []string{
-		"cd '/work/crabbox/cbx_1/openclaw'",
+		"cd '/work/crabbox/cbx_1/my-app'",
 		"NODE_OPTIONS='--max-old-space-size=8192'",
 		"bash -lc",
-		"'exec \"$@\"' bash 'pnpm' 'check:changed'",
+		`bash -lc 'cd '\''/work/crabbox/cbx_1/my-app'\'' && exec "$@"' bash 'pnpm' 'check:changed'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommand() missing %q in %q", want, got)
@@ -48,7 +48,7 @@ func TestRemoteShellCommandRunsScript(t *testing.T) {
 	for _, want := range []string{
 		"cd '/work/crabbox/cbx_1/repo'",
 		"CI='1'",
-		"bash -lc 'pnpm install && pnpm test'",
+		`bash -lc 'cd '\''/work/crabbox/cbx_1/repo'\'' && pnpm install && pnpm test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteShellCommand() missing %q in %q", want, got)
@@ -70,7 +70,7 @@ func TestRemoteCommandSourcesActionsEnvFile(t *testing.T) {
 		"cd '/home/runner/work/repo/repo'",
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"CI='1'",
-		"'exec \"$@\"' bash 'pnpm' 'test'",
+		`bash -lc 'cd '\''/home/runner/work/repo/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFile() missing %q in %q", want, got)
@@ -87,7 +87,7 @@ func TestRemoteCommandSourcesMultipleEnvFilesWithoutInlineSecret(t *testing.T) {
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"if [ -f '.crabbox/env/run.env.sh' ]; then . '.crabbox/env/run.env.sh'; fi",
 		"CI='1'",
-		"'exec \"$@\"' bash 'pnpm' 'test'",
+		`bash -lc 'cd '\''/work/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFiles() missing %q in %q", want, got)
@@ -387,6 +387,60 @@ func TestSSHArgsIncludeReliabilityOptions(t *testing.T) {
 	}
 }
 
+func TestSSHArgsNoInputAddsNativeStdinRedirect(t *testing.T) {
+	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "22"}
+	if got := strings.Join(sshArgsNoInput(target, "true"), " "); !strings.Contains(" "+got+" ", " -n ") {
+		t.Fatalf("sshArgsNoInput() missing -n: %q", got)
+	}
+	if got := strings.Join(sshArgs(target, "true"), " "); strings.Contains(" "+got+" ", " -n ") {
+		t.Fatalf("sshArgs() unexpectedly contains -n: %q", got)
+	}
+}
+
+func TestSSHArgsIncludeCertificateFile(t *testing.T) {
+	t.Setenv("HOME", "/tmp/crabbox-home")
+	got := strings.Join(sshArgs(SSHTarget{
+		User:            "tenki",
+		Host:            "sandbox",
+		Key:             "/tmp/tenki/id_ed25519",
+		CertificateFile: "/tmp/tenki/session-cert.pub",
+		KnownHostsFile:  "/tmp/tenki/known_hosts_session",
+		Port:            "22",
+	}, "true"), "\n")
+	if !strings.Contains(got, "CertificateFile=/tmp/tenki/session-cert.pub") {
+		t.Fatalf("sshArgs() missing CertificateFile: %q", got)
+	}
+	if !strings.Contains(got, "UserKnownHostsFile=/tmp/tenki/known_hosts_session") {
+		t.Fatalf("sshArgs() missing KnownHostsFile: %q", got)
+	}
+	if !strings.Contains(got, "ControlMaster=auto") {
+		t.Fatalf("sshArgs() should keep ControlMaster enabled for cert auth: %q", got)
+	}
+}
+
+func TestSSHArgsDisableHostKeyChecking(t *testing.T) {
+	t.Setenv("HOME", "/tmp/crabbox-home")
+	got := strings.Join(sshArgs(SSHTarget{
+		User:                   "tenki",
+		Host:                   "sandbox",
+		Key:                    "/tmp/tenki/id_ed25519",
+		Port:                   "22",
+		DisableHostKeyChecking: true,
+	}, "true"), "\n")
+	for _, want := range []string{
+		"StrictHostKeyChecking=no",
+		"UserKnownHostsFile=/dev/null",
+		"LogLevel=ERROR",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sshArgs() missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "accept-new") || strings.Contains(got, "/tmp/tenki/known_hosts") {
+		t.Fatalf("sshArgs() should not use persistent known_hosts: %q", got)
+	}
+}
+
 func TestSSHArgsAllowTokenUserWithoutIdentityFile(t *testing.T) {
 	t.Setenv("HOME", "/tmp/crabbox-home")
 	got := strings.Join(sshArgs(SSHTarget{
@@ -498,6 +552,55 @@ exit 0
 	}
 }
 
+func TestWaitForSSHReadyRecordsProxyFallbackPort(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	portsPath := filepath.Join(dir, "ports")
+	script := `#!/bin/sh
+port=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then
+    shift
+    port="$1"
+  fi
+  shift
+done
+printf '%s\n' "$port" >> "$CRABBOX_FAKE_SSH_PORTS"
+if [ "$port" = "2222" ]; then
+  exit 255
+fi
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORTS", portsPath)
+
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "2222",
+		FallbackPorts:  []string{"22"},
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	if err := waitForSSHReady(context.Background(), &target, io.Discard, "test", time.Second); err != nil {
+		t.Fatalf("waitForSSHReady: %v", err)
+	}
+	if target.Port != "22" {
+		t.Fatalf("target.Port=%q want resolved fallback port 22", target.Port)
+	}
+	ports, err := os.ReadFile(portsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ports) != "2222\n22\n" {
+		t.Fatalf("ports=%q want fallback sequence", string(ports))
+	}
+}
+
 func TestWaitForLoopbackVNCRecordsResolvedFallbackPort(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
@@ -599,6 +702,37 @@ func TestSSHCommandLineRedactsSecretAuthUser(t *testing.T) {
 	}
 }
 
+func TestSSHRegistersProviderRoutingFlags(t *testing.T) {
+	defaults := baseConfig()
+	fs := newFlagSet("ssh", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	id := fs.String("id", "", "")
+	providerFlags := registerProviderFlags(fs, defaults)
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{
+		"--provider", "proxmox",
+		"--proxmox-api-url", "https://pve.example.test:8006",
+		"--proxmox-node", "pve1",
+		"--proxmox-template-id", "9000",
+		"--proxmox-user", "runner",
+		"--proxmox-work-root", "/work/test",
+		"--id", "cbx_123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "proxmox" || cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/test" {
+		t.Fatalf("provider routing flags not applied for ssh: provider=%q proxmox=%#v", cfg.Provider, cfg.Proxmox)
+	}
+}
+
 func TestSSHTransportProbeDoesNotRequireCrabboxReady(t *testing.T) {
 	got := sshTransportProbeCommand(SSHTarget{Host: "100.64.0.10", Port: "2222"})
 	if strings.Contains(got, "crabbox-ready") || strings.Contains(got, "git --version") || strings.Contains(got, "/work/crabbox") {
@@ -633,6 +767,26 @@ func TestSSHControlPathIsScopedByKey(t *testing.T) {
 	}
 	if !strings.HasPrefix(filepath.Base(left), "crabbox-ssh-") || !strings.HasSuffix(left, "-%C") {
 		t.Fatalf("unexpected control path %q", left)
+	}
+}
+
+func TestSSHControlPathIsScopedByProxyAndCertificate(t *testing.T) {
+	base := SSHTarget{
+		User:            "tenki",
+		Host:            "sandbox",
+		Key:             "/tmp/tenki/id_ed25519",
+		CertificateFile: "/tmp/tenki/ssh-certs/session-a/cert.pub",
+		ProxyCommand:    "tenki sandbox ssh-proxy --session session-a",
+	}
+	otherCert := base
+	otherCert.CertificateFile = "/tmp/tenki/ssh-certs/session-b/cert.pub"
+	otherProxy := base
+	otherProxy.ProxyCommand = "tenki sandbox ssh-proxy --session session-b"
+	if sshControlPath(base) == sshControlPath(otherCert) {
+		t.Fatal("control paths should differ for different certificate files")
+	}
+	if sshControlPath(base) == sshControlPath(otherProxy) {
+		t.Fatal("control paths should differ for different proxy commands")
 	}
 }
 
@@ -756,7 +910,8 @@ func TestRemotePruneSyncManifestDeletesOnlyManagedPaths(t *testing.T) {
 	for _, want := range []string{
 		"sync-deleted.new",
 		"manifest_removed_paths",
-		"python3 -",
+		"command -v python3",
+		"command -v perl",
 		"rm -f --",
 		"rmdir --",
 		"sync-manifest.new",
@@ -848,6 +1003,80 @@ func TestRemotePruneSyncManifestPrunesManagedFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatalf("unsafe deleted path should not escape workdir: %v", err)
+	}
+}
+
+func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
+	workdir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "keep.txt\x00stale.txt\x00")
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest.new"), "keep.txt\x00")
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-deleted.new"), "")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep.txt"), "keep")
+	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
+
+	toolDir := t.TempDir()
+	for _, name := range []string{"dirname", "rm", "rmdir"} {
+		mustWriteTestCommandWrapper(t, toolDir, name)
+	}
+	mustWriteTestBashNoProfileWrapper(t, toolDir)
+	perlMarker := filepath.Join(t.TempDir(), "perl-invoked")
+	mustWriteTestCommandWrapperWithMarker(t, toolDir, "perl", perlMarker)
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remotePruneSyncManifest(workdir))
+	cmd.Env = append(os.Environ(), "PATH="+toolDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("remote prune perl fallback failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(perlMarker); err != nil {
+		t.Fatalf("perl fallback was not invoked: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "keep.txt")); err != nil {
+		t.Fatalf("keep.txt should survive prune: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale.txt should be pruned, stat err=%v", err)
+	}
+}
+
+func TestRemotePruneSyncManifestFailsClosedWhenInterpreterFails(t *testing.T) {
+	workdir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "stale.txt\x00")
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest.new"), "")
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-deleted.new"), "")
+	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
+
+	toolDir := t.TempDir()
+	for _, name := range []string{"dirname", "rm", "rmdir"} {
+		mustWriteTestCommandWrapper(t, toolDir, name)
+	}
+	mustWriteTestBashNoProfileWrapper(t, toolDir)
+	mustWriteTestFailingCommand(t, toolDir, "python3", 23)
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remotePruneSyncManifest(workdir))
+	cmd.Env = append(os.Environ(), "PATH="+toolDir)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("remote prune unexpectedly succeeded\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "stale.txt")); err != nil {
+		t.Fatalf("stale.txt should survive interpreter failure: %v", err)
+	}
+}
+
+func TestRemotePruneSyncManifestDoesNotSwallowReadErrors(t *testing.T) {
+	got := remotePruneSyncManifest("/work/repo")
+	for _, unsafe := range []string{"except IOError", "return () unless -"} {
+		if strings.Contains(got, unsafe) {
+			t.Fatalf("remote prune still treats manifest read errors as missing: %q", unsafe)
+		}
+	}
+	if !strings.Contains(got, "set -e -o pipefail") {
+		t.Fatalf("remote prune must propagate interpreter failures: %q", got)
 	}
 }
 
@@ -985,6 +1214,146 @@ func TestRemoteWriteSyncManifestsNew(t *testing.T) {
 	}
 }
 
+func TestRemoteWriteSyncManifestsNewFallsBackToPerlWithoutPython(t *testing.T) {
+	workdir := t.TempDir()
+	manifest := "keep.txt\x00"
+	deleted := "old.txt\x00"
+	input := fmt.Sprintf("%d\n", len(manifest)) + manifest + deleted
+
+	toolDir := t.TempDir()
+	mustWriteTestCommandWrapper(t, toolDir, "mkdir")
+	mustWriteTestBashNoProfileWrapper(t, toolDir)
+	perlMarker := filepath.Join(t.TempDir(), "perl-invoked")
+	mustWriteTestCommandWrapperWithMarker(t, toolDir, "perl", perlMarker)
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remoteWriteSyncManifestsNew(workdir))
+	cmd.Env = append(os.Environ(), "PATH="+toolDir)
+	cmd.Stdin = strings.NewReader(input)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write manifests perl fallback failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(perlMarker); err != nil {
+		t.Fatalf("perl fallback was not invoked: %v", err)
+	}
+	metaDir := filepath.Join(workdir, ".crabbox")
+	gotManifest, err := os.ReadFile(filepath.Join(metaDir, "sync-manifest.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotManifest) != manifest {
+		t.Fatalf("unexpected manifest: %q", gotManifest)
+	}
+	gotDeleted, err := os.ReadFile(filepath.Join(metaDir, "sync-deleted.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotDeleted) != deleted {
+		t.Fatalf("unexpected deleted manifest: %q", gotDeleted)
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewPerlReadsChunkedInput(t *testing.T) {
+	workdir := t.TempDir()
+	manifest := strings.Repeat("manifest-entry\x00", 4096)
+	deleted := "old.txt\x00"
+
+	toolDir := t.TempDir()
+	mustWriteTestCommandWrapper(t, toolDir, "mkdir")
+	mustWriteTestBashNoProfileWrapper(t, toolDir)
+	perlMarker := filepath.Join(t.TempDir(), "perl-invoked")
+	mustWriteTestCommandWrapperWithMarker(t, toolDir, "perl", perlMarker)
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remoteWriteSyncManifestsNew(workdir))
+	cmd.Env = append(os.Environ(), "PATH="+toolDir)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(stdin, fmt.Sprintf("%d\n", len(manifest))+manifest[:1]); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := io.WriteString(stdin, manifest[1:]+deleted); err != nil {
+		t.Fatal(err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("write chunked manifests failed: %v\n%s", err, output.String())
+	}
+	if _, err := os.Stat(perlMarker); err != nil {
+		t.Fatalf("perl fallback was not invoked: %v", err)
+	}
+	metaDir := filepath.Join(workdir, ".crabbox")
+	gotManifest, err := os.ReadFile(filepath.Join(metaDir, "sync-manifest.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotManifest) != manifest {
+		t.Fatalf("manifest bytes=%d want %d", len(gotManifest), len(manifest))
+	}
+	gotDeleted, err := os.ReadFile(filepath.Join(metaDir, "sync-deleted.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotDeleted) != deleted {
+		t.Fatalf("unexpected deleted manifest: %q", gotDeleted)
+	}
+}
+
+func mustWriteTestBashNoProfileWrapper(t *testing.T, dir string) {
+	t.Helper()
+	target, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bash")
+	script := "#!/bin/sh\n" +
+		`if [ "$1" = "-lc" ]; then` + "\n" +
+		"  shift\n" +
+		"  exec " + shellQuote(target) + ` --noprofile --norc -c "$@"` + "\n" +
+		"fi\n" +
+		"exec " + shellQuote(target) + ` "$@"` + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteTestCommandWrapperWithMarker(t *testing.T, dir, name, marker string) {
+	t.Helper()
+	target, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("lookpath %s: %v", name, err)
+	}
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\n: > " + shellQuote(marker) + "\nexec " + shellQuote(target) + ` "$@"` + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteTestFailingCommand(t *testing.T, dir, name string, code int) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := fmt.Sprintf("#!/bin/sh\nexit %d\n", code)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRemoteSyncMetadataUsesGitDirForGitWorktree(t *testing.T) {
 	workdir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(workdir, ".git"), 0o755); err != nil {
@@ -1006,6 +1375,9 @@ func TestRemoteSyncMetadataUsesGitDirForGitWorktree(t *testing.T) {
 func TestIsBootstrapWaitError(t *testing.T) {
 	if !isBootstrapWaitError(exit(5, "timed out waiting for SSH on 203.0.113.10 during bootstrap")) {
 		t.Fatal("expected SSH timeout to be retryable")
+	}
+	if !isBootstrapWaitError(exit(5, "timed out waiting for XCP-ng guest IPv4")) {
+		t.Fatal("expected XCP-ng guest IPv4 timeout to be retryable")
 	}
 	if isBootstrapWaitError(exit(6, "rsync failed")) {
 		t.Fatal("sync failure must not be treated as retryable bootstrap")
@@ -1161,6 +1533,19 @@ func mustWriteTestFile(t *testing.T, path, value string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWriteTestCommandWrapper(t *testing.T, dir, name string) {
+	t.Helper()
+	target, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("lookpath %s: %v", name, err)
+	}
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\nexec " + shellQuote(target) + ` "$@"` + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -3,6 +3,8 @@ package gcp
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,10 @@ type fakeGCPDoctorClient struct {
 	deleted   []string
 	mutated   bool
 	servers   []Server
+	created   Server
+	createCfg Config
+	createErr error
+	waitErr   error
 }
 
 func (c *fakeGCPDoctorClient) ListCrabboxServers(context.Context) ([]Server, error) {
@@ -29,11 +35,20 @@ func (c *fakeGCPDoctorClient) ListCrabboxServersComplete(context.Context) ([]Ser
 
 func (c *fakeGCPDoctorClient) CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error) {
 	c.mutated = true
-	return Server{}, Config{}, nil
+	if c.createErr != nil {
+		return Server{}, Config{}, c.createErr
+	}
+	if c.created.CloudID == "" {
+		c.created = Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{}}
+	}
+	return c.created, c.createCfg, nil
 }
 
 func (c *fakeGCPDoctorClient) WaitForServerIP(context.Context, string) (Server, error) {
-	return Server{}, nil
+	if c.waitErr != nil {
+		return Server{}, c.waitErr
+	}
+	return c.created, nil
 }
 
 func (c *fakeGCPDoctorClient) GetServer(context.Context, string) (Server, error) {
@@ -49,6 +64,63 @@ func (c *fakeGCPDoctorClient) DeleteServer(_ context.Context, name string) error
 func (c *fakeGCPDoctorClient) SetLabels(context.Context, string, map[string]string) error {
 	c.mutated = true
 	return nil
+}
+
+func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ipErr := errors.New("ip unavailable")
+	fake := &fakeGCPDoctorClient{
+		created:   Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{"lease": "cbx_created"}},
+		createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"},
+		waitErr:   ipErr,
+	}
+	old := newGCPClient
+	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newGCPClient = old })
+
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	_, err := backend.acquireOnce(context.Background(), false, "")
+	if !errors.Is(err, ipErr) {
+		t.Fatalf("err=%v, want IP failure", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-created" {
+		t.Fatalf("deleted=%v, want created server cleanup", fake.deleted)
+	}
+}
+
+func TestGCPAcquireCleansUpCreatedServerOnFallbackClientFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	rebuildErr := errors.New("fallback auth failed")
+	fake := &fakeGCPDoctorClient{
+		created:   Server{CloudID: "crabbox-fallback", Name: "crabbox-fallback", Labels: map[string]string{"lease": "cbx_created"}},
+		createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"},
+	}
+	calls := 0
+	old := newGCPClient
+	newGCPClient = func(context.Context, Config) (gcpClient, error) {
+		calls++
+		if calls >= 2 {
+			return nil, rebuildErr
+		}
+		return fake, nil
+	}
+	t.Cleanup(func() { newGCPClient = old })
+
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	_, err := backend.acquireOnce(context.Background(), false, "")
+	if !errors.Is(err, rebuildErr) {
+		t.Fatalf("err=%v, want fallback client failure", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-fallback" {
+		t.Fatalf("deleted=%v, want created server cleanup", fake.deleted)
+	}
+	if calls < 3 {
+		t.Fatalf("newGCPClient calls=%d, want cleanup client rebuild attempt", calls)
+	}
 }
 
 func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {

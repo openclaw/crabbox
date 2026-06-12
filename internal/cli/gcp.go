@@ -125,6 +125,7 @@ func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 			}
 			server, err := c.withZone(zone).createServer(ctx, next, publicKey, leaseID, slug, keep)
 			if err == nil {
+				c.Zone = zone
 				return server, next, nil
 			}
 			errs = append(errs, fmt.Errorf("%s/%s: %w", zone, machineType, err))
@@ -145,6 +146,7 @@ func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 				}
 				server, err := c.withZone(zone).createServer(ctx, next, publicKey, leaseID, slug, keep)
 				if err == nil {
+					c.Zone = zone
 					return server, next, nil
 				}
 				errs = append(errs, fmt.Errorf("on-demand %s/%s: %w", zone, machineType, err))

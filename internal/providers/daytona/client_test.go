@@ -2,8 +2,10 @@ package daytona
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
@@ -70,6 +72,92 @@ func TestDaytonaListCrabboxSandboxesUsesCursorPagination(t *testing.T) {
 	}
 }
 
+func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/sandbox":
+			_, _ = w.Write([]byte(`{"items":[],"nextCursor":null}`))
+		case "/sandbox/direct-one":
+			_, _ = w.Write([]byte(daytonaListItemJSON("direct-one", "direct-slug")))
+		case "/sandbox/missing":
+			http.Error(w, `{"message":"sandbox not found"}`, http.StatusNotFound)
+		case "/sandbox/denied":
+			http.Error(w, `{"message":"bad token"}`, http.StatusUnauthorized)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	apiCfg := apidaytona.NewConfiguration()
+	apiCfg.Servers = apidaytona.ServerConfigurations{{URL: srv.URL}}
+	apiCfg.HTTPClient = srv.Client()
+	client := &daytonaSDKClient{api: apidaytona.NewAPIClient(apiCfg), token: "api-token"}
+
+	got, leaseID, err := resolveDaytonaSandbox(context.Background(), client, Config{}, "direct-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetId() != "direct-one" || leaseID != "lease-one" {
+		t.Fatalf("direct lookup=%s lease=%s, want direct-one lease-one", got.GetId(), leaseID)
+	}
+
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "missing")
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "daytona sandbox not found: missing") {
+		t.Fatalf("missing err=%v, want local not-found exit", err)
+	}
+
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "denied")
+	if err == nil || !strings.Contains(err.Error(), "daytona get sandbox: 401 Unauthorized") {
+		t.Fatalf("denied err=%v, want preserved get-sandbox failure", err)
+	}
+	if strings.Contains(err.Error(), "sandbox not found") {
+		t.Fatalf("denied err=%v, want no not-found rewrite", err)
+	}
+}
+
+func TestParseDaytonaCLIAuthConfigRejectsUnknownActiveProfile(t *testing.T) {
+	_, err := parseDaytonaCLIAuthConfig([]byte(`{
+  "activeProfile": "missing",
+  "profiles": [
+    {"id": "dev", "name": "dev", "api": {"url": "https://dev.example/api", "key": "dev-key"}},
+    {"id": "prod", "name": "prod", "api": {"url": "https://prod.example/api", "key": "prod-key"}}
+  ]
+}`))
+	if err == nil {
+		t.Fatal("expected unknown active profile error")
+	}
+	if !strings.Contains(err.Error(), `active profile "missing" was not found`) {
+		t.Fatalf("err=%v, want missing active profile", err)
+	}
+}
+
+func TestParseDaytonaCLIAuthConfigFallsBackWhenNoActiveProfile(t *testing.T) {
+	auth, err := parseDaytonaCLIAuthConfig([]byte(`{
+  "profiles": [
+    {
+      "id": "dev",
+      "name": "dev",
+      "activeOrganizationId": "org-dev",
+      "api": {"url": "https://dev.example/api", "key": "dev-key"}
+    },
+    {
+      "id": "prod",
+      "name": "prod",
+      "api": {"url": "https://prod.example/api", "key": "prod-key"}
+    }
+  ]
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth.APIKey != "dev-key" || auth.OrganizationID != "org-dev" || auth.APIURL != "https://dev.example/api" {
+		t.Fatalf("auth=%#v", auth)
+	}
+}
+
 func daytonaListItemJSON(id, slug string) string {
 	return `{
 		"id": "` + id + `",
@@ -77,7 +165,9 @@ func daytonaListItemJSON(id, slug string) string {
 		"name": "` + id + `",
 		"target": "us",
 		"user": "daytona",
+		"env": {},
 		"public": false,
+		"networkBlockAll": false,
 		"cpu": 2,
 		"gpu": 0,
 		"memory": 4,

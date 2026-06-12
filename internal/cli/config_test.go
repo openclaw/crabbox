@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,8 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"CRABBOX_COORDINATOR",
+		"CRABBOX_COORDINATOR_MODE",
+		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
 		"CRABBOX_COORDINATOR_TOKEN",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
@@ -50,6 +53,10 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_GCP_SSH_CIDRS",
 		"CRABBOX_GCP_ROOT_GB",
 		"CRABBOX_GCP_SERVICE_ACCOUNT",
+		"CRABBOX_DIGITALOCEAN_REGION",
+		"CRABBOX_DIGITALOCEAN_IMAGE",
+		"CRABBOX_DIGITALOCEAN_VPC",
+		"CRABBOX_DIGITALOCEAN_SSH_CIDRS",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -75,6 +82,20 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_E2B_TEMPLATE",
 		"CRABBOX_E2B_WORKDIR",
 		"CRABBOX_E2B_USER",
+		"CRABBOX_OPENSANDBOX_API_URL",
+		"OPEN_SANDBOX_API_URL",
+		"CRABBOX_OPENSANDBOX_API_KEY",
+		"OPEN_SANDBOX_API_KEY",
+		"CRABBOX_OPENSANDBOX_IMAGE",
+		"CRABBOX_OPENSANDBOX_WORKDIR",
+		"CRABBOX_OPENSANDBOX_CPU",
+		"CRABBOX_OPENSANDBOX_MEMORY",
+		"CRABBOX_OPENSANDBOX_TIMEOUT_SECS",
+		"CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS",
+		"CRABBOX_OPENSANDBOX_PLATFORM_OS",
+		"CRABBOX_OPENSANDBOX_PLATFORM_ARCH",
+		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
+		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
 		"CRABBOX_ISLO_API_KEY",
 		"ISLO_API_KEY",
 		"CRABBOX_ISLO_BASE_URL",
@@ -86,6 +107,27 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_FREESTYLE_API_KEY",
+		"FREESTYLE_API_KEY",
+		"CRABBOX_FREESTYLE_API_URL",
+		"FREESTYLE_API_URL",
+		"CRABBOX_FREESTYLE_WORKDIR",
+		"CRABBOX_FREESTYLE_VCPUS",
+		"CRABBOX_FREESTYLE_MEMORY_GB",
+		"CRABBOX_TENKI_CLI",
+		"TENKI_CLI",
+		"CRABBOX_TENKI_ENDPOINT",
+		"TENKI_ENDPOINT",
+		"CRABBOX_TENKI_GATEWAY",
+		"TENKI_GATEWAY",
+		"CRABBOX_TENKI_WORKSPACE",
+		"CRABBOX_TENKI_PROJECT",
+		"CRABBOX_TENKI_IMAGE",
+		"CRABBOX_TENKI_SNAPSHOT",
+		"CRABBOX_TENKI_WORK_ROOT",
+		"CRABBOX_TENKI_CPUS",
+		"CRABBOX_TENKI_MEMORY_MB",
+		"CRABBOX_TENKI_DISK_GB",
 		"CRABBOX_TENSORLAKE_API_KEY",
 		"TENSORLAKE_API_KEY",
 		"CRABBOX_TENSORLAKE_API_URL",
@@ -105,6 +147,19 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_TENSORLAKE_DISK_MB",
 		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
 		"CRABBOX_TENSORLAKE_NO_INTERNET",
+		"CRABBOX_DOCKER_SANDBOX_CLI",
+		"CRABBOX_DOCKER_SANDBOX_AGENT",
+		"CRABBOX_DOCKER_SANDBOX_TEMPLATE",
+		"CRABBOX_DOCKER_SANDBOX_CPUS",
+		"CRABBOX_DOCKER_SANDBOX_MEMORY",
+		"CRABBOX_DOCKER_SANDBOX_CLONE",
+		"CRABBOX_DOCKER_SANDBOX_WORKDIR",
+		"CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES",
+		"CRABBOX_DOCKER_SANDBOX_MCP",
+		"CRABBOX_DOCKER_SANDBOX_KIT",
+		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI",
+		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS",
+		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG",
 		"CRABBOX_ASCII_BOX_API_KEY",
 		"ASCII_BOX_API_KEY",
 		"CRABBOX_ASCII_BOX_BASE_URL",
@@ -119,6 +174,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_APPLE_CONTAINER_CPUS",
 		"CRABBOX_APPLE_CONTAINER_MEMORY",
 		"CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS",
+		"CRABBOX_APPLE_VZ_HELPER",
+		"CRABBOX_APPLE_VZ_IMAGE",
+		"CRABBOX_APPLE_VZ_IMAGE_SHA256",
+		"CRABBOX_APPLE_VZ_USER",
+		"CRABBOX_APPLE_VZ_WORK_ROOT",
+		"CRABBOX_APPLE_VZ_CPUS",
+		"CRABBOX_APPLE_VZ_MEMORY",
+		"CRABBOX_APPLE_VZ_DISK",
 		"CRABBOX_MULTIPASS_CLI",
 		"CRABBOX_MULTIPASS_IMAGE",
 		"CRABBOX_MULTIPASS_USER",
@@ -168,6 +231,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT",
 		"CRABBOX_NAMESPACE_WORK_ROOT",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_API_KEY",
+		"MORPH_API_KEY",
+		"CRABBOX_MORPH_API_URL",
+		"CRABBOX_MORPH_SNAPSHOT",
+		"CRABBOX_MORPH_SSH_GATEWAY_HOST",
+		"CRABBOX_MORPH_WORK_ROOT",
+		"CRABBOX_MORPH_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_WAKE_ON_SSH",
 		"CRABBOX_EXE_DEV_CONTROL_HOST",
 		"EXE_DEV_CONTROL_HOST",
 		"CRABBOX_EXE_DEV_IMAGE",
@@ -191,6 +262,519 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_ENVIRONMENT_ID",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.DockerSandbox.CLIPath != "sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Workdir != "" {
+		t.Fatalf("dockerSandbox defaults not applied: %#v", cfg.DockerSandbox)
+	}
+	clone := true
+	template := "ubuntu"
+	cpus := 2.5
+	memory := "6g"
+	workdir := "/workspace/my-app"
+	extraWorkspaces := []string{"/tmp/extra"}
+	mcp := []string{"context7", "all"}
+	kit := []string{"example-org/base"}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "docker-sandbox",
+		DockerSandbox: &fileDockerSandboxConfig{
+			CLIPath:         "/opt/sbx",
+			Agent:           "shell",
+			Template:        &template,
+			CPUs:            &cpus,
+			Memory:          &memory,
+			Clone:           &clone,
+			Workdir:         &workdir,
+			ExtraWorkspaces: &extraWorkspaces,
+			MCP:             &mcp,
+			Kit:             &kit,
+		},
+	})
+	if cfg.Provider != "docker-sandbox" || cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2.5 || cfg.DockerSandbox.Memory != "6g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
+		t.Fatalf("file dockerSandbox config not applied: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("file dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLI", "/usr/local/bin/sbx")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_AGENT", "shell")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", "debian")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "4")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MEMORY", "8g")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLONE", "false")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_WORKDIR", "/workspace/env-app")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES", "/tmp/a,/tmp/b")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "context7,all")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "kit-a,kit-b")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DockerSandbox.CLIPath != "/usr/local/bin/sbx" || cfg.DockerSandbox.Template != "debian" || cfg.DockerSandbox.CPUs != 4 || cfg.DockerSandbox.Memory != "8g" || cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/env-app" {
+		t.Fatalf("env dockerSandbox config not applied: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
+		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region:   "sfo3",
+			Image:    "ubuntu-24-04-x64",
+			VPCUUID:  "vpc-file",
+			SSHCIDRs: []string{"203.0.113.0/24"},
+		},
+	})
+	if cfg.Provider != "digitalocean" || cfg.DigitalOcean.Region != "sfo3" || cfg.Location == "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" || cfg.Image == "ubuntu-24-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-file" {
+		t.Fatalf("file digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "203.0.113.0/24" {
+		t.Fatalf("file digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+	t.Setenv("CRABBOX_DIGITALOCEAN_VPC", "vpc-env")
+	t.Setenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.Location == "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" || cfg.Image == "ubuntu-22-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-env" {
+		t.Fatalf("env digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
+	}
+	if strings.Join(cfg.DigitalOcean.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
+		t.Fatalf("env digitalocean ssh cidrs=%v", cfg.DigitalOcean.SSHCIDRs)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	base := baseConfig()
+	if cfg.Location != base.Location || cfg.Image != base.Image {
+		t.Fatalf("digitalocean defaults leaked into generic fields: cfg=%#v", cfg)
+	}
+}
+
+func TestDigitalOceanPortableOSSelection(t *testing.T) {
+	t.Run("supported selector maps to provider image", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:24.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("unsupported selector is deferred to acquisition", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("default DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "" {
+			t.Fatalf("DigitalOcean.Image=%q, want unresolved provider image", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider image overrides portable selector", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		cfg.DigitalOcean.Image = "custom-image"
+		cfg.digitalOceanImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "custom-image" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+}
+
+func TestDigitalOceanUnsupportedPortableOSDoesNotBlockCLIOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("provider: digitalocean\nos: ubuntu:26.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("portable os override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--os", "ubuntu:24.04"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+			t.Fatalf("DigitalOcean.Image=%q", cfg.DigitalOcean.Image)
+		}
+	})
+
+	t.Run("provider override", func(t *testing.T) {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := newFlagSet("test", io.Discard)
+		values := registerLeaseCreateFlags(fs, cfg)
+		if err := parseFlags(fs, []string{"--provider", "aws"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "aws" {
+			t.Fatalf("Provider=%q", cfg.Provider)
+		}
+	})
+}
+
+func TestDigitalOceanEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "hetzner"
+	originalLocation := cfg.Location
+	originalImage := cfg.Image
+	t.Setenv("CRABBOX_DIGITALOCEAN_REGION", "nyc3")
+	t.Setenv("CRABBOX_DIGITALOCEAN_IMAGE", "ubuntu-22-04-x64")
+
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DigitalOcean.Region != "nyc3" || cfg.DigitalOcean.Image != "ubuntu-22-04-x64" {
+		t.Fatalf("digitalocean env not stored: do=%#v", cfg.DigitalOcean)
+	}
+	if cfg.Location != originalLocation || cfg.Image != originalImage {
+		t.Fatalf("digitalocean env leaked into generic fields: location=%q image=%q", cfg.Location, cfg.Image)
+	}
+}
+
+func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
+	clearConfigEnv(t)
+	base := baseConfig()
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "digitalocean",
+		SSH: &fileSSHConfig{
+			User: base.SSHUser,
+			Port: base.SSHPort,
+		},
+		Hetzner: &fileHetznerConfig{
+			Location: base.Location,
+			Image:    base.Image,
+		},
+		DigitalOcean: &fileDigitalOceanConfig{
+			Region: "sfo3",
+			Image:  "ubuntu-24-04-x64",
+		},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.Location != base.Location {
+		t.Fatalf("Location=%q want explicit %q", cfg.Location, base.Location)
+	}
+	if cfg.Image != base.Image {
+		t.Fatalf("Image=%q want explicit %q", cfg.Image, base.Image)
+	}
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort {
+		t.Fatalf("SSH=%s@:%s want explicit %s@:%s", cfg.SSHUser, cfg.SSHPort, base.SSHUser, base.SSHPort)
+	}
+	if cfg.DigitalOcean.Region != "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
+		t.Fatalf("DigitalOcean=%#v", cfg.DigitalOcean)
+	}
+}
+
+func TestDigitalOceanDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "tart",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != cfg.Tart.WorkRoot {
+		t.Fatalf("Tart WorkRoot=%q want provider root %q before override", cfg.WorkRoot, cfg.Tart.WorkRoot)
+	}
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean WorkRoot=%q want explicit generic root", cfg.WorkRoot)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("DigitalOcean SSHUser=%q want explicit generic user", cfg.SSHUser)
+	}
+	if cfg.SSHPort != "2200" {
+		t.Fatalf("DigitalOcean SSHPort=%q want explicit generic port", cfg.SSHPort)
+	}
+	if cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("DigitalOcean WindowsMode=%q want explicit generic mode", cfg.WindowsMode)
+	}
+}
+
+func TestDigitalOceanDefaultsIgnoreStaticProviderOverlays(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "ssh",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Static: &fileStaticConfig{
+			User:     "builder",
+			Port:     "2202",
+			WorkRoot: "/srv/static",
+		},
+	})
+	normalizeTargetConfig(&cfg)
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/static" {
+		t.Fatalf("static source settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+
+	cfg.Provider = "digitalocean"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("DigitalOcean settings user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+}
+
+func TestDigitalOceanDefaultsDoNotLeakAcrossProviderOverride(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "digitalocean"
+	wantLocation := cfg.Location
+	wantImage := cfg.Image
+	wantSSHUser := cfg.SSHUser
+	wantSSHPort := cfg.SSHPort
+	wantFallbackPorts := append([]string(nil), cfg.SSHFallbackPorts...)
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("digitalocean defaults: %v", err)
+	}
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("hetzner defaults: %v", err)
+	}
+
+	if cfg.Location != wantLocation || cfg.Image != wantImage ||
+		cfg.SSHUser != wantSSHUser || cfg.SSHPort != wantSSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(wantFallbackPorts, ",") {
+		t.Fatalf("digitalocean defaults leaked after provider override: %#v", cfg)
+	}
+}
+
+func TestDockerSandboxEmptyFileConfigDoesNotClearExistingValues(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox = DockerSandboxConfig{
+		CLIPath:         "/opt/sbx",
+		Agent:           "shell",
+		Template:        "ubuntu",
+		CPUs:            2,
+		Memory:          "4g",
+		Clone:           true,
+		Workdir:         "/workspace/my-app",
+		ExtraWorkspaces: []string{"/tmp/extra"},
+		MCP:             []string{"context7"},
+		Kit:             []string{"example-org/base"},
+	}
+	applyFileConfig(&cfg, fileConfig{DockerSandbox: &fileDockerSandboxConfig{}})
+	if cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2 || cfg.DockerSandbox.Memory != "4g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
+		t.Fatalf("empty file dockerSandbox config cleared existing scalar values: %#v", cfg.DockerSandbox)
+	}
+	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/extra" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7" || strings.Join(cfg.DockerSandbox.Kit, ",") != "example-org/base" {
+		t.Fatalf("empty file dockerSandbox config cleared existing list values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigCanClearInheritedLists(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox.ExtraWorkspaces = []string{"/tmp/inherited"}
+	cfg.DockerSandbox.MCP = []string{"context7"}
+	cfg.DockerSandbox.Kit = []string{"example-org/base"}
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+dockerSandbox:
+  extraWorkspaces: []
+  mcp: []
+  kit: []
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if len(cfg.DockerSandbox.ExtraWorkspaces) != 0 || len(cfg.DockerSandbox.MCP) != 0 || len(cfg.DockerSandbox.Kit) != 0 {
+		t.Fatalf("repo dockerSandbox empty lists did not clear inherited values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigCanClearInheritedRuntimeDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.DockerSandbox.Template = "ubuntu"
+	cfg.DockerSandbox.CPUs = 4
+	cfg.DockerSandbox.Memory = "8g"
+	cfg.DockerSandbox.Workdir = "/workspace/inherited"
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+dockerSandbox:
+  template: ""
+  cpus: 0
+  memory: ""
+  workdir: ""
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if cfg.DockerSandbox.Template != "" || cfg.DockerSandbox.CPUs != 0 || cfg.DockerSandbox.Memory != "" || cfg.DockerSandbox.Workdir != "" {
+		t.Fatalf("repo dockerSandbox runtime defaults did not clear inherited values: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestDockerSandboxFileConfigRejectsNegativeCPUs(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+provider: docker-sandbox
+dockerSandbox:
+  cpus: -1
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfig(&cfg, file)
+	if err == nil {
+		t.Fatal("applyConfigFile err=<nil>, want negative dockerSandbox cpus rejection")
+	}
+	if !strings.Contains(err.Error(), "docker-sandbox cpus must be non-negative") {
+		t.Fatalf("applyConfigFile err=%v, want negative dockerSandbox cpus rejection", err)
+	}
+}
+
+func TestDockerSandboxConfigAcceptsMCPFromFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+provider: docker-sandbox
+dockerSandbox:
+  mcp:
+    - context7
+    - all
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfig(&cfg, file)
+	if err != nil {
+		t.Fatalf("applyFileConfig mcp err=%v", err)
+	}
+	if strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" {
+		t.Fatalf("applyFileConfig mcp cfg=%#v", cfg.DockerSandbox)
+	}
+
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_MCP", "one,two")
+	err = applyEnv(&cfg)
+	if err != nil {
+		t.Fatalf("applyEnv mcp err=%v", err)
+	}
+	if strings.Join(cfg.DockerSandbox.MCP, ",") != "one,two" {
+		t.Fatalf("applyEnv mcp cfg=%#v", cfg.DockerSandbox)
+	}
+}
+
+func TestAnthropicSandboxRuntimeConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.AnthropicSRT.CLIPath != "srt" || cfg.AnthropicSRT.Settings != "" || cfg.AnthropicSRT.Debug {
+		t.Fatalf("anthropicSandboxRuntime defaults not applied: %#v", cfg.AnthropicSRT)
+	}
+	settings := ".crabbox/srt-settings.json"
+	debug := true
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "anthropic-sandbox-runtime",
+		AnthropicSRT: &fileAnthropicSRTConfig{
+			CLIPath:  "/opt/srt",
+			Settings: &settings,
+			Debug:    &debug,
+		},
+	})
+	if cfg.Provider != "anthropic-sandbox-runtime" || cfg.AnthropicSRT.CLIPath != "/opt/srt" || cfg.AnthropicSRT.Settings != settings || !cfg.AnthropicSRT.Debug {
+		t.Fatalf("file anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
+	}
+
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", "/usr/local/bin/srt")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", ".crabbox/env-srt-settings.json")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.AnthropicSRT.CLIPath != "/usr/local/bin/srt" || cfg.AnthropicSRT.Settings != ".crabbox/env-srt-settings.json" || cfg.AnthropicSRT.Debug {
+		t.Fatalf("env anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
+	}
+}
+
+func TestAnthropicSandboxRuntimeFileConfigCanClearSettings(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.AnthropicSRT.Settings = ".crabbox/inherited-srt-settings.json"
+
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(`
+anthropicSandboxRuntime:
+  settings: ""
+`), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatalf("applyFileConfig err=%v", err)
+	}
+	if cfg.AnthropicSRT.Settings != "" {
+		t.Fatalf("settings=%q want cleared", cfg.AnthropicSRT.Settings)
 	}
 }
 
@@ -256,6 +840,126 @@ func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "apple-vz"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.User != "crabbox" || cfg.AppleVZ.WorkRoot != "/work/crabbox" || cfg.AppleVZ.CPUs != 4 || cfg.AppleVZ.MemoryMiB != 8192 || cfg.AppleVZ.DiskGiB != 30 {
+		t.Fatalf("apple-vz defaults not applied: %#v", cfg.AppleVZ)
+	}
+	if cfg.AppleVZ.ImageSHA256 == "" {
+		t.Fatalf("apple-vz default image checksum not applied: %#v", cfg.AppleVZ)
+	}
+	if cfg.SSHUser != "crabbox" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.TargetOS != targetLinux {
+		t.Fatalf("apple-vz derived defaults not applied: sshUser=%q sshPort=%q workRoot=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.TargetOS)
+	}
+	fileCPUs := 6
+	fileMemoryMiB := 12288
+	fileDiskGiB := 64
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "apple-vz",
+		AppleVZ: &fileAppleVZConfig{
+			HelperPath:  "/opt/bin/crabbox-apple-vz-helper",
+			Image:       "https://example.test/custom.img",
+			ImageSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			User:        "runner",
+			WorkRoot:    "/work/example",
+			CPUs:        &fileCPUs,
+			MemoryMiB:   &fileMemoryMiB,
+			DiskGiB:     &fileDiskGiB,
+		},
+	})
+	if cfg.Provider != "apple-vz" || cfg.AppleVZ.HelperPath != "/opt/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/custom.img" || cfg.AppleVZ.ImageSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || cfg.AppleVZ.User != "runner" || cfg.AppleVZ.WorkRoot != "/work/example" || cfg.AppleVZ.CPUs != 6 || cfg.AppleVZ.MemoryMiB != 12288 || cfg.AppleVZ.DiskGiB != 64 {
+		t.Fatalf("file appleVZ config not applied: %#v", cfg.AppleVZ)
+	}
+	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatal("file appleVZ numeric settings should be marked explicit")
+	}
+
+	t.Setenv("CRABBOX_APPLE_VZ_HELPER", "/usr/local/bin/crabbox-apple-vz-helper")
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE", "https://example.test/env.img")
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	t.Setenv("CRABBOX_APPLE_VZ_USER", "env-user")
+	t.Setenv("CRABBOX_APPLE_VZ_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "8")
+	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "16384")
+	t.Setenv("CRABBOX_APPLE_VZ_DISK", "80")
+	applyEnv(&cfg)
+	if cfg.AppleVZ.HelperPath != "/usr/local/bin/crabbox-apple-vz-helper" || cfg.AppleVZ.Image != "https://example.test/env.img" || cfg.AppleVZ.ImageSHA256 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || cfg.AppleVZ.User != "env-user" || cfg.AppleVZ.WorkRoot != "/work/env" || cfg.AppleVZ.CPUs != 8 || cfg.AppleVZ.MemoryMiB != 16384 || cfg.AppleVZ.DiskGiB != 80 {
+		t.Fatalf("env appleVZ config not applied: %#v", cfg.AppleVZ)
+	}
+	if !AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatal("env appleVZ numeric settings should be marked explicit")
+	}
+}
+
+func TestAppleVZNumericSettingsPreserveExplicitZero(t *testing.T) {
+	clearConfigEnv(t)
+	fileZeroCPUs := 0
+	fileZero := 0
+	fileZeroDisk := 0
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{AppleVZ: &fileAppleVZConfig{
+		CPUs:      &fileZeroCPUs,
+		MemoryMiB: &fileZero,
+		DiskGiB:   &fileZeroDisk,
+	}})
+	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
+		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatalf("file appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
+	}
+
+	cfg = baseConfig()
+	t.Setenv("CRABBOX_APPLE_VZ_CPUS", "0")
+	t.Setenv("CRABBOX_APPLE_VZ_MEMORY", "0")
+	t.Setenv("CRABBOX_APPLE_VZ_DISK", "0")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.CPUs != 0 || cfg.AppleVZ.MemoryMiB != 0 || cfg.AppleVZ.DiskGiB != 0 ||
+		!AppleVZCPUsExplicit(cfg) || !AppleVZMemoryExplicit(cfg) || !AppleVZDiskExplicit(cfg) {
+		t.Fatalf("env appleVZ=%+v explicit=%v/%v/%v", cfg.AppleVZ, AppleVZCPUsExplicit(cfg), AppleVZMemoryExplicit(cfg), AppleVZDiskExplicit(cfg))
+	}
+}
+
+func TestAppleVZNumericSettingsRejectInvalidEnvironmentValues(t *testing.T) {
+	for _, name := range []string{"CRABBOX_APPLE_VZ_CPUS", "CRABBOX_APPLE_VZ_MEMORY", "CRABBOX_APPLE_VZ_DISK"} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			t.Setenv(name, "garbage")
+			if err := applyEnv(&cfg); err == nil || !strings.Contains(err.Error(), name+" must be an integer") {
+				t.Fatalf("applyEnv error=%v", err)
+			}
+		})
+	}
+}
+
+func TestAppleVZConfigDefaultsRedactSignedImageServerType(t *testing.T) {
+	for _, image := range []string{
+		"https://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+		"HTTPS://alice:secret@example.test/images/ubuntu.img?token=private#fragment",
+	} {
+		cfg := baseConfig()
+		cfg.Provider = "apple-vz"
+		cfg.AppleVZ.Image = image
+		cfg.AppleVZ.ImageSHA256 = strings.Repeat("a", 64)
+
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ServerType != "<remote-image>" {
+			t.Fatalf("ServerType=%q", cfg.ServerType)
+		}
+		if !strings.Contains(cfg.AppleVZ.Image, "token=private") {
+			t.Fatalf("AppleVZ.Image should retain the request URL in memory: %q", cfg.AppleVZ.Image)
+		}
+	}
+}
+
 func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -290,6 +994,332 @@ func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	applyEnv(&cfg)
 	if cfg.Multipass.CLIPath != "/usr/local/bin/multipass" || cfg.Multipass.Image != "26.04" || cfg.Multipass.User != "env-user" || cfg.Multipass.WorkRoot != "/work/env" || cfg.Multipass.CPUs != 6 || cfg.Multipass.Memory != "12G" || cfg.Multipass.Disk != "80G" || cfg.Multipass.LaunchTimeout != 11*time.Minute {
 		t.Fatalf("env multipass config not applied: %#v", cfg.Multipass)
+	}
+}
+
+func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.Tart.Image = "ghcr.io/test:latest"
+	cfg.Tart.User = "admin"
+	cfg.Tart.WorkRoot = "/Users/admin/work"
+	cfg.Tart.CPUs = 4
+	cfg.Tart.Memory = 8192
+	cfg.Tart.Disk = 50
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "admin" {
+		t.Fatalf("SSHUser=%q, want admin", cfg.SSHUser)
+	}
+	if cfg.SSHPort != "22" {
+		t.Fatalf("SSHPort=%q, want 22", cfg.SSHPort)
+	}
+	if cfg.SSHFallbackPorts != nil {
+		t.Fatalf("SSHFallbackPorts=%v, want nil", cfg.SSHFallbackPorts)
+	}
+	if cfg.WorkRoot != "/Users/admin/work" {
+		t.Fatalf("WorkRoot=%q, want /Users/admin/work", cfg.WorkRoot)
+	}
+	if cfg.TargetOS != "macos" {
+		t.Fatalf("TargetOS=%q, want macos", cfg.TargetOS)
+	}
+	if cfg.ServerType != "ghcr.io/test:latest" {
+		t.Fatalf("ServerType=%q, want ghcr.io/test:latest", cfg.ServerType)
+	}
+
+	// env overrides
+	t.Setenv("CRABBOX_TART_IMAGE", "ghcr.io/env:latest")
+	t.Setenv("CRABBOX_TART_USER", "env-user")
+	t.Setenv("CRABBOX_TART_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_TART_CPUS", "8")
+	t.Setenv("CRABBOX_TART_MEMORY", "16384")
+	t.Setenv("CRABBOX_TART_DISK", "100")
+	applyEnv(&cfg)
+	if cfg.Tart.Image != "ghcr.io/env:latest" || cfg.Tart.User != "env-user" || cfg.Tart.WorkRoot != "/work/env" || cfg.Tart.CPUs != 8 || cfg.Tart.Memory != 16384 || cfg.Tart.Disk != 100 {
+		t.Fatalf("env tart config not applied: %+v", cfg.Tart)
+	}
+	if !cfg.tartDiskExplicit {
+		t.Fatal("positive CRABBOX_TART_DISK should mark tart disk explicit")
+	}
+	t.Setenv("CRABBOX_TART_DISK", "0")
+	applyEnv(&cfg)
+	if cfg.Tart.Disk != 0 {
+		t.Fatalf("zero CRABBOX_TART_DISK disk=%d, want clone default 0", cfg.Tart.Disk)
+	}
+	if cfg.tartDiskExplicit {
+		t.Fatal("zero CRABBOX_TART_DISK should not mark tart disk explicit")
+	}
+}
+
+func TestIncusConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Incus.Remote != "local" || cfg.Incus.Project != "" || cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:ubuntu/24.04/cloud" {
+		t.Fatalf("incus defaults not applied: %#v", cfg.Incus)
+	}
+	deleteOnRelease := false
+	insecureTLS := true
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "incus",
+		Incus: &fileIncusConfig{
+			Remote:            "lab",
+			Project:           "crabbox",
+			Address:           "https://incus.example.test:8443",
+			Socket:            "~/incus.sock",
+			InstanceType:      "vm",
+			Image:             "images:ubuntu/26.04/cloud",
+			Profile:           "crabbox",
+			User:              "ubuntu",
+			WorkRoot:          "/workspace/incus",
+			DeleteOnRelease:   &deleteOnRelease,
+			StartTimeout:      "12m",
+			LaunchPort:        "22",
+			ProxyListenHost:   "127.0.0.1",
+			ProxyListenPort:   "2201",
+			ProxyDevice:       "ssh-proxy",
+			TLSServerCert:     "~/certs/incus.crt",
+			InsecureTLS:       &insecureTLS,
+			RemoteImageServer: "https://images.example.test",
+		},
+	})
+	if cfg.Incus.Remote != "lab" || cfg.Incus.Project != "crabbox" || cfg.Incus.Address != "https://incus.example.test:8443" || !strings.HasSuffix(cfg.Incus.Socket, "/incus.sock") {
+		t.Fatalf("file incus config not applied: %#v", cfg.Incus)
+	}
+	if cfg.Incus.InstanceType != "vm" || cfg.Incus.Image != "images:ubuntu/26.04/cloud" || cfg.Incus.Profile != "crabbox" || cfg.Incus.User != "ubuntu" || cfg.Incus.WorkRoot != "/workspace/incus" {
+		t.Fatalf("file incus identity config not applied: %#v", cfg.Incus)
+	}
+	if cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 12*time.Minute || cfg.Incus.ProxyListenPort != "2201" || cfg.Incus.ProxyDevice != "ssh-proxy" || !strings.HasSuffix(cfg.Incus.TLSServerCert, "/certs/incus.crt") || !cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://images.example.test" {
+		t.Fatalf("file incus runtime config not applied: %#v", cfg.Incus)
+	}
+
+	t.Setenv("CRABBOX_INCUS_REMOTE", "env-remote")
+	t.Setenv("CRABBOX_INCUS_PROJECT", "env-project")
+	t.Setenv("CRABBOX_INCUS_ADDRESS", "https://env-incus.example.test:8443")
+	t.Setenv("CRABBOX_INCUS_SOCKET", "~/env-incus.sock")
+	t.Setenv("CRABBOX_INCUS_INSTANCE_TYPE", "container")
+	t.Setenv("CRABBOX_INCUS_IMAGE", "images:debian/12/cloud")
+	t.Setenv("CRABBOX_INCUS_PROFILE", "env-profile")
+	t.Setenv("CRABBOX_INCUS_USER", "crabuser")
+	t.Setenv("CRABBOX_INCUS_WORK_ROOT", "/env/work")
+	t.Setenv("CRABBOX_INCUS_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_INCUS_START_TIMEOUT", "5m")
+	t.Setenv("CRABBOX_INCUS_LAUNCH_PORT", "2222")
+	t.Setenv("CRABBOX_INCUS_PROXY_LISTEN_HOST", "0.0.0.0")
+	t.Setenv("CRABBOX_INCUS_PROXY_LISTEN_PORT", "2223")
+	t.Setenv("CRABBOX_INCUS_PROXY_DEVICE", "env-proxy")
+	t.Setenv("CRABBOX_INCUS_TLS_SERVER_CERT", "~/env-incus.crt")
+	t.Setenv("CRABBOX_INCUS_INSECURE_TLS", "false")
+	t.Setenv("CRABBOX_INCUS_REMOTE_IMAGE_SERVER", "https://env-images.example.test")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Incus.Remote != "env-remote" || cfg.Incus.Project != "env-project" || cfg.Incus.Address != "https://env-incus.example.test:8443" || !strings.HasSuffix(cfg.Incus.Socket, "/env-incus.sock") {
+		t.Fatalf("env incus config not applied: %#v", cfg.Incus)
+	}
+	if cfg.Incus.InstanceType != "container" || cfg.Incus.Image != "images:debian/12/cloud" || cfg.Incus.Profile != "env-profile" || cfg.Incus.User != "crabuser" || cfg.Incus.WorkRoot != "/env/work" {
+		t.Fatalf("env incus identity config not applied: %#v", cfg.Incus)
+	}
+	if !cfg.Incus.DeleteOnRelease || cfg.Incus.StartTimeout != 5*time.Minute || cfg.Incus.LaunchPort != "2222" || cfg.Incus.ProxyListenPort != "2223" || cfg.Incus.ProxyDevice != "env-proxy" || !strings.HasSuffix(cfg.Incus.TLSServerCert, "/env-incus.crt") || cfg.Incus.InsecureTLS || cfg.Incus.RemoteImageServer != "https://env-images.example.test" {
+		t.Fatalf("env incus runtime config not applied: %#v", cfg.Incus)
+	}
+}
+
+func TestLoadConfigIncusPreservesExplicitTopLevelSSHUserAndWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: incus\nssh:\n  user: alice\nworkRoot: /tmp/custom\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestLoadConfigIncusPreservesExplicitTopLevelSSHUserAndWorkRootFromEnv(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	t.Setenv("CRABBOX_SSH_USER", "alice")
+	t.Setenv("CRABBOX_WORK_ROOT", "/tmp/custom")
+	if err := os.WriteFile(cfgPath, []byte("provider: incus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestLoadConfigIncusSpecificUserAndWorkRootOverrideTopLevel(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: incus\nssh:\n  user: alice\nworkRoot: /tmp/custom\nincus:\n  user: ubuntu\n  workRoot: /workspace/incus\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "ubuntu" {
+		t.Fatalf("SSHUser=%q want ubuntu", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/workspace/incus" {
+		t.Fatalf("WorkRoot=%q want /workspace/incus", cfg.WorkRoot)
+	}
+}
+
+func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	file := fileConfig{}
+	zero := 0
+	negative := -1
+	file.Tart = &fileTartConfig{
+		CPUs:   &zero,
+		Memory: &zero,
+		Disk:   &negative,
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tart.CPUs != 0 {
+		t.Fatalf("Tart.CPUs=%d, want 0 (explicit YAML zero must be preserved)", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 0 {
+		t.Fatalf("Tart.Memory=%d, want 0 (explicit YAML zero must be preserved)", cfg.Tart.Memory)
+	}
+	if cfg.Tart.Disk != -1 {
+		t.Fatalf("Tart.Disk=%d, want -1 (explicit YAML negative must be preserved)", cfg.Tart.Disk)
+	}
+	if !IsTartCPUsExplicit(&cfg) {
+		t.Fatal("tartCPUsExplicit must be true after YAML sets cpus")
+	}
+	if !IsTartMemoryExplicit(&cfg) {
+		t.Fatal("tartMemoryExplicit must be true after YAML sets memory")
+	}
+}
+
+func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Tart.CPUs = 8
+	cfg.Tart.Memory = 16384
+	file := fileConfig{}
+	file.Tart = &fileTartConfig{
+		Image: "ghcr.io/test:latest",
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tart.CPUs != 8 {
+		t.Fatalf("Tart.CPUs=%d, want 8 (missing YAML field must not overwrite)", cfg.Tart.CPUs)
+	}
+	if cfg.Tart.Memory != 16384 {
+		t.Fatalf("Tart.Memory=%d, want 16384 (missing YAML field must not overwrite)", cfg.Tart.Memory)
+	}
+}
+
+func TestOpenComputerConfigYAMLExplicitZeroPreserved(t *testing.T) {
+	cfg := baseConfig()
+	cfg.OpenComputer.CPU = 8
+	cfg.OpenComputer.MemoryMB = 16384
+	cfg.OpenComputer.TimeoutSecs = 600
+	cfg.OpenComputer.ExecTimeoutSecs = 7200
+	zero := 0
+	file := fileConfig{OpenComputer: &fileOpenComputerConfig{
+		CPU:             &zero,
+		MemoryMB:        &zero,
+		TimeoutSecs:     &zero,
+		ExecTimeoutSecs: &zero,
+	}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.CPU != 0 || cfg.OpenComputer.MemoryMB != 0 || cfg.OpenComputer.TimeoutSecs != 0 || cfg.OpenComputer.ExecTimeoutSecs != 0 {
+		t.Fatalf("explicit zero values not preserved: %#v", cfg.OpenComputer)
+	}
+}
+
+func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  apiUrl: https://attacker.example\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenComputer.APIURL != "" {
+		t.Fatalf("repository config set OpenComputer API URL to %q", cfg.OpenComputer.APIURL)
+	}
+}
+
+func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("openComputer:\n  burst: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("openComputer.burst YAML was not applied")
+	}
+
+	cfg.OpenComputer.Burst = false
+	t.Setenv("CRABBOX_OPENCOMPUTER_BURST", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenComputer.Burst {
+		t.Fatal("CRABBOX_OPENCOMPUTER_BURST was not applied")
+	}
+}
+
+func TestTartEnvExplicitFlags(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_TART_CPUS", "8")
+	t.Setenv("CRABBOX_TART_MEMORY", "16384")
+	applyEnv(&cfg)
+	if !IsTartCPUsExplicit(&cfg) {
+		t.Fatal("tartCPUsExplicit must be true after env sets CRABBOX_TART_CPUS")
+	}
+	if !IsTartMemoryExplicit(&cfg) {
+		t.Fatal("tartMemoryExplicit must be true after env sets CRABBOX_TART_MEMORY")
 	}
 }
 
@@ -395,6 +1425,128 @@ func TestRepoConfigClearsInheritedCacheVolumes(t *testing.T) {
 	}
 	if len(cfg.Cache.Volumes) != 0 {
 		t.Fatalf("repo config did not clear inherited cache volumes: %#v", cfg.Cache.Volumes)
+	}
+}
+
+func TestRepoConfigCannotRedirectInheritedXCPNgCredentials(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	userConfig := "provider: xcp-ng\nxcpNg:\n  apiUrl: https://trusted.example.test\n  username: root\n  password: user-secret\n"
+	if err := os.WriteFile(userPath, []byte(userConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := "xcpNg:\n  apiUrl: https://attacker.example.test\n  insecureTls: true\n  template: project-template\n"
+	if err := os.WriteFile(".crabbox.yaml", []byte(projectConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.APIURL != "https://trusted.example.test" || cfg.XCPNg.InsecureTLS {
+		t.Fatalf("project config changed trusted connection: %#v", cfg.XCPNg)
+	}
+	if cfg.XCPNg.Password != "user-secret" || cfg.XCPNg.Template != "project-template" {
+		t.Fatalf("unexpected merged xcp-ng config: %#v", cfg.XCPNg)
+	}
+}
+
+func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.XCPNg.TemplateUUID = "old-template-uuid"
+	cfg.XCPNg.SRUUID = "old-sr-uuid"
+	cfg.XCPNg.NetworkUUID = "old-network-uuid"
+	if err := applyFileConfig(&cfg, fileConfig{XCPNg: &fileXCPNgConfig{
+		Template: "new-template",
+		SR:       "new-sr",
+		Network:  "new-network",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
+		t.Fatalf("file names did not clear inherited UUIDs: %#v", cfg.XCPNg)
+	}
+
+	cfg.XCPNg.TemplateUUID = "old-template-uuid"
+	cfg.XCPNg.SRUUID = "old-sr-uuid"
+	cfg.XCPNg.NetworkUUID = "old-network-uuid"
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE", "env-template")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE_UUID", "")
+	t.Setenv("CRABBOX_XCP_NG_SR", "env-sr")
+	t.Setenv("CRABBOX_XCP_NG_SR_UUID", "")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK", "env-network")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK_UUID", "")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
+		t.Fatalf("environment names did not clear inherited UUIDs: %#v", cfg.XCPNg)
+	}
+}
+
+func TestRepoConfigCannotOverrideFreestyleAPIURL(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_DEFAULT_CLASS", "")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("freestyle:\n  apiUrl: https://trusted.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".crabbox.yaml", []byte("freestyle:\n  apiUrl: https://untrusted.example.test\n  workdir: repo-workdir\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Freestyle.APIURL != "https://trusted.example.test" {
+		t.Fatalf("Freestyle.APIURL=%q, want trusted user endpoint", cfg.Freestyle.APIURL)
+	}
+	if cfg.Freestyle.Workdir != "repo-workdir" {
+		t.Fatalf("Freestyle.Workdir=%q, want repository config applied", cfg.Freestyle.Workdir)
 	}
 }
 
@@ -537,6 +1689,8 @@ func TestLoadConfigFromUserFile(t *testing.T) {
 	}
 	if err := os.WriteFile(path, []byte(`broker:
   url: https://crabbox.example.test
+  mode: registered
+  autoWebVNC: false
   token: secret
   adminToken: admin-secret
   provider: aws
@@ -611,6 +1765,14 @@ namespace:
   autoStopIdleTimeout: 1h
   workRoot: /workspaces/test
   deleteOnRelease: true
+morph:
+  apiKey: morph-file-key
+  apiUrl: https://morph.example.test
+  snapshot: snapshot-file
+  sshGatewayHost: ssh.morph.example.test
+  workRoot: /tmp/morph-test
+  deleteOnRelease: true
+  wakeOnSSH: false
 daytona:
   apiUrl: https://daytona.example.test/api
   snapshot: crabbox-ready
@@ -653,6 +1815,22 @@ islo:
   vcpus: 4
   memoryMB: 8192
   diskGB: 40
+freestyle:
+  apiUrl: https://freestyle.example.test
+  workdir: team/repo
+  vcpus: 4
+  memoryGB: 8
+tenki:
+  cliPath: /usr/local/bin/tenki
+  endpoint: https://api.tenki.example.test
+  gateway: wss://gateway.tenki.example.test
+  workspace: ws_file
+  project: proj_file
+  image: ubuntu:tenki
+  workRoot: /home/tenki/test
+  cpus: 4
+  memoryMB: 8192
+  diskGB: 40
 tensorlake:
   apiUrl: https://api.tensorlake.example.test
   cliPath: /usr/local/bin/tl
@@ -667,6 +1845,25 @@ tensorlake:
   diskMB: 30000
   timeoutSecs: 1800
   noInternet: true
+openComputer:
+  apiUrl: https://opencomputer.example.test
+  workdir: /workspace/oc-test
+  cpu: 8
+  memoryMB: 16384
+  timeoutSecs: 600
+  execTimeoutSecs: 7200
+openSandbox:
+  apiUrl: https://opensandbox-file-ignored.example.test
+  image: docker.io/library/python:3.12
+  workdir: /workspace/osb-test
+  cpu: "2"
+  memory: 4Gi
+  timeoutSecs: 900
+  execTimeoutSecs: 1800
+  platformOS: linux
+  platformArch: arm64
+  secureAccess: true
+  useServerProxy: true
 cloudflare:
   apiUrl: https://cloudflare.example.test
   token: cloudflare-token
@@ -683,6 +1880,20 @@ proxmox:
   user: runner
   workRoot: /work/proxmox
   fullClone: false
+  insecureTLS: true
+xcpNg:
+  apiUrl: https://xcp-ng.example.test
+  username: root
+  password: xcp-ng-secret
+  template: ubuntu-template
+  templateUuid: tpl-0001
+  sr: default-sr
+  srUuid: sr-0001
+  network: pool-network
+  networkUuid: net-0001
+  host: host-0001
+  user: runner
+  workRoot: /work/xcp-ng
   insecureTLS: true
 semaphore:
   host: semaphore.example.test
@@ -750,6 +1961,9 @@ ssh:
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" || cfg.CoordAdminToken != "admin-secret" {
 		t.Fatalf("broker config not loaded: %#v", cfg)
 	}
+	if cfg.BrokerMode != BrokerModeRegistered || cfg.BrokerAutoWebVNC {
+		t.Fatalf("broker registration config not loaded: mode=%q autoWebVNC=%t", cfg.BrokerMode, cfg.BrokerAutoWebVNC)
+	}
 	if cfg.HostID != "h-neutral-file" {
 		t.Fatalf("host id not loaded: %q", cfg.HostID)
 	}
@@ -801,6 +2015,9 @@ ssh:
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.Repository != "github.com/openclaw/crabbox" || cfg.Namespace.Site != "fra1" || cfg.Namespace.VolumeSizeGB != 120 || cfg.Namespace.AutoStopIdleTimeout != time.Hour || cfg.Namespace.WorkRoot != "/workspaces/test" || !cfg.Namespace.DeleteOnRelease {
 		t.Fatalf("namespace config not loaded: %#v", cfg.Namespace)
 	}
+	if cfg.Morph.APIKey != "morph-file-key" || cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot-file" || cfg.Morph.SSHGatewayHost != "ssh.morph.example.test" || cfg.Morph.WorkRoot != "/tmp/morph-test" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("morph config not loaded: %#v", cfg.Morph)
+	}
 	if cfg.Daytona.APIURL != "https://daytona.example.test/api" || cfg.Daytona.Snapshot != "crabbox-ready" || cfg.Daytona.Target != "us" || cfg.Daytona.User != "daytona" || cfg.Daytona.WorkRoot != "/home/daytona/crabbox" || cfg.Daytona.SSHGatewayHost != "ssh.daytona.example.test" || cfg.Daytona.SSHAccessMinutes != 12 {
 		t.Fatalf("daytona config not loaded: %#v", cfg.Daytona)
 	}
@@ -819,8 +2036,20 @@ ssh:
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
 	}
+	if cfg.Freestyle.APIURL != "https://freestyle.example.test" || cfg.Freestyle.Workdir != "team/repo" || cfg.Freestyle.VCPUs != 4 || cfg.Freestyle.MemoryGB != 8 {
+		t.Fatalf("freestyle config not loaded: %#v", cfg.Freestyle)
+	}
+	if cfg.Tenki.CLIPath != "/usr/local/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki.example.test" || cfg.Tenki.Gateway != "wss://gateway.tenki.example.test" || cfg.Tenki.Workspace != "ws_file" || cfg.Tenki.Project != "proj_file" || cfg.Tenki.Image != "ubuntu:tenki" || cfg.Tenki.WorkRoot != "/home/tenki/test" || cfg.Tenki.CPUs != 4 || cfg.Tenki.MemoryMB != 8192 || cfg.Tenki.DiskGB != 40 {
+		t.Fatalf("tenki config not loaded: %#v", cfg.Tenki)
+	}
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
+	}
+	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
+		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)
+	}
+	if cfg.OpenSandbox.APIURL != "" || cfg.OpenSandbox.Image != "docker.io/library/python:3.12" || cfg.OpenSandbox.Workdir != "/workspace/osb-test" || cfg.OpenSandbox.CPU != "2" || cfg.OpenSandbox.Memory != "4Gi" || cfg.OpenSandbox.TimeoutSecs != 900 || cfg.OpenSandbox.ExecTimeoutSecs != 1800 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "arm64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
+		t.Fatalf("opensandbox config not loaded safely: %#v", cfg.OpenSandbox)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
 		t.Fatalf("cloudflare config not loaded: %#v", cfg.Cloudflare)
@@ -828,14 +2057,20 @@ ssh:
 	if cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.TokenID != "crabbox@pve!test" || cfg.Proxmox.TokenSecret != "proxmox-secret" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.Proxmox.Storage != "local-lvm" || cfg.Proxmox.Pool != "crabbox" || cfg.Proxmox.Bridge != "vmbr1" || cfg.Proxmox.User != "runner" || cfg.Proxmox.WorkRoot != "/work/proxmox" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("proxmox config not loaded: %#v", cfg.Proxmox)
 	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng.example.test" || cfg.XCPNg.Username != "root" || cfg.XCPNg.Password != "xcp-ng-secret" || cfg.XCPNg.Template != "ubuntu-template" || cfg.XCPNg.TemplateUUID != "tpl-0001" || cfg.XCPNg.SR != "default-sr" || cfg.XCPNg.SRUUID != "sr-0001" || cfg.XCPNg.Network != "pool-network" || cfg.XCPNg.NetworkUUID != "net-0001" || cfg.XCPNg.Host != "host-0001" || cfg.XCPNg.User != "runner" || cfg.XCPNg.WorkRoot != "/work/xcp-ng" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("xcpNg config not loaded: %#v", cfg.XCPNg)
+	}
 	if cfg.Semaphore.Host != "semaphore.example.test" || cfg.Semaphore.Token != "semaphore-token" || cfg.Semaphore.Project != "crabbox" || cfg.Semaphore.Machine != "f1-standard-4" || cfg.Semaphore.OSImage != "ubuntu2404" || cfg.Semaphore.IdleTimeout != "15m" {
 		t.Fatalf("semaphore config not loaded: %#v", cfg.Semaphore)
 	}
 	if cfg.Sprites.APIURL != "https://api.sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/test" {
 		t.Fatalf("sprites config not loaded: %#v", cfg.Sprites)
 	}
-	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.WorkRoot != "/home/peter/crabbox" {
-		t.Fatalf("static config not loaded: static=%#v workRoot=%s", cfg.Static, cfg.WorkRoot)
+	if cfg.Static.Host != "win-dev.local" || cfg.Static.User != "peter" || cfg.Static.Port != "22" || cfg.Static.WorkRoot != "/home/peter/crabbox" {
+		t.Fatalf("static config not loaded: static=%#v", cfg.Static)
+	}
+	if cfg.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("static work root leaked into active provider: workRoot=%s", cfg.WorkRoot)
 	}
 	if len(cfg.Results.JUnit) != 1 || cfg.Results.JUnit[0] != "junit.xml" || !cfg.Results.Auto {
 		t.Fatalf("results config not loaded: %#v", cfg.Results)
@@ -849,6 +2084,30 @@ ssh:
 	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Name != "pnpm-store" || cfg.Cache.Volumes[0].Key != "my-app-linux-amd64-node24-pnpm10-lock" || cfg.Cache.Volumes[0].Path != "/var/cache/crabbox/pnpm" || cfg.Cache.Volumes[0].SizeGB != 80 || !cfg.Cache.Volumes[0].Required {
 		t.Fatalf("cache volumes config not loaded: %#v", cfg.Cache.Volumes)
 	}
+}
+
+func TestNormalizeBrokerConfig(t *testing.T) {
+	t.Run("defaults to managed", func(t *testing.T) {
+		cfg := Config{}
+		if err := normalizeBrokerConfig(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.BrokerMode != BrokerModeManaged {
+			t.Fatalf("mode=%q", cfg.BrokerMode)
+		}
+	})
+	t.Run("registered requires coordinator", func(t *testing.T) {
+		cfg := Config{BrokerMode: BrokerModeRegistered}
+		if err := normalizeBrokerConfig(&cfg); err == nil || !strings.Contains(err.Error(), "requires broker.url") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("rejects unknown mode", func(t *testing.T) {
+		cfg := Config{BrokerMode: "mirror"}
+		if err := normalizeBrokerConfig(&cfg); err == nil || !strings.Contains(err.Error(), "managed or registered") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestLoadConfigExeDevWorkRootDefaults(t *testing.T) {
@@ -933,6 +2192,23 @@ func TestLoadConfigRoutesAzureBackendFromEnv(t *testing.T) {
 	}
 	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != AzureBackendDynamicSessions {
 		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.AzureBackend)
+	}
+}
+
+func TestLoadConfigMXCCapabilityEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(home, "missing.yaml"))
+	t.Setenv("CRABBOX_MXC_ALLOW_DACL_MUTATION", "true")
+	t.Setenv("CRABBOX_MXC_ALLOW_WINDOWS_UI", "true")
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MXC.AllowDACLMutation || !cfg.MXC.AllowWindowsUI {
+		t.Fatalf("mxc=%+v", cfg.MXC)
 	}
 }
 
@@ -1022,6 +2298,14 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TAILSCALE_EXIT_NODE_ALLOW_LAN_ACCESS", "1")
 	t.Setenv("CRABBOX_TARGET", "macos")
 	t.Setenv("CRABBOX_STATIC_HOST", "mac.local")
+	t.Setenv("MORPH_API_KEY", "morph-api-file")
+	t.Setenv("CRABBOX_MORPH_API_KEY", "morph-api-env")
+	t.Setenv("CRABBOX_MORPH_API_URL", "https://morph-env.example")
+	t.Setenv("CRABBOX_MORPH_SNAPSHOT", "snapshot-env")
+	t.Setenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", "ssh.morph-env.example")
+	t.Setenv("CRABBOX_MORPH_WORK_ROOT", "/tmp/morph-env")
+	t.Setenv("CRABBOX_MORPH_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_MORPH_WAKE_ON_SSH", "false")
 	t.Setenv("DAYTONA_API_KEY", "daytona-api-file")
 	t.Setenv("CRABBOX_DAYTONA_API_KEY", "daytona-api-env")
 	t.Setenv("DAYTONA_API_URL", "https://daytona-file.example/api")
@@ -1077,6 +2361,27 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
+	t.Setenv("FREESTYLE_API_KEY", "freestyle-key-file")
+	t.Setenv("CRABBOX_FREESTYLE_API_KEY", "freestyle-key-env")
+	t.Setenv("FREESTYLE_API_URL", "https://freestyle-file.example")
+	t.Setenv("CRABBOX_FREESTYLE_API_URL", "https://freestyle-env.example")
+	t.Setenv("CRABBOX_FREESTYLE_WORKDIR", "env/repo")
+	t.Setenv("CRABBOX_FREESTYLE_VCPUS", "6")
+	t.Setenv("CRABBOX_FREESTYLE_MEMORY_GB", "16")
+	t.Setenv("TENKI_CLI", "/usr/bin/tenki-file")
+	t.Setenv("CRABBOX_TENKI_CLI", "/opt/tenki/bin/tenki")
+	t.Setenv("TENKI_ENDPOINT", "https://api.tenki-file.example")
+	t.Setenv("CRABBOX_TENKI_ENDPOINT", "https://api.tenki-env.example")
+	t.Setenv("TENKI_GATEWAY", "wss://gateway.tenki-file.example")
+	t.Setenv("CRABBOX_TENKI_GATEWAY", "wss://gateway.tenki-env.example")
+	t.Setenv("CRABBOX_TENKI_WORKSPACE", "ws_env")
+	t.Setenv("CRABBOX_TENKI_PROJECT", "proj_env")
+	t.Setenv("CRABBOX_TENKI_IMAGE", "ubuntu:tenki-env")
+	t.Setenv("CRABBOX_TENKI_SNAPSHOT", "snap-env")
+	t.Setenv("CRABBOX_TENKI_WORK_ROOT", "/home/tenki/env")
+	t.Setenv("CRABBOX_TENKI_CPUS", "8")
+	t.Setenv("CRABBOX_TENKI_MEMORY_MB", "16384")
+	t.Setenv("CRABBOX_TENKI_DISK_GB", "80")
 	t.Setenv("TENSORLAKE_API_KEY", "tl-api-file")
 	t.Setenv("CRABBOX_TENSORLAKE_API_KEY", "tl-api-env")
 	t.Setenv("TENSORLAKE_API_URL", "https://api.tl-file.example")
@@ -1096,6 +2401,25 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TENSORLAKE_DISK_MB", "20480")
 	t.Setenv("CRABBOX_TENSORLAKE_TIMEOUT_SECS", "900")
 	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "true")
+	t.Setenv("OPENCOMPUTER_API_URL", "https://oc-file.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", "https://oc-env.example")
+	t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", "/workspace/oc-env")
+	t.Setenv("CRABBOX_OPENCOMPUTER_CPU", "6")
+	t.Setenv("CRABBOX_OPENCOMPUTER_MEMORY_MB", "12288")
+	t.Setenv("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", "1200")
+	t.Setenv("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", "2400")
+	t.Setenv("OPEN_SANDBOX_API_URL", "https://opensandbox-file.example")
+	t.Setenv("CRABBOX_OPENSANDBOX_API_URL", "https://opensandbox-env.example")
+	t.Setenv("CRABBOX_OPENSANDBOX_IMAGE", "ubuntu:osb-env")
+	t.Setenv("CRABBOX_OPENSANDBOX_WORKDIR", "/workspace/osb-env")
+	t.Setenv("CRABBOX_OPENSANDBOX_CPU", "750m")
+	t.Setenv("CRABBOX_OPENSANDBOX_MEMORY", "1536Mi")
+	t.Setenv("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "123")
+	t.Setenv("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", "456")
+	t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", "linux")
+	t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", "amd64")
+	t.Setenv("CRABBOX_OPENSANDBOX_SECURE_ACCESS", "true")
+	t.Setenv("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY", "true")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
 	t.Setenv("CRABBOX_CLOUDFLARE_WORKDIR", "/workspace/cloudflare-env")
@@ -1111,6 +2435,19 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_PROXMOX_WORK_ROOT", "/work/proxmox-env")
 	t.Setenv("CRABBOX_PROXMOX_FULL_CLONE", "false")
 	t.Setenv("CRABBOX_PROXMOX_INSECURE_TLS", "true")
+	t.Setenv("CRABBOX_XCP_NG_API_URL", "https://xcp-ng-env.example.test")
+	t.Setenv("CRABBOX_XCP_NG_USERNAME", "root-env")
+	t.Setenv("CRABBOX_XCP_NG_PASSWORD", "xcp-ng-env-secret")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE", "template-env")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE_UUID", "tpl-env")
+	t.Setenv("CRABBOX_XCP_NG_SR", "sr-env")
+	t.Setenv("CRABBOX_XCP_NG_SR_UUID", "sr-uuid-env")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK", "network-env")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK_UUID", "network-uuid-env")
+	t.Setenv("CRABBOX_XCP_NG_HOST", "host-env")
+	t.Setenv("CRABBOX_XCP_NG_USER", "runner-xcp-env")
+	t.Setenv("CRABBOX_XCP_NG_WORK_ROOT", "/work/xcp-ng-env")
+	t.Setenv("CRABBOX_XCP_NG_INSECURE_TLS", "true")
 	t.Setenv("SEMAPHORE_HOST", "semaphore-file.example.test")
 	t.Setenv("CRABBOX_SEMAPHORE_HOST", "semaphore-env.example.test")
 	t.Setenv("SEMAPHORE_API_TOKEN", "semaphore-token-file")
@@ -1226,6 +2563,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if len(cfg.Tailscale.Tags) != 2 || cfg.Tailscale.Tags[1] != "tag:ci" {
 		t.Fatalf("unexpected tailscale tags: %#v", cfg.Tailscale.Tags)
 	}
+	if cfg.Morph.APIKey != "morph-api-env" || cfg.Morph.APIURL != "https://morph-env.example" || cfg.Morph.Snapshot != "snapshot-env" || cfg.Morph.SSHGatewayHost != "ssh.morph-env.example" || cfg.Morph.WorkRoot != "/tmp/morph-env" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
+		t.Fatalf("unexpected morph env: %#v", cfg.Morph)
+	}
 	if cfg.Daytona.APIKey != "daytona-api-env" || cfg.Daytona.APIURL != "https://daytona-env.example/api" || cfg.Daytona.Snapshot != "snapshot-env" || cfg.Daytona.Target != "target-env" || cfg.Daytona.User != "daytona-env-user" || cfg.Daytona.WorkRoot != "/home/daytona/env" || cfg.Daytona.SSHGatewayHost != "ssh.env.example" || cfg.Daytona.SSHAccessMinutes != 44 {
 		t.Fatalf("unexpected daytona env: %#v", cfg.Daytona)
 	}
@@ -1241,14 +2581,29 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
 	}
+	if cfg.Freestyle.APIKey != "freestyle-key-env" || cfg.Freestyle.APIURL != "https://freestyle-env.example" || cfg.Freestyle.Workdir != "env/repo" || cfg.Freestyle.VCPUs != 6 || cfg.Freestyle.MemoryGB != 16 {
+		t.Fatalf("unexpected freestyle env: %#v", cfg.Freestyle)
+	}
+	if cfg.Tenki.CLIPath != "/opt/tenki/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki-env.example" || cfg.Tenki.Gateway != "wss://gateway.tenki-env.example" || cfg.Tenki.Workspace != "ws_env" || cfg.Tenki.Project != "proj_env" || cfg.Tenki.Image != "ubuntu:tenki-env" || cfg.Tenki.Snapshot != "snap-env" || cfg.Tenki.WorkRoot != "/home/tenki/env" || cfg.Tenki.CPUs != 8 || cfg.Tenki.MemoryMB != 16384 || cfg.Tenki.DiskGB != 80 {
+		t.Fatalf("unexpected tenki env: %#v", cfg.Tenki)
+	}
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
+	}
+	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
+		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
+	}
+	if cfg.OpenSandbox.APIURL != "https://opensandbox-env.example" || cfg.OpenSandbox.Image != "ubuntu:osb-env" || cfg.OpenSandbox.Workdir != "/workspace/osb-env" || cfg.OpenSandbox.CPU != "750m" || cfg.OpenSandbox.Memory != "1536Mi" || cfg.OpenSandbox.TimeoutSecs != 123 || cfg.OpenSandbox.ExecTimeoutSecs != 456 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "amd64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
+		t.Fatalf("unexpected opensandbox env: %#v", cfg.OpenSandbox)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {
 		t.Fatalf("unexpected cloudflare env: %#v", cfg.Cloudflare)
 	}
 	if cfg.Proxmox.APIURL != "https://pve-env.example:8006" || cfg.Proxmox.TokenID != "runner@pve!env" || cfg.Proxmox.TokenSecret != "proxmox-env-secret" || cfg.Proxmox.Node != "pve-env" || cfg.Proxmox.TemplateID != 9100 || cfg.Proxmox.Storage != "ceph-env" || cfg.Proxmox.Pool != "pool-env" || cfg.Proxmox.Bridge != "vmbr2" || cfg.Proxmox.User != "runner-env" || cfg.Proxmox.WorkRoot != "/work/proxmox-env" || cfg.Proxmox.FullClone || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("unexpected proxmox env: %#v", cfg.Proxmox)
+	}
+	if cfg.XCPNg.APIURL != "https://xcp-ng-env.example.test" || cfg.XCPNg.Username != "root-env" || cfg.XCPNg.Password != "xcp-ng-env-secret" || cfg.XCPNg.Template != "template-env" || cfg.XCPNg.TemplateUUID != "tpl-env" || cfg.XCPNg.SR != "sr-env" || cfg.XCPNg.SRUUID != "sr-uuid-env" || cfg.XCPNg.Network != "network-env" || cfg.XCPNg.NetworkUUID != "network-uuid-env" || cfg.XCPNg.Host != "host-env" || cfg.XCPNg.User != "runner-xcp-env" || cfg.XCPNg.WorkRoot != "/work/xcp-ng-env" || !cfg.XCPNg.InsecureTLS {
+		t.Fatalf("unexpected xcp-ng env: %#v", cfg.XCPNg)
 	}
 	if cfg.Semaphore.Host != "semaphore-env.example.test" || cfg.Semaphore.Token != "semaphore-token-env" || cfg.Semaphore.Project != "semaphore-project-env" || cfg.Semaphore.Machine != "f1-standard-env" || cfg.Semaphore.OSImage != "ubuntu-env" || cfg.Semaphore.IdleTimeout != "22m" {
 		t.Fatalf("unexpected semaphore env: %#v", cfg.Semaphore)
@@ -1285,6 +2640,19 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if len(cfg.Run.PreflightTools) != 3 || cfg.Run.PreflightTools[1] != "bun" {
 		t.Fatalf("unexpected preflight tools: %#v", cfg.Run.PreflightTools)
+	}
+}
+
+func TestApplyEnvRejectsNegativeOpenSandboxTimeouts(t *testing.T) {
+	for _, name := range []string{"CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "-1")
+			cfg := baseConfig()
+			err := applyEnv(&cfg)
+			if err == nil || !strings.Contains(err.Error(), name+" must be non-negative") {
+				t.Fatalf("err=%v, want negative timeout rejection", err)
+			}
+		})
 	}
 }
 
@@ -1402,6 +2770,117 @@ func TestAppleContainerExplicitImageSurvivesOSDefault(t *testing.T) {
 	}
 	if cfg.AppleContainer.Image != "my-org/custom:tag" {
 		t.Fatalf("explicit apple-container image was overwritten by --os: %q", cfg.AppleContainer.Image)
+	}
+}
+
+func TestAppleVZImageFollowsOSImageDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cfg.AppleVZ.Image, "ubuntu-24.04-server-cloudimg-arm64.img") {
+		t.Fatalf("apple-vz image should follow --os default: %q", cfg.AppleVZ.Image)
+	}
+	if cfg.AppleVZ.ImageSHA256 != "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec" {
+		t.Fatalf("apple-vz checksum should follow --os default: %q", cfg.AppleVZ.ImageSHA256)
+	}
+}
+
+func TestAppleVZExplicitImageSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\nappleVZ:\n  image: https://example.test/custom.img\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.Image != "https://example.test/custom.img" {
+		t.Fatalf("explicit apple-vz image was overwritten by --os: %q", cfg.AppleVZ.Image)
+	}
+	if cfg.AppleVZ.ImageSHA256 != "" {
+		t.Fatalf("custom apple-vz image should clear default checksum unless explicitly set: %q", cfg.AppleVZ.ImageSHA256)
+	}
+}
+
+func TestAppleVZExplicitChecksumSurvivesOSDefault(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	checksum := strings.Repeat("b", 64)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\ntarget: linux\nos: ubuntu:24.04\nappleVZ:\n  imageSHA256: "+checksum+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.ImageSHA256 != checksum {
+		t.Fatalf("explicit apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	}
+
+	t.Setenv("CRABBOX_APPLE_VZ_IMAGE_SHA256", strings.Repeat("c", 64))
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVZ.ImageSHA256 != strings.Repeat("c", 64) {
+		t.Fatalf("environment apple-vz checksum was overwritten by OS defaults: %q", cfg.AppleVZ.ImageSHA256)
+	}
+}
+
+func TestAppleVZPreservesExplicitTopLevelWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/custom/crabbox" {
+		t.Fatalf("WorkRoot=%q want /custom/crabbox", cfg.WorkRoot)
+	}
+}
+
+func TestAppleVZSpecificWorkRootOverridesTopLevel(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte("provider: apple-vz\nworkRoot: /custom/crabbox\nappleVZ:\n  workRoot: /work/apple-vz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/work/apple-vz" {
+		t.Fatalf("WorkRoot=%q want /work/apple-vz", cfg.WorkRoot)
 	}
 }
 
@@ -1615,6 +3094,46 @@ func TestInvalidNetworkEnvFails(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected invalid CRABBOX_NETWORK to fail")
+	}
+}
+
+func TestDockerSandboxCPUEnvCanBeOverriddenByFlags(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "2.5")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig err=%v, want command flags to get a chance to override provider config", err)
+	}
+	fs := newFlagSet("test", io.Discard)
+	values := registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--docker-sandbox-cpus", "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatalf("applyProviderFlags err=%v, want valid CLI override to win", err)
+	}
+	if cfg.DockerSandbox.CPUs != 2 {
+		t.Fatalf("cpus=%g, want CLI override 2", cfg.DockerSandbox.CPUs)
+	}
+}
+
+func TestInvalidDockerSandboxCPUEnvNonNumericFailsDuringLoad(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "not-a-number")
+
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "CRABBOX_DOCKER_SANDBOX_CPUS") {
+		t.Fatalf("loadConfig err=%v, want docker-sandbox CPU env parse rejection", err)
 	}
 }
 
@@ -1970,6 +3489,12 @@ func TestNamespaceDevboxSizeForConfig(t *testing.T) {
 }
 
 func TestConfigServerTypeHelperBranches(t *testing.T) {
+	if got := incusServerTypeForConfig(Config{}); got != "container" {
+		t.Fatalf("incus default=%q", got)
+	}
+	if got := incusServerTypeForConfig(Config{Incus: IncusConfig{InstanceType: "vm", Image: "images:ubuntu/24.04/cloud"}}); got != "vm:images:ubuntu/24.04/cloud" {
+		t.Fatalf("incus vm=%q", got)
+	}
 	if got := proxmoxServerTypeForConfig(Config{}); got != "template" {
 		t.Fatalf("proxmox default=%q", got)
 	}

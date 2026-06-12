@@ -118,10 +118,6 @@ func printKeepOnFailureDelegatedHint(w io.Writer, provider, leaseID, slug string
 	fmt.Fprintf(w, "stop: crabbox stop --provider %s %s\n", displayShellArg(provider), displayShellArg(id))
 }
 
-func PrintKeepOnFailureDelegatedHint(w io.Writer, provider, leaseID, slug string, idleTimeout, ttl time.Duration) {
-	printKeepOnFailureDelegatedHint(w, provider, leaseID, slug, idleTimeout, ttl)
-}
-
 func HandleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
 	if !req.KeepOnFailure {
 		return

@@ -111,10 +111,8 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 - Desktop / browser / code: no.
 - Actions hydration: no.
 - Coordinator (broker): no — Modal always runs direct from the CLI.
-- URL bridge / pond: Modal declares the bridge feature but does not yet expose a
-  per-sandbox ingress URL, so it reports `unsupported` when listed in a pond.
-  Modal peers appear in pond output with that clear signal rather than empty
-  targets.
+- URL bridge / pond: no advertised URL bridge. Modal does not expose a
+  per-sandbox ingress URL through Crabbox today.
 
 ## Gotchas
 
@@ -133,7 +131,7 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 - Delegated run/sync options that need an SSH target are rejected:
   `--script` / `--script-stdin`, `--fresh-pr`, `--full-resync`, `--env-helper`,
   `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`,
-  `--artifact-glob`, `--emit-proof`, and `--stop-after`.
+  `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
 - Forwarded environment values are written to a temporary shell profile,
   uploaded into `/tmp`, sourced (`set -a`) for the command, and removed
   best-effort afterward. They are never placed on the local Python process argv.

@@ -489,7 +489,7 @@ func coordinatorMachineOrphanField(labels map[string]string, activeLeaseIDs map[
 func (a App) cleanup(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("machine cleanup", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, azure, gcp, proxmox, namespace-devbox, or cloudflare")
+	provider := fs.String("provider", defaults.Provider, providerHelpCleanup())
 	dryRun := fs.Bool("dry-run", false, "only print")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)

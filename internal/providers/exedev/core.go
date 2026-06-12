@@ -27,6 +27,8 @@ type LeaseTarget = core.LeaseTarget
 type Server = core.Server
 type SSHTarget = core.SSHTarget
 type TailscaleConfig = core.TailscaleConfig
+type Repo = core.Repo
+type ExitError = core.ExitError
 type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
 
@@ -68,7 +70,7 @@ func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (strin
 	return core.AllocateDirectLeaseSlug(leaseID, requested, servers)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+var claimLeaseForRepoProvider = func(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
@@ -88,10 +90,6 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
 }
 
-func serverSlug(server Server) string {
-	return core.ServerSlug(server)
-}
-
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
@@ -100,7 +98,7 @@ func isDefaultWorkRoot(value string) bool {
 	return core.IsDefaultWorkRoot(value)
 }
 
-func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+var waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
 

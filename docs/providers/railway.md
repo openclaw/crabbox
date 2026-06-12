@@ -10,43 +10,27 @@ Read when:
 projects, environments, services, and deployments. Its public API is a GraphQL
 endpoint at `https://backboard.railway.com/graphql/v2`, authenticated with an
 account-scoped token (`Authorization: Bearer <token>`) created at
-`/account/tokens`. Railway is a delegated-run provider: it owns service and
-deployment lifecycle, and Crabbox drives it over GraphQL. There is no SSH lease,
-no workspace sync, and no coordinator path.
+`/account/tokens`. Railway is a `service-control` provider: it owns service and
+deployment lifecycle, and Crabbox drives service inspection and stopping over
+GraphQL. There is no SSH lease, no workspace sync, no arbitrary command
+execution, and no coordinator path.
 
 ## When To Use
 
-Use Railway when the workload is already a Railway service and a redeploy loop
-is what you want from a Crabbox run — for example, "rebuild and stream the new
-build/runtime log messages after a config change." Railway has no synchronous
-exec primitive (no shell, no `service.run(cmd)` field), so it cannot run an
-arbitrary command and return its output. For ad-hoc command execution, pick a
-provider that owns command transport, such as `e2b`, `modal`, or `exe-dev`, or
-an SSH-lease provider such as `aws`, `hetzner`, or `ssh`.
+Use Railway when the workload is already a Railway service and you need Crabbox
+to inspect or stop that service from the same provider matrix as other backends.
+Railway has no synchronous exec primitive (no shell, no `service.run(cmd)`
+field), so Crabbox rejects generic `run` requests instead of pretending the
+provided command ran. For ad-hoc command execution, pick a provider that owns
+command transport, such as `e2b`, `modal`, or `exe-dev`, or an SSH-lease provider
+such as `aws`, `hetzner`, or `ssh`.
 
-## How `run` Maps Onto Railway
+## Run Contract
 
-Railway has no `POST /exec` equivalent, so `crabbox run` maps onto the closest
-deployment lifecycle:
-
-1. Point at a pre-existing Railway service with `--id <serviceId>`, plus
-   `--railway-project <projectId>` and `--railway-environment <environmentId>`
-   (or the matching config keys / env vars).
-2. The provider reads the service's latest deployment, then issues the
-   `deploymentRedeploy` GraphQL mutation to redeploy the same build/image.
-3. It polls the new deployment (`deployment(id:)`) with exponential backoff,
-   streaming newly available `buildLogs` and `deploymentLogs` messages to
-   stdout, until the deployment reaches a terminal state or the 30-minute
-   timeout expires.
-4. The terminal `status` maps to a process exit code: `SUCCESS` and `SLEEPING`
-   become `0`; the failure/removal states (`FAILED`, `CRASHED`, `REMOVED`,
-   `SKIPPED`) become `1`.
-
-Because Railway runs whatever start command the service is configured with (via
-`railway.toml`, the dashboard, or `serviceInstanceUpdate`), **the command you
-pass to `crabbox run` is informational only.** It is echoed to stderr and shows
-up in run telemetry, but the Railway container executes its own configured start
-command, not your argument.
+`crabbox run --provider railway ... -- <command>` fails before calling the
+Railway API. Railway runs whatever start command the service is configured with
+(via `railway.toml`, the dashboard, or `serviceInstanceUpdate`), so accepting a
+generic Crabbox command would create false-positive test results.
 
 `status` returns the latest deployment status and readiness. `stop` calls
 `deploymentStop` on the latest deployment for the service. `list` enumerates one
@@ -57,11 +41,8 @@ service yourself in the dashboard or via `serviceCreate` first.
 ## Commands
 
 ```sh
-crabbox run --provider railway --no-sync \
-  --id "$RAILWAY_SERVICE_ID" \
-  --railway-project "$RAILWAY_PROJECT_ID" \
-  --railway-environment "$RAILWAY_ENVIRONMENT_ID" \
-  -- pnpm test
+crabbox run --provider railway --no-sync --id "$RAILWAY_SERVICE_ID" -- false
+# exits before any Railway API call; Railway cannot execute arbitrary commands
 ```
 
 ```sh
@@ -74,9 +55,10 @@ crabbox stop   --provider railway --id "$RAILWAY_SERVICE_ID" \
 crabbox list   --provider railway
 ```
 
-`warmup` is rejected; service creation must happen out-of-band. `run`, `status`,
-and `stop` all require `--id`, `--railway-project`, and `--railway-environment`.
-`list` needs only the API token.
+`warmup` is rejected; service creation must happen out-of-band. `run` is rejected
+because there is no Railway exec API. `status` and `stop` require `--id`,
+`--railway-project`, and `--railway-environment`. `list` needs only the API
+token.
 
 ## Auth
 
@@ -135,6 +117,7 @@ A non-`https` URL is rejected unless it targets `localhost`.
 - SSH: no.
 - Crabbox sync: no. `--no-sync` is required.
 - Provider sync: no.
+- Generic `run`: no. Railway has no arbitrary command execution API.
 - URL bridge: yes (delegated url-bridge feature).
 - Desktop/browser/code: no.
 - Actions hydration: no.
@@ -142,8 +125,8 @@ A non-`https` URL is rejected unless it targets `localhost`.
 
 ## Gotchas
 
-- Railway has no synchronous exec primitive. The command you pass is
-  informational; the service's configured start command is what runs.
+- Railway has no synchronous exec primitive. `run` rejects commands before
+  touching the API.
 - `--keep`, `--reclaim`, `--class`, and `--type` are rejected — Railway owns
   service lifecycle and resource sizing.
 - Sync options are rejected: `--no-sync` is required, and `--sync-only`,

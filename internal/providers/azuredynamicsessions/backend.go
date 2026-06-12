@@ -13,6 +13,8 @@ func NewAzureDynamicSessionsBackend(spec ProviderSpec, cfg Config, rt Runtime) B
 	return &azureDynamicSessionsBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
+var azureDynamicSessionsDeleteTimeout = 30 * time.Second
+
 type azureDynamicSessionsBackend struct {
 	spec ProviderSpec
 	cfg  Config
@@ -90,7 +92,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 			if !shouldStop {
 				return
 			}
-			if err := client.DeleteSession(context.Background(), leaseID); err != nil {
+			if err := b.deleteSessionBounded(client, leaseID); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %s stop failed for %s: %v\n", providerName, leaseID, err)
 				return
 			}
@@ -321,14 +323,25 @@ func (b *azureDynamicSessionsBackend) createSession(ctx context.Context, client 
 	}
 	scope, err := b.claimScope()
 	if err != nil {
-		_ = client.DeleteSession(context.Background(), leaseID)
-		return "", "", err
+		return "", "", b.rollbackCreatedSession(client, leaseID, err)
 	}
 	if err := claimLeaseForRepoProviderScope(leaseID, slug, providerName, scope, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.DeleteSession(context.Background(), leaseID)
-		return "", "", err
+		return "", "", b.rollbackCreatedSession(client, leaseID, err)
 	}
 	return leaseID, slug, nil
+}
+
+func (b *azureDynamicSessionsBackend) rollbackCreatedSession(client azureDynamicSessionsAPI, leaseID string, cause error) error {
+	if err := b.deleteSessionBounded(client, leaseID); err != nil {
+		return errors.Join(cause, fmt.Errorf("cleanup %s session %s: %w", providerName, leaseID, err))
+	}
+	return cause
+}
+
+func (b *azureDynamicSessionsBackend) deleteSessionBounded(client azureDynamicSessionsAPI, leaseID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), azureDynamicSessionsDeleteTimeout)
+	defer cancel()
+	return client.DeleteSession(ctx, leaseID)
 }
 
 func (b *azureDynamicSessionsBackend) resolveSessionID(_ context.Context, _ azureDynamicSessionsAPI, id, repoRoot string, reclaim bool) (string, string, error) {

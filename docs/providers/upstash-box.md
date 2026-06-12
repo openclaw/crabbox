@@ -7,7 +7,7 @@ Read this when you:
   directory;
 - change `internal/providers/upstashbox`.
 
-Upstash Box is a **delegated-run** provider. Crabbox calls the Upstash Box REST
+[Upstash Box](https://upstash.com/docs/box/overall/quickstart) is a **delegated-run** provider. Crabbox calls the Upstash Box REST
 API to manage Box lifecycle (create, get, list, delete), upload files, and run
 commands over its exec / exec-stream endpoints. Upstash owns the sandbox state
 and process transport; Crabbox owns local config, repo claims, archive sync and
@@ -143,7 +143,8 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 - Delegated run/sync options that need an SSH target or proof surface are
   rejected: `--script` / `--script-stdin`, `--fresh-pr`, `--full-resync`,
   `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`,
-  `--download`, `--artifact-glob`, `--emit-proof`, and `--stop-after`.
+  `--download`, `--artifact-glob`, `--require-artifact`, `--emit-proof`, and
+  `--stop-after`.
 - Forwarded environment values are written to a temporary shell profile in the
   Box workspace, sourced (`set -a`) for the command, and removed best-effort
   afterward. They are never placed on the local process argv.
@@ -153,4 +154,5 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
 ## Related docs
 
+- [Crabbox setup guide](https://upstash.com/docs/box/guides/crabbox-setup) — Upstash's walkthrough for running Crabbox on Upstash Box.
 - [Provider backends](../provider-backends.md)

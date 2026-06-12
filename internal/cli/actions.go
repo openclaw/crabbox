@@ -283,7 +283,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, slug, cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -495,7 +495,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err != nil {
 		return err
 	}
-	manifest, err := syncManifest(repo.Root, excludes)
+	manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
 	if err != nil {
 		return exit(6, "build sync file list: %v", err)
 	}
@@ -505,7 +505,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err := runSSHQuiet(ctx, target, remoteMkdir(workdir)); err != nil {
 		return exit(7, "create remote workdir: %v", err)
 	}
-	if cfg.Sync.GitSeed && remoteGitSeedCandidate(repo) {
+	if syncGitSeedEnabled(cfg, repo) {
 		if err := runSSHQuiet(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head)); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 		}

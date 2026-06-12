@@ -45,6 +45,15 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Deadcode
+        run: |
+          output_file=$(mktemp)
+          go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./... > "$output_file"
+          if [ -s "$output_file" ]; then
+            cat "$output_file"
+            exit 1
+          fi
+
       - name: Test
         run: go test -race ./...
 
@@ -56,6 +65,42 @@ jobs:
 
       - name: Build
         run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
+
+  apple-vz:
+    name: Apple VZ
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      CGO_CFLAGS: -mmacosx-version-min=13.0
+      CGO_LDFLAGS: -mmacosx-version-min=13.0
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Vet native helper
+        run: go vet ./internal/applevzhelper ./cmd/crabbox-apple-vz-helper
+
+      - name: Test native helper and provider
+        run: go test -race ./internal/applevzhelper ./internal/providers/applevz
+
+      - name: Build native helper
+        run: go build -trimpath -o /tmp/crabbox-apple-vz-helper ./cmd/crabbox-apple-vz-helper
+
+      - name: Verify native helper deployment target
+        run: |
+          minos="$(vtool -show-build /tmp/crabbox-apple-vz-helper | awk '$1 == "minos" { print $2; exit }')"
+          test "$minos" = "13.0"
 
   worker:
     name: Worker
@@ -111,6 +156,15 @@ jobs:
         with:
           node-version: 24
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install script dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Test
         run: node --test scripts/*.test.js
 
@@ -139,14 +193,17 @@ jobs:
 
   release-check:
     name: Release Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: macos-15
+    timeout-minutes: 30
 
     steps:
       - name: Check out
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -159,4 +216,17 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --snapshot --clean --skip=publish
+          args: release --snapshot --clean --skip=publish --parallelism 1
+
+      - name: Verify snapshot helper deployment target
+        run: |
+          helper="$(find dist -type f -name crabbox-apple-vz-helper -print -quit)"
+          if [ -z "$helper" ] || [ ! -x "$helper" ]; then
+            echo "::error::snapshot Apple VZ helper not found"
+            exit 1
+          fi
+          minos="$(vtool -show-build "$helper" | awk '$1 == "minos" { print $2; exit }')"
+          if [ "$minos" != "13.0" ]; then
+            echo "::error::Apple VZ helper minimum macOS is $minos, expected 13.0"
+            exit 1
+          fi

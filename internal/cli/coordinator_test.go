@@ -854,6 +854,38 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRegisterLease(t *testing.T) {
+	var got CoordinatorLeaseRegistration
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/leases/cbx_123/registration" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"external","lifecycle":"registered","state":"active"}}`))
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Token: "token", Client: server.Client()}
+	lease, err := client.RegisterLease(context.Background(), "cbx_123", CoordinatorLeaseRegistration{
+		Slug:               "my-box",
+		Provider:           "external",
+		TargetOS:           targetLinux,
+		Host:               "192.0.2.10",
+		SSHUser:            "runner",
+		SSHPort:            "22",
+		IdleTimeoutSeconds: 1800,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Lifecycle != "registered" || got.Slug != "my-box" || got.Provider != "external" || got.Host != "192.0.2.10" || got.IdleTimeoutSeconds != 1800 {
+		t.Fatalf("lease=%#v request=%#v", lease, got)
+	}
+}
+
 func TestCoordinatorCreateLeaseOmitsDefaultAzureOSDisk(t *testing.T) {
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

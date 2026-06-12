@@ -30,19 +30,6 @@ jobs:
       - name: Check out
         uses: actions/checkout@v6
 
-      - name: Install Go toolchain
-        shell: bash
-        run: |
-          if go version 2>/dev/null | grep -q 'go1.26.'; then
-            exit 0
-          fi
-          mkdir -p "$RUNNER_TEMP" "$RUNNER_TOOL_CACHE"
-          curl -fsSL -o "$RUNNER_TEMP/go1.26.2.linux-amd64.tar.gz" \
-            "https://go.dev/dl/go1.26.2.linux-amd64.tar.gz"
-          rm -rf "$RUNNER_TOOL_CACHE/go"
-          tar -C "$RUNNER_TOOL_CACHE" -xzf "$RUNNER_TEMP/go1.26.2.linux-amd64.tar.gz"
-          echo "$RUNNER_TOOL_CACHE/go/bin" >> "$GITHUB_PATH"
-
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -58,15 +45,30 @@ jobs:
 
       - name: Record hydrate state
         shell: bash
+        env:
+          CRABBOX_ID: ${{ inputs.crabbox_id }}
+          CRABBOX_JOB: ${{ inputs.crabbox_job }}
         run: |
+          case "$CRABBOX_ID" in
+            ""|*[!A-Za-z0-9_-]*)
+              echo "::error::crabbox_id must match [A-Za-z0-9_-]+"
+              exit 2
+              ;;
+          esac
+          case "$CRABBOX_JOB" in
+            *$'\n'*|*$'\r'*)
+              echo "::error::crabbox_job must not contain line breaks"
+              exit 2
+              ;;
+          esac
           mkdir -p "$HOME/.crabbox/actions"
-          state="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env"
-          env_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env.sh"
-          services_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.services"
+          state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
+          env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
+          services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
           {
             echo "export GITHUB_WORKSPACE=$(printf '%q' "$GITHUB_WORKSPACE")"
             echo "export GITHUB_RUN_ID=$(printf '%q' "$GITHUB_RUN_ID")"
-            echo "export GITHUB_JOB=$(printf '%q' "${{ inputs.crabbox_job }}")"
+            echo "export GITHUB_JOB=$(printf '%q' "$CRABBOX_JOB")"
             echo "export RUNNER_TEMP=$(printf '%q' "$RUNNER_TEMP")"
             echo "export RUNNER_TOOL_CACHE=$(printf '%q' "$RUNNER_TOOL_CACHE")"
             echo "export PATH=$(printf '%q' "$PATH")"
@@ -74,7 +76,7 @@ jobs:
           {
             echo "WORKSPACE=${GITHUB_WORKSPACE}"
             echo "RUN_ID=${GITHUB_RUN_ID}"
-            echo "JOB=${{ inputs.crabbox_job }}"
+            echo "JOB=${CRABBOX_JOB}"
             echo "ENV_FILE=${env_file}"
             echo "SERVICES_FILE=${services_file}"
             echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

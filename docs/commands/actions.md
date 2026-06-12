@@ -183,17 +183,33 @@ runner temp/toolcache references. Unsupported or complex expressions fail with a
 suggestion to use `--github-runner`.
 
 After checkout and setup, the workflow writes the ready marker under
-`$HOME/.crabbox/actions/`:
+`$HOME/.crabbox/actions/`. Map workflow inputs into step environment variables
+such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate them directly into
+shell source:
 
 ```sh
+case "$CRABBOX_ID" in
+  ""|*[!A-Za-z0-9_-]*)
+    echo "::error::crabbox_id must match [A-Za-z0-9_-]+"
+    exit 2
+    ;;
+esac
+case "$CRABBOX_JOB" in
+  *$'\n'*|*$'\r'*)
+    echo "::error::crabbox_job must not contain line breaks"
+    exit 2
+    ;;
+esac
+job="$CRABBOX_JOB"
+[ -n "$job" ] || job=hydrate
 mkdir -p "$HOME/.crabbox/actions"
-state="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env"
-env_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env.sh"
-services_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.services"
+state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
+env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
+services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
 {
   echo "WORKSPACE=${GITHUB_WORKSPACE}"
   echo "RUN_ID=${GITHUB_RUN_ID}"
-  echo "JOB=${{ inputs.crabbox_job }}"
+  echo "JOB=${job}"
   echo "ENV_FILE=${env_file}"
   echo "SERVICES_FILE=${services_file}"
   echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

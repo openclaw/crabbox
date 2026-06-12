@@ -78,7 +78,7 @@ tailnet peer mesh and the operator-side SSH mesh.
 | --------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------- |
 | `tailnet` | Hetzner / Azure / GCP (managed Linux with Tailscale)                                                       | tailnet IPv4 (or FQDN)        |
 | `ssh`     | AWS / Proxmox / static SSH / exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore                  | `ssh://<host>:<port>`         |
-| `url`     | Islo / E2B / Railway today; Modal / Cloudflare / Tensorlake report `unsupported` until they expose a per-sandbox HTTPS ingress | per-sandbox public HTTPS URL  |
+| `url`     | Islo / E2B / Railway                                                                                       | per-sandbox public HTTPS URL  |
 | `pending` | a tailnet- or SSH-capable provider whose claim has no endpoint recorded yet                                | empty (note explains)         |
 | `none`    | Blacksmith (owns its own connectivity), or any provider with no bridge adapter                             | empty (note explains)         |
 
@@ -96,7 +96,7 @@ the gap rather than mistaking it for "no shares published yet".
 | Islo                                                         | `url`     | Uses the Islo shares API. Existing shares are reused, so the call is idempotent.                            |
 | E2B                                                          | `url`     | Synthesizes the canonical per-port preview URL from the existing sandbox and config.                        |
 | Railway                                                      | `url`     | Surfaces the deployment URL Railway already populates. One URL per service (no per-port routing).           |
-| Modal / Cloudflare / Tensorlake                              | `url`     | No per-sandbox HTTPS ingress today; the adapter reports `bridgeState=unsupported`.                          |
+| Modal / Cloudflare / Tensorlake                              | `none`    | No advertised pond transport today; surfaced with a `no advertised pond transport` note.                    |
 | Blacksmith                                                   | `none`    | Owns its own connectivity; surfaced with the note `blacksmith owns connectivity`.                           |
 
 ## `pond connect`
@@ -112,8 +112,9 @@ a unified forward table, opens operator-side `ssh -L` forwards to each member's
 
 A provider is SSH-mesh-eligible when it advertises the `ssh` feature. That
 includes managed-Linux providers and SSH-lease providers, so a single pond can
-span both groups and still connect with one command. URL-only members (e.g.
-Modal) are skipped here with a warning but still show up in `pond peers`.
+span both groups and still connect with one command. URL-only members (for
+example Islo, E2B, or Railway) are skipped here with a warning but still show up
+in `pond peers`.
 
 | Flag                | Description                                                                              |
 | ------------------- | ---------------------------------------------------------------------------------------- |

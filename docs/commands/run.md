@@ -78,13 +78,23 @@ the checkout through the provider's APIs, runs the command through the
 provider, and prints `sync=delegated` in the final timing summary. These
 providers reject the SSH-run-only features `--capture-stdout`,
 `--capture-stderr`, `--capture-on-fail`, `--download`, `--script`,
-`--script-stdin`, `--fresh-pr`, and `--artifact-glob`. `--keep-on-failure` is
-supported for one-shot delegated runs. See the per-provider docs under
-[providers](../features/providers.md) for how `--id` resolves and any extra
-sync limitations.
+`--script-stdin`, and `--fresh-pr`. Delegated artifact features
+`--artifact-glob` and `--require-artifact` are accepted only by delegated
+adapters that explicitly advertise bounded run artifact retrieval.
+`--keep-on-failure` is supported for one-shot delegated runs. See the
+per-provider docs under [providers](../features/providers.md) for how `--id`
+resolves and any extra sync limitations.
 
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
+
+`--provider docker-sandbox --docker-sandbox-clone` has one provider-local
+exception to the default one-shot cleanup rule: if Crabbox creates a fresh
+clone-mode sandbox for the run and the command succeeds, Crabbox keeps that
+sandbox even without `--keep`. This preserves unfetched in-sandbox commits.
+Crabbox prints the exact `crabbox stop --provider docker-sandbox <slug>`
+command for manual cleanup. Reused `--id` Docker Sandbox runs keep their
+existing lifecycle behavior.
 
 ## Sync
 
@@ -286,9 +296,20 @@ parser-sensitive PR wording stays project-owned.
 Use repeatable `--artifact-glob <glob>` to collect matching remote files after a
 successful SSH-backed run. Globs resolve relative to the remote workdir and are
 stored locally under `.crabbox/runs/<run-or-lease>/` as a tarball. Profile and
-preset `artifactGlobs` are collected the same way. Delegated providers, and
-native Windows and macOS targets, reject artifact globs; use Linux or Windows
-WSL2.
+preset `artifactGlobs` are collected the same way. Delegated providers accept
+artifact globs only when their adapter advertises bounded run artifact
+retrieval; otherwise they reject the flag. Native Windows and macOS targets
+reject artifact globs; use Linux or Windows WSL2.
+
+Use repeatable `--require-artifact <glob>` when a successful command must emit a
+proof file, manifest, report, or other evidence artifact. Required artifact globs
+are checked after the remote command exits 0 and before `--download` files are
+written locally. They are also collected into the run artifact tarball. If any
+required glob matches nothing, the run fails even though the command itself
+succeeded. The same SSH-run target limits as
+`--artifact-glob` apply. Delegated providers that support bounded run artifact
+retrieval enforce provider-owned file and byte limits before returning local
+artifacts.
 
 Use repeatable `--download remote=local` when the command writes proof files on
 the box. Downloads run only after a successful remote command, paths resolve
@@ -379,6 +400,13 @@ For AWS one-shot leases, `--market` overrides `capacity.market` for this run.
 Explicit `--type` keeps exact-type semantics; Crabbox reports why that type
 failed rather than falling back to a different size.
 
+XCP-ng one-shot leases use the SSH-run path on Linux only. The provider clones
+the configured template with config-drive cloud-init, so `--script`,
+`--env-from-profile`, `--capture-stdout`, `--download`, and the other SSH-run
+features work after the VM is ready. Run `crabbox doctor --provider xcp-ng
+--json` before live runs, and keep `CRABBOX_XCP_NG_PASSWORD` in env or private
+config rather than argv.
+
 Azure one-shot leases use managed `StandardSSD_LRS` OS disks by default so they
 can become native checkpoint sources. Use `--azure-os-disk ephemeral` only for
 stateless leases that do not need native Azure checkpoint/fork support;
@@ -395,7 +423,7 @@ lease-acting commands):
 --provider <name>            See `crabbox providers` for the full list.
 --profile <name>
 --class <name>
---arch amd64|arm64           CPU architecture; arm64 is Linux-only on AWS/Azure.
+--arch amd64|arm64           CPU architecture; arm64 supports Linux on AWS/Azure and native Windows on Azure.
 --os <selector>              Portable Linux OS image, e.g. ubuntu:26.04
 --type <provider-type>
 --market spot|on-demand
@@ -465,6 +493,7 @@ Run-specific flags:
 --junit <comma-separated remote XML paths>
 --results-auto
 --artifact-glob <glob>       Repeatable.
+--require-artifact <glob>    Repeatable.
 --download <remote=local>    Repeatable.
 --capture-stdout <local path>
 --capture-stderr <local path>

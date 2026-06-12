@@ -54,7 +54,9 @@ func ApplyNamespaceProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 		cfg.Namespace.VolumeSizeGB = *v.VolumeSizeGB
 	}
 	if flagWasSet(fs, "namespace-auto-stop-idle-timeout") {
-		applyNamespaceDuration(&cfg.Namespace.AutoStopIdleTimeout, *v.AutoStopIdleTimeout)
+		if err := applyNamespaceDuration(&cfg.Namespace.AutoStopIdleTimeout, *v.AutoStopIdleTimeout); err != nil {
+			return err
+		}
 	}
 	if flagWasSet(fs, "namespace-work-root") {
 		cfg.Namespace.WorkRoot = *v.WorkRoot
@@ -89,13 +91,17 @@ func validateNamespaceConfig(cfg Config) error {
 	return nil
 }
 
-func applyNamespaceDuration(target *time.Duration, value string) {
+func applyNamespaceDuration(target *time.Duration, value string) error {
+	value = strings.TrimSpace(value)
 	if value == "" {
-		return
+		return exit(2, "namespace auto-stop idle timeout must be a positive duration")
 	}
-	if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
-		*target = parsed
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return exit(2, "namespace auto-stop idle timeout must be a positive duration")
 	}
+	*target = parsed
+	return nil
 }
 
 func cleanNamespaceWorkRoot(workRoot string) error {

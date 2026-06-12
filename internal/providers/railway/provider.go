@@ -19,7 +19,7 @@ func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:        providerName,
 		Family:      "railway",
-		Kind:        core.ProviderKindDelegatedRun,
+		Kind:        core.ProviderKindServiceControl,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
 		Features:    core.FeatureSet{core.FeatureURLBridge},
 		Coordinator: core.CoordinatorNever,

@@ -2,7 +2,6 @@ package railway
 
 import (
 	"flag"
-	"io"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -27,7 +26,6 @@ type Repo = core.Repo
 type ExitError = core.ExitError
 type FeatureSet = core.FeatureSet
 type Feature = core.Feature
-type timingReport = core.TimingReport
 
 const (
 	providerName = "railway"
@@ -46,10 +44,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {

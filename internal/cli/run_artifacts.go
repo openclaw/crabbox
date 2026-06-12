@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+const (
+	DelegatedRunArtifactDefaultMaxFiles = 256
+	DelegatedRunArtifactDefaultMaxBytes = int64(10 * 1024 * 1024)
+	DelegatedRunArtifactBeginMarker     = "__CRABBOX_ARTIFACT_TAR_BEGIN__"
+	DelegatedRunArtifactEndMarker       = "__CRABBOX_ARTIFACT_TAR_END__"
+)
+
 type RunArtifact struct {
 	Kind     string `json:"kind"`
 	Path     string `json:"path"`
@@ -23,6 +30,24 @@ type runArtifact = RunArtifact
 
 type runArtifactResult struct {
 	Files []runArtifact `json:"files,omitempty"`
+}
+
+func requireRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir string, globs []string) (string, error) {
+	if len(globs) == 0 {
+		return "", nil
+	}
+	if err := validateRequiredRunArtifactGlobs(globs); err != nil {
+		return "", err
+	}
+	if err := validateRequiredRunArtifactGlobTarget(target, globs); err != nil {
+		return "", err
+	}
+	remote := remoteRequireArtifactGlobsCommand(workdir, globs)
+	out, err := runSSHCombinedOutput(ctx, target, remote)
+	if err != nil {
+		return strings.TrimSpace(out), exit(7, "require artifacts: %v: %s", err, strings.TrimSpace(out))
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func collectRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir, repoRoot, runID, leaseID string, globs []string) ([]runArtifact, string, error) {
@@ -66,20 +91,44 @@ func LocalRunArtifactPath(repoRoot, runID, leaseID, name string) string {
 }
 
 func validateRunArtifactGlobs(globs []string) error {
+	return validateRunArtifactGlobsForFlag("--artifact-glob", globs)
+}
+
+func validateRequiredRunArtifactGlobs(globs []string) error {
+	return validateRunArtifactGlobsForFlag("--require-artifact", globs)
+}
+
+func ValidateRunArtifactGlobs(globs []string) error {
+	return validateRunArtifactGlobs(globs)
+}
+
+func ValidateRequiredRunArtifactGlobs(globs []string) error {
+	return validateRequiredRunArtifactGlobs(globs)
+}
+
+func validateRunArtifactGlobsForFlag(flag string, globs []string) error {
 	for _, glob := range globs {
 		if !safeArtifactGlob(glob) {
-			return exit(2, "--artifact-glob contains unsupported characters or non-relative path: %s", glob)
+			return exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
 		}
 	}
 	return nil
 }
 
 func validateRunArtifactGlobTarget(target SSHTarget, globs []string) error {
+	return validateRunArtifactGlobTargetForFlag(target, globs, "--artifact-glob")
+}
+
+func validateRequiredRunArtifactGlobTarget(target SSHTarget, globs []string) error {
+	return validateRunArtifactGlobTargetForFlag(target, globs, "--require-artifact")
+}
+
+func validateRunArtifactGlobTargetForFlag(target SSHTarget, globs []string, flag string) error {
 	if len(globs) > 0 && isWindowsNativeTarget(target) {
-		return exit(2, "--artifact-glob is not supported for native Windows targets")
+		return exit(2, "%s is not supported for native Windows targets", flag)
 	}
 	if len(globs) > 0 && target.TargetOS == targetMacOS {
-		return exit(2, "--artifact-glob is not supported for macOS targets")
+		return exit(2, "%s is not supported for macOS targets", flag)
 	}
 	return nil
 }
@@ -89,11 +138,44 @@ func safeArtifactGlob(glob string) bool {
 	if glob == "" || strings.HasPrefix(glob, "-") || strings.HasPrefix(glob, "/") || strings.Contains(glob, "..") || strings.ContainsAny(glob, "{}") {
 		return false
 	}
+	rel := strings.TrimPrefix(filepath.ToSlash(glob), "./")
+	if strings.HasPrefix(rel, "/") {
+		return false
+	}
 	return regexp.MustCompile(`^[A-Za-z0-9_./*?@+=:,-]+$`).MatchString(glob)
 }
 
 func remoteCollectArtifactGlobsCommand(workdir, remotePath string, globs []string) string {
 	return "bash -lc " + shellQuote(runArtifactCollectScript(workdir, remotePath, globs))
+}
+
+func remoteRequireArtifactGlobsCommand(workdir string, globs []string) string {
+	return "bash -lc " + shellQuote(runArtifactRequireScript(workdir, globs))
+}
+
+func runArtifactRequireScript(workdir string, globs []string) string {
+	var b strings.Builder
+	b.WriteString("set -euo pipefail\n")
+	b.WriteString("cd " + shellQuote(workdir) + "\n")
+	b.WriteString("shopt -s nullglob dotglob\n")
+	b.WriteString("missing=()\n")
+	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|.git|.git/*|.crabbox|.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
+	b.WriteString("check_artifact_file() { local f=\"$1\" rel; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
+	b.WriteString("add_required_artifact_match() { local f=\"$1\" rel existing; check_artifact_file \"$f\" || return 0; rel=$(artifact_rel_path \"$f\") || return 0; if [ ${#matches[@]} -gt 0 ]; then for existing in \"${matches[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; matches+=(\"$rel\"); }\n")
+	for _, glob := range globs {
+		b.WriteString("matches=()\n")
+		b.WriteString("for f in " + glob + "; do add_required_artifact_match \"$f\"; done\n")
+		if strings.Contains(glob, "**") {
+			if strings.Contains(glob, "**/") {
+				b.WriteString("for f in " + strings.Replace(glob, "**/", "", 1) + "; do add_required_artifact_match \"$f\"; done\n")
+			}
+			searchRoot := artifactGlobSearchRoot(glob)
+			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(searchRoot) + "; if [ -e \"$artifact_root\" ]; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then add_required_artifact_match \"$f\"; fi; done < <(find \"$artifact_root\" \\( -path './.git' -o -path './.git/*' -o -path './.crabbox' -o -path './.crabbox/*' -o -path '.git' -o -path '.git/*' -o -path '.crabbox' -o -path '.crabbox/*' \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+		}
+		b.WriteString("if [ ${#matches[@]} -eq 0 ]; then missing+=(" + shellQuote(glob) + "); else printf 'required artifact %s matched=%s\\n' " + shellQuote(glob) + " \"${#matches[@]}\"; fi\n")
+	}
+	b.WriteString("if [ ${#missing[@]} -gt 0 ]; then for f in \"${missing[@]}\"; do printf 'missing required artifact: %s\\n' \"$f\" >&2; done; exit 8; fi\n")
+	return b.String()
 }
 
 func runArtifactCollectScript(workdir, remotePath string, globs []string) string {
@@ -103,7 +185,8 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 	b.WriteString("mkdir -p .crabbox\n")
 	b.WriteString("shopt -s nullglob dotglob\n")
 	b.WriteString("files=()\n")
-	b.WriteString("add_artifact_file() { local f=\"$1\" rel existing; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 0; rel=${f#./}; case \"$rel\" in .git|.git/*|.crabbox|.crabbox/*|" + remotePath + ") return 0;; esac; if [ ${#files[@]} -gt 0 ]; then for existing in \"${files[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; files+=(\"$rel\"); }\n")
+	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|.git|.git/*|.crabbox|.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
+	b.WriteString("add_artifact_file() { local f=\"$1\" rel existing; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 0; rel=$(artifact_rel_path \"$f\") || return 0; case \"$rel\" in " + remotePath + ") return 0;; esac; if [ ${#files[@]} -gt 0 ]; then for existing in \"${files[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; files+=(\"$rel\"); }\n")
 	for _, glob := range globs {
 		b.WriteString("for f in " + glob + "; do add_artifact_file \"$f\"; done\n")
 		if strings.Contains(glob, "**") {
@@ -111,10 +194,60 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 				b.WriteString("for f in " + strings.Replace(glob, "**/", "", 1) + "; do add_artifact_file \"$f\"; done\n")
 			}
 			searchRoot := artifactGlobSearchRoot(glob)
-			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(searchRoot) + "; if [ -e \"$artifact_root\" ]; then while IFS= read -r -d '' f; do rel=${f#./}; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then add_artifact_file \"$f\"; fi; done < <(find \"$artifact_root\" \\( -path './.git' -o -path './.git/*' -o -path './.crabbox' -o -path './.crabbox/*' -o -path '.git' -o -path '.git/*' -o -path '.crabbox' -o -path '.crabbox/*' \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(searchRoot) + "; if [ -e \"$artifact_root\" ]; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then add_artifact_file \"$f\"; fi; done < <(find \"$artifact_root\" \\( -path './.git' -o -path './.git/*' -o -path './.crabbox' -o -path './.crabbox/*' -o -path '.git' -o -path '.git/*' -o -path '.crabbox' -o -path '.crabbox/*' \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 		}
 	}
 	b.WriteString("if [ ${#files[@]} -eq 0 ]; then printf 'warning: no artifact matches\\n' >&2; tar -czf " + shellQuote(remotePath) + " --files-from /dev/null; else tar -czf " + shellQuote(remotePath) + " -- \"${files[@]}\"; fi\n")
+	return b.String()
+}
+
+func DelegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles int, maxBytes int64) string {
+	if maxFiles <= 0 {
+		maxFiles = DelegatedRunArtifactDefaultMaxFiles
+	}
+	if maxBytes <= 0 {
+		maxBytes = DelegatedRunArtifactDefaultMaxBytes
+	}
+	var b strings.Builder
+	b.WriteString("set -euo pipefail\n")
+	b.WriteString("shopt -s nullglob dotglob\n")
+	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|.git|.git/*|.crabbox|.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
+	b.WriteString("check_artifact_file() { local f=\"$1\" rel; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
+	b.WriteString("dedupe_artifact_match() { local f=\"$1\" rel existing; check_artifact_file \"$f\" || return 0; rel=$(artifact_rel_path \"$f\") || return 0; if [ ${#matches[@]} -gt 0 ]; then for existing in \"${matches[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; matches+=(\"$rel\"); }\n")
+	appendArtifactGlobMatches := func(glob string) {
+		b.WriteString("for f in " + glob + "; do dedupe_artifact_match \"$f\"; done\n")
+		if strings.Contains(glob, "**") {
+			if strings.Contains(glob, "**/") {
+				b.WriteString("for f in " + strings.Replace(glob, "**/", "", 1) + "; do dedupe_artifact_match \"$f\"; done\n")
+			}
+			searchRoot := artifactGlobSearchRoot(glob)
+			b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(searchRoot) + "; if [ -e \"$artifact_root\" ]; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then dedupe_artifact_match \"$f\"; fi; done < <(find \"$artifact_root\" \\( -path './.git' -o -path './.git/*' -o -path './.crabbox' -o -path './.crabbox/*' -o -path '.git' -o -path '.git/*' -o -path '.crabbox' -o -path '.crabbox/*' \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+		}
+	}
+	if len(requiredGlobs) > 0 {
+		b.WriteString("missing=()\n")
+		for _, glob := range requiredGlobs {
+			b.WriteString("matches=()\n")
+			appendArtifactGlobMatches(glob)
+			b.WriteString("if [ ${#matches[@]} -eq 0 ]; then missing+=(" + shellQuote(glob) + "); else printf 'required artifact %s matched=%s\\n' " + shellQuote(glob) + " \"${#matches[@]}\"; fi\n")
+		}
+		b.WriteString("if [ ${#missing[@]} -gt 0 ]; then for f in \"${missing[@]}\"; do printf 'missing required artifact: %s\\n' \"$f\" >&2; done; exit 8; fi\n")
+	}
+	if len(artifactGlobs) == 0 {
+		return b.String()
+	}
+	b.WriteString("matches=()\n")
+	for _, glob := range artifactGlobs {
+		appendArtifactGlobMatches(glob)
+	}
+	b.WriteString("if [ ${#matches[@]} -gt " + fmt.Sprint(maxFiles) + " ]; then printf 'artifact-glob matched too many files: %s > %s\\n' \"${#matches[@]}\" " + shellQuote(fmt.Sprint(maxFiles)) + " >&2; exit 9; fi\n")
+	b.WriteString("tmp=$(mktemp -t crabbox-artifacts.XXXXXX.tgz); trap 'rm -f \"$tmp\"' EXIT\n")
+	b.WriteString("if [ ${#matches[@]} -eq 0 ]; then printf 'warning: no artifact matches\\n' >&2; tar -czf \"$tmp\" --files-from /dev/null; else tar -czf \"$tmp\" -- \"${matches[@]}\"; fi\n")
+	b.WriteString("bytes=$(wc -c < \"$tmp\" | tr -d ' ')\n")
+	b.WriteString("if [ \"$bytes\" -gt " + shellQuote(fmt.Sprint(maxBytes)) + " ]; then printf 'artifact-glob archive too large: %s > %s bytes\\n' \"$bytes\" " + shellQuote(fmt.Sprint(maxBytes)) + " >&2; exit 9; fi\n")
+	b.WriteString("printf '" + DelegatedRunArtifactBeginMarker + "\\n'\n")
+	b.WriteString("base64 < \"$tmp\"\n")
+	b.WriteString("printf '\\n" + DelegatedRunArtifactEndMarker + "\\n'\n")
 	return b.String()
 }
 

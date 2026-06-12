@@ -49,11 +49,11 @@ windowed desktop with the title bar visible, so the WebVNC viewer sees a normal
 human desktop; pass `--fullscreen` only for capture/video workflows.
 
 With `--webvnc`, the command keeps running after launch and bridges the desktop
-into the authenticated web portal (the same bridge as `crabbox webvnc`). Add
-`--open` to open the portal locally and `--take-control` to make the opened
-viewer the keyboard/mouse controller instead of an observer. `--open` and
-`--take-control` both require `--webvnc`. WebVNC bridging is limited to
-coordinator-backed `hetzner`, `aws`, and `azure` desktop leases.
+into WebVNC (the same bridge as `crabbox webvnc`). Coordinator-backed leases use
+the authenticated web portal; the local container provider uses local noVNC over
+SSH. Add `--open` to open the viewer locally and `--take-control` to make the
+opened viewer the keyboard/mouse controller instead of an observer. `--open` and
+`--take-control` both require `--webvnc`.
 
 `--egress <profile>` passes the active lease-local egress proxy to the launched
 browser as `--proxy-server=http://127.0.0.1:3128`, so the browser exits to the

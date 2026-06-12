@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -25,6 +26,7 @@ func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 		{provider: "hetzner", want: true},
 		{provider: "proxmox", want: false},
 		{provider: "daytona", want: false},
+		{provider: "morph", want: false},
 		{provider: "islo", want: false},
 		{provider: "e2b", want: false},
 		{provider: "blacksmith-testbox", want: false},
@@ -76,6 +78,73 @@ func TestDoctorLocalToolsAreProviderAware(t *testing.T) {
 				t.Fatalf("tools=%v want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDoctorRejectsUnsupportedProviderTarget(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "xcp-ng", "--target", "macos"})
+	if err == nil || !strings.Contains(err.Error(), "provider=xcp-ng managed provisioning supports target=linux only") {
+		t.Fatalf("doctor error=%v stdout=%q stderr=%q, want xcp-ng target rejection", err, stdout.String(), stderr.String())
+	}
+}
+
+func TestDoctorAllowsExistingLeaseDespiteUnsupportedProvisioningTarget(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	configPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: xcp-ng
+target: macos
+xcpNg:
+  apiUrl: https://xcp.example.test
+  username: root
+  password: secret
+  template: ubuntu
+  sr: local
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "ssh"), []byte(`#!/bin/sh
+printf 'git=git version 2.40.0\n'
+printf 'rsync=rsync version 3.2.7\n'
+printf 'curl=curl 8.0.0\n'
+printf 'jq=jq-1.7\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "xcp-ng", "--id", "cbx_existing"})
+	if err != nil {
+		t.Fatalf("doctor --id error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "provider=xcp-ng managed provisioning supports target=linux only") {
+		t.Fatalf("doctor --id rejected stale provisioning target: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "ok      remote   cbx_existing") {
+		t.Fatalf("doctor --id did not continue to remote checks: %q", stdout.String())
 	}
 }
 
@@ -306,6 +375,65 @@ func TestDoctorJSONCoordinatorOutputIncludesCapacityWarnings(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("capacity warning missing from JSON: %#v", view.Checks)
+	}
+}
+
+func TestDoctorBrokerAuthFailureSkipsProviderReadiness(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
+	readinessCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/v1/whoami":
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		case "/v1/providers/aws/readiness":
+			readinessCalled = true
+			http.Error(w, "provider readiness should not be checked after broker auth fails", http.StatusInternalServerError)
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "expired-user-token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "aws", "--json"})
+	if err == nil {
+		t.Fatalf("doctor succeeded unexpectedly stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if readinessCalled {
+		t.Fatal("doctor called provider readiness after broker auth failed")
+	}
+	var view doctorJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+		t.Fatalf("doctor JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if view.OK {
+		t.Fatalf("view.OK=true, want false: %#v", view)
+	}
+	foundBrokerHint := false
+	for _, check := range view.Checks {
+		if check.Check == "broker" && check.Details["class"] == "broker_auth" && check.Details["hint"] == "renew_crabbox_broker_login" {
+			foundBrokerHint = true
+		}
+		if check.Check == "provider" && strings.Contains(check.Message, "check_aws_credentials") {
+			t.Fatalf("provider check leaked misleading AWS hint: %#v", check)
+		}
+	}
+	if !foundBrokerHint {
+		t.Fatalf("missing broker auth hint: %#v", view.Checks)
 	}
 }
 

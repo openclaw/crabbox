@@ -124,6 +124,23 @@ describe("azure provider", () => {
     ).toBeUndefined();
   });
 
+  it("uses the Worker Azure image env fallback when the lease has no image override", () => {
+    const client = new AzureClient({
+      ...baseEnv,
+      CRABBOX_AZURE_IMAGE: "Canonical:custom-linux:image:latest",
+    });
+    const imageForConfig = (
+      client as unknown as { imageForConfig(config: LeaseConfig): string }
+    ).imageForConfig.bind(client);
+
+    expect(imageForConfig(testLeaseConfig({ azureImage: "" }))).toBe(
+      "Canonical:custom-linux:image:latest",
+    );
+    expect(
+      imageForConfig(testLeaseConfig({ azureImage: "Canonical:custom-linux:image:latest" })),
+    ).toBe("Canonical:custom-linux:image:latest");
+  });
+
   it("orders Azure region candidates from defaults, env, and capacity regions", () => {
     expect(
       azureRegionCandidates(
@@ -446,6 +463,12 @@ describe("azure provider", () => {
     expect(client.image).toContain("Canonical");
     expect(client.sshCIDRs).toEqual(["0.0.0.0/0"]);
     expect(client.defaultLocation).toBe("eastus");
+  });
+
+  it("rejects invalid configured Azure SSH CIDRs", () => {
+    expect(
+      () => new AzureClient({ ...baseEnv, CRABBOX_AZURE_SSH_CIDRS: "999.999.999.999/32" }),
+    ).toThrow("CRABBOX_AZURE_SSH_CIDRS entries must be valid");
   });
 
   it("creates Windows VMs with Windows OS profile and bootstrap extension", async () => {

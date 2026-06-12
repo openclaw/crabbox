@@ -63,6 +63,9 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if backend.Spec().Kind == ProviderKindServiceControl {
+		return exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
+	}
 	readyPoolKey := strings.TrimSpace(*poolKey)
 	if readyPoolKey != "" && backendCoordinator(backend) == nil {
 		return exit(2, "--pool requires a coordinator-backed SSH lease provider")
@@ -248,7 +251,7 @@ func (a App) releasePrewarmLeaseAfterPoolFailure(ctx context.Context, backend Ba
 		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release skipped: %v\n", leaseID, cause, err)
 		return
 	}
-	if err := a.releaseBackendLeaseBestEffort(ctx, sshBackend, lease); err != nil {
+	if err := a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, lease); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release failed: %v\n", leaseID, cause, err)
 	}
 }

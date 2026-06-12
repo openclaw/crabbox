@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -124,12 +125,12 @@ func (b *semaphoreBackend) Resolve(ctx context.Context, req core.ResolveRequest)
 
 	// Try direct lease ID (sem_UUID or UUID)
 	if isLeaseID(id) {
-		return b.resolveByJobID(ctx, stripLeasePrefix(id))
+		return b.resolveByJobID(ctx, stripLeasePrefix(id), req.ReleaseOnly, req.StatusOnly)
 	}
 
 	// Resolve slug → lease ID via claim file
 	if claim, found, err := core.ResolveLeaseClaim(id); err == nil && found && claim.Provider == providerName {
-		return b.resolveByJobID(ctx, stripLeasePrefix(claim.LeaseID))
+		return b.resolveByJobID(ctx, stripLeasePrefix(claim.LeaseID), req.ReleaseOnly, req.StatusOnly)
 	}
 
 	return core.LeaseTarget{}, core.Exit(4, "semaphore lease not found for %q — use the full lease ID (sem_UUID) or a slug from a recent warmup", id)
@@ -144,7 +145,7 @@ func isLeaseID(id string) bool {
 	return len(stripped) == 36 && stripped[8] == '-' && stripped[13] == '-'
 }
 
-func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (core.LeaseTarget, error) {
+func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string, releaseOnly, statusOnly bool) (core.LeaseTarget, error) {
 	status, err := b.client.GetJobStatus(ctx, jobID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -155,28 +156,9 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (co
 	if status.State != "RUNNING" {
 		return core.LeaseTarget{}, core.Exit(4, "semaphore job %s is not running (state: %s)", jobID, status.State)
 	}
-
-	sshKey, err := b.client.GetSSHKey(ctx, jobID)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-
 	leaseID := "sem_" + jobID
-	keyPath, err := storeSSHKey(leaseID, sshKey)
-	if err != nil {
-		return core.LeaseTarget{}, fmt.Errorf("store SSH key: %w", err)
-	}
-
 	slug := semaphoreClaimSlug(leaseID)
-
-	target := core.SSHTarget{
-		User:       "semaphore",
-		Host:       status.IP,
-		Key:        keyPath,
-		Port:       fmt.Sprintf("%d", status.SSHPort),
-		TargetOS:   core.TargetLinux,
-		ReadyCheck: "true",
-	}
+	host := strings.TrimSpace(status.IP)
 	server := core.Server{
 		CloudID:  jobID,
 		Provider: providerName,
@@ -188,8 +170,36 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string) (co
 			"provider": providerName,
 		},
 	}
-	server.PublicNet.IPv4.IP = status.IP
 	server.ServerType.Name = withDefault(b.cfg.Semaphore.Machine, "f1-standard-2")
+	if host != "" {
+		server.PublicNet.IPv4.IP = host
+	}
+	endpointReady := host != "" && status.SSHPort > 0
+	if releaseOnly || (statusOnly && !endpointReady) {
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
+	if !endpointReady {
+		return core.LeaseTarget{}, core.Exit(4, "semaphore job %s is running but SSH endpoint is not ready (ip=%q ssh_port=%d)", jobID, status.IP, status.SSHPort)
+	}
+
+	sshKey, err := b.client.GetSSHKey(ctx, jobID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+
+	keyPath, err := storeSSHKey(leaseID, sshKey)
+	if err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("store SSH key: %w", err)
+	}
+
+	target := core.SSHTarget{
+		User:       "semaphore",
+		Host:       host,
+		Key:        keyPath,
+		Port:       fmt.Sprintf("%d", status.SSHPort),
+		TargetOS:   core.TargetLinux,
+		ReadyCheck: "true",
+	}
 
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }

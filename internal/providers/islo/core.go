@@ -18,16 +18,8 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return core.FlagWasSet(fs, name)
 }
 
-func rejectDelegatedSyncOptions(provider string, req RunRequest) error {
-	return core.RejectDelegatedSyncOptions(provider, req)
-}
-
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func printKeepOnFailureDelegatedHint(w io.Writer, provider, leaseID, slug string, idleTimeout, ttl time.Duration) {
-	core.PrintKeepOnFailureDelegatedHint(w, provider, leaseID, slug, idleTimeout, ttl)
 }
 
 func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
@@ -50,6 +42,10 @@ func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }
 
+func renderTailscaleHostname(template, leaseID, slug, provider string) string {
+	return core.RenderTailscaleHostname(template, leaseID, slug, provider)
+}
+
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
@@ -66,6 +62,10 @@ func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot s
 	return core.ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func appendDirectPondTailscaleTag(cfg *Config) {
+	core.AppendDirectPondTailscaleTag(cfg)
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
@@ -74,12 +74,24 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
+func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
+	return core.UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn)
+}
+
+func updateLeaseClaimTailscaleSettings(leaseID, hostname string, tags []string, loginURL, exitNode string, exitLAN bool) error {
+	return core.UpdateLeaseClaimTailscaleSettings(leaseID, hostname, tags, loginURL, exitNode, exitLAN)
+}
+
+func clearLeaseClaimTailscale(leaseID string) error {
+	return core.ClearLeaseClaimTailscale(leaseID)
+}
+
 func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }
 
-func syncManifest(root string, excludes []string) (core.SyncManifest, error) {
-	return core.BuildSyncManifest(root, excludes)
+func syncManifest(root string, excludes, includes []string) (core.SyncManifest, error) {
+	return core.BuildSyncManifestFiltered(root, excludes, includes)
 }
 
 func checkSyncPreflight(manifest core.SyncManifest, cfg Config, force bool, stderr io.Writer) error {

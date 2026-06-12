@@ -67,9 +67,13 @@ require_smoke_env() {
 
 repo="${CRABBOX_LIVE_REPO:-$ROOT}"
 lease_id=""
+smoke_tmp_files=()
 cleanup() {
+  if ((${#smoke_tmp_files[@]} > 0)); then
+    rm -f "${smoke_tmp_files[@]}"
+  fi
   if [[ -n "$lease_id" ]]; then
-    (cd "$repo" && "$CRABBOX_BIN" stop --provider cloudflare "$lease_id") || true
+    "$CRABBOX_BIN" stop --provider cloudflare "$lease_id" || true
   fi
 }
 trap cleanup EXIT
@@ -86,23 +90,40 @@ smoke_no_sync() {
 
 smoke_keep_stop() {
   local keep_out
+  local keep_err
+  local lease_candidate
+  keep_out="$(mktemp)"
+  keep_err="$(mktemp)"
+  smoke_tmp_files+=("$keep_out" "$keep_err")
   local keep_status=0
-  set +e
-  keep_out="$(
-    cd "$repo"
+  if (
+    cd "$repo" || exit 2
     "$CRABBOX_BIN" run --provider cloudflare --type lite --keep --no-sync --timing-json --shell -- \
-      'set -eu; echo CRABBOX_CF_KEEP_OK; sleep 1' 2>&1
-  )"
-  keep_status=$?
-  set -e
-  printf '%s\n' "$keep_out"
-  lease_id="$(printf '%s\n' "$keep_out" | awk '/^leased / {print $2; exit}')"
+      'set -eu; echo CRABBOX_CF_KEEP_OK; sleep 1'
+  ) >"$keep_out" 2>"$keep_err"; then
+    keep_status=0
+  else
+    keep_status=$?
+  fi
+  cat "$keep_out"
+  cat "$keep_err" >&2
+  lease_id="$(sed -nE '/^[[:space:]]*\{/s/.*"leaseId"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$keep_err" | tail -1)"
+  if [[ -z "$lease_id" ]]; then
+    lease_candidate="$(sed -nE 's/^leased ([^[:space:]]+) slug=[^[:space:]]+ provider=cloudflare sandbox=[^[:space:]]+$/\1/p' "$keep_err" | tail -1)"
+    if [[ -z "$lease_candidate" ]]; then
+      lease_candidate="$(sed -nE 's/^leased ([^[:space:]]+) slug=[^[:space:]]+ provider=cloudflare sandbox=[^[:space:]]+$/\1/p' "$keep_out" | tail -1)"
+    fi
+    if [[ -n "$lease_candidate" ]]; then
+      lease_id="$lease_candidate"
+    fi
+  fi
+  rm -f "$keep_out" "$keep_err"
+  if [[ "$keep_status" -ne 0 ]]; then
+    return "$keep_status"
+  fi
   if [[ -z "$lease_id" ]]; then
     printf 'could not parse kept Cloudflare lease id\n' >&2
     exit 3
-  fi
-  if [[ "$keep_status" -ne 0 ]]; then
-    return "$keep_status"
   fi
 
   (

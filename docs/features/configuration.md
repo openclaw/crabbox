@@ -52,11 +52,12 @@ file is group- or world-readable.
 
 State that does not belong in either YAML file:
 
-- live lease records (those are coordinator-owned);
+- live lease records (managed records are coordinator-owned; registered records
+  are provider-owned and mirrored to the coordinator);
 - per-lease SSH private keys (they live under the user config dir, but not in
   `config.yaml`);
-- provider secrets (they live in the broker environment, your shell env, or a
-  credential manager).
+- provider secrets (managed-provider secrets live in the broker environment;
+  direct-provider secrets stay in your shell env or credential manager).
 
 ## YAML schema
 
@@ -68,6 +69,8 @@ set in user config. Most repos only need a small subset.
 ```yaml
 broker:
   url: https://broker.example.com
+  mode: managed             # managed | registered
+  autoWebVNC: true          # registered kept desktop leases only
   provider: aws
   token: <signed-github-token-or-shared-token>
   adminToken: <broker-admin-token>     # operators only
@@ -77,7 +80,7 @@ broker:
 
 provider: aws            # default provider when --provider is unset
 target: linux            # default target OS: linux | macos | windows
-architecture: amd64      # amd64 | arm64; arm64 is Linux-only on AWS/Azure
+architecture: amd64      # amd64 | arm64; arm64 supports Linux on AWS/Azure and native Windows on Azure
 os: ubuntu:26.04         # OS image; resolved to per-provider images for linux
 windows:
   mode: normal           # normal | wsl2 when target=windows
@@ -92,6 +95,14 @@ lease:
   idleTimeout: 30m
   ttl: 90m
 ```
+
+`broker.mode` defaults to `managed`. In `registered` mode, every direct SSH
+lease keeps its existing provider lifecycle and is registered with the broker
+for owner-scoped inventory, sharing, heartbeats, and portal bridges. Registration
+is best effort: a broker outage does not fail local provisioning. Releasing the
+local lease removes its registration, and coordinator release/expiry never
+invokes provider deletion. `CRABBOX_COORDINATOR_MODE` and
+`CRABBOX_COORDINATOR_AUTO_WEBVNC` provide environment overrides.
 
 `ttl`, `idleTimeout`, and `workRoot` are also accepted as top-level keys. The
 default class is `beast`, the default TTL is `90m`, and the default idle
@@ -290,6 +301,27 @@ port `8787`. Auth uses `az account get-access-token --resource
 https://dynamicsessions.io` unless `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` is
 set.
 
+### Anthropic Sandbox Runtime
+
+```yaml
+provider: anthropic-sandbox-runtime
+anthropicSandboxRuntime:
+  cliPath: srt
+  settings: "" # empty means Anthropic Sandbox Runtime default ~/.srt-settings.json
+  debug: false
+```
+
+`anthropic-sandbox-runtime` is a local one-shot delegated-run provider. It
+shells out to Anthropic Sandbox Runtime with
+`srt [--debug] [--settings <path>] -c <command>`. Use
+`--anthropic-sandbox-runtime-cli`, `--anthropic-sandbox-runtime-settings`, and
+`--anthropic-sandbox-runtime-debug` for command-line overrides, or
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI`,
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS`, and
+`CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG` for environment overrides. Crabbox
+validates the provider config keys; Anthropic Sandbox Runtime validates its own
+settings JSON and enforcement policy.
+
 ### Hetzner
 
 Hetzner credentials and image come from broker-side config. Repos do not need a
@@ -331,6 +363,77 @@ proxmox:
 Put `tokenSecret` in a private config file or use
 `CRABBOX_PROXMOX_TOKEN_SECRET`; do not pass it as a command-line flag.
 
+### XCP-ng
+
+```yaml
+provider: xcp-ng
+target: linux
+xcpNg:
+  apiUrl: https://xcp-pool.example.test
+  username: crabbox@example.test
+  password: <api-password>
+  template: crabbox-ubuntu-2404
+  templateUuid: ""
+  sr: default-sr
+  srUuid: ""
+  network: pool-network
+  networkUuid: ""
+  host: ""
+  user: crabbox
+  workRoot: /work/crabbox
+  insecureTLS: false
+```
+
+`apiUrl`, `username`, `password`, and either `sr` or `srUuid` are required for
+XCP-ng doctor and lifecycle commands. `template` or `templateUuid` is required
+before `warmup` or `run` can create a lease. The password must come from private
+config or `CRABBOX_XCP_NG_PASSWORD`; there is intentionally no
+XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
+returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
+For credential safety, repository-local `crabbox.yaml` and `.crabbox.yaml`
+files cannot override `apiUrl` or `insecureTLS`; set those in user config, an
+explicit `CRABBOX_CONFIG` file, or environment variables.
+
+`target: linux` describes the current Crabbox lease surface, not an XCP-ng
+hypervisor limitation. XCP-ng itself can host Linux, Windows, and BSD guests on
+dedicated 64-bit x86 server-class hardware, but Crabbox's normal `xcp-ng` flow
+provisions Linux templates only. The separate XCP-ng ISO E2E harness also
+covers Windows x86_64/x64 installer media. Use the Tart provider on Apple
+hardware for macOS VM workflows.
+
+`network`, `networkUuid`, and `host` are optional placement hints. When
+`network` or `networkUuid` is set, Crabbox moves all VIFs on the copied VM to
+that network. Prefer a single-NIC template for Crabbox-managed VMs, or leave
+both unset when the template's existing network topology should be preserved.
+
+The current SR-backed lifecycle uses `VM.copy`, then `VM.provision`, and then
+attaches a FAT16 `CIDATA` config-drive image. Keep `apiUrl` on an
+administrator-only management network or VPN, prefer trusted certificates, and
+limit `insecureTLS` to private lab environments.
+
+Environment overrides:
+
+```text
+CRABBOX_XCP_NG_API_URL
+CRABBOX_XCP_NG_USERNAME
+CRABBOX_XCP_NG_PASSWORD
+CRABBOX_XCP_NG_TEMPLATE
+CRABBOX_XCP_NG_TEMPLATE_UUID
+CRABBOX_XCP_NG_SR
+CRABBOX_XCP_NG_SR_UUID
+CRABBOX_XCP_NG_NETWORK
+CRABBOX_XCP_NG_NETWORK_UUID
+CRABBOX_XCP_NG_GUEST_CIDR
+CRABBOX_XCP_NG_HOST
+CRABBOX_XCP_NG_USER
+CRABBOX_XCP_NG_WORK_ROOT
+CRABBOX_XCP_NG_INSECURE_TLS
+```
+
+Set `CRABBOX_XCP_NG_GUEST_CIDR` to an IPv4 `/24` or narrower range attached
+to the local runner only when guest tools cannot report an address and active
+MAC discovery is required. Crabbox never sweeps all local interfaces.
+
 ### Static SSH
 
 ```yaml
@@ -362,16 +465,45 @@ localContainer:
 
 `provider: docker`, `provider: container`, and `provider: local-docker` are
 aliases for `local-container`. The backend uses Docker-compatible CLI commands,
-so Docker Desktop, OrbStack, Colima, and similar local runtimes work when their
-Docker context is active. Set `dockerSocket: true` only when commands inside
-the lease must use the host Docker daemon; Crabbox then mounts the active local
-Unix Docker socket and rejects remote Docker contexts. With the socket enabled
-and no explicit work root, Crabbox chooses a host-visible cache work root so
-nested Docker bind mounts can see the synced checkout.
+so Docker Desktop, OrbStack, Colima, Podman, and similar local runtimes work.
+Crabbox detects an installed `docker` or `podman` CLI and uses that runtime; if
+both are present, `docker` is selected unless `localContainer.runtime` is set
+explicitly. Set `dockerSocket: true` only when commands inside the lease must
+use the host Docker-compatible API; Crabbox then mounts the active local Unix
+socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
+With the socket enabled and no explicit work root, Crabbox chooses a host-visible
+cache work root so nested bind mounts can see the synced checkout.
 
 Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
 the container.
+
+### Apple VZ
+
+```yaml
+provider: apple-vz
+appleVZ:
+  # Optional for normal Homebrew/release installs.
+  helperPath: /custom/path/crabbox-apple-vz-helper
+  image: https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img
+  imageSHA256: 5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b
+  user: crabbox
+  workRoot: /work/crabbox
+  cpus: 4
+  memoryMiB: 8192
+  diskGiB: 30
+```
+
+`provider: applevz` is an alias for `apple-vz`. The backend drives a small
+local helper that boots a headless Linux VM with Apple's
+`Virtualization.framework`, then exposes guest SSH through a host-local proxy so
+Crabbox can use the normal SSH sync and run path. The image default follows the
+portable `osImage` selector unless `appleVZ.image` is set explicitly. Default
+remote images include pinned SHA-256 checksums; custom remote image URLs must
+set `appleVZ.imageSHA256`, while local image paths may omit it. Apple Silicon
+Homebrew bottles and release archives install the helper beside `crabbox`;
+`helperPath` is only needed for a custom or source-built helper. The effective
+architecture defaults to `arm64`, and explicit `amd64` is rejected.
 
 ### Multipass
 
@@ -421,6 +553,93 @@ namespace:
   workRoot: /workspaces/crabbox
   deleteOnRelease: false
 ```
+
+### KubeVirt
+
+```yaml
+provider: kubevirt
+kubevirt:
+  kubectl: kubectl
+  virtctl: virtctl
+  kubeconfig: ""
+  context: ""
+  namespace: default
+  template: ./kubevirt-vm.yaml
+  sshUser: crabbox
+  sshKey: ""
+  sshPublicKey: ""
+  sshPort: "22"
+  workRoot: /home/crabbox/crabbox
+  deleteOnRelease: true
+```
+
+The template must be one KubeVirt `VirtualMachine` using `runStrategy: Manual`.
+Crabbox sets its name, namespace, and lease labels, replaces documented
+placeholders, applies it with `kubectl`, and starts it with `virtctl`.
+
+### External provider
+
+Protocol adapter:
+
+```yaml
+provider: external
+external:
+  command: node
+  args:
+    - /absolute/path/provider.mjs
+  config:
+    backend: vm
+    namespace: team-devboxes
+  workRoot: /workspaces/crabbox
+  routingFile: ""
+```
+
+The executable receives one versioned JSON request on stdin per lifecycle
+operation and returns one JSON response on stdout. This keeps internal control
+plane logic outside Crabbox while preserving normal SSH sync, rsync, WebVNC,
+and command execution. Crabbox writes private per-lease routing state for
+generated stop commands; `routingFile` is normally set only by those commands.
+
+Declarative CLI:
+
+```yaml
+provider: external
+external:
+  lifecycle:
+    acquire:
+      steps:
+        - [devboxctl, new, "{{resourceName}}", --size, "{{config.size}}"]
+        - [devboxctl, setup, "{{resourceName}}"]
+      rollbackOnFailure: true
+      env:
+        DEVBOX_TOKEN: "{{env.DEVBOX_TOKEN}}"
+    list:
+      argv: [devboxctl, list, --format, json]
+      output: json-name-array
+      namePrefix: "cbx-"
+    release:
+      argv: [devboxctl, rm, --yes, "{{resourceName}}"]
+  connection:
+    resourceName: "{{leaseIdSlug}}"
+    cloudId: devboxes/{{resourceName}}
+    serverType: "{{config.size}}"
+    ssh:
+      user: "{{env.DEVBOX_USER}}"
+      host: "{{resourceName}}"
+      sshConfigProxy: true
+  config:
+    size: cpu16
+  workRoot: /home/developer/crabbox
+```
+
+Declarative lifecycle entries use one `argv` array or an ordered `steps` list,
+not shell commands. Acquire steps can opt into release cleanup with
+`rollbackOnFailure: true`. Put credentials in an operation `env:` map, not in
+`argv` or `steps`; environment-derived argv values require the explicit
+`allowEnvArgv: true` compatibility opt-in, and environment-derived resource
+names require `connection.allowEnvResourceName: true`. See
+[External Provider](../providers/external.md) for placeholders, output
+semantics, inventory formats, routing behavior, and security guidance.
 
 ### Daytona
 

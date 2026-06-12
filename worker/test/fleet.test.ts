@@ -112,6 +112,148 @@ class FakeWebSocket {
 }
 
 describe("fleet lease identity and idle", () => {
+  it("registers client-owned leases without granting the coordinator provider lifecycle", async () => {
+    const storage = new MemoryStorage();
+    let providerReleases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }, async () => {
+        providerReleases += 1;
+      }),
+    });
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+
+    const registered = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_000000000099/registration", {
+        headers: ownerHeaders,
+        body: {
+          slug: "test-box",
+          provider: "aws",
+          target: "linux",
+          desktop: true,
+          browser: true,
+          code: true,
+          cloudID: "i-registered-test",
+          serverName: "test-box",
+          serverType: "cpu16",
+          host: "test-box.example.com",
+          sshUser: "dev-user",
+          sshPort: "22",
+          exposedPorts: ["3000", "8080"],
+          workRoot: "/var/lib/crabbox/work",
+          ttlSeconds: 14_400,
+          idleTimeoutSeconds: 1_800,
+        },
+      }),
+    );
+    expect(registered.status).toBe(201);
+    await expect(registered.json()).resolves.toMatchObject({
+      lease: {
+        id: "cbx_000000000099",
+        slug: "test-box",
+        provider: "aws",
+        lifecycle: "registered",
+        state: "active",
+        estimatedHourlyUSD: 0,
+        exposedPorts: ["3000", "8080"],
+      },
+    });
+
+    const portal = await fleet.fetch(
+      request("GET", "/portal/leases/test-box", { headers: ownerHeaders }),
+    );
+    expect(portal.status).toBe(200);
+    const portalHTML = await portal.text();
+    expect(portalHTML).toContain("client managed");
+    expect(portalHTML).toContain("remove registration");
+
+    const poolRegistration = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/register", {
+        headers: ownerHeaders,
+        body: { leaseID: "cbx_000000000099" },
+      }),
+    );
+    expect(poolRegistration.status).toBe(400);
+    await expect(poolRegistration.json()).resolves.toMatchObject({
+      error: "unsupported_lifecycle",
+    });
+
+    const shared = await fleet.fetch(
+      request("PUT", "/v1/leases/test-box/share", {
+        headers: ownerHeaders,
+        body: { users: { "friend@example.com": "use" } },
+      }),
+    );
+    expect(shared.status).toBe(200);
+    const friend = await fleet.fetch(
+      request("GET", "/v1/leases/test-box", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(friend.status).toBe(200);
+
+    const released = await fleet.fetch(
+      request("POST", "/v1/leases/test-box/release", {
+        headers: ownerHeaders,
+        body: { delete: true },
+      }),
+    );
+    expect(released.status).toBe(200);
+    expect(providerReleases).toBe(0);
+    await expect(released.json()).resolves.toMatchObject({
+      lease: { lifecycle: "registered", state: "released" },
+    });
+  });
+
+  it("expires registered leases without invoking a provider", async () => {
+    const storage = new MemoryStorage();
+    let providerReleases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }, async () => {
+        providerReleases += 1;
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000098",
+      testLease({
+        id: "cbx_000000000098",
+        provider: "aws",
+        lifecycle: "registered",
+        cloudID: "i-registered-expired",
+        expiresAt: "2026-05-01T00:00:01.000Z",
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(providerReleases).toBe(0);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000098")?.state).toBe("expired");
+  });
+
+  it("does not let registration overwrite another owner or managed lease", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000097",
+      testLease({ id: "cbx_000000000097", owner: "other@example.com" }),
+    );
+    const response = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_000000000097/registration", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { provider: "external", target: "linux", host: "host.example.test" },
+      }),
+    );
+    expect(response.status).toBe(409);
+  });
+
   it("keeps expired leases active when provider cleanup fails and retries later", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {
@@ -507,6 +649,102 @@ describe("fleet lease identity and idle", () => {
     expect(deleted).toEqual(["i-orphan"]);
     expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
     expect(sweep?.candidates[0]).toMatchObject({ action: "terminated" });
+  });
+
+  it("terminates Azure orphan sweep candidates only when delete is enabled", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000777",
+      testLease({
+        id: "cbx_000000000777",
+        provider: "azure",
+        cloudID: "vm-provisioning",
+        region: "eastus",
+        state: "provisioning",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(
+          undefined,
+          {
+            provider: "azure",
+            servers: [
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-orphan",
+                region: "westus2",
+                name: "vm-orphan",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-kept",
+                name: "vm-kept",
+                labels: {
+                  crabbox: "true",
+                  keep: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-provisioning",
+                name: "vm-provisioning",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_000000000777",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+            ],
+          },
+          async (id) => {
+            deleted.push(id);
+          },
+        ),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "eastus",
+        CRABBOX_AZURE_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    const sweep = storage.value<{
+      mode: string;
+      terminated: number;
+      candidates: Array<Record<string, unknown>>;
+    }>("azure-orphan-sweep:last");
+    expect(deleted).toEqual(["vm-orphan"]);
+    expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
+    expect(sweep?.candidates).toEqual([
+      expect.objectContaining({
+        cloudID: "vm-orphan",
+        region: "westus2",
+        leaseID: "cbx_missing",
+        reason: "expired-provider-tag",
+        action: "terminated",
+      }),
+    ]);
   });
 
   it("releases stale pending EC2 Mac hosts during the AWS orphan sweep", async () => {
@@ -1181,6 +1419,124 @@ describe("fleet lease identity and idle", () => {
     expect(stranger.status).toBe(404);
   });
 
+  it("requires manage access for shared lease heartbeat and Tailscale metadata updates", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const useHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const manageHeaders = {
+      "x-crabbox-owner": "manager@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const now = new Date();
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "peter@example.com",
+        org: "openclaw",
+        tailscale: { enabled: true, hostname: "blue-lobster", tags: ["tag:ci"] },
+        share: {
+          users: {
+            "viewer@example.com": "use",
+            "manager@example.com": "manage",
+          },
+        },
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        lastTouchedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const visible = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster", { headers: useHeaders }),
+    );
+    expect(visible.status).toBe(200);
+
+    const useHeartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/heartbeat", {
+        headers: useHeaders,
+        body: { idleTimeoutSeconds: 2400 },
+      }),
+    );
+    expect(useHeartbeat.status).toBe(403);
+
+    const useTailscale = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/tailscale", {
+        headers: useHeaders,
+        body: { ipv4: "100.64.0.10", state: "ready" },
+      }),
+    );
+    expect(useTailscale.status).toBe(403);
+
+    const manageHeartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/heartbeat", {
+        headers: manageHeaders,
+        body: { idleTimeoutSeconds: 2400 },
+      }),
+    );
+    expect(manageHeartbeat.status).toBe(200);
+    const heartbeatBody = (await manageHeartbeat.json()) as { lease: LeaseRecord };
+    expect(heartbeatBody.lease.idleTimeoutSeconds).toBe(2400);
+
+    const manageTailscale = await fleet.fetch(
+      request("POST", "/v1/leases/blue-lobster/tailscale", {
+        headers: manageHeaders,
+        body: { ipv4: "100.64.0.10", state: "ready" },
+      }),
+    );
+    expect(manageTailscale.status).toBe(200);
+    const tailscaleBody = (await manageTailscale.json()) as { lease: LeaseRecord };
+    expect(tailscaleBody.lease.tailscale?.ipv4).toBe("100.64.0.10");
+    expect(tailscaleBody.lease.tailscale?.state).toBe("ready");
+  });
+
+  it("requires manage access for lease metadata writes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const viewerHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "shared-run",
+        owner: "alice@example.com",
+        org: "example-org",
+        share: { users: { "viewer@example.com": "use" } },
+        tailscale: { enabled: true, state: "requested" },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/shared-run/heartbeat", {
+        headers: viewerHeaders,
+        body: { idleTimeoutSeconds: 3600 },
+      }),
+    );
+    expect(heartbeat.status).toBe(403);
+
+    const tailscale = await fleet.fetch(
+      request("POST", "/v1/leases/shared-run/tailscale", {
+        headers: viewerHeaders,
+        body: { enabled: true, ipv4: "100.64.0.99", state: "ready" },
+      }),
+    );
+    expect(tailscale.status).toBe(403);
+
+    const stored = storage.value<LeaseRecord>("lease:cbx_000000000001");
+    expect(stored?.idleTimeoutSeconds).not.toBe(3600);
+    expect(stored?.tailscale?.ipv4).toBeUndefined();
+    expect(stored?.tailscale?.state).toBe("requested");
+  });
+
   it("mints brokered Tailscale keys, records non-secret metadata, and accepts readiness updates", async () => {
     const storage = new MemoryStorage();
     let providerConfig:
@@ -1280,6 +1636,580 @@ describe("fleet lease identity and idle", () => {
     expect(updated.lease.tailscale?.ipv4).toBe("100.64.0.10");
     expect(updated.lease.tailscale?.exitNode).toBe("mac-studio.tailnet.ts.net");
     expect(updated.lease.tailscale?.state).toBe("ready");
+  });
+
+  it("persists brokered leases as provisioning before provider create returns", async () => {
+    const storage = new MemoryStorage();
+    let storedDuringCreate: LeaseRecord | undefined;
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        () => {
+          storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+      ),
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(201);
+    expect(storedDuringCreate).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "provisioning",
+      cloudID: "",
+    });
+    const { lease } = (await create.json()) as { lease: LeaseRecord };
+    expect(lease).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "active",
+      cloudID: "vm-cbx-abcdef123456",
+    });
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.state).toBe("active");
+  });
+
+  it("marks provisioning leases failed when provider create fails", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        () => {
+          throw new Error("azure create timed out after VM request");
+        },
+        { provider: "azure", region: "eastus" },
+      ),
+    });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(500);
+    const lease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(lease).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "failed",
+      cleanupError: "azure create timed out after VM request",
+    });
+    expect(lease?.endedAt).toBeTruthy();
+  });
+
+  it("can release a provisioning lease before cloud resources are known", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, { provider: "azure" }, async (id) => {
+        deleted.push(id);
+      }),
+    });
+    storage.seed(
+      "lease:cbx_abcdef123456",
+      testLease({
+        id: "cbx_abcdef123456",
+        slug: "slow-azure",
+        provider: "azure",
+        cloudID: "",
+        region: "eastus",
+        state: "provisioning",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/slow-azure/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+
+    expect(release.status).toBe(200);
+    expect(deleted).toEqual([]);
+    const { lease } = (await release.json()) as { lease: LeaseRecord };
+    expect(lease.state).toBe("released");
+  });
+
+  it("does not reactivate a provisioning lease released while provider create is pending", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    const createStartedPromise = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finishCreatePromise = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        async () => {
+          createStarted();
+          await finishCreatePromise;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+        async (id) => {
+          deleted.push(id);
+        },
+      ),
+    });
+
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await createStartedPromise;
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(200);
+
+    finishCreate();
+    const create = await createPromise;
+    expect(create.status).toBe(409);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
+    const lease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(lease).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "released",
+      cloudID: "",
+    });
+  });
+
+  it("does not reactivate a provisioning lease released while create finalization is pending", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    let finalizationStarted!: () => void;
+    let finishFinalization!: () => void;
+    const finalizationStartedPromise = new Promise<void>((resolve) => {
+      finalizationStarted = resolve;
+    });
+    const finishFinalizationPromise = new Promise<void>((resolve) => {
+      finishFinalization = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        undefined,
+        {
+          provider: "azure",
+          cloudID: "vm-cbx-abcdef123456",
+          region: "eastus",
+          onFinalizeLeaseCreate: async (config, lease) => {
+            finalizationStarted();
+            await finishFinalizationPromise;
+            return { config, lease };
+          },
+        },
+        async (id) => {
+          deleted.push(id);
+        },
+      ),
+    });
+
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await finalizationStartedPromise;
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(200);
+
+    finishFinalization();
+    const create = await createPromise;
+    expect(create.status).toBe(409);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "released",
+      cloudID: "",
+    });
+  });
+
+  it("preserves no-delete releases while provider create is pending", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    const createStartedPromise = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finishCreatePromise = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        async () => {
+          createStarted();
+          await finishCreatePromise;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+        async (id) => {
+          deleted.push(id);
+        },
+      ),
+    });
+
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await createStartedPromise;
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: false },
+      }),
+    );
+    expect(release.status).toBe(200);
+    const retryRelease = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: false },
+      }),
+    );
+    expect(retryRelease.status).toBe(200);
+
+    finishCreate();
+    const create = await createPromise;
+    expect(create.status).toBe(409);
+    expect(deleted).toEqual([]);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "released",
+      cloudID: "vm-cbx-abcdef123456",
+      keep: true,
+      releaseDeletesServer: false,
+    });
+
+    const defaultRelease = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(defaultRelease.status).toBe(200);
+    expect(deleted).toEqual([]);
+
+    const deleteKept = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(deleteKept.status).toBe(200);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
+
+    const retryDeleteKept = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(retryDeleteKept.status).toBe(200);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
+  });
+
+  it("does not overwrite a released provisioning lease when provider create later fails", async () => {
+    const storage = new MemoryStorage();
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    const createStartedPromise = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finishCreatePromise = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(async () => {
+        createStarted();
+        await finishCreatePromise;
+        throw new Error("azure create failed after release");
+      }),
+    });
+
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await createStartedPromise;
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: false },
+      }),
+    );
+    expect(release.status).toBe(200);
+
+    finishCreate();
+    const create = await createPromise;
+    expect(create.status).toBe(500);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "released",
+      cloudID: "",
+      releaseDeletesServer: false,
+    });
+  });
+
+  it("keeps released state when cleanup after a provisioning release fails", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    let failDelete = true;
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    const createStartedPromise = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finishCreatePromise = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        async () => {
+          createStarted();
+          await finishCreatePromise;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+        async (id) => {
+          deleted.push(id);
+          if (failDelete) {
+            throw new Error("azure delete throttled");
+          }
+        },
+      ),
+    });
+
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await createStartedPromise;
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(200);
+
+    finishCreate();
+    const create = await createPromise;
+    expect(create.status).toBe(500);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
+    const failedCleanup = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(failedCleanup).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "released",
+      cloudID: "vm-cbx-abcdef123456",
+      cleanupError: "azure delete throttled",
+      releaseDeletesServer: true,
+    });
+
+    failDelete = false;
+    const retryDelete = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(retryDelete.status).toBe(200);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456", "vm-cbx-abcdef123456"]);
+    const retried = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(retried?.state).toBe("released");
+    expect(retried?.cleanupError).toBeUndefined();
+    expect(retried?.releaseDeletesServer).toBeUndefined();
+  });
+
+  it("keeps failed state when cleanup after provisioning expiry fails", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    const createStartedPromise = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finishCreatePromise = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        async () => {
+          createStarted();
+          await finishCreatePromise;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+        async (id) => {
+          deleted.push(id);
+          throw new Error("azure delete throttled");
+        },
+      ),
+    });
+
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await createStartedPromise;
+    const provisioning = storage.value<LeaseRecord>("lease:cbx_abcdef123456")!;
+    provisioning.state = "failed";
+    provisioning.endedAt = new Date().toISOString();
+    storage.seed("lease:cbx_abcdef123456", provisioning);
+
+    finishCreate();
+    const create = await createPromise;
+    expect(create.status).toBe(500);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      id: "cbx_abcdef123456",
+      provider: "azure",
+      state: "failed",
+      cloudID: "vm-cbx-abcdef123456",
+      cleanupError: "azure delete throttled",
+    });
   });
 
   it("rejects brokered Tailscale tags outside the coordinator allowlist", async () => {
@@ -1435,7 +2365,7 @@ describe("fleet lease identity and idle", () => {
     expect(create.status).toBe(201);
     expect(awsCIDRs).toEqual(["198.51.100.44/32", "203.0.113.7/32"]);
     expect(reconcile).toBe("authoritative");
-    expect(inFlightLeaseVisible).toBe(false);
+    expect(inFlightLeaseVisible).toBe(true);
     expect(inFlightCIDRs).toEqual(["203.0.113.7/32"]);
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.network?.sshSourceCIDRs).toEqual([
       "203.0.113.7/32",
@@ -6331,6 +7261,7 @@ describe("fleet identity", () => {
       owner: "peter@example.com",
       org: "openclaw",
       auth: "bearer",
+      admin: false,
     });
   });
 
@@ -6349,6 +7280,28 @@ describe("fleet identity", () => {
       owner: "friend@example.com",
       org: "openclaw",
       auth: "github",
+      admin: false,
+    });
+  });
+
+  it("reports forwarded GitHub token expiry when present", async () => {
+    const fleet = testFleet();
+    const response = await fleet.fetch(
+      request("GET", "/v1/whoami", {
+        headers: {
+          "x-crabbox-auth": "github",
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "openclaw",
+          "x-crabbox-token-expires-at": "2026-12-05T00:00:00.000Z",
+        },
+      }),
+    );
+    expect(await response.json()).toEqual({
+      owner: "friend@example.com",
+      org: "openclaw",
+      auth: "github",
+      admin: false,
+      tokenExpiresAt: "2026-12-05T00:00:00.000Z",
     });
   });
 
@@ -6358,6 +7311,145 @@ describe("fleet identity", () => {
     expect(response.status).toBe(403);
     const macHosts = await fleet.fetch(request("GET", "/v1/admin/mac-hosts"));
     expect(macHosts.status).toBe(403);
+  });
+
+  it("renders provider traffic lights on the admin portal page", async () => {
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_aws_admin",
+      testLease({
+        id: "cbx_aws_admin",
+        slug: "aws-admin",
+        provider: "aws",
+        owner: "alice@example.com",
+        org: "example-org",
+        serverType: "c7a.large",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_azure_admin",
+      testLease({
+        id: "cbx_azure_admin",
+        slug: "azure-admin",
+        provider: "azure",
+        owner: "bob@example.com",
+        org: "example-org",
+        serverType: "Standard_D2ads_v6",
+        state: "failed",
+      }),
+    );
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        servers: [testMachine({ provider: "aws", cloudID: "i-000000000001" })],
+      }),
+      hetzner: fakeProvider(undefined, {
+        provider: "hetzner",
+        onList: async () => {
+          throw new Error("hetzner GET /ssh_keys: http 401: token invalid");
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("GET", "/portal/admin", {
+        headers: {
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "admin@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain("provider health");
+    expect(body).toContain("4 supported");
+    expect(body).toContain("users");
+    expect(body).toContain('href="/portal/admin/users"');
+    expect(body).not.toContain("all leases");
+    expect(body).toContain("attention");
+    expect(body).toContain("provider-favicon");
+    expect(body).toContain("/v1/providers/aws/readiness");
+    expect(body).toContain("disabled>machines</button>");
+    expect(body).toContain("/portal/admin/leases?provider=aws");
+    expect(body).toContain("AWS");
+    expect(body).toContain("Azure");
+    expect(body).toContain("GCP");
+    expect(body).toContain("Hetzner");
+    expect(body).not.toContain("Blacksmith");
+    expect(body).toContain("GCP_PROJECT_ID");
+    expect(body).not.toContain("alice@example.com");
+    expect(body).not.toContain("aws-admin");
+    expect(body).not.toContain("azure-admin");
+    expect(body).toContain('data-tone="ok"');
+    expect(body).toContain('data-tone="bad"');
+    expect(body).toContain('data-tone="disabled"');
+    expect(body).toContain("token invalid");
+
+    const leasesPage = await fleet.fetch(
+      request("GET", "/portal/admin/leases?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const leasesBody = await leasesPage.text();
+    expect(leasesPage.status).toBe(200);
+    expect(leasesBody).toContain("AWS leases");
+    expect(leasesBody).toContain("all providers");
+    expect(leasesBody).toContain("aws-admin");
+    expect(leasesBody).not.toContain("azure-admin");
+    expect(leasesBody).toContain("admin-eject");
+    expect(leasesBody).toContain("Emergency release aws-admin");
+    expect(leasesBody).toContain(
+      "/portal/leases/cbx_aws_admin/release?return=%2Fportal%2Fadmin%2Fleases%3Fprovider%3Daws",
+    );
+
+    const usersPage = await fleet.fetch(
+      request("GET", "/portal/admin/users", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const usersBody = await usersPage.text();
+    expect(usersPage.status).toBe(200);
+    expect(usersBody).toContain("bob@example.com");
+    expect(usersBody).not.toContain("all leases");
+
+    const portal = await fleet.fetch(
+      request("GET", "/portal", {
+        headers: {
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "vincentkoc@ieee.org",
+          "x-crabbox-org": "openclaw",
+        },
+      }),
+    );
+    const portalBody = await portal.text();
+    expect(portalBody).toContain('href="/portal/admin"');
+    expect(portalBody).toContain("<span>admin</span>");
+
+    const filtered = await fleet.fetch(
+      request("GET", "/v1/admin/leases?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const filteredBody = (await filtered.json()) as { leases: LeaseRecord[] };
+    expect(filteredBody.leases.map((lease) => lease.provider)).toEqual(["aws"]);
+
+    const release = await fleet.fetch(
+      request(
+        "POST",
+        "/portal/leases/cbx_aws_admin/release?return=%2Fportal%2Fadmin%2Fleases%3Fprovider%3Daws",
+        { headers: { "x-crabbox-admin": "true" } },
+      ),
+    );
+    expect(release.status).toBe(303);
+    expect(release.headers.get("location")).toBe("/portal/admin/leases?provider=aws");
+  });
+
+  it("requires admin access for the admin portal page", async () => {
+    const fleet = testFleet();
+    const response = await fleet.fetch(request("GET", "/portal/admin"));
+    expect(response.status).toBe(403);
   });
 
   it("audits expired AWS leases against cloud state", async () => {
@@ -6440,6 +7532,64 @@ describe("fleet identity", () => {
     };
     expect(body.audits).toMatchObject([
       { leaseID: "cbx_000000000004", cloudStatus: "missing", cloudState: "terminated" },
+      { leaseID: "cbx_000000000002", cloudStatus: "missing" },
+      { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
+    ]);
+  });
+
+  it("audits expired Azure leases against cloud state", async () => {
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "live-azure",
+        provider: "azure",
+        cloudID: "vm-live",
+        region: "eastus",
+        state: "expired",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        slug: "gone-azure",
+        provider: "azure",
+        cloudID: "vm-gone",
+        region: "eastus",
+        state: "expired",
+        createdAt: "2026-05-01T00:01:00.000Z",
+      }),
+    );
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        servers: [
+          testMachine({
+            provider: "azure",
+            cloudID: "vm-live",
+            name: "vm-live",
+            status: "running",
+            serverType: "Standard_D16ads_v5",
+            host: "192.0.2.30",
+            labels: { crabbox: "true", lease: "cbx_000000000001" },
+          }),
+        ],
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/admin/lease-audit?state=expired&provider=azure", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      audits: Array<{ leaseID: string; cloudStatus: string; cloudState?: string }>;
+    };
+    expect(body.audits).toMatchObject([
       { leaseID: "cbx_000000000002", cloudStatus: "missing" },
       { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
     ]);
@@ -6604,6 +7754,7 @@ describe("fleet identity", () => {
     const body = (await poll.json()) as {
       status: string;
       token?: string;
+      tokenExpiresAt?: string;
       owner?: string;
       org?: string;
       login?: string;
@@ -6615,6 +7766,38 @@ describe("fleet identity", () => {
       login: "friend",
     });
     expect(body.token).toMatch(/^cbxu_/);
+    expect(body.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("honors configured GitHub user token TTL", async () => {
+    const { fleet, loginID, state, pollSecret } = await startGitHubLogin({
+      CRABBOX_USER_TOKEN_TTL_SECONDS: "7200",
+    });
+    vi.stubGlobal("fetch", githubFetchMock({ member: true }));
+
+    const callback = await fleet.fetch(
+      request("GET", `/v1/auth/github/callback?code=ok&state=${state}`),
+    );
+    expect(callback.status).toBe(200);
+
+    const poll = await fleet.fetch(
+      request("POST", "/v1/auth/github/poll", {
+        body: {
+          loginID,
+          pollSecret,
+        },
+      }),
+    );
+    expect(poll.status).toBe(200);
+    const body = (await poll.json()) as {
+      status: string;
+      token?: string;
+      tokenExpiresAt?: string;
+    };
+    expect(body.status).toBe("complete");
+    expect(body.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const payload = decodeUserTokenPayload(body.token ?? "");
+    expect(payload.exp - payload.iat).toBe(7200);
   });
 
   it("falls back to the default org when allowed org config is empty", async () => {
@@ -6922,7 +8105,7 @@ function testFleet(
 }
 
 function fakeProvider(
-  onCreate?: (config: LeaseConfig) => void,
+  onCreate?: (config: LeaseConfig) => Promise<void> | void,
   result: {
     provider?: "hetzner" | "aws" | "azure" | "gcp";
     serverType?: string;
@@ -6933,6 +8116,7 @@ function fakeProvider(
     market?: string;
     attempts?: ProvisioningAttempt[];
     servers?: ProviderMachine[];
+    onList?: () => Promise<ProviderMachine[]> | ProviderMachine[];
     onCreateImage?: (
       instanceID: string,
       name: string,
@@ -6971,6 +8155,18 @@ function fakeProvider(
       config: LeaseConfig,
       storage: MemoryStorage | undefined,
     ) => Promise<LeaseConfig> | LeaseConfig;
+    onFinalizeLeaseCreate?: (
+      config: LeaseConfig,
+      lease: LeaseRecord,
+      server: ProviderMachine,
+      attempts: ProvisioningAttempt[],
+    ) =>
+      | Promise<{ config: LeaseConfig; lease: LeaseRecord } | undefined>
+      | {
+          config: LeaseConfig;
+          lease: LeaseRecord;
+        }
+      | undefined;
   } = {},
   onDelete?: (id: string) => Promise<void>,
   onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
@@ -6981,6 +8177,9 @@ function fakeProvider(
       storage = nextStorage;
     },
     async listCrabboxServers() {
+      if (result.onList) {
+        return await result.onList();
+      }
       return result.servers ?? [];
     },
     async getServer(id: string) {
@@ -7071,7 +8270,7 @@ function fakeProvider(
       },
     ) {
       result.onCreateProvisioning?.(provisioning);
-      onCreate?.(config);
+      await onCreate?.(config);
       return {
         server: {
           provider: result.provider ?? "hetzner",
@@ -7111,6 +8310,10 @@ function fakeProvider(
       server: ProviderMachine,
       attempts: ProvisioningAttempt[],
     ) {
+      const finalized = await result.onFinalizeLeaseCreate?.(config, lease, server, attempts);
+      if (finalized) {
+        return finalized;
+      }
       const provider = result.provider ?? lease.provider;
       const nextLease = { ...lease };
       if (provider === "aws") {
@@ -7746,4 +8949,11 @@ function request(
 async function sha256HexForTest(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function decodeUserTokenPayload(token: string): { exp: number; iat: number } {
+  expect(token).toMatch(/^cbxu_/);
+  const [payload] = token.slice("cbxu_".length).split(".");
+  const decoded = Buffer.from(payload, "base64url").toString("utf8");
+  return JSON.parse(decoded) as { exp: number; iat: number };
 }

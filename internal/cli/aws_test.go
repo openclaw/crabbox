@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/base64"
+	"encoding/binary"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +19,158 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
+
+func TestAWSEnsureSSHKeyAcceptsMatchingExistingFingerprint(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
+	fingerprints, err := awsImportedPublicKeyFingerprints(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		actions = append(actions, params.Get("Action"))
+		switch params.Get("Action") {
+		case "DescribeKeyPairs":
+			if params.Get("IncludePublicKey") != "true" {
+				t.Fatalf("IncludePublicKey=%q, want true", params.Get("IncludePublicKey"))
+			}
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName><keyFingerprint>`+fingerprints[0]+`</keyFingerprint></item></keySet></DescribeKeyPairsResponse>`)
+		case "ImportKeyPair":
+			t.Fatal("ImportKeyPair should not run for matching existing key")
+		default:
+			writeEC2Error(w, "Unexpected", params.Get("Action"), http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	if err := testAWSClient(server.URL).EnsureSSHKey(context.Background(), "crabbox-test", publicKey); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(actions, []string{"DescribeKeyPairs"}) {
+		t.Fatalf("actions=%v, want DescribeKeyPairs only", actions)
+	}
+}
+
+func TestAWSEnsureSSHKeyRejectsMismatchedExistingFingerprint(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
+	var actions []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		actions = append(actions, params.Get("Action"))
+		switch params.Get("Action") {
+		case "DescribeKeyPairs":
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName><keyFingerprint>SHA256:mismatched</keyFingerprint></item></keySet></DescribeKeyPairsResponse>`)
+		case "ImportKeyPair":
+			t.Fatal("ImportKeyPair should not run for mismatched existing key")
+		default:
+			writeEC2Error(w, "Unexpected", params.Get("Action"), http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	err := testAWSClient(server.URL).EnsureSSHKey(context.Background(), "crabbox-test", publicKey)
+	if err == nil || !strings.Contains(err.Error(), "already exists with fingerprint") || !strings.Contains(err.Error(), "unique provider key") {
+		t.Fatalf("err=%v, want key fingerprint mismatch", err)
+	}
+	if !slices.Equal(actions, []string{"DescribeKeyPairs"}) {
+		t.Fatalf("actions=%v, want DescribeKeyPairs only", actions)
+	}
+}
+
+func TestAWSEnsureSSHKeyRejectsMismatchedExistingPublicKey(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
+	otherPublicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 2))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch params.Get("Action") {
+		case "DescribeKeyPairs":
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName><publicKey>`+otherPublicKey+`</publicKey></item></keySet></DescribeKeyPairsResponse>`)
+		case "ImportKeyPair":
+			t.Fatal("ImportKeyPair should not run for mismatched existing key")
+		default:
+			writeEC2Error(w, "Unexpected", params.Get("Action"), http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	err := testAWSClient(server.URL).EnsureSSHKey(context.Background(), "crabbox-test", publicKey)
+	if err == nil || !strings.Contains(err.Error(), "already exists with different public key") {
+		t.Fatalf("err=%v, want key material mismatch", err)
+	}
+}
+
+func TestAWSEnsureSSHKeyFallsBackToFingerprintForAlternatePublicKeyEncoding(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 1))
+	fingerprints, err := awsImportedPublicKeyFingerprints(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch params.Get("Action") {
+		case "DescribeKeyPairs":
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName><publicKey>---- BEGIN SSH2 PUBLIC KEY ----</publicKey><keyFingerprint>`+fingerprints[0]+`</keyFingerprint></item></keySet></DescribeKeyPairsResponse>`)
+		case "ImportKeyPair":
+			t.Fatal("ImportKeyPair should not run for matching fingerprint")
+		default:
+			writeEC2Error(w, "Unexpected", params.Get("Action"), http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	if err := testAWSClient(server.URL).EnsureSSHKey(context.Background(), "crabbox-test", publicKey); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAWSImportedRSAPublicKeyFingerprintsIncludeRFC4716Blob(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-rsa", []byte{1, 0, 1}, testBytes(128, 7))
+	_, blob, err := parseOpenSSHPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := md5.Sum(blob) //nolint:gosec // This test pins EC2's imported RSA MD5 fingerprint contract.
+	want := colonHex(sum[:])
+	fingerprints, err := awsImportedPublicKeyFingerprints(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fingerprints) == 0 || fingerprints[0] != want {
+		t.Fatalf("fingerprints=%v, want first %q", fingerprints, want)
+	}
+	if !awsKeyFingerprintMatches("MD5:"+want, fingerprints) {
+		t.Fatalf("fingerprints=%v should match MD5-prefixed value %q", fingerprints, want)
+	}
+}
 
 func TestApplyAWSRunInstanceTargetOptionsEnablesNestedVirtualizationForWSL2(t *testing.T) {
 	input := &ec2.RunInstancesInput{}
@@ -445,6 +600,7 @@ func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 	var imageQueries []string
 	var runImages []string
 	var runTypes []string
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 3))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -456,7 +612,7 @@ func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 		}
 		switch action := params.Get("Action"); action {
 		case "DescribeKeyPairs":
-			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName></item></keySet></DescribeKeyPairsResponse>`)
+			writeEC2XML(w, `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-test</keyName><publicKey>`+publicKey+`</publicKey></item></keySet></DescribeKeyPairsResponse>`)
 		case "DescribeSecurityGroups":
 			writeEC2XML(w, `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-123</groupId></item></securityGroupInfo></DescribeSecurityGroupsResponse>`)
 		case "RevokeSecurityGroupIngress":
@@ -510,7 +666,7 @@ func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 		SSHPort: "22",
 	}
 
-	serverRecord, resolved, err := client.createServerWithFallbackInRegion(context.Background(), cfg, "ssh-ed25519 test", "cbx_123", "mac-test", false, nil)
+	serverRecord, resolved, err := client.createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "mac-test", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,6 +738,33 @@ func TestAWSMacOSAMIQueryForInstanceType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testOpenSSHPublicKey(keyType string, parts ...[]byte) string {
+	blob := appendSSHString(nil, keyType)
+	for _, part := range parts {
+		blob = appendSSHBytes(blob, part)
+	}
+	return keyType + " " + base64.StdEncoding.EncodeToString(blob) + " crabbox-test"
+}
+
+func appendSSHString(dst []byte, value string) []byte {
+	return appendSSHBytes(dst, []byte(value))
+}
+
+func appendSSHBytes(dst, value []byte) []byte {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(value)))
+	dst = append(dst, lenBuf[:]...)
+	return append(dst, value...)
+}
+
+func testBytes(length int, start byte) []byte {
+	out := make([]byte, length)
+	for i := range out {
+		out[i] = start + byte(i)
+	}
+	return out
 }
 
 func testAWSClient(endpoint string) *AWSClient {

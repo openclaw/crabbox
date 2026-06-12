@@ -1,8 +1,10 @@
 package cloudflare
 
 import (
+	"context"
 	"flag"
 	"io"
+	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -25,6 +27,7 @@ type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type CleanupRequest = core.CleanupRequest
 type Server = core.Server
+type LeaseClaim = core.LeaseClaim
 type Repo = core.Repo
 type SyncManifest = core.SyncManifest
 type ExitError = core.ExitError
@@ -60,10 +63,6 @@ func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }
 
-func normalizeLeaseSlug(value string) string {
-	return core.NormalizeLeaseSlug(value)
-}
-
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
@@ -72,8 +71,8 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
-func claimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
+func claimLeaseForRepoProviderPondLabels(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, labels map[string]string) error {
+	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, "", pond, repoRoot, idleTimeout, reclaim, Server{Labels: labels}, core.SSHTarget{})
 }
 
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
@@ -132,10 +131,14 @@ func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }
 
-func syncManifest(root string, excludes []string) (SyncManifest, error) {
-	return core.BuildSyncManifest(root, excludes)
+func syncManifest(root string, excludes, includes []string) (SyncManifest, error) {
+	return core.BuildSyncManifestFiltered(root, excludes, includes)
 }
 
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
+}
+
+func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }

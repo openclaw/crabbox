@@ -18,6 +18,7 @@ var (
 	blacksmithIDPattern        = regexp.MustCompile(`\btbx_[A-Za-z0-9_-]+\b`)
 	blacksmithSyncStartPattern = regexp.MustCompile(`(?i)^\s*Syncing(?:\.\.\.| from repo root:)`)
 	blacksmithSyncDonePattern  = regexp.MustCompile(`(?i)^\s*(Changes synced in|No changes to sync|Sync complete)\b`)
+	blacksmithStatusPollDelay  = 5 * time.Second
 	blacksmithCleanupAttempts  = 36
 	blacksmithCleanupDelay     = 5 * time.Second
 	blacksmithCleanupQuiet     = 12
@@ -38,10 +39,6 @@ type blacksmithListItem struct {
 	Job      string `json:"job"`
 	Ref      string `json:"ref"`
 	Created  string `json:"created"`
-}
-
-func isBlacksmithProvider(provider string) bool {
-	return provider == blacksmithTestboxProvider || provider == "blacksmith"
 }
 
 func registerBlacksmithFlags(fs *flag.FlagSet, defaults Config) blacksmithFlagValues {
@@ -101,15 +98,6 @@ func blacksmithRunArgs(cfg Config, leaseID, keyPath string, command []string, de
 		args = append(args, "--debug")
 	}
 	args = append(args, blacksmithCommandString(command, shellMode))
-	return args
-}
-
-func blacksmithStatusArgs(cfg Config, leaseID string, wait bool, waitTimeout time.Duration) []string {
-	args := blacksmithBaseArgs(cfg)
-	args = append(args, "testbox", "status", "--id", leaseID)
-	if wait {
-		args = append(args, "--wait", "--wait-timeout", waitTimeout.String())
-	}
 	return args
 }
 
@@ -345,10 +333,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
 }
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {

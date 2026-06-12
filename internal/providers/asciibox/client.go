@@ -76,7 +76,11 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 	}
 	result, err := c.run(ctx, args...)
 	if err != nil {
-		if partial, parseErr := decodeNewBox(result.Stdout); parseErr == nil && partial.ID != "" {
+		partial, parseErr := decodeNewBox(result.Stdout)
+		if partial.ID != "" {
+			if parseErr != nil {
+				return partial, fmt.Errorf("ascii-box CLI new failed after creating %s: %s", partial.ID, c.formatError(result, err))
+			}
 			if ready, waitErr := c.waitForBoxReady(ctx, partial); waitErr == nil {
 				return ready, nil
 			}
@@ -86,7 +90,7 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 	}
 	box, err := decodeNewBox(result.Stdout)
 	if err != nil {
-		return boxData{}, err
+		return box, err
 	}
 	if strings.TrimSpace(box.ID) == "" {
 		return boxData{}, fmt.Errorf("ascii-box CLI new response missing box id")
@@ -218,9 +222,55 @@ func (c *client) ensureConfig(ctx context.Context) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	if err := writePrivateFileAtomic(configPath, data); err != nil {
 		return err
 	}
+	return nil
+}
+
+func writePrivateFileAtomic(path string, data []byte) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to overwrite symlink config file %s", path)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing to overwrite non-regular config file %s", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	keep := false
+	defer func() {
+		if !keep {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	keep = true
 	return nil
 }
 
@@ -344,7 +394,7 @@ func decodeNewBox(output string) (boxData, error) {
 			return latest, nil
 		}
 		if event.Event == "error" {
-			return boxData{}, fmt.Errorf("ascii-box CLI new failed: %s", redactBoxSecrets(string(line)))
+			return latest, fmt.Errorf("ascii-box CLI new failed: %s", redactBoxSecrets(string(line)))
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -395,6 +445,9 @@ func mergeBox(base, update boxData) boxData {
 	}
 	if update.ArchiveAfter != nil {
 		base.ArchiveAfter = update.ArchiveAfter
+	}
+	if update.ExpiresAt != nil {
+		base.ExpiresAt = update.ExpiresAt
 	}
 	if update.CreatedAt != nil {
 		base.CreatedAt = update.CreatedAt

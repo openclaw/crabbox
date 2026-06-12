@@ -1,14 +1,89 @@
 # Changelog
 
-## 0.26.1 - Unreleased
+## Unreleased
 
 ### Added
 
 - Added repeatable `--local-container-volume host:container[:ro]` bind mounts for explicit local-container runs. Thanks @anagnorisis2peripeteia.
+- Added provider-neutral coordinator registration for direct SSH leases, with owner-scoped inventory and sharing, outbound WebVNC, automatic bridge daemons for kept desktops, and coordinator-safe metadata-only release and expiry.
+- Added provider-optional `crabbox pause` and `crabbox resume` lifecycle commands, with Islo sandbox pause/resume support that preserves local lease claims. Thanks @zozo123.
+- Added `provider: opensandbox` for delegated Linux sandbox runs through the OpenSandbox API, including archive sync, retained lease reuse, off-argv environment forwarding, status, and cleanup. Thanks @coygeek.
+- Added `provider: anthropic-sandbox-runtime` (`srt`) for local one-shot command execution through Anthropic Sandbox Runtime, including filesystem/network policy handoff, doctor checks, config overrides, and live enforcement coverage. Thanks @coygeek.
+- Added `provider: apple-vz` for full ARM64 Ubuntu VMs through Apple's `Virtualization.framework`, including verified cloud images, secret-safe signed URL handling, loopback VSOCK SSH, retained leases, native helper packaging, failure rollback, and live lifecycle coverage. Thanks @coygeek.
+- Added `provider: digitalocean` for direct Linux SSH leases backed by DigitalOcean Droplets, including flat-tag ownership, per-lease SSH keys, docs, and guarded live smoke coverage. Thanks @coygeek.
+- Added a delegated Freestyle provider that runs commands in Freestyle VMs through the Freestyle REST API, with env-only authentication, archive sync, and automatic VM cleanup. Thanks @zozo123.
+- Added `provider: hyperv` for local Windows VM SSH leases through Microsoft Hyper-V, including differencing-disk provisioning, OpenSSH and MinGit bootstrap, password-less dev-image initialization, retained lease reuse, and cleanup. Thanks @anagnorisis2peripeteia.
+- Added an opt-in Islo userspace Tailscale plane with tailnet-aware pond peers, proxy-routed tailnet traffic, and URL-bridge fallback for leases without `--tailscale`. Thanks @zozo123.
+- Added `provider: xcpng` for SSH leases on XCP-ng pools through the XenAPI control plane, including template cloning, fresh ISO installs, retained lease reuse, cleanup, diagnostics, and guarded live E2E coverage. Thanks @coygeek.
+
+### Fixed
+
+- Fixed `local-container` stop cleanup when a Docker container was removed externally, including stale claim and stored-key removal. Thanks @hxy91819.
+- Fixed Apple VZ release artifacts to target macOS 13, bounded guest serial logs without blocking noisy VMs, escaped terminal controls in diagnostics, and preserved retained lease state when helper inventory lookup fails.
+- Fixed DigitalOcean capability-tag persistence, provider config visibility and precedence, account-scoped ambiguous Droplet/SSH-key create recovery, retryable cleanup, and unnecessary monitoring-agent installation.
+- Fixed Namespace Devbox setup instructions to use the current browser workspace approval flow instead of obsolete token environment variables.
+- Fixed XCP-ng XenAPI integer encoding, trusted endpoint configuration, template validation, HVM config-drive attachment, deterministic guest-network selection, retained-lease IP fallback, YAML-safe usernames, collision-resistant ISO runs, required networking for fresh ISO VMs, Windows 11 disk and vTPM requirements, bounded guest-network discovery, failure-recoverable VM ownership, copied-disk and local-key cleanup, generated Windows answer media, pre-boot answer attachment, and bounded ISO E2E cleanup.
+
+## 0.28.0 - 2026-06-11
+
+### Added
+
+- Added `provider: opencomputer` for delegated Linux sandbox runs through the OpenComputer REST API, including archive sync, retained leases, optional burst capacity, status, and cleanup. Thanks @zozo123.
+- Added local-container checkpoint forks that launch a fresh Docker lease from a committed checkpoint image while replaying and validating its recorded daemon scope. Thanks @anagnorisis2peripeteia.
+- Added opt-in native Docker local-container checkpoints with immutable image identity, daemon-scope-aware verification and deletion, mounted-workspace guards, and live lifecycle coverage. Thanks @anagnorisis2peripeteia.
+- Added `provider: morph` for Morph Cloud Linux SSH leases, including snapshot boot, Morph API key/config plumbing, per-instance SSH key retrieval, pause-on-release reuse, and provider docs. Thanks @coygeek.
+- Added a built-in Incus provider for local or remote Linux containers and virtual machines, including socket, TLS, and OIDC control-plane authentication, optional SSH proxy devices, retained lease reuse, and live lifecycle verification. Thanks @coygeek.
+- Added Tart macOS desktop leases with native Screen Sharing, a token-gated host-side WebVNC bridge, and documented local-network exposure boundaries. Thanks @anagnorisis2peripeteia.
+- Added native Azure Windows ARM64 lease support with explicit Windows ARM64 images, Cobalt ARM64 SKU inference, and `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` broker configuration for ARM64 validation.
+- Added persistent Apple Container 1.0 development machines through the local `apple-machine` provider.
+- Added local Windows sandbox execution through Microsoft Execution Containers with explicit filesystem, network, DACL-fallback, and Win32k capability controls plus an execution-backed doctor check.
 
 ### Changed
 
+- Removed the stale root OpenClaw plugin package and its npm publishing surface; Crabbox releases now version only the Worker package and Go CLI artifacts.
+- Expanded release, smoke, installer, provider-contract, cleanup, and race coverage across the CLI, Worker, and provider adapters.
+
 ### Fixed
+
+- Fixed kept Tart VMs stopping when the Crabbox command that launched them exited.
+- Hardened provider lifecycle ownership, claims, retained-resource metadata, rollback, cleanup timeouts, and partial-failure reporting across Apple Container, ASCII Box, AWS, Azure, Azure Dynamic Sessions, Blacksmith Testbox, Cloudflare, Daytona, Docker Sandbox, E2B, exe.dev, external providers, GCP, Hetzner, Islo, Local Container, Modal, Multipass, Namespace, Parallels, Proxmox, Railway, RunPod, Semaphore, Sprites, SSH, Tart, Tenki, Tensorlake, Upstash Box, and Weights & Biases.
+- Fixed static SSH requested slugs, delegated synthetic lease IDs, provider bridge targets, service inventory pagination, Windows share validation, and provider-specific configuration validation.
+- Fixed Linux and macOS developer-tool installers, AWS account and orphan guards, image-minting and WSL2 smoke cleanup, coverage isolation, live-smoke JSON handling, and release workflow tag checkout ordering.
+- Fixed CI deadcode, script sandboxing, and Cloudflare cleanup race failures found during release validation.
+
+## 0.27.0 - 2026-06-09
+
+### Added
+
+- Added ordered declarative external lifecycle steps with optional acquire rollback, allowing multi-command private provider setup without shell wrappers.
+
+## 0.26.1 - 2026-06-09
+
+### Added
+
+- Added declarative `external.lifecycle` command configuration, provider resource-name mapping, and coordinator-free WebVNC over SSH for deterministic private devbox CLIs.
+- Added Podman runtime compatibility for `provider: local-container`, including runtime selection, provider flags on SSH commands, and Podman-safe local lease claim scopes. Thanks @sallyom.
+- Added `sync.include` / `sync.includes` whitelists for root-relative sync plans, SSH sync, native Windows sync, local Actions hydration, and archive-sync providers. Thanks @anagnorisis2peripeteia.
+- Added generic `kubevirt` SSH leases and a versioned `external` executable provider so private or proprietary VM/devbox control planes can integrate through configuration without provider-specific Crabbox forks.
+- Added Tenki to the live provider smoke harness, including authenticated create/run coverage and a paused-session check that proves `status --wait` does not resume the sandbox.
+
+### Changed
+
+- Extended GitHub broker login user tokens to 180 days by default, exposed token expiry in login/doctor identity output, and made the lifetime configurable with `CRABBOX_USER_TOKEN_TTL_SECONDS`.
+- Added optional GitHub user-token admin allowlists via `CRABBOX_GITHUB_ADMIN_OWNERS` and `CRABBOX_GITHUB_ADMIN_LOGINS`, and removed committed capacity-admin identities from the reusable Worker config.
+
+### Fixed
+
+- Fixed brokered provider doctor output so expired or rejected broker tokens tell maintainers to renew Crabbox login instead of misreporting AWS, Azure, GCP, or Hetzner credential failures.
+- Fixed delegated run artifact collection so Blacksmith Testbox can satisfy `--require-artifact` and `--artifact-glob` before one-shot lease cleanup.
+- Fixed malformed AWS, Azure, and GCP SSH CIDR configuration to fail closed instead of falling back to broad SSH access. Thanks @coygeek.
+- Fixed local-container warmup on Windows by mounting the generated bootstrap directory instead of passing the script inline to Docker. Thanks @anagnorisis2peripeteia.
+- Fixed SSH-backed status waits to honor `--wait-timeout` while allowing Tenki readiness probes without resuming paused sessions. Thanks @aki-luxor.
+- Fixed Tenki JSON lease listings to expose the Crabbox lease ID instead of an unset numeric provider ID.
+- Fixed brokered Azure lease creation to persist in-flight leases before VM provisioning, keep failed creates visible, and sweep orphaned Azure VMs from coordinator maintenance. Fixes https://github.com/openclaw/crabbox/issues/215.
+- Fixed brokered lease release races so leases released while provisioning cannot be reactivated or lose cleanup retry state.
+- Fixed Islo provider status, streaming exec, archive upload, share, and delete handling for the current Islo API contract. Thanks @zozo123.
+- Restricted shared `use` viewers from mutating lease heartbeat or Tailscale metadata, and hardened archive sync for option-like filenames while preserving sync cancellation. Thanks @zozo123.
 
 ### Removed
 

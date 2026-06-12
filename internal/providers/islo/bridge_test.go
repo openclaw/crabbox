@@ -3,6 +3,7 @@ package islo
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,56 @@ func TestPublishPeerReusesExistingShare(t *testing.T) {
 	}
 }
 
+func TestPublishPeerSkipsExpiredExistingShares(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name         string
+		expiresAt    time.Time
+		expiresAtSet bool
+		wantCreate   bool
+	}{
+		{name: "non expiring", wantCreate: false},
+		{name: "future", expiresAt: now.Add(time.Hour), wantCreate: false},
+		{name: "expired", expiresAt: now.Add(-time.Second), wantCreate: true},
+		{name: "imminent", expiresAt: now.Add(isloShareReuseSkew / 2), wantCreate: true},
+		{name: "invalid expiry parse", expiresAtSet: true, wantCreate: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeBridgeClient{
+				preexisting: []IsloShare{{
+					ShareID:      "shr_existing",
+					URL:          "https://existing.share.islo.dev",
+					Port:         8080,
+					ExpiresAt:    tt.expiresAt,
+					ExpiresAtSet: tt.expiresAtSet,
+				}},
+			}
+			backend := newBridgeBackend(t, fake)
+			backend.rt.Clock = fixedClock{now: now}
+
+			target, err := backend.PublishPeer(context.Background(), "isb_crabbox-x-abc123", 8080, time.Hour)
+			if err != nil {
+				t.Fatalf("PublishPeer: %v", err)
+			}
+			if tt.wantCreate {
+				if target.ShareID != "shr_new" {
+					t.Fatalf("target=%#v want new share", target)
+				}
+				if len(fake.created) != 1 {
+					t.Fatalf("created=%d want 1", len(fake.created))
+				}
+				return
+			}
+			if target.ShareID != "shr_existing" {
+				t.Fatalf("target=%#v want existing share", target)
+			}
+			if len(fake.created) != 0 {
+				t.Fatalf("created=%d want 0", len(fake.created))
+			}
+		})
+	}
+}
+
 func TestPublishPeerCreatesWhenAbsent(t *testing.T) {
 	fake := &fakeBridgeClient{}
 	backend := newBridgeBackend(t, fake)
@@ -74,6 +125,18 @@ func TestPublishPeerCreatesWhenAbsent(t *testing.T) {
 	}
 	if len(fake.created) != 1 {
 		t.Fatalf("expected 1 new share, got %d", len(fake.created))
+	}
+}
+
+func TestPublishPeerDoesNotCreateWhenListFails(t *testing.T) {
+	fake := &fakeBridgeClient{listErr: errors.New("islo down")}
+	backend := newBridgeBackend(t, fake)
+	_, err := backend.PublishPeer(context.Background(), "isb_crabbox-x-abc123", 9090, time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "islo down") {
+		t.Fatalf("PublishPeer err=%v, want list error", err)
+	}
+	if len(fake.created) != 0 {
+		t.Fatalf("created=%d want 0", len(fake.created))
 	}
 }
 
@@ -122,3 +185,11 @@ func TestListPeerTargetsSurfacesErrors(t *testing.T) {
 
 // Static check: ensure isloBackend satisfies core.BridgeProvider.
 var _ core.BridgeProvider = (*isloBackend)(nil)
+
+type fixedClock struct {
+	now time.Time
+}
+
+func (c fixedClock) Now() time.Time {
+	return c.now
+}

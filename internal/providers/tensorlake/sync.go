@@ -1,12 +1,9 @@
 package tensorlake
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -40,7 +37,7 @@ func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCL
 	}
 
 	manifestStart := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes)
+	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}
@@ -97,44 +94,47 @@ func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCL
 }
 
 func (b *tensorlakeBackend) prepareWorkspace(ctx context.Context, cli *tensorlakeCLI, sandboxID, workdir string) error {
-	command := "mkdir -p " + shellQuote(workdir)
-	if b.cfg.Sync.Delete {
-		command = "rm -rf " + shellQuote(workdir) + " && " + command
-	}
-	return cli.execShell(ctx, sandboxID, command)
+	return cli.execShell(ctx, sandboxID, "mkdir -p "+shellQuote(workdir))
 }
 
 func (b *tensorlakeBackend) extractRemoteArchive(ctx context.Context, cli *tensorlakeCLI, sandboxID, remoteArchive, workdir string) error {
-	cmd := strings.Join([]string{
-		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workdir),
-		"rm -f " + shellQuote(remoteArchive),
-	}, " && ")
-	return cli.execShell(ctx, sandboxID, cmd)
+	return cli.execShell(ctx, sandboxID, tensorlakeExtractArchiveCommand(workdir, remoteArchive, b.cfg.Sync.Delete))
 }
 
-func createTensorlakeSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, stderr io.Writer) (*os.File, error) {
-	var input bytes.Buffer
-	input.Write(manifest.NUL())
-	archive, err := os.CreateTemp("", "crabbox-tensorlake-sync-*.tgz")
-	if err != nil {
-		return nil, fmt.Errorf("create sync archive temp file: %w", err)
+func tensorlakeExtractArchiveCommand(workdir, remoteArchive string, deleteExisting bool) string {
+	if !deleteExisting {
+		return strings.Join([]string{
+			"mkdir -p " + shellQuote(workdir) + " && tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workdir),
+			"crabbox_status=$?",
+			"rm -f " + shellQuote(remoteArchive),
+			"exit \"$crabbox_status\"",
+		}, "; ")
 	}
-	keep := false
-	defer func() {
-		if !keep {
-			name := archive.Name()
-			_ = archive.Close()
-			_ = os.Remove(name)
-		}
-	}()
-	cmd := exec.CommandContext(ctx, "tar", "--no-xattrs", "-czf", "-", "-C", repo.Root, "--null", "-T", "-")
-	cmd.Stdin = &input
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	cmd.Stdout = archive
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
+	parent := path.Dir(workdir)
+	tmp := path.Join(parent, ".crabbox-sync-"+randomSuffix())
+	backup := path.Join(parent, ".crabbox-backup-"+randomSuffix())
+	steps := []string{
+		"(",
+		"rm -rf " + shellQuote(tmp) + " " + shellQuote(backup) + " &&",
+		"mkdir -p " + shellQuote(tmp) + " &&",
+		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(tmp) + " &&",
+		"if [ -e " + shellQuote(workdir) + " ]; then mv " + shellQuote(workdir) + " " + shellQuote(backup) + "; fi &&",
+		"if mv " + shellQuote(tmp) + " " + shellQuote(workdir) + "; then",
+		"rm -rf " + shellQuote(backup) + ";",
+		"else",
+		"crabbox_swap_status=$?;",
+		"if [ -e " + shellQuote(backup) + " ]; then mv " + shellQuote(backup) + " " + shellQuote(workdir) + " || true; fi;",
+		"exit \"$crabbox_swap_status\";",
+		"fi",
+		");",
+		"crabbox_status=$?;",
+		"rm -rf " + shellQuote(tmp) + ";",
+		"rm -f " + shellQuote(remoteArchive) + ";",
+		"exit \"$crabbox_status\"",
 	}
-	keep = true
-	return archive, nil
+	return strings.Join(steps, " ")
+}
+
+func createTensorlakeSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {
+	return createPortableSyncArchive(ctx, repo, manifest, "crabbox-tensorlake-sync-*.tgz")
 }

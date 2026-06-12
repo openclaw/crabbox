@@ -21,14 +21,6 @@ type wandbRecordingRunner struct {
 	fn    func(LocalCommandRequest) (LocalCommandResult, error)
 }
 
-func (r *wandbRecordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
-	r.calls = append(r.calls, req)
-	if r.fn != nil {
-		return r.fn(req)
-	}
-	return LocalCommandResult{}, nil
-}
-
 func TestWandbProviderSpec(t *testing.T) {
 	spec := Provider{}.Spec()
 	if spec.Name != providerName {
@@ -213,6 +205,17 @@ type fakeWandbAPI struct {
 	statusErr        error
 }
 
+type closeableFakeWandbAPI struct {
+	fakeWandbAPI
+	closes   int
+	closeErr error
+}
+
+func (f *closeableFakeWandbAPI) Close() error {
+	f.closes++
+	return f.closeErr
+}
+
 func (f *fakeWandbAPI) Version(_ context.Context) (string, error) {
 	return f.versionValue, f.versionErr
 }
@@ -286,6 +289,35 @@ func TestWandbRunHappyPathAcquireExecStop(t *testing.T) {
 	}
 	if api.stopID != "sb-abc" {
 		t.Fatalf("Stop id = %q, want sb-abc (auto-stop after run)", api.stopID)
+	}
+}
+
+func TestWandbRunClosesCachedClientAfterOperation(t *testing.T) {
+	t.Setenv("WANDB_API_KEY", "fake")
+	api := &closeableFakeWandbAPI{
+		fakeWandbAPI: fakeWandbAPI{
+			acquired: wandbSandbox{ID: "sb-abc", Status: "RUNNING"},
+			execCode: 0,
+		},
+	}
+	backend := newWandbBackendForTest(api)
+	if _, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"echo", "hello"}}); err != nil {
+		t.Fatalf("Run err: %v", err)
+	}
+	if api.stopID != "sb-abc" {
+		t.Fatalf("Stop id = %q, want sb-abc before client close", api.stopID)
+	}
+	if api.closes != 1 {
+		t.Fatalf("client closes=%d, want 1", api.closes)
+	}
+	if backend.client != nil {
+		t.Fatal("backend retained closed client")
+	}
+	if err := backend.Close(); err != nil {
+		t.Fatalf("second Close err: %v", err)
+	}
+	if api.closes != 1 {
+		t.Fatalf("second Close changed closes=%d, want 1", api.closes)
 	}
 }
 

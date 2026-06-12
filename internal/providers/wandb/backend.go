@@ -46,6 +46,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 	if err != nil {
 		return RunResult{}, err
 	}
+	defer b.closeClientAfterOperation()
 	started := b.now()
 	cfg := b.cfg
 	image := blank(strings.TrimSpace(cfg.Wandb.DefaultImage), "ubuntu:24.04")
@@ -148,6 +149,7 @@ func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	if err != nil {
 		return nil, err
 	}
+	defer b.closeClientAfterOperation()
 	status := ""
 	if req.All {
 		status = "all"
@@ -177,6 +179,7 @@ func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 	if err != nil {
 		return StatusView{}, err
 	}
+	defer b.closeClientAfterOperation()
 	sb, err := client.Status(ctx, req.ID)
 	if err != nil {
 		return StatusView{}, err
@@ -205,6 +208,7 @@ func (b *wandbBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	defer b.closeClientAfterOperation()
 	return client.Stop(ctx, req.ID, 10, false)
 }
 
@@ -217,6 +221,7 @@ func (b *wandbBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResul
 	if err != nil {
 		return DoctorResult{}, err
 	}
+	defer b.closeClientAfterOperation()
 	if _, err := client.Version(ctx); err != nil {
 		// Surface the typed *wandbAPIError as-is: errors.As() at the cli
 		// boundary unwraps it into ExitError with the mapped sysexit code
@@ -239,11 +244,29 @@ func (b *wandbBackend) api() (wandbAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Cache the client so subsequent calls reuse the long-lived gRPC
-	// ClientConn (HTTP/2 multiplexes). Without this, Doctor's api()+List()
-	// path opened two conns and contradicted client.go's design comment.
+	// Cache the client so multiple calls inside one backend operation reuse
+	// one gRPC ClientConn. Operation entrypoints close it before returning.
 	b.client = c
 	return c, nil
+}
+
+func (b *wandbBackend) Close() error {
+	if b.client == nil {
+		return nil
+	}
+	client := b.client
+	b.client = nil
+	closer, ok := client.(interface{ Close() error })
+	if !ok {
+		return nil
+	}
+	return closer.Close()
+}
+
+func (b *wandbBackend) closeClientAfterOperation() {
+	if err := b.Close(); err != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: wandb client close failed: %v\n", err)
+	}
 }
 
 func (b *wandbBackend) now() time.Time {

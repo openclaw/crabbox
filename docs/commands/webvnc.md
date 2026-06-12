@@ -1,8 +1,8 @@
 # webvnc
 
-`crabbox webvnc` bridges a desktop lease into the authenticated coordinator
-portal. Use it when you want the same VNC desktop that `crabbox vnc` opens, but
-inside a browser tab instead of a native VNC client.
+`crabbox webvnc` opens a desktop lease in a browser tab. For coordinator-backed
+leases it bridges into the authenticated coordinator portal. The local container
+provider also supports WebVNC by serving noVNC locally over an SSH tunnel.
 
 ```sh
 crabbox warmup --desktop
@@ -25,12 +25,12 @@ requires that capability to be present (see
 ## How it works
 
 `webvnc` resolves the lease the same way `crabbox vnc` does, verifies the
-`desktop` capability, probes the runner's loopback VNC service
-(`127.0.0.1:5900`) over SSH, starts an SSH tunnel to it, mints a short-lived
-bridge ticket over the authenticated coordinator API, and opens a WebSocket
-bridge to the coordinator with that ticket. After portal authentication the
-browser connects to `/portal/leases/<lease>/vnc`, and the coordinator Durable
-Object pairs that browser WebSocket with the local bridge process.
+`desktop` capability, and probes the runner's loopback VNC service
+(`127.0.0.1:5900`) over SSH. Coordinator-backed leases then mint a short-lived
+bridge ticket over the authenticated coordinator API and connect the local
+bridge to the coordinator portal. The local container provider instead starts
+`websockify` inside the local container and tunnels that local noVNC endpoint to
+the browser.
 
 The data path is:
 
@@ -39,6 +39,15 @@ browser noVNC
   <-> coordinator portal websocket
   <-> local crabbox webvnc process
   <-> SSH tunnel
+  <-> runner 127.0.0.1:5900
+```
+
+For the local container provider, the data path is local:
+
+```text
+browser noVNC at 127.0.0.1:<port>
+  <-> SSH tunnel
+  <-> runner websockify
   <-> runner 127.0.0.1:5900
 ```
 
@@ -213,6 +222,9 @@ and `daemon stop` forms take only `--id`.
 - The local Docker container provider (`--provider local-container`) is also
   supported. It serves noVNC locally over an SSH tunnel rather than through the
   coordinator portal, so it needs no coordinator login.
+- Direct SSH providers that advertise desktop support, including KubeVirt and
+  external providers, use the same local noVNC-over-SSH path and need no
+  coordinator login.
 - Static SSH hosts are intentionally not supported, because the portal cannot
   prove that host-managed VNC credentials and prompts are safe to expose.
 - Blacksmith Testbox still owns its own machine connectivity.
@@ -221,15 +233,21 @@ and `daemon stop` forms take only `--id`.
 
 `webvnc requires a configured coordinator login`
 
-Run `crabbox login --url <broker-url>` for the coordinator you are using. WebVNC
-needs both the CLI bridge and the browser portal to authenticate with the
-coordinator. (The local container provider is the exception and needs no login.)
+Run `crabbox login --url <broker-url>` for the coordinator you are using. Portal
+WebVNC needs both the CLI bridge and the browser portal to authenticate with the
+coordinator. The local container provider is the exception and needs no login.
 
-`webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases`
+`webvnc requires a configured coordinator login`
 
-WebVNC is not available for static SSH hosts or Blacksmith Testbox. Use
-`crabbox vnc` for static hosts when you explicitly trust the host-managed VNC
-service.
+The selected provider is coordinator-backed. Direct desktop-capable SSH
+providers do not require coordinator login and serve noVNC locally over the
+provider SSH connection.
+
+`missing websockify` or `missing noVNC web assets`
+
+The direct target exposes VNC but does not have the noVNC package installed.
+Install `novnc` and `websockify` in the provider image or guest bootstrap, then
+retry. `crabbox vnc` remains available as the native-client fallback.
 
 `target does not expose VNC on 127.0.0.1:5900`
 

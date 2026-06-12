@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +33,10 @@ func cloudInit(cfg Config, publicKey string) string {
 	readyChecks := cloudInitOptionalReadyChecks(cfg)
 	writeFiles := cloudInitOptionalWriteFiles(cfg)
 	bootstrap := cloudInitOptionalBootstrap(cfg)
+	yamlSSHUser := yamlInlineString(cfg.SSHUser)
+	yamlPublicKey := yamlInlineString(publicKey)
+	shellSSHUser := shellQuote(cfg.SSHUser)
+	shellWorkRoot := shellQuote(cfg.WorkRoot)
 	return fmt.Sprintf(`#cloud-config
 package_update: false
 package_upgrade: false
@@ -83,19 +88,23 @@ runcmd:
     retry apt-get update
     retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
     mkdir -p %[3]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm
-    chown -R %[1]s:%[1]s %[3]s /var/cache/crabbox
+    chown -R %[7]s:%[7]s %[3]s /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
     timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
-%[7]s
+%[8]s
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
-`, cfg.SSHUser, publicKey, cfg.WorkRoot, portLines, readyChecks, writeFiles, bootstrap)
+`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap)
 }
 
 func CloudInitUserData(cfg Config, publicKey string) string {
 	return cloudInit(cfg, publicKey)
+}
+
+func yamlInlineString(value string) string {
+	return strconv.Quote(value)
 }
 
 func windowsUserData(cfg Config, publicKey string) string {
@@ -368,6 +377,18 @@ APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git rsync jq
+if [ -d /proc/sys/fs/binfmt_misc ]; then
+  if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
+    mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+  fi
+  if [ -e /proc/sys/fs/binfmt_misc/status ] && ! grep -qx enabled /proc/sys/fs/binfmt_misc/status; then
+    printf '1' >/proc/sys/fs/binfmt_misc/status 2>/dev/null || true
+  fi
+  if [ ! -e /proc/sys/fs/binfmt_misc/WSLInterop ]; then
+    test -w /proc/sys/fs/binfmt_misc/register
+    printf '%s' ':WSLInterop:M::MZ::/init:PF' >/proc/sys/fs/binfmt_misc/register
+  fi
+fi
 cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -375,6 +396,7 @@ git --version >/dev/null
 rsync --version >/dev/null
 curl --version >/dev/null
 jq --version >/dev/null
+test -e /proc/sys/fs/binfmt_misc/WSLInterop
 test -w ` + shellQuote(workRoot) + `
 READY
 chmod 0755 /usr/local/bin/crabbox-ready

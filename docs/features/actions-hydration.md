@@ -178,18 +178,34 @@ The hydrate job runs on the dynamic runner label (GitHub-runner path):
 runs-on: [self-hosted, "${{ inputs.crabbox_runner_label }}"]
 ```
 
-After setup, write the readiness marker:
+After setup, write the readiness marker. Map workflow inputs into step
+environment variables such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate
+them directly into shell source:
 
 ```sh
+case "$CRABBOX_ID" in
+  ""|*[!A-Za-z0-9_-]*)
+    echo "::error::crabbox_id must match [A-Za-z0-9_-]+"
+    exit 2
+    ;;
+esac
+case "$CRABBOX_JOB" in
+  *$'\n'*|*$'\r'*)
+    echo "::error::crabbox_job must not contain line breaks"
+    exit 2
+    ;;
+esac
+job="$CRABBOX_JOB"
+[ -n "$job" ] || job=hydrate
 mkdir -p "$HOME/.crabbox/actions"
-state="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env"
-env_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.env.sh"
-services_file="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.services"
+state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
+env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
+services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
 tmp="${state}.tmp"
 {
   echo "WORKSPACE=${GITHUB_WORKSPACE}"
   echo "RUN_ID=${GITHUB_RUN_ID}"
-  echo "JOB=${{ inputs.crabbox_job }}"
+  echo "JOB=${job}"
   echo "ENV_FILE=${env_file}"
   echo "SERVICES_FILE=${services_file}"
   echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -204,13 +220,19 @@ are step-scoped GitHub material and should stay inside the workflow unless the
 project intentionally persists its own short-lived credentials.
 
 The final step should keep the job alive while later commands run, exiting when
-`$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.stop` appears or when its
-timeout expires:
+`$HOME/.crabbox/actions/${CRABBOX_ID}.stop` appears or when its timeout expires.
+Map `CRABBOX_ID` and `CRABBOX_KEEP_ALIVE_MINUTES` through step environment:
 
 ```sh
-minutes="${{ inputs.crabbox_keep_alive_minutes }}"
+case "$CRABBOX_ID" in
+  ""|*[!A-Za-z0-9_-]*)
+    echo "::error::crabbox_id must match [A-Za-z0-9_-]+"
+    exit 2
+    ;;
+esac
+minutes="$CRABBOX_KEEP_ALIVE_MINUTES"
 case "$minutes" in ''|*[!0-9]*) minutes=90 ;; esac
-stop="$HOME/.crabbox/actions/${{ inputs.crabbox_id }}.stop"
+stop="$HOME/.crabbox/actions/${CRABBOX_ID}.stop"
 deadline=$(( $(date +%s) + minutes * 60 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
   [ -f "$stop" ] && exit 0

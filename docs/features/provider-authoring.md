@@ -50,7 +50,8 @@ without a stable connection contract.
 | `crabbox run` | yes | yes |
 | `crabbox warmup` | yes | yes |
 | `crabbox ssh` | yes | only if you implement short-lived SSH |
-| `crabbox vnc` / `webvnc` / `code` | yes (Linux + capability) | no |
+| `crabbox vnc` / `code` | yes (Linux + capability) | no |
+| `crabbox webvnc` | coordinator-backed or local-container only | no |
 | `crabbox actions hydrate` | yes (Linux) | no |
 | `crabbox cache stats` / `purge` / `warm` | yes | no |
 | Crabbox-owned sync | yes | no — your backend owns sync |
@@ -177,7 +178,9 @@ Rules:
     (relaxes some of the delegated sync-option rejections; see Step 6).
   - `FeatureCleanup` — implement `CleanupBackend` for orphan cleanup.
   - `FeatureDesktop`, `FeatureBrowser`, `FeatureCode` — lease can host a visible
-    desktop, a browser, or a code-server instance.
+    desktop, a browser, or a code-server instance. `FeatureDesktop` enables
+    native `crabbox vnc`; WebVNC also needs the coordinator portal or the
+    trusted local-container noVNC path.
   - `FeatureTailscale` — lease can join a tailnet via cloud-init / `--tailscale`.
   - `FeatureURLBridge` — delegated backend can expose a forwarded URL.
   - `FeatureCheckpoint`, `FeatureFork`, `FeatureRestore`, `FeatureSnapshot` —
@@ -340,8 +343,7 @@ summary.
    ```
    `RejectDelegatedSyncOptionsForSpec` reads `Spec().Features`, so declaring
    `FeatureArchiveSync`, `FeatureRunProof`, etc. relaxes the matching
-   rejections. (`core.RejectDelegatedSyncOptions(name, req)` is the
-   feature-less variant.)
+   rejections. Pass a spec without those features for the strict behavior.
 2. acquire a resource or resolve an existing id/slug;
 3. claim or reclaim the resource for the calling repo;
 4. stream provider output through `rt.Stdout` and `rt.Stderr`;

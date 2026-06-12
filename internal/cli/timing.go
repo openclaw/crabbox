@@ -69,10 +69,6 @@ func DurationMinutesCeil(duration time.Duration) int {
 	return minutes
 }
 
-func durationMinutesCeil(duration time.Duration) int {
-	return DurationMinutesCeil(duration)
-}
-
 func timingReportFromRun(provider, leaseID, slug string, timings runTimings, total time.Duration, exitCode int) timingReport {
 	return timingReport{
 		Provider:      provider,

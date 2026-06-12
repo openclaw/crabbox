@@ -1,12 +1,10 @@
 package daytona
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -16,6 +14,12 @@ import (
 	sdkoptions "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 )
+
+var daytonaCleanupTimeout = 30 * time.Second
+
+func daytonaCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), daytonaCleanupTimeout)
+}
 
 func (b *daytonaLeaseBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {
@@ -75,7 +79,9 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	if shouldStop {
 		defer func() {
 			if shouldStop {
-				b.deleteDaytonaToolboxSandbox(context.Background(), sandbox.ID, leaseID)
+				cleanupCtx, cancel := daytonaCleanupContext()
+				defer cancel()
+				b.deleteDaytonaToolboxSandbox(cleanupCtx, sandbox.ID, leaseID)
 			}
 		}()
 	}
@@ -320,7 +326,7 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 		return nil, err
 	}
 	manifestStarted := time.Now()
-	manifest, err := syncManifest(req.Repo.Root, excludes)
+	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
 		return nil, exit(6, "build sync file list: %v", err)
 	}
@@ -387,31 +393,8 @@ func daytonaExtractArchiveCommand(workdir, archivePath, deletePrefix string) str
 		"; crabbox_status=$?; rm -f " + shellQuote(archivePath) + "; exit $crabbox_status"
 }
 
-func createDaytonaSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, stderr io.Writer) (*os.File, error) {
-	var input bytes.Buffer
-	input.Write(manifest.NUL())
-	archive, err := os.CreateTemp("", "crabbox-daytona-sync-*.tgz")
-	if err != nil {
-		return nil, fmt.Errorf("create sync archive temp file: %w", err)
-	}
-	keep := false
-	defer func() {
-		if !keep {
-			name := archive.Name()
-			_ = archive.Close()
-			_ = os.Remove(name)
-		}
-	}()
-	cmd := exec.CommandContext(ctx, "tar", "-czf", "-", "-C", repo.Root, "--null", "-T", "-")
-	cmd.Stdin = &input
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	cmd.Stdout = archive
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
-	}
-	keep = true
-	return archive, nil
+func createDaytonaSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {
+	return createPortableSyncArchive(ctx, repo, manifest, "crabbox-daytona-sync-*.tgz")
 }
 
 func daytonaCommandString(command []string, shellMode bool) string {

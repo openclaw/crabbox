@@ -1,12 +1,10 @@
 package upstashbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -19,7 +17,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 		return nil, 0, err
 	}
 	manifestStarted := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes)
+	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}
@@ -55,7 +53,9 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 		"rm -f " + shellQuote(remoteArchiveName),
 	}, " && ")
 	if err := b.execShell(ctx, client, boxID, extract, io.Discard); err != nil {
-		_, _ = client.Exec(context.Background(), boxID, "rm -f "+shellQuote(remoteArchiveName), "")
+		if cleanupErr := cleanupRemoteFile(client, boxID, remoteArchiveName); cleanupErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: upstash-box sync cleanup failed for %s: %v\n", boxID, cleanupErr)
+		}
 		return nil, 0, err
 	}
 	uploadDuration := b.now().Sub(uploadStarted)
@@ -96,31 +96,8 @@ func (b *backend) execShell(ctx context.Context, client api, boxID, command stri
 	return nil
 }
 
-func createSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, stderr io.Writer) (*os.File, error) {
-	var input bytes.Buffer
-	input.Write(manifest.NUL())
-	archive, err := os.CreateTemp("", "crabbox-upstash-box-sync-*.tgz")
-	if err != nil {
-		return nil, fmt.Errorf("create sync archive temp file: %w", err)
-	}
-	keep := false
-	defer func() {
-		if !keep {
-			name := archive.Name()
-			_ = archive.Close()
-			_ = os.Remove(name)
-		}
-	}()
-	cmd := exec.CommandContext(ctx, "tar", "--no-xattrs", "-czf", "-", "-C", repo.Root, "--null", "-T", "-")
-	cmd.Stdin = &input
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	cmd.Stdout = archive
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
-	}
-	keep = true
-	return archive, nil
+func createSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {
+	return createPortableSyncArchive(ctx, repo, manifest, "crabbox-upstash-box-sync-*.tgz")
 }
 
 func randomSuffix() string {

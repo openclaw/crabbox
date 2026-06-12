@@ -70,7 +70,7 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
 }
 
-func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+var claimLeaseForRepoProviderScopePond = func(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
@@ -82,15 +82,15 @@ func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }
 
-func removeLeaseClaim(leaseID string) {
+var removeLeaseClaim = func(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
-func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+var updateLeaseClaimEndpoint = func(leaseID string, server Server, target SSHTarget) error {
 	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
 }
 
-func updateLeaseClaimCacheVolumes(leaseID string, specs []string) error {
+var updateLeaseClaimCacheVolumes = func(leaseID string, specs []string) error {
 	return core.UpdateLeaseClaimCacheVolumes(leaseID, specs)
 }
 
@@ -114,7 +114,7 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
 
-func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+var waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }
 

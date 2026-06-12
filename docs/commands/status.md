@@ -68,8 +68,8 @@ from idling out.
 
 Some providers add their own resolution flags, including
 `--exe-dev-control-host`, `--sprites-api-url`, `--sprites-work-root`,
-`--azure-dynamic-sessions-endpoint`, `--azure-dynamic-sessions-pool`,
-`--azure-dynamic-sessions-api-version`, `--e2b-api-url`, and `--e2b-domain`.
+`--azure-dynamic-sessions-endpoint`, `--azure-dynamic-sessions-api-version`,
+`--e2b-api-url`, and `--e2b-domain`.
 
 ## Output
 

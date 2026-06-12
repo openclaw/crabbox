@@ -224,9 +224,18 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 	if req.WaitTimeout <= 0 {
 		deadline = b.now().Add(5 * time.Minute)
 	}
+	var lastDescribeErr error
 	for {
 		out, describeErr := cli.describe(ctx, sandboxID)
 		state := parseDescribeState(out)
+		if describeErr != nil {
+			if !req.Wait {
+				return StatusView{}, describeErr
+			}
+			lastDescribeErr = describeErr
+		} else {
+			lastDescribeErr = nil
+		}
 		ready := describeErr == nil && isReadyState(state)
 		view := StatusView{
 			ID:       leaseID,
@@ -247,11 +256,19 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 			return view, nil
 		}
 		if b.now().After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for tensorlake sandbox %s to become ready", sandboxID)
+			err := exit(5, "timed out waiting for tensorlake sandbox %s to become ready", sandboxID)
+			if lastDescribeErr != nil {
+				return StatusView{}, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
+			}
+			return StatusView{}, err
 		}
 		select {
 		case <-ctx.Done():
-			return StatusView{}, ctx.Err()
+			err := ctx.Err()
+			if lastDescribeErr != nil {
+				return StatusView{}, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
+			}
+			return StatusView{}, err
 		case <-time.After(2 * time.Second):
 		}
 	}

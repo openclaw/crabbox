@@ -38,7 +38,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		Memory:   fs.String("local-container-memory", defaults.LocalContainer.Memory, "memory limit for local-container leases, for example 8g"),
 		Network:  fs.String("local-container-network", defaults.LocalContainer.Network, "container network for local-container leases"),
 		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket,
-			"mount /var/run/docker.sock into local-container leases so docker commands use the host daemon"),
+			"mount the host Docker-compatible socket into local-container leases so docker commands use the host engine"),
 		Volumes: &volumes,
 	}
 	// CLI-only: bind mounts expose host paths and must be an explicit
@@ -56,6 +56,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "local-container-runtime") {
 		cfg.LocalContainer.Runtime = *v.Runtime
+		core.MarkLocalContainerRuntimeExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "local-container-image") {
 		cfg.LocalContainer.Image = *v.Image

@@ -34,6 +34,8 @@ type crabboxKongCLI struct {
 	Cache      cacheKongCmd      `cmd:"" help:"Inspect, purge, or warm remote caches."`
 	Status     statusKongCmd     `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
 	List       listKongCmd       `cmd:"" passthrough:"" help:"List Crabbox machines."`
+	Ports      portsKongCmd      `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
+	Cp         cpKongCmd         `cmd:"" name:"cp" passthrough:"" help:"Copy files between host and a delegated sandbox."`
 	Share      shareKongCmd      `cmd:"" passthrough:"" help:"Share a lease with users or the owning org."`
 	Unshare    unshareKongCmd    `cmd:"" passthrough:"" help:"Remove lease sharing."`
 	Image      imageKongCmd      `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
@@ -51,6 +53,8 @@ type crabboxKongCLI struct {
 	Inspect    inspectKongCmd    `cmd:"" passthrough:"" help:"Print lease/provider details; add --json for scripts."`
 	Stop       stopKongCmd       `cmd:"" passthrough:"" help:"Release a lease or delete a direct-provider machine."`
 	Release    releaseKongCmd    `cmd:"" passthrough:"" help:"Alias for stop."`
+	Pause      pauseKongCmd      `cmd:"" passthrough:"" help:"Pause a lease, freeing remote compute while preserving state (provider-dependent)."`
+	Resume     resumeKongCmd     `cmd:"" passthrough:"" help:"Resume a previously paused lease."`
 	Cleanup    cleanupKongCmd    `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines or local provider state."`
 	Azure      azureKongCmd      `cmd:"" help:"Azure provider setup and login."`
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
@@ -181,6 +185,12 @@ type attachKongCmd struct {
 type resultsKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
+type portsKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type cpKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
 type statusKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
@@ -221,6 +231,12 @@ type stopKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type releaseKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type pauseKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type resumeKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type cleanupKongCmd struct {
@@ -542,6 +558,8 @@ func (c *logsKongCmd) Run(ctx context.Context, app App) error      { return app.
 func (c *eventsKongCmd) Run(ctx context.Context, app App) error    { return app.events(ctx, c.Args) }
 func (c *attachKongCmd) Run(ctx context.Context, app App) error    { return app.attach(ctx, c.Args) }
 func (c *resultsKongCmd) Run(ctx context.Context, app App) error   { return app.results(ctx, c.Args) }
+func (c *portsKongCmd) Run(ctx context.Context, app App) error     { return app.ports(ctx, c.Args) }
+func (c *cpKongCmd) Run(ctx context.Context, app App) error        { return app.copyCommand(ctx, c.Args) }
 func (c *statusKongCmd) Run(ctx context.Context, app App) error    { return app.status(ctx, c.Args) }
 func (c *listKongCmd) Run(ctx context.Context, app App) error      { return app.list(ctx, c.Args) }
 func (c *shareKongCmd) Run(ctx context.Context, app App) error     { return app.share(ctx, c.Args) }
@@ -558,6 +576,8 @@ func (c *screenshotKongCmd) Run(ctx context.Context, app App) error {
 func (c *inspectKongCmd) Run(ctx context.Context, app App) error { return app.inspect(ctx, c.Args) }
 func (c *stopKongCmd) Run(ctx context.Context, app App) error    { return app.stop(ctx, c.Args) }
 func (c *releaseKongCmd) Run(ctx context.Context, app App) error { return app.stop(ctx, c.Args) }
+func (c *pauseKongCmd) Run(ctx context.Context, app App) error   { return app.pause(ctx, c.Args) }
+func (c *resumeKongCmd) Run(ctx context.Context, app App) error  { return app.resume(ctx, c.Args) }
 func (c *cleanupKongCmd) Run(ctx context.Context, app App) error { return app.cleanup(ctx, c.Args) }
 func (c *pondConnectKongCmd) Run(ctx context.Context, app App) error {
 	return app.pondConnect(ctx, stripKongCommandPath(c.Args, "pond", "connect"))

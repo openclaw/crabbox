@@ -44,6 +44,7 @@ type CoordinatorLease struct {
 	ID                   string                `json:"id"`
 	Slug                 string                `json:"slug,omitempty"`
 	Provider             string                `json:"provider"`
+	Lifecycle            string                `json:"lifecycle,omitempty"`
 	TargetOS             string                `json:"target,omitempty"`
 	WindowsMode          string                `json:"windowsMode,omitempty"`
 	Desktop              bool                  `json:"desktop,omitempty"`
@@ -84,6 +85,32 @@ type CoordinatorLease struct {
 	ExpiresAt            string                `json:"expiresAt"`
 	Telemetry            *LeaseTelemetry       `json:"telemetry,omitempty"`
 	TelemetryHistory     []*LeaseTelemetry     `json:"telemetryHistory,omitempty"`
+}
+
+type CoordinatorLeaseRegistration struct {
+	Slug               string   `json:"slug,omitempty"`
+	Provider           string   `json:"provider"`
+	TargetOS           string   `json:"target"`
+	WindowsMode        string   `json:"windowsMode,omitempty"`
+	Desktop            bool     `json:"desktop,omitempty"`
+	DesktopEnv         string   `json:"desktopEnv,omitempty"`
+	Browser            bool     `json:"browser,omitempty"`
+	Code               bool     `json:"code,omitempty"`
+	CloudID            string   `json:"cloudID,omitempty"`
+	ServerID           int64    `json:"serverID,omitempty"`
+	ServerName         string   `json:"serverName,omitempty"`
+	ServerType         string   `json:"serverType,omitempty"`
+	Host               string   `json:"host"`
+	SSHUser            string   `json:"sshUser,omitempty"`
+	SSHPort            string   `json:"sshPort,omitempty"`
+	SSHFallbackPorts   []string `json:"sshFallbackPorts,omitempty"`
+	WorkRoot           string   `json:"workRoot,omitempty"`
+	Profile            string   `json:"profile,omitempty"`
+	Class              string   `json:"class,omitempty"`
+	Pond               string   `json:"pond,omitempty"`
+	ExposedPorts       []string `json:"exposedPorts,omitempty"`
+	TTLSeconds         int      `json:"ttlSeconds,omitempty"`
+	IdleTimeoutSeconds int      `json:"idleTimeoutSeconds,omitempty"`
 }
 
 type CoordinatorShareRole string
@@ -159,9 +186,11 @@ type CoordinatorUsageResponse struct {
 }
 
 type CoordinatorWhoami struct {
-	Owner string `json:"owner"`
-	Org   string `json:"org"`
-	Auth  string `json:"auth"`
+	Owner          string `json:"owner"`
+	Org            string `json:"org"`
+	Auth           string `json:"auth"`
+	Admin          bool   `json:"admin,omitempty"`
+	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
 }
 
 type CoordinatorProviderReadiness struct {
@@ -271,13 +300,14 @@ type CoordinatorGitHubLoginStart struct {
 }
 
 type CoordinatorGitHubLoginPoll struct {
-	Status   string `json:"status"`
-	Token    string `json:"token,omitempty"`
-	Owner    string `json:"owner,omitempty"`
-	Org      string `json:"org,omitempty"`
-	Login    string `json:"login,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Status         string `json:"status"`
+	Token          string `json:"token,omitempty"`
+	Owner          string `json:"owner,omitempty"`
+	Org            string `json:"org,omitempty"`
+	Login          string `json:"login,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type CoordinatorWebVNCTicket struct {
@@ -706,6 +736,14 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	}
 	addCoordinatorGCPFields(req, cfg)
 	err = c.do(ctx, http.MethodPost, "/v1/leases", req, &res)
+	return res.Lease, err
+}
+
+func (c *CoordinatorClient) RegisterLease(ctx context.Context, leaseID string, input CoordinatorLeaseRegistration) (CoordinatorLease, error) {
+	var res struct {
+		Lease CoordinatorLease `json:"lease"`
+	}
+	err := c.do(ctx, http.MethodPut, "/v1/leases/"+url.PathEscape(leaseID)+"/registration", input, &res)
 	return res.Lease, err
 }
 
@@ -1619,7 +1657,7 @@ func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody
 	curlConfigValue(&cfg, "url", c.BaseURL+path)
 	curlConfigValue(&cfg, "request", method)
 	curlConfigValue(&cfg, "connect-timeout", "10")
-	curlConfigValue(&cfg, "max-time", "300")
+	curlConfigValue(&cfg, "max-time", strconv.Itoa(int(coordinatorHTTPTimeout/time.Second)))
 	curlConfigFlag(&cfg, "silent")
 	curlConfigFlag(&cfg, "show-error")
 	curlConfigFlag(&cfg, "location")
@@ -1797,19 +1835,4 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 
 func coordinatorLeaseHostID(lease CoordinatorLease) string {
 	return firstNonBlank(lease.HostID, lease.HostIDCompat)
-}
-
-func (a App) touchCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, leaseID string) {
-	if leaseID == "" {
-		return
-	}
-	coord, ok, err := newCoordinatorClient(cfg)
-	if err != nil || !ok {
-		return
-	}
-	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	if _, err := coord.TouchLease(callCtx, leaseID); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", leaseID, err)
-	}
 }

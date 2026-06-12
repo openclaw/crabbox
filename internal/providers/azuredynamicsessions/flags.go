@@ -4,7 +4,6 @@ import "flag"
 
 type azureDynamicSessionsFlagValues struct {
 	Endpoint    *string
-	Pool        *string
 	APIVersion  *string
 	Workdir     *string
 	TimeoutSecs *int
@@ -13,7 +12,6 @@ type azureDynamicSessionsFlagValues struct {
 func RegisterAzureDynamicSessionsProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	return azureDynamicSessionsFlagValues{
 		Endpoint:    fs.String("azure-dynamic-sessions-endpoint", defaults.AzureDynamicSessions.Endpoint, "Azure Container Apps Dynamic Sessions pool management endpoint"),
-		Pool:        fs.String("azure-dynamic-sessions-pool", defaults.AzureDynamicSessions.Pool, "Azure Container Apps Dynamic Sessions pool name"),
 		APIVersion:  fs.String("azure-dynamic-sessions-api-version", defaults.AzureDynamicSessions.APIVersion, "Azure Dynamic Sessions management API version"),
 		Workdir:     fs.String("azure-dynamic-sessions-workdir", defaults.AzureDynamicSessions.Workdir, "Absolute working directory inside the Dynamic Sessions sandbox"),
 		TimeoutSecs: fs.Int("azure-dynamic-sessions-timeout-secs", defaults.AzureDynamicSessions.TimeoutSecs, "Command timeout in seconds"),
@@ -35,9 +33,6 @@ func ApplyAzureDynamicSessionsProviderFlags(cfg *Config, fs *flag.FlagSet, value
 	}
 	if flagWasSet(fs, "azure-dynamic-sessions-endpoint") {
 		cfg.AzureDynamicSessions.Endpoint = *v.Endpoint
-	}
-	if flagWasSet(fs, "azure-dynamic-sessions-pool") {
-		cfg.AzureDynamicSessions.Pool = *v.Pool
 	}
 	if flagWasSet(fs, "azure-dynamic-sessions-api-version") {
 		cfg.AzureDynamicSessions.APIVersion = *v.APIVersion

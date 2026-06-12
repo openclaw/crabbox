@@ -191,6 +191,52 @@ func TestPrintRunFailureDigest(t *testing.T) {
 	}
 }
 
+func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	args := runFailureDigestRoutingArgs(Config{
+		Provider: "external",
+		External: ExternalConfig{
+			Command: "provider-command",
+			Args:    []string{"--token", "secret-value"},
+			Config:  map[string]any{"token": "secret-config"},
+		},
+	}, "provider-id")
+	got := strings.Join(args, " ")
+	for _, want := range []string{"--provider external", "--external-routing-file"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("routing args missing %q: %s", want, got)
+		}
+	}
+	for _, secret := range []string{"provider-command", "secret-value", "secret-config"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("routing args leaked %q: %s", secret, got)
+		}
+	}
+}
+
+func TestRunFailureDigestSSHRoutingArgsUseExternalRoutingFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	args := runFailureDigestSSHRoutingArgs(Config{
+		Provider: "external",
+		External: ExternalConfig{
+			Command: "provider-command",
+			Args:    []string{"--token", "secret-value"},
+			Config:  map[string]any{"token": "secret-config"},
+		},
+	}, "cbx_abcdef123456")
+	got := strings.Join(args, " ")
+	for _, want := range []string{"--provider external", "--external-routing-file"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ssh routing args missing %q: %s", want, got)
+		}
+	}
+	for _, secret := range []string{"provider-command", "secret-value", "secret-config"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("ssh routing args leaked %q: %s", secret, got)
+		}
+	}
+}
+
 func TestPrintRunFailureDigestExplainsAndChainShortCircuit(t *testing.T) {
 	stderrTail := newStreamTailBuffer(40)
 	_, _ = stderrTail.Write([]byte("pnpm check failed\n"))
@@ -323,24 +369,109 @@ func TestFailureDigestRoutesNextCommands(t *testing.T) {
 	}
 }
 
-func TestFailureDigestUsesSSHCompatibleRouting(t *testing.T) {
+func TestFailureDigestRoutesProviderArgsToSSH(t *testing.T) {
+	cfg := Config{Provider: "proxmox", Proxmox: ProxmoxConfig{APIURL: "https://pve.example"}}
 	commands := failureDigestNextCommands(runFailureDigestInput{
 		Provider:       "proxmox",
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		RoutingArgs:    []string{"--provider", "proxmox", "--proxmox-api-url", "https://pve.example"},
-		SSHRoutingArgs: []string{"--provider", "proxmox"},
+		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
+		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
 		Classification: FailureClassification{RetryLikely: "unknown"},
 		StopCommand:    "crabbox stop --provider proxmox --proxmox-api-url https://pve.example cbx_123",
 	}, "unknown")
 	if len(commands) < 3 {
 		t.Fatalf("commands=%v", commands)
 	}
-	if strings.Contains(commands[0], "proxmox-api-url") {
-		t.Fatalf("ssh command contains provider-specific flag: %q", commands[0])
+	for _, command := range commands[:3] {
+		if !strings.Contains(command, "--proxmox-api-url") {
+			t.Fatalf("command lost provider routing: %q\nall=%v", command, commands)
+		}
 	}
-	if !strings.Contains(commands[1], "--proxmox-api-url") || !strings.Contains(commands[2], "--proxmox-api-url") {
-		t.Fatalf("run/stop commands lost provider routing: %v", commands)
+}
+
+func TestFailureDigestPreservesInheritedKubeconfigForKubeVirt(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/base.yaml:/tmp/cluster.yaml")
+	cfg := Config{
+		Provider: "kubevirt",
+		TargetOS: targetLinux,
+		KubeVirt: KubeVirtConfig{
+			Kubectl:   "kubectl",
+			Virtctl:   "virtctl",
+			Context:   "dev=west",
+			Namespace: "team-vms",
+		},
+	}
+	commands := failureDigestNextCommands(runFailureDigestInput{
+		Provider:       "kubevirt",
+		TargetOS:       targetLinux,
+		LeaseID:        "cbx_123",
+		CommandDisplay: "go test ./...",
+		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
+		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Classification: FailureClassification{RetryLikely: "unknown"},
+	}, "unknown")
+	joined := strings.Join(commands, "\n")
+	for _, want := range []string{
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox ssh --provider kubevirt",
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox run --provider kubevirt",
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox stop --provider kubevirt",
+		"--kubevirt-context dev=west",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("commands missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "dev='west' crabbox") {
+		t.Fatalf("context value was hoisted as env assignment:\n%s", joined)
+	}
+}
+
+func TestRunFailureDigestIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
+	args := runFailureDigestRoutingArgs(Config{
+		Provider: "xcp-ng",
+		TargetOS: targetLinux,
+		XCPNg: XCPNgConfig{
+			APIURL:       "pool-user:pool-pass@xcp-ng.example.test/path?view=1",
+			Username:     "root",
+			Password:     "xcp-ng-secret",
+			Template:     "ubuntu template",
+			TemplateUUID: "tpl-0001",
+			SR:           "default sr",
+			SRUUID:       "sr-0001",
+			Network:      "pool network",
+			NetworkUUID:  "net-0001",
+			Host:         "host-0001",
+			User:         "runner",
+			WorkRoot:     "/work/xcp-ng",
+			InsecureTLS:  true,
+		},
+	}, "cbx_123")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"--provider xcp-ng",
+		"--target linux",
+		"--xcp-ng-api-url xcp-ng.example.test/path?view=1",
+		"--xcp-ng-username root",
+		"--xcp-ng-template ubuntu template",
+		"--xcp-ng-template-uuid tpl-0001",
+		"--xcp-ng-sr default sr",
+		"--xcp-ng-sr-uuid sr-0001",
+		"--xcp-ng-network pool network",
+		"--xcp-ng-network-uuid net-0001",
+		"--xcp-ng-host host-0001",
+		"--xcp-ng-user runner",
+		"--xcp-ng-work-root /work/xcp-ng",
+		"--xcp-ng-insecure-tls",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("failure digest routing missing %q:\n%v", want, args)
+		}
+	}
+	for _, secret := range []string{"xcp-ng-secret", "pool-user", "pool-pass", "password"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("failure digest routing leaked %q: %v", secret, args)
+		}
 	}
 }
 

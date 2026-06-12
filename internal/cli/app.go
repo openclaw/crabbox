@@ -20,6 +20,13 @@ func Run(ctx context.Context, args []string) error {
 	return app.Run(ctx, args)
 }
 
+func (a App) input() io.Reader {
+	if a.Stdin != nil {
+		return a.Stdin
+	}
+	return os.Stdin
+}
+
 func (a App) Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		a.printHelp()
@@ -90,6 +97,10 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.usage(ctx, helpArgs), true
 	case "ssh":
 		return a.ssh(ctx, helpArgs), true
+	case "ports":
+		return a.ports(ctx, helpArgs), true
+	case "cp":
+		return a.copyCommand(ctx, helpArgs), true
 	case "vnc":
 		return a.vnc(ctx, helpArgs), true
 	case "webvnc":
@@ -110,6 +121,10 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.inspect(ctx, helpArgs), true
 	case "stop", "release":
 		return a.stop(ctx, helpArgs), true
+	case "pause":
+		return a.pause(ctx, helpArgs), true
+	case "resume":
+		return a.resume(ctx, helpArgs), true
 	case "cleanup":
 		return a.cleanup(ctx, helpArgs), true
 	default:
@@ -122,7 +137,7 @@ func isHelpArg(arg string) bool {
 }
 
 func (a App) printHelp() {
-	fmt.Fprintln(a.Stdout, `Crabbox leases remote test boxes, syncs your dirty checkout, runs commands, and cleans up.
+	fmt.Fprintf(a.Stdout, `Crabbox leases remote test boxes, syncs your dirty checkout, runs commands, and cleans up.
 
 Usage:
   crabbox <command> [flags]
@@ -176,6 +191,8 @@ Commands:
   capsule     Capture and replay lightweight failure capsules
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease
+  ports       Publish, list, or unpublish provider-native ports
+  cp          Copy files between host and a delegated sandbox
   vnc         Print or open VNC connection details for a desktop lease
   webvnc      Bridge a desktop lease into the authenticated web portal
   code        Bridge a code lease into the authenticated web portal
@@ -183,6 +200,8 @@ Commands:
   screenshot  Capture a PNG from a desktop lease
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
+  pause       Pause a lease, freeing remote compute while preserving state
+  resume      Resume a previously paused lease
   cleanup     Sweep expired direct-provider machines or local provider state
   pool        Manage ready-pool leases and list machine inventory aliases
   pond        Bridge plane peer discovery for delegated providers
@@ -196,6 +215,8 @@ Common Flows:
   crabbox status --id blue-lobster --wait
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
   crabbox ssh --id blue-lobster
+  crabbox ports --id blue-lobster --publish 8080
+  crabbox cp --id blue-lobster ./coverage.xml SANDBOX:/tmp/coverage.xml
   crabbox vnc --id blue-lobster --open
   crabbox desktop launch --id blue-lobster --browser --url https://example.com --webvnc --open
   crabbox desktop proof --id blue-lobster --output artifacts/blue-lobster-proof -- ./scripts/visual-smoke.sh
@@ -262,7 +283,7 @@ Environment:
   CRABBOX_ACCESS_CLIENT_ID     Cloudflare Access service token client ID
   CRABBOX_ACCESS_CLIENT_SECRET Cloudflare Access service token client secret
   CRABBOX_ACCESS_TOKEN         Cloudflare Access JWT for protected routes
-  CRABBOX_PROVIDER             hetzner, aws, azure, azure-dynamic-sessions, gcp, proxmox, parallels, ssh, exe-dev, blacksmith-testbox, namespace-devbox, semaphore, daytona, islo, e2b, modal, sprites, runpod, or cloudflare
+  CRABBOX_PROVIDER             %s
   CRABBOX_TARGET               linux, macos, or windows
   CRABBOX_WINDOWS_MODE         normal or wsl2
   CRABBOX_DESKTOP              Provision or require desktop/VNC capability
@@ -280,6 +301,9 @@ Environment:
   CRABBOX_CAPACITY_MARKET      spot or on-demand
   CRABBOX_CAPACITY_REGIONS     Comma-separated AWS region fallback candidates
   HCLOUD_TOKEN/HETZNER_TOKEN   Direct Hetzner mode
+  CRABBOX_MORPH_API_KEY/MORPH_API_KEY
+                               Morph Cloud API key for provider=morph
+  CRABBOX_MORPH_SNAPSHOT       Morph snapshot ID for provider=morph
   CRABBOX_PROXMOX_API_URL      Proxmox VE API URL, e.g. https://pve.local:8006
   CRABBOX_PARALLELS_SOURCE     Parallels source VM name for provider=parallels
   CRABBOX_PARALLELS_TEMPLATE   Parallels named template alias
@@ -290,7 +314,7 @@ Aliases:
   crabbox machine cleanup      Alias for cleanup
 
 Docs:
-  docs/commands/README.md`)
+  docs/commands/README.md`, providerHelpEnvValues())
 }
 
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {

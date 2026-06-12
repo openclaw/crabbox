@@ -138,8 +138,8 @@ local `tensorlake` process argv.
 - Crabbox sync: yes — gzipped tar uploaded via `tensorlake sbx cp` and extracted
   in-sandbox.
 - Provider sync: no separate Tensorlake sync command.
-- URL bridge: yes — the provider advertises the url-bridge capability for
-  reaching services running inside the sandbox.
+- URL bridge: no — Tensorlake does not expose a per-sandbox ingress URL through
+  Crabbox today.
 - Desktop / browser / code: no Crabbox VNC or code-server surface.
 - Actions hydration: no.
 - Coordinator: no — Tensorlake always runs direct from the CLI and never goes
@@ -149,9 +149,9 @@ local `tensorlake` process argv.
 
 - `--sync-only` and `--checksum` are rejected because Tensorlake does not expose
   Crabbox's rsync semantics. Other transport-owning flags (such as local
-  stdout/stderr captures and `--download`) are rejected by the core
-  delegated-sync gate. Use `--no-sync` with an explicit `--id` if the sandbox is
-  already primed.
+  stdout/stderr captures, `--download`, `--artifact-glob`, and
+  `--require-artifact`) are rejected by the core delegated-sync gate. Use
+  `--no-sync` with an explicit `--id` if the sandbox is already primed.
 - Large-sync guardrails still apply; pass `--force-sync-large` when a large
   archive sync is intentional.
 - `--shell` wraps the command as `bash -lc '<joined args>'`. Plain commands that

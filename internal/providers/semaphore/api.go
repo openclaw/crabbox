@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,6 +36,8 @@ type jobStatus struct {
 }
 
 const userAgent = "SemaphoreCI v2.0 Client"
+
+var waitForRunningPollInterval = 2 * time.Second
 
 func newAPIClient(host, token string, rt core.Runtime) *apiClient {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
@@ -90,18 +93,24 @@ func (c *apiClient) CreateJob(ctx context.Context, project, machine, osImage str
 // WaitForRunning polls until the job reaches RUNNING state.
 // Returns the SSH IP and port.
 func (c *apiClient) WaitForRunning(ctx context.Context, jobID string, tick func()) (string, int, error) {
+	var lastTransientErr error
 	for i := 0; i < 120; i++ {
 		select {
 		case <-ctx.Done():
 			return "", 0, ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(waitForRunningPollInterval):
 		}
 		tick()
 
 		status, err := c.GetJobStatus(ctx, jobID)
 		if err != nil {
+			if !retryableJobStatusError(ctx, err) {
+				return "", 0, err
+			}
+			lastTransientErr = err
 			continue
 		}
+		lastTransientErr = nil
 		if status.State == "FINISHED" {
 			return "", 0, core.Exit(5, "job %s finished before reaching RUNNING state", jobID)
 		}
@@ -112,7 +121,37 @@ func (c *apiClient) WaitForRunning(ctx context.Context, jobID string, tick func(
 			continue
 		}
 	}
+	if lastTransientErr != nil {
+		return "", 0, core.Exit(5, "job %s did not reach RUNNING state within timeout: last status error: %v", jobID, lastTransientErr)
+	}
 	return "", 0, core.Exit(5, "job %s did not reach RUNNING state within timeout", jobID)
+}
+
+func retryableJobStatusError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	var apiErr *semaphoreAPIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return false
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return false
+	}
+	return true
 }
 
 // GetJobStatus returns the job metadata, state, IP, and SSH port.
@@ -269,9 +308,19 @@ func (c *apiClient) getWithHeaders(ctx context.Context, path string) ([]byte, ht
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("semaphore API %s returned %d: %s", path, resp.StatusCode, string(body))
+		return nil, nil, &semaphoreAPIError{Path: path, StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	return body, resp.Header, nil
+}
+
+type semaphoreAPIError struct {
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *semaphoreAPIError) Error() string {
+	return fmt.Sprintf("semaphore API %s returned %d: %s", e.Path, e.StatusCode, e.Body)
 }
 
 func (c *apiClient) get(ctx context.Context, path string, target any) error {
@@ -290,7 +339,7 @@ func (c *apiClient) get(ctx context.Context, path string, target any) error {
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("semaphore API %s returned %d: %s", path, resp.StatusCode, string(body))
+		return &semaphoreAPIError{Path: path, StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	if target != nil {
 		return json.Unmarshal(body, target)
@@ -323,7 +372,7 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, target a
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("semaphore API %s returned %d: %s", path, resp.StatusCode, string(body))
+		return &semaphoreAPIError{Path: path, StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	if target != nil {
 		return json.Unmarshal(body, target)

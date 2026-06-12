@@ -18,6 +18,8 @@ type e2bFlagValues struct {
 	User     *string
 }
 
+const e2bCleanupTimeout = 30 * time.Second
+
 func RegisterE2BProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	return e2bFlagValues{
 		APIURL:   fs.String("e2b-api-url", defaults.E2B.APIURL, "E2B API URL"),
@@ -141,7 +143,7 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 			if !shouldStop {
 				return
 			}
-			if err := client.DeleteSandbox(context.Background(), sandboxID); err != nil {
+			if err := b.deleteSandboxForCleanup(client, sandboxID); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: e2b stop failed for %s: %v\n", sandboxID, err)
 				return
 			}
@@ -351,10 +353,20 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 		return "", e2bSandbox{}, "", exit(5, "e2b create sandbox returned no sandbox id")
 	}
 	if err := claimLeaseForRepoProviderPond(leaseID, slug, e2bProvider, cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.DeleteSandbox(context.Background(), sandbox.SandboxID)
+		if cleanupErr := b.deleteSandboxForCleanup(client, sandbox.SandboxID); cleanupErr != nil {
+			leakErr := fmt.Errorf("cleanup e2b sandbox %s after claim failure: %w; run `crabbox stop --provider e2b --id %s` to retry cleanup", sandbox.SandboxID, cleanupErr, sandbox.SandboxID)
+			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
+			return "", e2bSandbox{}, "", errors.Join(err, leakErr)
+		}
 		return "", e2bSandbox{}, "", err
 	}
 	return leaseID, sandbox, slug, nil
+}
+
+func (b *e2bBackend) deleteSandboxForCleanup(client e2bAPI, sandboxID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), e2bCleanupTimeout)
+	defer cancel()
+	return client.DeleteSandbox(ctx, sandboxID)
 }
 
 func (b *e2bBackend) resolveSandboxID(ctx context.Context, client e2bAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {

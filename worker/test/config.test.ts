@@ -17,6 +17,7 @@ import {
   serverTypeForClass,
   serverTypeForProviderClass,
   sshPorts,
+  validCIDRs,
 } from "../src/config";
 
 describe("machine class config", () => {
@@ -140,6 +141,10 @@ describe("machine class config", () => {
       expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
         azureWindows[name],
       );
+      expect(azureVMSizeCandidatesForTargetClass("windows", name, "normal", "arm64")).toEqual(
+        azureLinuxARM64[name],
+      );
+      expect(azureVMSizeCandidatesForTargetClass("windows", name, "wsl2", "arm64")).toEqual([name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name)).toEqual(awsWindows[name]);
       expect(awsInstanceTypeCandidatesForTargetClass("windows", name, "wsl2")).toEqual(
         awsWSL2[name],
@@ -232,6 +237,100 @@ describe("lease config", () => {
     expect(config.browser).toBe(false);
     expect(config.code).toBe(false);
     expect(config.ttlSeconds).toBe(86_400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 0 }).ttlSeconds).toBe(5400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: -1 }).ttlSeconds).toBe(5400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 42.9 }).ttlSeconds).toBe(42);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 0 }).idleTimeoutSeconds,
+    ).toBe(1800);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: -1 }).idleTimeoutSeconds,
+    ).toBe(1800);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 999_999 })
+        .idleTimeoutSeconds,
+    ).toBe(86_400);
+    expect(
+      leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 42.9 })
+        .idleTimeoutSeconds,
+    ).toBe(42);
+  });
+
+  it("filters invalid SSH CIDR values before provider config", () => {
+    expect(
+      validCIDRs([
+        " 203.0.113.7/32 ",
+        "0.0.0.0/0",
+        "255.255.255.255/32",
+        "2001:db8::1/128",
+        "::/0",
+        "999.999.999.999/32",
+        "256.0.0.1/32",
+        "1.2.3/24",
+        "1.2.3.4.5/24",
+        "203.0.113.7/33",
+        "203.0.113.7/-1",
+        "203.0.113.7/x",
+        "203.0.113.7",
+        "203.0.113.7/32/extra",
+        "::::/128",
+        "::1]#junk/128",
+        "::1]@[::2/128",
+        "::\n1/128",
+        "2001:db8::\t1/128",
+        "2001:db8::1/129",
+        "2001:db8::1/-1",
+        "2001:db8::1/x",
+        "not-a-cidr",
+      ]),
+    ).toEqual(["203.0.113.7/32", "0.0.0.0/0", "255.255.255.255/32", "2001:db8::1/128", "::/0"]);
+
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+      awsSSHCIDRs: ["198.51.100.77/32"],
+      gcpSSHCIDRs: ["2001:db8::2/128"],
+    });
+    expect(config.awsSSHCIDRs).toEqual(["198.51.100.77/32"]);
+    expect(config.gcpSSHCIDRs).toEqual(["2001:db8::2/128"]);
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["198.51.100.77/32", "999.999.999.999/32"],
+      }),
+    ).toThrow("awsSSHCIDRs entries must be valid");
+    expect(() =>
+      leaseConfig({
+        provider: "gcp",
+        sshPublicKey: "ssh-ed25519 test",
+        gcpSSHCIDRs: ["::::/128"],
+      }),
+    ).toThrow("gcpSSHCIDRs entries must be valid");
+    expect(
+      leaseConfig({
+        provider: "gcp",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32", "198.51.100.77/32"],
+        gcpSSHCIDRs: ["2001:db8::2/128"],
+      }).awsSSHCIDRs,
+    ).toEqual(["198.51.100.77/32"]);
+    expect(
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        gcpSSHCIDRs: ["::::/128", "2001:db8::2/128"],
+      }).gcpSSHCIDRs,
+    ).toEqual(["2001:db8::2/128"]);
+    expect(
+      leaseConfig({
+        provider: "hetzner",
+        sshPublicKey: "ssh-ed25519 test",
+        awsSSHCIDRs: ["999.999.999.999/32"],
+        gcpSSHCIDRs: ["::::/128"],
+      }),
+    ).toMatchObject({ awsSSHCIDRs: [], gcpSSHCIDRs: [] });
   });
 
   it("allows capacity hints to be disabled per lease", () => {
@@ -259,6 +358,11 @@ describe("lease config", () => {
     expect(empty.pond).toBe("");
     const tagged = leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " Alpha Pond " });
     expect(tagged.pond).toBe("alpha-pond");
+    const symbolRun = leaseConfig({
+      sshPublicKey: "ssh-ed25519 test",
+      pond: `alpha${"_".repeat(10_000)}pond`,
+    });
+    expect(symbolRun.pond).toBe("alpha-pond");
     expect(() => leaseConfig({ sshPublicKey: "ssh-ed25519 test", pond: " --- " })).toThrow(
       "pond must contain at least one letter or digit",
     );
@@ -364,6 +468,19 @@ describe("lease config", () => {
     expect(config.azureImage).toBe("Canonical:ubuntu-26_04-lts:server-arm64:latest");
   });
 
+  it("does not apply the Azure Windows ARM64 broker image default to Linux leases", () => {
+    const config = leaseConfig(
+      {
+        provider: "azure",
+        architecture: "arm64",
+        os: "ubuntu:26.04",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
+    );
+    expect(config.azureImage).toBe("Canonical:ubuntu-26_04-lts:server-arm64:latest");
+  });
+
   it("filters Azure defaults for ephemeral-preview full caching", () => {
     const arm = leaseConfig({
       provider: "azure",
@@ -435,15 +552,121 @@ describe("lease config", () => {
     }
   });
 
-  it("rejects ARM leases outside supported Linux providers", () => {
+  it("allows Azure Windows ARM64 leases", () => {
+    const config = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      architecture: "arm64",
+      serverType: "Standard_D32pds_v6",
+      azureImage: "Contoso:windows-arm64:server:latest",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(config.architecture).toBe("arm64");
+    expect(config.serverType).toBe("Standard_D32pds_v6");
+    expect(config.azureImage).toBe("Contoso:windows-arm64:server:latest");
+
+    const marketplace = leaseConfig({
+      provider: "azure",
+      target: "windows",
+      architecture: "arm64",
+      serverType: "Standard_D32pds_v6",
+      azureImage: "Canonical:windows-arm64:server:latest",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    expect(marketplace.azureImage).toBe("Canonical:windows-arm64:server:latest");
+
+    const defaultImage = leaseConfig(
+      {
+        provider: "azure",
+        target: "windows",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
+    );
+    expect(defaultImage.azureImage).toBe("Contoso:windows-arm64:server:latest");
+
+    const emptyRequestImage = leaseConfig(
+      {
+        provider: "azure",
+        target: "windows",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        azureImage: "",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
+    );
+    expect(emptyRequestImage.azureImage).toBe("Contoso:windows-arm64:server:latest");
+  });
+
+  it("rejects Azure Windows ARM64 leases without an explicit ARM64 image", () => {
     expect(() =>
       leaseConfig({
         provider: "azure",
         target: "windows",
         architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
         sshPublicKey: "ssh-ed25519 test",
       }),
-    ).toThrow("architecture=arm64 currently supports target=linux only");
+    ).toThrow("requires azureImage");
+
+    expect(() =>
+      leaseConfig(
+        {
+          provider: "azure",
+          target: "windows",
+          architecture: "arm64",
+          serverType: "Standard_D32pds_v6",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+        { azureImage: "Contoso:windows-arm64:server:latest" },
+      ),
+    ).toThrow("requires azureImage");
+
+    for (const azureImage of [
+      "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
+      "Canonical:0001-com-ubuntu-server-noble:24_04-lts-gen2:latest",
+    ]) {
+      expect(() =>
+        leaseConfig({
+          provider: "azure",
+          target: "windows",
+          architecture: "arm64",
+          serverType: "Standard_D32pds_v6",
+          azureImage,
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      ).toThrow("requires azureImage");
+    }
+  });
+
+  it("rejects Azure Windows ARM64 WSL2 leases", () => {
+    expect(() =>
+      leaseConfig({
+        provider: "azure",
+        target: "windows",
+        windowsMode: "wsl2",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        azureImage: "Contoso:windows-arm64:server:latest",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("supports windowsMode=normal only");
+  });
+
+  it("rejects ARM leases outside supported providers and targets", () => {
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        target: "windows",
+        architecture: "arm64",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow(
+      "architecture=arm64 currently supports target=linux or provider=azure target=windows only",
+    );
     expect(() =>
       leaseConfig({
         provider: "hetzner",

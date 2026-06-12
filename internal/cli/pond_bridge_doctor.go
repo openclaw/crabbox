@@ -292,32 +292,3 @@ func reachabilityGlyph(state string) string {
 		return state
 	}
 }
-
-// doctorPondReachabilitySummary builds the cross-provider reachability
-// matrix from the local claim sidecar and returns the text rendering. The
-// result is plugged into the existing doctor finish() helper without
-// adding new top-level commands — doctor stays the single entry point.
-func doctorPondReachabilitySummary(pond string) (PondReachabilityMatrix, string, error) {
-	if pond == "" {
-		return PondReachabilityMatrix{}, "", nil
-	}
-	claims, err := listLeaseClaims()
-	if err != nil {
-		return PondReachabilityMatrix{}, "", err
-	}
-	matches := filterClaimsForPond(claims, pond, "")
-	peers := make([]BridgePeer, 0, len(matches))
-	for _, claim := range matches {
-		peers = append(peers, bridgePeerFromClaim(claim, providerTransportClass(claim.Provider)))
-	}
-	sort.Slice(peers, func(i, j int) bool {
-		if peers[i].Slug == peers[j].Slug {
-			return peers[i].LeaseID < peers[j].LeaseID
-		}
-		return peers[i].Slug < peers[j].Slug
-	})
-	matrix := buildPondReachabilityMatrix(pond, peers)
-	var buf strings.Builder
-	renderPondReachabilityMatrix(&buf, matrix)
-	return matrix, buf.String(), nil
-}

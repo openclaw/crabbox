@@ -7,9 +7,10 @@ label, plus local claim sidecars for providers that do not own cloud labels. A
 pond exists for as long as at least one active lease carries the label.
 
 Reachability between pond members depends on the transport plane each member's
-provider supports. Tailscale gives true peer-to-peer `<slug>.cbx` names; the URL
-bridge gives provider-native HTTP(S) endpoints; the SSH-mesh gives operator-side
-`ssh -L` forwards. A pond can mix providers and planes.
+provider supports. Tailscale gives tailnet membership and, on managed Linux VM
+providers, OS-routed peer-to-peer `<slug>.cbx` names; the URL bridge gives
+provider-native HTTP(S) endpoints; the SSH-mesh gives operator-side `ssh -L`
+forwards. A pond can mix providers and planes.
 
 A `--pond` of one is the default — single-box flows are unchanged.
 
@@ -48,14 +49,16 @@ Each provider self-declares which planes its leases can serve via its
 `Spec().Features` (`FeatureTailscale`, `FeatureURLBridge`, `FeatureSSH`). A
 single provider can advertise more than one — for example a direct Hetzner box
 advertises both Tailscale and SSH, so Tailscale is the preferred peer mesh while
-`pond connect` can still build operator-side SSH forwards. URL-only sandboxes
-(such as Islo or E2B) do not join the peer mesh; they surface HTTP(S) endpoints
+`pond connect` can still build operator-side SSH forwards. Islo is dual-plane: by
+default it surfaces HTTP(S) endpoints, but warmed with `--tailscale` it joins the
+tailnet through userspace `tailscaled` driven over the exec stream. E2B and other
+URL-only sandboxes do not join the tailnet; they surface HTTP(S) endpoints
 instead.
 
 | Plane     | Feature flag       | Providers that advertise it (today)                                                                                       | What you get                                                |
 | --------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Tailscale | `FeatureTailscale` | Hetzner, Azure, GCP                                                                                                       | true peer-to-peer mesh, `<slug>.cbx` DNS                    |
-| Bridge    | `FeatureURLBridge` | Islo, E2B, Modal, Cloudflare, Tensorlake (adapters report `unsupported` until they ship a per-sandbox HTTPS ingress)      | provider-native HTTP(S) endpoints for discovery and sharing |
+| Tailscale | `FeatureTailscale` | Hetzner, Azure, GCP, Islo (userspace `tailscaled` via exec, opt-in with `--tailscale`)                                    | tailnet membership; OS-routed peer mesh on managed Linux, userspace proxy path on Islo |
+| Bridge    | `FeatureURLBridge` | Islo, E2B, Railway                                                                                                      | provider-native HTTP(S) endpoints for discovery and sharing |
 | SSH-mesh  | `FeatureSSH`       | any provider advertising SSH: Hetzner, Azure, GCP, AWS, Proxmox, static `ssh`, RunPod, exe-dev, Daytona, Sprites, Namespace, Semaphore, local-container, Parallels | operator-side `ssh -L` tunnels via `pond connect`           |
 
 macOS and Windows peer reachability are not covered by any plane yet.
@@ -188,13 +191,13 @@ crabbox warmup --pond "pr-$PR" --slug web --provider hetzner --tailscale
 crabbox pond release "pr-$PR"
 ```
 
-**Mixed-vendor integration test.** CPU on Hetzner, GPU on a delegated provider,
+**Mixed-vendor integration test.** CPU on Hetzner, a delegated HTTP sandbox,
 DB on Hetzner. Use Tailscale names for tailnet members and the URL bridge for
-HTTP(S) peers:
+providers that advertise it:
 
 ```sh
 crabbox warmup --pond "it-$SHA" --slug api --provider hetzner --tailscale
-crabbox warmup --pond "it-$SHA" --slug ml  --provider modal   --class a10g
+crabbox warmup --pond "it-$SHA" --slug web --provider e2b --e2b-template base
 crabbox warmup --pond "it-$SHA" --slug db  --provider hetzner --tailscale
 crabbox run --id api -- "DB_HOST=db.cbx go test ./..."
 ```
@@ -220,13 +223,17 @@ wait
 
 ## Tailscale names and the `.cbx` hosts file
 
-On every Tailscale-capable Linux peer, bootstrap installs a systemd timer that
-rewrites `/etc/hosts.cbx` and a managed `/etc/hosts` block every 30 seconds from
-the box-local `tailscale status --json` output. Each peer renders as
+On managed Linux VM peers, bootstrap installs a systemd timer that rewrites
+`/etc/hosts.cbx` and a managed `/etc/hosts` block every 30 seconds from the
+box-local `tailscale status --json` output. Each peer renders as
 `<tailnet-ipv4> <slug>.cbx`, so members resolve each other as `<slug>.cbx`
 within roughly one refresh interval — and the broker never sees a Tailscale
 credential. Discovery is gated by the per-pond ACL tag (below): only peers
 carrying that tag are written.
+
+Islo uses userspace Tailscale without systemd, OS routes, or the managed hosts
+file. Discover its recorded tailnet IPv4 with `crabbox pond peers`, then reach
+that address through the workload proxy environment.
 
 ## Tailscale ACL bootstrap
 

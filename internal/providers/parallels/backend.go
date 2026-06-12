@@ -2,6 +2,7 @@ package parallels
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,6 +80,17 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	keepKey := false
+	defer func() {
+		if !keepKey {
+			core.RemoveStoredTestboxKey(leaseID)
+		}
+	}()
+	cleanupVM := func(id string) {
+		if err := client.Delete(context.Background(), id); err != nil {
+			keepKey = true
+		}
+	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 	snapshotID := strings.TrimSpace(firstNonEmpty(cfg.Parallels.SourceSnapshotID, cfg.Parallels.SourceSnapshot))
@@ -96,24 +108,24 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		return LeaseTarget{}, err
 	}
 	if err := client.Start(ctx, server.CloudID); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	vm, err := client.WaitForIP(ctx, server.CloudID, cfg.Parallels.StartupTimeout)
 	if err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	if err := client.WaitForGuestExec(ctx, server.CloudID, cfg, cfg.Parallels.StartupTimeout); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	if err := client.InstallSSHKey(ctx, server.CloudID, cfg, publicKey); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	if err := client.EnsureGuestReady(ctx, server.CloudID, cfg); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	server.PublicNet.IPv4.IP = vm.IP
@@ -126,12 +138,13 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		target.SSHConfigProxy = true
 	}
 	if err := core.WaitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
-		_ = client.Delete(context.Background(), server.CloudID)
+		cleanupVM(server.CloudID)
 		return LeaseTarget{}, err
 	}
 	server.Status = "ready"
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s vm=%s ip=%s\n", leaseID, server.DisplayID(), vm.IP)
+	keepKey = true
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
@@ -145,10 +158,12 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	} else if ok {
 		id = claim.LeaseID
 	}
+	var hostErrs []error
 	for _, candidate := range core.ParallelsCandidateConfigs(b.Cfg) {
 		client := core.NewParallelsClient(candidate, b.RT.Exec)
 		vms, err := client.ListVMs(ctx)
 		if err != nil {
+			hostErrs = append(hostErrs, parallelsHostError(candidate, "list vms", err))
 			continue
 		}
 		for _, vm := range vms {
@@ -188,17 +203,20 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			}
 		}
 	}
+	if len(hostErrs) > 0 {
+		return LeaseTarget{}, fmt.Errorf("parallels fleet inventory incomplete while resolving %s: %w", req.ID, errors.Join(hostErrs...))
+	}
 	return LeaseTarget{}, core.Exit(4, "parallels lease not found: %s", req.ID)
 }
 
 func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
 	_ = req
 	var out []LeaseView
-	var lastErr error
+	var hostErrs []error
 	for _, cfg := range core.ParallelsCandidateConfigs(b.Cfg) {
 		leases, err := core.NewParallelsClient(cfg, b.RT.Exec).ListCrabboxServers(ctx)
 		if err != nil {
-			lastErr = err
+			hostErrs = append(hostErrs, parallelsHostError(cfg, "list leases", err))
 			continue
 		}
 		for i := range leases {
@@ -209,10 +227,14 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 		}
 		out = append(out, leases...)
 	}
-	if len(out) == 0 && lastErr != nil {
-		return nil, lastErr
+	if len(hostErrs) > 0 {
+		return nil, fmt.Errorf("parallels fleet inventory incomplete: %w", errors.Join(hostErrs...))
 	}
 	return out, nil
+}
+
+func parallelsHostError(cfg Config, action string, err error) error {
+	return fmt.Errorf("host %s %s: %w", blank(cfg.Parallels.SelectedHost, "local"), action, err)
 }
 
 func (b *leaseBackend) Doctor(ctx context.Context, req core.DoctorRequest) (core.DoctorResult, error) {
@@ -293,6 +315,9 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if err := client.Delete(ctx, server.CloudID); err != nil {
 			return err
 		}
+		leaseID := server.Labels["lease"]
+		core.RemoveLeaseClaim(leaseID)
+		core.RemoveStoredTestboxKey(leaseID)
 	}
 	return nil
 }

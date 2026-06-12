@@ -329,6 +329,9 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "daytona download", provider: "daytona", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "daytona delegates run execution; --download is not supported"},
 		{name: "islo download", provider: "islo", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "islo delegates run execution; --download is not supported"},
 		{name: "e2b download", provider: "e2b", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "e2b delegates run execution; --download is not supported"},
+		{name: "daytona require artifact", provider: "daytona", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "daytona delegates run execution; --require-artifact is not supported"},
+		{name: "islo require artifact", provider: "islo", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "islo delegates run execution; --require-artifact is not supported"},
+		{name: "e2b require artifact", provider: "e2b", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "e2b delegates run execution; --require-artifact is not supported"},
 		{name: "e2b lease output", provider: "e2b", args: []string{"--lease-output", "session.json"}, want: "--lease-output is not supported for provider=e2b yet"},
 		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
 		{name: "daytona script", provider: "daytona", args: []string{"--script", "testdata/missing.sh"}, want: "daytona delegates run execution; --script is not supported"},
@@ -484,6 +487,11 @@ func TestRunCommandRejectsProofAndArtifactsWithSyncOnly(t *testing.T) {
 			want: "--artifact-glob cannot be combined with --sync-only",
 		},
 		{
+			name: "require artifact",
+			args: []string{"--sync-only", "--require-artifact", "reports/data/manifest.json"},
+			want: "--require-artifact cannot be combined with --sync-only",
+		},
+		{
 			name: "emit proof",
 			args: []string{"--sync-only", "--emit-proof", filepath.Join(t.TempDir(), "proof.md")},
 			want: "--emit-proof cannot be combined with --sync-only",
@@ -518,6 +526,11 @@ func TestRunCommandRejectsTargetOnlyProfileOutputsBeforeLease(t *testing.T) {
 			name: "macos artifacts",
 			args: []string{"--provider", "ssh", "--target", "macos", "--artifact-glob", ".artifacts/**", "--", "true"},
 			want: "--artifact-glob is not supported for macOS targets",
+		},
+		{
+			name: "macos required artifact",
+			args: []string{"--provider", "ssh", "--target", "macos", "--require-artifact", "reports/data/manifest.json", "--", "true"},
+			want: "--require-artifact is not supported for macOS targets",
 		},
 		{
 			name: "native windows doctor",
@@ -696,6 +709,227 @@ func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 	}
 	if !strings.Contains(report.LeaseStopErr, "release API unavailable") {
 		t.Fatalf("leaseStopError=%q", report.LeaseStopErr)
+	}
+}
+
+func TestRunCommandRequireArtifactFailsAfterSuccessfulCommand(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "ssh.log")
+	downloadPath := filepath.Join(dir, "manifest.json")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  *"base64 <"*) printf 'ZG93bmxvYWRlZAo='; exit 0 ;;
+  *"check_artifact_file()"*) printf 'missing required artifact: reports/data/manifest.json\n' >&2; exit 8 ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--keep-on-failure",
+		"--timing-json",
+		"--require-artifact", "reports/data/manifest.json",
+		"--download", "reports/data/manifest.json=" + downloadPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("error=%v, want exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"require artifacts", "missing required artifact: reports/data/manifest.json"} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("message missing %q: %q", want, exitErr.Message)
+		}
+	}
+	if _, err := os.Stat(downloadPath); !os.IsNotExist(err) {
+		t.Fatalf("download ran before required artifact failure, stat err=%v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "test -f 'reports/data/manifest.json' && base64 < 'reports/data/manifest.json'") {
+		t.Fatalf("download command ran before required artifact check:\n%s", logData)
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=cbx_env_profile_test") {
+		t.Fatalf("missing keep-on-failure hint after required artifact failure:\n%s", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report TimingReport
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatalf("last stderr line is not timing JSON: %q\nfull stderr:\n%s", lines[len(lines)-1], stderr.String())
+	}
+	if report.ExitCode != 7 {
+		t.Fatalf("timing exitCode=%d, want 7\nreport=%#v", report.ExitCode, report)
+	}
+}
+
+func TestRunCommandRequireArtifactCollectsRequiredArtifactE2E(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+
+	sshPath := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "ssh.log")
+	remoteRoot := filepath.Join(dir, "remote-root")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  mkdir\ -p*|cd\ *|bash\ -lc*) exec sh -c "$cmd" ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_WORK_ROOT", remoteRoot)
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--require-artifact", "reports/data/manifest.json",
+		"--artifact-glob", "reports/data/*.txt",
+		"--", "sh", "-c", "mkdir -p reports/data && printf '{}\n' > reports/data/manifest.json && printf 'ok\n' > reports/data/quality.txt && printf 'data run complete\n'",
+	})
+	if err != nil {
+		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "data run complete") {
+		t.Fatalf("stdout missing command output:\n%s", stdout.String())
+	}
+	for _, want := range []string{
+		"required artifact reports/data/manifest.json matched=1",
+		"artifact kind=artifact-glob",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".crabbox", "runs", "*", "*-artifacts.tgz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("artifact tarballs=%#v, want exactly one", matches)
+	}
+	names := tarGzNames(t, matches[0])
+	for _, want := range []string{"reports/data/manifest.json", "reports/data/quality.txt"} {
+		if !stringSliceContains(names, want) {
+			t.Fatalf("archive missing %q: %#v", want, names)
+		}
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <"} {
+		if !strings.Contains(string(logData), want) {
+			t.Fatalf("ssh log missing %q:\n%s", want, logData)
+		}
+	}
+}
+
+func TestDelegatedRunArtifactScriptSkipsSlashNormalizedMatches(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "etc", "passwd"), []byte("repo fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarLog := filepath.Join(dir, "tar.log")
+	tarPath := filepath.Join(binDir, "tar")
+	if err := os.WriteFile(tarPath, []byte(`#!/bin/sh
+printf '%s\n' "$@" > "$CRABBOX_FAKE_TAR_LOG"
+out=""
+prev=""
+for arg do
+  if [ "$prev" = "-czf" ]; then out="$arg"; break; fi
+  prev="$arg"
+done
+: > "$out"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_TAR_LOG", tarLog)
+	cmd := exec.Command("bash", "-c", DelegatedRunArtifactScript(nil, []string{".//etc/passwd"}, 16, 1024*1024))
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("delegated artifact script failed: %v\n%s", err, out)
+	}
+	logData, err := os.ReadFile(tarLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "/etc/passwd") {
+		t.Fatalf("tar received slash-normalized path:\n%s", logData)
+	}
+	if !strings.Contains(string(logData), "--files-from\n/dev/null") {
+		t.Fatalf("tar should receive an empty archive after rejecting slash-normalized matches:\n%s", logData)
 	}
 }
 
@@ -1009,6 +1243,26 @@ func TestFullResyncSeedsPruneManifestFromGit(t *testing.T) {
 	}
 	if shouldSeedRemotePruneManifest(false, false) {
 		t.Fatal("normal non-hydrated sync should not seed old manifest from git")
+	}
+}
+
+func TestAllowRemoteSyncMassDeletionsForIncludeWhitelist(t *testing.T) {
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_ALLOW_MASS_DELETIONS", "")
+	if allowRemoteSyncMassDeletions(cfg, false) {
+		t.Fatal("ordinary sync should keep mass deletion guard enabled")
+	}
+	if !allowRemoteSyncMassDeletions(cfg, true) {
+		t.Fatal("hydrated actions workspace should allow mass deletions")
+	}
+	cfg.Sync.Includes = []string{"src"}
+	if !allowRemoteSyncMassDeletions(cfg, false) {
+		t.Fatal("sync.include should allow intentional whitelist pruning")
+	}
+	cfg.Sync.Includes = nil
+	t.Setenv("CRABBOX_ALLOW_MASS_DELETIONS", "1")
+	if !allowRemoteSyncMassDeletions(cfg, false) {
+		t.Fatal("env override should allow mass deletions")
 	}
 }
 
@@ -2169,5 +2423,58 @@ func TestApplyResolvedServerConfigRestoresLocalContainerSocketConfig(t *testing.
 	}
 	if !localContainerDockerSocketConfig(cfg) {
 		t.Fatal("restored socket config should use no-times sync")
+	}
+}
+
+func TestApplyResolvedServerConfigRestoresTargetAndWorkRoot(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.TargetOS = targetMacOS
+	cfg.WindowsMode = windowsModeNormal
+	server := Server{Labels: map[string]string{
+		"target":       targetWindows,
+		"windows_mode": windowsModeWSL2,
+		"work_root":    `D:\crabbox`,
+	}}
+
+	applyResolvedServerConfig(&cfg, server)
+
+	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeWSL2 || cfg.WorkRoot != `D:\crabbox` {
+		t.Fatalf("resolved config=%#v", cfg)
+	}
+}
+
+func TestApplyResolvedLeaseConfigPrefersStoredLabelsAndUpdatesTarget(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	target := SSHTarget{TargetOS: targetLinux, User: cfg.SSHUser}
+	server := Server{Labels: map[string]string{
+		"target":       targetWindows,
+		"windows_mode": windowsModeWSL2,
+		"work_root":    "/work/crabbox",
+	}}
+
+	applyResolvedLeaseConfig(&cfg, server, &target)
+
+	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeWSL2 || cfg.WorkRoot != "/work/crabbox" || cfg.SSHUser != "Administrator" {
+		t.Fatalf("resolved config=%#v", cfg)
+	}
+	if target.TargetOS != targetWindows || target.WindowsMode != windowsModeWSL2 || target.User != "Administrator" {
+		t.Fatalf("resolved target=%#v", target)
+	}
+}
+
+func TestApplyResolvedLeaseConfigPreservesProviderTargetUser(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	target := SSHTarget{TargetOS: targetLinux, User: "image-admin"}
+	server := Server{Labels: map[string]string{
+		"target":       targetWindows,
+		"windows_mode": windowsModeWSL2,
+	}}
+
+	applyResolvedLeaseConfig(&cfg, server, &target)
+
+	if target.User != "image-admin" {
+		t.Fatalf("resolved target user=%q, want provider user", target.User)
 	}
 }

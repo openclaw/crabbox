@@ -486,6 +486,66 @@ func TestDoctorPondSummarySkipsPondWithOnlyNonTailscaleClaims(t *testing.T) {
 	}
 }
 
+func TestDoctorPondSummarySkipsURLOnlyIsloClaims(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_islo1", Provider: "islo", Pond: "alpha", Slug: "api", RepoRoot: "/r"},
+	})
+	t.Setenv("TS_API_KEY", "tskey-api-stub")
+	prev := doctorTailscaleACLClientFactory
+	called := false
+	defer func() { doctorTailscaleACLClientFactory = prev }()
+	doctorTailscaleACLClientFactory = func(_ string) doctorTailscaleACLClient {
+		called = true
+		return stubDoctorTailscaleACLClient{}
+	}
+	cfg := Config{Provider: "islo", Pond: "alpha"}
+	status, _, details := doctorPondSummary(context.Background(), cfg)
+	if status != "skip" || details["reason"] != "no_tailscale_capable_provider" {
+		t.Fatalf("expected URL-only Islo pond to skip Tailscale doctor, got status=%q details=%#v", status, details)
+	}
+	if called {
+		t.Fatal("doctor called Tailscale API for URL-only Islo pond")
+	}
+}
+
+func TestDoctorPondSummaryChecksTailnetIsloClaims(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_islo1", Provider: "islo", Pond: "alpha", Slug: "api", RepoRoot: "/r"},
+	})
+	if err := updateLeaseClaimTailscale("isb_islo1", "100.64.7.7", ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TS_API_KEY", "tskey-api-stub")
+	prev := doctorTailscaleACLClientFactory
+	defer func() { doctorTailscaleACLClientFactory = prev }()
+	doctorTailscaleACLClientFactory = func(_ string) doctorTailscaleACLClient {
+		return stubDoctorTailscaleACLClient{policy: pondPolicyFixture(pondTailscaleTag(localCoordinatorOwner(), "alpha"))}
+	}
+	cfg := Config{Provider: "islo", Pond: "alpha"}
+	status, _, _ := doctorPondSummary(context.Background(), cfg)
+	if status != "ok" {
+		t.Fatalf("expected tailnet Islo pond to check Tailscale policy, got %q", status)
+	}
+}
+
+func TestDoctorPondSummaryChecksPersistedIsloEnrollment(t *testing.T) {
+	withTempClaims(t, []leaseClaim{
+		{LeaseID: "isb_islo1", Provider: "islo", Pond: "alpha", Slug: "api", RepoRoot: "/r"},
+	})
+	mutateClaim(t, "isb_islo1", func(claim *leaseClaim) { claim.TailscaleHostname = "api" })
+	t.Setenv("TS_API_KEY", "tskey-api-stub")
+	prev := doctorTailscaleACLClientFactory
+	defer func() { doctorTailscaleACLClientFactory = prev }()
+	doctorTailscaleACLClientFactory = func(_ string) doctorTailscaleACLClient {
+		return stubDoctorTailscaleACLClient{policy: pondPolicyFixture(pondTailscaleTag(localCoordinatorOwner(), "alpha"))}
+	}
+
+	status, _, _ := doctorPondSummary(context.Background(), Config{Provider: "islo", Pond: "alpha"})
+	if status != "ok" {
+		t.Fatalf("expected persisted Islo enrollment to check Tailscale policy, got %q", status)
+	}
+}
+
 func TestDoctorPondSummarySkipsWhenAPIKeyMissing(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hz1", Provider: "hetzner", Pond: "alpha", Slug: "web", RepoRoot: "/r"},

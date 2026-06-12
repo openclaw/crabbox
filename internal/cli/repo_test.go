@@ -43,6 +43,94 @@ func TestSyncManifestUsesGitFilesAndIgnoresIgnoredJunk(t *testing.T) {
 	}
 }
 
+func TestSyncManifestIncludeWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
+	writeFile(t, filepath.Join(dir, "scripts", "build.sh"), "echo hi\n")
+	writeFile(t, filepath.Join(dir, "package.json"), "{}\n")
+	writeFile(t, filepath.Join(dir, "data", "huge.bin"), strings.Repeat("x", 4096))
+	writeFile(t, filepath.Join(dir, "notes.txt"), "ignore me\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	manifest, err := syncManifestFiltered(dir, configuredExcludes(baseConfig()), []string{"src", "scripts", "package.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(manifest.Files, ",")
+	for _, want := range []string{"src/main.go", "scripts/build.sh", "package.json"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("include whitelist dropped wanted path %q: %q", want, got)
+		}
+	}
+	for _, notWant := range []string{"data/huge.bin", "notes.txt"} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("include whitelist kept non-included path %q: %q", notWant, got)
+		}
+	}
+}
+
+func TestPathIncluded(t *testing.T) {
+	if !pathIncluded("anything/at/all.txt", nil) {
+		t.Fatal("empty includes should keep all paths")
+	}
+	includes := []string{"src", "scripts/proof", "package.json"}
+	for _, in := range []string{"src/a.go", "src/deep/b.go", "scripts/proof/run.sh", "package.json"} {
+		if !pathIncluded(in, includes) {
+			t.Fatalf("expected %q to be included", in)
+		}
+	}
+	for _, out := range []string{"data/x.bin", "scripts/other.sh", "package.lock", "packages/app/src/main.go", "examples/package.json"} {
+		if pathIncluded(out, includes) {
+			t.Fatalf("expected %q to be excluded by whitelist", out)
+		}
+	}
+	globIncludes := []string{"*.go", "docs/*.md"}
+	for _, in := range []string{"main.go", "docs/readme.md"} {
+		if !pathIncluded(in, globIncludes) {
+			t.Fatalf("expected glob to include %q", in)
+		}
+	}
+	for _, out := range []string{"src/main.go", "docs/nested/readme.md"} {
+		if pathIncluded(out, globIncludes) {
+			t.Fatalf("expected root-relative glob to exclude %q", out)
+		}
+	}
+}
+
+func TestSyncGitSeedDisabledByIncludeWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+	head := gitOutput(dir, "rev-parse", "HEAD")
+	repo := Repo{Root: dir, RemoteURL: "https://github.com/example-org/my-app.git", Head: head}
+
+	cfg := baseConfig()
+	if !syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("seedable repo without includes should use git seed")
+	}
+	cfg.Sync.Includes = []string{"src"}
+	if syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("sync.include should disable full-repo git seed")
+	}
+	cfg.Sync.Includes = []string{" "}
+	if !syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("blank include entries should not disable git seed")
+	}
+	cfg.Sync.GitSeed = false
+	if syncGitSeedEnabled(cfg, repo) {
+		t.Fatal("gitSeed=false should disable git seed")
+	}
+}
+
 func TestSyncManifestPrunesNestedDefaultExcludes(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")

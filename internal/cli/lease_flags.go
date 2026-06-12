@@ -344,6 +344,11 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	if !cfg.ServerTypeExplicit {
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
+	if opts.LeaseID == "" {
+		if _, err := validateProviderTargetSupport(cfg); err != nil {
+			return Config{}, err
+		}
+	}
 	return cfg, nil
 }
 
@@ -361,11 +366,18 @@ func requireLeaseID(id, usage string, cfg Config) error {
 }
 
 func (a App) resolveNetworkLeaseTarget(ctx context.Context, cfg Config, id string, printFallback bool) (Server, SSHTarget, string, error) {
-	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, id)
+	return a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, id, printFallback)
+}
+
+func (a App) resolveNetworkLeaseTargetWithConfig(ctx context.Context, cfg *Config, id string, printFallback bool) (Server, SSHTarget, string, error) {
+	if cfg == nil {
+		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
+	}
+	server, target, leaseID, err := a.resolveLeaseTargetWithConfig(ctx, cfg, id)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
-	resolved, err := resolveNetworkTarget(ctx, cfg, server, target)
+	resolved, err := resolveNetworkTarget(ctx, *cfg, server, target)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
@@ -385,7 +397,7 @@ func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Se
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

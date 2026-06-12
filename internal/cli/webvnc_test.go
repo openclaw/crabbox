@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +19,10 @@ import (
 
 	"nhooyr.io/websocket"
 )
+
+func init() {
+	RegisterProvider(directWebVNCTestProvider{})
+}
 
 func TestWebVNCURLs(t *testing.T) {
 	if got := webVNCAgentURL("https://broker.example.com", "cbx_abcdef123456"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/webvnc/agent" {
@@ -65,12 +70,108 @@ func TestWebVNCURLs(t *testing.T) {
 	if values.Get("password") != "JVS/yMb%2B" {
 		t.Fatalf("decoded portal password=%q", values.Get("password"))
 	}
-	if got := localContainerWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&quality=6&resize=scale" {
+	if got := directSSHWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&quality=6&resize=scale" {
 		t.Fatalf("local container WebVNC URL=%q", got)
 	}
 	if !isLocalContainerProvider("docker") || !isLocalContainerProvider("local-container") {
 		t.Fatal("local-container aliases should use local WebVNC")
 	}
+	for _, provider := range []string{"local-container", "direct-webvnc-test"} {
+		if !supportsDirectSSHWebVNC(provider) {
+			t.Fatalf("provider %s should support direct SSH WebVNC", provider)
+		}
+	}
+	if supportsDirectSSHWebVNC("static") || supportsDirectSSHWebVNC("aws") {
+		t.Fatal("static and coordinator-backed providers should not use direct SSH WebVNC")
+	}
+}
+
+func TestGuardMacOSDirectWebVNC(t *testing.T) {
+	// macOS desktop leases (e.g. tart) must be rejected from the Linux-only
+	// noVNC bridge with native-client guidance, not silently enter it.
+	err := guardMacOSDirectWebVNC(Config{Provider: "tart", TargetOS: targetMacOS, SSHUser: "admin"})
+	if err == nil {
+		t.Fatal("macOS lease should be guarded out of the direct WebVNC browser path")
+	}
+	if !strings.Contains(err.Error(), "native VNC client") || !strings.Contains(err.Error(), "ssh -L 5900") {
+		t.Fatalf("guard error should give native-client guidance, got: %v", err)
+	}
+	// Even with TargetOS unresolved (as the webvnc subcommands leave it), tart is
+	// guarded via its provider spec's macOS target.
+	if err := guardMacOSDirectWebVNC(Config{Provider: "tart"}); err == nil {
+		t.Fatal("tart should be guarded via provider spec even when TargetOS is unset")
+	}
+	// Linux desktop leases keep using the browser bridge.
+	if err := guardMacOSDirectWebVNC(Config{Provider: "local-container", TargetOS: targetLinux}); err != nil {
+		t.Fatalf("linux lease should not be guarded: %v", err)
+	}
+}
+
+func TestRegisteredLeaseUsesCoordinatorWebVNC(t *testing.T) {
+	cfg := Config{
+		Provider:    "direct-webvnc-test",
+		Coordinator: "https://broker.example.test",
+		BrokerMode:  BrokerModeRegistered,
+	}
+	if useDirectSSHWebVNC(cfg) {
+		t.Fatal("registered lease should use the coordinator WebVNC bridge")
+	}
+	if !useDirectSSHWebVNC(Config{Provider: "direct-webvnc-test"}) {
+		t.Fatal("unregistered direct provider should keep its local WebVNC bridge")
+	}
+}
+
+func TestIsMacOSDesktopProviderOnlyDedicatedMacOS(t *testing.T) {
+	// tart's only target is macOS -> uses the host-side Screen Sharing bridge.
+	if !isMacOSDesktopProvider(Config{Provider: "tart"}) {
+		t.Error("tart (dedicated macOS provider) should route to the macOS bridge")
+	}
+	// parallels is multi-target (macOS + Linux + Windows); it must NOT be diverted
+	// into the tart bridge, even for a macOS lease — regression guard.
+	if isMacOSDesktopProvider(Config{Provider: "parallels"}) {
+		t.Error("parallels (multi-target) must not route to the macOS bridge")
+	}
+	if isMacOSDesktopProvider(Config{Provider: "parallels", TargetOS: targetMacOS}) {
+		t.Error("a macOS parallels lease must still use the existing WebVNC path")
+	}
+}
+
+func TestWebVNCBridgeArgsPreserveProviderRouting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	args := webVNCBridgeArgs(
+		Config{Provider: "direct-webvnc-test", TargetOS: targetLinux},
+		SSHTarget{TargetOS: targetLinux},
+		"cbx_abcdef123456",
+		false,
+		false,
+	)
+	got := strings.Join(args, " ")
+	if !strings.Contains(got, "--direct-webvnc-routing route-cbx_abcdef123456") {
+		t.Fatalf("args=%#v", args)
+	}
+}
+
+type directWebVNCTestProvider struct{}
+
+func (directWebVNCTestProvider) Name() string      { return "direct-webvnc-test" }
+func (directWebVNCTestProvider) Aliases() []string { return nil }
+func (directWebVNCTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "direct-webvnc-test",
+		Kind:        ProviderKindSSHLease,
+		Features:    FeatureSet{FeatureSSH, FeatureDesktop},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (directWebVNCTestProvider) RegisterFlags(fs *flag.FlagSet, _ Config) any {
+	return fs.String("direct-webvnc-routing", "", "test routing value")
+}
+func (directWebVNCTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (directWebVNCTestProvider) Configure(Config, Runtime) (Backend, error) { return nil, nil }
+func (directWebVNCTestProvider) CommandRoutingArgs(_ Config, leaseID string) []string {
+	return []string{"--direct-webvnc-routing", "route-" + leaseID}
 }
 
 func TestWebVNCResetRemoteCommandHandlesWaylandAndX11(t *testing.T) {

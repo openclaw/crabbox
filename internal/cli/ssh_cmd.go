@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"strings"
 )
@@ -13,14 +14,18 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	showSecret := fs.Bool("show-secret", false, "print secret auth material for token-based SSH providers")
+	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	setIDFromFirstArg(fs, id)
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	cfg, err := loadSSHCommandConfig(fs, *provider, providerFlags, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
+		return err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if err := requireLeaseID(*id, "crabbox ssh --id <lease-id-or-slug>", cfg); err != nil {
@@ -38,6 +43,17 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stdout, sshCommandLine(target, target.AuthSecret && !*showSecret))
 	return nil
+}
+
+func loadSSHCommandConfig(fs *flag.FlagSet, provider string, providerFlags providerFlagValues, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
+	cfg, err := loadLeaseTargetConfig(fs, provider, targetFlags, networkFlags, opts)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 func sshCommandLine(target SSHTarget, redactSecret bool) string {

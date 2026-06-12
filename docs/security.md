@@ -13,7 +13,9 @@ local CLI -> Cloudflare Worker / Fleet Durable Object -> provider VM
 The CLI owns local config, per-lease SSH keys, sync, and remote command
 execution. The Worker (the broker) owns authentication, authorization, lease
 state, provider credentials, cost guardrails, and cleanup. Providers own VM
-creation, network reachability, and deletion.
+creation, network reachability, and deletion. Delegated-run providers such as
+Docker Sandbox also own the command transport and runtime that receive commands
+and explicitly forwarded environment values.
 
 ## Trust Model
 
@@ -44,7 +46,7 @@ resolved in `worker/src/auth.ts` in this precedence:
    login. It is an HMAC-SHA256 signature (verified in constant time) over a
    base64url payload signed with `CRABBOX_SESSION_SECRET` (falling back to
    `CRABBOX_SHARED_TOKEN`). The payload carries `owner`, `org`, and GitHub
-   `login`, has a default 30-day expiry, and is rejected if it carries an
+   `login`, has a default 180-day expiry, and is rejected if it carries an
    `admin` claim — browser login can never mint admin tokens.
 
 ### GitHub browser login
@@ -93,13 +95,15 @@ operator    shared automation identity via a shared bearer token
 admin       view all leases/runs/pool/usage; drain/delete machines; image lifecycle
 ```
 
-Admin scope comes only from `CRABBOX_ADMIN_TOKEN`; locally, admin commands send
-it via `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`. Shared-operator
-requests do **not** trust caller-supplied `X-Crabbox-Owner` / `X-Crabbox-Org`
-headers — pin that automation's identity with `CRABBOX_SHARED_OWNER`
-(and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed tokens / verified Access
-identity instead. Missing shared-token config fails closed for non-health
-routes.
+Admin scope comes from `CRABBOX_ADMIN_TOKEN`, or from a signed GitHub user token
+whose verified email or login matches `CRABBOX_GITHUB_ADMIN_OWNERS` or
+`CRABBOX_GITHUB_ADMIN_LOGINS`. Locally, admin commands can still send the admin
+bearer via `CRABBOX_COORDINATOR_ADMIN_TOKEN` or `broker.adminToken`.
+Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
+`X-Crabbox-Org` headers — pin that automation's identity with
+`CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed
+tokens / verified Access identity instead. Missing shared-token config fails
+closed for non-health routes.
 
 ## Secrets
 
@@ -113,6 +117,10 @@ Handling rules:
   (or a profile's `env.allow`).
 - Never pass a secret value as a command-line flag.
 - Never log environment values; redact secret-looking strings in diagnostics.
+- Treat delegated-run providers as part of the runtime trust boundary: when you
+  allow a variable for a Docker Sandbox run, Docker Sandbox receives that value
+  through its `sbx exec --env-file` path even though Crabbox keeps the value out
+  of local process arguments.
 - User config files are written `0600`. `crabbox doctor` flags any local config
   whose permissions are broader, because broker tokens may live there.
 
@@ -138,6 +146,10 @@ Stored as Worker **secrets** (never in the repo):
   signing key when `CRABBOX_SESSION_SECRET` is unset.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
   `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing.
+- `CRABBOX_GITHUB_ADMIN_OWNERS`, `CRABBOX_GITHUB_ADMIN_LOGINS` — optional
+  comma-separated GitHub verified emails and logins whose user tokens become
+  admin at request time; set these per deployment, not in the reusable repo
+  config.
 - `CRABBOX_TAILSCALE_CLIENT_ID`, `CRABBOX_TAILSCALE_CLIENT_SECRET` — minting
   one-off Tailscale auth keys for brokered `--tailscale` leases.
 - `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`, `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`,

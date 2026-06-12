@@ -7,6 +7,10 @@ not move SSH private keys between machines.
 Sharing requires a configured coordinator. Without one, the command exits with
 `share requires a configured coordinator`.
 
+Direct-provider leases become shareable when `broker.mode: registered` is set.
+The coordinator shares portal capabilities such as WebVNC; it does not gain
+provider lifecycle ownership or the local SSH key.
+
 ## Usage
 
 ```sh

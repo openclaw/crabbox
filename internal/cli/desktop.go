@@ -64,12 +64,12 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		return err
 	}
 	if *webvnc && (isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider)) {
-		return exit(2, "desktop launch --webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases")
+		return exit(2, "desktop launch --webvnc is unavailable for provider=%s", cfg.Provider)
 	}
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -215,7 +215,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		command = command[1:]
 	}
 	command = trimCommandSeparator(command)
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -283,7 +283,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		}
 	}
 	if path := strings.TrimSpace(*screenshot); path != "" {
-		if err := captureDesktopScreenshot(ctx, target, path); err != nil {
+		if err := captureDesktopScreenshot(ctx, cfg, target, path); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "screenshot: %s\n", path)
@@ -407,7 +407,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		command = command[1:]
 	}
 	command = trimCommandSeparator(command)
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
 	if err != nil {
 		return err
 	}
@@ -421,7 +421,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -491,7 +491,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "metadata: %s\n", metadataPath)
 	screenshotPath := filepath.Join(dir, "screenshot.png")
-	if err := captureDesktopScreenshot(ctx, target, screenshotPath); err != nil {
+	if err := captureDesktopScreenshot(ctx, cfg, target, screenshotPath); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "screenshot: %s\n", screenshotPath)

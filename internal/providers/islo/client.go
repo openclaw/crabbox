@@ -23,6 +23,8 @@ import (
 type isloAPI interface {
 	CreateSandbox(context.Context, *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error)
 	GetSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
+	PauseSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
+	ResumeSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
 	ListSandboxes(context.Context) ([]*gosdk.SandboxResponse, error)
 	DeleteSandbox(context.Context, string) error
 	UploadArchive(context.Context, string, string, io.Reader) error
@@ -35,11 +37,12 @@ type isloAPI interface {
 // `POST /sandboxes/{name}/shares` API. It is the islo-specific shape of the
 // generic BridgePeer entry surfaced by the pond bridge plane.
 type IsloShare struct {
-	ShareID   string    `json:"share_id"`
-	URL       string    `json:"url"`
-	Port      int       `json:"port"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ShareID      string    `json:"share_id"`
+	URL          string    `json:"url"`
+	Port         int       `json:"port"`
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	ExpiresAtSet bool      `json:"-"`
 }
 
 type isloSDKClient struct {
@@ -49,6 +52,10 @@ type isloSDKClient struct {
 	httpClient *http.Client
 }
 
+const isloDefaultResponseHeaderTimeout = 30 * time.Second
+
+var isloCleanupTimeout = 15 * time.Second
+
 var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	apiKey := strings.TrimSpace(cfg.Islo.APIKey)
 	if apiKey == "" {
@@ -57,7 +64,7 @@ var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	baseURL := strings.TrimRight(blank(cfg.Islo.BaseURL, "https://api.islo.dev"), "/")
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultIsloHTTPClient()
 	}
 	auth := customauth.NewProvider(baseURL, apiKey, 0, httpClient)
 	var baseTransport http.RoundTripper
@@ -74,12 +81,30 @@ var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	return &isloSDKClient{sdk: sdk, auth: auth, baseURL: baseURL, httpClient: httpClient}, nil
 }
 
+func isloCleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), isloCleanupTimeout)
+}
+
+func defaultIsloHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = isloDefaultResponseHeaderTimeout
+	return &http.Client{Transport: transport}
+}
+
 func (c *isloSDKClient) CreateSandbox(ctx context.Context, req *gosdk.SandboxCreate) (*gosdk.SandboxResponse, error) {
 	return c.sdk.Sandboxes.CreateSandbox(ctx, req)
 }
 
 func (c *isloSDKClient) GetSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
 	return c.sdk.Sandboxes.GetSandbox(ctx, &gosdk.GetSandboxRequest{SandboxName: name})
+}
+
+func (c *isloSDKClient) PauseSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
+	return c.sdk.Sandboxes.PauseSandbox(ctx, &gosdk.PauseSandboxRequest{SandboxName: name})
+}
+
+func (c *isloSDKClient) ResumeSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
+	return c.sdk.Sandboxes.ResumeSandbox(ctx, &gosdk.ResumeSandboxRequest{SandboxName: name})
 }
 
 func (c *isloSDKClient) ListSandboxes(ctx context.Context) ([]*gosdk.SandboxResponse, error) {
@@ -105,8 +130,32 @@ func (c *isloSDKClient) ListSandboxes(ctx context.Context) ([]*gosdk.SandboxResp
 }
 
 func (c *isloSDKClient) DeleteSandbox(ctx context.Context, name string) error {
-	_, err := c.sdk.Sandboxes.DeleteSandbox(ctx, &gosdk.DeleteSandboxRequest{SandboxName: name})
-	return err
+	// The Islo delete endpoint returns an empty body (202/204), which the
+	// generated SDK decoder rejects ("expected a response, but the server
+	// responded with nothing"). Issue the DELETE directly so an empty success
+	// body is handled correctly, and treat an already-gone sandbox (404) as a
+	// successful idempotent delete.
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/sandboxes/"+url.PathEscape(name), nil)
+	if err != nil {
+		return err
+	}
+	if err := c.authorize(ctx, httpReq); err != nil {
+		return err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// Mirror the >=400 failure convention used by the other raw endpoints, with
+	// 404 carved out so an already-gone sandbox is an idempotent success.
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("islo delete sandbox %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 func (c *isloSDKClient) UploadArchive(ctx context.Context, name, targetPath string, archive io.Reader) error {
@@ -263,6 +312,7 @@ func isloShareFromAPI(raw isloShareResponse) IsloShare {
 		share.CreatedAt = t
 	}
 	if raw.ExpiresAt != nil && *raw.ExpiresAt != "" {
+		share.ExpiresAtSet = true
 		if t, err := time.Parse(time.RFC3339, *raw.ExpiresAt); err == nil {
 			share.ExpiresAt = t
 		}
@@ -303,6 +353,7 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	exitCode := 0
 	seenExit := false
+	streamErr := ""
 	event := ""
 	var data []string
 	flush := func() error {
@@ -322,6 +373,14 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 			}
 			exitCode = n
 			seenExit = true
+		case "error":
+			// The Islo exec SSE stream emits an "error" event for stream or
+			// VM-level failures. Capture the last one so we can surface a
+			// meaningful message instead of a generic missing-exit error when
+			// the stream ends without an exit event.
+			if msg := strings.TrimSpace(payload); msg != "" {
+				streamErr = msg
+			}
 		}
 		event = ""
 		data = data[:0]
@@ -358,6 +417,9 @@ func parseIsloSSE(r io.Reader, stdout, stderr io.Writer) (int, error) {
 		return 1, err
 	}
 	if !seenExit {
+		if streamErr != "" {
+			return 1, fmt.Errorf("islo exec stream error: %s", streamErr)
+		}
 		return 1, fmt.Errorf("islo exec stream ended without exit event")
 	}
 	return exitCode, nil

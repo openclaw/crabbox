@@ -69,6 +69,28 @@ need() {
   fi
 }
 
+shell_quote() {
+  printf '%q' "$1"
+}
+
+shell_command() {
+  local rendered=""
+  local arg
+  for arg in "$@"; do
+    if [[ -n "$rendered" ]]; then
+      rendered+=" "
+    fi
+    rendered+="$(shell_quote "$arg")"
+  done
+  printf '%s' "$rendered"
+}
+
+shell_command_redirect() {
+  local output="$1"
+  shift
+  printf '%s > %s' "$(shell_command "$@")" "$(shell_quote "$output")"
+}
+
 need jq
 if [[ ! -x "$CRABBOX_BIN" ]]; then
   printf 'CRABBOX_BIN is not executable: %s\n' "$CRABBOX_BIN" >&2
@@ -151,6 +173,10 @@ quota_ok=false
 if [[ "$quota_status" == "0" ]] && jq -e 'any(.[]; (.value // 0) >= 1)' "$artifact_dir/evidence/mac-host-quota.out" >/dev/null 2>&1; then
   quota_ok=true
 fi
+quota_zero=false
+if [[ "$quota_status" == "0" ]] && jq -e 'any(.[]; (.value? // null) as $value | (($value | type) == "number" and $value < 1))' "$artifact_dir/evidence/mac-host-quota.out" >/dev/null 2>&1; then
+  quota_zero=true
+fi
 
 helper_profile_ok=true
 if grep -Eq 'no local AWS profile matches coordinator account|local AWS account .* does not match coordinator account' "$artifact_dir/evidence/iam-apply-dry-run.err" "$artifact_dir/evidence/quota-request-dry-run.err" 2>/dev/null; then
@@ -158,15 +184,16 @@ if grep -Eq 'no local AWS profile matches coordinator account|local AWS account 
 fi
 
 commands_json="$(
-	printf '%s\n' \
-		"$CRABBOX_REMEDIATION_BIN admin providers identity --provider aws --region $region" \
-		"$CRABBOX_REMEDIATION_BIN admin providers identity --provider aws --region $region --json > provider-identity.json" \
-		"$CRABBOX_REMEDIATION_BIN admin providers policy --provider aws --target macos > macos-image-policy.json" \
-		"$CRABBOX_MACOS_IAM_APPLY_DISPLAY_COMMAND --identity provider-identity.json --policy macos-image-policy.json --profile $profile" \
-		"$CRABBOX_MACOS_IAM_APPLY_DISPLAY_COMMAND --identity provider-identity.json --policy macos-image-policy.json --profile $profile --apply" \
-		"$CRABBOX_REMEDIATION_BIN admin hosts quota --provider aws --target macos --region $region --type $instance_type --json > mac-host-quota.json" \
-		"$CRABBOX_MACOS_QUOTA_REQUEST_DISPLAY_COMMAND --identity provider-identity.json --quota mac-host-quota.json --region $region --profile $profile" \
-		"$CRABBOX_MACOS_QUOTA_REQUEST_DISPLAY_COMMAND --identity provider-identity.json --quota mac-host-quota.json --region $region --profile $profile --apply" |
+	{
+		shell_command "$CRABBOX_REMEDIATION_BIN" admin providers identity --provider aws --region "$region"; printf '\n'
+		shell_command_redirect provider-identity.json "$CRABBOX_REMEDIATION_BIN" admin providers identity --provider aws --region "$region" --json; printf '\n'
+		shell_command_redirect macos-image-policy.json "$CRABBOX_REMEDIATION_BIN" admin providers policy --provider aws --target macos; printf '\n'
+		shell_command "$CRABBOX_MACOS_IAM_APPLY_DISPLAY_COMMAND" --identity provider-identity.json --policy macos-image-policy.json --profile "$profile"; printf '\n'
+		shell_command "$CRABBOX_MACOS_IAM_APPLY_DISPLAY_COMMAND" --identity provider-identity.json --policy macos-image-policy.json --profile "$profile" --apply; printf '\n'
+		shell_command_redirect mac-host-quota.json "$CRABBOX_REMEDIATION_BIN" admin hosts quota --provider aws --target macos --region "$region" --type "$instance_type" --json; printf '\n'
+		shell_command "$CRABBOX_MACOS_QUOTA_REQUEST_DISPLAY_COMMAND" --identity provider-identity.json --quota mac-host-quota.json --region "$region" --profile "$profile"; printf '\n'
+		shell_command "$CRABBOX_MACOS_QUOTA_REQUEST_DISPLAY_COMMAND" --identity provider-identity.json --quota mac-host-quota.json --region "$region" --profile "$profile" --apply; printf '\n'
+	} |
     jq -R . |
     jq -s .
 )"
@@ -177,11 +204,11 @@ blockers_json="$(
     --argjson policyOK "$([[ "$policy_status" == "0" ]] && echo true || echo false)" \
     --argjson dryOK "$host_dry_ok" \
     --argjson quotaOK "$quota_ok" \
+    --argjson quotaZero "$quota_zero" \
     --argjson iamOK "$([[ "$iam_status" == "0" ]] && echo true || echo false)" \
     --argjson quotaRequestOK "$([[ "$quota_request_status" == "0" ]] && echo true || echo false)" \
     --argjson profileOK "$helper_profile_ok" \
     --arg dryText "$(cat "$artifact_dir/evidence/mac-host-dry-run.out" "$artifact_dir/evidence/mac-host-dry-run.err" 2>/dev/null || true)" \
-    --arg quotaText "$(cat "$artifact_dir/evidence/mac-host-quota.out" "$artifact_dir/evidence/mac-host-quota.err" 2>/dev/null || true)" \
     '[
       (if $providerIdentityOK then empty else "provider-identity" end),
       (if $policyOK then empty else "provider-policy" end),
@@ -189,7 +216,7 @@ blockers_json="$(
        elif ($dryText | contains("UnauthorizedOperation")) then "host-iam"
        else "host-dry-run" end),
       (if $quotaOK then empty
-       elif ($quotaText | contains("\"value\":0") or contains("\"value\": 0")) then "host-quota"
+       elif $quotaZero then "host-quota"
        else "host-quota-visibility" end),
       (if $profileOK then empty else "local-coordinator-aws-profile" end),
       (if $iamOK then empty else "iam-apply-dry-run" end),

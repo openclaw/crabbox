@@ -118,7 +118,8 @@ export function enforceCostLimits(
   limits: CostLimits,
   now: Date,
 ): string {
-  const active = leases.filter((lease) => isActiveLease(lease, now));
+  const managedLeases = leases.filter(isManagedLease);
+  const active = managedLeases.filter((lease) => isActiveLease(lease, now));
   const ownerActive = active.filter((lease) => lease.owner === candidate.owner);
   const orgActive = active.filter((lease) => lease.org === candidate.org);
   if (limits.maxActiveLeases > 0 && active.length + 1 > limits.maxActiveLeases) {
@@ -133,9 +134,13 @@ export function enforceCostLimits(
   }
 
   const month = monthKey(now);
-  const allUsage = usageSummary(leases, { scope: "all", month }, now);
-  const ownerUsage = usageSummary(leases, { scope: "user", owner: candidate.owner, month }, now);
-  const orgUsage = usageSummary(leases, { scope: "org", org: candidate.org, month }, now);
+  const allUsage = usageSummary(managedLeases, { scope: "all", month }, now);
+  const ownerUsage = usageSummary(
+    managedLeases,
+    { scope: "user", owner: candidate.owner, month },
+    now,
+  );
+  const orgUsage = usageSummary(managedLeases, { scope: "org", org: candidate.org, month }, now);
   if (overBudget(allUsage.reservedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSD)) {
     return `monthly budget exceeded: ${formatUSD(allUsage.reservedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSD)}`;
   }
@@ -151,7 +156,9 @@ export function enforceCostLimits(
 }
 
 export function usageSummary(leases: LeaseRecord[], filter: UsageFilter, now: Date): UsageSummary {
-  const selected = leases.filter((lease) => leaseMatchesUsageFilter(lease, filter));
+  const selected = leases.filter(
+    (lease) => isManagedLease(lease) && leaseMatchesUsageFilter(lease, filter),
+  );
   const total = newAccumulator();
   const byOwner = new Map<string, UsageAccumulator>();
   const byOrg = new Map<string, UsageAccumulator>();
@@ -236,7 +243,7 @@ function leaseMatchesUsageFilter(lease: LeaseRecord, filter: UsageFilter): boole
 function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
   const created = parseTime(lease.createdAt, now);
   const ended = parseTime(lease.endedAt || lease.releasedAt || "", now);
-  const stop = lease.state === "active" ? now : ended;
+  const stop = isLiveLease(lease) ? now : ended;
   const runtimeSeconds = Math.max(0, Math.trunc((stop.getTime() - created.getTime()) / 1000));
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
   return {
@@ -249,7 +256,15 @@ function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
 }
 
 function isActiveLease(lease: LeaseRecord, now: Date): boolean {
-  return lease.state === "active" && Date.parse(lease.expiresAt) > now.getTime();
+  return isLiveLease(lease) && Date.parse(lease.expiresAt) > now.getTime();
+}
+
+function isLiveLease(lease: LeaseRecord): boolean {
+  return lease.state === "active" || lease.state === "provisioning";
+}
+
+function isManagedLease(lease: LeaseRecord): boolean {
+  return lease.lifecycle !== "registered";
 }
 
 function mapAccumulator(map: Map<string, UsageAccumulator>, key: string): UsageAccumulator {

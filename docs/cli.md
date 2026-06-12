@@ -253,6 +253,8 @@ User config (machine-wide defaults and broker credentials):
 ```yaml
 broker:
   url: https://broker.example.com
+  mode: managed
+  autoWebVNC: true
   provider: aws
   token: ...
   access:
@@ -308,6 +310,13 @@ sync:
     - node_modules
     - .turbo
     - dist
+  # include (root-relative whitelist): when set, ONLY these paths are synced (after excludes).
+  # Sync a few paths out of a large repo instead of blacklisting everything else.
+  include:
+    - src
+    - scripts
+    - package.json
+    - pnpm-lock.yaml
 env:
   allow:
     - CI
@@ -417,6 +426,8 @@ This is the canonical environment-variable reference. The most common ones:
 CRABBOX_COORDINATOR                broker URL (enables brokered mode for supported providers)
 CRABBOX_COORDINATOR_TOKEN          broker user/shared token
 CRABBOX_COORDINATOR_ADMIN_TOKEN    broker admin token
+CRABBOX_COORDINATOR_MODE           managed|registered
+CRABBOX_COORDINATOR_AUTO_WEBVNC    auto-start portal bridge for kept registered desktops
 CRABBOX_ADMIN_TOKEN                alias for CRABBOX_COORDINATOR_ADMIN_TOKEN
 CRABBOX_ACCESS_CLIENT_ID           Cloudflare Access service-token id
 CRABBOX_ACCESS_CLIENT_SECRET       Cloudflare Access service-token secret
@@ -542,6 +553,8 @@ Provider-specific (read by individual adapters; see each provider page under
 
 ```text
 CRABBOX_BLACKSMITH_*               Blacksmith Testbox
+CRABBOX_KUBEVIRT_*                 KubeVirt
+CRABBOX_EXTERNAL_*                 External executable provider
 CRABBOX_NAMESPACE_*                Namespace Devbox
 CRABBOX_SEMAPHORE_* / SEMAPHORE_*  Semaphore
 CRABBOX_E2B_API_KEY / E2B_*        E2B

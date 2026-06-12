@@ -10,9 +10,10 @@ Read when:
 command transport, while Crabbox owns local config, repo claims, the sync
 manifest and its guardrails, slugs, timing summaries, and normalized
 `list`/`status` rendering. Crabbox uses the Islo Go SDK for auth and sandbox
-lifecycle (create, list, status, stop) and a small SSE reader for the
-`POST /sandboxes/{name}/exec/stream` endpoint, since the SDK's exec helper
-coalesces streamed output.
+lifecycle (create, list, status) and calls the HTTP API directly for stop (an
+empty-body `DELETE`), archive upload, shares, and command output — the last via
+a small SSE reader for the `POST /sandboxes/{name}/exec/stream` endpoint, since
+the SDK's exec helper coalesces streamed output.
 
 Sandboxes are Linux-only. There is no Crabbox-managed SSH lease; commands run
 through Islo's streaming exec endpoint, not through `crabbox ssh`/rsync.
@@ -34,7 +35,7 @@ provider: islo
 target: linux
 islo:
   baseUrl: https://api.islo.dev
-  image: docker.io/library/ubuntu:24.04
+  image: docker.io/library/ubuntu:26.04
   workdir: crabbox
   gatewayProfile: ""
   snapshotName: ""
@@ -45,7 +46,7 @@ islo:
 
 Defaults: `baseUrl` `https://api.islo.dev`, `workdir` `crabbox`, `vcpus` `2`,
 `memoryMB` `4096`, `diskGB` `20`. The image default comes from the resolved OS
-target.
+target (the default OS `ubuntu:26.04` resolves to `docker.io/library/ubuntu:26.04`).
 
 `islo.workdir` is a relative directory name under `/workspace`. Absolute paths
 and `..` escapes are rejected before Crabbox prepares or syncs the workspace, so
@@ -66,9 +67,11 @@ variable:
 | `diskGB`         | `--islo-disk-gb`         | `CRABBOX_ISLO_DISK_GB`         |
 
 ```sh
-crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:24.04
+crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
 crabbox status --provider islo --id blue-lobster
+crabbox pause --provider islo blue-lobster
+crabbox resume --provider islo blue-lobster
 crabbox stop --provider islo blue-lobster
 ```
 
@@ -81,10 +84,12 @@ crabbox stop --provider islo blue-lobster
   `/workspace/<islo.workdir>`, streams stdout/stderr from Islo's SSE exec
   endpoint, and returns the remote exit code. A stream is only treated as
   successful once an exit event arrives.
-- **list**, **status**, and **stop** go through the Islo SDK and only act on
-  Crabbox-created sandboxes. Identifiers may be a Crabbox slug, an `isb_...`
-  lease ID, or a Crabbox-created sandbox name; non-Crabbox sandboxes are
-  rejected.
+- **list** and **status** go through the Islo SDK; **stop** issues a direct
+  `DELETE`. All three act only on Crabbox-created sandboxes. Identifiers may be a
+  Crabbox slug, an `isb_...` lease ID, or a Crabbox-created sandbox name;
+  non-Crabbox sandboxes are rejected.
+- **pause** snapshots the sandbox and releases its active compute while
+  preserving the local lease claim; **resume** restores the sandbox to running.
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a
   newly created failed sandbox until an explicit `stop` or provider-side expiry.
 
@@ -96,6 +101,75 @@ HTTPS share for an exposed sandbox port via Islo's
 port when one is present. This is how delegated providers surface a reachable
 URL in place of an SSH-tunneled bridge.
 
+## Tailscale (userspace tailnet)
+
+Islo advertises `FeatureTailscale` in addition to `url-bridge`. Because Islo is a
+delegated-run provider with no Crabbox-managed SSH lease, Crabbox cannot reuse
+the SSH runner-bootstrap that VM providers (Hetzner/Azure/GCP) use to join the
+tailnet. Instead, when a lease is created with `--tailscale`, Crabbox brings the
+sandbox onto the tailnet **through the Islo exec stream** — no Islo-side changes
+are required:
+
+1. it downloads the pinned static Tailscale build into the sandbox (the image
+   ships `wget`, not `curl`, and has no systemd to run the packaged unit);
+2. it starts `tailscaled` in **userspace-networking** mode. This is deliberate:
+   kernel mode rewrites the sandbox routing table, which severs the Islo exec
+   transport mid-run. Userspace mode never touches host routing, so the node
+   joins the tailnet and the exec channel survives;
+3. it runs `tailscale up` with the pond-scoped advertise tags, `TS_CONTROL_URL`
+   as `--login-server` when set, and any configured exit-node flags;
+4. it records the assigned tailnet IPv4 on the lease claim for health and ACL
+   checks. `pond peers` keeps the URL bridge as the member's dialable transport
+   and notes that Tailscale is available for outbound proxy traffic only.
+
+```sh
+export CRABBOX_TAILSCALE_AUTH_KEY=tskey-auth-...     # reusable, ephemeral, tagged node auth key
+crabbox warmup --pond mesh --slug node-a --provider islo --tailscale
+crabbox warmup --pond mesh --slug node-b --provider islo --tailscale
+crabbox pond peers --pond mesh --json                # URL transport plus outbound-proxy note
+```
+
+The static build and its architecture-specific SHA-256 digests are pinned
+together in Crabbox.
+The direct auth key must be both reusable and ephemeral. Reusable is required
+because memory-only identity must re-enroll after daemon loss; ephemeral keeps
+those replacement device records from accumulating after sandboxes disappear.
+Tailscale auth keys are opaque, so Crabbox cannot inspect these properties and
+treats the supplied key as an operator contract.
+The Islo path runs Tailscale in userspace mode, so it does not install a kernel
+TUN route. For enrolled leases, Crabbox supplies workload commands with local
+proxy defaults (`ALL_PROXY=socks5://127.0.0.2:1055`,
+`HTTP_PROXY=http://127.0.0.2:1055`, and
+`HTTPS_PROXY=http://127.0.0.2:1055`) and their lowercase equivalents; explicit
+command environment values in either case override those defaults. An explicit
+`ALL_PROXY`/`all_proxy` also suppresses the protocol-specific defaults. Other
+processes must opt into those proxies or another userspace Tailscale surface.
+The proxy uses `127.0.0.2`, separate from userspace Tailscale's inbound loopback
+mapping. Crabbox runs `tailscaled` as `root` with its binaries and control
+socket in a root-only directory, while repository sync and workload commands
+run as Islo's non-root `islo` user. Node identity stays in memory and the auth
+key is passed through stdin, so an Islo filesystem snapshot cannot clone either
+credential. The control socket is revalidated before lease reuse, status
+reporting, and `pond peers`; after daemon loss, recovery requires a usable auth
+key. If recovery fails, stale tailnet claim metadata is removed and the lease
+remains visible through its URL bridge for status and discovery. `run` fails
+closed instead of executing an enrolled workload with ordinary direct egress.
+Read-only `status` and `pond peers` checks do not run the long repair path;
+lease reuse through `run` performs re-enrollment when needed.
+Unproxied process traffic still uses the sandbox's normal network namespace.
+Exit-node settings are passed through to `tailscale up`, but only traffic sent
+through the userspace Tailscale path uses them.
+Inbound tailnet connections are blocked with shields-up; Islo's
+`FeatureTailscale` contract is outbound proxy access, not a forwarded loopback
+service surface.
+
+A lease warmed **without** `--tailscale` is unchanged: no tailnet IP is recorded
+and `pond peers` reports it on the URL bridge as before. The pond ACL tag and its
+auto-bootstrap (`CRABBOX_POND_ACL_BOOTSTRAP=1` + `TS_API_KEY`) apply to Islo
+exactly as they do for other direct Tailscale-capable providers.
+Tailscale enrollment is creation-time only: a reused plain Islo lease must be
+recreated with `--tailscale` rather than enrolled in place.
+
 ## Rejected options
 
 Because Islo owns command transport and there is no Crabbox-managed SSH/rsync
@@ -104,8 +178,9 @@ target, these `run` options are rejected:
 - `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync` — no
   Crabbox rsync target to drive.
 - `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures,
-  `--capture-on-fail`, `--download`, `--artifact-glob`, `--env-helper`,
-  `--stop-after` — these require Crabbox-owned transport or execution.
+  `--capture-on-fail`, `--download`, `--artifact-glob`, `--require-artifact`,
+  `--env-helper`, `--stop-after` — these require Crabbox-owned transport or
+  execution.
 
 Large-sync guardrails still apply: the gzipped archive upload runs the same
 size preflight as rsync providers, but because `--force-sync-large` is rejected

@@ -7,8 +7,9 @@ Read when:
 - changing `internal/providers/islo`.
 
 Islo is a delegated-run provider. Crabbox uses the Islo Go SDK for sandbox
-lifecycle (create, list, status, delete) and reads a Server-Sent Events stream
-from the `POST /sandboxes/{name}/exec/stream` endpoint for command output. Islo
+lifecycle (create, list, status) and calls the HTTP API directly for delete (an
+empty-body `DELETE`), archive upload, shares, and command output — reading a
+Server-Sent Events stream from the `POST /sandboxes/{name}/exec/stream` endpoint. Islo
 owns sandbox state and command transport; Crabbox owns local config, repo
 claims, sync manifests and guardrails, slugs, timing summaries, and normalized
 `list`/`status` rendering. There is no Crabbox SSH lease and no broker
@@ -30,6 +31,8 @@ crabbox warmup --provider islo --islo-image docker.io/library/ubuntu:26.04
 crabbox run --provider islo -- pnpm test
 crabbox run --provider islo --id swift-crab --shell 'pnpm install && pnpm test'
 crabbox status --provider islo --id swift-crab --wait
+crabbox pause --provider islo swift-crab
+crabbox resume --provider islo swift-crab
 crabbox stop --provider islo swift-crab
 crabbox list --provider islo --json
 ```
@@ -118,6 +121,9 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
   `/sandboxes/{name}/shares` API, surfaced by `--expose` and the pond bridge
   plane. Share creation is idempotent per port.
+- Pause / resume: yes. `crabbox pause` snapshots the sandbox to disk and frees
+  its CPU/memory via Islo's pause API; `crabbox resume` restores it. The lease
+  claim is preserved across a pause.
 - Desktop / browser / code: no.
 - Actions hydration: no.
 - Coordinator (broker): no — always direct from the CLI.
@@ -128,9 +134,9 @@ sent to Islo when greater than zero; otherwise the sandbox uses Islo's defaults.
   a Crabbox-managed SSH/rsync target.
 - `--full-resync`, `--force-sync-large`, `--script`, `--script-stdin`,
   `--fresh-pr`, `--env-helper`, local stdout/stderr captures,
-  `--capture-on-fail`, `--download`, `--artifact-glob`, `--emit-proof`, and
-  `--stop-after` are rejected because Islo owns sync and command transport in
-  delegated-run mode.
+  `--capture-on-fail`, `--download`, `--artifact-glob`, `--require-artifact`,
+  `--emit-proof`, and `--stop-after` are rejected because Islo owns sync and
+  command transport in delegated-run mode.
 - `--keep-on-failure` keeps a newly created failed sandbox until an explicit
   `stop` or provider-side expiry.
 - Large-sync guardrails still apply. Because `--force-sync-large` is rejected,

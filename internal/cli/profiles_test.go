@@ -600,6 +600,54 @@ func TestRunStopCommandIncludesProviderRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "xcp-ng",
+		TargetOS: targetLinux,
+		XCPNg: XCPNgConfig{
+			APIURL:       "https://pool-user:pool-pass@xcp-ng.example.test/path?view=1",
+			Username:     "root",
+			Password:     "xcp-ng-secret",
+			Template:     "ubuntu template",
+			TemplateUUID: "tpl-0001",
+			SR:           "default sr",
+			SRUUID:       "sr-0001",
+			Network:      "pool network",
+			NetworkUUID:  "net-0001",
+			Host:         "host-0001",
+			User:         "runner",
+			WorkRoot:     "/work/xcp-ng",
+			InsecureTLS:  true,
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider xcp-ng",
+		"--target linux",
+		"--xcp-ng-api-url 'https://xcp-ng.example.test/path?view=1'",
+		"--xcp-ng-username root",
+		"--xcp-ng-template 'ubuntu template'",
+		"--xcp-ng-template-uuid tpl-0001",
+		"--xcp-ng-sr 'default sr'",
+		"--xcp-ng-sr-uuid sr-0001",
+		"--xcp-ng-network 'pool network'",
+		"--xcp-ng-network-uuid net-0001",
+		"--xcp-ng-host host-0001",
+		"--xcp-ng-user runner",
+		"--xcp-ng-work-root /work/xcp-ng",
+		"--xcp-ng-insecure-tls",
+		"cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	for _, secret := range []string{"xcp-ng-secret", "pool-user", "pool-pass", "password"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("stop command leaked %q:\n%s", secret, got)
+		}
+	}
+}
+
 func TestRunStopCommandIncludesSemaphoreRoutingFlags(t *testing.T) {
 	got := runStopCommand(Config{
 		Provider: "semaphore",
@@ -634,6 +682,114 @@ func TestRunStopCommandIncludesExeDevRoutingFlags(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandIncludesMorphRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "morph",
+		TargetOS: targetLinux,
+		Morph: MorphConfig{
+			APIKey:          "secret-morph-key",
+			APIURL:          "https://morph.example.test",
+			DeleteOnRelease: true,
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider morph",
+		"--morph-api-url https://morph.example.test",
+		"--morph-delete-on-release=true",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "secret-morph-key") {
+		t.Fatalf("stop command leaked Morph API key:\n%s", got)
+	}
+}
+
+func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "kubevirt",
+		TargetOS: targetLinux,
+		KubeVirt: KubeVirtConfig{
+			Kubectl:         "/opt/bin/kubectl",
+			Virtctl:         "/opt/bin/virtctl",
+			Kubeconfig:      "/tmp/kube config",
+			Context:         "dev",
+			Namespace:       "team-vms",
+			Template:        "/tmp/vm template.yaml",
+			DeleteOnRelease: false,
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider kubevirt",
+		"--kubevirt-kubectl /opt/bin/kubectl",
+		"--kubevirt-virtctl /opt/bin/virtctl",
+		"--kubevirt-kubeconfig '/tmp/kube config'",
+		"--kubevirt-context dev",
+		"--kubevirt-namespace team-vms",
+		"--kubevirt-template '/tmp/vm template.yaml'",
+		"--kubevirt-delete-on-release=false",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandIncludesInheritedKubeconfigForKubeVirt(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/tmp/base.yaml:/tmp/cluster.yaml")
+	got := runStopCommand(Config{
+		Provider: "kubevirt",
+		TargetOS: targetLinux,
+		KubeVirt: KubeVirtConfig{
+			Kubectl:   "kubectl",
+			Virtctl:   "virtctl",
+			Context:   "dev",
+			Namespace: "team-vms",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox stop",
+		"--provider kubevirt",
+		"--kubevirt-context dev",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandIncludesExternalRoutingFlags(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	got := runStopCommand(Config{
+		Provider: "external",
+		TargetOS: targetLinux,
+		External: ExternalConfig{
+			Command:  "node",
+			Args:     []string{"/tmp/provider script.mjs", "--token", "secret-arg"},
+			Config:   map[string]any{"namespace": "team-vms", "token": "secret-config"},
+			WorkRoot: "/home/dev/crabbox",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider external",
+		"--external-routing-file",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	for _, secret := range []string{"provider script.mjs", "secret-arg", "secret-config"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("stop command leaked %q:\n%s", secret, got)
 		}
 	}
 }
@@ -673,7 +829,7 @@ func TestSafeArtifactGlob(t *testing.T) {
 	if !safeArtifactGlob(".artifacts/qa-e2e/**") {
 		t.Fatal("expected QA artifact glob to be accepted")
 	}
-	for _, glob := range []string{"", "../secret", "/etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
+	for _, glob := range []string{"", "../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
 		if safeArtifactGlob(glob) {
 			t.Fatalf("expected unsafe glob %q to be rejected", glob)
 		}
@@ -754,6 +910,44 @@ func TestRunArtifactCollectScriptWarnsOnEmptyMatches(t *testing.T) {
 	}
 	if _, err := os.Stat(archivePath); err != nil {
 		t.Fatalf("empty artifact archive was not written: %v", err)
+	}
+}
+
+func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "reports", "data", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "manifest.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "nested", "quality.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json", "reports/data/**/*.json"})
+	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("require script failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"required artifact reports/data/manifest.json matched=1",
+		"required artifact reports/data/**/*.json matched=2",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunArtifactRequireScriptFailsOnMissingArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json"})
+	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
+	if err == nil {
+		t.Fatalf("require script unexpectedly passed:\n%s", out)
+	}
+	if !strings.Contains(string(out), "missing required artifact: reports/data/manifest.json") {
+		t.Fatalf("missing required artifact output:\n%s", out)
 	}
 }
 

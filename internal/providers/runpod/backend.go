@@ -2,9 +2,9 @@ package runpod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +19,7 @@ const (
 	runpodSSHPollInitial = 3 * time.Second
 	runpodSSHPollMax     = 15 * time.Second
 	runpodSSHPollTimeout = 10 * time.Minute
+	runpodCleanupTimeout = 15 * time.Second
 	runpodPollJitter     = 0.2
 )
 
@@ -48,8 +49,9 @@ type runpodLeaseBackend struct {
 	rt     Runtime
 	client runpodAPI
 
-	pollInitialOverride time.Duration
-	pollTimeoutOverride time.Duration
+	pollInitialOverride    time.Duration
+	pollTimeoutOverride    time.Duration
+	cleanupTimeoutOverride time.Duration
 }
 
 type runpodSSHEndpoint struct {
@@ -104,7 +106,7 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	ready, err := b.waitForPodSSH(ctx, client, pod.ID)
 	if err != nil {
 		if !req.Keep {
-			_ = client.TerminatePod(context.Background(), pod.ID)
+			err = b.cleanupFailedAcquire(client, pod.ID, err)
 		}
 		return LeaseTarget{}, err
 	}
@@ -112,18 +114,31 @@ func (b *runpodLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	lease, err := b.prepareLease(ctx, cfg, ready, leaseID, slug, req.Keep, true)
 	if err != nil {
 		if !req.Keep {
-			_ = client.TerminatePod(context.Background(), pod.ID)
+			err = b.cleanupFailedAcquire(client, pod.ID, err)
 		}
 		return LeaseTarget{}, err
 	}
 	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
-			_ = client.TerminatePod(context.Background(), pod.ID)
+			err = b.cleanupFailedAcquire(client, pod.ID, err)
 		}
 		return LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s pod=%s state=ready\n", leaseID, pod.ID)
 	return lease, nil
+}
+
+func (b *runpodLeaseBackend) cleanupFailedAcquire(client runpodAPI, podID string, cause error) error {
+	timeout := runpodCleanupTimeout
+	if b.cleanupTimeoutOverride > 0 {
+		timeout = b.cleanupTimeoutOverride
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := client.TerminatePod(cleanupCtx, podID); err != nil {
+		return errors.Join(cause, fmt.Errorf("runpod cleanup failed for pod %s: %w", podID, err))
+	}
+	return cause
 }
 
 func (b *runpodLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -257,12 +272,9 @@ func applyRunpodDefaults(cfg *Config) {
 	if cfg.Runpod.User != "" {
 		cfg.SSHUser = cfg.Runpod.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
-		cfg.SSHUser = blank(os.Getenv("USER"), "root")
-		// runpod pods always boot with root as the SSH user; if a generic env
-		// override hasn't kicked in, fall through to root.
-		if cfg.SSHUser == "" {
-			cfg.SSHUser = "root"
-		}
+		// RunPod pods always boot with root as the SSH user. The local USER
+		// environment variable is unrelated to the remote account.
+		cfg.SSHUser = "root"
 	}
 	if cfg.Runpod.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Runpod.WorkRoot

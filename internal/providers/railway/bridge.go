@@ -34,9 +34,16 @@ func (b *railwayBackend) PublishPeer(ctx context.Context, leaseID string, port i
 	if port <= 0 || port > 65535 {
 		return core.BridgePeerTarget{}, exit(2, "railway bridge: port %d out of range", port)
 	}
-	url, err := b.bridgeDeploymentURL(ctx, leaseID)
+	url, status, err := b.bridgeDeploymentURL(ctx, leaseID)
 	if err != nil {
 		return core.BridgePeerTarget{}, err
+	}
+	if url == "" {
+		statusText := string(status.Normalized())
+		if statusText == "" {
+			statusText = "unknown"
+		}
+		return core.BridgePeerTarget{}, exit(4, "railway bridge: deployment for %q is not ready (status=%s)", leaseID, statusText)
 	}
 	return core.BridgePeerTarget{Port: port, URL: url}, nil
 }
@@ -45,7 +52,7 @@ func (b *railwayBackend) PublishPeer(ctx context.Context, leaseID string, port i
 // empty when the service has no live deployment, which keeps the doctor probe
 // honest instead of pretending a sleeping service is bridge-reachable.
 func (b *railwayBackend) ListPeerTargets(ctx context.Context, leaseID string) ([]core.BridgePeerTarget, error) {
-	url, err := b.bridgeDeploymentURL(ctx, leaseID)
+	url, _, err := b.bridgeDeploymentURL(ctx, leaseID)
 	if err != nil {
 		return nil, err
 	}
@@ -56,25 +63,28 @@ func (b *railwayBackend) ListPeerTargets(ctx context.Context, leaseID string) ([
 }
 
 // bridgeDeploymentURL resolves a Railway lease (the service id, by Railway's
-// convention) to its current deployment URL. Returns an empty string when the
-// service has no deployment yet — callers translate that to "no targets"
-// rather than a hard error.
-func (b *railwayBackend) bridgeDeploymentURL(ctx context.Context, leaseID string) (string, error) {
+// convention) to its current ready deployment URL. Returns an empty string
+// when the service has no live deployment — callers translate that to "no
+// targets" or a not-ready publish error as appropriate.
+func (b *railwayBackend) bridgeDeploymentURL(ctx context.Context, leaseID string) (string, railwayDeploymentStatus, error) {
 	serviceID := strings.TrimSpace(leaseID)
 	if serviceID == "" {
-		return "", exit(2, "railway bridge: missing lease id")
+		return "", "", exit(2, "railway bridge: missing lease id")
 	}
 	projectID, environmentID, err := b.requireProjectEnv()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	client, err := b.api()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	deployment, err := client.LatestDeployment(ctx, projectID, environmentID, serviceID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return strings.TrimSpace(deployment.URL), nil
+	if !deployment.Status.IsReady() {
+		return "", deployment.Status, nil
+	}
+	return strings.TrimSpace(deployment.URL), deployment.Status, nil
 }
