@@ -45,7 +45,7 @@ Cloudflare Worker  ------------------------------------------>  (provision)
 
 ## Execution Modes
 
-The CLI picks one of three modes per provider in `loadBackend`
+The CLI picks one of four modes per provider in `loadBackend`
 (`internal/cli/provider_backend.go`):
 
 - **Brokered (coordinator) mode** — chosen when the provider declares
@@ -60,6 +60,11 @@ The CLI picks one of three modes per provider in `loadBackend`
   itself; no Worker is involved. The four brokerable providers fall back to this
   when no broker URL is set, and every other SSH-lease provider (`ssh`,
   `parallels`, `proxmox`, `daytona`, `runpod`, and so on) always runs here.
+- **Registered direct mode** — `broker.mode: registered` keeps the same direct
+  SSH provider lifecycle but registers lease metadata and heartbeats with the
+  Worker. The coordinator can list and share portal bridges, but cannot call the
+  provider, delete the resource, charge it to managed usage, or place it in a
+  ready pool.
 - **Delegated mode** — the provider implements a delegated-run backend (e.g.
   `e2b`, `modal`, `cloudflare`, `azure-dynamic-sessions`). The provider owns
   sync and execution end to end; the CLI calls `Warmup`/`Run` and never performs

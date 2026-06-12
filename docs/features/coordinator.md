@@ -13,12 +13,20 @@ Fleet Durable Object (`worker/src/fleet.ts`). Together they are the broker: an
 authenticated control plane that owns provider credentials, lease state, run
 records, usage accounting, and the live access bridges.
 
-Only the brokerable providers go through the coordinator: `aws`, `azure`,
-`gcp`, and `hetzner`. Every other adapter runs direct from the CLI. Even a
-brokerable provider runs direct unless a broker URL is configured
-(`CRABBOX_COORDINATOR`, or `config set-broker --url`); the CLI selects brokered
-mode only when the provider's spec is `Coordinator: supported` **and** a broker
-URL is set (`internal/cli/provider_backend.go`, `loadBackend`).
+The default `broker.mode: managed` lets brokerable providers (`aws`, `azure`,
+`gcp`, and `hetzner`) transfer lifecycle operations to the coordinator. Every
+other adapter runs direct from the CLI. A brokerable provider also runs direct
+unless a broker URL is configured (`CRABBOX_COORDINATOR`, or
+`config set-broker --url`).
+
+`broker.mode: registered` is provider-neutral. Provisioning, SSH, touch, and
+cleanup remain in the direct adapter, while the CLI idempotently registers an
+owner-scoped lease record with the coordinator. This enables portal inventory,
+sharing, and outbound WebVNC for external, KubeVirt, static SSH, local, and other
+direct SSH providers without giving the coordinator provider credentials.
+Coordinator release and expiry remove only the registration; they never delete
+the provider resource. Registered records are excluded from provider access
+reconciliation, ready pools, image operations, orphan sweeps, and cost totals.
 
 The coordinator brokers the **control plane**, not the data plane. Lease
 lifecycle, run recording, usage, and bridges flow through the Worker over HTTP.
@@ -86,6 +94,7 @@ GET    /v1/whoami
 GET    /v1/providers/{provider}/readiness
 GET    /v1/control                       (websocket: run events + heartbeats)
 POST   /v1/leases
+PUT    /v1/leases/{id}/registration
 GET    /v1/leases
 GET    /v1/leases/{id-or-slug}
 POST   /v1/leases/{id-or-slug}/heartbeat
@@ -107,6 +116,12 @@ GET    /v1/runners
 POST   /v1/runners/sync
 GET    /v1/usage
 ```
+
+Registration accepts generic provider and SSH metadata. Repeating the same
+owner/org/id/provider tuple refreshes it and reactivates an expired record.
+Changing provider, claiming another owner's ID, or replacing a managed record
+returns `409`. The CLI treats registration as best effort, but an authenticated
+WebVNC/share operation still requires the record to exist.
 
 Bridge ticket and websocket routes (WebVNC, code-server, egress) live under
 `/v1/leases/{id-or-slug}/{webvnc|code|egress}/...`; see

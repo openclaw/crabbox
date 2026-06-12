@@ -9,6 +9,37 @@ import (
 	"testing"
 )
 
+func TestConfigSetBrokerRegisteredMode(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{
+		"--url", "https://broker.example.test",
+		"--provider", "external",
+		"--mode", "registered",
+		"--auto-webvnc=false",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Broker == nil || file.Broker.URL != "https://broker.example.test" || file.Provider != "external" || file.Broker.Mode != "registered" || file.Broker.AutoWebVNC == nil || *file.Broker.AutoWebVNC {
+		t.Fatalf("config=%#v", file)
+	}
+	if !strings.Contains(stdout.String(), "mode=registered") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
 func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

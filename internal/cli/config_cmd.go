@@ -57,6 +57,8 @@ func configShowView(cfg Config) map[string]any {
 		"serverType":         cfg.ServerType,
 		"serverTypeExplicit": cfg.ServerTypeExplicit,
 		"coordinator":        cfg.Coordinator,
+		"brokerMode":         cfg.BrokerMode,
+		"brokerAutoWebVNC":   cfg.BrokerAutoWebVNC,
 		"brokerAuth":         tokenState(cfg.CoordToken),
 		"brokerAdminAuth":    tokenState(cfg.CoordAdminToken),
 		"accessAuth":         accessAuthState(cfg.Access),
@@ -312,7 +314,7 @@ func configShowView(cfg Config) map[string]any {
 func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "config=%s\n", userConfigPath())
 	fmt.Fprintf(w, "provider=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
-	fmt.Fprintf(w, "broker=%s auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), tokenState(cfg.CoordToken), tokenState(cfg.CoordAdminToken))
+	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, tokenState(cfg.CoordToken), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
 	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), len(syncIncludes(cfg)), cfg.Sync.Timeout)
@@ -416,7 +418,9 @@ func durationString(d time.Duration) string {
 func (a App) configSetBroker(args []string) error {
 	fs := newFlagSet("config set-broker", a.Stderr)
 	url := fs.String("url", "", "broker URL")
-	provider := fs.String("provider", "", "default brokered provider: hetzner, aws, azure, or gcp")
+	provider := fs.String("provider", "", "default provider (managed coordinator provider or registered direct provider)")
+	mode := fs.String("mode", "", "lease mode: managed or registered")
+	autoWebVNC := fs.Bool("auto-webvnc", true, "start a portal WebVNC bridge for kept registered desktop leases")
 	tokenStdin := fs.Bool("token-stdin", false, "read broker token from stdin")
 	adminTokenStdin := fs.Bool("admin-token-stdin", false, "read broker admin token from stdin")
 	if err := parseFlags(fs, args); err != nil {
@@ -424,6 +428,9 @@ func (a App) configSetBroker(args []string) error {
 	}
 	if *url == "" {
 		return exit(2, "config set-broker requires --url")
+	}
+	if *mode != "" && *mode != string(BrokerModeManaged) && *mode != string(BrokerModeRegistered) {
+		return exit(2, "--mode must be managed or registered")
 	}
 	var token string
 	if *tokenStdin {
@@ -459,6 +466,12 @@ func (a App) configSetBroker(args []string) error {
 		file.Broker = &fileBrokerConfig{}
 	}
 	file.Broker.URL = *url
+	if *mode != "" {
+		file.Broker.Mode = *mode
+	}
+	if flagWasSet(fs, "auto-webvnc") {
+		file.Broker.AutoWebVNC = autoWebVNC
+	}
 	if token != "" {
 		file.Broker.Token = token
 	}
@@ -473,7 +486,7 @@ func (a App) configSetBroker(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "wrote %s broker=%s auth=%s admin_auth=%s\n", written, *url, tokenState(file.Broker.Token), tokenState(file.Broker.AdminToken))
+	fmt.Fprintf(a.Stdout, "wrote %s broker=%s mode=%s auth=%s admin_auth=%s\n", written, *url, blank(file.Broker.Mode, string(BrokerModeManaged)), tokenState(file.Broker.Token), tokenState(file.Broker.AdminToken))
 	return nil
 }
 

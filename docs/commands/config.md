@@ -6,7 +6,7 @@ subcommands:
 ```text
 crabbox config path
 crabbox config show [--json]
-crabbox config set-broker --url <url> [--provider hetzner|aws|azure|gcp] [--token-stdin] [--admin-token-stdin]
+crabbox config set-broker --url <url> [--provider <provider>] [--mode managed|registered] [--auto-webvnc=false] [--token-stdin] [--admin-token-stdin]
 ```
 
 ## config path
@@ -59,6 +59,9 @@ Stores the broker URL and optional tokens in the user config file:
 # Set the broker URL and default brokered provider.
 crabbox config set-broker --url https://broker.example.com --provider aws
 
+# Register direct-provider leases without transferring lifecycle ownership.
+crabbox config set-broker --url https://broker.example.com --mode registered
+
 # Store a user token (read from stdin so it never lands in shell history).
 printf '%s' "$TOKEN" | crabbox config set-broker --url https://broker.example.com --token-stdin
 
@@ -69,8 +72,14 @@ printf '%s' "$ADMIN_TOKEN" | crabbox config set-broker --url https://broker.exam
 Flags:
 
 - `--url <url>` (required) — broker URL.
-- `--provider hetzner|aws|azure|gcp` — default provider for brokered leases.
+- `--provider <provider>` — default provider. Managed mode supports the
+  coordinator providers; registered mode accepts any configured direct provider.
   When set, it also becomes the default `provider` in user config.
+- `--mode managed|registered` — `managed` lets supported providers use the
+  broker control plane; `registered` keeps provider lifecycle local and mirrors
+  lease metadata to the broker.
+- `--auto-webvnc=false` — disable automatic portal WebVNC startup for kept
+  registered desktop leases. The default is true.
 - `--token-stdin` — read the broker token from stdin.
 - `--admin-token-stdin` — read the broker admin token from stdin.
 
@@ -80,7 +89,7 @@ the user config file (creating the directory with `0700` and the file with
 `0600`) and prints the resulting path and auth status, for example:
 
 ```text
-wrote /home/alice/.config/crabbox/config.yaml broker=https://broker.example.com auth=configured admin_auth=missing
+wrote /home/alice/.config/crabbox/config.yaml broker=https://broker.example.com mode=registered auth=configured admin_auth=missing
 ```
 
 `crabbox login` performs the same broker write as part of GitHub login; use

@@ -44,6 +44,7 @@ type CoordinatorLease struct {
 	ID                   string                `json:"id"`
 	Slug                 string                `json:"slug,omitempty"`
 	Provider             string                `json:"provider"`
+	Lifecycle            string                `json:"lifecycle,omitempty"`
 	TargetOS             string                `json:"target,omitempty"`
 	WindowsMode          string                `json:"windowsMode,omitempty"`
 	Desktop              bool                  `json:"desktop,omitempty"`
@@ -84,6 +85,32 @@ type CoordinatorLease struct {
 	ExpiresAt            string                `json:"expiresAt"`
 	Telemetry            *LeaseTelemetry       `json:"telemetry,omitempty"`
 	TelemetryHistory     []*LeaseTelemetry     `json:"telemetryHistory,omitempty"`
+}
+
+type CoordinatorLeaseRegistration struct {
+	Slug               string   `json:"slug,omitempty"`
+	Provider           string   `json:"provider"`
+	TargetOS           string   `json:"target"`
+	WindowsMode        string   `json:"windowsMode,omitempty"`
+	Desktop            bool     `json:"desktop,omitempty"`
+	DesktopEnv         string   `json:"desktopEnv,omitempty"`
+	Browser            bool     `json:"browser,omitempty"`
+	Code               bool     `json:"code,omitempty"`
+	CloudID            string   `json:"cloudID,omitempty"`
+	ServerID           int64    `json:"serverID,omitempty"`
+	ServerName         string   `json:"serverName,omitempty"`
+	ServerType         string   `json:"serverType,omitempty"`
+	Host               string   `json:"host"`
+	SSHUser            string   `json:"sshUser,omitempty"`
+	SSHPort            string   `json:"sshPort,omitempty"`
+	SSHFallbackPorts   []string `json:"sshFallbackPorts,omitempty"`
+	WorkRoot           string   `json:"workRoot,omitempty"`
+	Profile            string   `json:"profile,omitempty"`
+	Class              string   `json:"class,omitempty"`
+	Pond               string   `json:"pond,omitempty"`
+	ExposedPorts       []string `json:"exposedPorts,omitempty"`
+	TTLSeconds         int      `json:"ttlSeconds,omitempty"`
+	IdleTimeoutSeconds int      `json:"idleTimeoutSeconds,omitempty"`
 }
 
 type CoordinatorShareRole string
@@ -709,6 +736,14 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 	}
 	addCoordinatorGCPFields(req, cfg)
 	err = c.do(ctx, http.MethodPost, "/v1/leases", req, &res)
+	return res.Lease, err
+}
+
+func (c *CoordinatorClient) RegisterLease(ctx context.Context, leaseID string, input CoordinatorLeaseRegistration) (CoordinatorLease, error) {
+	var res struct {
+		Lease CoordinatorLease `json:"lease"`
+	}
+	err := c.do(ctx, http.MethodPut, "/v1/leases/"+url.PathEscape(leaseID)+"/registration", input, &res)
 	return res.Lease, err
 }
 

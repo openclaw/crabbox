@@ -253,6 +253,8 @@ User config (machine-wide defaults and broker credentials):
 ```yaml
 broker:
   url: https://broker.example.com
+  mode: managed
+  autoWebVNC: true
   provider: aws
   token: ...
   access:
@@ -424,6 +426,8 @@ This is the canonical environment-variable reference. The most common ones:
 CRABBOX_COORDINATOR                broker URL (enables brokered mode for supported providers)
 CRABBOX_COORDINATOR_TOKEN          broker user/shared token
 CRABBOX_COORDINATOR_ADMIN_TOKEN    broker admin token
+CRABBOX_COORDINATOR_MODE           managed|registered
+CRABBOX_COORDINATOR_AUTO_WEBVNC    auto-start portal bridge for kept registered desktops
 CRABBOX_ADMIN_TOKEN                alias for CRABBOX_COORDINATOR_ADMIN_TOKEN
 CRABBOX_ACCESS_CLIENT_ID           Cloudflare Access service-token id
 CRABBOX_ACCESS_CLIENT_SECRET       Cloudflare Access service-token secret

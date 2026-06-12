@@ -52,11 +52,12 @@ file is group- or world-readable.
 
 State that does not belong in either YAML file:
 
-- live lease records (those are coordinator-owned);
+- live lease records (managed records are coordinator-owned; registered records
+  are provider-owned and mirrored to the coordinator);
 - per-lease SSH private keys (they live under the user config dir, but not in
   `config.yaml`);
-- provider secrets (they live in the broker environment, your shell env, or a
-  credential manager).
+- provider secrets (managed-provider secrets live in the broker environment;
+  direct-provider secrets stay in your shell env or credential manager).
 
 ## YAML schema
 
@@ -68,6 +69,8 @@ set in user config. Most repos only need a small subset.
 ```yaml
 broker:
   url: https://broker.example.com
+  mode: managed             # managed | registered
+  autoWebVNC: true          # registered kept desktop leases only
   provider: aws
   token: <signed-github-token-or-shared-token>
   adminToken: <broker-admin-token>     # operators only
@@ -92,6 +95,14 @@ lease:
   idleTimeout: 30m
   ttl: 90m
 ```
+
+`broker.mode` defaults to `managed`. In `registered` mode, every direct SSH
+lease keeps its existing provider lifecycle and is registered with the broker
+for owner-scoped inventory, sharing, heartbeats, and portal bridges. Registration
+is best effort: a broker outage does not fail local provisioning. Releasing the
+local lease removes its registration, and coordinator release/expiry never
+invokes provider deletion. `CRABBOX_COORDINATOR_MODE` and
+`CRABBOX_COORDINATOR_AUTO_WEBVNC` provide environment overrides.
 
 `ttl`, `idleTimeout`, and `workRoot` are also accepted as top-level keys. The
 default class is `beast`, the default TTL is `90m`, and the default idle

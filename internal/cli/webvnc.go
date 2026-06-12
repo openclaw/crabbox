@@ -40,7 +40,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(fs.Output(), "")
 		fmt.Fprintln(fs.Output(), "Bridge flags:")
 		fmt.Fprintln(fs.Output(), "  --id <lease-id-or-slug>")
-		fmt.Fprintln(fs.Output(), "  --provider hetzner|aws|azure")
+		fmt.Fprintln(fs.Output(), "  --provider <desktop-ssh-provider>")
 		fmt.Fprintln(fs.Output(), "  --target linux|macos|windows")
 		fmt.Fprintln(fs.Output(), "  --windows-mode normal|wsl2")
 		fmt.Fprintln(fs.Output(), "  --static-host <host>")
@@ -53,7 +53,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(fs.Output(), "  --take-control")
 		fmt.Fprintln(fs.Output(), "  --reclaim")
 	}
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
+	provider := fs.String("provider", defaults.Provider, "desktop SSH provider")
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
@@ -89,7 +89,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	if supportsDirectSSHWebVNC(cfg.Provider) {
+	if useDirectSSHWebVNC(cfg) {
 		// macOS leases (e.g. tart) have no guest-side noVNC/websockify; serve the
 		// browser viewer from a host-side bridge over the guest's native Screen
 		// Sharing instead of the Linux directSSHWebVNC path.
@@ -98,8 +98,8 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		}
 		return a.directSSHWebVNC(ctx, cfg, *id, *localPort, *openPortal, *takeControl, *reclaim)
 	}
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return exit(2, "webvnc currently supports coordinator-backed hetzner/aws/azure desktop leases")
+	if isBlacksmithProvider(cfg.Provider) || (isStaticProvider(cfg.Provider) && !shouldRegisterCoordinatorLease(cfg)) {
+		return exit(2, "webvnc requires a coordinator-managed or registered desktop lease")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -157,14 +157,16 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
 	opened := false
 	return serveWebVNCBridgePool(ctx, webVNCBridgePoolConfig{
-		Coord:     coord,
-		LeaseID:   leaseID,
-		Host:      connHost,
-		Port:      connPort,
-		PoolSize:  webVNCBridgePoolSizeForTarget(target),
-		RescueCtx: rescueCtx,
-		NativeVNC: nativeVNCOpenCommand(cfg, target, leaseID),
-		Log:       a.Stdout,
+		Coord:       coord,
+		LeaseID:     leaseID,
+		Host:        connHost,
+		Port:        connPort,
+		PoolSize:    webVNCBridgePoolSizeForTarget(target),
+		IdleTimeout: cfg.IdleTimeout,
+		Telemetry:   leaseTelemetryCollectorForTarget(target),
+		RescueCtx:   rescueCtx,
+		NativeVNC:   nativeVNCOpenCommand(cfg, target, leaseID),
+		Log:         a.Stdout,
 		OnReady: func() error {
 			fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using WebVNC")
 			fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
@@ -197,15 +199,17 @@ func webVNCBridgePoolSizeForTarget(target SSHTarget) int {
 }
 
 type webVNCBridgePoolConfig struct {
-	Coord     *CoordinatorClient
-	LeaseID   string
-	Host      string
-	Port      string
-	PoolSize  int
-	RescueCtx rescueContext
-	NativeVNC string
-	Log       io.Writer
-	OnReady   func() error
+	Coord       *CoordinatorClient
+	LeaseID     string
+	Host        string
+	Port        string
+	PoolSize    int
+	IdleTimeout time.Duration
+	Telemetry   leaseTelemetryCollector
+	RescueCtx   rescueContext
+	NativeVNC   string
+	Log         io.Writer
+	OnReady     func() error
 }
 
 type webVNCBridgePoolEvent struct {
@@ -221,6 +225,10 @@ func serveWebVNCBridgePool(ctx context.Context, cfg webVNCBridgePoolConfig) erro
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if cfg.Coord != nil && strings.TrimSpace(cfg.LeaseID) != "" {
+		stopHeartbeat := startCoordinatorHeartbeat(ctx, cfg.Coord, cfg.LeaseID, cfg.IdleTimeout, nil, cfg.Telemetry, cfg.Log)
+		defer stopHeartbeat()
+	}
 	events := make(chan webVNCBridgePoolEvent, cfg.PoolSize)
 	for slot := 0; slot < cfg.PoolSize; slot++ {
 		go serveWebVNCBridgeSlot(ctx, cfg, slot, events)
@@ -332,7 +340,7 @@ func (a App) webVNCDaemonCommand(ctx context.Context, args []string) error {
 func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc daemon start", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
+	provider := fs.String("provider", defaults.Provider, "desktop SSH provider")
 	id := fs.String("id", "", "lease id or slug")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
@@ -357,7 +365,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	}
 	target := SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}
 	bridgeID := *id
-	if supportsDirectSSHWebVNC(cfg.Provider) {
+	if useDirectSSHWebVNC(cfg) {
 		if err := guardMacOSDirectWebVNC(cfg); err != nil {
 			return err
 		}
@@ -379,7 +387,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 		}
 		target = resolvedTarget
 		bridgeID = leaseID
-	} else if !isBlacksmithProvider(cfg.Provider) && !isStaticProvider(cfg.Provider) {
+	} else if !isBlacksmithProvider(cfg.Provider) && (!isStaticProvider(cfg.Provider) || shouldRegisterCoordinatorLease(cfg)) {
 		coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 		if err != nil {
 			return err
@@ -485,7 +493,7 @@ func (a App) webVNCDaemonListCommand(args []string) error {
 func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc status", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
+	provider := fs.String("provider", defaults.Provider, "desktop SSH provider")
 	id := fs.String("id", "", "lease id or slug")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	providerFlags := registerProviderFlags(fs, defaults)
@@ -505,14 +513,14 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	if supportsDirectSSHWebVNC(cfg.Provider) {
+	if useDirectSSHWebVNC(cfg) {
 		if err := guardMacOSDirectWebVNC(cfg); err != nil {
 			return err
 		}
 		return a.directSSHWebVNCStatus(ctx, cfg, *id, *localPort)
 	}
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return exit(2, "webvnc status currently supports coordinator-backed hetzner/aws/azure desktop leases")
+	if isBlacksmithProvider(cfg.Provider) || (isStaticProvider(cfg.Provider) && !shouldRegisterCoordinatorLease(cfg)) {
+		return exit(2, "webvnc status requires a coordinator-managed or registered desktop lease")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -606,7 +614,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc reset", a.Stderr)
-	provider := fs.String("provider", defaults.Provider, "provider: hetzner, aws, or azure")
+	provider := fs.String("provider", defaults.Provider, "desktop SSH provider")
 	id := fs.String("id", "", "lease id or slug")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
 	takeControl := fs.Bool("take-control", false, "ask the portal viewer to take keyboard and mouse control after connecting")
@@ -627,14 +635,14 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	if supportsDirectSSHWebVNC(cfg.Provider) {
+	if useDirectSSHWebVNC(cfg) {
 		if err := guardMacOSDirectWebVNC(cfg); err != nil {
 			return err
 		}
 		return a.directSSHWebVNCReset(ctx, cfg, *id, *openPortal, *takeControl)
 	}
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return exit(2, "webvnc reset currently supports coordinator-backed hetzner/aws/azure desktop leases")
+	if isBlacksmithProvider(cfg.Provider) || (isStaticProvider(cfg.Provider) && !shouldRegisterCoordinatorLease(cfg)) {
+		return exit(2, "webvnc reset requires a coordinator-managed or registered desktop lease")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -1276,6 +1284,10 @@ func supportsDirectSSHWebVNC(provider string) bool {
 	return spec.Kind == ProviderKindSSHLease &&
 		spec.Coordinator == CoordinatorNever &&
 		spec.Features.Has(FeatureDesktop)
+}
+
+func useDirectSSHWebVNC(cfg Config) bool {
+	return supportsDirectSSHWebVNC(cfg.Provider) && !shouldRegisterCoordinatorLease(cfg)
 }
 
 func (a App) directSSHWebVNC(ctx context.Context, cfg Config, id, localPort string, openViewer, _ bool, reclaim bool) error {

@@ -224,7 +224,7 @@ func unsupportedManagedTargetMessageForConfig(provider string, cfg Config) strin
 }
 
 func newTargetCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
-	if isStaticProvider(cfg.Provider) {
+	if isStaticProvider(cfg.Provider) && !shouldRegisterCoordinatorLease(cfg) {
 		return nil, false, nil
 	}
 	return newCoordinatorClient(cfg)

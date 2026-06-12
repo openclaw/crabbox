@@ -328,6 +328,13 @@ ssh:
     - "22"
 ```
 
+Set `broker.mode: registered` to keep provisioning and cleanup in any direct
+provider while registering lease metadata with the coordinator for inventory,
+sharing, and portal WebVNC. Kept desktop leases start the outbound WebVNC bridge
+automatically by default; set `broker.autoWebVNC: false` to opt out. The
+coordinator never receives provider credentials or deletes registered
+resources.
+
 Forwarded environment is intentionally narrow: `NODE_OPTIONS` and `CI`. Do not
 pass secrets as command-line arguments. For live-secret smoke tests, use
 `crabbox run --env-from-profile <file> --allow-env NAME` so Crabbox forwards

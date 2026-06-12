@@ -112,6 +112,7 @@ describe("usage accounting", () => {
       createdAt: "2026-05-01T02:00:00Z",
       expiresAt: "2026-05-01T03:00:00Z",
     });
+
     const limits = {
       ...costLimits({
         CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER: "4",
@@ -125,6 +126,37 @@ describe("usage accounting", () => {
     const error = enforceCostLimits(activeLeases, candidate, limits, now);
 
     expect(error).toContain("active lease limit for owner exceeded: 5/4");
+  });
+
+  it("excludes registered inventory from managed usage and active limits", () => {
+    const now = new Date("2026-05-01T02:00:00Z");
+    const registered = testLease({
+      id: "cbx_registered",
+      lifecycle: "registered",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: "2026-05-01T03:00:00Z",
+    });
+    const candidate = testLease({
+      id: "cbx_managed",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: "2026-05-01T03:00:00Z",
+    });
+    const limits = {
+      ...costLimits({} as never),
+      maxActiveLeases: 1,
+      maxActiveLeasesPerOwner: 1,
+      maxActiveLeasesPerOrg: 1,
+    };
+
+    expect(enforceCostLimits([registered], candidate, limits, now)).toBe("");
+    expect(usageSummary([registered], { scope: "all", month: "2026-05" }, now)).toMatchObject({
+      leases: 0,
+      activeLeases: 0,
+      estimatedUSD: 0,
+      reservedUSD: 0,
+    });
   });
 
   it("supports cost rate overrides", () => {
