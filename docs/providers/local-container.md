@@ -103,7 +103,11 @@ Provider flags:
 
 `--local-container-volume` bind-mounts a host directory into the container.
 Repeatable for multiple mounts. Passes through to Docker `-v`. Read-only
-mounts use the `:ro` suffix.
+mounts use the `:ro` suffix. Container targets must not overlap Crabbox-managed
+work, SSH, cache, or desktop configuration paths because bootstrap changes
+ownership under those paths. System paths such as `/etc`, `/usr`, `/var`,
+`/home`, and `/tmp` are also rejected; use an application mount point such as
+`/mnt/my-app` or `/cache`.
 
 **Security:** This flag is CLI-only. It is intentionally not loaded from
 repo-local `.crabbox.yaml` because bind mounts expose host paths and must

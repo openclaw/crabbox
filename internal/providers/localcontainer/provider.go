@@ -138,6 +138,26 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	return nil
 }
 
+func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(flagValues)
+	if !ok {
+		return nil
+	}
+	if core.FlagWasSet(fs, "local-container-cpus") {
+		cfg.LocalContainer.CPUs = *v.CPUs
+	}
+	if core.FlagWasSet(fs, "local-container-memory") {
+		cfg.LocalContainer.Memory = *v.Memory
+	}
+	if core.FlagWasSet(fs, "local-container-network") {
+		cfg.LocalContainer.Network = *v.Network
+	}
+	if v.Volumes != nil && len(*v.Volumes) > 0 {
+		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)
+	}
+	return nil
+}
+
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
 	backend, err := p.Configure(cfg, rt)
 	if err != nil {

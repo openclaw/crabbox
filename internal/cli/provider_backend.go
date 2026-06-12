@@ -252,6 +252,10 @@ type NativeCheckpointForkProvider interface {
 	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
 }
 
+type NativeCheckpointForkFlagProvider interface {
+	ApplyNativeCheckpointForkFlags(cfg *Config, fs *flag.FlagSet, values any) error
+}
+
 type JSONListBackend interface {
 	Backend
 	ListJSON(ctx context.Context, req ListRequest) (any, error)

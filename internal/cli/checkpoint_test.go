@@ -1633,6 +1633,77 @@ func TestApplyNativeCheckpointForkConfigHonorsEmptyAzureOSDiskFlag(t *testing.T)
 	}
 }
 
+func TestApplyNativeCheckpointForkConfigReappliesFinalProviderFlags(t *testing.T) {
+	defaults := defaultConfig()
+	fs := newFlagSet("checkpoint fork", io.Discard)
+	leaseFlags := registerLeaseCreateFlags(fs, defaults)
+	if err := parseInterspersedFlags(fs, []string{
+		"chk_local",
+		"--local-container-volume", "/host/data:/mnt/data:ro",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = "hetzner"
+	record := checkpointRecord{Kind: checkpointKindDockerCommit, TargetOS: targetLinux}
+	record.Native.Direct = true
+	record.Native.ImageID = "sha256:checkpoint"
+	record.Native.Name = "crabbox-checkpoint"
+	record.Native.Metadata = map[string]string{
+		"runtime":             "docker",
+		"container_user":      "runner",
+		"container_work_root": "/workspace/crabbox",
+	}
+
+	if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "local-container" {
+		t.Fatalf("Provider=%q, want local-container", cfg.Provider)
+	}
+	if len(cfg.LocalContainer.Volumes) != 1 || cfg.LocalContainer.Volumes[0] != "/host/data:/mnt/data:ro" {
+		t.Fatalf("Volumes=%#v, want explicit fork bind mount", cfg.LocalContainer.Volumes)
+	}
+}
+
+func TestApplyNativeCheckpointForkConfigDoesNotReapplyIdentityFlags(t *testing.T) {
+	defaults := defaultConfig()
+	fs := newFlagSet("checkpoint fork", io.Discard)
+	leaseFlags := registerLeaseCreateFlags(fs, defaults)
+	if err := parseInterspersedFlags(fs, []string{
+		"chk_local",
+		"--local-container-image", "ubuntu:latest",
+		"--local-container-docker-socket",
+		"--local-container-volume", "/host/data:/mnt/data:ro",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = "hetzner"
+	record := checkpointRecord{Kind: checkpointKindDockerCommit, TargetOS: targetLinux}
+	record.Native.Direct = true
+	record.Native.ImageID = "sha256:checkpoint"
+	record.Native.Name = "crabbox-checkpoint"
+	record.Native.Metadata = map[string]string{
+		"runtime":             "docker",
+		"container_user":      "runner",
+		"container_work_root": "/workspace/crabbox",
+	}
+
+	if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalContainer.Image != "sha256:checkpoint" {
+		t.Fatalf("Image=%q, want checkpoint identity", cfg.LocalContainer.Image)
+	}
+	if cfg.LocalContainer.DockerSocket {
+		t.Fatal("DockerSocket=true, want checkpoint fork invariant preserved")
+	}
+	if len(cfg.LocalContainer.Volumes) != 1 {
+		t.Fatalf("Volumes=%#v, want fork-safe bind mount", cfg.LocalContainer.Volumes)
+	}
+}
+
 func TestParseInterspersedFlagsAllowsCheckpointBeforeFlags(t *testing.T) {
 	fs := newFlagSet("checkpoint restore", io.Discard)
 	id := fs.String("id", "", "lease id")

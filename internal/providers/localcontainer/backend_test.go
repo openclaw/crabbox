@@ -1976,8 +1976,9 @@ func TestCreateContainerMountsHostVolumes(t *testing.T) {
 	b := testBackend(runner)
 	cfg := b.configForRun()
 	cfg.LocalContainer.Volumes = []string{
-		"/home/user/.config/myapp:/home/crabbox/.config/myapp:ro",
+		"/home/user/.config/myapp:/mnt/myapp-config:ro",
 		"/var/cache/models:/cache",
+		`C:\Users\alice\source:/mnt/windows-source:ro`,
 	}
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
@@ -1989,6 +1990,92 @@ func TestCreateContainerMountsHostVolumes(t *testing.T) {
 		want := "-v\n" + vol
 		if !strings.Contains(args, want) {
 			t.Fatalf("host volume mount missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestCreateContainerRejectsHostVolumeOverlapWithBootstrapPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		volume  string
+		desktop bool
+		cache   []core.CacheVolumeConfig
+	}{
+		{name: "work root", volume: "/host:/workspace/crabbox:ro"},
+		{name: "work root parent", volume: "/host:/workspace"},
+		{name: "work root child", volume: "/host:/workspace/crabbox/repo"},
+		{name: "ssh config", volume: "/host:/home/runner/.ssh/known_hosts"},
+		{name: "cache root", volume: "/host:/var/cache/crabbox/models"},
+		{name: "bootstrap state", volume: "/host:/var/lib/crabbox"},
+		{name: "system config", volume: "/host:/etc/ssh"},
+		{name: "desktop config windows source", volume: `C:\Users\alice\config:/home/runner/.config/app:ro`, desktop: true},
+		{
+			name:   "configured cache path",
+			volume: "/host:/opt/shared/cache/models",
+			cache:  []core.CacheVolumeConfig{{Key: "models", Path: "/opt/shared/cache"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+			b := testBackend(runner)
+			cfg := b.configForRun()
+			cfg.Desktop = tc.desktop
+			cfg.Cache.Volumes = tc.cache
+			cfg.LocalContainer.Volumes = []string{tc.volume}
+
+			_, _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_overlap", "overlap-test", "ssh-ed25519 AAAA test", true)
+			if err == nil || !strings.Contains(err.Error(), "overlaps bootstrap-managed path") {
+				t.Fatalf("err=%v, want bootstrap-managed path rejection", err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("runtime invoked before volume validation: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestCreateContainerRejectsRelativeWorkRootWithHostVolume(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.WorkRoot = "mnt/app"
+	cfg.LocalContainer.Volumes = []string{"/host/project:/mnt/app"}
+
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_relative", "relative-test", "ssh-ed25519 AAAA test", true)
+	if err == nil || !strings.Contains(err.Error(), "work root") || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("err=%v, want absolute work root rejection", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runtime invoked before work root validation: %#v", runner.calls)
+	}
+}
+
+func TestLocalContainerVolumeDestinationRejectsRelativeTarget(t *testing.T) {
+	_, err := localContainerVolumeDestination("/host:relative:ro")
+	if err == nil || !strings.Contains(err.Error(), "absolute container path") {
+		t.Fatalf("err=%v, want absolute destination rejection", err)
+	}
+}
+
+func TestBootstrapChecksHostVolumesAgainstResolvedHomeBeforeMutation(t *testing.T) {
+	guard := strings.Index(bootstrapScript, "CRABBOX_HOST_VOLUME_PATH_")
+	install := strings.Index(bootstrapScript, "apt-get update")
+	if guard < 0 || install < 0 || guard > install {
+		t.Fatalf("host volume guard must run before package or filesystem mutation: guard=%d install=%d", guard, install)
+	}
+	for _, want := range []string{
+		`while IFS=: read -r account _ _ _ _ account_home _`,
+		`check_host_volume_path "$host_path"`,
+		`resolved="$(readlink -f "$probe"`,
+		`host_path="$(resolve_container_path "$1")"`,
+		`managed_path="$(resolve_container_path "$managed_path")"`,
+		`"$work_root" "$home_dir"`,
+		`CRABBOX_CACHE_VOLUME_PATH_`,
+		`useradd -m -d "$home_dir" -s /bin/bash "$user"`,
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Fatalf("bootstrap host volume guard missing %q", want)
 		}
 	}
 }

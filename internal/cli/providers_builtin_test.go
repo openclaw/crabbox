@@ -1290,7 +1290,7 @@ func (testLocalContainerProvider) Spec() ProviderSpec {
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint, FeatureFork},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -1373,6 +1373,25 @@ func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpoin
 		return NativeCheckpointCapability{}, false
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindDockerCommit, Direct: true}, true
+}
+func (testLocalContainerProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	if req.Record.Kind != checkpointKindDockerCommit {
+		return exit(2, "provider=local-container does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	req.Config.LocalContainer.Image = req.Record.ImageID
+	req.Config.LocalContainer.Runtime = req.Record.Metadata["runtime"]
+	req.Config.LocalContainer.User = req.Record.Metadata["container_user"]
+	req.Config.LocalContainer.WorkRoot = req.Record.Metadata["container_work_root"]
+	req.Config.SSHUser = req.Config.LocalContainer.User
+	req.Config.WorkRoot = req.Config.LocalContainer.WorkRoot
+	return nil
+}
+func (testLocalContainerProvider) ApplyNativeCheckpointForkFlags(cfg *Config, _ *flag.FlagSet, values any) error {
+	v, ok := values.(testLocalContainerFlagValues)
+	if ok && v.Volumes != nil {
+		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)
+	}
+	return nil
 }
 
 type testAppleVZProvider struct{}

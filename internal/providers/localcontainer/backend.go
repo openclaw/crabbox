@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -561,6 +562,10 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	if err != nil {
 		return "", "", err
 	}
+	hostVolumeDestinations, err := validateLocalContainerHostVolumes(cfg, containerWorkRoot)
+	if err != nil {
+		return "", "", err
+	}
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -579,6 +584,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	}
 	for i, volume := range cfg.Cache.Volumes {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
+	}
+	for i, destination := range hostVolumeDestinations {
+		args = append(args, "-e", fmt.Sprintf("CRABBOX_HOST_VOLUME_PATH_%d=%s", i, destination))
 	}
 	for key, value := range labels {
 		args = append(args, "--label", key+"="+value)
@@ -1403,6 +1411,98 @@ func localContainerReadyCheck(cfg core.Config) string {
 	return strings.Join(checks, " && ")
 }
 
+func validateLocalContainerHostVolumes(cfg core.Config, workRoot string) ([]string, error) {
+	workRoot = strings.TrimSpace(workRoot)
+	if len(cfg.LocalContainer.Volumes) > 0 && !path.IsAbs(workRoot) {
+		return nil, core.Exit(2, "local-container work root %q must be an absolute container path when host volumes are mounted", workRoot)
+	}
+	workRoot = path.Clean(workRoot)
+	user := strings.TrimSpace(cfg.LocalContainer.User)
+	homeDir := path.Join("/home", user)
+	if user == "root" {
+		homeDir = "/root"
+	}
+	managedPaths := []string{
+		workRoot,
+		homeDir,
+		"/bin",
+		"/boot",
+		"/dev",
+		"/etc",
+		"/home",
+		"/lib",
+		"/lib64",
+		"/proc",
+		"/root",
+		"/run",
+		"/sbin",
+		"/sys",
+		"/tmp",
+		"/usr",
+		"/var",
+	}
+	for _, volume := range cfg.Cache.Volumes {
+		managedPaths = append(managedPaths, volume.Path)
+	}
+	destinations := make([]string, 0, len(cfg.LocalContainer.Volumes))
+	for _, volume := range cfg.LocalContainer.Volumes {
+		destination, err := localContainerVolumeDestination(volume)
+		if err != nil {
+			return nil, err
+		}
+		for _, managedPath := range managedPaths {
+			if containerPathsOverlap(destination, managedPath) {
+				return nil, core.Exit(2, "local-container volume %q targets %s, which overlaps bootstrap-managed path %s", volume, destination, path.Clean(managedPath))
+			}
+		}
+		destinations = append(destinations, destination)
+	}
+	return destinations, nil
+}
+
+func localContainerVolumeDestination(spec string) (string, error) {
+	spec = strings.TrimSpace(spec)
+	original := spec
+	lastColon := strings.LastIndex(spec, ":")
+	if lastColon < 0 {
+		return "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
+	}
+	destination := spec[lastColon+1:]
+	if !strings.HasPrefix(destination, "/") {
+		spec = spec[:lastColon]
+		lastColon = strings.LastIndex(spec, ":")
+		if lastColon < 0 {
+			return "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
+		}
+		destination = spec[lastColon+1:]
+	}
+	if !strings.HasPrefix(destination, "/") {
+		return "", core.Exit(2, "invalid local-container volume destination %q; expected an absolute container path", destination)
+	}
+	if strings.ContainsAny(destination, "\r\n") {
+		return "", core.Exit(2, "invalid local-container volume destination %q; line breaks are not allowed", destination)
+	}
+	return path.Clean(destination), nil
+}
+
+func containerPathsOverlap(left, right string) bool {
+	left = path.Clean(strings.TrimSpace(left))
+	right = path.Clean(strings.TrimSpace(right))
+	if left == "." || right == "." {
+		return false
+	}
+	return left == right ||
+		containerPathHasPrefix(left, right) ||
+		containerPathHasPrefix(right, left)
+}
+
+func containerPathHasPrefix(value, prefix string) bool {
+	if prefix == "/" {
+		return strings.HasPrefix(value, "/")
+	}
+	return strings.HasPrefix(value, prefix+"/")
+}
+
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
@@ -1415,6 +1515,80 @@ func isDefaultWorkRoot(value string) bool {
 const bootstrapScript = `
 set -eu
 export DEBIAN_FRONTEND=noninteractive
+user="${CRABBOX_SSH_USER:-crabbox}"
+work_root="${CRABBOX_WORK_ROOT:-/work/crabbox}"
+ssh_port="${CRABBOX_SSH_PORT:-2222}"
+home_dir=""
+if [ -r /etc/passwd ]; then
+  while IFS=: read -r account _ _ _ _ account_home _; do
+    if [ "$account" = "$user" ]; then
+      home_dir="$account_home"
+      break
+    fi
+  done < /etc/passwd
+fi
+if [ -z "$home_dir" ]; then
+  if [ "$user" = root ]; then
+    home_dir=/root
+  else
+    home_dir="/home/$user"
+  fi
+fi
+container_paths_overlap() {
+  left="${1%/}"
+  right="${2%/}"
+  [ -n "$left" ] || left=/
+  [ -n "$right" ] || right=/
+  [ "$left" = "$right" ] && return 0
+  { [ "$left" = / ] || [ "$right" = / ]; } && return 0
+  case "$left/" in "$right/"*) return 0 ;; esac
+  case "$right/" in "$left/"*) return 0 ;; esac
+  return 1
+}
+check_host_volume_path() {
+  if ! command -v readlink >/dev/null 2>&1; then
+    echo "local-container host volume validation requires readlink" >&2
+    exit 127
+  fi
+  resolve_container_path() {
+    candidate="${1%/}"
+    [ -n "$candidate" ] || candidate=/
+    probe="$candidate"
+    suffix=""
+    while :; do
+      resolved="$(readlink -f "$probe" 2>/dev/null || true)"
+      if [ -n "$resolved" ]; then
+        printf '%s%s\n' "${resolved%/}" "$suffix"
+        return
+      fi
+      [ "$probe" != / ] || break
+      suffix="/${probe##*/}$suffix"
+      probe="${probe%/*}"
+      [ -n "$probe" ] || probe=/
+    done
+    printf '%s\n' "$candidate"
+  }
+  host_path="$(resolve_container_path "$1")"
+  for managed_path in "$work_root" "$home_dir" /bin /boot /dev /etc /home /lib /lib64 /proc /root /run /sbin /sys /tmp /usr /var; do
+    managed_path="$(resolve_container_path "$managed_path")"
+    if container_paths_overlap "$host_path" "$managed_path"; then
+      echo "local-container host volume target $host_path overlaps bootstrap-managed path $managed_path" >&2
+      exit 2
+    fi
+  done
+  env | sed -n 's/^CRABBOX_CACHE_VOLUME_PATH_[0-9][0-9]*=//p' | while IFS= read -r cache_path; do
+    [ -n "$cache_path" ] || continue
+    cache_path="$(resolve_container_path "$cache_path")"
+    if container_paths_overlap "$host_path" "$cache_path"; then
+      echo "local-container host volume target $host_path overlaps bootstrap-managed cache path $cache_path" >&2
+      exit 2
+    fi
+  done
+}
+env | sed -n 's/^CRABBOX_HOST_VOLUME_PATH_[0-9][0-9]*=//p' | while IFS= read -r host_path; do
+  [ -n "$host_path" ] || continue
+  check_host_volume_path "$host_path"
+done
 need_install=0
 	for tool in /usr/sbin/sshd git rsync curl sudo python3; do
 	  command -v "$tool" >/dev/null 2>&1 || need_install=1
@@ -1498,11 +1672,8 @@ if [ -f /etc/ssh/sshd_config ]; then
     printf '\nPasswordAuthentication no\n' >> /etc/ssh/sshd_config
   fi
 fi
-user="${CRABBOX_SSH_USER:-crabbox}"
-work_root="${CRABBOX_WORK_ROOT:-/work/crabbox}"
-ssh_port="${CRABBOX_SSH_PORT:-2222}"
 if ! id "$user" >/dev/null 2>&1; then
-  useradd -m -s /bin/bash "$user"
+  useradd -m -d "$home_dir" -s /bin/bash "$user"
 fi
 passwd -d "$user" >/dev/null 2>&1 || true
 home_dir="$(getent passwd "$user" | cut -d: -f6)"

@@ -711,7 +711,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		if nativeCheckpointResourceID(record) == "" {
 			return exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
 		}
-		if err := applyNativeCheckpointForkConfig(&cfg, fs, record); err != nil {
+		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
 			return err
 		}
 	}
