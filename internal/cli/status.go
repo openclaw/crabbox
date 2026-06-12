@@ -253,14 +253,6 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 	return statusViewFromLeaseTarget(ctx, cfg, lease)
 }
 
-func (a App) resolveLeaseTarget(ctx context.Context, cfg Config, id string) (Server, SSHTarget, string, error) {
-	return a.resolveLeaseTargetWithConfig(ctx, &cfg, id)
-}
-
-func (a App) resolveLeaseTargetWithConfig(ctx context.Context, cfg *Config, id string) (Server, SSHTarget, string, error) {
-	return a.resolveLeaseTargetForRepoWithConfig(ctx, cfg, id, Repo{}, false)
-}
-
 func (a App) resolveLeaseTargetForRepo(ctx context.Context, cfg Config, id string, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
 	return a.resolveLeaseTargetForRepoWithConfig(ctx, &cfg, id, repo, reclaim)
 }

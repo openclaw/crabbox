@@ -385,10 +385,6 @@ func (a App) resolveNetworkLeaseTargetForRepoWithConfig(ctx context.Context, cfg
 	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, cfg, id, printFallback, repo, reclaim)
 }
 
-func (a App) resolveNetworkLeaseTargetWithRepo(ctx context.Context, cfg Config, id string, printFallback bool, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
-	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, &cfg, id, printFallback, repo, reclaim)
-}
-
 func (a App) resolveNetworkLeaseTargetWithRepoConfig(ctx context.Context, cfg *Config, id string, printFallback bool, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
 	if cfg == nil {
 		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
