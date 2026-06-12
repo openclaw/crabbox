@@ -74,6 +74,7 @@ func openSandboxCommandBudgetForConfig(cfg Config) time.Duration {
 
 func openSandboxRunBudgetForConfig(cfg Config, noSync, syncOnly bool) time.Duration {
 	commandBudget := openSandboxCommandBudgetForConfig(cfg)
+	// Even --no-sync runs one remote command to create the configured workdir.
 	syncBudget := commandBudget
 	if !noSync && cfg.Sync.Timeout > 0 {
 		syncBudget = cfg.Sync.Timeout

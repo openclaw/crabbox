@@ -44,6 +44,9 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if err := validateOpenSandboxRunConfig(b.cfg); err != nil {
 		return err
 	}
+	if _, err := openSandboxWorkdir(b.cfg); err != nil {
+		return err
+	}
 	started := b.now()
 	api, err := b.client()
 	if err != nil {

@@ -112,6 +112,19 @@ func TestWarmupRejectsUnusableLifetimeBeforeCreate(t *testing.T) {
 	}
 }
 
+func TestWarmupRejectsInvalidWorkdirBeforeCreate(t *testing.T) {
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.cfg.OpenSandbox.Workdir = "/workspace"
+	err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}})
+	if err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v, want workdir rejection", err)
+	}
+	if fake.created.Image != "" {
+		t.Fatalf("created=%#v, want validation before create", fake.created)
+	}
+}
+
 func TestWarmupCleansUpWhenActualExpirationCannotFitRun(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -130,6 +143,28 @@ func TestWarmupCleansUpWhenActualExpirationCannotFitRun(t *testing.T) {
 		t.Fatal(err)
 	} else if claim.LeaseID != "" {
 		t.Fatalf("claim=%#v want rollback removal", claim)
+	}
+}
+
+func TestOpenSandboxRunBudgetsIncludeRequiredRemoteOperations(t *testing.T) {
+	cfg := testConfig()
+	commandBudget := 10*time.Minute + 30*time.Second
+	for _, tc := range []struct {
+		name     string
+		noSync   bool
+		syncOnly bool
+		want     time.Duration
+	}{
+		{name: "sync and command", want: 15*time.Minute + commandBudget},
+		{name: "no sync still creates workdir then runs command", noSync: true, want: 2 * commandBudget},
+		{name: "sync only", syncOnly: true, want: 15 * time.Minute},
+		{name: "no sync sync only creates workdir", noSync: true, syncOnly: true, want: commandBudget},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := openSandboxRunBudgetForConfig(cfg, tc.noSync, tc.syncOnly); got != tc.want {
+				t.Fatalf("budget=%s want %s", got, tc.want)
+			}
+		})
 	}
 }
 
