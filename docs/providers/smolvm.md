@@ -120,6 +120,24 @@ Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you
 - No direct `crabbox ssh` / `crabbox vnc` (delegated execution model).
 - Supports `warmup`, `run`, `status`, `stop`, `list`, and `doctor`.
 
+## Live smoke
+
+Run the guarded hosted lifecycle smoke with an exported API key:
+
+```sh
+CRABBOX_SMOLVM_LIVE_SMOKE=1 scripts/live-smolvm-smoke.sh
+```
+
+The smoke creates one uniquely named sandbox, verifies initial archive sync and
+environment forwarding, reuses it for a second sync that adds, updates, and
+deletes files, checks nonzero command exit propagation, runs status/list/doctor,
+then stops the sandbox and verifies that it disappeared from inventory. An exit
+trap retries targeted cleanup by the unique slug up to three times if any
+intermediate step fails, treats a confirmed absent slug as already clean, and
+returns failure if cleanup remains blocked. The smoke leaves SmolVM's default
+open network enabled because a cold worker may need to pull the configured image
+during the first exec.
+
 ## Limitations
 
 - Output from runs appears after the command completes (the smolfleet API provides no live stream for delegated exec).
