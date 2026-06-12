@@ -893,12 +893,12 @@ func (c *ProxmoxClient) ListCrabboxServersCluster(ctx context.Context) ([]Server
 		if vm.Type != "qemu" || vm.Template != 0 || !strings.HasPrefix(vm.Name, "crabbox-") || vm.Node == "" {
 			continue
 		}
-		server, err := c.GetServerOnNode(ctx, vm.Node, strconv.Itoa(int(vm.VMID)))
+		server, exists, err := c.getClusterServer(ctx, vm)
 		if err != nil {
-			if IsProxmoxNotFound(err) {
-				continue
-			}
 			return nil, err
+		}
+		if !exists {
+			continue
 		}
 		if isCrabboxProxmoxLease(server) {
 			servers = append(servers, server)
@@ -913,6 +913,35 @@ func (c *ProxmoxClient) listClusterVMs(ctx context.Context) ([]proxmoxClusterVM,
 		return nil, err
 	}
 	return vms, nil
+}
+
+func (c *ProxmoxClient) getClusterServer(ctx context.Context, vm proxmoxClusterVM) (Server, bool, error) {
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		server, err := c.GetServerOnNode(ctx, vm.Node, strconv.Itoa(int(vm.VMID)))
+		if err == nil {
+			return server, true, nil
+		}
+		if !IsProxmoxNotFound(err) {
+			return Server{}, false, err
+		}
+		refreshed, err := c.listClusterVMs(ctx)
+		if err != nil {
+			return Server{}, false, err
+		}
+		found := false
+		for _, candidate := range refreshed {
+			if candidate.Type == "qemu" && candidate.Template == 0 && candidate.VMID == vm.VMID {
+				vm = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return Server{}, false, nil
+		}
+	}
+	return Server{}, false, fmt.Errorf("Proxmox VM %d did not stabilize during cluster inventory reconciliation", vm.VMID)
 }
 
 func (c *ProxmoxClient) GetServerOnNode(ctx context.Context, node, id string) (Server, error) {

@@ -875,6 +875,78 @@ func TestProxmoxListsCrabboxServersAcrossClusterNodes(t *testing.T) {
 	}
 }
 
+func TestProxmoxListCrabboxServersClusterRetriesMigratedVM(t *testing.T) {
+	resourceCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/vms": map[string]any{"VM.Audit": 1}}})
+		case "/api2/json/cluster/resources":
+			resourceCalls++
+			node := "pve1"
+			if resourceCalls > 1 {
+				node = "pve2"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 101, "node": node, "type": "qemu", "name": "crabbox-migrated", "template": 0},
+			}})
+		case "/api2/json/nodes/pve1/qemu/101/status/current":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": "not found"})
+		case "/api2/json/nodes/pve2/qemu/101/status/current":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"vmid": 101, "name": "crabbox-migrated", "status": "running"}})
+		case "/api2/json/nodes/pve2/qemu/101/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"description": proxmoxDescription(map[string]string{"crabbox": "true", "provider": "proxmox", "lease": "cbx_migrated", "slug": "migrated"}),
+			}})
+		case "/api2/json/nodes/pve2/qemu/101/agent/network-get-interfaces":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": "guest agent unavailable"})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	servers, err := client.ListCrabboxServersCluster(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resourceCalls != 2 || len(servers) != 1 || servers[0].HostID != "pve2" || servers[0].Labels["lease"] != "cbx_migrated" {
+		t.Fatalf("resourceCalls=%d servers=%#v", resourceCalls, servers)
+	}
+}
+
+func TestProxmoxListCrabboxServersClusterFailsClosedDuringMigration(t *testing.T) {
+	resourceCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/vms": map[string]any{"VM.Audit": 1}}})
+		case "/api2/json/cluster/resources":
+			resourceCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 101, "node": "pve1", "type": "qemu", "name": "crabbox-migrating", "template": 0},
+			}})
+		case "/api2/json/nodes/pve1/qemu/101/status/current":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": "not found"})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	if _, err := client.ListCrabboxServersCluster(context.Background()); err == nil || !strings.Contains(err.Error(), "did not stabilize") {
+		t.Fatalf("err=%v, want migration reconciliation failure", err)
+	}
+	if resourceCalls < 2 {
+		t.Fatalf("resourceCalls=%d, want refreshed cluster inventory", resourceCalls)
+	}
+}
+
 func TestProxmoxListCrabboxServersClusterRequiresPropagatedVMAudit(t *testing.T) {
 	resourcesCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

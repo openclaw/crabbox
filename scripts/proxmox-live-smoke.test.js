@@ -183,7 +183,10 @@ test("live mode runs lifecycle and read-only cleanup proof", () => {
 	assert.match(result.stdout, /classification=live_proof_complete/);
 	const calls = fs.readFileSync(fake.calls, "utf8").trim().split("\n");
 	const dryRunIndex = calls.indexOf("cleanup --provider proxmox --dry-run");
-	assert.ok(calls.some((line) => /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-[0-9a-f]{12} --keep$/.test(line)));
+	const warmup = calls.find((line) => line.startsWith("warmup --provider proxmox --slug "));
+	assert.match(warmup, /^warmup --provider proxmox --slug proxmox-live-smoke-\d{8}-[0-9a-f]{12} --keep$/);
+	const generatedSlug = warmup.split(" ")[4];
+	assert.ok(generatedSlug.length <= 41, `generated slug too long: ${generatedSlug}`);
 	assert.ok(calls.indexOf("status --provider proxmox --id cbx_test123 --json") > -1);
 	assert.ok(calls.indexOf("ssh --provider proxmox --id cbx_test123") > -1);
 	assert.ok(calls.indexOf("stop --provider proxmox --id cbx_test123") > -1);
@@ -224,7 +227,7 @@ test("live mode does not stop or cleanup when warmup fails before lease ownershi
 	assert.match(result.stdout, /reason=no_new_matching_lease/);
 	assert.match(result.stdout, /classification=environment_blocked/);
 	const calls = fs.readFileSync(fake.calls, "utf8");
-	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-[0-9a-f]{12} --keep$/m);
+	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke-\d{8}-[0-9a-f]{12} --keep$/m);
 	assert.match(calls, /^list --provider proxmox --json$/m);
 	assert.doesNotMatch(calls, /^status |^ssh |^stop |^cleanup /m);
 });

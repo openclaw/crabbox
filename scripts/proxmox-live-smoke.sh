@@ -61,7 +61,9 @@ if [[ ! "$nonce" =~ ^[0-9a-f]{12}$ ]]; then
   echo "could not generate live smoke ownership nonce" >&2
   exit 2
 fi
-slug="${slug_prefix:0:20}-$(date -u +%s)-${nonce}"
+epoch="$(date -u +%s)"
+epoch="${epoch: -8}"
+slug="${slug_prefix:0:19}-${epoch}-${nonce}"
 
 resolve_configured_value() {
   local field="$1"
