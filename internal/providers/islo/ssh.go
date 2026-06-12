@@ -11,11 +11,7 @@ import (
 
 const isloSSHDomain = "islo"
 
-var _ core.SSHLeaseBackend = (*isloBackend)(nil)
-
-func (b *isloBackend) Acquire(context.Context, core.AcquireRequest) (core.LeaseTarget, error) {
-	return core.LeaseTarget{}, exit(2, "provider=islo SSH resolves existing sandboxes only; create one with `crabbox warmup --provider islo`")
-}
+var _ core.SSHLoginBackend = (*isloBackend)(nil)
 
 func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	client, err := newIsloClient(b.cfg, b.rt)
@@ -34,24 +30,6 @@ func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (cor
 	applyIsloSSHLabels(&server, leaseID, b.cfg)
 	target := b.sshTargetForSandbox(name)
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
-}
-
-func (b *isloBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
-	client, err := newIsloClient(b.cfg, b.rt)
-	if err != nil {
-		return err
-	}
-	name := strings.TrimPrefix(req.Lease.LeaseID, isloLeasePrefix)
-	if req.Lease.Server.Name != "" {
-		name = req.Lease.Server.Name
-	}
-	if name != "" {
-		if err := client.DeleteSandbox(ctx, name); err != nil {
-			return isloError("delete sandbox", err)
-		}
-	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	return nil
 }
 
 func (b *isloBackend) Touch(_ context.Context, req core.TouchRequest) (Server, error) {
@@ -133,12 +111,13 @@ func (b *isloBackend) sshTargetForSandbox(name string) core.SSHTarget {
 		key = b.cfg.SSHKey
 	}
 	return core.SSHTarget{
-		User:          user,
-		Host:          isloSSHHost(name),
-		Key:           key,
-		Port:          port,
-		FallbackPorts: []string{},
-		TargetOS:      targetLinux,
+		User:           user,
+		Host:           isloSSHHost(name),
+		Key:            key,
+		Port:           port,
+		FallbackPorts:  []string{},
+		TargetOS:       targetLinux,
+		SSHConfigProxy: true,
 	}
 }
 

@@ -165,6 +165,16 @@ func TestIsloProviderDeclaresPauseResume(t *testing.T) {
 	}
 }
 
+func TestIsloProviderExposesLoginWithoutSSHLease(t *testing.T) {
+	backend := NewIsloBackend((Provider{}).Spec(), Config{}, Runtime{})
+	if _, ok := backend.(core.SSHLoginBackend); !ok {
+		t.Fatalf("backend=%T does not expose SSH login", backend)
+	}
+	if _, ok := backend.(core.SSHLeaseBackend); ok {
+		t.Fatalf("backend=%T must not expose a Crabbox-managed SSH lease", backend)
+	}
+}
+
 func TestResolveIsloLeaseIDRejectsUnclaimedRawSandbox(t *testing.T) {
 	if _, _, _, err := resolveIsloLeaseID("production", "", false); err == nil {
 		t.Fatal("expected raw non-Crabbox sandbox to be rejected")
@@ -287,7 +297,7 @@ func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 	if lease.SSH.Host != "crabbox-repo-abcdef.islo" || lease.SSH.User != isloWorkloadUser || lease.SSH.Port != "22" {
 		t.Fatalf("ssh target=%#v", lease.SSH)
 	}
-	if lease.SSH.Key != "" || len(lease.SSH.FallbackPorts) != 0 {
+	if lease.SSH.Key != "" || len(lease.SSH.FallbackPorts) != 0 || !lease.SSH.SSHConfigProxy {
 		t.Fatalf("islo ssh should not force Crabbox's default key or fallback ports: %#v", lease.SSH)
 	}
 	if lease.Server.PublicNet.IPv4.IP != "crabbox-repo-abcdef.islo" || lease.Server.Labels["ssh_host"] != "crabbox-repo-abcdef.islo" {

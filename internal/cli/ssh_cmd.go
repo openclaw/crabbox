@@ -31,7 +31,7 @@ func (a App) ssh(ctx context.Context, args []string) error {
 	if err := requireLeaseID(*id, "crabbox ssh --id <lease-id-or-slug>", cfg); err != nil {
 		return err
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
+	server, target, leaseID, err := a.resolveNetworkLoginTargetForRepo(ctx, cfg, *id, false, *reclaim)
 	if err != nil {
 		return err
 	}

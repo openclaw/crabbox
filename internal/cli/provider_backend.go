@@ -76,13 +76,22 @@ type DoctorBackend interface {
 	Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error)
 }
 
-type SSHLeaseBackend interface {
+type SSHLoginBackend interface {
 	Backend
-	Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error)
 	Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error)
+}
+
+type LeaseTouchBackend interface {
+	Backend
+	Touch(ctx context.Context, req TouchRequest) (Server, error)
+}
+
+type SSHLeaseBackend interface {
+	SSHLoginBackend
+	LeaseTouchBackend
+	Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error)
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
-	Touch(ctx context.Context, req TouchRequest) (Server, error)
 }
 
 type ResolvedLeaseTargetRebinder interface {
@@ -1049,7 +1058,7 @@ func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease L
 		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, err)
 		return lease.Server
 	}
-	sshBackend, ok := backend.(SSHLeaseBackend)
+	sshBackend, ok := backend.(LeaseTouchBackend)
 	if !ok {
 		fmt.Fprintf(a.Stderr, "warning: provider=%s does not support lease touch\n", backend.Spec().Name)
 		return lease.Server

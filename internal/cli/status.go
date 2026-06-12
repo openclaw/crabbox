@@ -263,6 +263,14 @@ func (a App) resolveLeaseTargetForRepoWithConfig(ctx context.Context, cfg *Confi
 }
 
 func (a App) resolveLeaseTargetWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest) (Server, SSHTarget, string, error) {
+	return a.resolveSSHTargetWithRequestConfig(ctx, cfg, req, false)
+}
+
+func (a App) resolveLoginTargetWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest) (Server, SSHTarget, string, error) {
+	return a.resolveSSHTargetWithRequestConfig(ctx, cfg, req, true)
+}
+
+func (a App) resolveSSHTargetWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest, allowLoginOnly bool) (Server, SSHTarget, string, error) {
 	if cfg == nil {
 		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
 	}
@@ -273,9 +281,14 @@ func (a App) resolveLeaseTargetWithRequestConfig(ctx context.Context, cfg *Confi
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
-	sshBackend, ok := backend.(SSHLeaseBackend)
+	sshBackend, ok := backend.(SSHLoginBackend)
 	if !ok {
 		return Server{}, SSHTarget{}, "", exit(2, "provider=%s does not expose an SSH target", backend.Spec().Name)
+	}
+	if !allowLoginOnly {
+		if _, ok := backend.(SSHLeaseBackend); !ok {
+			return Server{}, SSHTarget{}, "", exit(2, "provider=%s exposes SSH login only, not a Crabbox-managed SSH lease", backend.Spec().Name)
+		}
 	}
 	req.Options = leaseOptionsFromConfig(*cfg)
 	req.Options.ProviderScope = providerClaimScope(backend.Spec().Name, *cfg)
@@ -287,7 +300,7 @@ func (a App) resolveLeaseTargetWithRequestConfig(ctx context.Context, cfg *Confi
 	return lease.Server, lease.SSH, lease.LeaseID, nil
 }
 
-func resolveSSHLeaseTarget(ctx context.Context, backend SSHLeaseBackend, req ResolveRequest) (LeaseTarget, error) {
+func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req ResolveRequest) (LeaseTarget, error) {
 	claimsBefore, err := snapshotLeaseClaims()
 	if err != nil {
 		return LeaseTarget{}, err
