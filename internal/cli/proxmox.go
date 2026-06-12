@@ -25,6 +25,13 @@ type ProxmoxClient struct {
 	Client      *http.Client
 }
 
+type ProxmoxReadinessCheck struct {
+	Status  string
+	Check   string
+	Message string
+	Details map[string]string
+}
+
 var (
 	proxmoxRunSSHQuietWithOptions = runSSHQuietWithOptions
 	proxmoxRunSSHInputQuiet       = runSSHInputQuiet
@@ -53,9 +60,6 @@ func NewProxmoxClient(cfg Config) (*ProxmoxClient, error) {
 	}
 	if cfg.Proxmox.Node == "" {
 		return nil, exit(3, "proxmox node is required (set proxmox.node or CRABBOX_PROXMOX_NODE)")
-	}
-	if cfg.Proxmox.TemplateID <= 0 {
-		return nil, exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	if cfg.Proxmox.InsecureTLS {
@@ -106,10 +110,370 @@ func (c *ProxmoxClient) do(ctx context.Context, method, path string, form url.Va
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return err
 	}
-	if len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
+	if len(envelope.Data) == 0 {
+		return fmt.Errorf("proxmox %s %s: missing data envelope", method, path)
+	}
+	if bytes.Equal(envelope.Data, []byte("null")) {
 		return nil
 	}
 	return json.Unmarshal(envelope.Data, out)
+}
+
+type proxmoxStorage struct {
+	Storage string     `json:"storage"`
+	Active  proxmoxInt `json:"active"`
+	Enabled proxmoxInt `json:"enabled"`
+}
+
+type proxmoxNetwork struct {
+	Iface  string     `json:"iface"`
+	Type   string     `json:"type"`
+	Active proxmoxInt `json:"active"`
+}
+
+type proxmoxInt int
+
+func (i *proxmoxInt) UnmarshalJSON(data []byte) error {
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*i = proxmoxInt(n)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	if s == "" {
+		*i = 0
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return err
+	}
+	*i = proxmoxInt(n)
+	return nil
+}
+
+func (c *ProxmoxClient) DoctorReadiness(ctx context.Context, cfg Config) ([]ProxmoxReadinessCheck, error) {
+	checks := []ProxmoxReadinessCheck{
+		c.proxmoxAuthCheck(ctx),
+		c.proxmoxNodeCheck(ctx, cfg),
+		c.proxmoxStorageCheck(ctx, cfg),
+		c.proxmoxNetworkCheck(ctx, cfg),
+		c.proxmoxTemplateCheck(ctx, cfg),
+		c.proxmoxNextIDCheck(ctx),
+		c.proxmoxInventoryCheck(ctx),
+		{
+			Status:  "ok",
+			Check:   "mutation",
+			Message: "mutation=false",
+			Details: map[string]string{"mutation": "false"},
+		},
+	}
+	return checks, nil
+}
+
+func (c *ProxmoxClient) proxmoxAuthCheck(ctx context.Context) ProxmoxReadinessCheck {
+	path := "/version"
+	var version map[string]any
+	if err := c.do(ctx, http.MethodGet, path, nil, &version); err != nil {
+		return c.proxmoxFailedReadiness("auth", path, err, nil)
+	}
+	return ProxmoxReadinessCheck{Status: "ok", Check: "auth", Message: "auth=ready endpoint=/version", Details: map[string]string{"auth": "ready", "endpoint": path}}
+}
+
+func (c *ProxmoxClient) proxmoxNodeCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
+	path := "/nodes/" + url.PathEscape(c.Node) + "/status"
+	var status map[string]any
+	if err := c.do(ctx, http.MethodGet, path, nil, &status); err != nil {
+		return c.proxmoxFailedReadiness("node", path, err, map[string]string{"node": cfg.Proxmox.Node})
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "ok",
+		Check:   "node",
+		Message: fmt.Sprintf("node=%s endpoint=/nodes/%s/status", cfg.Proxmox.Node, cfg.Proxmox.Node),
+		Details: map[string]string{"node": cfg.Proxmox.Node, "endpoint": "/nodes/" + cfg.Proxmox.Node + "/status"},
+	}
+}
+
+func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
+	path := "/nodes/" + url.PathEscape(c.Node) + "/storage"
+	var storages []proxmoxStorage
+	if err := c.do(ctx, http.MethodGet, path, nil, &storages); err != nil {
+		return c.proxmoxFailedReadiness("storage", path, err, map[string]string{"storage": cfg.Proxmox.Storage})
+	}
+	if cfg.Proxmox.Storage == "" {
+		return ProxmoxReadinessCheck{
+			Status:  "ok",
+			Check:   "storage",
+			Message: fmt.Sprintf("storage=any count=%d", len(storages)),
+			Details: map[string]string{"storage": "any", "count": strconv.Itoa(len(storages)), "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+		}
+	}
+	for _, storage := range storages {
+		if storage.Storage != cfg.Proxmox.Storage {
+			continue
+		}
+		if storage.Enabled == 0 || storage.Active == 0 {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "storage",
+				Message: fmt.Sprintf("storage=%s class=missing_resource hint=enable_proxmox_storage active=%d enabled=%d", cfg.Proxmox.Storage, storage.Active, storage.Enabled),
+				Details: map[string]string{"storage": cfg.Proxmox.Storage, "class": "missing_resource", "hint": "enable_proxmox_storage", "active": strconv.Itoa(int(storage.Active)), "enabled": strconv.Itoa(int(storage.Enabled)), "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+			}
+		}
+		return ProxmoxReadinessCheck{
+			Status:  "ok",
+			Check:   "storage",
+			Message: fmt.Sprintf("storage=%s active=1 enabled=1", cfg.Proxmox.Storage),
+			Details: map[string]string{"storage": cfg.Proxmox.Storage, "active": "1", "enabled": "1", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+		}
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "failed",
+		Check:   "storage",
+		Message: fmt.Sprintf("storage=%s class=missing_resource hint=grant_or_configure_proxmox_storage", cfg.Proxmox.Storage),
+		Details: map[string]string{"storage": cfg.Proxmox.Storage, "class": "missing_resource", "hint": "grant_or_configure_proxmox_storage", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+	}
+}
+
+func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
+	path := "/nodes/" + url.PathEscape(c.Node) + "/network"
+	var networks []proxmoxNetwork
+	if err := c.do(ctx, http.MethodGet, path, nil, &networks); err != nil {
+		return c.proxmoxFailedReadiness("bridge", path, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
+	}
+	if cfg.Proxmox.Bridge == "" {
+		return ProxmoxReadinessCheck{
+			Status:  "ok",
+			Check:   "bridge",
+			Message: fmt.Sprintf("bridge=any count=%d", len(networks)),
+			Details: map[string]string{"bridge": "any", "count": strconv.Itoa(len(networks)), "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+		}
+	}
+	for _, network := range networks {
+		if network.Iface != cfg.Proxmox.Bridge {
+			continue
+		}
+		if network.Type != "" && network.Type != "bridge" {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "bridge",
+				Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge type=%s", cfg.Proxmox.Bridge, network.Type),
+				Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "type": network.Type, "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+			}
+		}
+		if network.Active == 0 {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "bridge",
+				Message: fmt.Sprintf("bridge=%s class=missing_resource hint=activate_proxmox_bridge active=0", cfg.Proxmox.Bridge),
+				Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "activate_proxmox_bridge", "active": "0", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+			}
+		}
+		return ProxmoxReadinessCheck{
+			Status:  "ok",
+			Check:   "bridge",
+			Message: fmt.Sprintf("bridge=%s type=bridge active=1", cfg.Proxmox.Bridge),
+			Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "type": "bridge", "active": "1", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+		}
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "failed",
+		Check:   "bridge",
+		Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge", cfg.Proxmox.Bridge),
+		Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+	}
+}
+
+func (c *ProxmoxClient) proxmoxTemplateCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
+	if cfg.Proxmox.TemplateID <= 0 {
+		return ProxmoxReadinessCheck{
+			Status:  "failed",
+			Check:   "template",
+			Message: "templateId=missing class=config hint=set_proxmox_template_id",
+			Details: map[string]string{"templateId": "missing", "class": "config", "hint": "set_proxmox_template_id"},
+		}
+	}
+	vms, err := c.listQEMU(ctx)
+	if err != nil {
+		return c.proxmoxFailedReadiness("template", "/nodes/"+url.PathEscape(c.Node)+"/qemu", err, map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID)})
+	}
+	for _, vm := range vms {
+		if vm.VMID != cfg.Proxmox.TemplateID {
+			continue
+		}
+		if vm.Template == 0 {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "template",
+				Message: fmt.Sprintf("templateId=%d class=missing_resource hint=convert_vm_to_template", cfg.Proxmox.TemplateID),
+				Details: map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID), "class": "missing_resource", "hint": "convert_vm_to_template", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/qemu"},
+			}
+		}
+		configPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), cfg.Proxmox.TemplateID)
+		var config map[string]any
+		if err := c.do(ctx, http.MethodGet, configPath, nil, &config); err != nil {
+			return c.proxmoxFailedReadiness("template", configPath, err, map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID)})
+		}
+		return ProxmoxReadinessCheck{
+			Status:  "ok",
+			Check:   "template",
+			Message: fmt.Sprintf("templateId=%d template=ready", cfg.Proxmox.TemplateID),
+			Details: map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID), "template": "ready", "endpoint": fmt.Sprintf("/nodes/%s/qemu/%d/config", cfg.Proxmox.Node, cfg.Proxmox.TemplateID)},
+		}
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "failed",
+		Check:   "template",
+		Message: fmt.Sprintf("templateId=%d class=missing_resource hint=configure_existing_proxmox_template", cfg.Proxmox.TemplateID),
+		Details: map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID), "class": "missing_resource", "hint": "configure_existing_proxmox_template", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/qemu"},
+	}
+}
+
+func (c *ProxmoxClient) proxmoxNextIDCheck(ctx context.Context) ProxmoxReadinessCheck {
+	id, err := c.nextID(ctx)
+	if err != nil {
+		return c.proxmoxFailedReadiness("nextid", "/cluster/nextid", err, nil)
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "ok",
+		Check:   "nextid",
+		Message: fmt.Sprintf("nextid=%d endpoint=/cluster/nextid", id),
+		Details: map[string]string{"nextid": strconv.Itoa(id), "endpoint": "/cluster/nextid"},
+	}
+}
+
+func (c *ProxmoxClient) proxmoxInventoryCheck(ctx context.Context) ProxmoxReadinessCheck {
+	vms, err := c.listQEMU(ctx)
+	if err != nil {
+		return c.proxmoxFailedReadiness("inventory", "/nodes/"+url.PathEscape(c.Node)+"/qemu", err, nil)
+	}
+	leases := 0
+	for _, vm := range vms {
+		if vm.Template == 0 && strings.HasPrefix(vm.Name, "crabbox-") {
+			leases++
+		}
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "ok",
+		Check:   "inventory",
+		Message: fmt.Sprintf("api=list mutation=false leases=%d vms=%d", leases, len(vms)),
+		Details: map[string]string{"api": "list", "mutation": "false", "leases": strconv.Itoa(leases), "vms": strconv.Itoa(len(vms)), "endpoint": "/nodes/" + c.Node + "/qemu"},
+	}
+}
+
+func (c *ProxmoxClient) proxmoxFailedReadiness(check, path string, err error, extra map[string]string) ProxmoxReadinessCheck {
+	class := proxmoxReadinessErrorClass(err)
+	details := map[string]string{
+		"class":    class,
+		"endpoint": proxmoxDisplayPath(path),
+		"hint":     proxmoxReadinessHint(check, class),
+		"error":    proxmoxSafeError(err),
+	}
+	for key, value := range extra {
+		if value != "" {
+			details[key] = value
+		}
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "failed",
+		Check:   check,
+		Message: fmt.Sprintf("class=%s endpoint=%s hint=%s error=%s", class, proxmoxDisplayPath(path), details["hint"], proxmoxSafeError(err)),
+		Details: details,
+	}
+}
+
+func proxmoxReadinessErrorClass(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	var proxErr *ProxmoxError
+	if errors.As(err, &proxErr) {
+		switch proxErr.StatusCode {
+		case http.StatusUnauthorized:
+			return "auth"
+		case http.StatusForbidden:
+			return "permission"
+		case http.StatusNotFound:
+			return "missing_resource"
+		}
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "timeout") || strings.Contains(message, "timed out") || strings.Contains(message, "deadline"):
+		return "timeout"
+	case strings.Contains(message, "permission") || strings.Contains(message, "denied") || strings.Contains(message, "sys.audit") || strings.Contains(message, "403"):
+		return "permission"
+	case strings.Contains(message, "unauthorized") || strings.Contains(message, "401") || strings.Contains(message, "token"):
+		return "auth"
+	case strings.Contains(message, "no such host") || strings.Contains(message, "connection refused") || strings.Contains(message, "tls") || strings.Contains(message, "network") || strings.Contains(message, "dial"):
+		return "network"
+	case strings.Contains(message, "missing") || strings.Contains(message, "required"):
+		return "config"
+	default:
+		return "provider"
+	}
+}
+
+func proxmoxReadinessHint(check, class string) string {
+	if class == "permission" {
+		switch check {
+		case "node":
+			return "grant_proxmox_node_audit"
+		case "storage":
+			return "grant_proxmox_storage_audit"
+		case "bridge":
+			return "grant_proxmox_network_audit"
+		case "template":
+			return "grant_proxmox_vm_audit"
+		case "nextid":
+			return "grant_proxmox_sys_audit"
+		default:
+			return "grant_proxmox_read_permissions"
+		}
+	}
+	if class == "auth" {
+		return "check_proxmox_token_id_secret"
+	}
+	if class == "network" {
+		return "check_proxmox_api_url_tls_network"
+	}
+	if class == "missing_resource" {
+		return "check_proxmox_node_storage_bridge_template"
+	}
+	if class == "config" {
+		return "check_proxmox_provider_config"
+	}
+	return "check_proxmox_api_response"
+}
+
+func proxmoxSafeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	text = strings.ReplaceAll(text, "PVEAPIToken=", "PVEAPIToken=<redacted>")
+	return strings.Join(strings.Fields(text), "_")
+}
+
+func proxmoxDisplayPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	u, err := url.Parse(path)
+	if err == nil && u.Path != "" {
+		path = u.Path
+	}
+	if strings.Contains(path, "?") {
+		path, _, _ = strings.Cut(path, "?")
+	}
+	return path
 }
 
 func (c *ProxmoxClient) nextID(ctx context.Context) (int, error) {
@@ -173,6 +537,9 @@ func (c *ProxmoxClient) ListCrabboxServers(ctx context.Context) ([]Server, error
 func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
 	if cfg.TargetOS != targetLinux {
 		return Server{}, exit(2, "proxmox provider currently supports target=linux only")
+	}
+	if cfg.Proxmox.TemplateID <= 0 {
+		return Server{}, exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
 	}
 	vmid, err := c.nextID(ctx)
 	if err != nil {

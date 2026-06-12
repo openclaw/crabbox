@@ -121,8 +121,9 @@ proxmox:
 
 ## Quick start
 
-Create an API token in Proxmox and grant it permission to clone, configure,
-start, stop, delete, and inspect VMs on the target node and storage.
+Create an API token in Proxmox and grant it permission to inspect the target
+node, storage, network bridge, template VM, and QEMU inventory. Before the
+first lease, run the non-mutating doctor check:
 
 ```sh
 export CRABBOX_PROXMOX_API_URL=https://pve.example.com:8006
@@ -131,6 +132,7 @@ export CRABBOX_PROXMOX_TOKEN_SECRET='<token-secret>'
 export CRABBOX_PROXMOX_NODE=pve1
 export CRABBOX_PROXMOX_TEMPLATE_ID=9400
 
+crabbox doctor --provider proxmox --json
 crabbox warmup --provider proxmox --keep
 crabbox run --provider proxmox --no-sync -- echo proxmox-ok
 crabbox ssh --provider proxmox --id swift-crab
@@ -140,6 +142,12 @@ crabbox cleanup --provider proxmox
 
 For self-signed private clusters, set `CRABBOX_PROXMOX_INSECURE_TLS=1` or pass
 `--proxmox-insecure-tls`.
+
+`doctor --provider proxmox` is read-only. It checks authentication with
+`/version`, then verifies the configured node status, storage list, network
+bridge list, template VM/config, `/cluster/nextid`, and QEMU inventory. The
+output includes `mutation=false`; it does not clone, configure, start, stop, or
+delete VMs.
 
 ## Configuration
 
@@ -161,10 +169,11 @@ proxmox:
   insecureTLS: false
 ```
 
-`apiUrl`, `tokenId`, `tokenSecret`, `node`, and `templateId` are required; the
-CLI errors out if any is missing. `user` defaults to `crabbox`, `workRoot`
-defaults to `/work/crabbox`, and `fullClone` defaults to `true`. The API URL may
-include or omit a trailing `/api2/json`; Crabbox normalizes it.
+`apiUrl`, `tokenId`, `tokenSecret`, `node`, and `templateId` are required for
+leasing. Doctor can still construct the API client without `templateId` so it
+can report a structured failed `template` check. `user` defaults to `crabbox`,
+`workRoot` defaults to `/work/crabbox`, and `fullClone` defaults to `true`. The
+API URL may include or omit a trailing `/api2/json`; Crabbox normalizes it.
 
 Keep secret values in a private config file with `0600` permissions, in
 `~/.profile`, or in a secret manager. Do not pass token secrets as CLI
@@ -206,6 +215,60 @@ There is intentionally no `--proxmox-token-secret` flag, so the token secret
 never appears in shell history or process arguments. Supply it through
 `CRABBOX_PROXMOX_TOKEN_SECRET` or the config file instead.
 
+## Readiness and token permissions
+
+`crabbox doctor --provider proxmox` is the readiness gate for this provider. In
+JSON mode, provider checks use stable names and details:
+
+```sh
+crabbox doctor --provider proxmox --json
+```
+
+Expected Proxmox-specific checks:
+
+```text
+auth       /version accepts the API token
+node       /nodes/<node>/status is readable
+storage    /nodes/<node>/storage is readable, and configured storage is active
+bridge     /nodes/<node>/network is readable, and configured bridge exists
+template   /nodes/<node>/qemu and /config show templateId is a QEMU template
+nextid     /cluster/nextid is readable
+inventory  /nodes/<node>/qemu is readable for Crabbox VM inventory
+mutation   always reports mutation=false
+```
+
+Proxmox API tokens can authenticate successfully while lacking useful
+authorization for node, storage, network, template, or next-id endpoints. When
+that happens, doctor reports the failing endpoint class with a remediation hint,
+for example `class=permission hint=grant_proxmox_node_audit`. The messages are
+secret-safe and do not print token secret values.
+
+For a separated automation token, start by granting read access needed by
+doctor on these paths, then add clone/config/start/stop/delete permissions only
+for lease lifecycle operations:
+
+```text
+/nodes/<node>
+/nodes/<node>/storage/<storage>
+/nodes/<node>/qemu/<templateId>
+/sdn or /nodes/<node>/network, depending on how the bridge is managed
+```
+
+The exact least-privilege role depends on the Proxmox VE version and local ACL
+model. If doctor fails with `class=permission`, fix the named endpoint first and
+rerun doctor before attempting `warmup` or `run`.
+
+For CI or lab smoke checks after building the local binary:
+
+```sh
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_LIVE_DOCTOR_PROVIDERS=proxmox CRABBOX_BIN=./bin/crabbox scripts/live-doctor-smoke.sh
+```
+
+The smoke script validates that `doctor --json` emits one JSON object with
+`ok`, `provider`, and `checks`. It is read-only; failures usually mean missing
+local config, unavailable Proxmox API, TLS/network problems, or token ACL gaps.
+
 ## Lifecycle
 
 1. Allocate a Crabbox lease ID and friendly slug.
@@ -233,7 +296,16 @@ Crabbox-managed VMs (those named `crabbox-*` with `crabbox=true` and a matching
 `proxmox node is required` / `proxmox templateId is required`
 
 Set the corresponding `proxmox.*` config field or `CRABBOX_PROXMOX_*`
-environment variable. All four are mandatory.
+environment variable. The API URL, token ID, token secret, and node are required
+to contact the API. `templateId` is required before leasing; doctor reports it
+as a failed `template` check when it is missing.
+
+`class=permission hint=grant_proxmox_*`
+
+The token authenticated but cannot read a prerequisite endpoint. Grant the
+token read access for the endpoint named in the doctor details, such as the
+node status, storage inventory, network bridge inventory, template VM config,
+or `/cluster/nextid`, then rerun `crabbox doctor --provider proxmox --json`.
 
 `timeout waiting for proxmox qemu guest agent` /
 `no guest ipv4 address reported by qemu guest agent`
