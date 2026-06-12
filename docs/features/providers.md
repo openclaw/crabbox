@@ -113,7 +113,8 @@ provider on Apple hardware for macOS VM workflows.
 These run the command inside a sandbox/proof runner; Crabbox does not lease or
 SSH into a box. Local sync options (`--no-sync`, rsync flags) are rejected - the
 provider owns sync. Most are Linux-only. `anthropic-sandbox-runtime` is local
-to the current macOS or Linux host.
+to the current macOS or Linux host; `windows-sandbox` is local to a Windows
+host.
 
 ```text
 cloudflare              Cloudflare Containers (Worker runtime)
@@ -130,6 +131,7 @@ tensorlake              Tensorlake Firecracker sandboxes
 upstash-box             Upstash sandboxes
 blacksmith-testbox      Blacksmith CI test runner (proof/session)
 wandb                   Weights & Biases run sandboxes
+windows-sandbox         Windows Sandbox on the local Windows host
 ```
 
 ## Service-control providers
@@ -182,6 +184,7 @@ railway                 Railway service status and stop controls
 - [SmolVM](../providers/smolvm.md): delegated Smol Machines microVM execution via smolfleet.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Blacksmith CI runner.
 - [Weights & Biases](../providers/wandb.md): delegated W&B run sandbox execution.
+- [Windows Sandbox](../providers/windows-sandbox.md): delegated Windows Sandbox execution on a local Windows host.
 - [Provider backends](../provider-backends.md): guide for adding a new provider/backend/plugin.
 
 ## Machine classes
