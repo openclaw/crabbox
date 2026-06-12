@@ -375,7 +375,7 @@ func TestResolveLeaseTargetUsesPersistedExternalRouting(t *testing.T) {
 	}
 	cfg := baseConfig()
 	app := App{Stdout: os.Stdout, Stderr: os.Stderr}
-	server, _, gotLeaseID, err := app.resolveLeaseTargetWithConfig(context.Background(), &cfg, "old-box")
+	server, _, gotLeaseID, err := app.resolveLeaseTargetWithRequestConfig(context.Background(), &cfg, ResolveRequest{ID: "old-box"})
 	if err != nil {
 		t.Fatal(err)
 	}
