@@ -1,6 +1,8 @@
 package opensandbox
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +25,7 @@ type openSandboxClient interface {
 	GetSandbox(context.Context, string) (sandboxInfo, error)
 	DeleteSandbox(context.Context, string) error
 	ResumeSandbox(context.Context, string) error
+	PingSandbox(context.Context, string) error
 	UploadFile(context.Context, string, string, io.Reader) error
 	RunCommand(context.Context, string, runCommandRequest) (int, error)
 	Probe(context.Context) error
@@ -41,9 +44,10 @@ type createSandboxOptions struct {
 }
 
 type sandboxInfo struct {
-	ID       string
-	State    string
-	Metadata map[string]string
+	ID        string
+	State     string
+	Metadata  map[string]string
+	ExpiresAt *time.Time
 }
 
 type runCommandRequest struct {
@@ -51,6 +55,17 @@ type runCommandRequest struct {
 	Workdir     string
 	Env         map[string]string
 	TimeoutSecs int
+}
+
+type commandStreamEvent struct {
+	Event      string
+	Data       string
+	Structured bool
+}
+
+type execdConnection struct {
+	baseURL string
+	headers map[string]string
 }
 
 var errOpenSandboxNotFound = errors.New("opensandbox not found")
@@ -143,6 +158,9 @@ func isLoopbackHost(host string) bool {
 
 func secureOpenSandboxHTTPClient(source *http.Client, baseURL string) *http.Client {
 	client := *source
+	if client.Transport == nil {
+		client.Transport = sdk.DefaultTransport()
+	}
 	trusted, _ := url.Parse(baseURL)
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -214,9 +232,9 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 	}
 	timeoutSecs := opts.TimeoutSecs
 	if timeoutSecs <= 0 {
-		// The low-level request treats nil as manual cleanup, unlike the SDK's
-		// high-level default. Preserve the SDK's bounded 10-minute lifetime.
-		timeoutSecs = sdk.DefaultTimeoutSeconds
+		// The low-level request treats nil as manual cleanup. Keep the fallback
+		// bounded while covering Crabbox's default command budget.
+		timeoutSecs = openSandboxExecTimeoutSecs
 	}
 	var platform *sdk.PlatformSpec
 	if strings.TrimSpace(opts.PlatformOS) != "" || strings.TrimSpace(opts.PlatformArch) != "" {
@@ -276,11 +294,20 @@ func (c *sdkOpenSandboxClient) ResumeSandbox(ctx context.Context, sandboxID stri
 	return nil
 }
 
-func (c *sdkOpenSandboxClient) readyTimeout() time.Duration {
-	if c.cfg.OpenSandbox.TimeoutSecs > 0 {
-		return time.Duration(c.cfg.OpenSandbox.TimeoutSecs) * time.Second
+func (c *sdkOpenSandboxClient) PingSandbox(ctx context.Context, sandboxID string) error {
+	execd, err := c.execd(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
-	return openSandboxReadyTimeout
+	return execd.Ping(ctx)
+}
+
+func (c *sdkOpenSandboxClient) readyTimeout() time.Duration {
+	timeout := openSandboxReadyTimeout
+	if lifetime := openSandboxLifetimeForConfig(c.cfg); lifetime > 0 && lifetime < timeout {
+		timeout = lifetime
+	}
+	return timeout
 }
 
 func (c *sdkOpenSandboxClient) requestTimeout() time.Duration {
@@ -398,7 +425,7 @@ func (c *sdkOpenSandboxClient) UploadFile(ctx context.Context, sandboxID, remote
 }
 
 func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string, req runCommandRequest) (int, error) {
-	execd, err := c.execd(ctx, sandboxID)
+	conn, err := c.resolveExecd(ctx, sandboxID)
 	if err != nil {
 		return 1, err
 	}
@@ -409,12 +436,12 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 	}
 	exitCode := 0
 	terminal := false
-	err = execd.RunCommand(ctx, sdk.RunCommandRequest{
+	err = c.runCommandStream(ctx, conn, sdk.RunCommandRequest{
 		Command: strings.TrimSpace(req.Command),
 		Cwd:     req.Workdir,
 		Timeout: int64(req.TimeoutSecs) * int64(time.Second/time.Millisecond),
 		Envs:    req.Env,
-	}, func(event sdk.StreamEvent) error {
+	}, func(event commandStreamEvent) error {
 		result, err := c.handleCommandEvent(event)
 		if result.exitCode != nil {
 			exitCode = *result.exitCode
@@ -433,6 +460,105 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 	return exitCode, nil
 }
 
+func (c *sdkOpenSandboxClient) runCommandStream(ctx context.Context, conn execdConnection, req sdk.RunCommandRequest, handler func(commandStreamEvent) error) error {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("opensandbox marshal command request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(conn.baseURL, "/")+"/command", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("opensandbox create command request: %w", err)
+	}
+	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+sdk.Version)
+	for key, value := range conn.headers {
+		request.Header.Set(key, value)
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("opensandbox send command request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= http.StatusBadRequest {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+		return fmt.Errorf("opensandbox command request failed status=%d body=%s", response.StatusCode, strings.TrimSpace(string(message)))
+	}
+	return streamOpenSandboxCommand(ctx, response.Body, handler)
+}
+
+func streamOpenSandboxCommand(ctx context.Context, body io.Reader, handler func(commandStreamEvent) error) error {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+
+	current := commandStreamEvent{}
+	dataLines := []string(nil)
+	eventCount := 0
+	dispatch := func() error {
+		if len(dataLines) == 0 {
+			return nil
+		}
+		current.Data = strings.Join(dataLines, "\n")
+		if err := handler(current); err != nil {
+			return err
+		}
+		eventCount++
+		current = commandStreamEvent{}
+		dataLines = nil
+		return nil
+	}
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		line := scanner.Text()
+		if line == "" {
+			if err := dispatch(); err != nil {
+				return err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "{") {
+			current.Structured = true
+			dataLines = append(dataLines, line)
+			var probe struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal([]byte(line), &probe) == nil && probe.Type != "" {
+				current.Event = probe.Type
+			}
+			continue
+		}
+		field, value, _ := strings.Cut(line, ":")
+		value = strings.TrimPrefix(value, " ")
+		switch field {
+		case "data":
+			dataLines = append(dataLines, value)
+		case "event":
+			current.Event = value
+		case "id":
+			// IDs are not used by command execution.
+		}
+	}
+	if err := dispatch(); err != nil {
+		return err
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("opensandbox command stream read: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if eventCount == 0 {
+		return errors.New("opensandbox command stream was empty")
+	}
+	return nil
+}
+
 func (c *sdkOpenSandboxClient) execRequestTimeout(timeoutSecs int) time.Duration {
 	if c.execTimeoutOverride > 0 {
 		return c.execTimeoutOverride
@@ -449,9 +575,20 @@ type commandEventResult struct {
 	terminal   bool
 }
 
-func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (commandEventResult, error) {
+func (c *sdkOpenSandboxClient) handleCommandEvent(event commandStreamEvent) (commandEventResult, error) {
 	if strings.TrimSpace(event.Data) == "" {
 		return commandEventResult{}, nil
+	}
+	explicitType := strings.ToLower(strings.TrimSpace(event.Event))
+	if !event.Structured {
+		switch explicitType {
+		case "stdout":
+			_, err := io.WriteString(c.rt.Stdout, event.Data)
+			return commandEventResult{}, err
+		case "stderr":
+			_, err := io.WriteString(c.rt.Stderr, event.Data)
+			return commandEventResult{}, err
+		}
 	}
 	var payload struct {
 		Type     string `json:"type"`
@@ -464,7 +601,7 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 		EValue string `json:"evalue,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
-		switch strings.ToLower(event.Event) {
+		switch explicitType {
 		case "result", "error", "execution_complete":
 			return commandEventResult{}, fmt.Errorf("decode opensandbox %s event: %w", event.Event, err)
 		case "stderr":
@@ -473,16 +610,6 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 		}
 		_, writeErr := io.WriteString(c.rt.Stdout, event.Data)
 		return commandEventResult{}, writeErr
-	}
-	explicitType := strings.ToLower(strings.TrimSpace(event.Event))
-	payloadType := strings.ToLower(strings.TrimSpace(payload.Type))
-	if (explicitType == "stdout" || explicitType == "stderr") && payloadType != "" && payloadType != explicitType {
-		if explicitType == "stderr" {
-			_, err := io.WriteString(c.rt.Stderr, event.Data)
-			return commandEventResult{}, err
-		}
-		_, err := io.WriteString(c.rt.Stdout, event.Data)
-		return commandEventResult{}, err
 	}
 	if payload.Type == "" {
 		switch explicitType {
@@ -498,19 +625,19 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 	if eventType == "" {
 		eventType = event.Event
 	}
-	if payload.ExitCode != nil && eventType != "error" && explicitType != "stdout" && explicitType != "stderr" {
+	if payload.ExitCode != nil && (eventType == "result" || eventType == "execution_complete") {
 		code := *payload.ExitCode
 		return commandEventResult{exitCode: &code, terminal: true}, nil
 	}
 	switch eventType {
 	case "stdout":
-		_, err := io.WriteString(c.rt.Stdout, framedCommandOutput(event, payload.Text, payload.Data))
+		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "result":
 		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "stderr":
-		_, err := io.WriteString(c.rt.Stderr, framedCommandOutput(event, payload.Text, payload.Data))
+		_, err := io.WriteString(c.rt.Stderr, commandOutput(payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "error":
 		value := payload.EValue
@@ -542,13 +669,6 @@ func commandOutput(text, data string) string {
 	return data
 }
 
-func framedCommandOutput(event sdk.StreamEvent, text, data string) string {
-	if output := commandOutput(text, data); output != "" {
-		return output
-	}
-	return event.Data
-}
-
 func (c *sdkOpenSandboxClient) Probe(ctx context.Context) error {
 	if _, err := c.lifecycle().ListSandboxes(ctx, sdk.ListOptions{PageSize: 1}); err != nil {
 		return fmt.Errorf("opensandbox probe: %w", err)
@@ -557,10 +677,18 @@ func (c *sdkOpenSandboxClient) Probe(ctx context.Context) error {
 }
 
 func (c *sdkOpenSandboxClient) execd(ctx context.Context, sandboxID string) (*sdk.ExecdClient, error) {
+	conn, err := c.resolveExecd(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return sdk.NewExecdClient(conn.baseURL, "", sdk.WithHTTPClient(c.client), sdk.WithHeaders(conn.headers)), nil
+}
+
+func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID string) (execdConnection, error) {
 	useProxy := c.cfg.OpenSandbox.UseServerProxy
 	endpoint, err := c.lifecycle().GetEndpoint(ctx, sandboxID, sdk.DefaultExecdPort, &useProxy)
 	if err != nil {
-		return nil, fmt.Errorf("opensandbox resolve execd endpoint: %w", err)
+		return execdConnection{}, fmt.Errorf("opensandbox resolve execd endpoint: %w", err)
 	}
 	conn := c.config()
 	endpointURL := conn.RewriteEndpointURL(endpoint.Endpoint)
@@ -571,7 +699,7 @@ func (c *sdkOpenSandboxClient) execd(ctx context.Context, sandboxID string) (*sd
 	if c.cfg.OpenSandbox.UseServerProxy && headers["X-EXECD-ACCESS-TOKEN"] == "" && c.key != "" {
 		headers["X-EXECD-ACCESS-TOKEN"] = c.key
 	}
-	return sdk.NewExecdClient(endpointURL, "", sdk.WithHTTPClient(c.client), sdk.WithHeaders(headers)), nil
+	return execdConnection{baseURL: endpointURL, headers: headers}, nil
 }
 
 func sdkSandboxInfo(info *sdk.SandboxInfo) sandboxInfo {
@@ -579,9 +707,10 @@ func sdkSandboxInfo(info *sdk.SandboxInfo) sandboxInfo {
 		return sandboxInfo{}
 	}
 	return sandboxInfo{
-		ID:       info.ID,
-		State:    string(info.Status.State),
-		Metadata: cloneStringMap(info.Metadata),
+		ID:        info.ID,
+		State:     string(info.Status.State),
+		Metadata:  cloneStringMap(info.Metadata),
+		ExpiresAt: info.ExpiresAt,
 	}
 }
 

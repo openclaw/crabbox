@@ -87,8 +87,8 @@ openSandbox:
   workdir: /workspace/crabbox      # sync target and exec cwd
   cpu: "1"                         # resource limit string; empty = service default
   memory: 2Gi                      # resource limit string; empty = service default
-  timeoutSecs: 0                   # 0 = SDK default 600s TTL; positive values also set readiness budget
-  execTimeoutSecs: 3600            # command/sync-helper timeout
+  timeoutSecs: 0                   # 0 = Crabbox TTL; positive values add a provider cap
+  execTimeoutSecs: 600             # command/sync-helper timeout
   platformOS: linux                # empty = service default
   platformArch: amd64              # empty = service default
   secureAccess: false              # request secured endpoints
@@ -134,7 +134,9 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
    resource limits, timeout, platform, secure-access setting, and Crabbox
    metadata (`crabbox=true`, `crabbox.name=...`, `crabbox.claim=...`).
 2. The local lease is stored as `osbx_<sandbox-id>` with a friendly slug and a
-   repo claim.
+   repo claim. The sandbox expiration is the earliest configured provider
+   timeout or Crabbox TTL. Crabbox never renews that absolute deadline; idle
+   timeout remains the sliding local inactivity policy.
 3. By default `run` archive-syncs the working tree: a `git ls-files`-driven
    manifest is packed into a gzipped tar locally, uploaded through the
    OpenSandbox file API, and extracted into the configured workdir.

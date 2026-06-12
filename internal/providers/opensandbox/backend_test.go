@@ -3,11 +3,14 @@ package opensandbox
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -75,6 +78,76 @@ func TestOpenSandboxFlagsRejectNegativeTimeouts(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxConfigRejectsTTLBelowCommandTimeout(t *testing.T) {
+	cfg := testConfig()
+	cfg.OpenSandbox.TimeoutSecs = 600
+	cfg.OpenSandbox.ExecTimeoutSecs = 900
+	err := validateOpenSandboxRunConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "effective lifetime 10m0s") {
+		t.Fatalf("err=%v, want TTL/command timeout validation", err)
+	}
+}
+
+func TestOpenSandboxLifecycleConfigAllowsLegacyLongCommandBudget(t *testing.T) {
+	cfg := testConfig()
+	cfg.OpenSandbox.ExecTimeoutSecs = 3600
+	if err := validateOpenSandboxConfig(cfg); err != nil {
+		t.Fatalf("lifecycle config validation must not strand status/stop: %v", err)
+	}
+	if err := validateOpenSandboxRunConfig(cfg); err != nil {
+		t.Fatalf("90m TTL should cover legacy 60m command budget: %v", err)
+	}
+}
+
+func TestWarmupRejectsUnusableLifetimeBeforeCreate(t *testing.T) {
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.cfg.TTL = 10 * time.Minute
+	err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}})
+	if err == nil || !strings.Contains(err.Error(), "effective lifetime") {
+		t.Fatalf("err=%v, want unusable lifetime rejection", err)
+	}
+	if fake.created.Image != "" {
+		t.Fatalf("created=%#v, want validation before create", fake.created)
+	}
+}
+
+func TestWarmupCleansUpWhenActualExpirationCannotFitRun(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.createExpiresIn = 20 * time.Minute
+	backend := newTestBackend(fake)
+	err := backend.Warmup(context.Background(), WarmupRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "less than the") {
+		t.Fatalf("err=%v, want actual expiration rejection", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("deleted=%#v want warmup rollback", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leasePrefix + fake.sandbox.ID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim=%#v want rollback removal", claim)
+	}
+}
+
+func TestRunRejectsRequestBudgetBeforeCreate(t *testing.T) {
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.cfg.OpenSandbox.TimeoutSecs = 1200
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: "/repo"}, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "sync/command budget") {
+		t.Fatalf("err=%v, want request budget rejection", err)
+	}
+	if fake.created.Image != "" {
+		t.Fatalf("created=%#v, want validation before create", fake.created)
+	}
+}
+
 func TestOpenSandboxWorkdirRejectsBroadPaths(t *testing.T) {
 	for _, workdir := range []string{"/", "/tmp", "/workspace", "/workspace/.."} {
 		t.Run(workdir, func(t *testing.T) {
@@ -119,6 +192,9 @@ func TestRunCreatesSandboxForwardsEnvAndCleansUp(t *testing.T) {
 	if fake.created.Image != "ubuntu:24.04" || fake.created.Metadata[openSandboxClaimKey] == "" || fake.created.Metadata[openSandboxNameKey] == "" {
 		t.Fatalf("create request not populated: %#v", fake.created)
 	}
+	if fake.created.TimeoutSecs != 5400 {
+		t.Fatalf("create timeout=%d want Crabbox TTL cap 5400", fake.created.TimeoutSecs)
+	}
 	if got := fake.runs[len(fake.runs)-1].Env["API_TOKEN"]; got != "secret-value" {
 		t.Fatalf("env forwarded as %q", got)
 	}
@@ -129,6 +205,24 @@ func TestRunCreatesSandboxForwardsEnvAndCleansUp(t *testing.T) {
 		t.Fatal(err)
 	} else if len(claims) != 0 {
 		t.Fatalf("claim not cleaned up: %#v", claims)
+	}
+}
+
+func TestRunRefreshesMissingCreateExpirationAfterCleanupIsArmed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.omitCreateExpiration = true
+	backend := newTestBackend(fake)
+	if _, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.getCalls == 0 {
+		t.Fatal("expected expiration refresh after create omitted expiresAt")
+	}
+	if len(fake.deleted) != 1 {
+		t.Fatalf("deleted=%#v want normal cleanup", fake.deleted)
 	}
 }
 
@@ -240,7 +334,7 @@ func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
 	fake := newFakeClient()
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/original", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, testOpenSandboxScope(t, fake.baseURL), "", "/original", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = "different"
@@ -265,10 +359,11 @@ func TestRunResumesPausedSandboxBeforeReuse(t *testing.T) {
 	fake.sandbox.State = "Paused"
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/repo", time.Minute, false); err != nil {
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	fake.sandbox.Metadata[openSandboxClaimKey] = openSandboxEndpointScope(fake.baseURL) + "-own-local"
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
 	_, err := backend.Run(context.Background(), RunRequest{
 		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"},
 	})
@@ -280,13 +375,32 @@ func TestRunResumesPausedSandboxBeforeReuse(t *testing.T) {
 	}
 }
 
+func TestRunReuseUsesActualExpirationInsteadOfCreationConfig(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.cfg.OpenSandbox.TimeoutSecs = 1200
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "actual-expiration", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	if _, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunDoesNotResumePausedSandboxBeforeRepoAuthorization(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
 	fake.sandbox.State = "Paused"
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	scope := openSandboxEndpointScope(fake.baseURL) + "-own-local"
+	scope := testOpenSandboxScope(t, fake.baseURL)
 	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/original", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +423,7 @@ func TestRunReclaimPersistsOnlyAfterReusableSandboxValidation(t *testing.T) {
 	fake.sandbox.State = "Stopped"
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	scope := openSandboxEndpointScope(fake.baseURL) + "-own-local"
+	scope := testOpenSandboxScope(t, fake.baseURL)
 	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/original", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +449,7 @@ func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	fake := newFakeClient()
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, testOpenSandboxScope(t, fake.baseURL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = "different"
@@ -354,7 +468,7 @@ func TestStopForgetMissingRemovesClaimOnlyWhenExplicit(t *testing.T) {
 	fake.notFound = true
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "stale", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "stale", providerName, testOpenSandboxScope(t, fake.baseURL), "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := backend.Stop(context.Background(), StopRequest{ID: "stale"}); err == nil {
@@ -371,11 +485,117 @@ func TestStopForgetMissingRemovesClaimOnlyWhenExplicit(t *testing.T) {
 	}
 }
 
+func TestStatusWaitsForExecdHealth(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.pingFailures = 1
+	backend := newTestBackend(fake)
+	backend.statusPollOverride = time.Millisecond
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "status-test", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	view, err := backend.Status(context.Background(), StatusRequest{
+		ID: "status-test", Wait: true, WaitTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Ready || fake.pingCalls != 2 {
+		t.Fatalf("view=%#v pingCalls=%d want ready after second ping", view, fake.pingCalls)
+	}
+}
+
+func TestStatusWithoutWaitBoundsExecdHealthProbe(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.pingWaitForCancel = true
+	backend := newTestBackend(fake)
+	backend.statusProbeOverride = 20 * time.Millisecond
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "status-bounded", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	start := time.Now()
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "status-bounded"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Ready {
+		t.Fatalf("view=%#v want not ready after timed out health probe", view)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("status probe took %s, want under 1s", elapsed)
+	}
+}
+
+func TestStatusSurfacesHardExecdHealthFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.pingErr = errors.New("malformed execd endpoint")
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "status-hard-failure", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-hard-failure"})
+	if err == nil || !strings.Contains(err.Error(), "malformed execd endpoint") {
+		t.Fatalf("err=%v, want hard health failure", err)
+	}
+}
+
+func TestStatusSurfacesTLSExecdHealthFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.pingErr = &url.Error{
+		Op:  "Get",
+		URL: "https://execd.example.test/health",
+		Err: errors.New("tls: failed to verify certificate"),
+	}
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "status-tls-failure", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	_, err := backend.Status(context.Background(), StatusRequest{
+		ID: "status-tls-failure", Wait: true, WaitTimeout: time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to verify certificate") {
+		t.Fatalf("err=%v, want TLS health failure", err)
+	}
+	if fake.pingCalls != 1 {
+		t.Fatalf("pingCalls=%d want 1; permanent TLS failure must not be retried", fake.pingCalls)
+	}
+}
+
 func TestNewOpenSandboxClientRequiresExplicitAPIURL(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	_, err := newOpenSandboxClient(testConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err == nil || !strings.Contains(err.Error(), "trusted API URL") {
 		t.Fatalf("err=%v, want trusted API URL requirement", err)
+	}
+}
+
+func TestSecureOpenSandboxHTTPClientInstallsSDKTransport(t *testing.T) {
+	client := secureOpenSandboxHTTPClient(&http.Client{}, "https://opensandbox.example.test")
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.TLSClientConfig == nil {
+		t.Fatalf("transport=%T want SDK HTTP transport", client.Transport)
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 || transport.TLSClientConfig.VerifyConnection == nil {
+		t.Fatalf("TLS config=%#v want SDK TLS hardening", transport.TLSClientConfig)
 	}
 }
 
@@ -443,8 +663,8 @@ func TestSDKClientCreateUsesHeadersAndRequestBody(t *testing.T) {
 	if gotBody.Image.URI != "ubuntu:test" || gotBody.ResourceLimits["cpu"] != "500m" || gotBody.ResourceLimits["memory"] != "512Mi" || gotBody.Metadata[openSandboxClaimKey] != "scope" || gotBody.Platform.OS != "linux" || gotBody.Platform.Arch != "amd64" {
 		t.Fatalf("body=%#v", gotBody)
 	}
-	if gotBody.Timeout != sdk.DefaultTimeoutSeconds {
-		t.Fatalf("timeout=%d want SDK default %d", gotBody.Timeout, sdk.DefaultTimeoutSeconds)
+	if gotBody.Timeout != openSandboxExecTimeoutSecs {
+		t.Fatalf("timeout=%d want Crabbox fallback %d", gotBody.Timeout, openSandboxExecTimeoutSecs)
 	}
 	if strings.Join(gotBody.Entrypoint, "\x00") != strings.Join(sdk.DefaultEntrypoint, "\x00") {
 		t.Fatalf("entrypoint=%#v want %#v", gotBody.Entrypoint, sdk.DefaultEntrypoint)
@@ -540,8 +760,12 @@ func TestSDKClientReadyTimeoutUsesProviderBudget(t *testing.T) {
 		t.Fatalf("ready timeout=%s want %s", got, openSandboxReadyTimeout)
 	}
 	client.cfg.OpenSandbox.TimeoutSecs = 900
-	if got := client.readyTimeout(); got != 15*time.Minute {
-		t.Fatalf("ready timeout=%s want 15m", got)
+	if got := client.readyTimeout(); got != openSandboxReadyTimeout {
+		t.Fatalf("ready timeout=%s want capped %s", got, openSandboxReadyTimeout)
+	}
+	client.cfg.OpenSandbox.TimeoutSecs = 120
+	if got := client.readyTimeout(); got != 2*time.Minute {
+		t.Fatalf("ready timeout=%s want effective 2m lifetime", got)
 	}
 }
 
@@ -830,7 +1054,7 @@ func TestCommandResultWithoutExitCodeIsNotTerminal(t *testing.T) {
 func TestCommandEventRoutesRawStderrEvent(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
-	if _, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stderr", Data: "warn"}); err != nil {
+	if _, err := client.handleCommandEvent(commandStreamEvent{Event: "stderr", Data: "warn"}); err != nil {
 		t.Fatal(err)
 	}
 	if stdout.String() != "" || stderr.String() != "warn" {
@@ -843,12 +1067,12 @@ func TestCommandEventPreservesJSONLookingRawStdoutStderr(t *testing.T) {
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
 	stdoutPayload := `{"type":"stdout","exit_code":0}`
 	stderrPayload := `{"type":"stderr","exit_code":0}`
-	if result, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stdout", Data: stdoutPayload}); err != nil {
+	if result, err := client.handleCommandEvent(commandStreamEvent{Event: "stdout", Data: stdoutPayload}); err != nil {
 		t.Fatal(err)
 	} else if result.terminal || result.errorEvent {
 		t.Fatalf("stdout result=%#v, want raw nonterminal output", result)
 	}
-	if result, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stderr", Data: stderrPayload}); err != nil {
+	if result, err := client.handleCommandEvent(commandStreamEvent{Event: "stderr", Data: stderrPayload}); err != nil {
 		t.Fatal(err)
 	} else if result.terminal || result.errorEvent {
 		t.Fatalf("stderr result=%#v, want raw nonterminal output", result)
@@ -861,7 +1085,7 @@ func TestCommandEventPreservesJSONLookingRawStdoutStderr(t *testing.T) {
 func TestCommandEventUsesStructuredJSONWhenTypePresent(t *testing.T) {
 	var stdout bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: io.Discard}}
-	if _, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stdout", Data: `{"type":"stdout","text":"hello"}`}); err != nil {
+	if _, err := client.handleCommandEvent(commandStreamEvent{Event: "stdout", Data: `{"type":"stdout","text":"hello"}`, Structured: true}); err != nil {
 		t.Fatal(err)
 	}
 	if stdout.String() != "hello" {
@@ -897,8 +1121,23 @@ func TestCommandEventPreservesOutputWhitespace(t *testing.T) {
 	}
 }
 
-func streamEvent(data string) sdk.StreamEvent {
-	return sdk.StreamEvent{Data: data}
+func TestCommandStreamTracksWireFraming(t *testing.T) {
+	var events []commandStreamEvent
+	input := "event: stdout\ndata: {\"type\":\"stdout\",\"text\":\"raw-json\"}\n\n" +
+		"{\"type\":\"stderr\",\"data\":\"structured\"}\n\n"
+	if err := streamOpenSandboxCommand(context.Background(), strings.NewReader(input), func(event commandStreamEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Structured || !events[1].Structured {
+		t.Fatalf("events=%#v, want explicit SSE then structured NDJSON", events)
+	}
+}
+
+func streamEvent(data string) commandStreamEvent {
+	return commandStreamEvent{Data: data, Structured: true}
 }
 
 func newTestBackend(fake *fakeOpenSandboxClient) *openSandboxBackend {
@@ -924,9 +1163,12 @@ func testConfig() Config {
 	cfg.OpenSandbox.Workdir = "/workspace/crabbox"
 	cfg.OpenSandbox.CPU = "1"
 	cfg.OpenSandbox.Memory = "2Gi"
-	cfg.OpenSandbox.ExecTimeoutSecs = 3600
+	cfg.OpenSandbox.ExecTimeoutSecs = 600
 	cfg.OpenSandbox.PlatformOS = "linux"
 	cfg.OpenSandbox.PlatformArch = "amd64"
+	cfg.TTL = 90 * time.Minute
+	cfg.IdleTimeout = 30 * time.Minute
+	cfg.Sync.Timeout = 15 * time.Minute
 	return cfg
 }
 
@@ -939,20 +1181,37 @@ func tempGitRepo(t *testing.T) string {
 	return dir
 }
 
+func testOpenSandboxScope(t *testing.T, baseURL string) string {
+	t.Helper()
+	scope, err := newOpenSandboxClaimScope(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
+}
+
 type fakeOpenSandboxClient struct {
-	baseURL  string
-	sandbox  sandboxInfo
-	created  createSandboxOptions
-	runs     []runCommandRequest
-	deleted  []string
-	resumed  []string
-	uploads  []string
-	runExit  int
-	runErr   error
-	notFound bool
+	baseURL              string
+	sandbox              sandboxInfo
+	created              createSandboxOptions
+	runs                 []runCommandRequest
+	deleted              []string
+	resumed              []string
+	uploads              []string
+	runExit              int
+	runErr               error
+	notFound             bool
+	pingCalls            int
+	pingFailures         int
+	pingWaitForCancel    bool
+	pingErr              error
+	omitCreateExpiration bool
+	getCalls             int
+	createExpiresIn      time.Duration
 }
 
 func newFakeClient() *fakeOpenSandboxClient {
+	expiresAt := time.Now().Add(30 * time.Minute)
 	return &fakeOpenSandboxClient{
 		baseURL: "https://opensandbox.example.test",
 		sandbox: sandboxInfo{
@@ -961,6 +1220,7 @@ func newFakeClient() *fakeOpenSandboxClient {
 			Metadata: map[string]string{
 				openSandboxClaimKey: "pending",
 			},
+			ExpiresAt: &expiresAt,
 		},
 	}
 }
@@ -970,7 +1230,17 @@ func (f *fakeOpenSandboxClient) BaseURL() string { return f.baseURL }
 func (f *fakeOpenSandboxClient) CreateSandbox(_ context.Context, req createSandboxOptions) (sandboxInfo, error) {
 	f.created = req
 	f.sandbox.Metadata = cloneStringMap(req.Metadata)
-	return f.sandbox, nil
+	expiresIn := time.Duration(req.TimeoutSecs) * time.Second
+	if f.createExpiresIn > 0 {
+		expiresIn = f.createExpiresIn
+	}
+	expiresAt := time.Now().Add(expiresIn)
+	f.sandbox.ExpiresAt = &expiresAt
+	created := f.sandbox
+	if f.omitCreateExpiration {
+		created.ExpiresAt = nil
+	}
+	return created, nil
 }
 
 func (f *fakeOpenSandboxClient) ListSandboxes(context.Context, map[string]string) ([]sandboxInfo, error) {
@@ -978,6 +1248,7 @@ func (f *fakeOpenSandboxClient) ListSandboxes(context.Context, map[string]string
 }
 
 func (f *fakeOpenSandboxClient) GetSandbox(context.Context, string) (sandboxInfo, error) {
+	f.getCalls++
 	if f.notFound {
 		return sandboxInfo{}, errOpenSandboxNotFound
 	}
@@ -995,6 +1266,22 @@ func (f *fakeOpenSandboxClient) DeleteSandbox(_ context.Context, sandboxID strin
 func (f *fakeOpenSandboxClient) ResumeSandbox(_ context.Context, sandboxID string) error {
 	f.resumed = append(f.resumed, sandboxID)
 	f.sandbox.State = "Running"
+	return nil
+}
+
+func (f *fakeOpenSandboxClient) PingSandbox(ctx context.Context, _ string) error {
+	f.pingCalls++
+	if f.pingWaitForCancel {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if f.pingErr != nil {
+		return f.pingErr
+	}
+	if f.pingFailures > 0 {
+		f.pingFailures--
+		return context.DeadlineExceeded
+	}
 	return nil
 }
 

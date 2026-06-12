@@ -1512,7 +1512,7 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			CPU:             "1",
 			Memory:          "2Gi",
-			ExecTimeoutSecs: 3600,
+			ExecTimeoutSecs: 600,
 			PlatformOS:      "linux",
 			PlatformArch:    "amd64",
 		},

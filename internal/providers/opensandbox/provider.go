@@ -2,6 +2,7 @@ package opensandbox
 
 import (
 	"flag"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -49,6 +50,54 @@ func validateOpenSandboxConfig(cfg Config) error {
 		return exit(2, "opensandbox execTimeoutSecs must be non-negative")
 	}
 	return nil
+}
+
+func validateOpenSandboxRunConfig(cfg Config) error {
+	return validateOpenSandboxRequestConfig(cfg, RunRequest{})
+}
+
+func validateOpenSandboxRequestConfig(cfg Config, req RunRequest) error {
+	required := openSandboxRunBudgetForConfig(cfg, req.NoSync, req.SyncOnly)
+	if lifetime := openSandboxLifetimeForConfig(cfg); lifetime < required {
+		return exit(2, "opensandbox effective lifetime %s must cover sync/command budget %s", lifetime, required)
+	}
+	return nil
+}
+
+func openSandboxCommandBudgetForConfig(cfg Config) time.Duration {
+	execTimeout := cfg.OpenSandbox.ExecTimeoutSecs
+	if execTimeout == 0 {
+		execTimeout = openSandboxExecTimeoutSecs
+	}
+	return time.Duration(execTimeout)*time.Second + openSandboxExecGrace
+}
+
+func openSandboxRunBudgetForConfig(cfg Config, noSync, syncOnly bool) time.Duration {
+	commandBudget := openSandboxCommandBudgetForConfig(cfg)
+	syncBudget := commandBudget
+	if !noSync && cfg.Sync.Timeout > 0 {
+		syncBudget = cfg.Sync.Timeout
+	}
+	if syncOnly {
+		return syncBudget
+	}
+	return syncBudget + commandBudget
+}
+
+func openSandboxLifetimeForConfig(cfg Config) time.Duration {
+	lifetime := time.Duration(0)
+	for _, candidate := range []time.Duration{
+		time.Duration(cfg.OpenSandbox.TimeoutSecs) * time.Second,
+		cfg.TTL,
+	} {
+		if candidate > 0 && (lifetime == 0 || candidate < lifetime) {
+			lifetime = candidate
+		}
+	}
+	if lifetime == 0 {
+		return openSandboxMinimumTTL
+	}
+	return lifetime
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
