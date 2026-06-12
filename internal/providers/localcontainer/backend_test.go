@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net"
 	"os"
@@ -2032,5 +2033,33 @@ func TestVolumeListFlagParsesRepeated(t *testing.T) {
 	}
 	if vols[1] != "/host/b:/guest/b" {
 		t.Fatalf("volume[1]=%q", vols[1])
+	}
+}
+
+func TestVolumeFlagRejectsLeaseReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag string
+	}{
+		{name: "existing lease", flag: "id"},
+		{name: "ready pool", flag: "pool"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			fs.String(tc.flag, "", "lease reuse")
+			values := registerFlags(fs, core.Config{})
+			if err := fs.Parse([]string{
+				"--" + tc.flag, "cbx_existing",
+				"--local-container-volume", "/host/a:/guest/a:ro",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := core.Config{Provider: providerName}
+			err := applyFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "only applies when creating a new lease") {
+				t.Fatalf("err=%v, want lease reuse rejection", err)
+			}
+		})
 	}
 }

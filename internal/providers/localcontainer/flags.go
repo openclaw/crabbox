@@ -83,6 +83,12 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 	}
 	if v.Volumes != nil && len(*v.Volumes) > 0 {
+		if idFlag := fs.Lookup("id"); idFlag != nil && strings.TrimSpace(idFlag.Value.String()) != "" {
+			return core.Exit(2, "--local-container-volume only applies when creating a new lease; omit --id or warm a new lease")
+		}
+		if poolFlag := fs.Lookup("pool"); poolFlag != nil && strings.TrimSpace(poolFlag.Value.String()) != "" {
+			return core.Exit(2, "--local-container-volume only applies when creating a new lease; omit --pool or warm a new lease")
+		}
 		cfg.LocalContainer.Volumes = []string(*v.Volumes)
 	}
 	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
