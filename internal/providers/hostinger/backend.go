@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -445,6 +446,8 @@ func validateHostingerLocalTools() error {
 	return nil
 }
 
+var hostingerSSHUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9._-]{0,31}$`)
+
 func validateHostingerWorkRoot(cfg Config) error {
 	workRoot := strings.TrimSpace(cfg.WorkRoot)
 	if workRoot != cfg.WorkRoot || workRoot == "" || !strings.HasPrefix(workRoot, "/") || path.Clean(workRoot) != workRoot {
@@ -452,12 +455,10 @@ func validateHostingerWorkRoot(cfg Config) error {
 	}
 	roots := []string{"/work/crabbox", "/workspaces/crabbox", "/var/lib/crabbox/work", "/opt/crabbox"}
 	user := strings.TrimSpace(cfg.SSHUser)
-	if user != cfg.SSHUser {
-		return exit(2, "provider=%s SSH user must not contain surrounding whitespace, got %q", providerName, cfg.SSHUser)
+	if user != cfg.SSHUser || !hostingerSSHUserPattern.MatchString(user) {
+		return exit(2, "provider=%s SSH user must be a valid Linux login name, got %q", providerName, cfg.SSHUser)
 	}
-	if user != "" && user != "." && user != ".." && !strings.Contains(user, "/") {
-		roots = append(roots, "/home/"+user+"/crabbox")
-	}
+	roots = append(roots, "/home/"+user+"/crabbox")
 	for _, root := range roots {
 		if workRoot == root || strings.HasPrefix(workRoot, root+"/") {
 			return nil
@@ -619,15 +620,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.Hostinger.User == "" {
 		cfg.Hostinger.User = "root"
 	}
-	if !isHostingerWorkRootExplicit(cfg) && isWorkRootExplicit(cfg) {
-		cfg.Hostinger.WorkRoot = cfg.WorkRoot
-	}
 	if cfg.Hostinger.WorkRoot == "" {
-		if !isDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.Hostinger.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.Hostinger.WorkRoot = "/home/" + cfg.Hostinger.User + "/crabbox"
-		}
+		cfg.Hostinger.WorkRoot = effectiveHostingerWorkRoot(*cfg)
 	}
 	if cfg.Hostinger.ReleaseAction == "" {
 		cfg.Hostinger.ReleaseAction = "stop"

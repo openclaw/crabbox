@@ -101,16 +101,8 @@ func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
 
-func isDefaultWorkRoot(value string) bool {
-	return core.IsDefaultWorkRoot(value)
-}
-
-func isWorkRootExplicit(cfg *Config) bool {
-	return core.IsWorkRootExplicit(cfg)
-}
-
-func isHostingerWorkRootExplicit(cfg *Config) bool {
-	return core.IsHostingerWorkRootExplicit(cfg)
+func effectiveHostingerWorkRoot(cfg Config) string {
+	return core.EffectiveHostingerWorkRoot(cfg)
 }
 
 func markHostingerWorkRootExplicit(cfg *Config) {

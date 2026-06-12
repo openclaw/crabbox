@@ -439,6 +439,31 @@ func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
+	other := effectiveConfigForShow(baseConfig())
+	if other.Hostinger.WorkRoot != "/home/root/crabbox" ||
+		other.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("unexpected inactive Hostinger defaults: %#v", other)
+	}
+
+	explicit := baseConfig()
+	explicit.Hostinger.WorkRoot = " /home/root/crabbox "
+	if got := effectiveConfigForShow(explicit).Hostinger.WorkRoot; got != explicit.Hostinger.WorkRoot {
+		t.Fatalf("explicit Hostinger work root changed: %q", got)
+	}
+
+	cfg := baseConfig()
+	cfg.Provider = "hostinger"
+	cfg.Hostinger.User = "ubuntu"
+
+	got := effectiveConfigForShow(cfg)
+	if got.WorkRoot != "/home/ubuntu/crabbox" ||
+		got.SSHUser != "ubuntu" ||
+		got.Hostinger.WorkRoot != "/home/ubuntu/crabbox" {
+		t.Fatalf("unexpected effective Hostinger config: %#v", got)
+	}
+}
+
 func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

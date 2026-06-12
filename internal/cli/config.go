@@ -1439,6 +1439,20 @@ func MarkHostingerWorkRootExplicit(cfg *Config) {
 	cfg.hostingerWorkRootExplicit = true
 }
 
+func EffectiveHostingerWorkRoot(cfg Config) string {
+	if cfg.Hostinger.WorkRoot != "" {
+		return cfg.Hostinger.WorkRoot
+	}
+	if cfg.explicitWorkRoot != "" {
+		return cfg.explicitWorkRoot
+	}
+	user := strings.TrimSpace(cfg.Hostinger.User)
+	if user == "" {
+		user = "root"
+	}
+	return "/home/" + user + "/crabbox"
+}
+
 func baseConfig() Config {
 	home, _ := os.UserHomeDir()
 	sshKey := ""
@@ -1586,7 +1600,6 @@ func baseConfig() Config {
 			APIURL:         "https://developers.hostinger.com",
 			HostnamePrefix: "crabbox",
 			User:           "root",
-			WorkRoot:       defaultPOSIXWorkRoot,
 			ReleaseAction:  "stop",
 		},
 		Islo: IsloConfig{

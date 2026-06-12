@@ -585,8 +585,10 @@ func TestValidateHostingerWorkRoot(t *testing.T) {
 			t.Fatalf("invalid root accepted: %q", root)
 		}
 	}
-	if err := validateHostingerWorkRoot(core.Config{WorkRoot: "/home/ubuntu/crabbox", SSHUser: " ubuntu"}); err == nil {
-		t.Fatal("whitespace-padded SSH user accepted")
+	for _, user := range []string{"", " ubuntu", "ubuntu ", "-oProxyCommand=touch /tmp/pwned", "user@host", "user/name", strings.Repeat("a", 33)} {
+		if err := validateHostingerWorkRoot(core.Config{WorkRoot: "/home/ubuntu/crabbox", SSHUser: user}); err == nil {
+			t.Fatalf("invalid SSH user accepted: %q", user)
+		}
 	}
 }
 
@@ -1905,9 +1907,24 @@ func TestCleanupSkipsManualHostingerVMs(t *testing.T) {
 
 func TestHostingerDefaultsPreserveWorkRootPrecedence(t *testing.T) {
 	cfg := core.BaseConfig()
+	cfg.Hostinger.User = "ubuntu"
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*leaseBackend)
+	if backend.cfg.WorkRoot != "/home/ubuntu/crabbox" || backend.cfg.Hostinger.WorkRoot != "/home/ubuntu/crabbox" {
+		t.Fatalf("per-user work root default not applied: %#v", backend.cfg.Hostinger)
+	}
+
+	cfg = core.BaseConfig()
+	cfg.WorkRoot = "/tmp/other-provider"
+	backend = NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*leaseBackend)
+	if backend.cfg.WorkRoot != "/home/root/crabbox" || backend.cfg.Hostinger.WorkRoot != "/home/root/crabbox" {
+		t.Fatalf("inherited another provider's derived work root: %#v", backend.cfg.Hostinger)
+	}
+
+	cfg = core.BaseConfig()
 	cfg.WorkRoot = "/srv/crabbox"
 	core.MarkWorkRootExplicit(&cfg)
-	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*leaseBackend)
+	cfg.WorkRoot = "/tmp/other-provider"
+	backend = NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*leaseBackend)
 	if backend.cfg.WorkRoot != "/srv/crabbox" || backend.cfg.Hostinger.WorkRoot != "/srv/crabbox" {
 		t.Fatalf("generic work root not inherited: %#v", backend.cfg.Hostinger)
 	}

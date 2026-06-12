@@ -33,6 +33,7 @@ func (a App) configShow(args []string) error {
 }
 
 func effectiveConfigForShow(cfg Config) Config {
+	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
 	if cfg.Provider == "digitalocean" {
 		base := baseConfig()
 		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
@@ -41,6 +42,12 @@ func effectiveConfigForShow(cfg Config) Config {
 		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
 			cfg.SSHPort = "22"
 		}
+		cfg.SSHFallbackPorts = nil
+	}
+	if cfg.Provider == "hostinger" {
+		cfg.WorkRoot = cfg.Hostinger.WorkRoot
+		cfg.SSHUser = cfg.Hostinger.User
+		cfg.SSHPort = "22"
 		cfg.SSHFallbackPorts = nil
 	}
 	return cfg
