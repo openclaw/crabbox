@@ -269,6 +269,48 @@ The smoke script validates that `doctor --json` emits one JSON object with
 `ok`, `provider`, and `checks`. It is read-only; failures usually mean missing
 local config, unavailable Proxmox API, TLS/network problems, or token ACL gaps.
 
+## Live proof runbook
+
+Use `scripts/proxmox-live-smoke.sh` when you need redacted, PR-ready evidence
+from a real Proxmox lab. The script is intentionally opt-in for mutation. With
+no live flag, it runs only read-only checks:
+
+```sh
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_BIN=./bin/crabbox scripts/proxmox-live-smoke.sh
+```
+
+The read-only path runs `doctor --provider proxmox --json`, validates the JSON
+shape, runs `list --provider proxmox --json`, and writes raw plus redacted logs
+under a temporary proof directory. If you also set
+`CRABBOX_PROXMOX_SSH_INVENTORY_HOST`, the script runs a read-only SSH inventory
+against the Proxmox node using a temporary `UserKnownHostsFile` in that proof
+directory. It does not change the user's real SSH trust store.
+
+After doctor is green and the configured `templateId` is a ready QEMU template,
+run one controlled lease proof:
+
+```sh
+CRABBOX_BIN=./bin/crabbox \
+CRABBOX_PROXMOX_LIVE_SMOKE=1 \
+CRABBOX_PROXMOX_LIVE_SMOKE_SLUG=proxmox-live-smoke \
+scripts/proxmox-live-smoke.sh
+```
+
+Live mode runs the public CLI surface: `warmup --keep`, `status --json`, `ssh`
+to print the pasteable command, `stop`, `cleanup --dry-run`, and a final
+`list --json`. Real cleanup is skipped unless
+`CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP=1` is set; keep the dry-run output in the PR
+evidence even when no actual cleanup is needed.
+
+Proof artifacts are written to `CRABBOX_PROXMOX_LIVE_SMOKE_DIR` when set, or a
+new directory under `/tmp` otherwise. Files ending in `.raw.log` are private
+operator evidence. Use only `.redacted.log` files and
+`summary.redacted.log` for public PR text, and still review them before
+posting. The redactor removes the configured API URL, token ID, token secret,
+optional SSH inventory host, `PVEAPIToken=...` values, local home paths, and
+known wrapper credential filenames.
+
 ## Lifecycle
 
 1. Allocate a Crabbox lease ID and friendly slug.
