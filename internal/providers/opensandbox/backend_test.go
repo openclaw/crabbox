@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -940,6 +941,20 @@ func TestStatusSurfacesTLSExecdHealthFailure(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxReadinessRetriesTransientTransportErrors(t *testing.T) {
+	for name, err := range map[string]error{
+		"EOF":            &url.Error{Op: "Get", URL: "https://execd.example.test/ping", Err: io.EOF},
+		"unexpected EOF": &url.Error{Op: "Get", URL: "https://execd.example.test/ping", Err: io.ErrUnexpectedEOF},
+		"temporary DNS":  &url.Error{Op: "Get", URL: "https://execd.example.test/ping", Err: &net.DNSError{Err: "starting", Name: "execd.example.test", IsTemporary: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !isOpenSandboxReadinessPending(err) {
+				t.Fatalf("err=%v should remain retryable during startup", err)
+			}
+		})
+	}
+}
+
 func TestNewOpenSandboxClientRequiresExplicitAPIURL(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	_, err := newOpenSandboxClient(testConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
@@ -1229,6 +1244,49 @@ func TestSDKClientCreateDeletesSandboxWhenReadinessFails(t *testing.T) {
 	}
 }
 
+func TestSDKClientCreateSurfacesPermanentReadinessFailureImmediately(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	deleted := 0
+	endpointHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"sb-hard-failure","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-hard-failure/endpoints/44772":
+			endpointHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"http://198.51.100.10:44772","headers":{"X-EXECD-ACCESS-TOKEN":"secret"}}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-hard-failure":
+			deleted++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "must use HTTPS unless it is loopback") {
+		t.Fatalf("err=%v, want permanent readiness failure", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("permanent readiness failure took %s", elapsed)
+	}
+	if endpointHits != 1 || deleted != 1 {
+		t.Fatalf("endpointHits=%d deleted=%d want one probe and rollback", endpointHits, deleted)
+	}
+}
+
 func TestSDKClientProxyExecdAddsAccessTokenWhenEndpointOmitsIt(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "proxy-key")
 	var gotEndpointQuery, gotExecdAuth string
@@ -1452,6 +1510,7 @@ func TestSDKClientRunCommandRejectsPrematureEOF(t *testing.T) {
 
 func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	var interrupted string
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1460,8 +1519,12 @@ func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
 			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/command":
 			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"init\",\"text\":\"cmd-stalled\"}\n\n")
 			w.(http.Flusher).Flush()
 			<-r.Context().Done()
+		case r.Method == http.MethodDelete && r.URL.Path == "/command":
+			interrupted = r.URL.Query().Get("id")
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1486,6 +1549,9 @@ func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("streaming timeout took %s, want under 1s", elapsed)
+	}
+	if interrupted != "cmd-stalled" {
+		t.Fatalf("interrupted=%q want cmd-stalled", interrupted)
 	}
 }
 
@@ -1552,6 +1618,17 @@ func TestCommandEventHonorsExplicitExitCode(t *testing.T) {
 	}
 	if !result.terminal {
 		t.Fatalf("result=%#v, want terminal completion event", result)
+	}
+}
+
+func TestCommandEventCapturesExecutionID(t *testing.T) {
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	result, err := client.handleCommandEvent(streamEvent(`{"type":"init","text":"cmd-123"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.executionID != "cmd-123" || result.terminal {
+		t.Fatalf("result=%#v want execution ID", result)
 	}
 }
 

@@ -417,6 +417,9 @@ func (c *sdkOpenSandboxClient) waitUntilReady(ctx context.Context, sandboxID str
 		if err == nil {
 			return nil
 		}
+		if !isOpenSandboxReadinessPending(err) {
+			return fmt.Errorf("sandbox %s readiness failed: %w", sandboxID, err)
+		}
 		lastErr = err
 		if waitCtx.Err() != nil {
 			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
@@ -481,6 +484,7 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 	}
 	exitCode := 0
 	terminal := false
+	executionID := ""
 	outputState := commandOutputState{}
 	err = c.runCommandStream(ctx, conn, sdk.RunCommandRequest{
 		Command: strings.TrimSpace(req.Command),
@@ -494,14 +498,19 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 		} else if result.errorEvent && exitCode == 0 {
 			exitCode = 1
 		}
+		if result.executionID != "" {
+			executionID = result.executionID
+		}
 		terminal = terminal || result.terminal
 		return err
 	})
 	if err != nil {
-		return exitCodeOrDefault(exitCode), fmt.Errorf("opensandbox run command: %w", err)
+		runErr := fmt.Errorf("opensandbox run command: %w", err)
+		return exitCodeOrDefault(exitCode), c.interruptOpenSandboxCommand(ctx, conn, executionID, runErr)
 	}
 	if !terminal {
-		return 1, errors.New("opensandbox run command: stream ended before terminal event")
+		runErr := errors.New("opensandbox run command: stream ended before terminal event")
+		return 1, c.interruptOpenSandboxCommand(ctx, conn, executionID, runErr)
 	}
 	return exitCode, nil
 }
@@ -620,9 +629,10 @@ func (c *sdkOpenSandboxClient) execRequestTimeout(timeoutSecs int) time.Duration
 }
 
 type commandEventResult struct {
-	exitCode   *int
-	errorEvent bool
-	terminal   bool
+	executionID string
+	exitCode    *int
+	errorEvent  bool
+	terminal    bool
 }
 
 type commandOutputState struct {
@@ -689,6 +699,8 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 		return commandEventResult{exitCode: &code, terminal: true}, nil
 	}
 	switch eventType {
+	case "init":
+		return commandEventResult{executionID: payload.Text}, nil
 	case "stdout":
 		err := writeCommandOutput(c.rt.Stdout, commandOutput(payload.Text, payload.Data), &outputState.stdout)
 		return commandEventResult{}, err
@@ -753,7 +765,23 @@ func (c *sdkOpenSandboxClient) execd(ctx context.Context, sandboxID string) (*sd
 	if err != nil {
 		return nil, err
 	}
-	return sdk.NewExecdClient(conn.baseURL, "", sdk.WithHTTPClient(c.execdHTTPClient(conn)), sdk.WithHeaders(conn.headers)), nil
+	return c.execdForConnection(conn), nil
+}
+
+func (c *sdkOpenSandboxClient) execdForConnection(conn execdConnection) *sdk.ExecdClient {
+	return sdk.NewExecdClient(conn.baseURL, "", sdk.WithHTTPClient(c.execdHTTPClient(conn)), sdk.WithHeaders(conn.headers))
+}
+
+func (c *sdkOpenSandboxClient) interruptOpenSandboxCommand(ctx context.Context, conn execdConnection, executionID string, cause error) error {
+	if strings.TrimSpace(executionID) == "" {
+		return cause
+	}
+	interruptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openSandboxInterruptTimeout)
+	defer cancel()
+	if err := c.execdForConnection(conn).InterruptCommand(interruptCtx, executionID); err != nil {
+		return fmt.Errorf("%w; interrupt opensandbox command %s failed: %v", cause, executionID, err)
+	}
+	return cause
 }
 
 func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID string) (execdConnection, error) {

@@ -44,15 +44,16 @@ const (
 	NetworkPublic   = core.NetworkPublic
 	statusViewReady = "running"
 
-	openSandboxCleanupTimeout  = 15 * time.Second
-	openSandboxReadyTimeout    = 5 * time.Minute
-	openSandboxExecGrace       = 30 * time.Second
-	openSandboxMinimumTTL      = 10 * time.Minute
-	openSandboxStatusPoll      = 2 * time.Second
-	openSandboxStatusProbe     = 5 * time.Second
-	openSandboxExecTimeoutSecs = 600
-	openSandboxClaimKey        = "crabbox.claim"
-	openSandboxNameKey         = "crabbox.name"
+	openSandboxCleanupTimeout   = 15 * time.Second
+	openSandboxReadyTimeout     = 5 * time.Minute
+	openSandboxExecGrace        = 30 * time.Second
+	openSandboxMinimumTTL       = 10 * time.Minute
+	openSandboxStatusPoll       = 2 * time.Second
+	openSandboxStatusProbe      = 5 * time.Second
+	openSandboxInterruptTimeout = 5 * time.Second
+	openSandboxExecTimeoutSecs  = 600
+	openSandboxClaimKey         = "crabbox.claim"
+	openSandboxNameKey          = "crabbox.name"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
