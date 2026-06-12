@@ -319,7 +319,6 @@ fi
 warmup_status=0
 run_step warmup "$bin" warmup --provider proxmox --slug "$slug" --keep || warmup_status=$?
 extract_lease_id
-needs_reconcile=0
 if [[ "$warmup_status" -ne 0 ]]; then
   echo "step=lifecycle status=fail reason=warmup_failed" | tee -a "$summary"
   failure=1
@@ -332,7 +331,6 @@ if [[ "$warmup_status" -eq 0 && -n "$lease_id" ]]; then
   run_step stop "$bin" stop --provider proxmox --id "$lease_id" || stop_status=$?
   if [[ "$stop_status" -ne 0 ]]; then
     failure=1
-    needs_reconcile=1
   fi
   cleanup_dry_run_status=0
   run_step cleanup-dry-run "$bin" cleanup --provider proxmox --dry-run || cleanup_dry_run_status=$?
@@ -342,21 +340,17 @@ if [[ "$warmup_status" -eq 0 && -n "$lease_id" ]]; then
 elif [[ -n "$lease_id" ]]; then
   stop_status=0
   run_step stop-reconciled "$bin" stop --provider proxmox --id "$lease_id" || stop_status=$?
-  if [[ "$stop_status" -ne 0 ]]; then
-    needs_reconcile=1
-  fi
 else
   if [[ "$warmup_status" -eq 0 ]]; then
     echo "step=lease-id status=fail reason=warmup output did not include an owned lease id" | tee -a "$summary"
     failure=1
   fi
-  needs_reconcile=1
 fi
 list_after_status=0
 run_step list-after "$bin" list --provider proxmox --json || list_after_status=$?
 if [[ "$list_after_status" -ne 0 ]]; then
   failure=1
-elif [[ "$needs_reconcile" -eq 1 ]]; then
+else
   if reconcile_new_smoke_lease "$proof_dir/list-after.raw.log"; then
     run_step list-final "$bin" list --provider proxmox --json || failure=1
   else

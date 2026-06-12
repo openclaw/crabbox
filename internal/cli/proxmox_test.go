@@ -229,6 +229,51 @@ func TestProxmoxDoctorReadinessRejectsInactiveBridge(t *testing.T) {
 	}
 }
 
+func TestProxmoxDoctorReadinessAcceptsOVSBridge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/pve1/network" {
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"iface": "vmbr0", "type": "OVSBridge", "active": 1},
+		}})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.Bridge = "vmbr0"
+	check := client.proxmoxNetworkCheck(context.Background(), cfg)
+	if check.Status != "ok" || check.Details["type"] != "OVSBridge" {
+		t.Fatalf("bridge check=%#v", check)
+	}
+}
+
+func TestProxmoxDoctorReadinessClassifiesACLHiddenBridgeAsPermission(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/network":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case "/api2/json/nodes/pve1/network/vmbr0":
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": "permission check failed (/nodes/pve1/network/vmbr0, Sys.Audit)"})
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.Bridge = "vmbr0"
+	check := client.proxmoxNetworkCheck(context.Background(), cfg)
+	if check.Status != "failed" || check.Details["class"] != "permission" || check.Details["hint"] != "grant_proxmox_network_audit" {
+		t.Fatalf("bridge check=%#v", check)
+	}
+}
+
 func TestProxmoxDoctorReadinessRejectsEmptyStorageInventory(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api2/json/nodes/pve1/storage" {

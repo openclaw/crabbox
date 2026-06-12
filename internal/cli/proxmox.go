@@ -301,34 +301,52 @@ func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) Pro
 		if network.Iface != cfg.Proxmox.Bridge {
 			continue
 		}
-		if network.Type != "" && network.Type != "bridge" {
-			return ProxmoxReadinessCheck{
-				Status:  "failed",
-				Check:   "bridge",
-				Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge type=%s", cfg.Proxmox.Bridge, network.Type),
-				Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "type": network.Type, "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
-			}
-		}
-		if network.Active == 0 {
-			return ProxmoxReadinessCheck{
-				Status:  "failed",
-				Check:   "bridge",
-				Message: fmt.Sprintf("bridge=%s class=missing_resource hint=activate_proxmox_bridge active=0", cfg.Proxmox.Bridge),
-				Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "activate_proxmox_bridge", "active": "0", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
-			}
+		return proxmoxBridgeReadiness(cfg.Proxmox.Bridge, network, "/nodes/"+cfg.Proxmox.Node+"/network")
+	}
+	interfacePath := path + "/" + url.PathEscape(cfg.Proxmox.Bridge)
+	var network proxmoxNetwork
+	if err := c.doRequired(ctx, http.MethodGet, interfacePath, nil, &network); err != nil {
+		if !IsProxmoxNotFound(err) {
+			return c.proxmoxFailedReadiness("bridge", interfacePath, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
 		}
 		return ProxmoxReadinessCheck{
-			Status:  "ok",
+			Status:  "failed",
 			Check:   "bridge",
-			Message: fmt.Sprintf("bridge=%s type=bridge active=1", cfg.Proxmox.Bridge),
-			Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "type": "bridge", "active": "1", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+			Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge", cfg.Proxmox.Bridge),
+			Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+		}
+	}
+	return proxmoxBridgeReadiness(cfg.Proxmox.Bridge, network, "/nodes/"+cfg.Proxmox.Node+"/network/"+cfg.Proxmox.Bridge)
+}
+
+func proxmoxBridgeReadiness(bridge string, network proxmoxNetwork, endpoint string) ProxmoxReadinessCheck {
+	bridgeType := network.Type
+	if bridgeType == "" {
+		bridgeType = "bridge"
+	}
+	switch strings.ToLower(bridgeType) {
+	case "bridge", "ovsbridge":
+	default:
+		return ProxmoxReadinessCheck{
+			Status:  "failed",
+			Check:   "bridge",
+			Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge type=%s", bridge, network.Type),
+			Details: map[string]string{"bridge": bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "type": network.Type, "endpoint": endpoint},
+		}
+	}
+	if network.Active == 0 {
+		return ProxmoxReadinessCheck{
+			Status:  "failed",
+			Check:   "bridge",
+			Message: fmt.Sprintf("bridge=%s class=missing_resource hint=activate_proxmox_bridge active=0", bridge),
+			Details: map[string]string{"bridge": bridge, "class": "missing_resource", "hint": "activate_proxmox_bridge", "active": "0", "endpoint": endpoint},
 		}
 	}
 	return ProxmoxReadinessCheck{
-		Status:  "failed",
+		Status:  "ok",
 		Check:   "bridge",
-		Message: fmt.Sprintf("bridge=%s class=missing_resource hint=configure_proxmox_bridge", cfg.Proxmox.Bridge),
-		Details: map[string]string{"bridge": cfg.Proxmox.Bridge, "class": "missing_resource", "hint": "configure_proxmox_bridge", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/network"},
+		Message: fmt.Sprintf("bridge=%s type=%s active=1", bridge, bridgeType),
+		Details: map[string]string{"bridge": bridge, "type": bridgeType, "active": "1", "endpoint": endpoint},
 	}
 }
 

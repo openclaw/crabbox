@@ -18,6 +18,7 @@ function setupFakeCrabbox() {
 	const calls = path.join(dir, "calls.log");
 	const proof = path.join(dir, "proof");
 	const leaseState = path.join(dir, "lease.state");
+	const extraLeaseState = path.join(dir, "extra-lease.state");
 	fs.mkdirSync(tools);
 	fs.mkdirSync(proof, { mode: 0o700 });
 	const fakeCrabbox = path.join(dir, "crabbox");
@@ -44,6 +45,9 @@ case "$1" in
         created_slug="\${created_slug}-abcd"
       fi
       printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"100","name":"crabbox-proxmox-live-smoke","labels":{"lease":"cbx_test123","slug":"%s","provider":"proxmox"}}]\\n' "$created_slug"
+    elif [[ -f "${extraLeaseState}" ]]; then
+      extra_slug="$(cat "${extraLeaseState}")"
+      printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"101","name":"crabbox-proxmox-live-smoke-retry","labels":{"lease":"cbx_leaked","slug":"%s","provider":"proxmox"}}]\\n' "$extra_slug"
     else
       printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"}]\\n'
     fi
@@ -71,6 +75,9 @@ case "$1" in
       exit 1
     fi
     printf '%s\\n' "$requested_slug" >"${leaseState}"
+    if [[ "\${FAKE_CRABBOX_EXTRA_LEAK:-0}" == "1" ]]; then
+      printf '%s-retry\\n' "$requested_slug" >"${extraLeaseState}"
+    fi
     if [[ "\${FAKE_CRABBOX_OMIT_LEASE_OUTPUT:-0}" != "1" ]]; then
       printf 'leased cbx_test123 slug=proxmox-live-smoke provider=proxmox server=100 type=template-9400 ip=192.0.2.10 idle_timeout=30m expires=later\\n'
     fi
@@ -83,7 +90,11 @@ case "$1" in
     printf 'ssh -i /tmp/crabbox-ssh-test/key crabbox@192.0.2.10\\n'
     ;;
   stop)
-    rm -f "${leaseState}"
+    if [[ "$*" == *"cbx_leaked"* ]]; then
+      rm -f "${extraLeaseState}"
+    else
+      rm -f "${leaseState}"
+    fi
     printf 'released lease=cbx_test123 server=100\\n'
     ;;
   cleanup)
@@ -255,6 +266,27 @@ test("live mode reconciles a collision-suffixed lease slug", () => {
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
 	assert.equal(fs.existsSync(path.join(fake.dir, "lease.state")), false);
+});
+
+test("live mode reconciles a leaked earlier attempt after a successful lifecycle", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_EXTRA_LEAK: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /status=attempt lease=cbx_leaked/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^stop --provider proxmox --id cbx_leaked$/m);
+	assert.equal(fs.existsSync(path.join(fake.dir, "extra-lease.state")), false);
 });
 
 test("live mode releases a uniquely created lease when warmup output omits its ID", () => {
