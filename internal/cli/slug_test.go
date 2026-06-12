@@ -82,6 +82,9 @@ func TestRequestedLeaseSlugNormalizesAndValidates(t *testing.T) {
 	if _, err := requestedLeaseSlug("!!!"); err == nil {
 		t.Fatal("expected empty normalized slug error")
 	}
+	if _, err := requestedLeaseSlug("proxmox-live-smoke-34567890-0123456789ab"); err != nil {
+		t.Fatalf("live smoke slug rejected by CLI parser: %v", err)
+	}
 }
 
 func TestAllocateDirectLeaseSlugUsesRequestedSlug(t *testing.T) {

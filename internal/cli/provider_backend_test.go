@@ -84,6 +84,13 @@ func TestLeaseOptionsFromConfigCanonicalizesProviderScope(t *testing.T) {
 	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != "project:project-a" {
 		t.Fatalf("provider scope=%q", scope)
 	}
+
+	cfg.Provider = "proxmox"
+	cfg.Proxmox.APIURL = "HTTPS://user:secret@PVE.EXAMPLE.TEST:8006/api2/json/?token=secret#fragment"
+	cfg.Proxmox.Node = "pve1"
+	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != "endpoint:https://pve.example.test:8006|node:pve1" {
+		t.Fatalf("proxmox provider scope=%q", scope)
+	}
 }
 
 func TestProviderHelpAllIncludesDelegatedProviders(t *testing.T) {

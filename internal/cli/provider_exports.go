@@ -152,6 +152,10 @@ func LeaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
 	return leaseClaimMatchesIdentifier(claim, identifier)
 }
 
+func ProviderClaimScope(provider string, cfg Config) string {
+	return providerClaimScope(canonicalClaimProvider(provider), cfg)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
 }
@@ -187,6 +191,10 @@ func UpdateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, se
 
 func UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
 	return updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
+}
+
+func ReplaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return replaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
 }
 
 // UpdateLeaseClaimEndpointIfUnchangedAfter holds the claim lock while action

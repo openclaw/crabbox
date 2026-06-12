@@ -58,8 +58,11 @@ Provider readiness validates the selected provider without creating a lease.
 - Without a coordinator, providers that implement a direct doctor run their own
   non-mutating check (cheapest list or readiness API). These print stable fields
   such as `timeout=10s`, `api=list`, and `mutation=false` so scripts can tell
-  what was probed. Direct AWS also checks EC2 vCPU quotas. GCP uses an
-  aggregated Compute Engine inventory query across zones. XCP-ng opens a XAPI
+  what was probed. Proxmox checks API auth, node status, storage, bridge,
+  template, next-id, and inventory endpoints separately so authenticated but
+  under-authorized API tokens produce actionable failed checks. Direct AWS also
+  checks EC2 vCPU quotas. GCP uses an aggregated Compute Engine inventory query
+  across zones. XCP-ng opens a XAPI
   session and lists Crabbox-managed leases without creating, changing, or
   deleting VMs. Hostinger lists VPS
   inventory plus priced VPS catalog entries, payment methods, templates, and
@@ -72,7 +75,7 @@ Provider readiness validates the selected provider without creating a lease.
 - Providers with no direct doctor print `skip provider ... direct_doctor=unsupported`.
 
 The provider check is bounded to a 10s timeout. A failure adds a `class`
-(`timeout`, `tool`, `config`, `auth`, `network`, or `provider`) and a
+(`timeout`, `tool`, `config`, `auth`, `permission`, `network`, or `provider`) and a
 remediation `hint`:
 
 ```text
