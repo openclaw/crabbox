@@ -1,7 +1,6 @@
 package linode
 
 import (
-	"context"
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -48,25 +47,9 @@ func (Provider) ServerTypeForClass(class string) string {
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	return linodeFoundationBackend{spec: p.Spec()}, nil
+	return NewLinodeLeaseBackend(p.Spec(), cfg, rt), nil
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return linodeFoundationBackend{spec: p.Spec()}, nil
-}
-
-type linodeFoundationBackend struct {
-	spec core.ProviderSpec
-}
-
-func (b linodeFoundationBackend) Spec() core.ProviderSpec {
-	return b.spec
-}
-
-func (b linodeFoundationBackend) Doctor(ctx context.Context, req core.DoctorRequest) (core.DoctorResult, error) {
-	return core.DoctorResult{Provider: providerName, Status: "ok", Message: "provider foundation registered; lifecycle implemented in a later plan", Checks: []core.DoctorCheck{{
-		Check:   "linode-provider-foundation",
-		Status:  "ok",
-		Message: "provider foundation registered; lifecycle implemented in a later plan",
-	}}}, nil
+	return newLinodeLeaseBackend(p.Spec(), cfg, rt), nil
 }

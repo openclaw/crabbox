@@ -155,6 +155,10 @@ func (c *linodeClient) DeleteLinode(ctx context.Context, id int64) error {
 	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/linode/instances/%d", id), nil, nil)
 }
 
+func (c *linodeClient) UpdateLinodeTags(ctx context.Context, id int64, tags []string) error {
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/linode/instances/%d", id), map[string]any{"tags": tags}, nil)
+}
+
 func (c *linodeClient) ListTypes(ctx context.Context) ([]linodeType, error) {
 	var out []linodeType
 	err := c.listPaged(ctx, "/linode/types", func(page linodePage) {
