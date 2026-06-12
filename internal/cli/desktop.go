@@ -47,19 +47,11 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		*id = fs.Arg(0)
 		positionalID = true
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
 		return err
 	}
-	cfg.Provider = *provider
-	cfg.Desktop = true
 	cfg.Browser = *browser
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
-		return err
-	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
 		return err
 	}
@@ -192,16 +184,8 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 		positionalID = true
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
-		return err
-	}
-	cfg.Provider = *provider
-	cfg.Desktop = true
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return err
 	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
@@ -384,16 +368,8 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 		positionalID = true
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
-		return err
-	}
-	cfg.Provider = *provider
-	cfg.Desktop = true
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return err
 	}
 	if err := validateRequestedCapabilities(cfg); err != nil {

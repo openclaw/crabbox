@@ -671,7 +671,7 @@ func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, e
 	scope := b.claimScope()
 	if claim, err := core.ReadLeaseClaim(identifier); err != nil {
 		return core.LeaseClaim{}, false, err
-	} else if externalClaimMatchesScope(claim, scope) {
+	} else if b.claimMatchesScopeOrRouting(claim, scope) {
 		return claim, true, nil
 	} else if claim.LeaseID != "" && strings.HasPrefix(identifier, "cbx_") {
 		return core.LeaseClaim{}, false, nil
@@ -680,13 +680,12 @@ func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, e
 	if err != nil {
 		return core.LeaseClaim{}, false, err
 	}
-	slug := core.NormalizeLeaseSlug(identifier)
 	var match core.LeaseClaim
 	for _, claim := range claims {
-		if !externalClaimMatchesScope(claim, scope) {
+		if !b.claimMatchesScopeOrRouting(claim, scope) {
 			continue
 		}
-		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) {
+		if core.LeaseClaimMatchesIdentifier(claim, identifier) {
 			if match.LeaseID != "" && match.LeaseID != claim.LeaseID {
 				return core.LeaseClaim{}, false, core.Exit(4, "external provider claim %q is ambiguous in this lifecycle scope", identifier)
 			}
@@ -697,6 +696,17 @@ func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, e
 		return match, true, nil
 	}
 	return core.LeaseClaim{}, false, nil
+}
+
+func (b *leaseBackend) claimMatchesScopeOrRouting(claim core.LeaseClaim, scope string) bool {
+	if externalClaimMatchesScope(claim, scope) {
+		return true
+	}
+	if claim.LeaseID == "" || claim.Provider != providerName || strings.TrimSpace(b.cfg.External.RoutingFile) == "" {
+		return false
+	}
+	path, err := core.ExternalRoutingPath(claim.LeaseID)
+	return err == nil && filepath.Clean(path) == filepath.Clean(b.cfg.External.RoutingFile)
 }
 
 func externalClaimMatchesScope(claim core.LeaseClaim, scope string) bool {

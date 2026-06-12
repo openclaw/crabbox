@@ -288,7 +288,7 @@ func (b *leaseBackend) lifecycleLeaseForName(name string) (protocolLease, error)
 		return protocolLease{}, err
 	}
 	for _, claim := range claims {
-		if !externalClaimMatchesScope(claim, b.claimScope()) {
+		if !b.claimMatchesScopeOrRouting(claim, b.claimScope()) {
 			continue
 		}
 		if strings.TrimSpace(claim.Labels["name"]) == name ||

@@ -80,13 +80,16 @@ func loadPortsConfig(fs *flag.FlagSet, provider string, providerFlags providerFl
 		return Config{}, err
 	}
 	cfg.Provider = provider
-	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
-		return Config{}, err
-	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return Config{}, err
 	}
 	if err := autoRouteStaticLease(&cfg, fs, id); err != nil {
+		return Config{}, err
+	}
+	if err := autoRouteExternalLease(&cfg, fs, id); err != nil {
+		return Config{}, err
+	}
+	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

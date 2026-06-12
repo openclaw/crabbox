@@ -2734,13 +2734,16 @@ func (a App) stop(ctx context.Context, args []string) error {
 		return err
 	}
 	cfg.Provider = *provider
+	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
+		return err
+	}
+	if err := autoRouteExternalLease(&cfg, fs, *id); err != nil {
+		return err
+	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))

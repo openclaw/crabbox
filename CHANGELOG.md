@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed `stop` and `pond release` to preserve claims, SSH credentials, lifecycle metadata, and restart routing when providers intentionally retain reusable stopped resources.
+- Fixed external lease commands to reuse each lease's persisted provider routing after the current external configuration changes.
 - Fixed `local-container` stop cleanup when a Docker container was removed externally, including stale claim and stored-key removal. Thanks @hxy91819.
 - Fixed Apple VZ release artifacts to target macOS 13, bounded guest serial logs without blocking noisy VMs, escaped terminal controls in diagnostics, and preserved retained lease state when helper inventory lookup fails.
 - Fixed DigitalOcean capability-tag persistence, provider config visibility and precedence, account-scoped ambiguous Droplet/SSH-key create recovery, retryable cleanup, and unnecessary monitoring-agent installation.

@@ -172,6 +172,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	if err := autoRouteExternalLease(&cfg, fs, resolvedDoctorID); err != nil {
+		return err
+	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}

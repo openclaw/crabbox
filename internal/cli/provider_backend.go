@@ -770,6 +770,9 @@ func applyProviderRoutingFlags(cfg *Config, fs *flag.FlagSet, values providerFla
 }
 
 func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues) error {
+	if flagWasSet(fs, "provider") {
+		cfg.providerExplicit = true
+	}
 	if _, err := routeProviderFlagOverride(cfg, fs, values); err != nil {
 		return err
 	}

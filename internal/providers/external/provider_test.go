@@ -84,6 +84,51 @@ func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
 	}
 }
 
+func TestConfigurePreservesOverridesAppliedToLoadedRouting(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := core.LoadExternalRouting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Command = "override-provider"
+	loaded.WorkRoot = "/override/work"
+	cfg := core.BaseConfig()
+	cfg.External = loaded
+	cfg.WorkRoot = loaded.WorkRoot
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*leaseBackend).cfg
+	if got.External.Command != loaded.Command || got.WorkRoot != loaded.WorkRoot {
+		t.Fatalf("config=%#v", got)
+	}
+}
+
+func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.External.RoutingFile = path
+	backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*leaseBackend).cfg
+	if got.External.Command != saved.External.Command || got.WorkRoot != saved.External.WorkRoot {
+		t.Fatalf("config=%#v", got)
+	}
+}
+
 func TestProtocolClaimScopeIgnoresZeroLifecycleConnection(t *testing.T) {
 	cfg := testConfig()
 	before := externalClaimScope(cfg)
@@ -1111,6 +1156,14 @@ func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) 
 	); err != nil {
 		t.Fatal(err)
 	}
+	// A private per-lease route remains authoritative when a provider upgrade
+	// changes the lifecycle scope encoded in the current routing state.
+	cfg.External.Config = map[string]any{"cluster": "new-cluster"}
+	routingPath, err := core.PersistExternalRouting("cbx_abcdef123456", cfg.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.External.RoutingFile = routingPath
 	runner := &recordingRunner{}
 	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "fast-coral", ReleaseOnly: true})
@@ -1125,6 +1178,24 @@ func TestDeclarativeResolveThenReleaseReusesPersistedResourceName(t *testing.T) 
 	}
 	if runner.name != "devboxctl" || strings.Join(runner.args, "|") != "rm|original-resource" {
 		t.Fatalf("command=%q args=%#v", runner.name, runner.args)
+	}
+}
+
+func TestResolveClaimMatchesCloudID(t *testing.T) {
+	root := isolateCrabboxState(t)
+	cfg := testConfig()
+	leaseID := "cbx_abcdef123456"
+	claimExternalLease(t, cfg, leaseID, "fast-coral", root, time.Minute, false)
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, core.Server{CloudID: "provider/resource-123"}, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &leaseBackend{cfg: cfg}
+	claim, ok, err := backend.resolveClaim("provider/resource-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || claim.LeaseID != leaseID {
+		t.Fatalf("claim=%#v ok=%v", claim, ok)
 	}
 }
 

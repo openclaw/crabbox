@@ -192,6 +192,13 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 			continue
 		}
 		cfg.Provider = claim.Provider
+		if cerr := autoRouteExternalLeaseForConfig(&cfg, claim.LeaseID); cerr != nil {
+			if firstErr == nil {
+				firstErr = cerr
+			}
+			fmt.Fprintf(a.Stderr, "warning: skip %s/%s: route lease: %v\n", claim.Provider, claim.LeaseID, cerr)
+			continue
+		}
 		backend, berr := loadBackend(cfg, runtimeForApp(a))
 		if berr != nil {
 			if firstErr == nil {

@@ -103,6 +103,9 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := autoRouteStaticLease(cfg, fs, existingLeaseID); err != nil {
 		return err
 	}
+	if err := autoRouteExternalLease(cfg, fs, existingLeaseID); err != nil {
+		return err
+	}
 	if flagWasSet(fs, "os") {
 		osImage, err := normalizeOSImage(*values.OSImage)
 		if err != nil {
@@ -330,6 +333,9 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 		return Config{}, err
 	}
 	if err := autoRouteStaticLease(&cfg, fs, opts.LeaseID); err != nil {
+		return Config{}, err
+	}
+	if err := autoRouteExternalLease(&cfg, fs, opts.LeaseID); err != nil {
 		return Config{}, err
 	}
 	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {

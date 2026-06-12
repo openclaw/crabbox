@@ -21,6 +21,7 @@ func init() {
 	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testXCPNgProvider{})
 	RegisterProvider(testStaticSSHProvider{})
+	RegisterProvider(testExternalProvider{})
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
@@ -42,6 +43,52 @@ func init() {
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
+}
+
+type testExternalProvider struct{}
+
+func (testExternalProvider) Name() string      { return "external" }
+func (testExternalProvider) Aliases() []string { return nil }
+func (testExternalProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "external",
+		Family:      "external",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testExternalProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return fs.String("external-routing-file", defaults.External.RoutingFile, "")
+}
+func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if flagWasSet(fs, "external-routing-file") {
+		path, _ := values.(*string)
+		if path != nil {
+			routing, err := LoadExternalRouting(*path)
+			if err != nil {
+				return err
+			}
+			cfg.External = routing
+		}
+	}
+	if strings.TrimSpace(cfg.External.Command) == "" {
+		return exit(2, "external command is required")
+	}
+	return nil
+}
+func (p testExternalProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
+	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}, cfg: cfg}, nil
+}
+
+type testExternalSSHBackend struct {
+	testSSHBackend
+	cfg Config
+}
+
+func (b testExternalSSHBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	return LeaseTarget{LeaseID: req.ID, Server: Server{Name: b.cfg.External.Command}}, nil
 }
 
 type testAzureProvider struct{}

@@ -266,6 +266,9 @@ func (a App) resolveLeaseTargetWithRequestConfig(ctx context.Context, cfg *Confi
 	if cfg == nil {
 		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
 	}
+	if err := autoRouteExternalLeaseForConfig(cfg, id); err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
 	backend, err := loadBackend(*cfg, runtimeForApp(a))
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err

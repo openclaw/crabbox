@@ -17,6 +17,7 @@ import (
 type Config struct {
 	Profile                       string
 	Provider                      string
+	providerExplicit              bool
 	TargetOS                      string
 	targetExplicit                bool
 	Architecture                  string
@@ -247,13 +248,14 @@ type KubeVirtConfig struct {
 }
 
 type ExternalConfig struct {
-	Command     string
-	Args        []string
-	Config      map[string]any
-	Lifecycle   ExternalLifecycleConfig
-	Connection  ExternalConnectionConfig
-	WorkRoot    string
-	RoutingFile string
+	Command       string
+	Args          []string
+	Config        map[string]any
+	Lifecycle     ExternalLifecycleConfig
+	Connection    ExternalConnectionConfig
+	WorkRoot      string
+	RoutingFile   string
+	routingLoaded bool
 }
 
 type ExternalLifecycleConfig struct {
