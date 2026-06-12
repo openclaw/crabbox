@@ -88,13 +88,17 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		cloudID := server.CloudID
 		server, err = b.waitForServerIP(ctx, client, cloudID, bootstrapWaitTimeout(cfg))
 		if err != nil {
-			_ = client.DeleteServer(context.Background(), cloudID)
+			if deleteErr := client.DeleteServer(context.Background(), cloudID); deleteErr == nil {
+				removeLocalLeaseResidue(leaseID)
+			}
 			return LeaseTarget{}, err
 		}
 	}
 	target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
-		_ = client.DeleteServer(context.Background(), server.CloudID)
+		if deleteErr := client.DeleteServer(context.Background(), server.CloudID); deleteErr == nil {
+			removeLocalLeaseResidue(leaseID)
+		}
 		return LeaseTarget{}, err
 	}
 	if server.Labels == nil {
@@ -214,7 +218,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	if err := client.DeleteServer(ctx, id); err != nil {
 		return err
 	}
-	removeLeaseClaim(leaseID)
+	removeLocalLeaseResidue(leaseID)
 	return nil
 }
 
@@ -253,7 +257,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 			return err
 		}
-		removeLeaseClaim(proxmoxClaimLabelLeaseID(server))
+		removeLocalLeaseResidue(proxmoxClaimLabelLeaseID(server))
 	}
 	return nil
 }
@@ -304,6 +308,14 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 }
 func isCrabboxLease(server Server) bool { return core.IsCrabboxProxmoxLease(server) }
 func removeLeaseClaim(leaseID string)   { core.RemoveLeaseClaim(leaseID) }
+func removeStoredTestboxKey(leaseID string) {
+	core.RemoveStoredTestboxKey(leaseID)
+}
+
+func removeLocalLeaseResidue(leaseID string) {
+	removeLeaseClaim(leaseID)
+	removeStoredTestboxKey(leaseID)
+}
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }

@@ -77,6 +77,14 @@ func NewProxmoxClient(cfg Config) (*ProxmoxClient, error) {
 }
 
 func (c *ProxmoxClient) do(ctx context.Context, method, path string, form url.Values, out any) error {
+	return c.doEnvelope(ctx, method, path, form, out, false)
+}
+
+func (c *ProxmoxClient) doRequired(ctx context.Context, method, path string, form url.Values, out any) error {
+	return c.doEnvelope(ctx, method, path, form, out, true)
+}
+
+func (c *ProxmoxClient) doEnvelope(ctx context.Context, method, path string, form url.Values, out any, requireData bool) error {
 	var body io.Reader
 	if form != nil {
 		body = strings.NewReader(form.Encode())
@@ -110,11 +118,11 @@ func (c *ProxmoxClient) do(ctx context.Context, method, path string, form url.Va
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return err
 	}
-	if len(envelope.Data) == 0 {
-		return fmt.Errorf("proxmox %s %s: missing data envelope", method, path)
-	}
-	if bytes.Equal(envelope.Data, []byte("null")) {
-		return nil
+	if len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
+		if !requireData {
+			return nil
+		}
+		return fmt.Errorf("proxmox %s %s: missing required data in response", method, path)
 	}
 	return json.Unmarshal(envelope.Data, out)
 }
@@ -478,7 +486,7 @@ func proxmoxDisplayPath(path string) string {
 
 func (c *ProxmoxClient) nextID(ctx context.Context) (int, error) {
 	var raw any
-	if err := c.do(ctx, http.MethodGet, "/cluster/nextid", nil, &raw); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, "/cluster/nextid", nil, &raw); err != nil {
 		return 0, err
 	}
 	switch v := raw.(type) {
@@ -504,7 +512,7 @@ type proxmoxVM struct {
 
 func (c *ProxmoxClient) listQEMU(ctx context.Context) ([]proxmoxVM, error) {
 	var vms []proxmoxVM
-	if err := c.do(ctx, http.MethodGet, "/nodes/"+url.PathEscape(c.Node)+"/qemu", nil, &vms); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, "/nodes/"+url.PathEscape(c.Node)+"/qemu", nil, &vms); err != nil {
 		return nil, err
 	}
 	return vms, nil
@@ -562,7 +570,7 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 		clone.Set("pool", cfg.Proxmox.Pool)
 	}
 	var upid string
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(c.Node), cfg.Proxmox.TemplateID), clone, &upid); err != nil {
+	if err := c.doRequired(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(c.Node), cfg.Proxmox.TemplateID), clone, &upid); err != nil {
 		return Server{}, err
 	}
 	clonedVMID := strconv.Itoa(vmid)
@@ -664,7 +672,7 @@ func proxmoxSSHKeysValue(publicKey string) string {
 
 func (c *ProxmoxClient) startVM(ctx context.Context, vmid int) error {
 	var upid string
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/status/start", url.PathEscape(c.Node), vmid), url.Values{}, &upid); err != nil {
+	if err := c.doRequired(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/status/start", url.PathEscape(c.Node), vmid), url.Values{}, &upid); err != nil {
 		return err
 	}
 	return c.waitTask(ctx, upid)
@@ -712,7 +720,7 @@ func (c *ProxmoxClient) GetServer(ctx context.Context, id string) (Server, error
 		return c.getServerByName(ctx, id)
 	}
 	var status proxmoxVM
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/status/current", url.PathEscape(c.Node), vmid), nil, &status); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/status/current", url.PathEscape(c.Node), vmid), nil, &status); err != nil {
 		return Server{}, err
 	}
 	labels := map[string]string{}
@@ -765,6 +773,9 @@ func (c *ProxmoxClient) configureVM(ctx context.Context, vmid int, form url.Valu
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), form, &upid); err != nil {
 		return err
 	}
+	if upid == "" {
+		return nil
+	}
 	return c.waitTask(ctx, upid)
 }
 
@@ -775,18 +786,21 @@ type proxmoxTaskStatus struct {
 
 func (c *ProxmoxClient) waitTask(ctx context.Context, upid string) error {
 	if upid == "" {
-		return nil
+		return errors.New("proxmox task UPID is empty")
 	}
 	path := fmt.Sprintf("/nodes/%s/tasks/%s/status", url.PathEscape(c.Node), url.PathEscape(upid))
 	deadline := time.Now().Add(15 * time.Minute)
 	for {
 		var status proxmoxTaskStatus
-		if err := c.do(ctx, http.MethodGet, path, nil, &status); err != nil {
+		if err := c.doRequired(ctx, http.MethodGet, path, nil, &status); err != nil {
 			return err
 		}
 		if status.Status == "stopped" {
-			if status.ExitStatus == "" || status.ExitStatus == "OK" {
+			if status.ExitStatus == "OK" {
 				return nil
+			}
+			if status.ExitStatus == "" {
+				return fmt.Errorf("proxmox task %s failed: missing exitstatus", upid)
 			}
 			return fmt.Errorf("proxmox task %s failed: %s", upid, status.ExitStatus)
 		}
@@ -826,7 +840,7 @@ func (c *ProxmoxClient) guestIPv4(ctx context.Context, vmid int) (string, error)
 	var res struct {
 		Result []proxmoxAgentInterface `json:"result"`
 	}
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/agent/network-get-interfaces", url.PathEscape(c.Node), vmid), nil, &res); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/agent/network-get-interfaces", url.PathEscape(c.Node), vmid), nil, &res); err != nil {
 		return "", err
 	}
 	for _, iface := range res.Result {
