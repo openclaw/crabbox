@@ -18,7 +18,7 @@
 - Fixed Apple VZ release artifacts to target macOS 13, bounded guest serial logs without blocking noisy VMs, escaped terminal controls in diagnostics, and preserved retained lease state when helper inventory lookup fails.
 - Fixed DigitalOcean capability-tag persistence, provider config visibility and precedence, account-scoped ambiguous Droplet/SSH-key create recovery, retryable cleanup, and unnecessary monitoring-agent installation.
 - Fixed Namespace Devbox setup instructions to use the current browser workspace approval flow instead of obsolete token environment variables.
-- Fixed XCP-ng ISO E2E cleanup to remain bounded after installer or guest-readiness timeouts.
+- Fixed XCP-ng XenAPI integer encoding, template validation, provider-scoped deletion ownership, generated Windows answer media, pre-boot answer attachment, and bounded ISO E2E cleanup.
 
 ## 0.28.0 - 2026-06-11
 

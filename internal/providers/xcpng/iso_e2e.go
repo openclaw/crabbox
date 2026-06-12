@@ -91,6 +91,7 @@ var (
 	isoE2EWriteLinuxSeedISO       = writeLinuxSeedISO
 	isoE2EWriteWindowsAnswerISO   = writeWindowsAnswerISO
 	isoE2EGenerateWindowsPassword = generateWindowsAutoLogonPassword
+	isoE2ERemoveLocalArtifact     = os.Remove
 	isoE2EUbuntuLinuxLinePattern  = regexp.MustCompile(`(?m)^(\s*linux\s+/casper/vmlinuz\s+)(.*?)(\s+---\s*)$`)
 	isoE2EWindowsARMLinePattern   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(arm64|aarch64|arm)(?:[^a-z0-9]|$)`)
 )
@@ -242,7 +243,7 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	if err = runtime.prepareWindowsAnswerMedia(ctx, opts, &result); err != nil {
 		return result, err
 	}
-	defer runtime.cleanupLocalArtifacts()
+	defer finalizeLocalArtifacts(runtime, &result, &err)
 	if err = runtime.createBaseVM(ctx, opts, &result); err != nil {
 		return result, err
 	}
@@ -267,6 +268,10 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 		}
 		return result, err
 	}
+	if err = runtime.attachAnswerMedia(ctx, opts, &result); err != nil {
+		return result, err
+	}
+	result.Phase = "windows_iso_attached"
 	if err = runtime.startVM(ctx); err != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "windows_setup_started"
@@ -281,10 +286,6 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 		result.Reason = fmt.Sprintf("set installed-boot order: %v", err)
 		return result, err
 	}
-	if err = runtime.attachAnswerMedia(ctx, opts, &result); err != nil {
-		return result, err
-	}
-	result.Phase = "windows_iso_attached"
 	installerDeadline := isoE2EWindowsInstallTimeout
 	if opts.Timeout > isoE2EGuestMetricsTimeout {
 		remaining := opts.Timeout - isoE2EGuestMetricsTimeout
@@ -367,7 +368,7 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	if err = runtime.prepareInstallerMedia(ctx, opts, &result); err != nil {
 		return result, err
 	}
-	defer runtime.cleanupLocalArtifacts()
+	defer finalizeLocalArtifacts(runtime, &result, &err)
 	if err = runtime.createBaseVM(ctx, opts, &result); err != nil {
 		return result, err
 	}
@@ -541,10 +542,55 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 		summary.Phase = "windows_answer_generation"
 		return nil
 	}
-	summary.Classification = "windows_requirements_blocked"
+	keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, r.leaseID)
+	if err != nil {
+		summary.Classification = "test_failed"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = err.Error()
+		return err
+	}
+	initialPassword, err := isoE2EGenerateWindowsPassword()
+	if err != nil {
+		summary.Classification = "test_failed"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = fmt.Sprintf("generate Windows autounattend password: %v", err)
+		return err
+	}
+	payload, err := newWindowsAutounattendPayload(opts.Config, r.leaseID, strings.TrimPrefix(r.leaseID, "cbx_"), publicKey, initialPassword)
+	if err != nil {
+		summary.Classification = "test_failed"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = err.Error()
+		return err
+	}
+	answerISO, err := isoE2EWriteWindowsAnswerISO(ctx, opts.EvidenceDir, payload)
+	if err != nil {
+		summary.Classification = "test_failed"
+		summary.Phase = "windows_answer_generation"
+		summary.Reason = err.Error()
+		return err
+	}
+	r.keyPath = keyPath
+	r.publicKey = publicKey
+	r.windowsUser = payload.Username
+	r.generatedAnswer = answerISO
+	r.cleanupLocal = append(r.cleanupLocal, answerISO)
+	answerDir := filepath.Dir(answerISO)
+	if strings.HasPrefix(filepath.Base(answerDir), "windows-answer-media-") {
+		r.cleanupLocal = append(r.cleanupLocal, answerDir)
+	}
+	if isoE2EKeepGeneratedWindowsAnswer() {
+		for _, path := range r.cleanupLocal {
+			r.keepLocal[path] = struct{}{}
+		}
+		summary.Evidence["windows_answer_iso"] = answerISO
+	}
+	summary.AnswerISO = answerISO
+	summary.Details["answer_iso_source"] = "generated-local-file"
+	summary.Details["windows_bootstrap"] = "openssh-key"
+	summary.Details["ssh_key"] = filepath.Base(keyPath)
 	summary.Phase = "windows_answer_generation"
-	summary.Reason = "generated Windows answer ISO on XCP-ng is deferred until the auxiliary answer-media path has real live proof; supply prebuilt answer media or skip the Windows mutate ISO flow"
-	return core.Exit(4, "%s", summary.Reason)
+	return nil
 }
 
 func (r *isoE2ERuntime) createBaseVM(ctx context.Context, opts ISOE2EOptions, summary *ISOE2ESummary) error {
@@ -866,13 +912,38 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 	summary.Cleanup = "cleaned"
 }
 
-func (r *isoE2ERuntime) cleanupLocalArtifacts() {
+func finalizeLocalArtifacts(runtime *isoE2ERuntime, summary *ISOE2ESummary, runErr *error) {
+	cleanupErr := runtime.cleanupLocalArtifacts()
+	if cleanupErr == nil {
+		return
+	}
+	summary.Cleanup = "failed"
+	if summary.Classification == "" ||
+		strings.HasSuffix(summary.Classification, "_passed") ||
+		summary.Classification == "source_uncovered" {
+		summary.Classification = "resource_cleanup_failed"
+	}
+	if summary.Reason == "" {
+		summary.Reason = cleanupErr.Error()
+	} else {
+		summary.Reason = fmt.Sprintf("%s; %v", summary.Reason, cleanupErr)
+	}
+	if *runErr == nil {
+		*runErr = cleanupErr
+	}
+}
+
+func (r *isoE2ERuntime) cleanupLocalArtifacts() error {
+	var cleanupErr error
 	for _, path := range r.cleanupLocal {
 		if _, keep := r.keepLocal[path]; keep {
 			continue
 		}
-		_ = os.Remove(path)
+		if err := isoE2ERemoveLocalArtifact(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove local ISO artifact %s: %w", filepath.Base(path), err))
+		}
 	}
+	return cleanupErr
 }
 
 func resolveISOE2EPlacement(ctx context.Context, client lifecycleClient, cfg Config) (xcpNgPlacement, error) {
@@ -984,6 +1055,9 @@ func writeLinuxSeedISO(ctx context.Context, evidenceDir string, payload xcpNgLin
 }
 
 func writeWindowsAnswerISO(ctx context.Context, evidenceDir string, payload xcpNgWindowsAutounattendPayload) (string, error) {
+	if err := os.MkdirAll(evidenceDir, 0o700); err != nil {
+		return "", err
+	}
 	workDir, err := os.MkdirTemp(evidenceDir, "windows-answer-")
 	if err != nil {
 		return "", err
@@ -995,9 +1069,18 @@ func writeWindowsAnswerISO(ctx context.Context, evidenceDir string, payload xcpN
 	if err := os.WriteFile(filepath.Join(workDir, "CRABBOX-BOOTSTRAP.PS1"), []byte(payload.BootstrapPowerShell), 0o600); err != nil {
 		return "", err
 	}
-	path := filepath.Join(evidenceDir, fmt.Sprintf("%s-windows-answer.iso", isoE2ECurrentTime().Format("20060102t150405z")))
+	artifactDir, err := os.MkdirTemp(evidenceDir, "windows-answer-media-")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(artifactDir, fmt.Sprintf("%s-windows-answer.iso", isoE2ECurrentTime().Format("20060102t150405z")))
 	if err := buildDataISO(ctx, path, workDir, "CRABBOXWIN"); err != nil {
+		_ = os.RemoveAll(artifactDir)
 		return "", fmt.Errorf("build Windows answer ISO: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = os.RemoveAll(artifactDir)
+		return "", fmt.Errorf("secure Windows answer ISO: %w", err)
 	}
 	return path, nil
 }

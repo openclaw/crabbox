@@ -698,7 +698,7 @@ func TestRunISOE2EWindowsReadOnlyBlocksARMInstaller(t *testing.T) {
 	}
 }
 
-func TestRunISOE2EWindowsMutateDefersGeneratedBootstrap(t *testing.T) {
+func TestRunISOE2EWindowsMutateGeneratesAndAttachesBootstrapBeforeStart(t *testing.T) {
 	dir := t.TempDir()
 	isoPath := filepath.Join(dir, "Win11_25H2_English_x64_v2.iso")
 	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
@@ -710,26 +710,201 @@ func TestRunISOE2EWindowsMutateDefersGeneratedBootstrap(t *testing.T) {
 		hostRef:      "OpaqueRef:host",
 		iso:          xcpNgISOMediaRef{Source: "local-file", NameLabel: isoPath},
 		guestIP:      "192.0.2.60",
+		drive:        xcpNgConfigDrive{VDIRef: "OpaqueRef:answer-vdi", VBDRef: "OpaqueRef:answer-vbd", Name: "answer.iso"},
 		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
 		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
 	}
 	oldClient := newLifecycleClient
+	oldWait := isoE2EWaitForSSHReady
+	oldRunSSH := isoE2ERunSSHQuiet
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldWrite := isoE2EWriteWindowsAnswerISO
+	oldPassword := isoE2EGenerateWindowsPassword
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
-	t.Cleanup(func() { newLifecycleClient = oldClient })
-	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "windows", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
-	if err == nil {
-		t.Fatal("expected generated Windows bootstrap path to be deferred")
+	isoE2EWaitForSSHReady = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
+	isoE2ERunSSHQuiet = func(context.Context, core.SSHTarget, string) error { return nil }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
 	}
-	if summary.Classification != "windows_requirements_blocked" || summary.Phase != "windows_answer_generation" {
-		t.Fatalf("summary=%#v", summary)
-	}
-	if !strings.Contains(summary.Reason, "deferred") {
-		t.Fatalf("summary=%#v", summary)
-	}
-	for _, call := range fake.calls {
-		if call == "create-fresh-vm" || call == "start" {
-			t.Fatalf("generated Windows bootstrap path should stop before VM creation, calls=%v", fake.calls)
+	isoE2EWriteWindowsAnswerISO = func(_ context.Context, _ string, payload xcpNgWindowsAutounattendPayload) (string, error) {
+		if payload.Username != "crabbox" || payload.AnswerXML == "" || payload.BootstrapPowerShell == "" {
+			t.Fatalf("payload=%#v", payload)
 		}
+		answerPath := filepath.Join(dir, "answer.iso")
+		if err := os.WriteFile(answerPath, []byte("answer"), 0o600); err != nil {
+			return "", err
+		}
+		return answerPath, nil
+	}
+	isoE2EGenerateWindowsPassword = func() (string, error) { return "TempPass1!", nil }
+	t.Cleanup(func() {
+		newLifecycleClient = oldClient
+		isoE2EWaitForSSHReady = oldWait
+		isoE2ERunSSHQuiet = oldRunSSH
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2EWriteWindowsAnswerISO = oldWrite
+		isoE2EGenerateWindowsPassword = oldPassword
+	})
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "windows", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Classification != "windows_install_passed" || summary.Phase != "windows_command_ok" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if summary.Details["answer_iso_source"] != "generated-local-file" || summary.Details["windows_bootstrap"] != "openssh-key" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if _, err := os.Stat(summary.AnswerISO); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("generated answer ISO was not removed: err=%v", err)
+	}
+	calls := strings.Join(fake.calls, ",")
+	if strings.Index(calls, "attach-iso") < 0 || strings.Index(calls, "start") < 0 || strings.LastIndex(calls, "attach-iso") > strings.Index(calls, "start") {
+		t.Fatalf("answer media must attach before start, calls=%v", fake.calls)
+	}
+}
+
+func TestPrepareWindowsAnswerMediaRetainsGeneratedISOOnlyWhenRequested(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CRABBOX_XCP_NG_ISO_E2E_KEEP_WINDOWS_ANSWER", "1")
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldWrite := isoE2EWriteWindowsAnswerISO
+	oldPassword := isoE2EGenerateWindowsPassword
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return filepath.Join(dir, "id_ed25519"), "ssh-ed25519 AAAATEST crabbox", nil
+	}
+	isoE2EWriteWindowsAnswerISO = func(context.Context, string, xcpNgWindowsAutounattendPayload) (string, error) {
+		answerPath := filepath.Join(dir, "answer.iso")
+		if err := os.WriteFile(answerPath, []byte("answer"), 0o600); err != nil {
+			return "", err
+		}
+		return answerPath, nil
+	}
+	isoE2EGenerateWindowsPassword = func() (string, error) { return "TempPass1!", nil }
+	t.Cleanup(func() {
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2EWriteWindowsAnswerISO = oldWrite
+		isoE2EGenerateWindowsPassword = oldPassword
+	})
+	runtime := isoE2ERuntime{
+		leaseID:   "cbx_test",
+		keepLocal: map[string]struct{}{},
+	}
+	summary := ISOE2ESummary{Evidence: map[string]string{}, Details: map[string]string{}}
+	if err := runtime.prepareWindowsAnswerMedia(context.Background(), ISOE2EOptions{Config: testConfig(), EvidenceDir: dir}, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.cleanupLocalArtifacts(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(summary.AnswerISO); err != nil {
+		t.Fatalf("retained answer ISO missing: %v", err)
+	}
+	if summary.Evidence["windows_answer_iso"] != summary.AnswerISO {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestFinalizeLocalArtifactsSurfacesRemovalFailure(t *testing.T) {
+	oldRemove := isoE2ERemoveLocalArtifact
+	isoE2ERemoveLocalArtifact = func(string) error { return errors.New("permission denied") }
+	t.Cleanup(func() { isoE2ERemoveLocalArtifact = oldRemove })
+	runtime := &isoE2ERuntime{
+		cleanupLocal: []string{"/tmp/windows-answer.iso"},
+		keepLocal:    map[string]struct{}{},
+	}
+	summary := ISOE2ESummary{Classification: "windows_install_passed", Cleanup: "cleaned"}
+	var runErr error
+	finalizeLocalArtifacts(runtime, &summary, &runErr)
+	if runErr == nil || !strings.Contains(runErr.Error(), "permission denied") {
+		t.Fatalf("err=%v", runErr)
+	}
+	if summary.Classification != "resource_cleanup_failed" || summary.Cleanup != "failed" {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestFinalizeLocalArtifactsPreservesPrimaryFailure(t *testing.T) {
+	oldRemove := isoE2ERemoveLocalArtifact
+	isoE2ERemoveLocalArtifact = func(string) error { return errors.New("permission denied") }
+	t.Cleanup(func() { isoE2ERemoveLocalArtifact = oldRemove })
+	runtime := &isoE2ERuntime{
+		cleanupLocal: []string{"/tmp/windows-answer.iso"},
+		keepLocal:    map[string]struct{}{},
+	}
+	primaryErr := errors.New("guest readiness timed out")
+	runErr := primaryErr
+	summary := ISOE2ESummary{Classification: "environment_blocked", Cleanup: "failed", Reason: primaryErr.Error()}
+	finalizeLocalArtifacts(runtime, &summary, &runErr)
+	if !errors.Is(runErr, primaryErr) {
+		t.Fatalf("err=%v", runErr)
+	}
+	if summary.Classification != "environment_blocked" || !strings.Contains(summary.Reason, "permission denied") {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestWriteWindowsAnswerISOEnforcesPrivatePermissions(t *testing.T) {
+	dir := t.TempDir()
+	evidenceDir := filepath.Join(dir, "evidence")
+	if err := os.Mkdir(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	xorriso := filepath.Join(binDir, "xorriso")
+	script := `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    : > "$1"
+    chmod 0644 "$1"
+    exit 0
+  fi
+  shift
+done
+exit 1
+`
+	if err := os.WriteFile(xorriso, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	path, err := writeWindowsAnswerISO(context.Background(), evidenceDir, xcpNgWindowsAutounattendPayload{
+		AnswerXML:           "<unattend/>",
+		BootstrapPowerShell: "Write-Output ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for target, want := range map[string]os.FileMode{evidenceDir: 0o755, filepath.Dir(path): 0o700, path: 0o600} {
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode=%#o want=%#o", target, got, want)
+		}
+	}
+}
+
+func TestIsCrabboxLeaseRequiresXCPNgProviderLabel(t *testing.T) {
+	server := crabboxServer(xcpNgTestVMUUID, "cbx_lease", "ready", time.Now().Add(time.Hour))
+	delete(server.Labels, "provider")
+	if isCrabboxLease(server) {
+		t.Fatalf("server without provider label considered managed: %#v", server.Labels)
+	}
+	server.Labels["provider"] = "other"
+	if isCrabboxLease(server) {
+		t.Fatalf("server with wrong provider label considered managed: %#v", server.Labels)
+	}
+	server.Labels["provider"] = "xcp-ng"
+	if !isCrabboxLease(server) {
+		t.Fatalf("server with xcp-ng provider label not considered managed: %#v", server.Labels)
 	}
 }
 

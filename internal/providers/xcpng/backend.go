@@ -611,7 +611,7 @@ func isCrabboxLease(server Server) bool {
 	if server.Labels["crabbox"] != "true" || server.Labels["created_by"] != "crabbox" {
 		return false
 	}
-	if provider := server.Labels["provider"]; provider != "" && provider != "xcp-ng" {
+	if server.Labels["provider"] != "xcp-ng" {
 		return false
 	}
 	return strings.TrimSpace(server.Labels["lease"]) != ""

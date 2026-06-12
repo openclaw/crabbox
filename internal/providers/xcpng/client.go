@@ -128,13 +128,28 @@ func (c *xapiClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
 }
 
 func (c *xapiClient) ResolveTemplate(ctx context.Context, cfg xcpNgConfig) (xapiRef, error) {
+	var (
+		ref xapiRef
+		err error
+	)
 	if cfg.TemplateUUID != "" {
-		return c.getByUUID(ctx, "VM", cfg.TemplateUUID)
+		ref, err = c.getByUUID(ctx, "VM", cfg.TemplateUUID)
+	} else if cfg.Template != "" {
+		ref, err = c.getUniqueByName(ctx, "VM", cfg.Template)
+	} else {
+		return "", exit(3, "xcp-ng template or template UUID is required")
 	}
-	if cfg.Template != "" {
-		return c.getUniqueByName(ctx, "VM", cfg.Template)
+	if err != nil {
+		return "", err
 	}
-	return "", exit(3, "xcp-ng template or template UUID is required")
+	isTemplate, err := c.callString(ctx, "VM.get_is_a_template", c.session, ref.value())
+	if err != nil {
+		return "", fmt.Errorf("validate xcp-ng template: %w", err)
+	}
+	if isTemplate != "true" {
+		return "", exit(4, "xcp-ng VM is not a template: %s", firstNonBlank(cfg.TemplateUUID, cfg.Template))
+	}
+	return ref, nil
 }
 
 func (c *xapiClient) ResolveSR(ctx context.Context, cfg xcpNgConfig) (xapiRef, error) {
@@ -1939,9 +1954,9 @@ func encodeXMLRPCValue(b *bytes.Buffer, value any) {
 		xml.EscapeText(b, []byte(v))
 		b.WriteString("</string>")
 	case int:
-		fmt.Fprintf(b, "<int>%d</int>", v)
+		fmt.Fprintf(b, "<string>%d</string>", v)
 	case int64:
-		fmt.Fprintf(b, "<int>%d</int>", v)
+		fmt.Fprintf(b, "<string>%d</string>", v)
 	case bool:
 		if v {
 			b.WriteString("<boolean>1</boolean>")

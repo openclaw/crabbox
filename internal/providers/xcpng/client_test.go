@@ -38,6 +38,22 @@ func TestXMLRPCRequestEncodingKeepsCredentialOutOfURL(t *testing.T) {
 	}
 }
 
+func TestXMLRPCRequestEncodesXenAPIIntegersAsDecimalStrings(t *testing.T) {
+	body, err := encodeXMLRPCRequest("VM.set_memory_static_max", "session", "vm", int64(24*1024*1024*1024), 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{"<string>25769803776</string>", "<string>1500</string>"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("body missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "<int>") || strings.Contains(text, "<i4>") {
+		t.Fatalf("XenAPI integer encoded as XML-RPC integer: %s", text)
+	}
+}
+
 func TestXAPIEndpointNormalizesBareHostAndRejectsPlainHTTP(t *testing.T) {
 	endpoint, err := xapiEndpoint("xcp-ng.example.test")
 	if err != nil {
@@ -1323,6 +1339,8 @@ func TestResolveTemplateSRAndNetworkChooseUUIDNameOrEmpty(t *testing.T) {
 					writeXMLRPCString(t, w, "OpaqueRef:by-uuid")
 				case "VM.get_by_name_label", "SR.get_by_name_label", "network.get_by_name_label":
 					writeXMLRPCStringArray(t, w, []string{"OpaqueRef:by-name"})
+				case "VM.get_is_a_template":
+					writeXMLRPCString(t, w, "true")
 				default:
 					t.Fatalf("unexpected method %s", method)
 				}
@@ -1345,10 +1363,32 @@ func TestResolveTemplateSRAndNetworkChooseUUIDNameOrEmpty(t *testing.T) {
 			if ref != tt.wantRef {
 				t.Fatalf("ref=%q want %q", ref, tt.wantRef)
 			}
-			if got := strings.Join(methods, ","); got != tt.wantMethod {
-				t.Fatalf("methods=%s want %s", got, tt.wantMethod)
+			wantMethods := tt.wantMethod
+			if strings.HasPrefix(tt.wantMethod, "VM.") {
+				wantMethods += ",VM.get_is_a_template"
+			}
+			if got := strings.Join(methods, ","); got != wantMethods {
+				t.Fatalf("methods=%s want %s", got, wantMethods)
 			}
 		})
+	}
+}
+
+func TestResolveTemplateRejectsOrdinaryVM(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch method := readXMLRPCMethod(t, r); method {
+		case "VM.get_by_uuid":
+			writeXMLRPCString(t, w, "OpaqueRef:ordinary-vm")
+		case "VM.get_is_a_template":
+			writeXMLRPCString(t, w, "false")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if _, err := client.ResolveTemplate(context.Background(), xcpNgConfig{TemplateUUID: xcpNgTestVMUUID}); err == nil || !strings.Contains(err.Error(), "is not a template") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
