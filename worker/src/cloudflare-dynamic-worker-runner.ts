@@ -62,7 +62,7 @@ type DynamicWorkerLoader = {
 };
 
 type WorkerStub = {
-  getEntrypoint(name?: string | null, options?: EntrypointOptions): WorkerEntrypointStub;
+  getEntrypoint(name?: string, options?: EntrypointOptions): WorkerEntrypointStub;
 };
 
 type WorkerEntrypointStub = {
@@ -257,7 +257,7 @@ async function createRun(
       parsed.cacheMode === "one-shot"
         ? env.LOADER.load(workerCodeResult)
         : env.LOADER.get(parsed.workerId, async () => workerCodeResult);
-    const entrypoint = worker.getEntrypoint(null, entrypointOptions(parsed.limits));
+    const entrypoint = worker.getEntrypoint(undefined, entrypointOptions(parsed.limits));
     const dynamicResponse = await entrypoint.fetch(requestForDynamicWorker(parsed));
     const result = await responseResult(dynamicResponse);
     const completedAt = Date.now();

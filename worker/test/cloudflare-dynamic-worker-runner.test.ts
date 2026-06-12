@@ -41,7 +41,7 @@ class MockDynamicWorker {
   }
 
   getEntrypoint(
-    _name?: string | null,
+    _name?: string,
     options?: EntrypointOptions,
   ): {
     fetch: (request: Request) => Promise<Response>;
