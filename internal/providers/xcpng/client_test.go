@@ -2032,6 +2032,41 @@ func TestDeleteFreshServerDestroysVTPMAfterHaltBeforeVM(t *testing.T) {
 	}
 }
 
+func TestAttachedDestroyableDisksExcludesExternalCDMedia(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_VBDs":
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:external-cd-vbd", "OpaqueRef:install-disk-vbd"})
+		case "VBD.get_record":
+			if countMethod(methods, "VBD.get_record") == 1 {
+				writeXMLRPCVBDRecordWithType(t, w, "OpaqueRef:external-iso-vdi", "CD")
+			} else {
+				writeXMLRPCVBDRecordWithType(t, w, "OpaqueRef:install-disk-vdi", "Disk")
+			}
+		case "VDI.get_record":
+			writeXMLRPCVDIRecord(t, w, "crabbox-install-disk")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+
+	disks, err := client.attachedDestroyableDisks(context.Background(), "OpaqueRef:vm", map[string]struct{}{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disks) != 1 || disks[0].VDIRef != "OpaqueRef:install-disk-vdi" {
+		t.Fatalf("disks=%#v", disks)
+	}
+	if countMethod(methods, "VDI.get_record") != 1 {
+		t.Fatalf("external CD VDI was inspected as destroyable: methods=%v", methods)
+	}
+}
+
 func TestDeleteVTPMTreatsMissingHandleAsDeleted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if method := readXMLRPCMethod(t, r); method != "VTPM.destroy" {
@@ -2629,9 +2664,14 @@ func writeXMLRPCUnmanagedVMRecord(t *testing.T, w http.ResponseWriter) {
 }
 
 func writeXMLRPCVBDRecord(t *testing.T, w http.ResponseWriter, vdiRef string) {
+	writeXMLRPCVBDRecordWithType(t, w, vdiRef, "Disk")
+}
+
+func writeXMLRPCVBDRecordWithType(t *testing.T, w http.ResponseWriter, vdiRef, vbdType string) {
 	t.Helper()
 	response := `<?xml version="1.0"?><methodResponse><params><param><value><struct>
 <member><name>empty</name><value><boolean>0</boolean></value></member>
+<member><name>type</name><value><string>` + vbdType + `</string></value></member>
 <member><name>VDI</name><value><string>` + vdiRef + `</string></value></member>
 </struct></value></param></params></methodResponse>`
 	if _, err := w.Write([]byte(response)); err != nil {

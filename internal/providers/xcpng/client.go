@@ -1454,6 +1454,9 @@ func (c *xapiClient) attachedDestroyableDisks(ctx context.Context, vmRef string,
 		if xmlStructString(record, "empty") == "true" {
 			continue
 		}
+		if !strings.EqualFold(xmlStructString(record, "type"), "Disk") {
+			continue
+		}
 		vdiRef := xmlStructString(record, "VDI")
 		if vdiRef == "" || vdiRef == "OpaqueRef:NULL" {
 			continue
