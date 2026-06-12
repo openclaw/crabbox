@@ -39,6 +39,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return applyFlags(cfg, fs, values)
 }
 
+func (Provider) CreationOnlyFlagNames() []string {
+	return []string{"local-container-volume"}
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)

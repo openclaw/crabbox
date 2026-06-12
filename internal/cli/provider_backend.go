@@ -36,6 +36,10 @@ type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
 }
 
+type ProviderCreationOnlyFlagProvider interface {
+	CreationOnlyFlagNames() []string
+}
+
 type LeaseClaimEndpointPreparer interface {
 	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
 }

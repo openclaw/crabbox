@@ -1282,6 +1282,9 @@ func (testLocalContainerProvider) Name() string { return "local-container" }
 func (testLocalContainerProvider) Aliases() []string {
 	return []string{"docker", "container", "local-docker"}
 }
+func (testLocalContainerProvider) CreationOnlyFlagNames() []string {
+	return []string{"local-container-volume"}
+}
 func (testLocalContainerProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "local-container",

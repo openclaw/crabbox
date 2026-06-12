@@ -356,5 +356,12 @@ func prewarmProviderPassthroughFlags(defaults Config) map[string]bool {
 		}
 		flags[f.Name] = takesValue
 	})
+	for _, provider := range registeredProviders() {
+		if creationOnly, ok := provider.(ProviderCreationOnlyFlagProvider); ok {
+			for _, name := range creationOnly.CreationOnlyFlagNames() {
+				delete(flags, name)
+			}
+		}
+	}
 	return flags
 }
