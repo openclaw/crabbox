@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -855,6 +857,8 @@ func TestCreateFreshVMPreservesTemplateDefaults(t *testing.T) {
 			switch {
 			case strings.Contains(body, "<string>secureboot</string>") && strings.Contains(body, "<string>true</string>"):
 				addedPlatformValues = append(addedPlatformValues, "secureboot=true")
+			case strings.Contains(body, "<string>device-model</string>") && strings.Contains(body, "<string>qemu-upstream-uefi</string>"):
+				addedPlatformValues = append(addedPlatformValues, "device-model=qemu-upstream-uefi")
 			default:
 				t.Fatalf("unexpected add platform body=%s", body)
 			}
@@ -967,6 +971,8 @@ func TestCreateFreshVMSecureBootOverridesTemplateWithoutDroppingPlatformDefaults
 			switch {
 			case strings.Contains(body, "<string>secureboot</string>") && strings.Contains(body, "<string>true</string>"):
 				addedPlatformValues = append(addedPlatformValues, "secureboot=true")
+			case strings.Contains(body, "<string>device-model</string>") && strings.Contains(body, "<string>qemu-upstream-uefi</string>"):
+				addedPlatformValues = append(addedPlatformValues, "device-model=qemu-upstream-uefi")
 			default:
 				t.Fatalf("unexpected add platform body=%s", body)
 			}
@@ -996,6 +1002,7 @@ func TestCreateFreshVMSecureBootOverridesTemplateWithoutDroppingPlatformDefaults
 	}
 	sort.Strings(removedBootKeys)
 	sort.Strings(addedBootValues)
+	sort.Strings(addedPlatformValues)
 	if got := strings.Join(removedBootKeys, ","); got != "firmware,order" {
 		t.Fatalf("removedBootKeys=%v", removedBootKeys)
 	}
@@ -1005,7 +1012,7 @@ func TestCreateFreshVMSecureBootOverridesTemplateWithoutDroppingPlatformDefaults
 	if got := strings.Join(removedPlatformKeys, ","); got != "secureboot" {
 		t.Fatalf("removedPlatformKeys=%v", removedPlatformKeys)
 	}
-	if got := strings.Join(addedPlatformValues, ","); got != "secureboot=true" {
+	if got := strings.Join(addedPlatformValues, ","); got != "device-model=qemu-upstream-uefi,secureboot=true" {
 		t.Fatalf("addedPlatformValues=%v", addedPlatformValues)
 	}
 }
@@ -1283,7 +1290,7 @@ func TestDiscoverIPv4ByMACFallsBackToLocalProbe(t *testing.T) {
 		xcpNgLocalIPv4Networks = oldLocalIPv4Networks
 		xcpNgProbeTCPAddress = oldProbeTCPAddress
 	})
-	ip, err := discoverIPv4ByMAC(context.Background(), []string{"AA-BB-CC-DD-EE-FF"}, "")
+	ip, err := discoverIPv4ByMAC(context.Background(), []string{"AA-BB-CC-DD-EE-FF"}, "192.0.2.0/24")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1292,6 +1299,84 @@ func TestDiscoverIPv4ByMACFallsBackToLocalProbe(t *testing.T) {
 	}
 	if probeCount.Load() == 0 {
 		t.Fatal("expected TCP probe sweep")
+	}
+}
+
+func TestGuestProbeNetworksRequiresBoundedAttachedCIDR(t *testing.T) {
+	networks := []net.IPNet{{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)}}
+
+	got, err := guestProbeNetworks(networks, "192.0.2.64/26")
+	if err != nil || len(got) != 1 || got[0].String() != "192.0.2.64/26" {
+		t.Fatalf("networks=%v err=%v", got, err)
+	}
+	for _, cidr := range []string{"", "198.51.100.0/24", "192.0.0.0/16", "not-a-cidr"} {
+		if _, err := guestProbeNetworks(networks, cidr); err == nil {
+			t.Fatalf("guest CIDR %q unexpectedly accepted", cidr)
+		}
+	}
+	halfSubnet := []net.IPNet{{IP: net.IPv4(192, 0, 2, 128), Mask: net.CIDRMask(25, 32)}}
+	if _, err := guestProbeNetworks(halfSubnet, "192.0.2.130/24"); err == nil {
+		t.Fatal("guest CIDR extending outside local interface was accepted")
+	}
+}
+
+func TestEnumerateIPv4HostsSupportsPointToPointAndSingleHostRanges(t *testing.T) {
+	for _, tc := range []struct {
+		cidr string
+		want []string
+	}{
+		{cidr: "192.0.2.10/32", want: []string{"192.0.2.10"}},
+		{cidr: "192.0.2.10/31", want: []string{"192.0.2.10", "192.0.2.11"}},
+	} {
+		_, network, err := net.ParseCIDR(tc.cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := enumerateIPv4Hosts(*network); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("cidr=%s hosts=%v want %v", tc.cidr, got, tc.want)
+		}
+	}
+}
+
+func TestClampIPv4NetworkPreservesPointToPointAndSingleHostMasks(t *testing.T) {
+	for _, cidr := range []string{"10.0.1.10/16", "192.0.2.10/31", "192.0.2.10/32"} {
+		ip, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := network.String()
+		network.IP = ip
+		got, ok := clampIPv4Network(*network)
+		if !ok || got.String() != want {
+			t.Fatalf("cidr=%s got=%s want=%s ok=%v", cidr, got.String(), want, ok)
+		}
+	}
+}
+
+func TestGuestProbeNetworksAcceptsBoundedCIDRWithinBroadLocalInterface(t *testing.T) {
+	networks := []net.IPNet{{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(16, 32)}}
+	got, err := guestProbeNetworks(networks, "10.0.2.0/24")
+	if err != nil || len(got) != 1 || got[0].String() != "10.0.2.0/24" {
+		t.Fatalf("networks=%v err=%v", got, err)
+	}
+}
+
+func TestReadARPTableAcceptsSuccessfulEmptyReader(t *testing.T) {
+	oldRun := xcpNgRunNeighborCommand
+	xcpNgRunNeighborCommand = func(_ context.Context, name string, _ ...string) ([]byte, error) {
+		if name == "arp" {
+			return nil, exec.ErrNotFound
+		}
+		return []byte{}, nil
+	}
+	t.Cleanup(func() { xcpNgRunNeighborCommand = oldRun })
+
+	table, err := readARPTable(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(table) != 0 {
+		t.Fatalf("table=%v", table)
 	}
 }
 

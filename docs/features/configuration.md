@@ -412,11 +412,16 @@ CRABBOX_XCP_NG_SR
 CRABBOX_XCP_NG_SR_UUID
 CRABBOX_XCP_NG_NETWORK
 CRABBOX_XCP_NG_NETWORK_UUID
+CRABBOX_XCP_NG_GUEST_CIDR
 CRABBOX_XCP_NG_HOST
 CRABBOX_XCP_NG_USER
 CRABBOX_XCP_NG_WORK_ROOT
 CRABBOX_XCP_NG_INSECURE_TLS
 ```
+
+Set `CRABBOX_XCP_NG_GUEST_CIDR` to an IPv4 `/24` or narrower range attached
+to the local runner only when guest tools cannot report an address and active
+MAC discovery is required. Crabbox never sweeps all local interfaces.
 
 ### Static SSH
 

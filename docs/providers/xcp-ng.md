@@ -180,11 +180,17 @@ CRABBOX_XCP_NG_SR
 CRABBOX_XCP_NG_SR_UUID
 CRABBOX_XCP_NG_NETWORK
 CRABBOX_XCP_NG_NETWORK_UUID
+CRABBOX_XCP_NG_GUEST_CIDR
 CRABBOX_XCP_NG_HOST
 CRABBOX_XCP_NG_USER
 CRABBOX_XCP_NG_WORK_ROOT
 CRABBOX_XCP_NG_INSECURE_TLS
 ```
+
+`CRABBOX_XCP_NG_GUEST_CIDR` enables bounded active MAC discovery for fresh
+guests that do not yet report XAPI guest metrics. It must be an IPv4 `/24` or
+narrower range attached to the local runner. Without it, Crabbox may use an
+existing neighbor-table entry but does not sweep local subnets.
 
 Provider flags mirror the non-secret config fields:
 

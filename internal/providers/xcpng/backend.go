@@ -296,6 +296,10 @@ func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleCli
 			if discoverErr == nil && discovered != "" {
 				return discovered, nil
 			}
+			var configErr guestProbeConfigError
+			if errors.As(discoverErr, &configErr) {
+				return "", discoverErr
+			}
 			if lastErr == nil && discoverErr != nil {
 				lastErr = discoverErr
 			}

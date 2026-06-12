@@ -596,6 +596,22 @@ func TestWaitForGuestIPv4FallsBackToDiscoveredGuestIP(t *testing.T) {
 	}
 }
 
+func TestWaitForGuestIPv4ReturnsDiscoveryConfigurationErrorImmediately(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		errOn: map[string]error{
+			"guest-ip":          errors.New("guest metrics unavailable"),
+			"discover-guest-ip": guestProbeConfigError{message: "invalid guest CIDR"},
+		},
+	}
+	backend := newTestBackend(t, fake)
+
+	_, err := backend.waitForGuestIPv4(context.Background(), fake, "OpaqueRef:vm", time.Hour)
+
+	if err == nil || err.Error() != "invalid guest CIDR" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestResolveRejectsExistingNonCrabboxVM(t *testing.T) {
 	fake := &fakeLifecycleClient{getServer: map[string]Server{"OpaqueRef:user": {CloudID: "OpaqueRef:user", Name: "user-vm", Labels: map[string]string{"crabbox": "false"}}}}
 	backend := newTestBackend(t, fake)
@@ -1164,7 +1180,7 @@ func TestRunISOE2ELinuxMutateClassifiesGuestMetricsBlocker(t *testing.T) {
 	}
 }
 
-func TestRunISOE2ELinuxMutateFallsBackToDiscoveredGuestIP(t *testing.T) {
+func TestRunISOE2ELinuxMutateUsesGuestMetricsForInstallCompletion(t *testing.T) {
 	dir := t.TempDir()
 	isoPath := filepath.Join(dir, "ubuntu.iso")
 	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
@@ -1178,8 +1194,8 @@ func TestRunISOE2ELinuxMutateFallsBackToDiscoveredGuestIP(t *testing.T) {
 		drive:        xcpNgConfigDrive{VDIRef: "OpaqueRef:seed-vdi", VBDRef: "OpaqueRef:seed-vbd", Name: "linux-seed", DestroyVDI: true},
 		importedISO:  xcpNgConfigDrive{VDIRef: "OpaqueRef:imported-vdi", Name: "installer.iso", DestroyVDI: true},
 		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk-vdi", VBDRef: "OpaqueRef:disk-vbd", Name: "install-disk", DestroyVDI: true},
-		discoveredIP: "192.0.2.88",
-		errOn:        map[string]error{"guest-ip": errors.New("no guest ipv4 address reported by XCP-ng guest metrics")},
+		guestIP:      "192.0.2.88",
+		discoveredIP: "198.51.100.88",
 	}
 	oldClient := newLifecycleClient
 	oldWait := isoE2EWaitForSSHReady
@@ -1216,8 +1232,39 @@ func TestRunISOE2ELinuxMutateFallsBackToDiscoveredGuestIP(t *testing.T) {
 	if summary.Details["first_boot_ip"] != "192.0.2.88" {
 		t.Fatalf("summary=%#v", summary)
 	}
-	if got := strings.Join(fake.calls, ","); !strings.Contains(got, "discover-guest-ip") {
-		t.Fatalf("calls=%v", fake.calls)
+	if got := strings.Join(fake.calls, ","); strings.Contains(got, "discover-guest-ip") {
+		t.Fatalf("installer completion used ARP discovery: calls=%v", fake.calls)
+	}
+}
+
+func TestISOE2EGuestDiscoveryRequiresExplicitInstallPathOptIn(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		errOn:        map[string]error{"guest-ip": errors.New("guest metrics unavailable")},
+		discoveredIP: "192.0.2.88",
+	}
+	runtime := isoE2ERuntime{client: fake, vm: xcpNgFreshVMResult{VM: xapiVM{Ref: "OpaqueRef:vm"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := runtime.waitForGuestIPv4(ctx, "Linux", false); err == nil {
+		t.Fatal("expected metrics-only wait to fail")
+	}
+	if got := strings.Join(fake.calls, ","); strings.Contains(got, "discover-guest-ip") {
+		t.Fatalf("metrics-only wait used discovery: calls=%v", fake.calls)
+	}
+
+	fake.calls = nil
+	ip, err := runtime.waitForGuestIPv4(context.Background(), "Windows", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "192.0.2.88" || !strings.Contains(strings.Join(fake.calls, ","), "discover-guest-ip") {
+		t.Fatalf("ip=%q calls=%v", ip, fake.calls)
+	}
+
+	fake.calls = nil
+	fake.errOn["discover-guest-ip"] = guestProbeConfigError{message: "invalid guest CIDR"}
+	if _, err := runtime.waitForGuestIPv4(context.Background(), "Windows", true); err == nil || err.Error() != "invalid guest CIDR" {
+		t.Fatalf("err=%v", err)
 	}
 }
 

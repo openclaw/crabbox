@@ -25,12 +25,17 @@ import (
 )
 
 type xapiClient struct {
-	endpoint string
-	session  string
-	username string
-	password string
-	http     *http.Client
+	endpoint  string
+	session   string
+	username  string
+	password  string
+	guestCIDR string
+	http      *http.Client
 }
+
+type guestProbeConfigError struct{ message string }
+
+func (e guestProbeConfigError) Error() string { return e.message }
 
 var (
 	xcpNgShutdownPollInterval = 2 * time.Second
@@ -46,8 +51,11 @@ var (
 		}
 		return err
 	}
-	xcpNgLocalIPv4Networks = localIPv4Networks
-	xcpNgReadARPTable      = readARPTable
+	xcpNgLocalIPv4Networks  = localIPv4Networks
+	xcpNgReadARPTable       = readARPTable
+	xcpNgRunNeighborCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	}
 )
 
 func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
@@ -68,7 +76,13 @@ func newXAPIClient(ctx context.Context, cfg Config) (*xapiClient, error) {
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: xcfg.InsecureTLS}, //nolint:gosec // explicit private-lab opt-in.
 	}
 	httpClient := &http.Client{Timeout: 5 * time.Minute, Transport: transport}
-	c := &xapiClient{endpoint: endpoint, username: xcfg.Username, password: xcfg.Password, http: httpClient}
+	c := &xapiClient{
+		endpoint:  endpoint,
+		username:  xcfg.Username,
+		password:  xcfg.Password,
+		guestCIDR: strings.TrimSpace(os.Getenv("CRABBOX_XCP_NG_GUEST_CIDR")),
+		http:      httpClient,
+	}
 	if err := c.login(ctx); err != nil {
 		return nil, err
 	}
@@ -329,6 +343,7 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 	}
 	if req.SecureBoot {
 		platformKeys["secureboot"] = "true"
+		platformKeys["device-model"] = "qemu-upstream-uefi"
 	}
 	// Clone from the "Other install media" template instead of using VM.create,
 	// which requires Map(String,String) fields that trigger the XAPI XML-RPC
@@ -712,11 +727,7 @@ func (c *xapiClient) DiscoverGuestIPv4(ctx context.Context, ref xapiRef) (string
 	if err != nil {
 		return "", err
 	}
-	endpointHost := ""
-	if u, parseErr := url.Parse(c.endpoint); parseErr == nil {
-		endpointHost = u.Hostname()
-	}
-	return discoverIPv4ByMAC(ctx, macs, endpointHost)
+	return discoverIPv4ByMAC(ctx, macs, c.guestCIDR)
 }
 
 func (c *xapiClient) GuestIPv4ForID(ctx context.Context, id string) (string, error) {
@@ -765,7 +776,7 @@ func (c *xapiClient) vmVIFMACs(ctx context.Context, vmRef string) ([]string, err
 	return macs, nil
 }
 
-func discoverIPv4ByMAC(ctx context.Context, macs []string, endpointHost string) (string, error) {
+func discoverIPv4ByMAC(ctx context.Context, macs []string, guestCIDR string) (string, error) {
 	macs = normalizeMACList(macs)
 	if len(macs) == 0 {
 		return "", errors.New("xcp-ng guest IP fallback requires at least one VIF MAC")
@@ -777,7 +788,10 @@ func discoverIPv4ByMAC(ctx context.Context, macs []string, endpointHost string) 
 	if err != nil {
 		return "", err
 	}
-	networks = preferredLocalIPv4Networks(networks, endpointHost)
+	networks, err = guestProbeNetworks(networks, guestCIDR)
+	if err != nil {
+		return "", err
+	}
 	if len(networks) == 0 {
 		return "", errors.New("xcp-ng guest IP fallback found no local IPv4 networks to probe")
 	}
@@ -798,21 +812,27 @@ func matchIPv4ByMAC(ctx context.Context, macs []string) (string, error) {
 	return "", nil
 }
 
-func preferredLocalIPv4Networks(networks []net.IPNet, endpointHost string) []net.IPNet {
-	endpointIP := net.ParseIP(strings.TrimSpace(endpointHost)).To4()
-	if endpointIP == nil {
-		return networks
+func guestProbeNetworks(networks []net.IPNet, guestCIDR string) ([]net.IPNet, error) {
+	guestCIDR = strings.TrimSpace(guestCIDR)
+	if guestCIDR == "" {
+		return nil, errors.New("xcp-ng active guest IP discovery is disabled; set CRABBOX_XCP_NG_GUEST_CIDR to opt in")
 	}
-	filtered := make([]net.IPNet, 0, len(networks))
-	for _, network := range networks {
-		if network.Contains(endpointIP) {
-			filtered = append(filtered, network)
+	parsedIP, guestNetwork, err := net.ParseCIDR(guestCIDR)
+	if err != nil || parsedIP.To4() == nil {
+		return nil, guestProbeConfigError{message: fmt.Sprintf("invalid CRABBOX_XCP_NG_GUEST_CIDR %q", guestCIDR)}
+	}
+	ones, bits := guestNetwork.Mask.Size()
+	if bits != 32 || ones < 24 {
+		return nil, guestProbeConfigError{message: "CRABBOX_XCP_NG_GUEST_CIDR must be an IPv4 /24 or narrower range"}
+	}
+	first := guestNetwork.IP.To4()
+	last := ipv4FromUint32(binaryIPv4(first) | ^binaryIPv4(net.IP(guestNetwork.Mask)))
+	for _, localNetwork := range networks {
+		if localNetwork.Contains(first) && localNetwork.Contains(last) {
+			return []net.IPNet{*guestNetwork}, nil
 		}
 	}
-	if len(filtered) == 0 {
-		return networks
-	}
-	return filtered
+	return nil, guestProbeConfigError{message: fmt.Sprintf("CRABBOX_XCP_NG_GUEST_CIDR %q is not attached to a local interface", guestCIDR)}
 }
 
 func probeLocalNetworks(ctx context.Context, networks []net.IPNet) {
@@ -887,12 +907,9 @@ func clampIPv4Network(network net.IPNet) (net.IPNet, bool) {
 	if ip == nil {
 		return net.IPNet{}, false
 	}
-	ones, bits := network.Mask.Size()
-	if bits != net.IPv4len*8 || ones >= 31 {
+	_, bits := network.Mask.Size()
+	if bits != net.IPv4len*8 {
 		return net.IPNet{}, false
-	}
-	if ones < 24 {
-		network.Mask = net.CIDRMask(24, net.IPv4len*8)
 	}
 	network.IP = ip.Mask(network.Mask)
 	return network, true
@@ -908,16 +925,20 @@ func enumerateIPv4Hosts(network net.IPNet) []string {
 		return nil
 	}
 	hostBits := bits - ones
-	if hostBits <= 0 {
-		return nil
+	if hostBits == 0 {
+		return []string{ip.String()}
 	}
 	total := 1 << hostBits
 	if total > 256 {
 		total = 256
 	}
 	base := binaryIPv4(ip)
-	hosts := make([]string, 0, max(total-2, 0))
-	for offset := 1; offset < total-1; offset++ {
+	firstOffset, lastOffset := 1, total-1
+	if hostBits == 1 {
+		firstOffset, lastOffset = 0, total
+	}
+	hosts := make([]string, 0, lastOffset-firstOffset)
+	for offset := firstOffset; offset < lastOffset; offset++ {
 		hosts = append(hosts, ipv4FromUint32(base+uint32(offset)).String())
 	}
 	return hosts
@@ -926,17 +947,19 @@ func enumerateIPv4Hosts(network net.IPNet) []string {
 func readARPTable(ctx context.Context) (map[string]string, error) {
 	table := map[string]string{}
 	var firstErr error
+	var succeeded bool
 	for _, spec := range [][]string{{"arp", "-an"}, {"ip", "neigh"}} {
-		out, err := exec.CommandContext(ctx, spec[0], spec[1:]...).CombinedOutput()
+		out, err := xcpNgRunNeighborCommand(ctx, spec[0], spec[1:]...)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
+		succeeded = true
 		mergeARPTable(table, string(out))
 	}
-	if len(table) > 0 {
+	if len(table) > 0 || succeeded {
 		return table, nil
 	}
 	return nil, firstErr

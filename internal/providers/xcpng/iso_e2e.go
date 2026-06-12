@@ -299,16 +299,16 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	}
 	installerCtx, installerCancel := context.WithTimeout(ctx, installerDeadline)
 	defer installerCancel()
-	firstBootIP, ipErr := runtime.waitForGuestIPv4(installerCtx, "Windows")
+	firstBootIP, ipErr := runtime.waitForGuestIPv4(installerCtx, "Windows", !runtime.windowsFallback)
 	if ipErr != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "windows_install_complete"
 		result.Reason = ipErr.Error()
 		return result, ipErr
 	}
-	result.Phase = "windows_install_complete"
-	result.Details["first_boot_ip"] = firstBootIP
 	if runtime.windowsFallback {
+		result.Phase = "windows_install_complete"
+		result.Details["first_boot_ip"] = firstBootIP
 		result.Classification = "source_uncovered"
 		result.Phase = "windows_first_boot"
 		result.Details["readiness_probe"] = "guest-metrics"
@@ -329,6 +329,8 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 		result.Reason = err.Error()
 		return result, err
 	}
+	result.Phase = "windows_install_complete"
+	result.Details["first_boot_ip"] = firstBootIP
 	result.Phase = "windows_first_boot"
 	if err = isoE2ERunSSHQuiet(ctx, runtime.sshTarget, `Write-Output windows-iso-e2e-ok`); err != nil {
 		result.Classification = "environment_blocked"
@@ -423,7 +425,7 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	}
 	installerCtx, installerCancel := context.WithTimeout(ctx, installerDeadline)
 	defer installerCancel()
-	firstBootIP, ipErr := runtime.waitForGuestIPv4(installerCtx, "Linux")
+	firstBootIP, ipErr := runtime.waitForGuestIPv4(installerCtx, "Linux", false)
 	if ipErr != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "linux_install_complete"
@@ -811,7 +813,7 @@ func (r *isoE2ERuntime) startVM(ctx context.Context) error {
 	return r.client.StartVM(ctx, xapiRef(r.vm.VM.Ref))
 }
 
-func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context, installLabel string) (string, error) {
+func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context, installLabel string, allowDiscovery bool) (string, error) {
 	waitLabel := strings.ToLower(strings.TrimSpace(installLabel))
 	if waitLabel == "" {
 		waitLabel = "guest"
@@ -832,14 +834,20 @@ func (r *isoE2ERuntime) waitForGuestIPv4(ctx context.Context, installLabel strin
 			return ip, nil
 		}
 		lastErr = err
-		if discoverer, ok := r.client.(guestIPv4Discoverer); ok && time.Now().After(nextDiscover) {
-			nextDiscover = time.Now().Add(guestIPDiscoverInterval)
-			discovered, discoverErr := discoverer.DiscoverGuestIPv4(ctx, xapiRef(r.vm.VM.Ref))
-			if discoverErr == nil && discovered != "" {
-				return discovered, nil
-			}
-			if lastErr == nil && discoverErr != nil {
-				lastErr = discoverErr
+		if allowDiscovery {
+			if discoverer, ok := r.client.(guestIPv4Discoverer); ok && time.Now().After(nextDiscover) {
+				nextDiscover = time.Now().Add(guestIPDiscoverInterval)
+				discovered, discoverErr := discoverer.DiscoverGuestIPv4(ctx, xapiRef(r.vm.VM.Ref))
+				if discoverErr == nil && discovered != "" {
+					return discovered, nil
+				}
+				var configErr guestProbeConfigError
+				if errors.As(discoverErr, &configErr) {
+					return "", discoverErr
+				}
+				if lastErr == nil && discoverErr != nil {
+					lastErr = discoverErr
+				}
 			}
 		}
 
