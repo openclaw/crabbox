@@ -177,7 +177,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	ip, err := b.waitForGuestIPv4(ctx, client, vmRef, bootstrapWaitTimeout(cfg))
 	if err != nil {
-		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
+		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
 		retainKey = vmRetained
 		if vmRetained {
 			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after guest IP failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
@@ -187,7 +187,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	server.PublicNet.IPv4.IP = ip
 	target := sshTargetFromConfig(cfg, ip)
 	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
-		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
+		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
 		retainKey = vmRetained
 		if vmRetained {
 			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after SSH bootstrap failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
@@ -256,7 +256,7 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 	server := xcpNgVMToServer(vm, labels, "")
 	payload, err := newCloudInitPayload(cfg, leaseID, slug, publicKey)
 	if err != nil {
-		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
+		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, xcpNgConfigDrive{})
 		if vmRetained {
 			return server, xcpNgConfigDrive{}, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
 		}
@@ -264,14 +264,14 @@ func (b *leaseBackend) createAndBoot(ctx context.Context, client lifecycleClient
 	}
 	configDrive, err := client.AttachConfigDrive(ctx, xcpNgConfigDriveRequest{VMRef: xapiRef(vm.Ref), SRRef: placement.srRef, LeaseID: leaseID, Slug: slug, Payload: payload, Labels: labels})
 	if err != nil {
-		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, xcpNgConfigDrive{})
+		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, xcpNgConfigDrive{})
 		if vmRetained {
 			return server, xcpNgConfigDrive{}, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
 		}
 		return Server{}, xcpNgConfigDrive{}, "", errors.Join(err, cleanupErr)
 	}
 	if err := client.StartVM(ctx, xapiRef(vm.Ref)); err != nil {
-		vmRetained, cleanupErr := b.cleanupFailedLease(context.Background(), client, server.CloudID, configDrive)
+		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
 		if vmRetained {
 			return server, configDrive, xapiRef(vm.Ref), errors.Join(err, cleanupErr)
 		}
@@ -319,11 +319,8 @@ func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleCli
 }
 
 func (b *leaseBackend) cleanupFailedLease(ctx context.Context, client lifecycleClient, vmID string, drive xcpNgConfigDrive) (bool, error) {
-	if _, bounded := ctx.Deadline(); !bounded {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, xcpNgRollbackCleanupTimeout)
-		defer cancel()
-	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), xcpNgRollbackCleanupTimeout)
+	defer cancel()
 	var cleanupErr error
 	if drive.VBDRef != "" || drive.VDIRef != "" {
 		if err := client.DeleteConfigDrive(ctx, drive); err != nil {
@@ -719,6 +716,7 @@ var bootstrapWaitTimeout = func(cfg Config) time.Duration { return core.Bootstra
 var guestIPPollInterval = 5 * time.Second
 var guestIPDiscoverInterval = 15 * time.Second
 var xcpNgRollbackCleanupTimeout = 11 * time.Minute
+var xcpNgPartialRollbackTimeout = 30 * time.Second
 var findServerByAlias = func(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }

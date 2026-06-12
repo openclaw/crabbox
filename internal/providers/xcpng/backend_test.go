@@ -486,6 +486,24 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 	}
 }
 
+func TestCleanupFailedLeaseIsBoundedAndDetachedFromCancellation(t *testing.T) {
+	fake := &fakeLifecycleClient{}
+	backend := newTestBackend(t, fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	retained, err := backend.cleanupFailedLease(ctx, fake, xcpNgTestVMUUID, xcpNgConfigDrive{VDIRef: "OpaqueRef:vdi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained {
+		t.Fatal("cleanup unexpectedly retained VM")
+	}
+	if !fake.deleteBounded || !fake.deleteCDBounded {
+		t.Fatalf("cleanup contexts: delete=%v delete-config-drive=%v", fake.deleteBounded, fake.deleteCDBounded)
+	}
+}
+
 func TestAcquireRetainsKeyWhenVMRollbackFails(t *testing.T) {
 	fake := &fakeLifecycleClient{
 		templateRef: "OpaqueRef:tpl",

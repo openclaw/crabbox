@@ -278,39 +278,43 @@ func (c *xapiClient) CloneVM(ctx context.Context, req xcpNgCloneRequest) (xapiVM
 	}
 	vm := xapiVM{Ref: ref, Name: name, PowerState: "halted", Labels: req.Labels}
 	if err := c.setVMLabels(ctx, ref, req.Labels); err != nil {
-		return c.rollbackClonedVM(ref, vm, req.Labels, false, err)
+		return c.rollbackClonedVM(ctx, ref, vm, req.Labels, false, err)
 	}
 	if req.HostRef != "" {
 		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil && req.HostRef != "" {
-			return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
+			return c.rollbackClonedVM(ctx, ref, vm, req.Labels, true, err)
 		}
 	}
 	if req.NetworkRef != "" {
 		if err := c.setVMNetwork(ctx, ref, req.NetworkRef.value()); err != nil {
-			return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
+			return c.rollbackClonedVM(ctx, ref, vm, req.Labels, true, err)
 		}
 	}
 	if _, err := c.call(ctx, "VM.provision", c.session, ref); err != nil {
-		return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
+		return c.rollbackClonedVM(ctx, ref, vm, req.Labels, true, err)
 	}
 	if err := c.markAttachedUserDisks(ctx, ref, vmDiskLabels(req.Labels)); err != nil {
-		return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
+		return c.rollbackClonedVM(ctx, ref, vm, req.Labels, true, err)
 	}
 	uuid, err := c.callString(ctx, "VM.get_uuid", c.session, ref)
 	if err != nil {
-		return c.rollbackClonedVM(ref, vm, req.Labels, true, err)
+		return c.rollbackClonedVM(ctx, ref, vm, req.Labels, true, err)
 	}
 	vm.UUID = uuid
 	return vm, nil
 }
 
-func (c *xapiClient) rollbackClonedVM(ref string, vm xapiVM, labels map[string]string, labeled bool, cause error) (xapiVM, error) {
-	cleanupErr := c.deleteServer(context.Background(), ref, true)
+func (c *xapiClient) rollbackClonedVM(ctx context.Context, ref string, vm xapiVM, labels map[string]string, labeled bool, cause error) (xapiVM, error) {
+	cleanupCtx, cancel := xcpNgRollbackContext(ctx)
+	defer cancel()
+	cleanupErr := c.deleteServer(cleanupCtx, ref, true)
 	if cleanupErr == nil {
 		return xapiVM{}, cause
 	}
 	if !labeled {
-		if recoveryErr := c.setVMLabels(context.Background(), ref, labels); recoveryErr != nil {
+		recoveryCtx, recoveryCancel := xcpNgRollbackContext(ctx)
+		defer recoveryCancel()
+		if recoveryErr := c.setVMLabels(recoveryCtx, ref, labels); recoveryErr != nil {
 			return vm, errors.Join(cause, fmt.Errorf("rollback copied xcp-ng VM: %w", cleanupErr), fmt.Errorf("mark copied xcp-ng VM for recovery: %w", recoveryErr))
 		}
 	}
@@ -360,7 +364,7 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 	result := xcpNgFreshVMResult{VM: xapiVM{Ref: ref, Name: req.Name, PowerState: "halted", Labels: req.Labels}}
 	labeled := false
 	rollback := func(cause error) (xcpNgFreshVMResult, error) {
-		return c.rollbackFreshVM(result, req.Labels, labeled, cause)
+		return c.rollbackFreshVM(ctx, result, req.Labels, labeled, cause)
 	}
 	if _, err := c.call(ctx, "VM.set_is_a_template", c.session, ref, false); err != nil {
 		return rollback(err)
@@ -474,25 +478,35 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 	return result, nil
 }
 
-func (c *xapiClient) rollbackFreshVM(result xcpNgFreshVMResult, labels map[string]string, labeled bool, cause error) (xcpNgFreshVMResult, error) {
-	cleanupErr := c.deleteServer(context.Background(), result.VM.Ref, true)
+func (c *xapiClient) rollbackFreshVM(ctx context.Context, result xcpNgFreshVMResult, labels map[string]string, labeled bool, cause error) (xcpNgFreshVMResult, error) {
+	cleanupCtx, cancel := xcpNgRollbackContext(ctx)
+	defer cancel()
+	cleanupErr := c.deleteServer(cleanupCtx, result.VM.Ref, true)
 	if cleanupErr == nil {
 		return xcpNgFreshVMResult{}, cause
 	}
 	if !labeled {
-		if recoveryErr := c.setVMLabels(context.Background(), result.VM.Ref, labels); recoveryErr != nil {
+		recoveryCtx, recoveryCancel := xcpNgRollbackContext(ctx)
+		defer recoveryCancel()
+		if recoveryErr := c.setVMLabels(recoveryCtx, result.VM.Ref, labels); recoveryErr != nil {
 			return result, errors.Join(cause, fmt.Errorf("rollback fresh xcp-ng VM: %w", cleanupErr), fmt.Errorf("mark fresh xcp-ng VM for recovery: %w", recoveryErr))
 		}
 	}
 	return result, errors.Join(cause, fmt.Errorf("rollback fresh xcp-ng VM: %w", cleanupErr))
 }
 
-func (c *xapiClient) rollbackConfigDrive(drive xcpNgConfigDrive, cause error) (xcpNgConfigDrive, error) {
-	cleanupErr := c.DeleteConfigDrive(context.Background(), drive)
+func (c *xapiClient) rollbackConfigDrive(ctx context.Context, drive xcpNgConfigDrive, cause error) (xcpNgConfigDrive, error) {
+	cleanupCtx, cancel := xcpNgRollbackContext(ctx)
+	defer cancel()
+	cleanupErr := c.DeleteConfigDrive(cleanupCtx, drive)
 	if cleanupErr == nil {
 		return xcpNgConfigDrive{}, cause
 	}
 	return drive, errors.Join(cause, fmt.Errorf("rollback xcp-ng drive %s: %w", drive.VDIRef, cleanupErr))
+}
+
+func xcpNgRollbackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), xcpNgPartialRollbackTimeout)
 }
 
 func (c *xapiClient) ImportISO(ctx context.Context, req xcpNgImportISORequest) (xcpNgConfigDrive, error) {
@@ -535,12 +549,12 @@ func (c *xapiClient) ImportISO(ctx context.Context, req xcpNgImportISORequest) (
 	drive := xcpNgConfigDrive{VDIRef: vdiRef, Name: name, Labels: labels, DestroyVDI: req.DestroyVDI}
 	if err := c.importFileVDI(ctx, vdiRef, path, info.Size(), "crabbox import ISO", "Import Crabbox installer ISO"); err != nil {
 		drive.DestroyVDI = true
-		return c.rollbackConfigDrive(drive, err)
+		return c.rollbackConfigDrive(ctx, drive, err)
 	}
 	if req.MarkReadOnly {
 		if _, err := c.call(ctx, "VDI.set_read_only", c.session, vdiRef, true); err != nil {
 			drive.DestroyVDI = true
-			return c.rollbackConfigDrive(drive, err)
+			return c.rollbackConfigDrive(ctx, drive, err)
 		}
 	}
 	return drive, nil
@@ -593,7 +607,7 @@ func (c *xapiClient) AttachDisk(ctx context.Context, req xcpNgDiskAttachRequest)
 	})
 	if err != nil {
 		drive.DestroyVDI = true
-		return c.rollbackConfigDrive(drive, err)
+		return c.rollbackConfigDrive(ctx, drive, err)
 	}
 	drive.VBDRef = vbdRef
 	return drive, nil
@@ -627,7 +641,7 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 	}
 	drive := xcpNgConfigDrive{VDIRef: vdiRef, Name: name, Labels: labels, DestroyVDI: true}
 	if err := c.importRawVDI(ctx, vdiRef, image); err != nil {
-		return c.rollbackConfigDrive(drive, err)
+		return c.rollbackConfigDrive(ctx, drive, err)
 	}
 	vbdRef, err := c.callString(ctx, "VBD.create", c.session, map[string]any{
 		"VM":                       req.VMRef.value(),
@@ -644,7 +658,7 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 		"other_config":             labels,
 	})
 	if err != nil {
-		return c.rollbackConfigDrive(drive, err)
+		return c.rollbackConfigDrive(ctx, drive, err)
 	}
 	drive.VBDRef = vbdRef
 	drive.DestroyVDI = true
@@ -1433,7 +1447,11 @@ func (c *xapiClient) importReaderVDI(ctx context.Context, vdiRef string, reader 
 	if err != nil {
 		return err
 	}
-	defer func() { _ = c.callDiscard(context.Background(), "task.destroy", c.session, taskRef) }()
+	defer func() {
+		cleanupCtx, cancel := xcpNgRollbackContext(ctx)
+		defer cancel()
+		_ = c.callDiscard(cleanupCtx, "task.destroy", c.session, taskRef)
+	}()
 
 	u, err := url.Parse(c.endpoint)
 	if err != nil {
@@ -1596,7 +1614,10 @@ func (c *xapiClient) setVMOtherConfig(ctx context.Context, ref string, values ma
 		}
 		if _, err := c.call(ctx, "VM.add_to_other_config", c.session, ref, key, value); err != nil {
 			if hadOldValue {
-				if _, restoreErr := c.call(context.Background(), "VM.add_to_other_config", c.session, ref, key, oldValue); restoreErr != nil {
+				restoreCtx, cancel := xcpNgRollbackContext(ctx)
+				_, restoreErr := c.call(restoreCtx, "VM.add_to_other_config", c.session, ref, key, oldValue)
+				cancel()
+				if restoreErr != nil {
 					return errors.Join(err, fmt.Errorf("restore xcp-ng VM metadata %q: %w", key, restoreErr))
 				}
 			}

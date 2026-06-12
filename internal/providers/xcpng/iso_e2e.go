@@ -711,7 +711,10 @@ func (r *isoE2ERuntime) attachInstallerISO(ctx context.Context, installer xcpNgI
 	drive, err := r.client.AttachISO(ctx, xcpNgISOAttachRequest{VMRef: xapiRef(r.vm.VM.Ref), ISO: installer, UserDevice: userDevice, Bootable: true, Labels: r.labels, Unpluggable: true})
 	if err != nil {
 		if r.importedInstaller.VDIRef != "" && r.importedInstaller.DestroyVDI {
-			if deleteErr := r.client.DeleteConfigDrive(context.Background(), r.importedInstaller); deleteErr == nil {
+			cleanupCtx, cancel := xcpNgRollbackContext(ctx)
+			deleteErr := r.client.DeleteConfigDrive(cleanupCtx, r.importedInstaller)
+			cancel()
+			if deleteErr == nil {
 				r.importedInstaller = xcpNgConfigDrive{}
 			} else {
 				err = fmt.Errorf("%w; cleanup imported installer ISO: %v", err, deleteErr)
@@ -794,7 +797,10 @@ func (r *isoE2ERuntime) attachAnswerISO(ctx context.Context, answerISO xcpNgISOM
 	drive, err := r.client.AttachISO(ctx, xcpNgISOAttachRequest{VMRef: xapiRef(r.vm.VM.Ref), ISO: answerISO, UserDevice: userDevice, Bootable: false, Labels: r.labels, Unpluggable: true})
 	if err != nil {
 		if r.importedAnswer.VDIRef != "" && r.importedAnswer.DestroyVDI {
-			if deleteErr := r.client.DeleteConfigDrive(context.Background(), r.importedAnswer); deleteErr == nil {
+			cleanupCtx, cancel := xcpNgRollbackContext(ctx)
+			deleteErr := r.client.DeleteConfigDrive(cleanupCtx, r.importedAnswer)
+			cancel()
+			if deleteErr == nil {
 				r.importedAnswer = xcpNgConfigDrive{}
 			} else {
 				err = fmt.Errorf("%w; cleanup imported answer ISO: %v", err, deleteErr)

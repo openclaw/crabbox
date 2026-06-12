@@ -659,6 +659,29 @@ func TestCloneVMLabelsBeforeAffinityAndRollsBackCopiedDisk(t *testing.T) {
 	}
 }
 
+func TestXCPNgRollbackContextIsBoundedAndDetachedFromCancellation(t *testing.T) {
+	ctx, cancel := xcpNgRollbackContext(context.Background())
+	defer cancel()
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		t.Fatal("rollback context has no deadline")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > xcpNgPartialRollbackTimeout {
+		t.Fatalf("rollback deadline remaining=%s", remaining)
+	}
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+	canceledCtx, cancelCanceled := xcpNgRollbackContext(parent)
+	defer cancelCanceled()
+	if canceledCtx.Err() != nil {
+		t.Fatalf("rollback context inherited cancellation: %v", canceledCtx.Err())
+	}
+	if _, bounded := canceledCtx.Deadline(); !bounded {
+		t.Fatal("detached rollback context has no deadline")
+	}
+}
+
 func TestCloneVMProvisionRollbackDestroysUnlabeledCopiedDisk(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
