@@ -133,7 +133,9 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 	cfg.Provider = "external"
 	cfg.External = ExternalConfig{Command: "new-provider", WorkRoot: "/new/work"}
 	cfg.TargetOS = targetWindows
+	cfg.targetExplicit = true
 	cfg.WindowsMode = windowsModeWSL2
+	cfg.explicitWindowsMode = windowsModeWSL2
 	fs := newFlagSet("test", os.Stderr)
 	if err := autoRouteExternalLease(&cfg, fs, "old-box"); err != nil {
 		t.Fatal(err)
@@ -242,6 +244,9 @@ func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 	}
 	if cfg.External.RoutingFile != selectedPath {
 		t.Fatalf("routing file=%q, want %q", cfg.External.RoutingFile, selectedPath)
+	}
+	if cfg.External.Command != "cbx_111111111111" || !cfg.External.routingLoaded {
+		t.Fatalf("configured routing was not loaded: %#v", cfg.External)
 	}
 }
 

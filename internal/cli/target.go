@@ -293,17 +293,23 @@ func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if providerExplicit {
 		cfg.providerExplicit = true
 	}
+	if flagWasSet(fs, "target") {
+		cfg.targetFlagExplicit = true
+	}
+	if flagWasSet(fs, "windows-mode") {
+		cfg.windowsModeFlagExplicit = true
+	}
 	return autoRouteExternalLeaseWithHints(
 		cfg,
 		id,
 		flagWasSet(fs, "external-routing-file"),
-		flagWasSet(fs, "target") || cfg.targetExplicit,
-		flagWasSet(fs, "windows-mode") || cfg.explicitWindowsMode != "",
+		cfg.targetFlagExplicit,
+		cfg.windowsModeFlagExplicit,
 	)
 }
 
 func autoRouteExternalLeaseForConfig(cfg *Config, id string) error {
-	return autoRouteExternalLeaseWithHints(cfg, id, false, cfg.targetExplicit, cfg.explicitWindowsMode != "")
+	return autoRouteExternalLeaseWithHints(cfg, id, false, cfg.targetFlagExplicit, cfg.windowsModeFlagExplicit)
 }
 
 func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
@@ -325,7 +331,12 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		}
 	}
 	if providerSelected && strings.TrimSpace(cfg.External.RoutingFile) != "" {
-		return nil
+		if !cfg.External.routingLoaded {
+			if err := loadExternalRoutingConfig(cfg, cfg.External.RoutingFile); err != nil {
+				return err
+			}
+		}
+		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 	}
 	claim, ok, err := uniqueExternalLeaseClaim(id, providerSelected)
 	if err != nil || !ok {
@@ -344,6 +355,13 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 	if !cfg.providerExplicit {
 		cfg.Provider = "external"
 	}
+	if err := loadExternalRoutingConfig(cfg, path); err != nil {
+		return err
+	}
+	return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
+}
+
+func loadExternalRoutingConfig(cfg *Config, path string) error {
 	routing, err := LoadExternalRouting(path)
 	if err != nil {
 		return err
@@ -352,6 +370,10 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 	if strings.TrimSpace(routing.WorkRoot) != "" {
 		cfg.WorkRoot = routing.WorkRoot
 	}
+	return nil
+}
+
+func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit bool) error {
 	if !targetExplicit {
 		cfg.TargetOS = targetLinux
 		if !windowsModeExplicit {

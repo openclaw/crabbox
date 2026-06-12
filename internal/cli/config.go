@@ -20,6 +20,7 @@ type Config struct {
 	providerExplicit              bool
 	TargetOS                      string
 	targetExplicit                bool
+	targetFlagExplicit            bool
 	Architecture                  string
 	architectureExplicit          bool
 	OSImage                       string
@@ -27,6 +28,7 @@ type Config struct {
 	osImageProviderDefaults       string
 	WindowsMode                   string
 	explicitWindowsMode           string
+	windowsModeFlagExplicit       bool
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool

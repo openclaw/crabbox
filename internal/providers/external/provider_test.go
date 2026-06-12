@@ -129,6 +129,24 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 	}
 }
 
+func TestRouteConfigLoadsConfiguredRoutingFile(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.External.RoutingFile = path
+	if err := (Provider{}).RouteConfig(&cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Command != saved.External.Command || cfg.WorkRoot != saved.External.WorkRoot || !core.ExternalRoutingLoaded(cfg.External) {
+		t.Fatalf("config=%#v", cfg)
+	}
+}
+
 func TestProtocolClaimScopeIgnoresZeroLifecycleConnection(t *testing.T) {
 	cfg := testConfig()
 	before := externalClaimScope(cfg)

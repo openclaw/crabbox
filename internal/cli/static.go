@@ -32,10 +32,12 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 	if flagWasSet(fs, "target") {
 		cfg.TargetOS = *values.Target
 		cfg.targetExplicit = true
+		cfg.targetFlagExplicit = true
 	}
 	if flagWasSet(fs, "windows-mode") {
 		cfg.WindowsMode = *values.WindowsMode
 		cfg.explicitWindowsMode = *values.WindowsMode
+		cfg.windowsModeFlagExplicit = true
 	}
 	if flagWasSet(fs, "static-host") {
 		cfg.Static.Host = *values.StaticHost
