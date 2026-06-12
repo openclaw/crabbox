@@ -228,6 +228,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_CLOUDFLARE_RUNNER_URL",
 		"CRABBOX_CLOUDFLARE_RUNNER_TOKEN",
 		"CRABBOX_CLOUDFLARE_WORKDIR",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_DATE",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_FLAGS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CACHE_MODE",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_EGRESS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS",
 		"CRABBOX_SEMAPHORE_HOST",
 		"SEMAPHORE_HOST",
 		"CRABBOX_SEMAPHORE_TOKEN",
@@ -1109,6 +1119,55 @@ func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
 	applyEnv(&cfg)
 	if cfg.AsciiBox.APIKey != "override-key" || cfg.AsciiBox.BaseURL != "https://override.example.test" || cfg.AsciiBox.CLIPath != "/opt/box" || cfg.AsciiBox.Workdir != "/home/user/env-project" {
 		t.Fatalf("env asciiBox config not applied: %#v", cfg.AsciiBox)
+	}
+}
+
+func TestCloudflareDynamicWorkersConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.CloudflareDynamicWorkers.CacheMode != "stable" || cfg.CloudflareDynamicWorkers.Egress != "blocked" || cfg.CloudflareDynamicWorkers.TimeoutSecs != 60 {
+		t.Fatalf("dynamic workers defaults not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "cloudflare-dynamic-workers",
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			LoaderURL:          "https://file-loader.example.test",
+			Token:              "file-token",
+			CompatibilityDate:  "2026-06-01",
+			CompatibilityFlags: []string{"nodejs_compat"},
+			CacheMode:          "explicit",
+			Egress:             "intercept",
+			CPUMs:              25,
+			Subrequests:        7,
+			TimeoutSecs:        45,
+			Metadata:           map[string]string{"team": "file"},
+		},
+	})
+	if cfg.Provider != "cloudflare-dynamic-workers" || cfg.CloudflareDynamicWorkers.LoaderURL != "https://file-loader.example.test" || cfg.CloudflareDynamicWorkers.Token != "file-token" {
+		t.Fatalf("file dynamic workers config not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	if cfg.CloudflareDynamicWorkers.Metadata["team"] != "file" || cfg.CloudflareDynamicWorkers.CacheMode != "explicit" || cfg.CloudflareDynamicWorkers.Egress != "intercept" {
+		t.Fatalf("file dynamic workers metadata/cache not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", "https://env-loader.example.test")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN", "env-token")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_DATE", "2026-06-02")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_FLAGS", "nodejs_compat,streams_enable_constructors")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CACHE_MODE", "stable")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_EGRESS", "blocked")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", "50")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", "12")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", "30")
+	applyEnv(&cfg)
+	if cfg.CloudflareDynamicWorkers.LoaderURL != "https://env-loader.example.test" || cfg.CloudflareDynamicWorkers.Token != "env-token" || cfg.CloudflareDynamicWorkers.CompatibilityDate != "2026-06-02" {
+		t.Fatalf("env dynamic workers config not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	if strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ",") != "nodejs_compat,streams_enable_constructors" {
+		t.Fatalf("compatibility flags=%v", cfg.CloudflareDynamicWorkers.CompatibilityFlags)
+	}
+	if cfg.CloudflareDynamicWorkers.CacheMode != "stable" || cfg.CloudflareDynamicWorkers.Egress != "blocked" || cfg.CloudflareDynamicWorkers.CPUMs != 50 || cfg.CloudflareDynamicWorkers.Subrequests != 12 || cfg.CloudflareDynamicWorkers.TimeoutSecs != 30 {
+		t.Fatalf("env dynamic workers limits/cache not applied: %#v", cfg.CloudflareDynamicWorkers)
 	}
 }
 
