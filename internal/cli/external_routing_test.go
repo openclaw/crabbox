@@ -231,6 +231,12 @@ func TestAutoRouteExternalLeaseFailsClosedWithoutRoutingState(t *testing.T) {
 	if err := autoRouteExternalLease(&cfg, fs, "old-box"); err == nil || !strings.Contains(err.Error(), "routing state is missing") {
 		t.Fatalf("err=%v", err)
 	}
+	selected := baseConfig()
+	selected.Provider = "external"
+	selected.External = ExternalConfig{Command: "current-provider", WorkRoot: "/work/crabbox"}
+	if err := routeExternalLeaseClaim(&selected, leaseID); err == nil || !strings.Contains(err.Error(), "refusing unverified cleanup") {
+		t.Fatalf("forced route err=%v", err)
+	}
 }
 
 func TestTargetLinuxClearsAmbientWindowsMode(t *testing.T) {
@@ -247,6 +253,25 @@ func TestTargetLinuxClearsAmbientWindowsMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal || cfg.explicitWindowsMode != "" {
+		t.Fatalf("config=%#v", cfg)
+	}
+}
+
+func TestExplicitExternalRoutingRestoresLinuxTarget(t *testing.T) {
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeWSL2
+	fs := newFlagSet("test", os.Stderr)
+	provider := fs.String("provider", cfg.Provider, "")
+	fs.String("external-routing-file", "", "")
+	if err := parseFlags(fs, []string{"--provider", "external", "--external-routing-file", "/tmp/route.json"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Provider = *provider
+	if err := autoRouteExternalLease(&cfg, fs, "old-box"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "external" || cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal {
 		t.Fatalf("config=%#v", cfg)
 	}
 }

@@ -313,6 +313,16 @@ func autoRouteExternalLeaseForConfig(cfg *Config, id string) error {
 }
 
 func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
+	path, err := ExternalRoutingPath(leaseID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return exit(2, "external routing state is missing for lease %s; refusing unverified cleanup", leaseID)
+		}
+		return err
+	}
 	cfg.External.RoutingFile = ""
 	cfg.External.routingLoaded = false
 	return autoRouteExternalLeaseForConfig(cfg, leaseID)
@@ -320,7 +330,7 @@ func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
 
 func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, targetExplicit, windowsModeExplicit bool) error {
 	id = strings.TrimSpace(id)
-	if id == "" || routingExplicit {
+	if id == "" {
 		return nil
 	}
 	provider, providerErr := ProviderFor(cfg.Provider)
@@ -329,6 +339,12 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		if providerErr != nil || provider.Name() != "external" {
 			return nil
 		}
+	}
+	if routingExplicit {
+		if !cfg.providerExplicit {
+			cfg.Provider = "external"
+		}
+		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 	}
 	if providerSelected && strings.TrimSpace(cfg.External.RoutingFile) != "" {
 		if !cfg.External.routingLoaded {

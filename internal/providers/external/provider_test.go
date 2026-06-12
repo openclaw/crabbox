@@ -129,7 +129,7 @@ func TestConfigureLoadsConfiguredRoutingFile(t *testing.T) {
 	}
 }
 
-func TestRouteConfigLoadsConfiguredRoutingFile(t *testing.T) {
+func TestApplyFlagsLoadsConfiguredRoutingFile(t *testing.T) {
 	isolateCrabboxState(t)
 	saved := testConfig()
 	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
@@ -139,10 +139,35 @@ func TestRouteConfigLoadsConfiguredRoutingFile(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.External.RoutingFile = path
-	if err := (Provider{}).RouteConfig(&cfg, nil, nil); err != nil {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.External.Command != saved.External.Command || cfg.WorkRoot != saved.External.WorkRoot || !core.ExternalRoutingLoaded(cfg.External) {
+		t.Fatalf("config=%#v", cfg)
+	}
+}
+
+func TestApplyFlagsExplicitRoutingOverridesStaleConfiguredPath(t *testing.T) {
+	isolateCrabboxState(t)
+	saved := testConfig()
+	path, err := core.PersistExternalRouting("cbx_abcdef123456", saved.External)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.External.RoutingFile = filepath.Join(t.TempDir(), "missing.json")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--external-routing-file", path}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.RoutingFile != path || cfg.External.Command != saved.External.Command {
 		t.Fatalf("config=%#v", cfg)
 	}
 }

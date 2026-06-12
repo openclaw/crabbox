@@ -37,13 +37,6 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
-	if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !core.ExternalRoutingLoaded(cfg.External) {
-		routing, err := core.LoadExternalRouting(path)
-		if err != nil {
-			return core.Exit(2, "%v", err)
-		}
-		cfg.External = routing
-	}
 	if cfg.WorkRoot == core.BaseConfig().WorkRoot && cfg.External.WorkRoot != "" {
 		cfg.WorkRoot = cfg.External.WorkRoot
 	}
