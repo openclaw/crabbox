@@ -269,6 +269,13 @@ func (b *linodeLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 		servers = append(servers, server)
 		byID[server.ID] = item
 	}
+	server, leaseID, err := core.FindServerByAlias(servers, req.ID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if leaseID != "" {
+		return b.targetFromLinode(byID[server.ID], req, linodes, accountID)
+	}
 	if id, ok := parseLinodeID(req.ID); ok {
 		if item, found := byID[id]; found {
 			return b.targetFromLinode(item, req, linodes, accountID)
@@ -282,13 +289,6 @@ func (b *linodeLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 		}
 		return b.targetFromLinode(item, req, appendLinodeIfMissing(linodes, item), accountID)
 	}
-	server, leaseID, err := core.FindServerByAlias(servers, req.ID)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-	if leaseID != "" {
-		return b.targetFromLinode(byID[server.ID], req, linodes, accountID)
-	}
 	if req.ReleaseOnly {
 		return b.releaseTargetFromClaim(ctx, client, req.ID, accountID)
 	}
@@ -301,14 +301,15 @@ func (b *linodeLeaseBackend) releaseTargetFromClaim(ctx context.Context, client 
 		ok    bool
 		err   error
 	)
-	if linodeID, numeric := parseLinodeID(id); numeric {
-		id = strconv.FormatInt(linodeID, 10)
-		claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
-	} else {
-		var exact bool
-		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
-		if err == nil && exact && (!ok || claim.LeaseID != id) {
-			return core.LeaseTarget{}, core.Exit(2, "linode exact lease identifier %q does not match a valid linode claim", id)
+	var exact bool
+	claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
+	if err == nil && exact && (!ok || claim.LeaseID != id) {
+		return core.LeaseTarget{}, core.Exit(2, "linode exact lease identifier %q does not match a valid linode claim", id)
+	}
+	if err == nil && !ok {
+		if linodeID, numeric := parseLinodeID(id); numeric {
+			id = strconv.FormatInt(linodeID, 10)
+			claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
 		}
 	}
 	if err != nil {

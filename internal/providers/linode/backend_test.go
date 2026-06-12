@@ -302,6 +302,54 @@ func TestResolveBySlugAndReleaseDeleteOwnedLinode(t *testing.T) {
 	}
 }
 
+func TestResolveNumericSlugBeforeRawLinodeID(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = defaultType
+	item := linodeInstance{ID: 456, Label: core.LeaseProviderName("cbx_abcdef123456", "123"), Status: "running", Type: defaultType, IPv4: []string{"203.0.113.123"}, Tags: leaseTags(cfg, "cbx_abcdef123456", "123", "ready", false, time.Now())}
+	api := &fakeLinodeAPI{linodes: []linodeInstance{item}}
+	backend := newTestBackend(t, api)
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_abcdef123456" || lease.Server.ID != 456 || lease.Server.Labels["slug"] != "123" {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
+func TestResolveReleaseOnlyNumericSlugClaimBeforeRawLinodeID(t *testing.T) {
+	leaseID := "cbx_numeric"
+	slug := "123"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels[linodeAccountLabel] = "email:alice@example.com"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "456",
+		ID:       456,
+		Name:     core.LeaseProviderName(leaseID, slug),
+		Labels:   labels,
+	}
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.ID != 456 || lease.Server.Labels["slug"] != slug {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
 func TestReleaseRefusesAccountMismatch(t *testing.T) {
 	api := &fakeLinodeAPI{accountID: "email:first@example.com"}
 	backend := newTestBackend(t, api)
