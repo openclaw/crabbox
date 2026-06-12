@@ -318,7 +318,7 @@ async function stopRun(env: Env, runId: string): Promise<Response> {
     message: "run metadata stopped",
     time: stoppedAt,
   });
-  await persistRun(env, record);
+  await deleteRun(env, runId);
   return json(runResponse(record));
 }
 
@@ -768,6 +768,12 @@ async function storedRuns(env: Env): Promise<RunRecord[]> {
     );
   }
   return [...records.values()];
+}
+
+async function deleteRun(env: Env, runId: string): Promise<void> {
+  runStore.delete(runId);
+  if (!env.RUNS) return;
+  await env.RUNS.delete(runMetadataKey(runId));
 }
 
 function runMetadataKey(runId: string): string {

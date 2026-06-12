@@ -93,6 +93,7 @@ class MockKVNamespace {
   readonly values = new Map<string, string>();
   readonly getCalls: string[] = [];
   readonly putCalls: Array<{ key: string; value: string }> = [];
+  readonly deleteCalls: string[] = [];
   readonly listCalls: Array<{ prefix?: string }> = [];
 
   async get(key: string): Promise<string | null> {
@@ -103,6 +104,11 @@ class MockKVNamespace {
   async put(key: string, value: string): Promise<void> {
     this.putCalls.push({ key, value });
     this.values.set(key, value);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+    this.values.delete(key);
   }
 
   async list(options: { prefix?: string } = {}): Promise<{ keys: Array<{ name: string }> }> {
@@ -436,8 +442,11 @@ describe("Cloudflare Dynamic Workers runner", () => {
       id: "run_meta",
       status: "stopped",
     });
-    const persisted = JSON.parse(runs.values.get("runs:run_meta") ?? "{}") as { state?: string };
-    expect(persisted.state).toBe("stopped");
+    expect(runs.deleteCalls).toEqual(["runs:run_meta"]);
+    expect(runs.values.has("runs:run_meta")).toBe(false);
+
+    const missing = await worker.fetch(authedRequest("/v1/runs/run_meta"), testEnv, testCtx);
+    expect(missing.status).toBe(404);
   });
 
   it("returns stable errors for invalid and failed runs without leaking secrets", async () => {

@@ -550,7 +550,7 @@ func runSucceeded(status string) bool {
 
 func terminalState(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "missing", "expired", "deleted", "stopped", "failed", "error":
+	case "missing", "expired", "deleted", "stopped", "failed", "error", "completed", "succeeded", "success", "ok":
 		return true
 	default:
 		return false

@@ -201,6 +201,14 @@ func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 	}
 }
 
+func TestTerminalStateIncludesSuccessfulRunStates(t *testing.T) {
+	for _, status := range []string{"completed", "succeeded", "success", "ok"} {
+		if !terminalState(status) {
+			t.Fatalf("terminalState(%q)=false, want true", status)
+		}
+	}
+}
+
 func TestRunExplicitCacheRequiresID(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	backend.cfg.CloudflareDynamicWorkers.CacheMode = "explicit"
