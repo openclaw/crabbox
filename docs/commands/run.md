@@ -78,7 +78,10 @@ the checkout through the provider's APIs, runs the command through the
 provider, and prints `sync=delegated` in the final timing summary. These
 providers reject the SSH-run-only features `--capture-stdout`,
 `--capture-stderr`, `--capture-on-fail`, `--download`, `--script`,
-`--script-stdin`, and `--fresh-pr`. Delegated artifact features
+`--script-stdin`, and `--fresh-pr` unless a delegated adapter advertises the
+`module-run` feature. Module-runtime delegated providers use `--script <file>`
+or `--script-stdin` as source module input and reject trailing `-- <command>`
+argv because they do not provide a Linux shell. Delegated artifact features
 `--artifact-glob` and `--require-artifact` are accepted only by delegated
 adapters that explicitly advertise bounded run artifact retrieval.
 `--keep-on-failure` is supported for one-shot delegated runs. See the
@@ -219,7 +222,10 @@ shebang is honored on POSIX targets; scripts without one run through `bash`.
 Native Windows targets run uploaded scripts through Windows PowerShell, and
 `--script-stdin` is treated as a PowerShell script; a non-`.ps1` script path
 gets a `.ps1` extension added before upload. Trailing arguments after `--` are
-passed to the script. This is an SSH-run feature; delegated providers reject it.
+passed to the script. This is an SSH-run feature for OS-backed providers.
+Delegated module-runtime providers that advertise `module-run` accept the same
+script flags as source module input, but they reject trailing command argv and
+do not imply shell, SSH, rsync, or POSIX filesystem behavior.
 
 ## Live secrets and env forwarding
 

@@ -1159,6 +1159,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.OSImage = normalized
 	}
 	applyOSImageProviderDefaults(cfg, false)
+	applySingleProviderTargetDefault(cfg)
 	if cfg.Provider == "digitalocean" {
 		if cfg.DigitalOcean.Region == "" {
 			cfg.DigitalOcean.Region = "nyc3"
@@ -1388,6 +1389,35 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.WorkRoot = cfg.Proxmox.WorkRoot
 	}
 	return nil
+}
+
+func applySingleProviderTargetDefault(cfg *Config) {
+	if cfg == nil || IsTargetExplicit(cfg) {
+		return
+	}
+	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
+		return
+	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return
+	}
+	spec := provider.Spec()
+	if len(spec.Targets) != 1 {
+		return
+	}
+	target := spec.Targets[0]
+	if strings.TrimSpace(target.OS) == "" {
+		return
+	}
+	cfg.TargetOS = strings.TrimSpace(target.OS)
+	if cfg.TargetOS == targetWindows {
+		if strings.TrimSpace(target.WindowsMode) != "" {
+			cfg.WindowsMode = strings.TrimSpace(target.WindowsMode)
+		}
+	} else if cfg.explicitWindowsMode == "" {
+		cfg.WindowsMode = windowsModeNormal
+	}
 }
 
 func applyOSImageProviderDefaults(cfg *Config, force bool) {

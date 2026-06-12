@@ -449,6 +449,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	options := leaseOptionsFromConfig(cfg)
 	scriptRequested := *scriptPath != "" || *scriptStdin
+	var script *RunScriptSpec
 	runReq := RunRequest{
 		Repo:                  repo,
 		ID:                    *leaseIDFlag,
@@ -484,6 +485,13 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		ProofTemplate:         strings.TrimSpace(*proofTemplate),
 		ProfileVariables:      expansion.Variables,
 		StopAfter:             strings.TrimSpace(*stopAfter),
+	}
+	if scriptRequested && backend.Spec().Features.Has(FeatureModuleRun) {
+		script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
+		if err != nil {
+			return err
+		}
+		runReq.Script = script
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if strings.TrimSpace(*readyPool) != "" {
@@ -530,7 +538,6 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			registrationCoord = client
 		}
 	}
-	var script *RunScriptSpec
 	if scriptRequested {
 		script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
 		if err != nil {

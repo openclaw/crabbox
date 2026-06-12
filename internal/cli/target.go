@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	targetLinux   = "linux"
-	targetMacOS   = "macos"
-	targetWindows = "windows"
+	targetLinux         = "linux"
+	targetMacOS         = "macos"
+	targetWindows       = "windows"
+	targetWorkerRuntime = "worker-runtime"
 
 	windowsModeNormal = "normal"
 	windowsModeWSL2   = "wsl2"
@@ -21,11 +22,12 @@ const (
 )
 
 const (
-	TargetLinux       = targetLinux
-	TargetMacOS       = targetMacOS
-	TargetWindows     = targetWindows
-	WindowsModeNormal = windowsModeNormal
-	WindowsModeWSL2   = windowsModeWSL2
+	TargetLinux         = targetLinux
+	TargetMacOS         = targetMacOS
+	TargetWindows       = targetWindows
+	TargetWorkerRuntime = targetWorkerRuntime
+	WindowsModeNormal   = windowsModeNormal
+	WindowsModeWSL2     = windowsModeWSL2
 )
 
 func normalizeTargetConfig(cfg *Config) {
@@ -107,9 +109,9 @@ func normalizeWindowsMode(value string) string {
 
 func validateTargetConfig(cfg Config) error {
 	switch cfg.TargetOS {
-	case targetLinux, targetMacOS, targetWindows:
+	case targetLinux, targetMacOS, targetWindows, targetWorkerRuntime:
 	default:
-		return exit(2, "target must be linux, macos, or windows")
+		return exit(2, "target must be linux, macos, windows, or worker-runtime")
 	}
 	if cfg.TargetOS != targetWindows && cfg.WindowsMode != windowsModeNormal {
 		return exit(2, "windows.mode is only valid with target=windows")

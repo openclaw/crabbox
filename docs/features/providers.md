@@ -27,7 +27,10 @@ Each adapter declares a `Spec` that drives how Crabbox treats it:
   `aws`, `azure`, `gcp`, and `hetzner` are `supported`, and even those run direct
   unless a broker URL and token are configured (see
   [Configuration](configuration.md) and `crabbox config set-broker`).
-- **Targets** — which of Linux, macOS, and Windows the provider can lease.
+- **Targets** — which runtime category the provider can satisfy. OS-backed
+  providers advertise Linux, macOS, or Windows; module/runtime providers can
+  advertise `worker-runtime` when they execute source in a hosted runtime
+  without SSH, POSIX shell, or filesystem sync semantics.
 
 `internal/cli/provider_backend.go` defines the kinds, coordinator modes, and
 feature flags; `internal/cli/config.go` holds the per-provider config sections

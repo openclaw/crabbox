@@ -1009,6 +1009,27 @@ func TestRejectDelegatedSyncOptionsAllowsProofFeature(t *testing.T) {
 	}
 }
 
+func TestRejectDelegatedSyncOptionsAllowsModuleRunScriptOnly(t *testing.T) {
+	spec := ProviderSpec{Name: "module-runtime-test", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureModuleRun}}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	}); err != nil {
+		t.Fatalf("module-run provider should allow script input: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		Command: []string{"node", "worker.mjs"},
+	}); err == nil {
+		t.Fatal("module-run provider should reject trailing command argv")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "e2b", Kind: ProviderKindDelegatedRun}, RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	}); err == nil {
+		t.Fatal("delegated provider without module-run feature should reject script input")
+	}
+}
+
 func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

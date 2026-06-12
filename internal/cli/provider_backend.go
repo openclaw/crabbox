@@ -336,6 +336,7 @@ const (
 	FeatureRunProof     Feature = "run-proof"
 	FeatureRunSession   Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeatureModuleRun    Feature = "module-run"
 	FeaturePauseResume  Feature = "pause-resume"
 )
 
@@ -988,6 +989,7 @@ func featureSetHas(features FeatureSet, feature Feature) bool {
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
 	provider := spec.Name
 	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
+	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)
 	if req.SyncOnly && !archiveSync {
 		return exit(2, "%s delegates sync; --sync-only is not supported", provider)
 	}
@@ -1028,8 +1030,11 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.StopAfter != "" {
 		return exit(2, "%s delegates run execution; --stop-after is not supported", provider)
 	}
-	if req.Script != nil || req.ScriptRequested {
+	if (req.Script != nil || req.ScriptRequested) && !moduleRun {
 		return exit(2, "%s delegates run execution; --script is not supported", provider)
+	}
+	if moduleRun && len(req.Command) > 0 {
+		return exit(2, "%s executes module source; trailing shell commands are not supported", provider)
 	}
 	if !req.FreshPR.Empty() {
 		return exit(2, "%s delegates sync; --fresh-pr is not supported", provider)
