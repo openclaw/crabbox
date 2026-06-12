@@ -71,7 +71,7 @@ func TestProxmoxDoctorReadinessChecksNonMutatingPrerequisites(t *testing.T) {
 		case "/api2/json/nodes/pve1/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "online"}})
 		case "/api2/json/nodes/pve1/storage":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"storage": "local-lvm", "active": 1, "enabled": 1}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"storage": "local-lvm", "active": 1, "enabled": 1, "content": "images,rootdir"}}})
 		case "/api2/json/nodes/pve1/network":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1}}})
 		case "/api2/json/nodes/pve1/qemu":
@@ -313,6 +313,27 @@ func TestProxmoxDoctorReadinessRejectsStorageInventoryWithoutUsableStorage(t *te
 	}
 }
 
+func TestProxmoxDoctorReadinessRejectsStorageWithoutImagesContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/pve1/storage" {
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"storage": "archive", "active": 1, "enabled": 1, "content": "iso,backup,vztmpl"},
+		}})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.Storage = "archive"
+	check := client.proxmoxStorageCheck(context.Background(), cfg)
+	if check.Status != "failed" || check.Details["hint"] != "enable_proxmox_storage_images" {
+		t.Fatalf("storage check=%#v", check)
+	}
+}
+
 func TestProxmoxDoctorReadinessReportsMissingTemplateIDAsCheck(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -450,6 +471,29 @@ func TestProxmoxTemplateReadinessRequiresConfigData(t *testing.T) {
 	check := client.proxmoxTemplateCheck(context.Background(), cfg)
 	if check.Status != "failed" || !strings.Contains(check.Details["error"], "missing_required_data") {
 		t.Fatalf("check=%#v, want missing required data failure", check)
+	}
+}
+
+func TestProxmoxTemplateReadinessRequiresCloudInitDrive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/qemu":
+			_, _ = w.Write([]byte(`{"data":[{"vmid":9000,"name":"template","template":1}]}`))
+		case "/api2/json/nodes/pve1/qemu/9000/config":
+			_, _ = w.Write([]byte(`{"data":{"name":"template","scsi0":"local-lvm:vm-9000-disk-0"}}`))
+		default:
+			t.Fatalf("unexpected path=%s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9000
+	check := client.proxmoxTemplateCheck(context.Background(), cfg)
+	if check.Status != "failed" || check.Details["hint"] != "attach_proxmox_cloudinit_drive" {
+		t.Fatalf("check=%#v, want missing cloud-init failure", check)
 	}
 }
 

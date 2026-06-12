@@ -154,6 +154,7 @@ type proxmoxStorage struct {
 	Storage string     `json:"storage"`
 	Active  proxmoxInt `json:"active"`
 	Enabled proxmoxInt `json:"enabled"`
+	Content string     `json:"content"`
 }
 
 type proxmoxNetwork struct {
@@ -268,6 +269,14 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 				Details: map[string]string{"storage": cfg.Proxmox.Storage, "class": "missing_resource", "hint": "enable_proxmox_storage", "active": strconv.Itoa(int(storage.Active)), "enabled": strconv.Itoa(int(storage.Enabled)), "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
 			}
 		}
+		if !proxmoxStorageSupportsImages(storage.Content) {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "storage",
+				Message: fmt.Sprintf("storage=%s class=missing_resource hint=enable_proxmox_storage_images", cfg.Proxmox.Storage),
+				Details: map[string]string{"storage": cfg.Proxmox.Storage, "class": "missing_resource", "hint": "enable_proxmox_storage_images", "content": storage.Content, "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+			}
+		}
 		return ProxmoxReadinessCheck{
 			Status:  "ok",
 			Check:   "storage",
@@ -281,6 +290,15 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 		Message: fmt.Sprintf("storage=%s class=missing_resource hint=grant_or_configure_proxmox_storage", cfg.Proxmox.Storage),
 		Details: map[string]string{"storage": cfg.Proxmox.Storage, "class": "missing_resource", "hint": "grant_or_configure_proxmox_storage", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
 	}
+}
+
+func proxmoxStorageSupportsImages(content string) bool {
+	for _, item := range strings.Split(content, ",") {
+		if strings.EqualFold(strings.TrimSpace(item), "images") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
@@ -380,6 +398,14 @@ func (c *ProxmoxClient) proxmoxTemplateCheck(ctx context.Context, cfg Config) Pr
 		if err := c.doRequired(ctx, http.MethodGet, configPath, nil, &config); err != nil {
 			return c.proxmoxFailedReadiness("template", configPath, err, map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID)})
 		}
+		if !proxmoxTemplateHasCloudInit(config) {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "template",
+				Message: fmt.Sprintf("templateId=%d class=missing_resource hint=attach_proxmox_cloudinit_drive", cfg.Proxmox.TemplateID),
+				Details: map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID), "class": "missing_resource", "hint": "attach_proxmox_cloudinit_drive", "endpoint": fmt.Sprintf("/nodes/%s/qemu/%d/config", cfg.Proxmox.Node, cfg.Proxmox.TemplateID)},
+			}
+		}
 		return ProxmoxReadinessCheck{
 			Status:  "ok",
 			Check:   "template",
@@ -393,6 +419,24 @@ func (c *ProxmoxClient) proxmoxTemplateCheck(ctx context.Context, cfg Config) Pr
 		Message: fmt.Sprintf("templateId=%d class=missing_resource hint=configure_existing_proxmox_template", cfg.Proxmox.TemplateID),
 		Details: map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID), "class": "missing_resource", "hint": "configure_existing_proxmox_template", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/qemu"},
 	}
+}
+
+func proxmoxTemplateHasCloudInit(config map[string]any) bool {
+	for key, value := range config {
+		lowerKey := strings.ToLower(key)
+		diskKey := strings.HasPrefix(lowerKey, "ide") ||
+			strings.HasPrefix(lowerKey, "sata") ||
+			strings.HasPrefix(lowerKey, "scsi") ||
+			strings.HasPrefix(lowerKey, "virtio")
+		if !diskKey {
+			continue
+		}
+		text, ok := value.(string)
+		if ok && strings.Contains(strings.ToLower(text), "cloudinit") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *ProxmoxClient) proxmoxNextIDCheck(ctx context.Context) ProxmoxReadinessCheck {

@@ -145,9 +145,10 @@ For self-signed private clusters, set `CRABBOX_PROXMOX_INSECURE_TLS=1` or pass
 
 `doctor --provider proxmox` is read-only. It checks authentication with
 `/version`, then verifies the configured node status, storage list, network
-bridge list, template VM/config, `/cluster/nextid`, and QEMU inventory. The
-output includes `mutation=false`; it does not clone, configure, start, stop, or
-delete VMs.
+bridge list, template VM/config, `/cluster/nextid`, and QEMU inventory. An
+explicit target storage must support `images`, and the configured template must
+have a cloud-init drive. The output includes `mutation=false`; it does not clone,
+configure, start, stop, or delete VMs.
 
 ## Configuration
 

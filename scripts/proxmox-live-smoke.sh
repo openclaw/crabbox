@@ -284,6 +284,32 @@ reconcile_new_smoke_lease() {
   run_step stop-reconciled "$bin" stop --provider proxmox --id "$candidate_lease"
 }
 
+verify_no_new_smoke_lease() {
+  local final_raw="$1"
+  local final_inventory="$proof_dir/list-final.inventory.tsv"
+  local candidate_count=0
+  local candidate_slug=""
+  local cloud_id=""
+
+  secure_log_file "$final_inventory"
+  if ! extract_list_inventory "$final_raw" | sort -u >"$final_inventory"; then
+    echo "step=lease-final-verify status=fail reason=list_json_invalid" | tee -a "$summary"
+    return 1
+  fi
+  while IFS=$'\t' read -r _ candidate_slug cloud_id; do
+    [[ "$candidate_slug" == "$slug" || "$candidate_slug" == "$slug"-* ]] || continue
+    if awk -F '\t' -v id="$cloud_id" '$3 == id { found = 1 } END { exit !found }' "$baseline_inventory"; then
+      continue
+    fi
+    candidate_count=$((candidate_count + 1))
+  done <"$final_inventory"
+  if [[ "$candidate_count" -ne 0 ]]; then
+    echo "step=lease-final-verify status=fail reason=new_matching_leases_remain count=$candidate_count" | tee -a "$summary"
+    return 1
+  fi
+  echo "step=lease-final-verify status=pass" | tee -a "$summary"
+}
+
 failure=0
 
 run_step doctor "$bin" doctor --provider proxmox --json || failure=1
@@ -352,7 +378,11 @@ if [[ "$list_after_status" -ne 0 ]]; then
   failure=1
 else
   if reconcile_new_smoke_lease "$proof_dir/list-after.raw.log"; then
-    run_step list-final "$bin" list --provider proxmox --json || failure=1
+    list_final_status=0
+    run_step list-final "$bin" list --provider proxmox --json || list_final_status=$?
+    if [[ "$list_final_status" -ne 0 ]] || ! verify_no_new_smoke_lease "$proof_dir/list-final.raw.log"; then
+      failure=1
+    fi
   else
     failure=1
   fi

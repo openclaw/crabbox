@@ -91,7 +91,9 @@ case "$1" in
     ;;
   stop)
     if [[ "$*" == *"cbx_leaked"* ]]; then
-      rm -f "${extraLeaseState}"
+      if [[ "\${FAKE_CRABBOX_KEEP_RECONCILED_LEAK:-0}" != "1" ]]; then
+        rm -f "${extraLeaseState}"
+      fi
     else
       rm -f "${leaseState}"
     fi
@@ -287,6 +289,26 @@ test("live mode reconciles a leaked earlier attempt after a successful lifecycle
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^stop --provider proxmox --id cbx_leaked$/m);
 	assert.equal(fs.existsSync(path.join(fake.dir, "extra-lease.state")), false);
+});
+
+test("live mode fails when final inventory still contains a reconciled lease", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_EXTRA_LEAK: "1",
+			FAKE_CRABBOX_KEEP_RECONCILED_LEAK: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /reason=new_matching_leases_remain/);
+	assert.match(result.stdout, /classification=environment_blocked/);
 });
 
 test("live mode releases a uniquely created lease when warmup output omits its ID", () => {
