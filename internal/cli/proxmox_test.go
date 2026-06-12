@@ -81,6 +81,8 @@ func TestProxmoxDoctorReadinessChecksNonMutatingPrerequisites(t *testing.T) {
 			}})
 		case "/api2/json/nodes/pve1/qemu/9400/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "crabbox-template", "ide2": "local-lvm:cloudinit"}})
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": "102"})
 		default:
@@ -141,6 +143,8 @@ func TestProxmoxDoctorReadinessClassifiesPermissionGaps(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"vmid": 9400, "name": "tmpl", "template": 1}}})
 		case "/api2/json/nodes/pve1/qemu/9400/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "tmpl"}})
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
 		default:
@@ -199,6 +203,8 @@ func TestProxmoxDoctorReadinessRejectsInactiveBridge(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"vmid": 9400, "name": "tmpl", "template": 1}}})
 		case "/api2/json/nodes/pve1/qemu/9400/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "tmpl"}})
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
 		default:
@@ -270,6 +276,16 @@ func TestProxmoxDoctorReadinessRequiresUsableTemplateBridgeWhenUnset(t *testing.
 			config:     map[string]any{"ide2": "local-lvm:cloudinit", "net0": "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0"},
 			networks:   []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1}},
 			wantStatus: "ok",
+			wantBridge: "vmbr0",
+		},
+		{
+			name:   "broken net0 with active net1",
+			config: map[string]any{"ide2": "local-lvm:cloudinit", "net0": "virtio=AA:BB:CC:DD:EE:FF,bridge=vmbr0", "net1": "virtio=AA:BB:CC:DD:EE:00,bridge=vmbr1"},
+			networks: []any{
+				map[string]any{"iface": "vmbr0", "type": "bridge", "active": 0},
+				map[string]any{"iface": "vmbr1", "type": "bridge", "active": 1},
+			},
+			wantStatus: "failed",
 			wantBridge: "vmbr0",
 		},
 	}
@@ -420,6 +436,35 @@ func TestProxmoxDoctorReadinessValidatesTemplateStorageWhenUnset(t *testing.T) {
 	}
 }
 
+func TestProxmoxDoctorReadinessValidatesTemplateSourceWithStorageOverride(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/storage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"storage": "target", "active": 1, "enabled": 1, "content": "images"},
+				map[string]any{"storage": "source", "active": 0, "enabled": 1, "content": "images"},
+			}})
+		case "/api2/json/nodes/pve1/qemu/9400/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"scsi0": "source:vm-9400-disk-0,size=8G",
+			}})
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9400
+	cfg.Proxmox.Storage = "target"
+	check := client.proxmoxStorageCheck(context.Background(), cfg)
+	if check.Status != "failed" || check.Details["storage"] != "source" || check.Details["source"] != "template" {
+		t.Fatalf("storage check=%#v", check)
+	}
+}
+
 func TestProxmoxDoctorReadinessReportsMissingTemplateIDAsCheck(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -429,6 +474,8 @@ func TestProxmoxDoctorReadinessReportsMissingTemplateIDAsCheck(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "online"}})
 		case "/api2/json/nodes/pve1/storage", "/api2/json/nodes/pve1/network", "/api2/json/nodes/pve1/qemu":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
 		default:
@@ -694,12 +741,30 @@ func TestProxmoxGuestIPv4FiltersNonRoutableInterfaces(t *testing.T) {
 
 func TestProxmoxVMExistsInCluster(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api2/json/cluster/resources" || r.URL.Query().Get("type") != "vm" {
+		if r.Method != http.MethodGet {
 			t.Fatalf("%s %s", r.Method, r.URL.String())
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
-			map[string]any{"vmid": 101, "node": "pve2", "type": "qemu"},
-		}})
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			permissionPath := r.URL.Query().Get("path")
+			if permissionPath != "/vms/101" && permissionPath != "/vms/202" {
+				t.Fatalf("permissions query=%s", r.URL.RawQuery)
+			}
+			propagate := 1
+			if permissionPath == "/vms/101" {
+				propagate = 0
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{permissionPath: map[string]any{"VM.Audit": propagate}}})
+		case "/api2/json/cluster/resources":
+			if r.URL.Query().Get("type") != "vm" {
+				t.Fatalf("resources query=%s", r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 101, "node": "pve2", "type": "qemu"},
+			}})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
 	}))
 	defer server.Close()
 
@@ -709,6 +774,56 @@ func TestProxmoxVMExistsInCluster(t *testing.T) {
 	}
 	if exists, err := client.VMExistsInCluster(context.Background(), "202"); err != nil || exists {
 		t.Fatalf("exists=%t err=%v, want VM absent", exists, err)
+	}
+}
+
+func TestProxmoxVMExistsInClusterRejectsFilteredInventory(t *testing.T) {
+	resourcesCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			permissionPath := r.URL.Query().Get("path")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{permissionPath: map[string]any{"Sys.Audit": 1}}})
+		case "/api2/json/cluster/resources":
+			resourcesCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	if _, err := client.VMExistsInCluster(context.Background(), "101"); err == nil || !strings.Contains(err.Error(), "/vms/101") {
+		t.Fatalf("err=%v, want non-authoritative inventory rejection", err)
+	}
+	if resourcesCalled {
+		t.Fatal("cluster resources queried without root VM.Audit")
+	}
+}
+
+func TestProxmoxInventoryReadinessRequiresRootVMAudit(t *testing.T) {
+	qemuCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"Sys.Audit": 1}}})
+		case "/api2/json/nodes/pve1/qemu":
+			qemuCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	check := client.proxmoxInventoryCheck(context.Background())
+	if check.Status != "failed" || check.Details["hint"] != "grant_proxmox_cluster_vm_audit" {
+		t.Fatalf("inventory check=%#v", check)
+	}
+	if qemuCalled {
+		t.Fatal("node inventory queried without root VM.Audit")
 	}
 }
 

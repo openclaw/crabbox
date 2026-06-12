@@ -235,6 +235,7 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 	if err := c.doRequired(ctx, http.MethodGet, path, nil, &storages); err != nil {
 		return c.proxmoxFailedReadiness("storage", path, err, map[string]string{"storage": cfg.Proxmox.Storage})
 	}
+	var destination *ProxmoxReadinessCheck
 	if cfg.Proxmox.Storage == "" {
 		usable := 0
 		for _, storage := range storages {
@@ -250,43 +251,64 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 				Details: map[string]string{"storage": "any", "class": "missing_resource", "hint": "grant_or_enable_proxmox_storage", "count": strconv.Itoa(len(storages)), "usable": "0", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
 			}
 		}
-		if cfg.Proxmox.TemplateID <= 0 {
-			return ProxmoxReadinessCheck{
-				Status:  "failed",
-				Check:   "storage",
-				Message: "storage=template class=config hint=set_proxmox_template_id",
-				Details: map[string]string{"storage": "template", "class": "config", "hint": "set_proxmox_template_id"},
-			}
+	} else {
+		check := proxmoxNamedStorageReadiness(cfg.Proxmox.Storage, storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
+		if check.Status != "ok" {
+			return check
 		}
-		configPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), cfg.Proxmox.TemplateID)
-		var config map[string]any
-		if err := c.doRequired(ctx, http.MethodGet, configPath, nil, &config); err != nil {
-			return c.proxmoxFailedReadiness("storage", configPath, err, map[string]string{"storage": "template"})
-		}
-		required := proxmoxTemplateStorages(config)
-		if len(required) == 0 {
-			return ProxmoxReadinessCheck{
-				Status:  "failed",
-				Check:   "storage",
-				Message: fmt.Sprintf("storage=template class=missing_resource hint=configure_proxmox_template_storage templateId=%d", cfg.Proxmox.TemplateID),
-				Details: map[string]string{"storage": "template", "class": "missing_resource", "hint": "configure_proxmox_template_storage", "templateId": strconv.Itoa(cfg.Proxmox.TemplateID), "endpoint": proxmoxDisplayPath(configPath)},
-			}
-		}
-		for _, name := range required {
-			check := proxmoxNamedStorageReadiness(name, storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
-			check.Details["source"] = "template"
-			if check.Status != "ok" {
-				return check
-			}
-		}
-		return ProxmoxReadinessCheck{
-			Status:  "ok",
+		destination = &check
+	}
+	required, failure := c.proxmoxTemplateStorageReadiness(ctx, cfg, storages)
+	if failure != nil {
+		return *failure
+	}
+	if destination != nil {
+		destination.Details["source"] = "configured"
+		destination.Details["templateStorages"] = strings.Join(required, ",")
+		return *destination
+	}
+	return ProxmoxReadinessCheck{
+		Status:  "ok",
+		Check:   "storage",
+		Message: fmt.Sprintf("storage=%s source=template active=1 enabled=1", strings.Join(required, ",")),
+		Details: map[string]string{"storage": strings.Join(required, ","), "source": "template", "active": "1", "enabled": "1", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+	}
+}
+
+func (c *ProxmoxClient) proxmoxTemplateStorageReadiness(ctx context.Context, cfg Config, storages []proxmoxStorage) ([]string, *ProxmoxReadinessCheck) {
+	if cfg.Proxmox.TemplateID <= 0 {
+		check := ProxmoxReadinessCheck{
+			Status:  "failed",
 			Check:   "storage",
-			Message: fmt.Sprintf("storage=%s source=template active=1 enabled=1", strings.Join(required, ",")),
-			Details: map[string]string{"storage": strings.Join(required, ","), "source": "template", "active": "1", "enabled": "1", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+			Message: "storage=template class=config hint=set_proxmox_template_id",
+			Details: map[string]string{"storage": "template", "class": "config", "hint": "set_proxmox_template_id"},
+		}
+		return nil, &check
+	}
+	configPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), cfg.Proxmox.TemplateID)
+	var config map[string]any
+	if err := c.doRequired(ctx, http.MethodGet, configPath, nil, &config); err != nil {
+		check := c.proxmoxFailedReadiness("storage", configPath, err, map[string]string{"storage": "template"})
+		return nil, &check
+	}
+	required := proxmoxTemplateStorages(config)
+	if len(required) == 0 {
+		check := ProxmoxReadinessCheck{
+			Status:  "failed",
+			Check:   "storage",
+			Message: fmt.Sprintf("storage=template class=missing_resource hint=configure_proxmox_template_storage templateId=%d", cfg.Proxmox.TemplateID),
+			Details: map[string]string{"storage": "template", "class": "missing_resource", "hint": "configure_proxmox_template_storage", "templateId": strconv.Itoa(cfg.Proxmox.TemplateID), "endpoint": proxmoxDisplayPath(configPath)},
+		}
+		return nil, &check
+	}
+	for _, name := range required {
+		check := proxmoxNamedStorageReadiness(name, storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
+		check.Details["source"] = "template"
+		if check.Status != "ok" {
+			return nil, &check
 		}
 	}
-	return proxmoxNamedStorageReadiness(cfg.Proxmox.Storage, storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
+	return required, nil
 }
 
 func proxmoxNamedStorageReadiness(name string, storages []proxmoxStorage, endpoint string) ProxmoxReadinessCheck {
@@ -387,7 +409,11 @@ func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) Pro
 		if err := c.doRequired(ctx, http.MethodGet, configPath, nil, &config); err != nil {
 			return c.proxmoxFailedReadiness("bridge", configPath, err, map[string]string{"bridge": "template"})
 		}
-		bridges = proxmoxTemplateBridges(config)
+		if bridge := proxmoxTemplateNet0Bridge(config); bridge != "" {
+			bridges = []string{bridge}
+		} else {
+			bridges = nil
+		}
 	}
 	if len(bridges) == 0 {
 		return ProxmoxReadinessCheck{
@@ -433,27 +459,18 @@ func (c *ProxmoxClient) proxmoxBridgeCheck(ctx context.Context, path, node, brid
 	return proxmoxBridgeReadiness(bridge, network, "/nodes/"+node+"/network/"+bridge)
 }
 
-func proxmoxTemplateBridges(config map[string]any) []string {
-	var bridges []string
-	seen := map[string]bool{}
-	for key, value := range config {
-		if !strings.HasPrefix(strings.ToLower(key), "net") {
-			continue
-		}
-		text, ok := value.(string)
-		if !ok {
-			continue
-		}
-		for _, item := range strings.Split(text, ",") {
-			name, bridge, found := strings.Cut(item, "=")
-			bridge = strings.TrimSpace(bridge)
-			if found && strings.EqualFold(strings.TrimSpace(name), "bridge") && bridge != "" && !seen[bridge] {
-				seen[bridge] = true
-				bridges = append(bridges, bridge)
-			}
+func proxmoxTemplateNet0Bridge(config map[string]any) string {
+	text, ok := config["net0"].(string)
+	if !ok {
+		return ""
+	}
+	for _, item := range strings.Split(text, ",") {
+		name, bridge, found := strings.Cut(item, "=")
+		if found && strings.EqualFold(strings.TrimSpace(name), "bridge") {
+			return strings.TrimSpace(bridge)
 		}
 	}
-	return bridges
+	return ""
 }
 
 func proxmoxBridgeReadiness(bridge string, network proxmoxNetwork, endpoint string) ProxmoxReadinessCheck {
@@ -572,6 +589,9 @@ func (c *ProxmoxClient) proxmoxNextIDCheck(ctx context.Context) ProxmoxReadiness
 }
 
 func (c *ProxmoxClient) proxmoxInventoryCheck(ctx context.Context) ProxmoxReadinessCheck {
+	if err := c.requireClusterVMAudit(ctx); err != nil {
+		return c.proxmoxFailedReadiness("inventory", "/access/permissions?path=/", err, map[string]string{"scope": "cluster"})
+	}
 	vms, err := c.listQEMU(ctx)
 	if err != nil {
 		return c.proxmoxFailedReadiness("inventory", "/nodes/"+url.PathEscape(c.Node)+"/qemu", err, nil)
@@ -586,7 +606,7 @@ func (c *ProxmoxClient) proxmoxInventoryCheck(ctx context.Context) ProxmoxReadin
 		Status:  "ok",
 		Check:   "inventory",
 		Message: fmt.Sprintf("api=list mutation=false leases=%d vms=%d", leases, len(vms)),
-		Details: map[string]string{"api": "list", "mutation": "false", "leases": strconv.Itoa(leases), "vms": strconv.Itoa(len(vms)), "endpoint": "/nodes/" + c.Node + "/qemu"},
+		Details: map[string]string{"api": "list", "mutation": "false", "leases": strconv.Itoa(leases), "vms": strconv.Itoa(len(vms)), "scope": "cluster", "endpoint": "/nodes/" + c.Node + "/qemu"},
 	}
 }
 
@@ -660,6 +680,8 @@ func proxmoxReadinessHint(check, class string) string {
 			return "grant_proxmox_vm_audit"
 		case "nextid":
 			return "grant_proxmox_sys_audit"
+		case "inventory":
+			return "grant_proxmox_cluster_vm_audit"
 		default:
 			return "grant_proxmox_read_permissions"
 		}
@@ -732,6 +754,22 @@ type proxmoxClusterVM struct {
 	VMID proxmoxInt `json:"vmid"`
 }
 
+func (c *ProxmoxClient) requireVMAudit(ctx context.Context, path string, requirePropagation bool) error {
+	var permissions map[string]map[string]proxmoxInt
+	if err := c.doRequired(ctx, http.MethodGet, "/access/permissions?path="+url.QueryEscape(path), nil, &permissions); err != nil {
+		return err
+	}
+	propagated, ok := permissions[path]["VM.Audit"]
+	if !ok || (requirePropagation && propagated == 0) {
+		return fmt.Errorf("permission denied: authoritative Proxmox inventory requires VM.Audit on %s", path)
+	}
+	return nil
+}
+
+func (c *ProxmoxClient) requireClusterVMAudit(ctx context.Context) error {
+	return c.requireVMAudit(ctx, "/", true)
+}
+
 func (c *ProxmoxClient) listQEMU(ctx context.Context) ([]proxmoxVM, error) {
 	var vms []proxmoxVM
 	if err := c.doRequired(ctx, http.MethodGet, "/nodes/"+url.PathEscape(c.Node)+"/qemu", nil, &vms); err != nil {
@@ -768,6 +806,9 @@ func (c *ProxmoxClient) VMExistsInCluster(ctx context.Context, id string) (bool,
 	vmid, err := strconv.Atoi(strings.TrimSpace(id))
 	if err != nil || vmid <= 0 {
 		return false, fmt.Errorf("invalid Proxmox VM identity %q", id)
+	}
+	if err := c.requireVMAudit(ctx, "/vms/"+strconv.Itoa(vmid), false); err != nil {
+		return false, err
 	}
 	var vms []proxmoxClusterVM
 	if err := c.doRequired(ctx, http.MethodGet, "/cluster/resources?type=vm", nil, &vms); err != nil {

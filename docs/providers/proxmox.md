@@ -42,7 +42,7 @@ proxmox
 The configured template must be a Linux QEMU VM template with:
 
 - a cloud-init drive configured;
-- a NIC attached to an active bridge when `proxmox.bridge` is not set;
+- `net0` attached to an active bridge when `proxmox.bridge` is not set;
 - the QEMU guest agent installed and enabled;
 - DHCP networking (or an equivalent IP config the guest agent can report);
 - outbound package access for `apt-get`;
@@ -147,11 +147,16 @@ For self-signed private clusters, set `CRABBOX_PROXMOX_INSECURE_TLS=1` or pass
 `doctor --provider proxmox` is read-only. It checks authentication with
 `/version`, then verifies the configured node status, storage list, network
 bridge list, template VM/config, `/cluster/nextid`, and QEMU inventory. An
-explicit target storage must support `images`; without an override, every
-storage referenced by the template disks must be active, enabled, and
-image-capable. The configured template must have a cloud-init drive and, when
-no bridge override is set, a NIC on an active bridge. The output includes
-`mutation=false`; it does not clone, configure, start, stop, or delete VMs.
+explicit target storage must support `images`, and every source storage
+referenced by the template disks must be active, enabled, and image-capable.
+The configured template must have a cloud-init drive and, when no bridge
+override is set, `net0` on an active bridge. Cluster inventory recovery also
+requires propagated `VM.Audit` on `/`, so a permission-filtered
+`/cluster/resources` response is never treated as proof that a VM is absent.
+Release recovery also verifies effective `VM.Audit` on the exact
+`/vms/<vmid>` path before accepting absence.
+The output includes `mutation=false`; it does not clone, configure, start,
+stop, or delete VMs.
 
 ## Configuration
 
@@ -233,11 +238,11 @@ Expected Proxmox-specific checks:
 ```text
 auth       /version accepts the API token
 node       /nodes/<node>/status is readable
-storage    configured or template disk storage is active and image-capable
-bridge     configured or template NIC bridge exists and is active
+storage    clone target and all template source stores are image-capable
+bridge     configured bridge or the template net0 bridge is active
 template   /nodes/<node>/qemu and /config show templateId is a QEMU template
 nextid     /cluster/nextid is readable
-inventory  /nodes/<node>/qemu is readable for Crabbox VM inventory
+inventory  root VM.Audit is propagated and VM inventory is readable
 mutation   always reports mutation=false
 ```
 
@@ -256,11 +261,16 @@ for lease lifecycle operations:
 /nodes/<node>/storage/<storage>
 /nodes/<node>/qemu/<templateId>
 /sdn or /nodes/<node>/network, depending on how the bridge is managed
+/
 ```
 
 The exact least-privilege role depends on the Proxmox VE version and local ACL
 model. If doctor fails with `class=permission`, fix the named endpoint first and
-rerun doctor before attempting `warmup` or `run`.
+rerun doctor before attempting `warmup` or `run`. The root ACL needs propagated
+`VM.Audit` so `/access/permissions?path=/` can establish that
+cluster-wide inventory should be available. Release recovery additionally
+checks `/access/permissions?path=/vms/<vmid>` before treating
+`/cluster/resources?type=vm` as authoritative for that VM.
 
 For CI or lab smoke checks after building the local binary:
 
