@@ -8,14 +8,13 @@ Run an opt-in Proxmox live proof through the public Crabbox CLI.
 
 By default the script is read-only: it builds redacted proof logs for doctor and
 list. Set CRABBOX_PROXMOX_LIVE_SMOKE=1 to run a controlled warmup/status/ssh
-command/stop/cleanup lifecycle.
+command/stop/cleanup-dry-run lifecycle.
 
 Environment:
   CRABBOX_BIN                         Crabbox binary (default: ./bin/crabbox)
   CRABBOX_PROXMOX_LIVE_SMOKE          Set to 1 to permit lease mutation
   CRABBOX_PROXMOX_LIVE_SMOKE_SLUG     Requested lease slug (default: proxmox-live-smoke)
   CRABBOX_PROXMOX_LIVE_SMOKE_DIR      Proof directory (default: /tmp/crabbox-proxmox-live-proof.XXXXXX)
-  CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP  Run real cleanup after dry-run if set to 1
   CRABBOX_PROXMOX_SSH_INVENTORY_HOST  Optional Proxmox node SSH host for read-only inventory
   CRABBOX_PROXMOX_SSH_INVENTORY_USER  Optional Proxmox node SSH user (default: root)
 
@@ -32,7 +31,6 @@ fi
 bin="${CRABBOX_BIN:-./bin/crabbox}"
 live="${CRABBOX_PROXMOX_LIVE_SMOKE:-0}"
 slug="${CRABBOX_PROXMOX_LIVE_SMOKE_SLUG:-proxmox-live-smoke}"
-allow_cleanup="${CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP:-0}"
 inventory_host="${CRABBOX_PROXMOX_SSH_INVENTORY_HOST:-}"
 inventory_user="${CRABBOX_PROXMOX_SSH_INVENTORY_USER:-root}"
 
@@ -98,6 +96,7 @@ else
     exit 2
   }
 fi
+export CRABBOX_PROXMOX_REDACT_PROOF_DIR="$proof_dir"
 
 secure_log_file() {
   local file="$1"
@@ -131,7 +130,7 @@ redact_stream() {
       $api_url = $ENV{"CRABBOX_PROXMOX_REDACT_API_URL"} // "";
       $api_host = $ENV{"CRABBOX_PROXMOX_REDACT_API_HOST"} // "";
       $inventory_host = $ENV{"CRABBOX_PROXMOX_SSH_INVENTORY_HOST"} // "";
-      $proof_dir = $ENV{"CRABBOX_PROXMOX_LIVE_SMOKE_DIR"} // "";
+      $proof_dir = $ENV{"CRABBOX_PROXMOX_REDACT_PROOF_DIR"} // "";
       $bin = $ENV{"CRABBOX_BIN"} // "";
     }
     s/\Q$token_secret\E/<proxmox-token-secret>/g if length($token_secret);
@@ -245,13 +244,6 @@ if [[ "$warmup_status" -eq 0 && -n "$lease_id" ]]; then
   run_step cleanup-dry-run "$bin" cleanup --provider proxmox --dry-run || cleanup_dry_run_status=$?
   if [[ "$cleanup_dry_run_status" -ne 0 ]]; then
     failure=1
-  fi
-  if [[ "$allow_cleanup" == "1" && "$cleanup_dry_run_status" -eq 0 ]]; then
-    run_step cleanup "$bin" cleanup --provider proxmox || failure=1
-  elif [[ "$allow_cleanup" == "1" ]]; then
-    echo "step=cleanup status=skip reason=cleanup_dry_run_failed" | tee -a "$summary"
-  else
-    echo "step=cleanup status=skip reason=CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP not set to 1 after dry-run" | tee -a "$summary"
   fi
 else
   if [[ "$warmup_status" -eq 0 ]]; then

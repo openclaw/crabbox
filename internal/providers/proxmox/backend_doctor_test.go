@@ -14,6 +14,7 @@ import (
 
 type fakeProxmoxDoctorClient struct {
 	listCalls             int
+	listErr               error
 	getCalls              int
 	deleteCalls           int
 	deletedIDs            []string
@@ -40,7 +41,7 @@ func (c *fakeProxmoxDoctorClient) DoctorReadiness(context.Context, Config) ([]co
 
 func (c *fakeProxmoxDoctorClient) ListCrabboxServers(context.Context) ([]Server, error) {
 	c.listCalls++
-	return c.servers, nil
+	return c.servers, c.listErr
 }
 
 func (c *fakeProxmoxDoctorClient) CreateServer(_ context.Context, _ Config, _ string, leaseID string, _ string, _ bool) (Server, error) {
@@ -955,6 +956,67 @@ func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing
 	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok || claim.CloudID != "202" || claim.SSHHost != "192.0.2.202" {
 		t.Fatalf("claim=%#v ok=%t err=%v, want surviving duplicate", claim, ok, err)
+	}
+	assertStoredTestboxKeyExists(t, leaseID)
+}
+
+func TestProxmoxReleaseRemovesExactClaimWhenInventoryRefreshFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_release_inventory_failure"
+	server := expiredProxmoxServer("101", leaseID)
+	server.Provider = "proxmox"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{server}, listErr: errors.New("inventory unavailable")}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	var stderr strings.Builder
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*leaseBackend)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
+		t.Fatalf("claim ok=%t err=%v, want removed after confirmed deletion", ok, err)
+	}
+	assertStoredTestboxKeyRemoved(t, leaseID)
+	if !strings.Contains(stderr.String(), "reconcile Proxmox lease after release") {
+		t.Fatalf("stderr=%q, want reconciliation warning", stderr.String())
+	}
+}
+
+func TestProxmoxReleasePreservesDifferentClaimWhenInventoryRefreshFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_release_inventory_mismatch"
+	deleted := expiredProxmoxServer("101", leaseID)
+	deleted.Provider = "proxmox"
+	claimed := expiredProxmoxServer("202", leaseID)
+	claimed.Provider = "proxmox"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, claimed, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{deleted, claimed}, listErr: errors.New("inventory unavailable")}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: deleted}}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.CloudID != "202" {
+		t.Fatalf("claim=%#v ok=%t err=%v, want different claim preserved", claim, ok, err)
 	}
 	assertStoredTestboxKeyExists(t, leaseID)
 }

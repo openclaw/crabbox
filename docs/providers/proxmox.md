@@ -299,12 +299,12 @@ scripts/proxmox-live-smoke.sh
 
 Live mode runs the public CLI surface: `warmup --keep`, `status --json`, `ssh`
 to print the pasteable command, `stop`, `cleanup --dry-run`, and a final
-`list --json`. Real cleanup is skipped unless
-`CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP=1` is set; keep the dry-run output in the PR
-evidence even when no actual cleanup is needed.
+`list --json`. The smoke script never runs provider-wide mutating cleanup; the
+owned lease is released by `stop`, and the cleanup dry-run remains evidence that
+other Proxmox leases would not be changed by the proof.
 
 Proof artifacts are written to `CRABBOX_PROXMOX_LIVE_SMOKE_DIR` when set, or a
-new directory under `/tmp` otherwise. The directory and logs use owner-only
+new system temporary directory otherwise. The directory and logs use owner-only
 permissions, endpoint URLs are redacted, and live mode refuses to mutate when a
 readiness preflight fails. Files ending in `.raw.log` are private operator
 evidence. Use only `.redacted.log` files and
