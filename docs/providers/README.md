@@ -60,7 +60,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 49 providers (29 SSH lease, 19 delegated run, 1 service control).
+Current built-in surface: 50 providers (30 SSH lease, 19 delegated run, 1 service control).
 
 Access terms:
 
@@ -103,6 +103,7 @@ Access terms:
 | [namespace-devbox](namespace-devbox.md) (`namespace`, `namespace-devboxes`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Namespace Devbox | `provider-managed`; GPU: unknown | Namespace devbox CLI; stop by default; optional delete | Fast managed development box over SSH | Uses the devbox product, not Namespace Compute instances |
 | [opencomputer](opencomputer.md) (`oc`, `open-computer`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; OpenComputer Linux VM | `provider-managed`; GPU: unknown | OpenComputer; VM delete | Hosted delegated Linux VM execution | REST execution contract, not an SSH lease |
 | [opensandbox](opensandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; OpenSandbox sandbox | `provider-managed`; GPU: unknown | OpenSandbox; sandbox delete | Hosted delegated sandbox through an open SDK | Requires compatible OpenSandbox control and exec endpoints |
+| [ovh](ovh.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; OVHcloud Public Cloud instance | `cloud`; GPU: optional | Crabbox; instance, key, and local claim delete | OVHcloud Public Cloud Linux VM | Direct-only; credentials use OVH signed requests and local claims |
 | [parallels](parallels.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `workspace-checkpoint`, `workspace-fork`, `workspace-restore`, `provider-snapshot` | `linux`, `macos`, `windows/normal`, `windows/wsl2`; Parallels linked-clone VM | `local`; GPU: no | Crabbox; clone delete | Local macOS, Linux, or Windows VM with snapshots | Requires prepared Parallels source VMs and SSH |
 | [proxmox](proxmox.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Proxmox VE QEMU clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM fleet | Needs a prepared template, guest agent, and network |
 | [railway](railway.md) (`rail`, `railwayapp`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: `url-bridge` | `linux`; Railway service | `cloud`; GPU: unknown | Railway; service stop only | Inspecting or stopping an existing Railway service | Cannot execute arbitrary Crabbox run commands |
