@@ -297,6 +297,9 @@ CRABBOX_PROXMOX_LIVE_SMOKE_SLUG=proxmox-live-smoke \
 scripts/proxmox-live-smoke.sh
 ```
 
+The configured smoke slug is a prefix. The script appends a per-process run
+identifier so concurrent proofs cannot claim or reconcile each other's leases.
+
 Live mode runs the public CLI surface: `warmup --keep`, `status --json`, `ssh`
 to print the pasteable command, `stop`, `cleanup --dry-run`, and a final
 `list --json`. The smoke script never runs provider-wide mutating cleanup; the

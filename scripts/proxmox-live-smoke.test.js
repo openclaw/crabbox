@@ -39,9 +39,9 @@ case "$1" in
     ;;
   list)
     if [[ -f "${leaseState}" ]]; then
-      created_slug="proxmox-live-smoke"
+      created_slug="$(cat "${leaseState}")"
       if [[ "\${FAKE_CRABBOX_SUFFIXED_SLUG:-0}" == "1" ]]; then
-        created_slug="proxmox-live-smoke-abcd"
+        created_slug="\${created_slug}-abcd"
       fi
       printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"100","name":"crabbox-proxmox-live-smoke","labels":{"lease":"cbx_test123","slug":"%s","provider":"proxmox"}}]\\n' "$created_slug"
     else
@@ -49,8 +49,20 @@ case "$1" in
     fi
     ;;
   warmup)
+    requested_slug=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --slug)
+          requested_slug="\${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
     if [[ "\${FAKE_CRABBOX_FAIL_WARMUP_WITH_LEASE:-0}" == "1" ]]; then
-      touch "${leaseState}"
+      printf '%s\\n' "$requested_slug" >"${leaseState}"
       printf 'warmup failed after leased cbx_test123\\n' >&2
       exit 1
     fi
@@ -58,7 +70,7 @@ case "$1" in
       printf 'warmup failed before lease creation\\n' >&2
       exit 1
     fi
-    touch "${leaseState}"
+    printf '%s\\n' "$requested_slug" >"${leaseState}"
     if [[ "\${FAKE_CRABBOX_OMIT_LEASE_OUTPUT:-0}" != "1" ]]; then
       printf 'leased cbx_test123 slug=proxmox-live-smoke provider=proxmox server=100 type=template-9400 ip=192.0.2.10 idle_timeout=30m expires=later\\n'
     fi
@@ -155,7 +167,7 @@ test("live mode runs lifecycle and read-only cleanup proof", () => {
 	assert.match(result.stdout, /classification=live_proof_complete/);
 	const calls = fs.readFileSync(fake.calls, "utf8").trim().split("\n");
 	const dryRunIndex = calls.indexOf("cleanup --provider proxmox --dry-run");
-	assert.ok(calls.indexOf("warmup --provider proxmox --slug proxmox-live-smoke --keep") > -1);
+	assert.ok(calls.some((line) => /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-\d+ --keep$/.test(line)));
 	assert.ok(calls.indexOf("status --provider proxmox --id cbx_test123 --json") > -1);
 	assert.ok(calls.indexOf("ssh --provider proxmox --id cbx_test123") > -1);
 	assert.ok(calls.indexOf("stop --provider proxmox --id cbx_test123") > -1);
@@ -196,7 +208,7 @@ test("live mode does not stop or cleanup when warmup fails before lease ownershi
 	assert.match(result.stdout, /reason=no_new_matching_lease/);
 	assert.match(result.stdout, /classification=environment_blocked/);
 	const calls = fs.readFileSync(fake.calls, "utf8");
-	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke --keep$/m);
+	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-\d+ --keep$/m);
 	assert.match(calls, /^list --provider proxmox --json$/m);
 	assert.doesNotMatch(calls, /^status |^ssh |^stop |^cleanup /m);
 });

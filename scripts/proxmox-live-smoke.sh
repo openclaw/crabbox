@@ -13,7 +13,7 @@ command/stop/cleanup-dry-run lifecycle.
 Environment:
   CRABBOX_BIN                         Crabbox binary (default: ./bin/crabbox)
   CRABBOX_PROXMOX_LIVE_SMOKE          Set to 1 to permit lease mutation
-  CRABBOX_PROXMOX_LIVE_SMOKE_SLUG     Requested lease slug (default: proxmox-live-smoke)
+  CRABBOX_PROXMOX_LIVE_SMOKE_SLUG     Per-run lease slug prefix (default: proxmox-live-smoke)
   CRABBOX_PROXMOX_LIVE_SMOKE_DIR      Proof directory (default: /tmp/crabbox-proxmox-live-proof.XXXXXX)
   CRABBOX_PROXMOX_SSH_INVENTORY_HOST  Optional Proxmox node SSH host for read-only inventory
   CRABBOX_PROXMOX_SSH_INVENTORY_USER  Optional Proxmox node SSH user (default: root)
@@ -30,7 +30,7 @@ fi
 
 bin="${CRABBOX_BIN:-./bin/crabbox}"
 live="${CRABBOX_PROXMOX_LIVE_SMOKE:-0}"
-slug="${CRABBOX_PROXMOX_LIVE_SMOKE_SLUG:-proxmox-live-smoke}"
+slug_prefix="${CRABBOX_PROXMOX_LIVE_SMOKE_SLUG:-proxmox-live-smoke}"
 inventory_host="${CRABBOX_PROXMOX_SSH_INVENTORY_HOST:-}"
 inventory_user="${CRABBOX_PROXMOX_SSH_INVENTORY_USER:-root}"
 
@@ -47,6 +47,16 @@ if ! command -v perl >/dev/null 2>&1; then
   echo "missing required tool: perl" >&2
   exit 2
 fi
+
+slug_prefix="$(
+  printf '%s' "$slug_prefix" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+)"
+if [[ -z "$slug_prefix" ]]; then
+  slug_prefix="proxmox-live-smoke"
+fi
+slug="${slug_prefix:0:20}-$(date -u +%s)-$$"
 
 resolve_configured_value() {
   local field="$1"
