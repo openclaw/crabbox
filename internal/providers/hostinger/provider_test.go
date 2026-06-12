@@ -1260,7 +1260,7 @@ func TestResolveStartsStoppedHostingerVMForSSHCommands(t *testing.T) {
 	waitCalls := 0
 	hostingerWaitForSSHReady = func(_ context.Context, target *SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
 		waitCalls++
-		if phase != "restart" || target.ReadyCheck != "" {
+		if phase != "restart" || target.ReadyCheck != "true" {
 			t.Fatalf("restart wait phase=%q readyCheck=%q", phase, target.ReadyCheck)
 		}
 		return nil

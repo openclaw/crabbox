@@ -364,7 +364,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	}
 	if started && !b.skipSSHWait {
 		transport := lease.SSH
-		transport.ReadyCheck = ""
+		transport.ReadyCheck = "true"
 		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "restart", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), leaseID, cfg, err)
 		}

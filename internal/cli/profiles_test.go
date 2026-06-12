@@ -713,6 +713,25 @@ func TestRunStopCommandIncludesMorphRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesHostingerRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "hostinger",
+		TargetOS: targetLinux,
+		Hostinger: HostingerConfig{
+			APIURL: "https://hostinger.example.test/api",
+		},
+	}, "1750645")
+	for _, want := range []string{
+		"--provider hostinger",
+		"--hostinger-url https://hostinger.example.test/api",
+		"--id 1750645",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
 	cfg := Config{
 		Provider: "kubevirt",

@@ -1745,6 +1745,10 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if DeleteOnReleaseExplicit(cfg, "morph") {
 			args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
 		}
+	case "hostinger":
+		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
+			args = append(args, "--hostinger-url", cfg.Hostinger.APIURL)
+		}
 	case "kubevirt":
 		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
 			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)
