@@ -386,11 +386,10 @@ func (b *backend) resolveMachineID(ctx context.Context, client api, id, repoRoot
 		if err != nil {
 			return "", "", "", err
 		}
-		return id, machine.ID, machineSlug(id, machine), nil
+		return b.finishResolvedMachine(machine, repoRoot, reclaim)
 	}
 	if machine, err := client.GetMachine(ctx, id); err == nil && isCrabboxMachine(machine) {
-		leaseID := machineLeaseID(machine)
-		return leaseID, machine.ID, machineSlug(leaseID, machine), nil
+		return b.finishResolvedMachine(machine, repoRoot, reclaim)
 	} else if err != nil && !isNotFound(err) {
 		return "", "", "", err
 	}
@@ -402,11 +401,20 @@ func (b *backend) resolveMachineID(ctx context.Context, client api, id, repoRoot
 		if gerr != nil || !isCrabboxMachine(m) {
 			return "", "", "", err
 		}
-		leaseID := machineLeaseID(m)
-		return leaseID, m.ID, machineSlug(leaseID, m), nil
+		return b.finishResolvedMachine(m, repoRoot, reclaim)
 	}
+	return b.finishResolvedMachine(machine, repoRoot, reclaim)
+}
+
+func (b *backend) finishResolvedMachine(machine machineData, repoRoot string, reclaim bool) (string, string, string, error) {
 	leaseID := machineLeaseID(machine)
-	return leaseID, machine.ID, machineSlug(leaseID, machine), nil
+	slug := machineSlug(leaseID, machine)
+	if repoRoot != "" {
+		if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
+			return "", "", "", err
+		}
+	}
+	return leaseID, machine.ID, slug, nil
 }
 
 func resolveMachineByLease(ctx context.Context, client api, leaseID string) (machineData, error) {
@@ -444,12 +452,12 @@ func machineToServer(cfg Config, m machineData) Server {
 	labels := directLeaseLabels(cfg, leaseID, machineSlug(leaseID, m), providerName, "", cfg.Smolvm.Keep, time.Now().UTC())
 	labels["machine_id"] = m.ID
 	labels["machine_name"] = m.Name
-	labels["image"] = blank(m.Image, imageName(cfg))
-	if m.CPUs > 0 {
-		labels["cpus"] = fmt.Sprintf("%d", m.CPUs)
+	labels["image"] = blank(m.Source.Reference, imageName(cfg))
+	if m.Resources.CPUs > 0 {
+		labels["cpus"] = fmt.Sprintf("%d", m.Resources.CPUs)
 	}
-	if m.MemoryMB > 0 {
-		labels["memory_mb"] = fmt.Sprintf("%d", m.MemoryMB)
+	if m.Resources.MemoryMB > 0 {
+		labels["memory_mb"] = fmt.Sprintf("%d", m.Resources.MemoryMB)
 	}
 	labels["state"] = m.State
 	server := Server{

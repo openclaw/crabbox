@@ -76,6 +76,7 @@ SMOLMACHINES_API_KEY
 CRABBOX_SMOLVM_API_KEY
 SMK_API_KEY
 CRABBOX_SMOLVM_BASE_URL
+CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL
 CRABBOX_SMOLVM_IMAGE
 CRABBOX_SMOLVM_WORKDIR
 CRABBOX_SMOLVM_CPUS
@@ -86,7 +87,9 @@ CRABBOX_SMOLVM_KEEP
 
 The base URL must use `https` (plain `http` is allowed only for localhost
 endpoints) and must not contain userinfo, query, or fragment components; the
-API key is sent as a bearer token only to a validated endpoint.
+API key is sent as a bearer token only to official `smolmachines.com` hosts or
+loopback by default. Set `CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1` only when you
+intend to trust a custom control plane with the API key.
 
 Defaults: image `alpine` (lightweight; provides the standard shell tools needed for direct archive sync via the API), workdir `/workspace`, network open by default.
 

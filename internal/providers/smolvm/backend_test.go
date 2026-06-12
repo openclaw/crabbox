@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -61,15 +62,15 @@ func TestClientUsesSmolvmRESTShape(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
 					t.Fatal(err)
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": "mach_1", "name": "crabbox-blue-123456789abc", "state": "running"})
+				_ = json.NewEncoder(w).Encode(testMachineResponse("mach_1", "crabbox-blue-123456789abc", "running"))
 			case http.MethodGet:
-				_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "mach_1", "name": "crabbox-blue-123456789abc", "state": "running"}})
+				_ = json.NewEncoder(w).Encode([]map[string]any{testMachineResponse("mach_1", "crabbox-blue-123456789abc", "running")})
 			default:
 				t.Fatalf("unexpected method %s", r.Method)
 			}
 		case "/v1/machines/mach_1":
 			if r.Method == http.MethodGet {
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": "mach_1", "name": "crabbox-blue-123456789abc", "state": "running"})
+				_ = json.NewEncoder(w).Encode(testMachineResponse("mach_1", "crabbox-blue-123456789abc", "running"))
 				return
 			}
 			if r.Method == http.MethodDelete {
@@ -80,7 +81,7 @@ func TestClientUsesSmolvmRESTShape(t *testing.T) {
 		case "/v1/machines/mach_1/exec":
 			var body struct {
 				Command string `json:"command"`
-				Workdir string `json:"workdir"`
+				CWD     string `json:"cwd"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
@@ -96,7 +97,7 @@ func TestClientUsesSmolvmRESTShape(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "smolvm-direct-write: ok\n"})
 				return
 			}
-			if !strings.Contains(body.Command, "echo hi") || (body.Workdir != "crabbox" && body.Workdir != "/crabbox") {
+			if !strings.Contains(body.Command, "echo hi") || (body.CWD != "crabbox" && body.CWD != "/crabbox") {
 				t.Fatalf("exec body=%#v", body)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "hi\n", "stderr": "warn\n"})
@@ -173,6 +174,25 @@ func TestNewAPIAllowsLoopbackHTTPBaseURL(t *testing.T) {
 	cfg.Smolvm.BaseURL = "http://127.0.0.1:8080"
 	if _, err := newAPI(cfg, Runtime{}); err != nil {
 		t.Fatalf("loopback http rejected: %v", err)
+	}
+}
+
+func TestNewAPIRejectsUntrustedHTTPSBaseURLByDefault(t *testing.T) {
+	cfg := Config{}
+	cfg.Smolvm.APIKey = "smk_key"
+	cfg.Smolvm.BaseURL = "https://smolvm.attacker.example"
+	if _, err := newAPI(cfg, Runtime{}); err == nil || !strings.Contains(err.Error(), "ALLOW_CUSTOM_BASE_URL") {
+		t.Fatalf("newAPI error=%v, want custom endpoint opt-in requirement", err)
+	}
+}
+
+func TestNewAPIAllowsExplicitCustomHTTPSBaseURL(t *testing.T) {
+	t.Setenv("CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL", "1")
+	cfg := Config{}
+	cfg.Smolvm.APIKey = "smk_key"
+	cfg.Smolvm.BaseURL = "https://smolvm.example.test"
+	if _, err := newAPI(cfg, Runtime{}); err != nil {
+		t.Fatalf("explicit custom endpoint rejected: %v", err)
 	}
 }
 
@@ -372,7 +392,11 @@ func TestSyncWorkspaceUsesInject(t *testing.T) {
 }
 
 func TestStatusMapsMachineName(t *testing.T) {
-	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", Image: "alpine", State: "running", CPUs: 4, MemoryMB: 8192}}
+	fake := &fakeAPI{machine: machineData{
+		ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running",
+		Source:    smolvmMachineSource{Type: "image", Reference: "alpine"},
+		Resources: smolvmMachineResources{CPUs: 4, MemoryMB: 8192},
+	}}
 	withFakeAPI(t, fake)
 	cfg := testConfig()
 	cfg.Smolvm.BaseURL = "https://eu.smolmachines.com"
@@ -399,6 +423,31 @@ func TestStatusRejectsNonCrabboxRawMachine(t *testing.T) {
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	if _, err := backend.Status(context.Background(), StatusRequest{ID: "mach_1"}); err == nil {
 		t.Fatal("expected non-Crabbox raw machine id to be rejected")
+	}
+}
+
+func TestRunRawMachineIDEnforcesRepositoryClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_123456789abc"
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue", providerName, repoA, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running"}}
+	withFakeAPI(t, fake)
+	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:      "mach_1",
+		Repo:    Repo{Name: "repo-b", Root: repoB},
+		Command: []string{"echo", "hello"},
+		NoSync:  true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
+		t.Fatalf("Run error=%v, want cross-repository claim rejection", err)
+	}
+	if len(fake.verbs) != 0 {
+		t.Fatalf("verbs=%v, want no machine mutation or execution", fake.verbs)
 	}
 }
 
@@ -458,10 +507,11 @@ func (f *fakeAPI) CreateMachine(_ context.Context, req createRequest) (machineDa
 	f.createReq = req
 	f.machine = machineData{ID: "mach_1", Name: req.Name, State: "running"}
 	if ref := strings.TrimSpace(req.Source.Reference); ref != "" {
-		f.machine.Image = ref
+		f.machine.Source = req.Source
 	} else if req.Source.Type != "" {
-		f.machine.Image = req.Source.Type
+		f.machine.Source.Reference = req.Source.Type
 	}
+	f.machine.Resources = req.Resources
 	return f.machine, nil
 }
 
@@ -543,5 +593,15 @@ func runGit(t *testing.T, dir string, args ...string) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+}
+
+func testMachineResponse(id, name, state string) map[string]any {
+	return map[string]any{
+		"id": id, "name": name, "state": state,
+		"source":    map[string]any{"type": "image", "reference": "ubuntu:24.04"},
+		"resources": map[string]any{"cpus": 2, "memoryMb": 4096},
+		"network":   map[string]any{"mode": "blocked"},
+		"ephemeral": false, "createdAt": "2026-06-12T20:00:00Z", "updatedAt": "2026-06-12T20:00:00Z",
 	}
 }

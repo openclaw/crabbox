@@ -45,14 +45,15 @@ type createRequest struct {
 }
 
 type machineData struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	State     string `json:"state"`
-	Image     string `json:"image,omitempty"`
-	CPUs      int    `json:"cpus,omitempty"`
-	MemoryMB  int    `json:"memory_mb,omitempty"`
-	CreatedAt int64  `json:"created_at,omitempty"`
-	UpdatedAt int64  `json:"updated_at,omitempty"`
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name"`
+	State     string                 `json:"state"`
+	Source    smolvmMachineSource    `json:"source"`
+	Resources smolvmMachineResources `json:"resources"`
+	Network   *smolvmMachineNetwork  `json:"network,omitempty"`
+	Workdir   string                 `json:"workdir,omitempty"`
+	CreatedAt string                 `json:"createdAt,omitempty"`
+	UpdatedAt string                 `json:"updatedAt,omitempty"`
 }
 
 type execResult struct {
@@ -119,7 +120,7 @@ type smolvmCreateMachineRequest struct {
 
 type smolvmExecCommandRequest struct {
 	Command        any               `json:"command"` // CommandSpec accepts array or string (we pass the buildCommand script string for shell forms)
-	Workdir        string            `json:"workdir,omitempty"`
+	CWD            string            `json:"cwd,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	Stdin          string            `json:"stdin,omitempty"`
 	Stream         bool              `json:"stream,omitempty"`
@@ -158,7 +159,25 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return nil, exit(2, "%s url %q must not include query or fragment components", providerName, base)
 	}
+	if !trustedSmolvmAPIHost(parsed) && !customSmolvmBaseURLAllowed() {
+		return nil, exit(2, "%s url host %q is not an official Smol Machines endpoint; set CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1 to send credentials to a custom control plane", providerName, parsed.Hostname())
+	}
 	return &client{apiKey: apiKey, base: strings.TrimRight(parsed.String(), "/"), http: httpClient}, nil
+}
+
+func trustedSmolvmAPIHost(parsed *url.URL) bool {
+	host := strings.ToLower(parsed.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" ||
+		host == "smolmachines.com" || strings.HasSuffix(host, ".smolmachines.com")
+}
+
+func customSmolvmBaseURLAllowed() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {
@@ -238,7 +257,7 @@ func (c *client) Exec(ctx context.Context, machineID, command, folder string) (e
 		if f == "/" || f == "" {
 			f = "/workspace"
 		}
-		execReq.Workdir = f
+		execReq.CWD = f
 	}
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(machineID)+"/exec", nil, execReq, &result); err != nil {
 		return execResult{}, err
