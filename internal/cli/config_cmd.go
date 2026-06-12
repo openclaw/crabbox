@@ -363,6 +363,19 @@ func configShowView(cfg Config) map[string]any {
 			"network":  cfg.Smolvm.Network,
 			"keep":     cfg.Smolvm.Keep,
 		},
+		"blaxel": map[string]any{
+			"apiUrl":          redactedConfigURL(cfg.Blaxel.APIURL),
+			"auth":            tokenState(cfg.Blaxel.APIKey),
+			"workspace":       cfg.Blaxel.Workspace,
+			"region":          cfg.Blaxel.Region,
+			"image":           cfg.Blaxel.Image,
+			"memoryMB":        cfg.Blaxel.MemoryMB,
+			"ttl":             cfg.Blaxel.TTL,
+			"idleTTL":         cfg.Blaxel.IdleTTL,
+			"workdir":         cfg.Blaxel.Workdir,
+			"execTimeoutSecs": cfg.Blaxel.ExecTimeoutSecs,
+			"forgetMissing":   cfg.Blaxel.ForgetMissing,
+		},
 		"asciiBox": map[string]any{
 			"baseUrl": cfg.AsciiBox.BaseURL,
 			"auth":    tokenState(cfg.AsciiBox.APIKey),
@@ -548,6 +561,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", cfg.E2B.APIURL, cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "smolvm base_url=%s image=%s workdir=%s cpus=%d memory_mb=%d network=%s keep=%t auth=%s\n", cfg.Smolvm.BaseURL, cfg.Smolvm.Image, cfg.Smolvm.Workdir, cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB, cfg.Smolvm.Network, cfg.Smolvm.Keep, tokenState(cfg.Smolvm.APIKey))
+	fmt.Fprintf(w, "blaxel api_url=%s workspace=%s region=%s image=%s memory_mb=%d ttl=%s idle_ttl=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.Blaxel.APIURL), "-"), blank(cfg.Blaxel.Workspace, "-"), blank(cfg.Blaxel.Region, "-"), cfg.Blaxel.Image, cfg.Blaxel.MemoryMB, blank(cfg.Blaxel.TTL, "-"), blank(cfg.Blaxel.IdleTTL, "-"), cfg.Blaxel.Workdir, cfg.Blaxel.ExecTimeoutSecs, cfg.Blaxel.ForgetMissing, tokenState(cfg.Blaxel.APIKey))
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
 	fmt.Fprintf(w, "superserve base_url=%s template=%s snapshot=%s workdir=%s timeout_secs=%d exec_timeout_secs=%d network_allow_out=%s network_deny_out=%s forget_missing=%t auth=%s\n", redactedConfigURL(cfg.Superserve.BaseURL), blank(cfg.Superserve.Template, "-"), blank(cfg.Superserve.Snapshot, "-"), cfg.Superserve.Workdir, cfg.Superserve.TimeoutSecs, cfg.Superserve.ExecTimeoutSecs, blank(strings.Join(cfg.Superserve.NetworkAllowOut, ","), "-"), blank(strings.Join(cfg.Superserve.NetworkDenyOut, ","), "-"), cfg.Superserve.ForgetMissing, superserveAuthState())
 	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))

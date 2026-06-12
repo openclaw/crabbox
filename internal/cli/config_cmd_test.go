@@ -544,6 +544,84 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesBlaxelWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_BLAXEL_API_KEY", "blaxel-secret-token")
+	t.Setenv("CRABBOX_BLAXEL_API_URL", "https://api.blaxel.example.test")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"provider: blaxel",
+		"blaxel:",
+		"  workspace: workspace-test",
+		"  region: us-pdx-1",
+		"  image: ubuntu:24.04",
+		"  memoryMB: 2048",
+		"  ttl: 30m",
+		"  idleTTL: 5m",
+		"  workdir: /workspace/test",
+		"  execTimeoutSecs: 120",
+		"  forgetMissing: true",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "blaxel api_url=https://api.blaxel.example.test workspace=workspace-test region=us-pdx-1 image=ubuntu:24.04 memory_mb=2048 ttl=30m idle_ttl=5m workdir=/workspace/test exec_timeout_secs=120 forget_missing=true auth=configured") {
+		t.Fatalf("config show missing blaxel summary: %q", text)
+	}
+	if strings.Contains(text, "blaxel-secret-token") {
+		t.Fatalf("config show leaked Blaxel token: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Blaxel struct {
+			APIURL          string `json:"apiUrl"`
+			Auth            string `json:"auth"`
+			Workspace       string `json:"workspace"`
+			Region          string `json:"region"`
+			Image           string `json:"image"`
+			MemoryMB        int    `json:"memoryMB"`
+			TTL             string `json:"ttl"`
+			IdleTTL         string `json:"idleTTL"`
+			Workdir         string `json:"workdir"`
+			ExecTimeoutSecs int    `json:"execTimeoutSecs"`
+			ForgetMissing   bool   `json:"forgetMissing"`
+		} `json:"blaxel"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Blaxel.APIURL != "https://api.blaxel.example.test" ||
+		got.Blaxel.Auth != "configured" ||
+		got.Blaxel.Workspace != "workspace-test" ||
+		got.Blaxel.Region != "us-pdx-1" ||
+		got.Blaxel.Image != "ubuntu:24.04" ||
+		got.Blaxel.MemoryMB != 2048 ||
+		got.Blaxel.TTL != "30m" ||
+		got.Blaxel.IdleTTL != "5m" ||
+		got.Blaxel.Workdir != "/workspace/test" ||
+		got.Blaxel.ExecTimeoutSecs != 120 ||
+		!got.Blaxel.ForgetMissing {
+		t.Fatalf("unexpected blaxel json: %#v", got.Blaxel)
+	}
+	if strings.Contains(stdout.String(), "blaxel-secret-token") {
+		t.Fatalf("config show json leaked Blaxel token: %q", stdout.String())
+	}
+}
+
 func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

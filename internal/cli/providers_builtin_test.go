@@ -20,6 +20,7 @@ func init() {
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
+	RegisterProvider(testBlaxelProvider{})
 	RegisterProvider(testGCPProvider{})
 	RegisterProvider(testIncusProvider{})
 	RegisterProvider(testProxmoxProvider{})
@@ -235,6 +236,28 @@ func (testAzureDynamicSessionsProvider) ApplyFlags(*Config, *flag.FlagSet, any) 
 func (testAzureDynamicSessionsProvider) ServerTypeForConfig(Config) string { return "" }
 func (testAzureDynamicSessionsProvider) ServerTypeForClass(string) string  { return "" }
 func (p testAzureDynamicSessionsProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+
+type testBlaxelProvider struct{}
+
+func (testBlaxelProvider) Name() string      { return "blaxel" }
+func (testBlaxelProvider) Aliases() []string { return nil }
+func (testBlaxelProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "blaxel",
+		Family:      "blaxel",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testBlaxelProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testBlaxelProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testBlaxelProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 

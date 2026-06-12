@@ -223,6 +223,28 @@ func TestVercelSandboxRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestBlaxelRegistersCanonicalWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("blaxel")
+	if err != nil {
+		t.Fatalf("ProviderFor(blaxel): %v", err)
+	}
+	if provider.Name() != "blaxel" {
+		t.Fatalf("ProviderFor(blaxel).Name=%q", provider.Name())
+	}
+	for _, alias := range []string{"blx", "sandbox"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "blaxel" {
+			t.Fatalf("%q alias unexpectedly resolves to blaxel", alias)
+		}
+	}
+	spec := provider.Spec()
+	if spec.Family != "blaxel" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("blaxel spec=%#v", spec)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("blaxel features=%#v", spec.Features)
+	}
+}
+
 func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
 		provider, err := core.ProviderFor(name)
@@ -1057,6 +1079,7 @@ func allBuiltInProviderNames() []string {
 		"aws",
 		"azure",
 		"azure-dynamic-sessions",
+		"blaxel",
 		"blacksmith-testbox",
 		"cloudflare",
 		"cloudflare-dynamic-workers",

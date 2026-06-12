@@ -164,6 +164,20 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_OPENSANDBOX_PLATFORM_ARCH",
 		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
 		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
+		"CRABBOX_BLAXEL_API_KEY",
+		"BL_API_KEY",
+		"CRABBOX_BLAXEL_API_URL",
+		"CRABBOX_BLAXEL_WORKSPACE",
+		"BL_WORKSPACE",
+		"CRABBOX_BLAXEL_REGION",
+		"BL_REGION",
+		"CRABBOX_BLAXEL_IMAGE",
+		"CRABBOX_BLAXEL_MEMORY_MB",
+		"CRABBOX_BLAXEL_TTL",
+		"CRABBOX_BLAXEL_IDLE_TTL",
+		"CRABBOX_BLAXEL_WORKDIR",
+		"CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS",
+		"CRABBOX_BLAXEL_FORGET_MISSING",
 		"CRABBOX_AGENT_SANDBOX_KUBECONFIG",
 		"CRABBOX_AGENT_SANDBOX_KUBECTL",
 		"CRABBOX_AGENT_SANDBOX_CONTEXT",
@@ -3205,6 +3219,141 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"example.com", "192.168.0.0/16"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"10.0.0.5"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"443", "9000-9001"}) {
 		t.Fatalf("vercel-sandbox env lists not applied: %#v", cfg.VercelSandbox)
+	}
+}
+
+func TestBlaxelConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	defaultAPIURL := cfg.Blaxel.APIURL
+	var file fileConfig
+	yamlText := strings.Join([]string{
+		"blaxel:",
+		"  apiUrl: https://repo-ignored.example.test",
+		"  workspace: workspace-file",
+		"  region: us-pdx-1",
+		"  image: ubuntu:24.04",
+		"  memoryMB: 4096",
+		"  ttl: 30m",
+		"  idleTTL: 5m",
+		"  workdir: /workspace/file",
+		"  execTimeoutSecs: 120",
+		"  forgetMissing: true",
+	}, "\n")
+	if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Blaxel.APIURL != defaultAPIURL {
+		t.Fatalf("untrusted repo config redirected Blaxel API URL to %q", cfg.Blaxel.APIURL)
+	}
+	if cfg.Blaxel.APIKey != "" ||
+		cfg.Blaxel.Workspace != "" ||
+		cfg.Blaxel.Region != "us-pdx-1" ||
+		cfg.Blaxel.Image != "ubuntu:24.04" ||
+		cfg.Blaxel.MemoryMB != 4096 ||
+		cfg.Blaxel.TTL != "30m" ||
+		cfg.Blaxel.IdleTTL != "5m" ||
+		cfg.Blaxel.Workdir != "/workspace/file" ||
+		cfg.Blaxel.ExecTimeoutSecs != 120 ||
+		!cfg.Blaxel.ForgetMissing {
+		t.Fatalf("file cfg.Blaxel=%#v", cfg.Blaxel)
+	}
+
+	t.Setenv("CRABBOX_BLAXEL_API_KEY", "blaxel-env-key")
+	t.Setenv("CRABBOX_BLAXEL_API_URL", "https://api-env.example.test")
+	t.Setenv("CRABBOX_BLAXEL_WORKSPACE", "workspace-env")
+	t.Setenv("CRABBOX_BLAXEL_REGION", "us-was-1")
+	t.Setenv("CRABBOX_BLAXEL_IMAGE", "python:3.12")
+	t.Setenv("CRABBOX_BLAXEL_MEMORY_MB", "8192")
+	t.Setenv("CRABBOX_BLAXEL_TTL", "1h")
+	t.Setenv("CRABBOX_BLAXEL_IDLE_TTL", "10m")
+	t.Setenv("CRABBOX_BLAXEL_WORKDIR", "/workspace/env")
+	t.Setenv("CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS", "240")
+	t.Setenv("CRABBOX_BLAXEL_FORGET_MISSING", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := BlaxelConfig{
+		APIKey:          "blaxel-env-key",
+		APIURL:          "https://api-env.example.test",
+		Workspace:       "workspace-env",
+		Region:          "us-was-1",
+		Image:           "python:3.12",
+		MemoryMB:        8192,
+		TTL:             "1h",
+		IdleTTL:         "10m",
+		Workdir:         "/workspace/env",
+		ExecTimeoutSecs: 240,
+		ForgetMissing:   false,
+	}
+	if cfg.Blaxel != want {
+		t.Fatalf("env cfg.Blaxel=%#v, want %#v", cfg.Blaxel, want)
+	}
+}
+
+func TestBlaxelVendorEnvFallbacks(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("BL_API_KEY", "vendor-key")
+	t.Setenv("BL_WORKSPACE", "vendor-workspace")
+	t.Setenv("BL_REGION", "vendor-region")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Blaxel.APIKey != "vendor-key" || cfg.Blaxel.Workspace != "vendor-workspace" || cfg.Blaxel.Region != "vendor-region" {
+		t.Fatalf("cfg.Blaxel=%#v", cfg.Blaxel)
+	}
+}
+
+func TestBlaxelConfigRejectsInvalidValues(t *testing.T) {
+	clearConfigEnv(t)
+	for _, tc := range []struct {
+		name  string
+		yaml  string
+		env   map[string]string
+		error string
+	}{
+		{
+			name:  "negative memory in YAML",
+			yaml:  "blaxel:\n  memoryMB: -1\n",
+			error: "blaxel memoryMB must be non-negative",
+		},
+		{
+			name:  "negative exec timeout in YAML",
+			yaml:  "blaxel:\n  execTimeoutSecs: -1\n",
+			error: "blaxel execTimeoutSecs must be non-negative",
+		},
+		{
+			name:  "negative exec timeout in env",
+			env:   map[string]string{"CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS": "-1"},
+			error: "CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS must be non-negative",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			if tc.yaml != "" {
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(tc.yaml), &file); err != nil {
+					t.Fatal(err)
+				}
+				err := applyFileConfig(&cfg, file)
+				if err == nil || !strings.Contains(err.Error(), tc.error) {
+					t.Fatalf("applyFileConfig err=%v, want %q", err, tc.error)
+				}
+				return
+			}
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			err := applyEnv(&cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.error) {
+				t.Fatalf("applyEnv err=%v, want %q", err, tc.error)
+			}
+		})
 	}
 }
 
