@@ -508,8 +508,16 @@ func (a App) configSetBroker(args []string) error {
 	if file.Broker == nil {
 		file.Broker = &fileBrokerConfig{}
 	}
-	effectiveMode := blank(blank(*mode, file.Broker.Mode), string(BrokerModeManaged))
-	brokerProvider, err := validateBrokerProviderForMode(*provider, effectiveMode)
+	effectiveMode, err := normalizeBrokerMode(blank(*mode, file.Broker.Mode))
+	if err != nil {
+		return err
+	}
+	explicitProvider := strings.TrimSpace(*provider)
+	validationProvider := explicitProvider
+	if validationProvider == "" {
+		validationProvider = strings.TrimSpace(file.Broker.Provider)
+	}
+	brokerProvider, err := validateBrokerProviderForMode(validationProvider, string(effectiveMode))
 	if err != nil {
 		return err
 	}
@@ -548,7 +556,7 @@ func (a App) configSetBroker(args []string) error {
 	if adminToken != "" {
 		file.Broker.AdminToken = adminToken
 	}
-	if brokerProvider != "" {
+	if explicitProvider != "" && brokerProvider != "" {
 		file.Broker.Provider = brokerProvider
 		file.Provider = brokerProvider
 	}

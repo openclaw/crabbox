@@ -74,7 +74,7 @@ func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *test
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	t.Setenv("CRABBOX_PROVIDER", "")
-	if err := os.WriteFile(configPath, []byte("broker:\n  url: https://old.example.test\n  mode: registered\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("broker:\n  url: https://old.example.test\n  mode: Registered\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,7 +89,62 @@ func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if file.Broker == nil || file.Broker.Mode != "registered" || file.Broker.Provider != "xcp-ng" {
+	if file.Broker == nil || file.Broker.Mode != "Registered" || file.Broker.Provider != "xcp-ng" {
+		t.Fatalf("config=%#v", file)
+	}
+}
+
+func TestConfigSetBrokerRejectsPersistedDirectProviderWhenSwitchingToManaged(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	original := "provider: xcp-ng\nbroker:\n  url: https://old.example.test\n  mode: registered\n  provider: xcp-ng\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err := app.configSetBroker([]string{
+		"--url", "https://new.example.test",
+		"--mode", "managed",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
+		t.Fatalf("err=%v, want managed provider rejection", err)
+	}
+	data, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != original {
+		t.Fatalf("config changed after rejection:\n%s", data)
+	}
+}
+
+func TestConfigSetBrokerDoesNotPromoteTopLevelProviderWhenOmitted(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("provider: xcp-ng\nbroker:\n  url: https://old.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{"--url", "https://new.example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Provider != "xcp-ng" || file.Broker == nil || file.Broker.Provider != "" {
 		t.Fatalf("config=%#v", file)
 	}
 }

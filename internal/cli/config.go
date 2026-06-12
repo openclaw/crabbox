@@ -38,6 +38,7 @@ type Config struct {
 	ServerTypeExplicit            bool
 	Coordinator                   string
 	BrokerMode                    BrokerMode
+	brokerProvider                string
 	BrokerAutoWebVNC              bool
 	CoordToken                    string
 	CoordAdminToken               string
@@ -953,6 +954,10 @@ func defaultConfig() Config {
 }
 
 func loadConfig() (Config, error) {
+	return loadConfigWithOverrides("", "")
+}
+
+func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
 		freestyleAPIURL := cfg.Freestyle.APIURL
@@ -965,6 +970,13 @@ func loadConfig() (Config, error) {
 	}
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
+	}
+	if coordinator = strings.TrimSpace(coordinator); coordinator != "" {
+		cfg.Coordinator = coordinator
+	}
+	if provider = strings.TrimSpace(provider); provider != "" {
+		cfg.Provider = provider
+		cfg.brokerProvider = ""
 	}
 	if err := normalizeBrokerConfig(&cfg); err != nil {
 		return Config{}, err
@@ -990,20 +1002,28 @@ func loadConfig() (Config, error) {
 }
 
 func normalizeBrokerConfig(cfg *Config) error {
-	mode := BrokerMode(strings.ToLower(strings.TrimSpace(string(cfg.BrokerMode))))
+	mode, err := normalizeBrokerMode(string(cfg.BrokerMode))
+	if err != nil {
+		return err
+	}
+	cfg.BrokerMode = mode
+	if mode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) == "" {
+		return exit(2, "broker.mode=registered requires broker.url or coordinator")
+	}
+	return nil
+}
+
+func normalizeBrokerMode(value string) (BrokerMode, error) {
+	mode := BrokerMode(strings.ToLower(strings.TrimSpace(value)))
 	if mode == "" {
 		mode = BrokerModeManaged
 	}
 	switch mode {
 	case BrokerModeManaged, BrokerModeRegistered:
-		cfg.BrokerMode = mode
+		return mode, nil
 	default:
-		return exit(2, "broker.mode must be managed or registered")
+		return "", exit(2, "broker.mode must be managed or registered")
 	}
-	if mode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) == "" {
-		return exit(2, "broker.mode=registered requires broker.url or coordinator")
-	}
-	return nil
 }
 
 func canonicalizeConfigProvider(cfg *Config) {
@@ -2596,6 +2616,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	}
 	if file.Provider != "" {
 		cfg.Provider = file.Provider
+		cfg.brokerProvider = ""
 	}
 	if file.Target != "" {
 		cfg.TargetOS = file.Target
@@ -2670,6 +2691,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Broker.Provider != "" {
 			cfg.Provider = file.Broker.Provider
+			cfg.brokerProvider = file.Broker.Provider
 		}
 		if file.Broker.Access != nil {
 			if file.Broker.Access.ClientID != "" {
@@ -4238,7 +4260,10 @@ func applyLeaseDuration(target *time.Duration, value string) {
 
 func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
-	cfg.Provider = getenv("CRABBOX_PROVIDER", cfg.Provider)
+	if provider := os.Getenv("CRABBOX_PROVIDER"); provider != "" {
+		cfg.Provider = provider
+		cfg.brokerProvider = ""
+	}
 	if t := os.Getenv("CRABBOX_TARGET"); t != "" {
 		cfg.TargetOS = t
 		cfg.targetExplicit = true
