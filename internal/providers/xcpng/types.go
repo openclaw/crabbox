@@ -81,12 +81,14 @@ type xcpNgFreshVMRequest struct {
 	PVArgs      string
 	DomainType  string
 	SecureBoot  bool
+	VTPM        bool
 	Affinity    xapiRef
 }
 
 type xcpNgFreshVMResult struct {
-	VM     xapiVM
-	VIFRef string
+	VM      xapiVM
+	VIFRef  string
+	VTPMRef string
 }
 
 func xapiName(name string) string {

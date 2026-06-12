@@ -344,7 +344,9 @@ media:
   needed;
 - creates a fresh secure-boot VM plus writable install disk, boots from the
   Windows installer media first, then switches the next boot to the installed
-  disk;
+  disk; the fresh VM uses a 64 GiB install disk, and Windows 11-labelled media
+  also gets a unique vTPM for the Windows 11 hardware requirements (requiring
+  XCP-ng 8.3 or newer);
 - waits for first-boot guest metrics and then attempts SSH proof with
   `Write-Output windows-iso-e2e-ok`; and
 - falls back to `source_uncovered` after first-boot guest metrics when the

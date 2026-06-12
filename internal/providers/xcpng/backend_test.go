@@ -40,8 +40,11 @@ type fakeLifecycleClient struct {
 	deletedCD       []xcpNgConfigDrive
 	deleteBounded   bool
 	deleteCDBounded bool
+	closeBounded    bool
+	closeCanceled   bool
 	setLabels       map[string]map[string]string
 	afterGuestIP    func()
+	diskReq         xcpNgDiskAttachRequest
 }
 
 func (f *fakeLifecycleClient) record(call string) {
@@ -55,8 +58,10 @@ func (f *fakeLifecycleClient) fail(call string) error {
 	return f.errOn[call]
 }
 
-func (f *fakeLifecycleClient) Close(context.Context) error {
+func (f *fakeLifecycleClient) Close(ctx context.Context) error {
 	f.record("close")
+	_, f.closeBounded = ctx.Deadline()
+	f.closeCanceled = ctx.Err() != nil
 	return f.fail("close")
 }
 
@@ -145,6 +150,9 @@ func (f *fakeLifecycleClient) CreateFreshVM(_ context.Context, req xcpNgFreshVMR
 	if result.VIFRef == "" && req.Network != nil {
 		result.VIFRef = "OpaqueRef:vif"
 	}
+	if result.VTPMRef == "" && req.VTPM {
+		result.VTPMRef = "OpaqueRef:vtpm"
+	}
 	return result, nil
 }
 
@@ -171,6 +179,7 @@ func (f *fakeLifecycleClient) ImportISO(_ context.Context, req xcpNgImportISOReq
 func (f *fakeLifecycleClient) AttachDisk(_ context.Context, req xcpNgDiskAttachRequest) (xcpNgConfigDrive, error) {
 	f.record("attach-disk")
 	f.mutated = true
+	f.diskReq = req
 	if err := f.fail("attach-disk"); err != nil {
 		return f.attachedDisk, err
 	}
@@ -296,6 +305,14 @@ func (f *fakeLifecycleClient) DeleteServer(ctx context.Context, id string) error
 	f.deleted = append(f.deleted, id)
 	_, f.deleteBounded = ctx.Deadline()
 	return f.fail("delete")
+}
+
+func (f *fakeLifecycleClient) DeleteFreshServer(ctx context.Context, id, vtpmRef string) error {
+	f.record("delete-fresh-server")
+	if vtpmRef != "" {
+		f.record("delete-vtpm")
+	}
+	return f.DeleteServer(ctx, id)
 }
 
 func (f *fakeLifecycleClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDrive) error {
@@ -483,6 +500,16 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 	}
 	if !fake.deleteBounded || !fake.deleteCDBounded {
 		t.Fatalf("rollback cleanup contexts: delete=%v delete-config-drive=%v", fake.deleteBounded, fake.deleteCDBounded)
+	}
+}
+
+func TestCloseClientUsesDetachedBoundedContext(t *testing.T) {
+	fake := &fakeLifecycleClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	closeClient(ctx, fake, io.Discard)
+	if !fake.closeBounded || fake.closeCanceled {
+		t.Fatalf("close context bounded=%v canceled=%v", fake.closeBounded, fake.closeCanceled)
 	}
 }
 
@@ -892,6 +919,57 @@ func TestRunISOE2EWindowsReadOnlyBlocksARMInstaller(t *testing.T) {
 	}
 }
 
+func TestWindowsInstallerVTPMDetection(t *testing.T) {
+	for _, value := range []string{"Win11_25H2_English_x64.iso", "Windows-11-Pro.iso", "w11.iso"} {
+		if !windowsInstallerRequiresVTPM(value) {
+			t.Fatalf("Windows 11 installer not detected: %s", value)
+		}
+	}
+	for _, value := range []string{"Win10_22H2.iso", "Windows_Server_2025.iso", "custom-x64.iso"} {
+		if windowsInstallerRequiresVTPM(value) {
+			t.Fatalf("non-Windows 11 installer requires vTPM: %s", value)
+		}
+	}
+}
+
+func TestRunISOE2EWindowsUsesResolvedInstallerNameForVTPM(t *testing.T) {
+	dir := t.TempDir()
+	answerPath := filepath.Join(dir, "provided-answer.iso")
+	if err := os.WriteFile(answerPath, []byte("answer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:      "OpaqueRef:sr",
+		networkRef: "OpaqueRef:net",
+		hostRef:    "OpaqueRef:host",
+		iso: xcpNgISOMediaRef{
+			VDIRef:    "OpaqueRef:installer",
+			NameLabel: "Win11_25H2_English_x64.iso",
+			Source:    "sr-vdi",
+		},
+		errOn: map[string]error{"create-fresh-vm": errors.New("stop after request capture")},
+	}
+	oldClient := newLifecycleClient
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	t.Cleanup(func() { newLifecycleClient = oldClient })
+
+	_, err := RunISOE2E(context.Background(), ISOE2EOptions{
+		Config:      testConfig(),
+		Mode:        "mutate",
+		OS:          "windows",
+		ISO:         xcpNgTestVMUUID,
+		AnswerISO:   answerPath,
+		EvidenceDir: filepath.Join(dir, "evidence"),
+		MutateGate:  true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "stop after request capture") {
+		t.Fatalf("err=%v", err)
+	}
+	if !fake.freshReq.VTPM {
+		t.Fatalf("fresh VM request did not require vTPM: %#v", fake.freshReq)
+	}
+}
+
 func TestRunISOE2EWindowsMutateGeneratesAndAttachesBootstrapBeforeStart(t *testing.T) {
 	dir := t.TempDir()
 	isoPath := filepath.Join(dir, "Win11_25H2_English_x64_v2.iso")
@@ -954,6 +1032,12 @@ func TestRunISOE2EWindowsMutateGeneratesAndAttachesBootstrapBeforeStart(t *testi
 	}
 	if summary.Details["answer_iso_source"] != "generated-local-file" || summary.Details["windows_bootstrap"] != "openssh-key" {
 		t.Fatalf("summary=%#v", summary)
+	}
+	if fake.diskReq.SizeBytes != isoE2EWindowsDiskBytes {
+		t.Fatalf("Windows install disk size=%d", fake.diskReq.SizeBytes)
+	}
+	if !strings.Contains(strings.Join(fake.calls, ","), "delete-vtpm") {
+		t.Fatalf("Windows vTPM was not cleaned up: calls=%v", fake.calls)
 	}
 	if sshTimeout != isoE2EDefaultTimeout || time.Until(sshContextDeadline) <= isoE2EWindowsInstallTimeout {
 		t.Fatalf("ssh proof timeout=%s deadline=%s", sshTimeout, sshContextDeadline)

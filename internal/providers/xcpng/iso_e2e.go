@@ -65,6 +65,7 @@ type isoE2ERuntime struct {
 	cleanupLocal      []string
 	keepLocal         map[string]struct{}
 	windowsFallback   bool
+	windowsVTPM       bool
 }
 
 const (
@@ -73,7 +74,8 @@ const (
 	isoE2EWindowsInstallTimeout = 70 * time.Minute
 	isoE2EGuestMetricsTimeout   = 20 * time.Minute
 	isoE2ECleanupTimeout        = 11 * time.Minute
-	isoE2EInstallDiskBytes      = 24 * 1024 * 1024 * 1024
+	isoE2ELinuxInstallDiskBytes = 24 * 1024 * 1024 * 1024
+	isoE2EWindowsDiskBytes      = 64 * 1024 * 1024 * 1024
 )
 
 var (
@@ -98,6 +100,7 @@ var (
 	isoE2ERemoveStoredTestboxKey  = removeISOE2EStoredTestboxKey
 	isoE2EUbuntuLinuxLinePattern  = regexp.MustCompile(`(?m)^(\s*linux\s+/casper/vmlinuz\s+)(.*?)(\s+---\s*)$`)
 	isoE2EWindowsARMLinePattern   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(arm64|aarch64|arm)(?:[^a-z0-9]|$)`)
+	isoE2EWindows11LinePattern    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:win(?:dows)?[\s._-]*11|w11)(?:[^a-z0-9]|$)`)
 )
 
 func isoE2ELeaseID() string {
@@ -249,7 +252,14 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	now := isoE2ECurrentTime()
 	leaseID := isoE2ELeaseID()
 	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
-	if err = ensureWindowsInstallerSupported(opts.ISO, "", &result); err != nil {
+	installerIdentity, err := client.ResolveISOMedia(ctx, xcpNgProviderConfig(opts.Config), opts.ISO)
+	if err != nil {
+		result.Classification = "environment_blocked"
+		result.Phase = "installer_iso"
+		result.Reason = err.Error()
+		return result, err
+	}
+	if err = ensureWindowsInstallerSupported(opts.ISO, installerIdentity.NameLabel, &result); err != nil {
 		return result, err
 	}
 	runtime := &isoE2ERuntime{
@@ -259,6 +269,7 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 		labels:       labels,
 		cleanupLocal: []string{},
 		keepLocal:    map[string]struct{}{},
+		windowsVTPM:  windowsInstallerRequiresVTPM(opts.ISO, installerIdentity.NameLabel),
 	}
 	runtime.labels["workflow"] = "iso-e2e"
 	runtime.labels["os"] = opts.OS
@@ -639,6 +650,7 @@ func (r *isoE2ERuntime) createBaseVM(ctx context.Context, opts ISOE2EOptions, su
 		}(),
 		Labels:     r.labels,
 		SecureBoot: strings.EqualFold(opts.OS, "windows"),
+		VTPM:       strings.EqualFold(opts.OS, "windows") && r.windowsVTPM,
 		HVMBoot: func() map[string]string {
 			boot := map[string]string{"order": "dc"}
 			if strings.EqualFold(opts.OS, "windows") {
@@ -712,7 +724,7 @@ func (r *isoE2ERuntime) attachInstallDisk(ctx context.Context) error {
 		SRRef:       r.placement.srRef,
 		Name:        r.vm.VM.Name + "-install-disk",
 		Description: fmt.Sprintf("Crabbox %s ISO install disk", isoE2EOSLabel(r.labels["os"])),
-		SizeBytes:   isoE2EInstallDiskBytes,
+		SizeBytes:   isoE2EInstallDiskSize(r.labels["os"]),
 		UserDevice:  "0",
 		Labels:      r.labels,
 		Unpluggable: true,
@@ -937,7 +949,7 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, isoE2ECleanupTimeout)
 	defer cancel()
-	cleanupErr := r.client.DeleteServer(cleanupCtx, r.vm.VM.Ref)
+	cleanupErr := r.client.DeleteFreshServer(cleanupCtx, r.vm.VM.Ref, r.vm.VTPMRef)
 	seen := map[string]struct{}{}
 	for _, drive := range []xcpNgConfigDrive{r.installDisk, r.answerDrive, r.installerDrive, r.importedAnswer, r.importedInstaller} {
 		if !drive.DestroyVDI || drive.VDIRef == "" {
@@ -964,6 +976,13 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 		return
 	}
 	summary.Cleanup = "cleaned"
+}
+
+func isoE2EInstallDiskSize(osName string) int64 {
+	if strings.EqualFold(osName, "windows") {
+		return isoE2EWindowsDiskBytes
+	}
+	return isoE2ELinuxInstallDiskBytes
 }
 
 func finalizeLocalArtifacts(runtime *isoE2ERuntime, summary *ISOE2ESummary, runErr *error) {
@@ -1078,6 +1097,15 @@ func windowsInstallerLooksARM(value string) bool {
 		return true
 	}
 	return isoE2EWindowsARMLinePattern.MatchString(filepath.Base(normalized))
+}
+
+func windowsInstallerRequiresVTPM(values ...string) bool {
+	for _, value := range values {
+		if isoE2EWindows11LinePattern.MatchString(filepath.Base(strings.TrimSpace(value))) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateISOE2EOptions(opts *ISOE2EOptions) error {

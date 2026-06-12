@@ -452,6 +452,13 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 			return rollback(err)
 		}
 	}
+	if req.VTPM {
+		vtpmRef, err := c.callString(ctx, "VTPM.create", c.session, ref, true)
+		if err != nil {
+			return rollback(err)
+		}
+		result.VTPMRef = vtpmRef
+	}
 	if req.HostRef != "" {
 		if _, err := c.call(ctx, "VM.set_affinity", c.session, ref, req.HostRef.value()); err != nil {
 			return rollback(err)
@@ -489,7 +496,7 @@ func (c *xapiClient) CreateFreshVM(ctx context.Context, req xcpNgFreshVMRequest)
 func (c *xapiClient) rollbackFreshVM(ctx context.Context, result xcpNgFreshVMResult, labels map[string]string, labeled bool, cause error) (xcpNgFreshVMResult, error) {
 	cleanupCtx, cancel := xcpNgRollbackContext(ctx)
 	defer cancel()
-	cleanupErr := c.deleteServer(cleanupCtx, result.VM.Ref, true)
+	cleanupErr := c.deleteServer(cleanupCtx, result.VM.Ref, true, result.VTPMRef)
 	if cleanupErr == nil {
 		return xcpNgFreshVMResult{}, cause
 	}
@@ -1084,7 +1091,11 @@ func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
 	return c.deleteServer(ctx, ref, isTemplate == "true")
 }
 
-func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks bool) error {
+func (c *xapiClient) DeleteFreshServer(ctx context.Context, id, vtpmRef string) error {
+	return c.deleteServer(ctx, id, false, vtpmRef)
+}
+
+func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks bool, vtpmRefs ...string) error {
 	ref, err := c.vmRefForID(ctx, id)
 	if err != nil {
 		return err
@@ -1126,6 +1137,11 @@ func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks boo
 	}
 	if err := c.shutdownVM(ctx, ref); err != nil {
 		return err
+	}
+	for _, vtpmRef := range vtpmRefs {
+		if err := c.DeleteVTPM(ctx, vtpmRef); err != nil {
+			return err
+		}
 	}
 	for _, drive := range drives {
 		if err := c.DeleteConfigDrive(ctx, drive); err != nil {
@@ -1238,6 +1254,16 @@ func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDri
 		if err := c.callDiscard(ctx, "VDI.destroy", c.session, drive.VDIRef); err != nil && !isNotFound(err) {
 			return err
 		}
+	}
+	return nil
+}
+
+func (c *xapiClient) DeleteVTPM(ctx context.Context, ref string) error {
+	if strings.TrimSpace(ref) == "" {
+		return nil
+	}
+	if err := c.callDiscard(ctx, "VTPM.destroy", c.session, ref); err != nil && !isNotFound(err) {
+		return err
 	}
 	return nil
 }

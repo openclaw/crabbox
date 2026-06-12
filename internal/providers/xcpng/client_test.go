@@ -960,6 +960,8 @@ func TestCreateFreshVMSecureBootOverridesTemplateWithoutDroppingPlatformDefaults
 			writeXMLRPCString(t, w, "OpaqueRef:vm")
 		case "VM.set_is_a_template", "VM.set_memory_static_max", "VM.set_memory_dynamic_max", "VM.set_memory_dynamic_min", "VM.set_memory_static_min", "VM.set_VCPUs_max", "VM.set_VCPUs_at_startup", "VM.set_HVM_boot_policy":
 			writeXMLRPCString(t, w, "true")
+		case "VTPM.create":
+			writeXMLRPCString(t, w, "OpaqueRef:vtpm")
 		case "VM.get_HVM_boot_params":
 			writeXMLRPCStringMap(t, w, map[string]string{"firmware": "bios", "order": "cd"})
 		case "VM.remove_from_HVM_boot_params":
@@ -1038,12 +1040,16 @@ func TestCreateFreshVMSecureBootOverridesTemplateWithoutDroppingPlatformDefaults
 		Name:       "crabbox-test",
 		Labels:     map[string]string{"lease": "cbx_lease"},
 		SecureBoot: true,
+		VTPM:       true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if vm.VM.UUID != xcpNgTestVMUUID {
 		t.Fatalf("vm=%#v", vm)
+	}
+	if vm.VTPMRef != "OpaqueRef:vtpm" {
+		t.Fatalf("VTPMRef=%q", vm.VTPMRef)
 	}
 	sort.Strings(removedBootKeys)
 	sort.Strings(addedBootValues)
@@ -1928,6 +1934,57 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	}
 	if countMethod(methods, "VDI.destroy") != 2 {
 		t.Fatalf("methods=%s should destroy config drive and owned cloned root VDI only", got)
+	}
+}
+
+func TestDeleteFreshServerDestroysVTPMAfterHaltBeforeVM(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := readXMLRPCMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_record":
+			writeXMLRPCVMRecord(t, w, "cbx_lease")
+		case "VM.get_guest_metrics":
+			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+		case "VM.get_VBDs":
+			writeXMLRPCStringArray(t, w, nil)
+		case "VDI.get_all_records":
+			writeXMLRPCEmptyRecordMap(t, w)
+		case "VM.get_power_state":
+			writeXMLRPCString(t, w, "Halted")
+		case "VTPM.destroy", "VM.destroy":
+			writeXMLRPCString(t, w, "true")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+
+	if err := client.DeleteFreshServer(context.Background(), "OpaqueRef:vm", "OpaqueRef:vtpm"); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(methods, ",")
+	haltIndex := strings.Index(got, "VM.get_power_state")
+	vtpmIndex := strings.Index(got, "VTPM.destroy")
+	vmIndex := strings.Index(got, "VM.destroy")
+	if haltIndex < 0 || vtpmIndex <= haltIndex || vmIndex <= vtpmIndex {
+		t.Fatalf("delete order=%s", got)
+	}
+}
+
+func TestDeleteVTPMTreatsMissingHandleAsDeleted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if method := readXMLRPCMethod(t, r); method != "VTPM.destroy" {
+			t.Fatalf("unexpected method %s", method)
+		}
+		writeXMLRPCFault(t, w, "HANDLE_INVALID")
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	if err := client.DeleteVTPM(context.Background(), "OpaqueRef:missing"); err != nil {
+		t.Fatal(err)
 	}
 }
 

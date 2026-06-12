@@ -52,6 +52,7 @@ type lifecycleClient interface {
 	GetServer(context.Context, string) (Server, error)
 	SetLabels(context.Context, string, map[string]string) error
 	DeleteServer(context.Context, string) error
+	DeleteFreshServer(context.Context, string, string) error
 	DeleteConfigDrive(context.Context, xcpNgConfigDrive) error
 }
 
@@ -675,7 +676,9 @@ func isCrabboxVMDisk(labels map[string]string, leaseID string) bool {
 }
 
 func closeClient(ctx context.Context, client lifecycleClient, stderr io.Writer) {
-	if err := client.Close(ctx); err != nil {
+	closeCtx, cancel := xcpNgRollbackContext(ctx)
+	defer cancel()
+	if err := client.Close(closeCtx); err != nil {
 		fmt.Fprintf(stderr, "warning: close xcp-ng session: %v\n", err)
 	}
 }
