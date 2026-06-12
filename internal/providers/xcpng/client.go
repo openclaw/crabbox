@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -819,8 +820,7 @@ func (c *xapiClient) GetServer(ctx context.Context, id string) (Server, error) {
 	if err != nil {
 		return Server{}, err
 	}
-	ip, _ := c.GuestIPv4(ctx, xapiRef(record.Ref))
-	return xcpNgVMToServer(record, record.Labels, ip), nil
+	return xcpNgVMToServer(record, record.Labels, ""), nil
 }
 
 func (c *xapiClient) vmVIFMACs(ctx context.Context, vmRef string) ([]string, error) {
@@ -2109,20 +2109,18 @@ func usableIPv4(value string) string {
 }
 
 func renderLabels(labels map[string]string) string {
-	keys := make([]string, 0, len(labels))
-	for key := range labels {
-		keys = append(keys, key)
+	data, err := json.Marshal(labels)
+	if err != nil {
+		return "{}"
 	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, key := range keys {
-		fmt.Fprintf(&b, "%s=%s\n", key, labels[key])
-	}
-	return b.String()
+	return string(data)
 }
 
 func parseRenderedLabels(value string) map[string]string {
 	labels := map[string]string{}
+	if json.Unmarshal([]byte(value), &labels) == nil {
+		return labels
+	}
 	for _, line := range strings.Split(value, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {

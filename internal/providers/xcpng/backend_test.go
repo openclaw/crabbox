@@ -668,6 +668,79 @@ func TestResolveRejectsExistingNonCrabboxVM(t *testing.T) {
 	}
 }
 
+func TestResolveStatusOnlySkipsGuestIPAndUsesLivePowerState(t *testing.T) {
+	managed := crabboxServer(xcpNgTestVMUUID, "cbx_status", "ready", time.Now().Add(time.Hour))
+	managed.Status = "Halted"
+	managed.PublicNet.IPv4.IP = ""
+	managed.PrivateNet.IPv4.IP = ""
+	fake := &fakeLifecycleClient{
+		getServer: map[string]Server{"cbx_status": managed},
+		errOn: map[string]error{
+			"guest-ip-by-id":    errors.New("guest tools unavailable"),
+			"discover-guest-ip": errors.New("guest network unavailable"),
+		},
+	}
+	backend := newTestBackend(t, fake)
+
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_status", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Server.Status != "halted" || resolved.Server.Labels["state"] != "halted" || resolved.SSH.Host != "" {
+		t.Fatalf("resolved=%#v", resolved)
+	}
+	if countCalls(fake.calls, "guest-ip-by-id") != 0 || countCalls(fake.calls, "discover-guest-ip") != 0 {
+		t.Fatalf("status-only probed guest network: %v", fake.calls)
+	}
+}
+
+func TestResolveStatusOnlyPreservesHealthyRunningEndpoint(t *testing.T) {
+	managed := crabboxServer(xcpNgTestVMUUID, "cbx_status", "ready", time.Now().Add(time.Hour))
+	managed.Status = "Running"
+	managed.Labels["state"] = "active"
+	managed.PublicNet.IPv4.IP = ""
+	managed.PrivateNet.IPv4.IP = ""
+	fake := &fakeLifecycleClient{
+		getServer: map[string]Server{"cbx_status": managed},
+		guestIP:   "192.0.2.55",
+	}
+	backend := newTestBackend(t, fake)
+
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_status", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.SSH.Host != "192.0.2.55" || resolved.Server.PublicNet.IPv4.IP != "192.0.2.55" || resolved.Server.Labels["state"] != "active" {
+		t.Fatalf("resolved=%#v", resolved)
+	}
+	if countCalls(fake.calls, "guest-ip-by-id") != 1 {
+		t.Fatalf("calls=%v", fake.calls)
+	}
+}
+
+func TestResolveStatusOnlyToleratesUnavailableRunningEndpoint(t *testing.T) {
+	managed := crabboxServer(xcpNgTestVMUUID, "cbx_status", "active", time.Now().Add(time.Hour))
+	managed.Status = "Running"
+	managed.PublicNet.IPv4.IP = ""
+	managed.PrivateNet.IPv4.IP = ""
+	fake := &fakeLifecycleClient{
+		getServer: map[string]Server{"cbx_status": managed},
+		errOn: map[string]error{
+			"guest-ip-by-id":    errors.New("guest tools unavailable"),
+			"discover-guest-ip": errors.New("guest network unavailable"),
+		},
+	}
+	backend := newTestBackend(t, fake)
+
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_status", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.SSH.Host != "" || resolved.Server.Labels["state"] != "active" {
+		t.Fatalf("resolved=%#v", resolved)
+	}
+}
+
 func countCalls(calls []string, want string) int {
 	var count int
 	for _, call := range calls {

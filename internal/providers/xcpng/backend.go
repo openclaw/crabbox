@@ -351,6 +351,9 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			if !isCrabboxLease(server) {
 				return LeaseTarget{}, exit(4, "lease/server not found: %s (VM exists but is not Crabbox-managed)", req.ID)
 			}
+			if req.StatusOnly && !req.ReadyProbe {
+				return b.targetForServer(b.resolveStatusServer(ctx, client, server)), nil
+			}
 			server, err = b.ensureServerIP(ctx, client, server, req.ReleaseOnly)
 			if err != nil {
 				return LeaseTarget{}, err
@@ -373,6 +376,11 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		} else if !req.ReleaseOnly {
 			return LeaseTarget{}, err
 		}
+		if req.StatusOnly && !req.ReadyProbe {
+			target := b.targetForServer(b.resolveStatusServer(ctx, client, server))
+			target.LeaseID = leaseID
+			return target, nil
+		}
 		server, err = b.ensureServerIP(ctx, client, server, req.ReleaseOnly)
 		if err != nil {
 			return LeaseTarget{}, err
@@ -382,6 +390,42 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return target, nil
 	}
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+}
+
+func (b *leaseBackend) resolveStatusServer(ctx context.Context, client lifecycleClient, server Server) Server {
+	server = reconcileXCPNgServerState(server)
+	if !strings.EqualFold(strings.TrimSpace(server.Status), "running") || firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" {
+		return server
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	ip, err := client.GuestIPv4ForID(probeCtx, server.CloudID)
+	if err != nil || ip == "" {
+		if discoverer, ok := client.(guestIPv4Discoverer); ok {
+			ip, _ = discoverer.DiscoverGuestIPv4(probeCtx, xapiRef(server.CloudID))
+		}
+	}
+	if ip != "" {
+		server.PublicNet.IPv4.IP = ip
+		server.PrivateNet.IPv4.IP = ip
+	}
+	return server
+}
+
+func reconcileXCPNgServerState(server Server) Server {
+	liveState := strings.ToLower(strings.TrimSpace(server.Status))
+	if liveState == "" {
+		return server
+	}
+	server.Status = liveState
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
+	labelState := strings.ToLower(strings.TrimSpace(server.Labels["state"]))
+	if liveState != "running" || labelState == "" {
+		server.Labels["state"] = liveState
+	}
+	return server
 }
 
 func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClient, server Server, releaseOnly bool) (Server, error) {

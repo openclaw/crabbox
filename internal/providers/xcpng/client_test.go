@@ -1533,8 +1533,6 @@ func TestGetServerAndSetLabelsResolveUUIDToFreshRef(t *testing.T) {
 			writeXMLRPCString(t, w, "OpaqueRef:vm-fresh")
 		case "VM.get_record":
 			writeXMLRPCVMRecord(t, w, "cbx_lease")
-		case "VM.get_guest_metrics":
-			writeXMLRPCFault(t, w, "HANDLE_INVALID")
 		case "VM.get_other_config":
 			if !strings.Contains(strings.Join(methods, ","), "VM.get_by_uuid") {
 				t.Fatalf("set labels did not resolve UUID first; methods=%v", methods)
@@ -1560,6 +1558,29 @@ func TestGetServerAndSetLabelsResolveUUIDToFreshRef(t *testing.T) {
 	}
 	if got := strings.Join(methods, ","); !strings.Contains(got, "VM.get_by_uuid,VM.get_record") || !strings.Contains(got, "VM.get_by_uuid,VM.get_other_config,VM.remove_from_other_config,VM.add_to_other_config") {
 		t.Fatalf("methods=%s", got)
+	}
+	if strings.Contains(strings.Join(methods, ","), "VM.get_guest_metrics") {
+		t.Fatalf("metadata lookup queried guest metrics: %v", methods)
+	}
+}
+
+func TestRenderedLabelsRoundTripEmbeddedNewlinesWithoutInjection(t *testing.T) {
+	labels := map[string]string{
+		"provider":  "xcp-ng",
+		"work_root": "/work/crabbox\nprovider=other",
+	}
+
+	got := parseRenderedLabels(renderLabels(labels))
+
+	if !reflect.DeepEqual(got, labels) {
+		t.Fatalf("labels=%#v want %#v", got, labels)
+	}
+}
+
+func TestParseRenderedLabelsSupportsLegacyRecords(t *testing.T) {
+	got := parseRenderedLabels("provider=xcp-ng\nwork_root=/work/crabbox\n")
+	if got["provider"] != "xcp-ng" || got["work_root"] != "/work/crabbox" {
+		t.Fatalf("labels=%#v", got)
 	}
 }
 
