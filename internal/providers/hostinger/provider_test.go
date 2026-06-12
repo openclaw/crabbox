@@ -514,6 +514,30 @@ func TestDoctorFailsInvalidPurchaseOptions(t *testing.T) {
 	}
 }
 
+func TestDoctorDiscoversPurchaseOptionsBeforeSelectorsAreConfigured(t *testing.T) {
+	api := &fakeAPI{}
+	backend := NewLeaseBackend(Provider{}.Spec(), core.Config{
+		Hostinger: core.HostingerConfig{APIToken: "token"},
+	}, core.Runtime{}).(*leaseBackend)
+	backend.client = api
+
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Checks) != 2 ||
+		result.Checks[1].Status != "warning" ||
+		!strings.Contains(result.Checks[1].Message, "configuration=incomplete") ||
+		result.Checks[1].Details["priced_items"] == "" ||
+		result.Checks[1].Details["templates"] == "" ||
+		result.Checks[1].Details["data_centers"] == "" {
+		t.Fatalf("doctor checks=%#v", result.Checks)
+	}
+	if api.purchaseCalls != 0 || api.startCalls != 0 || api.stopCalls != 0 {
+		t.Fatalf("doctor mutated Hostinger resources: %#v", api)
+	}
+}
+
 func TestAcquireRejectsUnsupportedReleaseActionBeforePurchase(t *testing.T) {
 	api := &fakeAPI{}
 	cfg := core.Config{Hostinger: core.HostingerConfig{

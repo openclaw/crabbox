@@ -145,6 +145,8 @@ crabbox doctor --provider hostinger --json
 
 The `purchase-options` check fails when a configured id is unavailable, the
 payment method is inactive or ambiguous, or the template is not Ubuntu/Debian.
+Before required selectors are configured, it reports a non-failing warning and
+still returns the available ids for discovery.
 It still includes the configured ids plus bounded `priced_items`,
 `payment_methods`, `templates`, and `data_centers` summaries so you can correct
 the configuration without a mutating command.

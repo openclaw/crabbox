@@ -664,7 +664,24 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResul
 	result.Message += " purchase=explicit release=stop"
 	purchaseStatus := "ok"
 	purchaseMessage := fmt.Sprintf("priced_items=%d payment_methods=%d templates=%d data_centers=%d", hostingerCatalogPriceCount(options.catalog), len(options.paymentMethods), len(options.templates), len(options.dataCenters))
-	if _, err := validateHostingerPurchaseOptions(b.configForRun(), options); err != nil {
+	cfg := b.configForRun()
+	missing := make([]string, 0, 3)
+	if strings.TrimSpace(cfg.Hostinger.ItemID) == "" {
+		missing = append(missing, "item_id")
+	}
+	if strings.TrimSpace(cfg.Hostinger.TemplateID) == "" {
+		missing = append(missing, "template_id")
+	}
+	if strings.TrimSpace(cfg.Hostinger.DataCenterID) == "" {
+		missing = append(missing, "data_center_id")
+	}
+	if err := validateHostingerConfiguredPurchaseOptions(cfg, options); err != nil {
+		purchaseStatus = "failed"
+		purchaseMessage = err.Error()
+	} else if len(missing) > 0 {
+		purchaseStatus = "warning"
+		purchaseMessage += " configuration=incomplete missing=" + strings.Join(missing, ",")
+	} else if _, err := validateHostingerPurchaseOptions(cfg, options); err != nil {
 		purchaseStatus = "failed"
 		purchaseMessage = err.Error()
 	}
@@ -827,63 +844,27 @@ func loadHostingerPurchaseOptions(ctx context.Context, client hostingerAPI) (hos
 }
 
 func validateHostingerPurchaseOptions(cfg Config, options hostingerPurchaseOptions) (int64, error) {
-	itemID := strings.TrimSpace(cfg.Hostinger.ItemID)
-	itemFound := false
-	for _, item := range options.catalog {
-		for _, price := range item.Prices {
-			if price.ID == itemID {
-				itemFound = true
-				break
-			}
-		}
+	if err := validateHostingerConfiguredPurchaseOptions(cfg, options); err != nil {
+		return 0, err
 	}
-	if !itemFound {
+	itemID := strings.TrimSpace(cfg.Hostinger.ItemID)
+	if itemID == "" {
 		return 0, exit(2, "provider=%s configured item id %q is not a current priced VPS item; available=%s", providerName, blank(itemID, "missing"), blank(summarizeHostingerCatalog(options.catalog), "none"))
 	}
 
 	templateID := strings.TrimSpace(cfg.Hostinger.TemplateID)
-	var selectedTemplate hostingerTemplate
-	for _, template := range options.templates {
-		if hostingerIDString(template.ID) == templateID {
-			selectedTemplate = template
-			break
-		}
-	}
-	if hostingerIDString(selectedTemplate.ID) == "" {
+	if templateID == "" {
 		return 0, exit(2, "provider=%s configured template id %q is unavailable; available=%s", providerName, blank(templateID, "missing"), blank(summarizeHostingerTemplates(options.templates), "none"))
-	}
-	if !hostingerTemplateSupported(selectedTemplate) {
-		return 0, exit(2, "provider=%s template %s=%s is unsupported; choose an Ubuntu or Debian template so Crabbox can install required SSH tools before readiness", providerName, templateID, firstNonBlank(selectedTemplate.Name, selectedTemplate.OS))
 	}
 
 	dataCenterID := strings.TrimSpace(cfg.Hostinger.DataCenterID)
-	dataCenterFound := false
-	for _, dataCenter := range options.dataCenters {
-		if hostingerIDString(dataCenter.ID) == dataCenterID {
-			dataCenterFound = true
-			break
-		}
-	}
-	if !dataCenterFound {
+	if dataCenterID == "" {
 		return 0, exit(2, "provider=%s configured data center id %q is unavailable; available=%s", providerName, blank(dataCenterID, "missing"), blank(summarizeHostingerDataCenters(options.dataCenters), "none"))
 	}
 
 	configuredPaymentID := strings.TrimSpace(cfg.Hostinger.PaymentMethodID)
 	if configuredPaymentID != "" {
-		paymentID, err := hostingerIntegerID("payment method id", configuredPaymentID)
-		if err != nil {
-			return 0, err
-		}
-		for _, method := range options.paymentMethods {
-			if hostingerIDString(method.ID) != configuredPaymentID {
-				continue
-			}
-			if method.IsExpired || method.IsSuspended {
-				return 0, exit(2, "provider=%s configured payment method id %q is not active; available=%s", providerName, configuredPaymentID, blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
-			}
-			return paymentID, nil
-		}
-		return 0, exit(2, "provider=%s configured payment method id %q is unavailable; available=%s", providerName, configuredPaymentID, blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
+		return hostingerIntegerID("payment method id", configuredPaymentID)
 	}
 	var selected string
 	for _, method := range options.paymentMethods {
@@ -903,6 +884,73 @@ func validateHostingerPurchaseOptions(cfg Config, options hostingerPurchaseOptio
 		return 0, exit(2, "provider=%s requires an active default Hostinger payment method or --hostinger-payment-method-id; available=%s", providerName, blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
 	}
 	return hostingerIntegerID("payment method id", selected)
+}
+
+func validateHostingerConfiguredPurchaseOptions(cfg Config, options hostingerPurchaseOptions) error {
+	itemID := strings.TrimSpace(cfg.Hostinger.ItemID)
+	if itemID != "" {
+		found := false
+		for _, item := range options.catalog {
+			for _, price := range item.Prices {
+				if price.ID == itemID {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			return exit(2, "provider=%s configured item id %q is not a current priced VPS item; available=%s", providerName, itemID, blank(summarizeHostingerCatalog(options.catalog), "none"))
+		}
+	}
+
+	templateID := strings.TrimSpace(cfg.Hostinger.TemplateID)
+	if templateID != "" {
+		var selected hostingerTemplate
+		for _, template := range options.templates {
+			if hostingerIDString(template.ID) == templateID {
+				selected = template
+				break
+			}
+		}
+		if hostingerIDString(selected.ID) == "" {
+			return exit(2, "provider=%s configured template id %q is unavailable; available=%s", providerName, templateID, blank(summarizeHostingerTemplates(options.templates), "none"))
+		}
+		if !hostingerTemplateSupported(selected) {
+			return exit(2, "provider=%s template %s=%s is unsupported; choose an Ubuntu or Debian template so Crabbox can install required SSH tools before readiness", providerName, templateID, firstNonBlank(selected.Name, selected.OS))
+		}
+	}
+
+	dataCenterID := strings.TrimSpace(cfg.Hostinger.DataCenterID)
+	if dataCenterID != "" {
+		found := false
+		for _, dataCenter := range options.dataCenters {
+			if hostingerIDString(dataCenter.ID) == dataCenterID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return exit(2, "provider=%s configured data center id %q is unavailable; available=%s", providerName, dataCenterID, blank(summarizeHostingerDataCenters(options.dataCenters), "none"))
+		}
+	}
+
+	paymentID := strings.TrimSpace(cfg.Hostinger.PaymentMethodID)
+	if paymentID == "" {
+		return nil
+	}
+	if _, err := hostingerIntegerID("payment method id", paymentID); err != nil {
+		return err
+	}
+	for _, method := range options.paymentMethods {
+		if hostingerIDString(method.ID) != paymentID {
+			continue
+		}
+		if method.IsExpired || method.IsSuspended {
+			return exit(2, "provider=%s configured payment method id %q is not active; available=%s", providerName, paymentID, blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
+		}
+		return nil
+	}
+	return exit(2, "provider=%s configured payment method id %q is unavailable; available=%s", providerName, paymentID, blank(summarizeHostingerPaymentMethods(options.paymentMethods), "none"))
 }
 
 func hostingerTemplateSupported(template hostingerTemplate) bool {
