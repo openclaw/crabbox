@@ -24,6 +24,7 @@ type fakeAPI struct {
 	createKeys        []SSHKey
 	createInstances   []InstanceCreateRequest
 	createInstanceErr error
+	createAcceptedErr bool
 	getInstanceErr    error
 	deleteInstanceErr error
 	deleteKeyErr      error
@@ -113,9 +114,6 @@ func (f *fakeAPI) GetInstance(_ context.Context, _, instanceID string) (Instance
 func (f *fakeAPI) CreateInstance(_ context.Context, _ string, req InstanceCreateRequest) (Instance, error) {
 	f.mutatingCalls++
 	f.createInstances = append(f.createInstances, req)
-	if f.createInstanceErr != nil {
-		return Instance{}, f.createInstanceErr
-	}
 	instance := Instance{
 		ID:       "inst-1",
 		Name:     req.Name,
@@ -130,6 +128,12 @@ func (f *fakeAPI) CreateInstance(_ context.Context, _ string, req InstanceCreate
 			Version: 4,
 			Type:    "public",
 		}},
+	}
+	if f.createInstanceErr != nil {
+		if f.createAcceptedErr {
+			f.instances = append(f.instances, instance)
+		}
+		return Instance{}, f.createInstanceErr
 	}
 	f.instances = append(f.instances, instance)
 	return instance, nil
@@ -519,8 +523,47 @@ func TestAcquirePreservesRecoveryClaimOnCreateError(t *testing.T) {
 	if len(claims) != 1 || claims[0].Labels["recovery"] != "ambiguous-create" || claims[0].Labels[ovhSSHKeyIDLabel] == "" {
 		t.Fatalf("claims=%#v", claims)
 	}
-	if len(fake.deletedKeys) != 1 {
-		t.Fatalf("expected rollback key delete, got %v", fake.deletedKeys)
+	if len(fake.deletedKeys) != 0 || len(fake.deletedInstances) != 0 {
+		t.Fatalf("ambiguous rollback should preserve recovery resources instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
+func TestAcquireCreateErrorRecoversAcceptedInstanceForRelease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		createInstanceErr: errors.New("response lost after create"),
+		createAcceptedErr: true,
+	}
+	backend := testBackend(fake)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "recover-me"})
+	if err == nil || !strings.Contains(err.Error(), "response lost after create") {
+		t.Fatalf("err=%v", err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].CloudID != "inst-1" || claims[0].Labels["recovery"] != "ambiguous-create" {
+		t.Fatalf("claims=%#v", claims)
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "recover-me", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "inst-1" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 1 || fake.deletedInstances[0] != "inst-1" {
+		t.Fatalf("deleted instances=%v", fake.deletedInstances)
+	}
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] == "" {
+		t.Fatalf("deleted keys=%v", fake.deletedKeys)
 	}
 }
 

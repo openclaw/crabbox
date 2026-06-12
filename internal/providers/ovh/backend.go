@@ -151,6 +151,12 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		if err == nil || committed {
 			return
 		}
+		if ambiguousCreate {
+			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, labels, created, createdKey, keyCreated, req.Reclaim); claimErr != nil {
+				err = errors.Join(err, fmt.Errorf("persist ovh recovery claim: %w", claimErr))
+			}
+			return
+		}
 		if created.ID == "" && createdKey.ID == "" {
 			core.RemoveStoredTestboxKey(leaseID)
 			return
@@ -191,8 +197,11 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	})
 	if err != nil {
 		ambiguousCreate = true
-		if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, labels, created, createdKey, keyCreated, req.Reclaim); claimErr != nil {
-			return core.LeaseTarget{}, errors.Join(err, fmt.Errorf("persist ovh create recovery claim: %w", claimErr))
+		if recovered, ok, findErr := findCreatedInstance(ctx, client, cfg.OVH.ProjectID, leaseID, slug, labels); findErr != nil {
+			return core.LeaseTarget{}, errors.Join(err, fmt.Errorf("reconcile ovh create recovery: %w", findErr))
+		} else if ok {
+			created = mergeInstanceLabels(recovered, labels)
+			created.SSHKeyID = firstNonBlank(created.SSHKeyID, createdKey.ID)
 		}
 		return core.LeaseTarget{}, err
 	}
@@ -318,6 +327,17 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client API, id str
 		return core.LeaseTarget{}, core.Exit(3, "ovh project mismatch: current project %s does not match lease project %s", b.Cfg.OVH.ProjectID, claim.Labels[ovhProjectLabel])
 	}
 	if claim.CloudID == "" {
+		instance, found, err := findCreatedInstance(ctx, client, b.Cfg.OVH.ProjectID, claim.LeaseID, claim.Slug, claim.Labels)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if found {
+			server := serverFromInstance(instance, b.Cfg)
+			if err := validateOVHClaim(claim, server); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+		}
 		return core.LeaseTarget{
 			LeaseID: claim.LeaseID,
 			Server:  core.Server{Provider: providerName, Name: claim.Slug, Labels: claim.Labels},
@@ -658,6 +678,41 @@ func mergeInstanceLabels(instance Instance, labels map[string]string) Instance {
 		}
 	}
 	return instance
+}
+
+func findCreatedInstance(ctx context.Context, client API, projectID, leaseID, slug string, labels map[string]string) (Instance, bool, error) {
+	instances, err := client.ListInstances(ctx, projectID)
+	if err != nil {
+		return Instance{}, false, err
+	}
+	expectedName := core.LeaseProviderName(leaseID, slug)
+	var found Instance
+	matches := 0
+	for _, instance := range instances {
+		if instance.Name != expectedName {
+			continue
+		}
+		if !isOwnedInstance(instance) {
+			continue
+		}
+		if instance.Labels["lease"] != leaseID || instance.Labels["slug"] != slug {
+			continue
+		}
+		if expectedProject := strings.TrimSpace(labels[ovhProjectLabel]); expectedProject != "" && instance.Labels[ovhProjectLabel] != expectedProject {
+			continue
+		}
+		if expectedKey := strings.TrimSpace(labels[ovhSSHKeyIDLabel]); expectedKey != "" &&
+			instance.Labels[ovhSSHKeyIDLabel] != expectedKey &&
+			instance.SSHKeyID != expectedKey {
+			continue
+		}
+		found = instance
+		matches++
+	}
+	if matches > 1 {
+		return Instance{}, false, core.Exit(2, "refusing to recover ambiguous OVH create result for lease=%s slug=%s: matched %d instances", leaseID, slug, matches)
+	}
+	return found, matches == 1, nil
 }
 
 func overlayClaimLabels(server core.Server, claim core.LeaseClaim) core.Server {
