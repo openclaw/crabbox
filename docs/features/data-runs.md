@@ -8,10 +8,37 @@ Use this when a repo script should:
 
 - run inside a short-lived Crabbox box or supported SSH lease;
 - emit a bounded manifest, QA report, or summary artifact;
+- prove a source -> transform -> destination contract for pipeline debugging,
+  backfills, migrations, or repair loops;
 - keep raw datasets, connector state, schedules, and warehouse semantics outside
   Crabbox;
 - report provider policy claims without pretending unsupported enforcement
   happened.
+
+## Positioning
+
+Data Runs are for evidence, not orchestration. They let a caller-owned command
+prove that a data workflow behaved as expected from inside a Crabbox-managed
+execution environment. The command can be a small fixture, a dbt/SQLMesh model,
+an Airbyte-style wrapper, a warehouse migration, or an auto-healing probe for a
+failing production pipeline.
+
+Crabbox owns the box lifecycle, command execution, required artifacts, bounded
+manifest download, and validation. The caller owns connectors, credentials, raw
+data movement, schedules, retries, and any production mutation or promotion.
+
+Common topologies are:
+
+- `single-box-fixture`: source, transform, and destination all run inside one
+  ephemeral box for deterministic debugging without secrets;
+- `box-to-services`: the command runs in one box and connects to caller-owned
+  services such as Postgres, ClickHouse Cloud, Snowflake, BigQuery, or S3;
+- `service-to-service`: the command coordinates existing services from the box
+  while raw data moves only between caller-owned systems.
+
+This boundary is useful for agents: an agent can reproduce a broken pipeline,
+run a reduced contract smoke, compare bounded counts and metrics, and propose or
+apply a repair without putting raw rows or credentials into Crabbox evidence.
 
 ## Shape
 

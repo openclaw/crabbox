@@ -5,6 +5,12 @@ fit `crabbox run`: lease or reuse a box, sync the checkout, run a command, and
 prove the command emitted a bounded manifest. It does not add connectors,
 schedules, retries, warehouse semantics, or raw data movement to Crabbox.
 
+Use it for pipeline contract smokes, backfill or migration checks, dbt/SQLMesh
+or Airbyte-style wrappers, and agent-driven debugging/repair loops. The data
+work can run entirely inside one box, from one box into caller-owned services, or
+as service-to-service coordination. In all cases, Crabbox only runs the command
+and validates bounded proof; the caller owns source and destination access.
+
 ## Usage
 
 ```sh
@@ -83,6 +89,9 @@ The manifest must be JSON, at most 64 KiB, and use schema
     { "name": "warehouse.users", "identity": "service-account:data-writer", "rows": 42 }
   ],
   "summary": {
+    "topology": "box-to-services",
+    "useCase": "pipeline-debugging-contract-smoke",
+    "flow": "source.users -> normalize_users -> warehouse.users",
     "tables": 1,
     "changed": true
   },
