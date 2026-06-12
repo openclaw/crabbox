@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -261,6 +262,35 @@ func TestRunRefreshesMissingCreateExpirationAfterCleanupIsArmed(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotPublishClaimWhenCreationLockIsCanceled(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	unlock, err := lockOpenSandboxLeaseOperation(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = backend.Run(ctx, RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want operation lock deadline", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("deleted=%#v want unpublished sandbox rollback", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim=%#v must not be published without operation lock", claim)
+	}
+}
+
 func TestRunNoSyncEnsuresWorkspaceWithPortableShell(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -278,6 +308,44 @@ func TestRunNoSyncEnsuresWorkspaceWithPortableShell(t *testing.T) {
 	}
 	if !strings.HasPrefix(fake.runs[0].Command, "sh -lc ") {
 		t.Fatalf("workspace command=%q, want sh -lc", fake.runs[0].Command)
+	}
+}
+
+func TestRunTimingJSONRemainsFinalLineWhenActivityRefreshFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "timing", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.afterRun = func(req runCommandRequest) {
+		if req.Workdir != "" {
+			_ = os.WriteFile(filepath.Join(stateDir, "claims", leaseID+".json"), []byte("{"), 0o600)
+		}
+	}
+
+	_, err = backend.Run(context.Background(), RunRequest{
+		ID: "timing", Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"}, TimingJSON: true,
+	})
+	if err == nil {
+		t.Fatal("expected activity refresh failure")
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report map[string]any
+	if jsonErr := json.Unmarshal([]byte(lines[len(lines)-1]), &report); jsonErr != nil {
+		t.Fatalf("final stderr line is not timing JSON: %q: %v", lines[len(lines)-1], jsonErr)
+	}
+	if report["exitCode"] != float64(1) {
+		t.Fatalf("timing exitCode=%v want 1", report["exitCode"])
 	}
 }
 
@@ -517,6 +585,237 @@ func TestStopForgetMissingRemovesClaimOnlyWhenExplicit(t *testing.T) {
 		t.Fatal(err)
 	} else if claim.LeaseID != "" {
 		t.Fatalf("claim still present after forget-missing: %#v", claim)
+	}
+}
+
+func TestStopSerializesWithActiveLeaseRun(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.runStarted = make(chan struct{}, 1)
+	fake.runRelease = make(chan struct{})
+	backend := newTestBackend(fake)
+	backend.rt.Stdout = io.Discard
+	backend.rt.Stderr = io.Discard
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "active", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := backend.Run(context.Background(), RunRequest{
+			ID: "active", Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"},
+		})
+		runDone <- err
+	}()
+	select {
+	case <-fake.runStarted:
+	case <-time.After(time.Second):
+		t.Fatal("run did not reach user command")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- backend.Stop(context.Background(), StopRequest{ID: "active"})
+	}()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("stop completed while run held operation lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(fake.runRelease)
+	if err := <-runDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("deleted=%#v want stopped sandbox", fake.deleted)
+	}
+}
+
+func TestCleanupDeletesOwnedIdleSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.rt.Clock = fixedClock{now: time.Now().Add(2 * time.Hour)}
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "idle", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("deleted=%#v want idle sandbox", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim=%#v want removed", claim)
+	}
+}
+
+func TestCleanupDryRunPreservesOwnedIdleSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.rt.Clock = fixedClock{now: time.Now().Add(2 * time.Hour)}
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "idle", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%#v after dry run", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID == "" {
+		t.Fatal("claim removed during dry run")
+	}
+}
+
+func TestCleanupRejectsIdleSandboxOwnershipMismatch(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.rt.Clock = fixedClock{now: time.Now().Add(2 * time.Hour)}
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "idle", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = "different"
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "ownership metadata") {
+		t.Fatalf("err=%v, want ownership mismatch", err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%#v after ownership mismatch", fake.deleted)
+	}
+}
+
+func TestCleanupRemovesMissingSandboxClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.notFound = true
+	backend := newTestBackend(fake)
+	backend.cfg.OpenSandbox.ForgetMissing = true
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "missing", providerName, scope, "", "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim=%#v want stale claim removed", claim)
+	}
+}
+
+func TestCleanupPreservesAmbiguousMissingSandboxClaimByDefault(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.notFound = true
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "missing", providerName, scope, "", "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil {
+		t.Fatal(err)
+	} else if claim.LeaseID == "" {
+		t.Fatal("ambiguous missing claim was removed without forget-missing")
+	}
+}
+
+func TestCleanupSerializesWithLeaseReuse(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.deleteStarted = make(chan struct{}, 1)
+	fake.deleteRelease = make(chan struct{})
+	backend := newTestBackend(fake)
+	backend.rt.Clock = fixedClock{now: time.Now().Add(2 * time.Hour)}
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "idle", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- backend.Cleanup(context.Background(), CleanupRequest{})
+	}()
+	select {
+	case <-fake.deleteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start deleting")
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := backend.Run(context.Background(), RunRequest{
+			ID: "idle", Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"},
+		})
+		runDone <- err
+	}()
+	select {
+	case err := <-runDone:
+		t.Fatalf("reuse completed while cleanup held operation lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(fake.deleteRelease)
+	if err := <-cleanupDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-runDone; err == nil || !strings.Contains(err.Error(), "not claimed") {
+		t.Fatalf("reuse err=%v, want missing claim after serialized cleanup", err)
+	}
+	if len(fake.runs) != 0 {
+		t.Fatalf("runs=%#v, deleted sandbox must not execute", fake.runs)
+	}
+}
+
+func TestOpenSandboxOperationLockHonorsContextCancellation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	unlock, err := lockOpenSandboxLeaseOperation(context.Background(), leasePrefix+"lock-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := lockOpenSandboxLeaseOperation(ctx, leasePrefix+"lock-test"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("cancellation took %s", elapsed)
 	}
 }
 
@@ -940,6 +1239,33 @@ func TestSDKClientProxyExecdAddsAccessTokenWhenEndpointOmitsIt(t *testing.T) {
 	}
 }
 
+func TestSDKClientRejectsPlaintextPublicExecdEndpoint(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-public/endpoints/44772" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"http://198.51.100.10:44772/exec?signature=secret-value","headers":{"X-EXECD-ACCESS-TOKEN":"secret"}}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.RunCommand(context.Background(), "sb-public", runCommandRequest{Command: "true"})
+	if err == nil || !strings.Contains(err.Error(), `endpoint host "198.51.100.10:44772" must use HTTPS unless it is loopback`) {
+		t.Fatalf("err=%v, want public plaintext endpoint rejection", err)
+	}
+	if strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("error leaked endpoint signature: %v", err)
+	}
+}
+
 func TestSDKClientRunCommandSendsTimeoutMillis(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	var gotTimeout int64
@@ -1312,6 +1638,14 @@ func testOpenSandboxScope(t *testing.T, baseURL string) string {
 	return scope
 }
 
+type fixedClock struct {
+	now time.Time
+}
+
+func (c fixedClock) Now() time.Time {
+	return c.now
+}
+
 type fakeOpenSandboxClient struct {
 	baseURL              string
 	sandbox              sandboxInfo
@@ -1330,6 +1664,11 @@ type fakeOpenSandboxClient struct {
 	omitCreateExpiration bool
 	getCalls             int
 	createExpiresIn      time.Duration
+	deleteStarted        chan struct{}
+	deleteRelease        chan struct{}
+	afterRun             func(runCommandRequest)
+	runStarted           chan struct{}
+	runRelease           chan struct{}
 }
 
 func newFakeClient() *fakeOpenSandboxClient {
@@ -1379,6 +1718,15 @@ func (f *fakeOpenSandboxClient) GetSandbox(context.Context, string) (sandboxInfo
 
 func (f *fakeOpenSandboxClient) DeleteSandbox(_ context.Context, sandboxID string) error {
 	f.deleted = append(f.deleted, sandboxID)
+	if f.deleteStarted != nil {
+		select {
+		case f.deleteStarted <- struct{}{}:
+		default:
+		}
+	}
+	if f.deleteRelease != nil {
+		<-f.deleteRelease
+	}
 	if f.notFound {
 		return errOpenSandboxNotFound
 	}
@@ -1414,6 +1762,18 @@ func (f *fakeOpenSandboxClient) UploadFile(_ context.Context, _ string, remotePa
 
 func (f *fakeOpenSandboxClient) RunCommand(_ context.Context, _ string, req runCommandRequest) (int, error) {
 	f.runs = append(f.runs, req)
+	if req.Workdir != "" && f.runStarted != nil {
+		select {
+		case f.runStarted <- struct{}{}:
+		default:
+		}
+	}
+	if req.Workdir != "" && f.runRelease != nil {
+		<-f.runRelease
+	}
+	if f.afterRun != nil {
+		f.afterRun(req)
+	}
 	return f.runExit, f.runErr
 }
 

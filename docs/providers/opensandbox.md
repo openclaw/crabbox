@@ -54,6 +54,7 @@ crabbox run --provider opensandbox -- go test ./...
 crabbox run --provider opensandbox --id blue-lobster --shell 'pnpm install && pnpm test'
 crabbox status --provider opensandbox --id blue-lobster
 crabbox stop --provider opensandbox blue-lobster
+crabbox cleanup --provider opensandbox
 ```
 
 ## Auth
@@ -70,6 +71,8 @@ set the API URL. That prevents a checked-in config from redirecting an
 automatically loaded API key. Overrides must be absolute HTTP(S) URLs; plain
 HTTP is accepted only for `localhost` or loopback IPs during local development.
 Userinfo, query parameters, and fragments are rejected.
+Resolved execd endpoints follow the same transport rule: public endpoints must
+use HTTPS, while plain HTTP is accepted only for loopback development servers.
 
 Local lease claims are scoped to the normalized API URL and a random ownership
 marker stored both locally and in OpenSandbox sandbox metadata. Before reusing
@@ -150,6 +153,10 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
    setup, or command failure and prints rerun/stop guidance. Best-effort
    cleanup calls are bounded; failed cleanup reports the sandbox ID for manual
    provider-side cleanup.
+6. `cleanup` removes retained sandboxes after their local sliding idle timeout.
+   Cleanup rechecks ownership metadata and serializes with lease reuse.
+   Missing-or-inaccessible claims are preserved unless `forgetMissing` is
+   explicitly enabled.
 
 ## Capabilities
 

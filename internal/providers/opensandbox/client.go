@@ -714,14 +714,37 @@ func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID strin
 	}
 	conn := c.config()
 	endpointURL := conn.RewriteEndpointURL(endpoint.Endpoint)
-	if !strings.HasPrefix(endpointURL, "http") {
-		endpointURL = conn.GetProtocol() + "://" + endpointURL
+	endpointURL, err = validateOpenSandboxExecdURL(endpointURL, conn.GetProtocol())
+	if err != nil {
+		return execdConnection{}, err
 	}
 	headers := cloneStringMap(endpoint.Headers)
 	if c.cfg.OpenSandbox.UseServerProxy && headers["X-EXECD-ACCESS-TOKEN"] == "" && c.key != "" {
 		headers["X-EXECD-ACCESS-TOKEN"] = c.key
 	}
 	return execdConnection{baseURL: endpointURL, headers: headers}, nil
+}
+
+func validateOpenSandboxExecdURL(raw, defaultProtocol string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.Contains(raw, "://") {
+		raw = strings.TrimSpace(defaultProtocol) + "://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return "", exit(5, "opensandbox execd endpoint must be an absolute HTTP(S) URL")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", exit(5, "opensandbox execd endpoint must use HTTP(S)")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return "", exit(5, "opensandbox execd endpoint must not contain userinfo or a fragment")
+	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return "", exit(5, "opensandbox execd endpoint host %q must use HTTPS unless it is loopback", parsed.Host)
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func sdkSandboxInfo(info *sdk.SandboxInfo) sandboxInfo {
