@@ -158,6 +158,11 @@ private-lab escape hatch, not a general deployment mode. If `apiUrl` points at
 a pool member that returns XAPI `HOST_IS_SLAVE` during login, Crabbox retries
 login once against the master address reported by XAPI.
 
+Repository-local `crabbox.yaml` and `.crabbox.yaml` files cannot override
+`apiUrl` or `insecureTLS`, so a checkout cannot redirect inherited credentials.
+Configure those connection-trust settings in user config, an explicit
+`CRABBOX_CONFIG` file, or environment variables.
+
 Keep the password in a private config file with `0600` permissions, in an
 environment variable, or in a secret manager. Do not pass it on argv. Crabbox
 intentionally has no XCP-ng password command-line flag, so the password does not

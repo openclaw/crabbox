@@ -58,6 +58,7 @@ type isoE2ERuntime struct {
 	generatedAnswer   string
 	linuxSeedPayload  xcpNgCloudInitPayload
 	keyPath           string
+	ownsKey           bool
 	publicKey         string
 	windowsUser       string
 	sshTarget         core.SSHTarget
@@ -86,21 +87,24 @@ var (
 	isoE2EEnsureTestboxKey = func(cfg Config, leaseID string) (string, string, error) {
 		return core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	}
+	isoE2EStoredTestboxKeyExists  = storedISOE2ETestboxKeyExists
+	isoE2ENewLeaseID              = core.NewLeaseID
 	isoE2EProviderKeyForLease     = func(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
 	isoE2ERemasterUbuntuISO       = remasterUbuntuAutoinstallISO
 	isoE2EWriteLinuxSeedISO       = writeLinuxSeedISO
 	isoE2EWriteWindowsAnswerISO   = writeWindowsAnswerISO
 	isoE2EGenerateWindowsPassword = generateWindowsAutoLogonPassword
 	isoE2ERemoveLocalArtifact     = os.Remove
+	isoE2ERemoveStoredTestboxKey  = removeISOE2EStoredTestboxKey
 	isoE2EUbuntuLinuxLinePattern  = regexp.MustCompile(`(?m)^(\s*linux\s+/casper/vmlinuz\s+)(.*?)(\s+---\s*)$`)
 	isoE2EWindowsARMLinePattern   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(arm64|aarch64|arm)(?:[^a-z0-9]|$)`)
 )
 
-func isoE2ELeaseID(now time.Time) string {
+func isoE2ELeaseID() string {
 	if override := strings.TrimSpace(os.Getenv("CRABBOX_XCP_NG_ISO_E2E_LEASE_ID")); override != "" {
 		return override
 	}
-	return fmt.Sprintf("cbx_isoe2e_%d", now.Unix())
+	return "cbx_isoe2e_" + strings.TrimPrefix(isoE2ENewLeaseID(), "cbx_")
 }
 
 func isoE2EAllowImportedInstaller() bool {
@@ -223,7 +227,7 @@ func resolveISOE2EReadOnly(ctx context.Context, client lifecycleClient, placemen
 func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcpNgPlacement, opts ISOE2EOptions, summary ISOE2ESummary) (result ISOE2ESummary, err error) {
 	result = summary
 	now := isoE2ECurrentTime()
-	leaseID := isoE2ELeaseID(now)
+	leaseID := isoE2ELeaseID()
 	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
 	if err = ensureWindowsInstallerSupported(opts.ISO, "", &result); err != nil {
 		return result, err
@@ -240,11 +244,11 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	runtime.labels["os"] = opts.OS
 	runtime.labels["name_prefix"] = opts.NamePrefix
 	runtime.labels["provider_key"] = isoE2EProviderKeyForLease(runtime.leaseID)
+	defer finalizeLocalArtifacts(runtime, &result, &err)
+	defer runtime.cleanup(context.Background(), &result, &err)
 	if err = runtime.prepareWindowsAnswerMedia(ctx, opts, &result); err != nil {
 		return result, err
 	}
-	defer finalizeLocalArtifacts(runtime, &result, &err)
-	defer runtime.cleanup(context.Background(), &result, &err)
 	if err = runtime.createBaseVM(ctx, opts, &result); err != nil {
 		return result, err
 	}
@@ -341,7 +345,7 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNgPlacement, opts ISOE2EOptions, summary ISOE2ESummary) (result ISOE2ESummary, err error) {
 	result = summary
 	now := isoE2ECurrentTime()
-	leaseID := isoE2ELeaseID(now)
+	leaseID := isoE2ELeaseID()
 	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
 	runtime := &isoE2ERuntime{
 		client:       client,
@@ -355,6 +359,9 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	runtime.labels["os"] = opts.OS
 	runtime.labels["name_prefix"] = opts.NamePrefix
 	runtime.labels["provider_key"] = isoE2EProviderKeyForLease(runtime.leaseID)
+	defer finalizeLocalArtifacts(runtime, &result, &err)
+	defer runtime.cleanup(context.Background(), &result, &err)
+	keyExisted := isoE2EStoredTestboxKeyExists(runtime.leaseID)
 	keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, runtime.leaseID)
 	if err != nil {
 		result.Classification = "test_failed"
@@ -363,13 +370,12 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 		return result, err
 	}
 	runtime.keyPath = keyPath
+	runtime.ownsKey = !keyExisted
 	runtime.publicKey = publicKey
 	result.Details["ssh_key"] = filepath.Base(keyPath)
 	if err = runtime.prepareInstallerMedia(ctx, opts, &result); err != nil {
 		return result, err
 	}
-	defer finalizeLocalArtifacts(runtime, &result, &err)
-	defer runtime.cleanup(context.Background(), &result, &err)
 	if err = runtime.createBaseVM(ctx, opts, &result); err != nil {
 		return result, err
 	}
@@ -518,6 +524,7 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 			r.windowsFallback = true
 			return nil
 		}
+		keyExisted := isoE2EStoredTestboxKeyExists(r.leaseID)
 		keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, r.leaseID)
 		if err != nil {
 			summary.Classification = "test_failed"
@@ -525,6 +532,9 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 			summary.Reason = err.Error()
 			return err
 		}
+		r.keyPath = keyPath
+		r.ownsKey = !keyExisted
+		r.publicKey = publicKey
 		rawUser := strings.TrimSpace(core.Blank(opts.Config.XCPNg.User, opts.Config.SSHUser))
 		user := windowsAccountName(rawUser)
 		if user == "" {
@@ -533,8 +543,6 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 			summary.Reason = "xcp-ng windows autounattend user is required"
 			return exit(2, "%s", summary.Reason)
 		}
-		r.keyPath = keyPath
-		r.publicKey = publicKey
 		r.windowsUser = user
 		summary.Details["answer_iso_source"] = "provided-media"
 		summary.Details["windows_bootstrap"] = "openssh-key"
@@ -542,6 +550,7 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 		summary.Phase = "windows_answer_generation"
 		return nil
 	}
+	keyExisted := isoE2EStoredTestboxKeyExists(r.leaseID)
 	keyPath, publicKey, err := isoE2EEnsureTestboxKey(opts.Config, r.leaseID)
 	if err != nil {
 		summary.Classification = "test_failed"
@@ -549,6 +558,9 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 		summary.Reason = err.Error()
 		return err
 	}
+	r.keyPath = keyPath
+	r.ownsKey = !keyExisted
+	r.publicKey = publicKey
 	initialPassword, err := isoE2EGenerateWindowsPassword()
 	if err != nil {
 		summary.Classification = "test_failed"
@@ -570,8 +582,6 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 		summary.Reason = err.Error()
 		return err
 	}
-	r.keyPath = keyPath
-	r.publicKey = publicKey
 	r.windowsUser = payload.Username
 	r.generatedAnswer = answerISO
 	r.cleanupLocal = append(r.cleanupLocal, answerISO)
@@ -923,7 +933,7 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 }
 
 func finalizeLocalArtifacts(runtime *isoE2ERuntime, summary *ISOE2ESummary, runErr *error) {
-	cleanupErr := runtime.cleanupLocalArtifacts()
+	cleanupErr := errors.Join(runtime.cleanupLocalArtifacts(), runtime.cleanupStoredTestboxKey(summary.Cleanup))
 	if cleanupErr == nil {
 		return
 	}
@@ -941,6 +951,39 @@ func finalizeLocalArtifacts(runtime *isoE2ERuntime, summary *ISOE2ESummary, runE
 	if *runErr == nil {
 		*runErr = cleanupErr
 	}
+}
+
+func (r *isoE2ERuntime) cleanupStoredTestboxKey(cleanupStatus string) error {
+	if r.keyPath == "" || !r.ownsKey {
+		return nil
+	}
+	if cleanupStatus == "skipped" || cleanupStatus == "resource_cleanup_failed" {
+		return nil
+	}
+	if r.vm.VM.Ref != "" && cleanupStatus != "cleaned" {
+		return nil
+	}
+	if err := isoE2ERemoveStoredTestboxKey(r.leaseID); err != nil {
+		return fmt.Errorf("remove ISO E2E SSH key: %w", err)
+	}
+	return nil
+}
+
+func storedISOE2ETestboxKeyExists(leaseID string) bool {
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(keyPath)
+	return err == nil
+}
+
+func removeISOE2EStoredTestboxKey(leaseID string) error {
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Dir(keyPath))
 }
 
 func (r *isoE2ERuntime) cleanupLocalArtifacts() error {

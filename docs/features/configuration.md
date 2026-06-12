@@ -379,6 +379,9 @@ before `warmup` or `run` can create a lease. The password must come from private
 config or `CRABBOX_XCP_NG_PASSWORD`; there is intentionally no
 XCP-ng password command-line flag. Prefer a pool-master `apiUrl`; if XAPI
 returns `HOST_IS_SLAVE`, Crabbox retries login once against the reported master.
+For credential safety, repository-local `crabbox.yaml` and `.crabbox.yaml`
+files cannot override `apiUrl` or `insecureTLS`; set those in user config, an
+explicit `CRABBOX_CONFIG` file, or environment variables.
 
 `target: linux` describes the current Crabbox lease surface, not an XCP-ng
 hypervisor limitation. XCP-ng itself can host Linux, Windows, and BSD guests on

@@ -2510,10 +2510,22 @@ func applyConfigFile(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	return applyFileConfig(cfg, file)
+	return applyFileConfigWithTrust(cfg, file, trustedConfigPath(path))
 }
 
 func applyFileConfig(cfg *Config, file fileConfig) error {
+	return applyFileConfigWithTrust(cfg, file, true)
+}
+
+func trustedConfigPath(path string) bool {
+	if explicit := strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")); explicit != "" {
+		return filepath.Clean(path) == filepath.Clean(explicit)
+	}
+	userPath := userConfigPath()
+	return userPath != "" && filepath.Clean(path) == filepath.Clean(userPath)
+}
+
+func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
 	if file.Profile != "" {
 		cfg.Profile = file.Profile
 	}
@@ -2847,7 +2859,9 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 	}
 	if file.XCPNg != nil {
-		if file.XCPNg.APIURL != "" {
+		// Project config is repository-controlled. Do not let it redirect
+		// inherited user or environment credentials to another XAPI endpoint.
+		if trusted && file.XCPNg.APIURL != "" {
 			cfg.XCPNg.APIURL = file.XCPNg.APIURL
 		}
 		if file.XCPNg.Username != "" {
@@ -2883,7 +2897,7 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		if file.XCPNg.WorkRoot != "" {
 			cfg.XCPNg.WorkRoot = file.XCPNg.WorkRoot
 		}
-		if file.XCPNg.InsecureTLS != nil {
+		if trusted && file.XCPNg.InsecureTLS != nil {
 			cfg.XCPNg.InsecureTLS = *file.XCPNg.InsecureTLS
 		}
 	}

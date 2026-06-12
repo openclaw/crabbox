@@ -1295,6 +1295,88 @@ func TestISOE2ECleanupUsesBoundedContext(t *testing.T) {
 	}
 }
 
+func TestISOE2ELeaseIDIsCollisionResistantUnlessOverridden(t *testing.T) {
+	oldNewLeaseID := isoE2ENewLeaseID
+	ids := []string{"cbx_010203040506", "cbx_111213141516"}
+	isoE2ENewLeaseID = func() string {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}
+	t.Cleanup(func() { isoE2ENewLeaseID = oldNewLeaseID })
+
+	first := isoE2ELeaseID()
+	second := isoE2ELeaseID()
+	if first == second || first != "cbx_isoe2e_010203040506" || second != "cbx_isoe2e_111213141516" {
+		t.Fatalf("lease IDs first=%q second=%q", first, second)
+	}
+	t.Setenv("CRABBOX_XCP_NG_ISO_E2E_LEASE_ID", "cbx_isoe2e_recovery")
+	if got := isoE2ELeaseID(); got != "cbx_isoe2e_recovery" {
+		t.Fatalf("override lease ID=%q", got)
+	}
+}
+
+func TestISOE2EKeyCleanupFollowsRemoteCleanupStatus(t *testing.T) {
+	oldRemoveStoredKey := isoE2ERemoveStoredTestboxKey
+	var removed []string
+	isoE2ERemoveStoredTestboxKey = func(leaseID string) error {
+		removed = append(removed, leaseID)
+		return nil
+	}
+	t.Cleanup(func() { isoE2ERemoveStoredTestboxKey = oldRemoveStoredKey })
+
+	for _, status := range []string{"skipped", "resource_cleanup_failed"} {
+		runtime := isoE2ERuntime{leaseID: "cbx_keep", keyPath: "/tmp/key", ownsKey: true, vm: xcpNgFreshVMResult{VM: xapiVM{Ref: "OpaqueRef:vm"}}}
+		if err := runtime.cleanupStoredTestboxKey(status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reused := isoE2ERuntime{leaseID: "cbx_reused", keyPath: "/tmp/key", vm: xcpNgFreshVMResult{VM: xapiVM{Ref: "OpaqueRef:vm"}}}
+	if err := reused.cleanupStoredTestboxKey("cleaned"); err != nil {
+		t.Fatal(err)
+	}
+	cleaned := isoE2ERuntime{leaseID: "cbx_cleaned", keyPath: "/tmp/key", ownsKey: true, vm: xcpNgFreshVMResult{VM: xapiVM{Ref: "OpaqueRef:vm"}}}
+	if err := cleaned.cleanupStoredTestboxKey("cleaned"); err != nil {
+		t.Fatal(err)
+	}
+	preparationFailure := isoE2ERuntime{leaseID: "cbx_preparation", keyPath: "/tmp/key", ownsKey: true}
+	if err := preparationFailure.cleanupStoredTestboxKey("not_needed"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := removed, []string{"cbx_cleaned", "cbx_preparation"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("removed=%v want %v", got, want)
+	}
+}
+
+func TestWindowsAnswerPreparationRegistersOwnedKeyBeforeLaterFailure(t *testing.T) {
+	oldEnsure := isoE2EEnsureTestboxKey
+	oldExists := isoE2EStoredTestboxKeyExists
+	oldPassword := isoE2EGenerateWindowsPassword
+	isoE2EStoredTestboxKeyExists = func(string) bool { return false }
+	isoE2EEnsureTestboxKey = func(Config, string) (string, string, error) {
+		return "/tmp/owned-key", "ssh-ed25519 AAAATEST", nil
+	}
+	isoE2EGenerateWindowsPassword = func() (string, error) {
+		return "", errors.New("password generation failed")
+	}
+	t.Cleanup(func() {
+		isoE2EEnsureTestboxKey = oldEnsure
+		isoE2EStoredTestboxKeyExists = oldExists
+		isoE2EGenerateWindowsPassword = oldPassword
+	})
+	runtime := isoE2ERuntime{leaseID: "cbx_windows"}
+	summary := ISOE2ESummary{Details: map[string]string{}}
+
+	err := runtime.prepareWindowsAnswerMedia(context.Background(), ISOE2EOptions{}, &summary)
+
+	if err == nil || !strings.Contains(err.Error(), "password generation failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if runtime.keyPath != "/tmp/owned-key" || !runtime.ownsKey {
+		t.Fatalf("runtime key state=%#v", runtime)
+	}
+}
+
 func TestISOE2ERuntimeKeepsRecoveryHandlesFromFailedAllocations(t *testing.T) {
 	fake := &fakeLifecycleClient{
 		freshVM:      xcpNgFreshVMResult{VM: xapiVM{Ref: "OpaqueRef:vm"}},
