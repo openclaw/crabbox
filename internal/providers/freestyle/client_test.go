@@ -148,6 +148,13 @@ func TestFreestyleCreateVMOmitsUnsetSizing(t *testing.T) {
 		if _, ok := body["memSizeGb"]; ok {
 			t.Fatalf("memSizeGb should be omitted from default create request: %#v", body)
 		}
+		if _, ok := body["template"]; ok {
+			t.Fatalf("template should be omitted from default create request: %#v", body)
+		}
+		ports, ok := body["ports"].([]any)
+		if !ok || len(ports) != 0 {
+			t.Fatalf("ports=%#v want explicit empty array", body["ports"])
+		}
 		if err := json.NewEncoder(w).Encode(freestyleCreateVMResponse{ID: "vm123"}); err != nil {
 			t.Errorf("encode response: %v", err)
 		}
@@ -165,6 +172,50 @@ func TestFreestyleCreateVMOmitsUnsetSizing(t *testing.T) {
 	}
 	if vm.ID != "vm123" {
 		t.Fatalf("vm.ID=%q", vm.ID)
+	}
+}
+
+func TestFreestyleCreateVMNestsCustomSizing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if _, ok := body["vcpuCount"]; ok {
+			t.Fatalf("vcpuCount must not be top-level: %#v", body)
+		}
+		if _, ok := body["memSizeGb"]; ok {
+			t.Fatalf("memSizeGb must not be top-level: %#v", body)
+		}
+		template, ok := body["template"].(map[string]any)
+		if !ok || template["vcpuCount"] != float64(4) || template["memSizeGb"] != float64(8) {
+			t.Fatalf("template=%#v want nested custom sizing", body["template"])
+		}
+		ports, ok := body["ports"].([]any)
+		if !ok || len(ports) != 0 {
+			t.Fatalf("ports=%#v want explicit empty array", body["ports"])
+		}
+		if err := json.NewEncoder(w).Encode(freestyleCreateVMResponse{ID: "vm123"}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := &freestyleHTTPClient{
+		apiKey:     "test-key",
+		apiURL:     server.URL,
+		httpClient: server.Client(),
+	}
+	_, err := client.CreateVM(context.Background(), freestyleCreateVMRequest{
+		Name:  "crabbox-test",
+		Ports: []freestylePortMapping{},
+		Template: &freestyleCreateVMTemplate{
+			VcpuCount: 4,
+			MemSizeGb: 8,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVM err=%v", err)
 	}
 }
 

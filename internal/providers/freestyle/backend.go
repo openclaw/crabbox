@@ -344,12 +344,15 @@ func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAP
 	// Only send sizing when explicitly configured; otherwise omit so Freestyle
 	// applies the plan defaults. Sending custom sizing on a plan that does not
 	// allow it fails with CUSTOM_SIZING_NOT_ALLOWED.
-	create := freestyleCreateVMRequest{Name: name}
-	if b.cfg.Freestyle.VCPUs > 0 {
-		create.VcpuCount = b.cfg.Freestyle.VCPUs
+	create := freestyleCreateVMRequest{
+		Name:  name,
+		Ports: []freestylePortMapping{},
 	}
-	if b.cfg.Freestyle.MemoryGB > 0 {
-		create.MemSizeGb = b.cfg.Freestyle.MemoryGB
+	if b.cfg.Freestyle.VCPUs > 0 || b.cfg.Freestyle.MemoryGB > 0 {
+		create.Template = &freestyleCreateVMTemplate{
+			VcpuCount: b.cfg.Freestyle.VCPUs,
+			MemSizeGb: b.cfg.Freestyle.MemoryGB,
+		}
 	}
 	vm, err := client.CreateVM(ctx, create)
 	if err != nil {

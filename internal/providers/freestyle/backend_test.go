@@ -491,8 +491,11 @@ func TestFreestyleCreateSandboxWorksWithoutWorkdir(t *testing.T) {
 	if client.createReq == nil {
 		t.Fatal("create request was nil")
 	}
-	if client.createReq.VcpuCount != 0 || client.createReq.MemSizeGb != 0 {
-		t.Fatalf("create sizing=%d/%d want omitted", client.createReq.VcpuCount, client.createReq.MemSizeGb)
+	if client.createReq.Template != nil {
+		t.Fatalf("create template=%#v want omitted", client.createReq.Template)
+	}
+	if client.createReq.Ports == nil || len(client.createReq.Ports) != 0 {
+		t.Fatalf("create ports=%#v want explicit empty array", client.createReq.Ports)
 	}
 }
 
@@ -513,8 +516,11 @@ func TestFreestyleCreateSandboxPassesNameWithoutWorkdir(t *testing.T) {
 	if !strings.HasPrefix(client.createReq.Name, "crabbox-repo-") {
 		t.Fatalf("name=%q", client.createReq.Name)
 	}
-	if client.createReq.VcpuCount != 4 || client.createReq.MemSizeGb != 8 {
-		t.Fatalf("create sizing=%d/%d", client.createReq.VcpuCount, client.createReq.MemSizeGb)
+	if client.createReq.Template == nil || client.createReq.Template.VcpuCount != 4 || client.createReq.Template.MemSizeGb != 8 {
+		t.Fatalf("create template=%#v", client.createReq.Template)
+	}
+	if client.createReq.Ports == nil || len(client.createReq.Ports) != 0 {
+		t.Fatalf("create ports=%#v want explicit empty array", client.createReq.Ports)
 	}
 }
 

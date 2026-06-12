@@ -40,9 +40,19 @@ type freestyleCreateVMResponse struct {
 }
 
 type freestyleCreateVMRequest struct {
-	Name      string `json:"name"`
-	VcpuCount int    `json:"vcpuCount,omitempty"`
-	MemSizeGb int    `json:"memSizeGb,omitempty"`
+	Name     string                     `json:"name"`
+	Ports    []freestylePortMapping     `json:"ports"`
+	Template *freestyleCreateVMTemplate `json:"template,omitempty"`
+}
+
+type freestyleCreateVMTemplate struct {
+	VcpuCount int `json:"vcpuCount,omitempty"`
+	MemSizeGb int `json:"memSizeGb,omitempty"`
+}
+
+type freestylePortMapping struct {
+	Port       int `json:"port"`
+	TargetPort int `json:"targetPort"`
 }
 
 type freestyleExecRequest struct {
@@ -188,6 +198,9 @@ func (c *freestyleHTTPClient) do(ctx context.Context, method, urlPath string, bo
 }
 
 func (c *freestyleHTTPClient) CreateVM(ctx context.Context, req freestyleCreateVMRequest) (freestyleVM, error) {
+	if req.Ports == nil {
+		req.Ports = []freestylePortMapping{}
+	}
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return freestyleVM{}, err

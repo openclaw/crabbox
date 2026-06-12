@@ -113,6 +113,9 @@ before workspace preparation and sync.
 Freestyle advertises archive sync (`FeatureArchiveSync`). Crabbox supports
 `--sync-only`, `--force-sync-large`, and `--no-sync`.
 
+Crabbox creates Freestyle VMs with an explicit empty external-port list. No
+guest service is publicly exposed by default.
+
 Archive upload tries Freestyle's file API first. When that endpoint is
 unavailable, Crabbox falls back to chunked base64 upload through exec. Sync still
 completes reliably through the fallback path.
