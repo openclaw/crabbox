@@ -1199,6 +1199,146 @@ func TestSDKClientReadyTimeoutUsesProviderBudget(t *testing.T) {
 	}
 }
 
+func TestSDKClientRunningWaitHonorsDiscoveredExpiration(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	deleted := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"sb-expiring","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-expiring":
+			w.Header().Set("Content-Type", "application/json")
+			expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+			_, _ = io.WriteString(w, `{"id":"sb-expiring","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-expiring":
+			deleted++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "expired before reaching Running") {
+		t.Fatalf("err=%v, want discovered expiration failure", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("expiration wait took %s", elapsed)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted=%d want rollback", deleted)
+	}
+}
+
+func TestSDKClientRefreshesMissingCreateExpirationBeforeReadiness(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	getHits := 0
+	deleted := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"sb-missing-expiry","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-missing-expiry":
+			getHits++
+			w.Header().Set("Content-Type", "application/json")
+			expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+			_, _ = io.WriteString(w, `{"id":"sb-missing-expiry","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-missing-expiry/endpoints/44772":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/ping":
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-missing-expiry":
+			deleted++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("err=%v, want readiness expiration", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("missing expiration readiness took %s", elapsed)
+	}
+	if getHits != 1 || deleted != 1 {
+		t.Fatalf("getHits=%d deleted=%d want expiration refresh and rollback", getHits, deleted)
+	}
+}
+
+func TestSDKClientUsesRefreshedExpirationForSecondRunningWait(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	getHits := 0
+	deleted := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
+			getHits++
+			if getHits > 1 {
+				<-r.Context().Done()
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+			_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
+			deleted++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "wait for running after expiration refresh") {
+		t.Fatalf("err=%v, want bounded second running wait", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("refreshed expiration wait took %s", elapsed)
+	}
+	if getHits != 2 || deleted != 1 {
+		t.Fatalf("getHits=%d deleted=%d want two status requests and rollback", getHits, deleted)
+	}
+}
+
 func TestSDKClientCreateDeletesSandboxWhenReadinessFails(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	deleted := 0
@@ -1207,7 +1347,7 @@ func TestSDKClientCreateDeletesSandboxWhenReadinessFails(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"sb-cleanup","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+			_, _ = io.WriteString(w, `{"id":"sb-cleanup","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-cleanup/endpoints/44772":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
@@ -1252,7 +1392,7 @@ func TestSDKClientCreateSurfacesPermanentReadinessFailureImmediately(t *testing.
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"sb-hard-failure","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+			_, _ = io.WriteString(w, `{"id":"sb-hard-failure","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-hard-failure/endpoints/44772":
 			endpointHits++
 			w.Header().Set("Content-Type", "application/json")
