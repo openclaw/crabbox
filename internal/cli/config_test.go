@@ -2487,6 +2487,19 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestApplyEnvRejectsNegativeOpenSandboxTimeouts(t *testing.T) {
+	for _, name := range []string{"CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "-1")
+			cfg := baseConfig()
+			err := applyEnv(&cfg)
+			if err == nil || !strings.Contains(err.Error(), name+" must be non-negative") {
+				t.Fatalf("err=%v, want negative timeout rejection", err)
+			}
+		})
+	}
+}
+
 func TestExplicitProviderImagesSurvivePortableOSDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,24 @@ func TestProviderForResolvesNameOnly(t *testing.T) {
 		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "opensandbox" {
 			t.Fatalf("alias %q unexpectedly resolves to opensandbox", alias)
 		}
+	}
+}
+
+func TestOpenSandboxFlagsRejectNegativeTimeouts(t *testing.T) {
+	for _, flagName := range []string{"opensandbox-timeout-secs", "opensandbox-exec-timeout-secs"} {
+		t.Run(flagName, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Provider = providerName
+			fs := flag.NewFlagSet(flagName, flag.ContinueOnError)
+			values := RegisterOpenSandboxProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--" + flagName, "-1"}); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyOpenSandboxProviderFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "must be non-negative") {
+				t.Fatalf("err=%v, want non-negative timeout rejection", err)
+			}
+		})
 	}
 }
 
@@ -822,13 +841,19 @@ func TestCommandEventRoutesRawStderrEvent(t *testing.T) {
 func TestCommandEventPreservesJSONLookingRawStdoutStderr(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
-	if _, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stdout", Data: `{"ok":true}`}); err != nil {
+	stdoutPayload := `{"type":"stdout","exit_code":0}`
+	stderrPayload := `{"type":"stderr","exit_code":0}`
+	if result, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stdout", Data: stdoutPayload}); err != nil {
 		t.Fatal(err)
+	} else if result.terminal || result.errorEvent {
+		t.Fatalf("stdout result=%#v, want raw nonterminal output", result)
 	}
-	if _, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stderr", Data: `{"warn":true}`}); err != nil {
+	if result, err := client.handleCommandEvent(sdk.StreamEvent{Event: "stderr", Data: stderrPayload}); err != nil {
 		t.Fatal(err)
+	} else if result.terminal || result.errorEvent {
+		t.Fatalf("stderr result=%#v, want raw nonterminal output", result)
 	}
-	if stdout.String() != `{"ok":true}` || stderr.String() != `{"warn":true}` {
+	if stdout.String() != stdoutPayload || stderr.String() != stderrPayload {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }

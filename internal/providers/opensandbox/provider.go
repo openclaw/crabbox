@@ -37,7 +37,24 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return ApplyOpenSandboxProviderFlags(cfg, fs, values)
 }
 
+func (Provider) ValidateConfig(cfg core.Config) error {
+	return validateOpenSandboxConfig(cfg)
+}
+
+func validateOpenSandboxConfig(cfg Config) error {
+	if cfg.OpenSandbox.TimeoutSecs < 0 {
+		return exit(2, "opensandbox timeoutSecs must be non-negative")
+	}
+	if cfg.OpenSandbox.ExecTimeoutSecs < 0 {
+		return exit(2, "opensandbox execTimeoutSecs must be non-negative")
+	}
+	return nil
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	if err := p.ValidateConfig(cfg); err != nil {
+		return nil, err
+	}
 	cfg.Provider = providerName
 	return &openSandboxBackend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
 }

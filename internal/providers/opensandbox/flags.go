@@ -87,5 +87,5 @@ func ApplyOpenSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	if flagWasSet(fs, "opensandbox-forget-missing") {
 		cfg.OpenSandbox.ForgetMissing = *v.ForgetMissing
 	}
-	return nil
+	return validateOpenSandboxConfig(*cfg)
 }

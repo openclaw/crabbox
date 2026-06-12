@@ -474,8 +474,18 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 		_, writeErr := io.WriteString(c.rt.Stdout, event.Data)
 		return commandEventResult{}, writeErr
 	}
+	explicitType := strings.ToLower(strings.TrimSpace(event.Event))
+	payloadType := strings.ToLower(strings.TrimSpace(payload.Type))
+	if (explicitType == "stdout" || explicitType == "stderr") && payloadType != "" && payloadType != explicitType {
+		if explicitType == "stderr" {
+			_, err := io.WriteString(c.rt.Stderr, event.Data)
+			return commandEventResult{}, err
+		}
+		_, err := io.WriteString(c.rt.Stdout, event.Data)
+		return commandEventResult{}, err
+	}
 	if payload.Type == "" {
-		switch strings.ToLower(event.Event) {
+		switch explicitType {
 		case "stdout":
 			_, err := io.WriteString(c.rt.Stdout, event.Data)
 			return commandEventResult{}, err
@@ -488,19 +498,19 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 	if eventType == "" {
 		eventType = event.Event
 	}
-	if payload.ExitCode != nil && eventType != "error" {
+	if payload.ExitCode != nil && eventType != "error" && explicitType != "stdout" && explicitType != "stderr" {
 		code := *payload.ExitCode
 		return commandEventResult{exitCode: &code, terminal: true}, nil
 	}
 	switch eventType {
 	case "stdout":
-		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
+		_, err := io.WriteString(c.rt.Stdout, framedCommandOutput(event, payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "result":
 		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "stderr":
-		_, err := io.WriteString(c.rt.Stderr, commandOutput(payload.Text, payload.Data))
+		_, err := io.WriteString(c.rt.Stderr, framedCommandOutput(event, payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "error":
 		value := payload.EValue
@@ -530,6 +540,13 @@ func commandOutput(text, data string) string {
 		return text
 	}
 	return data
+}
+
+func framedCommandOutput(event sdk.StreamEvent, text, data string) string {
+	if output := commandOutput(text, data); output != "" {
+		return output
+	}
+	return event.Data
 }
 
 func (c *sdkOpenSandboxClient) Probe(ctx context.Context) error {
