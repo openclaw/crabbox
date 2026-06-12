@@ -239,7 +239,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
 	cfg := b.configForRun()
 	client, err := newClient(cfg)
 	if err != nil {
@@ -251,6 +251,27 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	}
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
+	var previousClaim, preflightClaim core.LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := core.RestoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Incus lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
+	if req.Repo.Root != "" && leaseID != "" {
+		previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		preflightClaim, err = core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, server.Labels["slug"], providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = true
 	}
 	if req.StatusOnly {
 		state, _, err := client.GetInstanceState(inst.Name)
@@ -303,11 +324,11 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		}
 	}
 	if req.Repo.Root != "" && leaseID != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, server.Labels["slug"], providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if _, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
 			return LeaseTarget{}, err
 		}
-	}
-	if !req.StatusOnly && leaseID != "" {
+		rollbackClaim = false
+	} else if !req.StatusOnly && leaseID != "" {
 		if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 			return LeaseTarget{}, err
 		}

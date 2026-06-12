@@ -490,6 +490,129 @@ func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
 	}
 }
 
+func TestMorphResolveChecksRepoClaimBeforeResume(t *testing.T) {
+	configureMorphTestHome(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testMorphConfig()
+	cfg.Morph.WakeOnSSH = false
+	if err := claimLeaseForRepoProvider("cbx_claimed", "claimed", providerName, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	resumeCalls := 0
+	sshKeyCalls := 0
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			return morphInstance{
+				ID:       instanceID,
+				Status:   "paused",
+				Metadata: morphMetadata{"crabbox": "true", "provider": providerName, "lease": "cbx_claimed", "slug": "claimed"},
+			}, nil
+		},
+		resumeInstance: func(context.Context, string) error {
+			resumeCalls++
+			return nil
+		},
+		getSSHKey: func(context.Context, string) (morphSSHKey, error) {
+			sshKeyCalls++
+			return morphSSHKey{PrivateKey: "PRIVATE KEY"}, nil
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    cfg,
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+		now:    time.Now,
+	}
+
+	req := ResolveRequest{ID: "inst_claimed"}
+	req.Repo.Root = t.TempDir()
+	_, err := backend.Resolve(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if resumeCalls != 0 || sshKeyCalls != 0 {
+		t.Fatalf("claim conflict resumeCalls=%d sshKeyCalls=%d", resumeCalls, sshKeyCalls)
+	}
+}
+
+func TestMorphResolveRestoresRepoClaimWhenSSHKeyFails(t *testing.T) {
+	configureMorphTestHome(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			return morphInstance{
+				ID:       instanceID,
+				Status:   "ready",
+				Metadata: morphMetadata{"crabbox": "true", "provider": providerName, "lease": "cbx_failing", "slug": "failing"},
+			}, nil
+		},
+		getSSHKey: func(context.Context, string) (morphSSHKey, error) {
+			return morphSSHKey{}, errors.New("key unavailable")
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testMorphConfig(),
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+		now:    time.Now,
+	}
+	req := ResolveRequest{ID: "inst_failing"}
+	req.Repo.Root = t.TempDir()
+
+	_, err := backend.Resolve(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "key unavailable") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence("cbx_failing"); err != nil || exists {
+		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestMorphResolveRejectsConcurrentRepoReclaim(t *testing.T) {
+	configureMorphTestHome(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+	fake := &fakeMorphAPI{
+		getInstance: func(_ context.Context, instanceID string) (morphInstance, error) {
+			return morphInstance{
+				ID:       instanceID,
+				Status:   "ready",
+				Metadata: morphMetadata{"crabbox": "true", "provider": providerName, "lease": "cbx_race", "slug": "race"},
+			}, nil
+		},
+		getSSHKey: func(context.Context, string) (morphSSHKey, error) {
+			return morphSSHKey{PrivateKey: "PRIVATE KEY"}, nil
+		},
+	}
+	backend := &morphLeaseBackend{
+		spec:   Provider{}.Spec(),
+		cfg:    testMorphConfig(),
+		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		client: fake,
+		now:    time.Now,
+	}
+	oldWait := waitForMorphSSHReady
+	waitForMorphSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return claimLeaseForRepoProvider("cbx_race", "race", providerName, repoB, time.Hour, true)
+	}
+	t.Cleanup(func() { waitForMorphSSHReady = oldWait })
+	req := ResolveRequest{ID: "inst_race"}
+	req.Repo.Root = repoA
+
+	_, err := backend.Resolve(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	claim, ok, claimErr := resolveLeaseClaimForProvider("cbx_race", providerName)
+	if claimErr != nil || !ok || claim.RepoRoot != repoB {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+}
+
 func TestMorphResolveEnablesProviderWakeOnSSHBeforeRelyingOnIt(t *testing.T) {
 	configureMorphTestHome(t)
 	cfg := testMorphConfig()

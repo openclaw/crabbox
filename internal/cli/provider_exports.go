@@ -102,6 +102,10 @@ func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
 func ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, cacheVolumes []string) error {
 	return claimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, cacheVolumes)
 }
@@ -154,6 +158,10 @@ func RemoveLeaseClaim(leaseID string) {
 
 func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return removeLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
+	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }
 
 func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {

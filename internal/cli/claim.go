@@ -109,6 +109,15 @@ func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim)
 }
 
+func claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	var updated leaseClaim
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
+		guard:  unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
+		result: &updated,
+	})
+	return updated, err
+}
+
 func claimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, cacheVolumes []string) error {
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
 		setCacheVolumes: true,
@@ -874,6 +883,29 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected leaseClaim) error {
 			return exit(2, "remove claim %s: %v", path, err)
 		}
 		return nil
+	})
+}
+
+func restoreLeaseClaimIfUnchanged(leaseID string, current, previous leaseClaim, previousExists bool) error {
+	if !previousExists {
+		return removeLeaseClaimIfUnchanged(leaseID, current)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
+			return err
+		}
+		return writeLeaseClaimAtomic(path, cloneLeaseClaim(previous))
 	})
 }
 

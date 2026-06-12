@@ -79,7 +79,7 @@ func (b *namespaceLeaseBackend) Acquire(ctx context.Context, req AcquireRequest)
 	return lease, nil
 }
 
-func (b *namespaceLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *namespaceLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
 	name, leaseID, slug, err := resolveNamespaceDevboxName(req.ID, req.Reclaim)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -100,18 +100,37 @@ func (b *namespaceLeaseBackend) Resolve(ctx context.Context, req ResolveRequest)
 		}
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
-	lease, err := b.prepareLease(ctx, name, leaseID, slug, true)
+	var previousClaim, preflightClaim LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := restoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Namespace lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
+	if req.Repo.Root != "" {
+		previousClaim, previousClaimExists, err = readLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		preflightClaim, err = claimLeaseForRepoProviderIfUnchanged(leaseID, slug, namespaceProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = true
+	}
+	lease, err = b.prepareLease(ctx, name, leaseID, slug, true)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
 	restoreNamespaceClaimLabels(&lease.Server, claim, claimOK, b.namespaceConfigForRun())
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		if _, err = updateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, lease.Server, lease.SSH); err != nil {
 			return LeaseTarget{}, err
 		}
-		if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-			return LeaseTarget{}, err
-		}
+		rollbackClaim = false
 	}
 	return lease, nil
 }

@@ -68,7 +68,7 @@ func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 	return lease, nil
 }
 
-func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (lease core.LeaseTarget, err error) {
 	name, leaseID, slug, keep, err := b.resolveIdentity(ctx, req.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -84,6 +84,27 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		}
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
+	var previousClaim, preflightClaim core.LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := core.RestoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore KubeVirt lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
+	if req.Repo.Root != "" {
+		previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		preflightClaim, err = core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, providerName, b.claimScope(), "", req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		rollbackClaim = true
+	}
 	keyPath, err := b.resolveSSHKey(leaseID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -95,17 +116,15 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	if err := b.startVM(ctx, name); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease, err := b.prepareLease(ctx, name, leaseID, slug, keyPath, keep, persistedLabels)
+	lease, err = b.prepareLease(ctx, name, leaseID, slug, keyPath, keep, persistedLabels)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		if _, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, lease.Server, lease.SSH); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if err := core.UpdateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-			return core.LeaseTarget{}, err
-		}
+		rollbackClaim = false
 	}
 	return lease, nil
 }

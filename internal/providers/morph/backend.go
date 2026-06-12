@@ -246,7 +246,7 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	return createdLease, nil
 }
 
-func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
 	cfg := b.configForRun()
 	client, err := b.api()
 	if err != nil {
@@ -259,6 +259,27 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	server := morphServer(instance, cfg, leaseID, slug)
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return LeaseTarget{LeaseID: leaseID, Server: server}, nil
+	}
+	var previousClaim, preflightClaim LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := restoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Morph lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
+	if req.Repo.Root != "" {
+		previousClaim, previousClaimExists, err = readLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		preflightClaim, err = claimLeaseForRepoProviderIfUnchanged(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = true
 	}
 	needsReady := !req.StatusOnly || req.ReadyProbe
 	if needsReady {
@@ -295,6 +316,12 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 			instance = refreshed
 			server = morphServer(instance, cfg, leaseID, slug)
 		}
+	}
+	if req.Repo.Root != "" {
+		if _, err = updateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = false
 	}
 	return LeaseTarget{LeaseID: leaseID, Server: server, SSH: target}, nil
 }

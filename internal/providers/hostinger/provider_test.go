@@ -856,6 +856,28 @@ func TestWaitForVMRequiresPublicIPBeforeReady(t *testing.T) {
 	}
 }
 
+func TestWaitForVMFailsFastOnTerminalState(t *testing.T) {
+	for _, state := range []string{"error", "suspended", "destroyed"} {
+		t.Run(state, func(t *testing.T) {
+			api := &fakeAPI{
+				vms: []hostingerVM{{ID: "vm-terminal", Hostname: "srv.example.test", State: state}},
+			}
+			backend := NewLeaseBackend(Provider{}.Spec(), core.Config{Hostinger: core.HostingerConfig{APIToken: "token"}}, core.Runtime{}).(*leaseBackend)
+			oldSleep := hostingerSleep
+			hostingerSleep = func(time.Duration) { t.Fatal("terminal state should not sleep") }
+			t.Cleanup(func() { hostingerSleep = oldSleep })
+
+			_, err := backend.waitForVM(context.Background(), api, "vm-terminal")
+			if err == nil || !strings.Contains(err.Error(), "terminal state="+state) {
+				t.Fatalf("waitForVM error=%v", err)
+			}
+			if api.getCalls != 1 {
+				t.Fatalf("getCalls=%d, want one", api.getCalls)
+			}
+		})
+	}
+}
+
 func TestAcquireRecoversAmbiguousPurchaseByExactHostname(t *testing.T) {
 	isolateHostingerTestState(t)
 	api := &fakeAPI{purchaseErrAfterCreate: errors.New("request timed out")}
@@ -1914,6 +1936,84 @@ func TestResolveReleaseRejectsUnownedHostingerVM(t *testing.T) {
 	}
 }
 
+func TestFailedHostingerAdoptionRemainsNonDestructiveUntilSSHValidation(t *testing.T) {
+	isolateHostingerTestState(t)
+	api := &fakeAPI{
+		vms: []hostingerVM{{ID: "vm-production", Hostname: "crabbox-blue-abcdef123456", State: "running", IPv4: hostingerIPAddresses{"203.0.113.50"}}},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Hostinger.APIToken = "token"
+	cfg.SSHKey = filepath.Join(t.TempDir(), "adoption-key")
+	core.MarkSSHKeyExplicit(&cfg)
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+	repoRoot := t.TempDir()
+
+	oldRunSSHQuiet := hostingerRunSSHQuiet
+	oldSleep := hostingerSleep
+	ctx, cancel := context.WithCancel(context.Background())
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+		cancel()
+		return errors.New("ssh validation failed")
+	}
+	hostingerSleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		hostingerRunSSHQuiet = oldRunSSHQuiet
+		hostingerSleep = oldSleep
+	})
+
+	_, err := backend.Resolve(ctx, core.ResolveRequest{
+		ID:      "crabbox-blue-abcdef123456",
+		Repo:    core.Repo{Root: repoRoot},
+		Prepare: true,
+	})
+	if err == nil {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil || len(claims) != 1 || !hostingerAdoptionPending(claims[0]) {
+		t.Fatalf("pending claims=%#v err=%v", claims, claimErr)
+	}
+	leaseID := claims[0].LeaseID
+	owned, listErr := backend.List(context.Background(), core.ListRequest{})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(owned) != 0 {
+		t.Fatalf("pending adoption appeared owned: %#v", owned)
+	}
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: "vm-production", Provider: providerName}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to stop unowned hostinger vps") {
+		t.Fatalf("ReleaseLease error=%v", err)
+	}
+	if api.stopCalls != 0 {
+		t.Fatalf("failed adoption stopped VPS: %v", api.stopped)
+	}
+
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error { return nil }
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:      "crabbox-blue-abcdef123456",
+		Repo:    core.Repo{Root: repoRoot},
+		Prepare: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if claimErr != nil || !ok || hostingerAdoptionPending(claim) {
+		t.Fatalf("adopted claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if api.stopCalls != 1 || api.stopped[0] != "vm-production" {
+		t.Fatalf("stops=%v", api.stopped)
+	}
+}
+
 func TestUnclaimedHostnameCollisionDoesNotRebindClaim(t *testing.T) {
 	isolateHostingerTestState(t)
 	leaseID := "cbx_abcdef123456"
@@ -1934,6 +2034,7 @@ func TestUnclaimedHostnameCollisionDoesNotRebindClaim(t *testing.T) {
 	}
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
 	backend.client = api
+	backend.skipSSHWait = true
 
 	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{
 		ID:   "vm-collision",

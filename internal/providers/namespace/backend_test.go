@@ -197,6 +197,50 @@ func TestResolveReleaseOnlySkipsNamespacePrepare(t *testing.T) {
 	}
 }
 
+func TestResolveChecksRepoClaimBeforeNamespacePrepare(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_deadbeef0000"
+	slug := "blue-lobster"
+	if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &namespaceRecordingRunner{}
+	backend := &namespaceLeaseBackend{
+		cfg: Config{Provider: namespaceProvider},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+	}
+
+	req := ResolveRequest{ID: leaseID}
+	req.Repo.Root = t.TempDir()
+	_, err := backend.Resolve(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("claim conflict prepared devbox: %#v", runner.calls)
+	}
+}
+
+func TestResolveRestoresRepoClaimWhenNamespacePrepareFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_deadbeef0000"
+	runner := &namespaceRecordingRunner{failAll: true}
+	backend := &namespaceLeaseBackend{
+		cfg: Config{Provider: namespaceProvider},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+	}
+	req := ResolveRequest{ID: leaseID}
+	req.Repo.Root = t.TempDir()
+
+	_, err := backend.Resolve(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "namespace devbox failed") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
+	}
+}
+
 func TestCleanupNamespaceSSHFilesRemovesOnlyCrabboxNamespaceFiles(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

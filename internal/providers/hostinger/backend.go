@@ -34,6 +34,7 @@ const (
 	hostingerRecoveryLabel         = "recovery"
 	hostingerRecoveryHostnameLabel = "hostinger_hostname"
 	hostingerRecoveryAmbiguous     = "ambiguous-purchase"
+	hostingerAdoptionPendingLabel  = "hostinger_adoption_pending"
 )
 
 func NewLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -333,12 +334,23 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		}
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
+	var repoClaim LeaseClaim
+	adoptionPending := false
 	if req.Repo.Root != "" {
 		claimServer, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
 			return LeaseTarget{}, err
 		}
-		if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, claimServer, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		expected, expectedExists, err := resolveLeaseClaimForProvider(leaseID, providerName)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		adoptionPending = !hostingerClaimOwned(expected, expectedExists, vm.IDString())
+		if adoptionPending {
+			claimServer.Labels[hostingerAdoptionPendingLabel] = "true"
+		}
+		repoClaim, err = claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, claimServer, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, expectedExists)
+		if err != nil {
 			return LeaseTarget{}, err
 		}
 		removeHostingerRecoveryRecord(leaseID)
@@ -376,12 +388,14 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		}
 		return LeaseTarget{}, err
 	}
+	sshValidated := b.skipSSHWait
 	if started && !b.skipSSHWait {
 		transport := lease.SSH
 		transport.ReadyCheck = "true"
 		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "restart", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
 		}
+		sshValidated = true
 	}
 	if req.Prepare && !b.skipSSHWait {
 		if err := b.ensureBootstrap(ctx, cfg, lease, "resolve"); err != nil {
@@ -390,12 +404,34 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			}
 			return LeaseTarget{}, err
 		}
+		sshValidated = true
 	}
-	if started {
+	if adoptionPending && !sshValidated {
+		transport := lease.SSH
+		transport.ReadyCheck = "true"
+		if err := hostingerWaitForSSHReady(ctx, &transport, b.rt.Stderr, "adoption", bootstrapWaitTimeout(cfg)); err != nil {
+			if started {
+				return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+			}
+			return LeaseTarget{}, err
+		}
+		sshValidated = true
+	}
+	if started || req.Repo.Root != "" {
+		expected := repoClaim
+		if started {
+			expected = restartClaim
+		}
 		server := lease.Server
-		server.Labels = touchDirectLeaseLabels(restartClaim.Labels, cfg, "running", time.Now().UTC())
-		if _, err := updateLeaseClaimEndpointIfUnchanged(restartClaim.LeaseID, restartClaim, server, lease.SSH); err != nil {
-			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+		server.Labels = touchDirectLeaseLabels(expected.Labels, cfg, "running", time.Now().UTC())
+		if adoptionPending {
+			delete(server.Labels, hostingerAdoptionPendingLabel)
+		}
+		if _, err := updateLeaseClaimEndpointIfUnchanged(expected.LeaseID, expected, server, lease.SSH); err != nil {
+			if started {
+				return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
+			}
+			return LeaseTarget{}, err
 		}
 	}
 	return lease, nil
@@ -576,6 +612,10 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 		if !ok || len(claim.Labels) == 0 {
 			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=no-local-cleanup-claim\n", server.DisplayID(), server.Name)
+			continue
+		}
+		if hostingerAdoptionPending(claim) {
+			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=adoption-pending\n", server.DisplayID(), server.Name)
 			continue
 		}
 		if claim.CloudID != server.CloudID {
@@ -1048,11 +1088,19 @@ func (b *leaseBackend) resolveVM(ctx context.Context, client hostingerAPI, id st
 }
 
 func hostingerReleaseOwned(vm hostingerVM) (bool, error) {
-	_, claimed, err := resolveLeaseClaimForProviderCloudID(vm.IDString(), providerName)
+	claim, claimed, err := resolveLeaseClaimForProviderCloudID(vm.IDString(), providerName)
 	if err != nil {
 		return false, err
 	}
-	return claimed, nil
+	return claimed && !hostingerAdoptionPending(claim), nil
+}
+
+func hostingerClaimOwned(claim LeaseClaim, exists bool, vmID string) bool {
+	return exists && claim.CloudID == vmID && !hostingerAdoptionPending(claim)
+}
+
+func hostingerAdoptionPending(claim LeaseClaim) bool {
+	return strings.EqualFold(strings.TrimSpace(claim.Labels[hostingerAdoptionPendingLabel]), "true")
 }
 
 func (b *leaseBackend) waitForVM(ctx context.Context, client hostingerAPI, id string) (hostingerVM, error) {
@@ -1067,6 +1115,9 @@ func (b *leaseBackend) waitForVM(ctx context.Context, client hostingerAPI, id st
 		}
 		if vm.Host() != "" && vm.Ready() {
 			return vm, nil
+		}
+		if vm.Terminal() {
+			return hostingerVM{}, exit(5, "hostinger vps %s entered terminal state=%s", id, firstNonBlank(vm.State, vm.Status, "unknown"))
 		}
 		if time.Now().After(deadline) {
 			return hostingerVM{}, exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, firstNonBlank(vm.State, vm.Status))
@@ -1389,7 +1440,7 @@ func hostingerLeaseIdentityWithClaim(vm hostingerVM, cfg Config) (string, string
 		return "", "", false, err
 	}
 	if ok && claim.LeaseID != "" {
-		return claim.LeaseID, firstNonBlank(claim.Slug, hostingerLeaseIdentitySlug(vm, cfg)), true, nil
+		return claim.LeaseID, firstNonBlank(claim.Slug, hostingerLeaseIdentitySlug(vm, cfg)), !hostingerAdoptionPending(claim), nil
 	}
 	recovery, recovered, err := findHostingerRecoveryRecord(vm)
 	if err != nil {
@@ -1466,6 +1517,15 @@ func (vm hostingerVM) Ready() bool {
 func (vm hostingerVM) Stopped() bool {
 	state := strings.ToLower(firstNonBlank(vm.State, vm.Status))
 	return state == "stopped" || state == "off" || state == "powered_off"
+}
+
+func (vm hostingerVM) Terminal() bool {
+	switch strings.ToLower(firstNonBlank(vm.State, vm.Status)) {
+	case "error", "suspended", "destroyed":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstNonBlank(values ...string) string {

@@ -1142,6 +1142,95 @@ func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
 	}
 }
 
+func TestResolveChecksRepoClaimBeforeStartingInstance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-retained": {
+				Name:       "crabbox-retained",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_claimed",
+					labelKey("slug"):    "claimed",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+	}
+	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_claimed", "claimed", providerName, instanceScope("crabbox-retained"), cfg.Pond, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	_, err := b.Resolve(context.Background(), ResolveRequest{
+		ID:   "crabbox-retained",
+		Repo: core.Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if len(fake.stateUpdates) != 0 {
+		t.Fatalf("claim conflict mutated instance state: %v", fake.stateUpdates)
+	}
+}
+
+func TestResolveRestoresRepoClaimWhenStartFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-failing": {
+				Name:       "crabbox-failing",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_failing",
+					labelKey("slug"):    "failing",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-failing": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+		stateErr: io.ErrUnexpectedEOF,
+	}
+	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	_, err := b.Resolve(context.Background(), ResolveRequest{
+		ID:   "crabbox-failing",
+		Repo: core.Repo{Root: t.TempDir()},
+	})
+	if err == nil {
+		t.Fatal("Resolve succeeded")
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence("cbx_failing"); err != nil || exists {
+		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
+	}
+}
+
 func TestResolveFallsBackToConfiguredKeyWhenStoredKeyIsMissing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

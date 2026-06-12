@@ -56,13 +56,6 @@ func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (strin
 	return core.AllocateDirectLeaseSlug(leaseID, requested, servers)
 }
 
-var claimLeaseTargetForRepoConfig = func(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	if repoRoot == "" {
-		return core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, target, idleTimeout)
-	}
-	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
-}
-
 var claimLeaseTargetForRepoConfigIfUnchanged = func(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	if repoRoot == "" {
 		return core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, server, target, idleTimeout, expected, expectedExists)

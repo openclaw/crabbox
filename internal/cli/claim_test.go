@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -173,6 +174,75 @@ func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	}
 	if claim.Provider != "aws" || claim.CloudID != "i-456" {
 		t.Fatalf("changed claim overwritten: %#v", claim)
+	}
+}
+
+func TestConditionalRepoClaimCanBeRestored(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_transaction123"
+
+	previous, previousExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, "transaction", "kubevirt", "cluster:test", "", "/repo-a", time.Minute, false, previous, previousExists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.RepoRoot != "/repo-a" {
+		t.Fatalf("claimed=%#v", claimed)
+	}
+	if err := restoreLeaseClaimIfUnchanged(leaseID, claimed, previous, previousExists); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("restored absent claim exists=%v err=%v", exists, err)
+	}
+
+	if err := claimLeaseForRepoProviderScope(leaseID, "transaction", "kubevirt", "cluster:test", "/repo-original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	previous, previousExists, err = readLeaseClaimWithPresence(leaseID)
+	if err != nil || !previousExists {
+		t.Fatalf("previous=%#v exists=%v err=%v", previous, previousExists, err)
+	}
+	claimed, err = claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, "transaction", "kubevirt", "cluster:test", "", "/repo-b", time.Minute, true, previous, previousExists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreLeaseClaimIfUnchanged(leaseID, claimed, previous, previousExists); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restored, previous) {
+		t.Fatalf("restored=%#v want %#v", restored, previous)
+	}
+
+	incompleteID := "cbx_incomplete123"
+	path, err := leaseClaimPath(incompleteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous, previousExists, err = readLeaseClaimWithPresence(incompleteID)
+	if err != nil || !previousExists || previous.LeaseID != "" {
+		t.Fatalf("incomplete previous=%#v exists=%v err=%v", previous, previousExists, err)
+	}
+	claimed, err = claimLeaseForRepoProviderScopePondIfUnchanged(incompleteID, "incomplete", "kubevirt", "cluster:test", "", "/repo", time.Minute, false, previous, previousExists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreLeaseClaimIfUnchanged(incompleteID, claimed, previous, previousExists); err != nil {
+		t.Fatal(err)
+	}
+	restored, restoredExists, err := readLeaseClaimWithPresence(incompleteID)
+	if err != nil || !restoredExists || restored.LeaseID != "" {
+		t.Fatalf("restored incomplete=%#v exists=%v err=%v", restored, restoredExists, err)
 	}
 }
 

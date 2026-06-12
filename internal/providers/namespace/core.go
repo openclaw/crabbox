@@ -89,6 +89,18 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
+func claimLeaseForRepoProviderIfUnchanged(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, "", "", repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
+func readLeaseClaimWithPresence(leaseID string) (LeaseClaim, bool, error) {
+	return core.ReadLeaseClaimWithPresence(leaseID)
+}
+
+func restoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
+	return core.RestoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
@@ -103,6 +115,10 @@ func removeLeaseClaim(leaseID string) {
 
 func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
 	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
+}
+
+func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
 }
 
 func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {

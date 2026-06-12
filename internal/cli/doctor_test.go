@@ -148,6 +148,32 @@ printf 'jq=jq-1.7\n'
 	}
 }
 
+func TestDoctorDoesNotPrepareExistingLease(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	runPrepareTestResolveRequests = nil
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{
+		"--provider", "run-prepare-test",
+		"--id", "cbx_existing",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+		t.Fatalf("doctor error=%v stdout=%q stderr=%q, want resolve-captured exit", err, stdout.String(), stderr.String())
+	}
+	if len(runPrepareTestResolveRequests) != 1 {
+		t.Fatalf("resolve requests=%#v, want one", runPrepareTestResolveRequests)
+	}
+	if got := runPrepareTestResolveRequests[0]; got.ID != "cbx_existing" || got.Prepare {
+		t.Fatalf("resolve request=%#v, want existing id without Prepare", got)
+	}
+}
+
 func TestDoctorRunsDirectProviderCheckForCoordinatorNeverProvider(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
 		if _, err := exec.LookPath(tool); err != nil {
