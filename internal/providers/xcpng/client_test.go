@@ -2130,8 +2130,6 @@ func TestDeleteServerRefusesUnmanagedTemplateBeforeDiskCleanup(t *testing.T) {
 		switch method {
 		case "VM.get_record":
 			writeXMLRPCUnmanagedVMRecord(t, w)
-		case "VM.get_guest_metrics":
-			writeXMLRPCFault(t, w, "HANDLE_INVALID")
 		case "VM.get_is_a_template", "VM.get_VBDs", "VDI.destroy", "VM.destroy":
 			t.Fatalf("%s must not run for unmanaged template", method)
 		default:
@@ -2143,7 +2141,7 @@ func TestDeleteServerRefusesUnmanagedTemplateBeforeDiskCleanup(t *testing.T) {
 	if err := client.DeleteServer(context.Background(), "OpaqueRef:user-template"); err == nil || !strings.Contains(err.Error(), "refusing to delete non-Crabbox") {
 		t.Fatalf("err=%v", err)
 	}
-	if got := strings.Join(methods, ","); got != "VM.get_record,VM.get_guest_metrics" {
+	if got := strings.Join(methods, ","); got != "VM.get_record" {
 		t.Fatalf("methods=%s", got)
 	}
 }
