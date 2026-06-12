@@ -13,6 +13,7 @@ var benchmarkProviderCategories = map[string]string{
 	"azure":                      "brokerable-cloud",
 	"azure-dynamic-sessions":     "delegated-sandbox",
 	"blacksmith-testbox":         "ci-proof-runner",
+	"blaxel":                     "delegated-sandbox",
 	"cloudflare":                 "delegated-sandbox",
 	"cloudflare-dynamic-workers": "delegated-sandbox",
 	"cloudflare-sandbox":         "delegated-sandbox",

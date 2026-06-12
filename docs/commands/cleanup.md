@@ -29,13 +29,16 @@ so brokered expiry is owned entirely by the coordinator's TTL alarm. See
 
 What cleanup does depends on the selected provider:
 
-- **Direct cloud/VM providers** (for example `hetzner`, `aws`, `azure`, `gcp`,
-  `proxmox`, `xcp-ng`, `hostinger`, `parallels`, `cloudflare`, `local-container`,
-  `multipass`)
+- **Direct cloud/VM and delegated providers with cleanup** (for example
+  `hetzner`, `aws`, `azure`, `gcp`, `proxmox`, `xcp-ng`, `hostinger`,
+  `parallels`, `cloudflare`, `blaxel`, `local-container`, `multipass`)
   enumerate the machines they own and decide, per machine, whether to delete it.
 - **`hostinger`** is stop-only: cleanup skips VPSs that are not positively
   identified as Crabbox-owned and stops matching VPSs; it does not delete VPSs
   or cancel Hostinger subscriptions.
+- **`blaxel`** starts from local Blaxel claims scoped to the configured API URL
+  and workspace, verifies remote ownership labels before deleting, and keeps
+  missing claims unless `--blaxel-forget-missing` is explicitly set.
 - **`namespace-devbox`** removes only Crabbox-owned local Namespace SSH files;
   it does not delete remote Devboxes.
 - **`namespace-instance`** destroys only Namespace Compute instances carrying
@@ -123,7 +126,7 @@ namespace ssh cleanup no crabbox files found
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|cloudflare-dynamic-workers|cloudflare-sandbox|multipass|vercel-sandbox
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|cloudflare-dynamic-workers|cloudflare-sandbox|blaxel|multipass|vercel-sandbox
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```

@@ -320,6 +320,9 @@ hostinger
   coordinator: never
 ```
 
+Blaxel reports as a direct delegated-run Linux provider with `archive-sync` and
+`cleanup`, and `coordinator: never`.
+
 The `aliases` line appears only when the provider declares alternate names. A
 dash (`-`) means the field has no entries (for example, a provider that
 advertises no features).

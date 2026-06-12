@@ -248,8 +248,8 @@ list, and cleanup.
   SDK config and auth material discovery without creating resources.
 
 Delegated-run providers (`cloudflare`, `cloudflare-sandbox`,
-`azure-dynamic-sessions`, `e2b`, `islo`, `modal`, `tensorlake`, `upstash-box`,
-`blacksmith-testbox`, `wandb`, `opensandbox`, `superserve`, and
+`azure-dynamic-sessions`, `blaxel`, `e2b`, `islo`, `modal`, `tensorlake`,
+`upstash-box`, `blacksmith-testbox`, `wandb`, `opensandbox`, `superserve`, and
 `vercel-sandbox`) do not use the broker for run execution; each owns sandbox
 lifecycle and command execution and syncs through its own API (gzipped archive
 upload for most). Islo also exposes a direct `crabbox ssh` login helper for

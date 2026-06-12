@@ -77,6 +77,9 @@ Provider readiness validates the selected provider without creating a lease.
   OpenAPI document without creating a sandbox; when no bridge URL is configured
   it exits clearly with the missing `cloudflareSandbox.url` /
   `CRABBOX_CLOUDFLARE_SANDBOX_URL` requirement.
+  Blaxel validates the configured API URL, reports whether an API key and
+  workspace are configured, probes the Blaxel API, and lists inventory with
+  `mutation=false`.
   Vercel Sandbox checks the SDK bridge
   contract, local `sandbox` CLI, read-only `sandbox list --all --limit 1`
   auth/inventory access, project scoping readiness, and local `vsbx_...`

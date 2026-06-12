@@ -26,7 +26,7 @@ The shape of the output depends on the selected `--provider`:
   itself reports. In `provider=ssh` mode this prints the single configured static
   target.
 - **Delegated and sandbox providers** (`exe-dev`, `namespace-devbox`, `semaphore`,
-  `sprites`, `daytona`, `islo`, `e2b`, and similar) render through the core lease
+  `sprites`, `daytona`, `blaxel`, `islo`, `e2b`, and similar) render through the core lease
   view, so both human output and `--json` use the normalized Crabbox lease shape.
 
 Providers that do not implement listing exit with an error.

@@ -115,6 +115,13 @@ reachability layer, not a provider — static hosts should put a MagicDNS name o
 
 ## Provider notes
 
+### blaxel
+
+`--provider blaxel` creates a Crabbox-owned Blaxel Linux sandbox and waits for
+the sandbox to become ready. Warmup prints the `blx_<sandbox-id>` lease ID and a
+friendly slug for later `run --id`, `status`, and `stop` calls. It does not
+prepare SSH, browser, desktop, code-server, or Actions runner surfaces.
+
 ### ssh (static / bring-your-own host)
 
 With `--provider ssh`, warmup claims an existing host instead of creating cloud

@@ -28,6 +28,10 @@ Crabbox lease ID and local slug:
 
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug and forwards to
   `blacksmith testbox stop`.
+- `blaxel` — accepts a Crabbox lease ID (`blx_<sandbox-id>`) or local slug and
+  deletes the Blaxel sandbox only when the local claim and remote ownership
+  labels match. Missing sandboxes keep the local claim unless
+  `--blaxel-forget-missing` is set.
 - `namespace-devbox` — shuts down the Namespace Devbox by default and retains
   its local claim and SSH files for reuse. Set `namespace.deleteOnRelease` (or
   pass `--namespace-delete-on-release`) to delete the Devbox and local SSH
@@ -129,6 +133,7 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --hostinger-url <url>                    Hostinger API URL
 --hostinger-release-action stop          Hostinger release action; only stop is supported
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
+--blaxel-forget-missing                  remove a Blaxel claim after confirming the sandbox is already gone
 --cloudflare-dynamic-workers-url <url>   Cloudflare Dynamic Workers loader URL
 --cloudflare-sandbox-url <url>           Cloudflare Sandbox bridge URL
 --cloudflare-sandbox-forget-missing      forget a local claim when the bridge reports the sandbox missing

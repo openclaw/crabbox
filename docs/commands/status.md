@@ -25,6 +25,9 @@ addition to the Crabbox lease ID and local slug:
 
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug; derives a
   normalized status view from `blacksmith testbox list --all`.
+- `blaxel` — accepts a Crabbox lease ID (`blx_<sandbox-id>`) or local slug,
+  verifies the local claim against Blaxel ownership labels, and reports the
+  sandbox state, endpoint, pond, and readiness.
 - `namespace-devbox` — accepts a lease ID, local slug, or existing Devbox name;
   prepares SSH through the Namespace CLI.
 - `namespace-instance` — accepts a lease ID, local slug, or Compute instance ID;
@@ -61,7 +64,7 @@ from idling out.
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|azure|azure-dynamic-sessions|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b|vercel-sandbox
+--provider hetzner|aws|azure|azure-dynamic-sessions|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|blaxel|namespace-devbox|semaphore|sprites|daytona|islo|e2b|vercel-sandbox
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

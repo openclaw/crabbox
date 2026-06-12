@@ -72,8 +72,8 @@ with `--keep` to write a small JSON lease handle for orchestrators.
 ## Delegated providers
 
 Most providers connect over SSH and Crabbox owns sync and command transport.
-Delegated providers (for example Blacksmith Testbox, Daytona, Islo, Azure
-Dynamic Sessions, Cloudflare Dynamic Workers, Cloudflare Sandbox, E2B,
+Delegated providers (for example Blacksmith Testbox, Blaxel, Daytona, Islo,
+Azure Dynamic Sessions, Cloudflare Dynamic Workers, Cloudflare Sandbox, E2B,
 Superserve, OpenSandbox, and Vercel Sandbox) own command transport themselves:
 Crabbox sends either checkout content or module source through the provider's
 APIs, runs through the provider, and prints `sync=delegated` in the final timing
@@ -104,6 +104,13 @@ rather than live Cloudflare writes in the default test suite.
 
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
+
+`--provider blaxel` creates or reuses a Crabbox-claimed Blaxel Linux sandbox,
+uploads the checkout as an archive through the Blaxel file API, executes the
+command through the Blaxel process API, and mirrors the remote exit code.
+`--sync-only`, `--no-sync`, `--force-sync-large`, `--keep`, and
+`--keep-on-failure` follow the delegated-run contract; SSH-only run features are
+rejected.
 
 `--provider cloudflare-dynamic-workers` is a module-runtime provider. It accepts
 Worker module source through `--script` or `--script-stdin`, supports cache and

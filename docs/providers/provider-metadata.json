@@ -125,6 +125,20 @@
     "caveat": "No Crabbox-managed SSH lease",
     "docs": "azure-dynamic-sessions.md"
   },
+  "blaxel": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Blaxel managed Linux sandbox",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "Blaxel",
+    "cleanup": "owned sandbox delete",
+    "bestFit": "Managed delegated Linux sandbox execution",
+    "caveat": "Requires Blaxel API credentials and workspace access",
+    "docs": "blaxel.md"
+  },
   "blacksmith-testbox": {
     "status": "built-in",
     "category": "ci-proof-runner",
