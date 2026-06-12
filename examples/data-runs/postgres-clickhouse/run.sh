@@ -65,9 +65,19 @@ SOURCE_ROWS="$(docker compose -p "$PROJECT" -f "$DEMO_DIR/compose.yaml" exec -T 
 SINK_ROWS="$(docker compose -p "$PROJECT" -f "$DEMO_DIR/compose.yaml" exec -T clickhouse clickhouse-client --user crabbox_demo --password crabbox_demo --database crabbox_demo --query 'SELECT sum(orders) FROM daily_sales' | tr -d '[:space:]')"
 AGG_ROWS="$(docker compose -p "$PROJECT" -f "$DEMO_DIR/compose.yaml" exec -T clickhouse clickhouse-client --user crabbox_demo --password crabbox_demo --database crabbox_demo --query 'SELECT count() FROM daily_sales' | tr -d '[:space:]')"
 TOTAL_CENTS="$(docker compose -p "$PROJECT" -f "$DEMO_DIR/compose.yaml" exec -T clickhouse clickhouse-client --user crabbox_demo --password crabbox_demo --database crabbox_demo --query 'SELECT sum(amount_cents) FROM daily_sales' | tr -d '[:space:]')"
+EXPECTED_AGG_ROWS=6
+EXPECTED_TOTAL_CENTS=91512
 
 if [[ "$SOURCE_ROWS" != "$SINK_ROWS" ]]; then
   echo "row-count mismatch: source=$SOURCE_ROWS sink=$SINK_ROWS" >&2
+  exit 1
+fi
+if [[ "$AGG_ROWS" != "$EXPECTED_AGG_ROWS" ]]; then
+  echo "aggregate-group mismatch: got=$AGG_ROWS want=$EXPECTED_AGG_ROWS" >&2
+  exit 1
+fi
+if [[ "$TOTAL_CENTS" != "$EXPECTED_TOTAL_CENTS" ]]; then
+  echo "amount-total mismatch: got=$TOTAL_CENTS want=$EXPECTED_TOTAL_CENTS" >&2
   exit 1
 fi
 
@@ -75,11 +85,19 @@ cat > "$REPORT_DIR/quality.json" <<'JSON'
 {
   "checks": [
     {
-      "name": "source_rows_match_sink_rows",
+      "name": "source_records_loaded",
       "status": "pass"
     },
     {
-      "name": "aggregate_rows_present",
+      "name": "destination_records_match_source",
+      "status": "pass"
+    },
+    {
+      "name": "transform_daily_sales_groups",
+      "status": "pass"
+    },
+    {
+      "name": "amount_total_matches_expected",
       "status": "pass"
     }
   ],
@@ -126,8 +144,14 @@ cat > "$REPORT_DIR/manifest.json" <<JSON
   "schemaVersion": "crabbox.data-run.v1",
   "status": "success",
   "summary": {
-    "aggregateRows": $AGG_ROWS,
-    "totalAmountCents": $TOTAL_CENTS
+    "aggregateGroups": $AGG_ROWS,
+    "amountTotalCents": $TOTAL_CENTS,
+    "flow": "postgres.orders -> daily_sales_by_region -> clickhouse.daily_sales",
+    "inputRecords": $SOURCE_ROWS,
+    "loadedRecords": $SINK_ROWS,
+    "topology": "single-box-fixture",
+    "transform": "daily_sales_by_region",
+    "useCase": "pipeline-debugging-contract-smoke"
   }
 }
 JSON
