@@ -89,11 +89,14 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if err != nil {
 			return RunResult{}, err
 		}
-		if err := b.ensureReusableSandbox(ctx, api, sandboxID, sb); err != nil {
-			return RunResult{}, err
-		}
 		claim, err := readLeaseClaim(leaseID)
 		if err != nil {
+			return RunResult{}, err
+		}
+		if err := authorizeOpenSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim); err != nil {
+			return RunResult{}, err
+		}
+		if err := b.ensureReusableSandbox(ctx, api, sandboxID, sb); err != nil {
 			return RunResult{}, err
 		}
 		_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
@@ -487,6 +490,13 @@ func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTi
 		slug = newLeaseSlug(claim.LeaseID)
 	}
 	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
+}
+
+func authorizeOpenSandboxRepoClaim(claim LeaseClaim, repoRoot string, reclaim bool) error {
+	if repoRoot == "" || claim.RepoRoot == "" || claim.RepoRoot == repoRoot || reclaim {
+		return nil
+	}
+	return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
 }
 
 func validateOpenSandboxClaimScope(claim LeaseClaim, baseURL string) error {

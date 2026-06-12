@@ -62,6 +62,7 @@ type sdkOpenSandboxClient struct {
 	key                    string
 	client                 *http.Client
 	requestTimeoutOverride time.Duration
+	execTimeoutOverride    time.Duration
 }
 
 func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
@@ -401,7 +402,13 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 	if err != nil {
 		return 1, err
 	}
+	if timeout := c.execRequestTimeout(req.TimeoutSecs); timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	exitCode := 0
+	terminal := false
 	err = execd.RunCommand(ctx, sdk.RunCommandRequest{
 		Command: strings.TrimSpace(req.Command),
 		Cwd:     req.Workdir,
@@ -414,17 +421,32 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 		} else if result.errorEvent && exitCode == 0 {
 			exitCode = 1
 		}
+		terminal = terminal || result.terminal
 		return err
 	})
 	if err != nil {
 		return exitCodeOrDefault(exitCode), fmt.Errorf("opensandbox run command: %w", err)
 	}
+	if !terminal {
+		return 1, errors.New("opensandbox run command: stream ended before terminal event")
+	}
 	return exitCode, nil
+}
+
+func (c *sdkOpenSandboxClient) execRequestTimeout(timeoutSecs int) time.Duration {
+	if c.execTimeoutOverride > 0 {
+		return c.execTimeoutOverride
+	}
+	if timeoutSecs <= 0 {
+		return 0
+	}
+	return time.Duration(timeoutSecs)*time.Second + openSandboxExecGrace
 }
 
 type commandEventResult struct {
 	exitCode   *int
 	errorEvent bool
+	terminal   bool
 }
 
 func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (commandEventResult, error) {
@@ -442,7 +464,10 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 		EValue string `json:"evalue,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
-		if strings.EqualFold(event.Event, "stderr") {
+		switch strings.ToLower(event.Event) {
+		case "result", "error", "execution_complete":
+			return commandEventResult{}, fmt.Errorf("decode opensandbox %s event: %w", event.Event, err)
+		case "stderr":
 			_, writeErr := io.WriteString(c.rt.Stderr, event.Data)
 			return commandEventResult{}, writeErr
 		}
@@ -465,10 +490,13 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 	}
 	if payload.ExitCode != nil && eventType != "error" {
 		code := *payload.ExitCode
-		return commandEventResult{exitCode: &code}, nil
+		return commandEventResult{exitCode: &code, terminal: true}, nil
 	}
 	switch eventType {
-	case "stdout", "result":
+	case "stdout":
+		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
+		return commandEventResult{}, err
+	case "result":
 		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "stderr":
@@ -483,15 +511,16 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event sdk.StreamEvent) (comman
 			_, _ = io.WriteString(c.rt.Stderr, value)
 		}
 		if code, ok := parseExitCode(value); ok {
-			return commandEventResult{exitCode: &code, errorEvent: true}, nil
+			return commandEventResult{exitCode: &code, errorEvent: true, terminal: true}, nil
 		}
 		code := 1
-		return commandEventResult{exitCode: &code, errorEvent: true}, nil
+		return commandEventResult{exitCode: &code, errorEvent: true, terminal: true}, nil
 	case "execution_complete":
 		if payload.ExitCode != nil {
 			code := *payload.ExitCode
-			return commandEventResult{exitCode: &code}, nil
+			return commandEventResult{exitCode: &code, terminal: true}, nil
 		}
+		return commandEventResult{terminal: true}, nil
 	}
 	return commandEventResult{}, nil
 }

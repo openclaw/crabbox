@@ -261,6 +261,56 @@ func TestRunResumesPausedSandboxBeforeReuse(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotResumePausedSandboxBeforeRepoAuthorization(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.sandbox.State = "Paused"
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := openSandboxEndpointScope(fake.baseURL) + "-own-local"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, NoSync: true, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo /original") {
+		t.Fatalf("err=%v, want repository claim rejection", err)
+	}
+	if len(fake.resumed) != 0 {
+		t.Fatalf("resumed=%#v, want no remote mutation before authorization", fake.resumed)
+	}
+}
+
+func TestRunReclaimPersistsOnlyAfterReusableSandboxValidation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.sandbox.State = "Stopped"
+	backend := newTestBackend(fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := openSandboxEndpointScope(fake.baseURL) + "-own-local"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, Reclaim: true, NoSync: true, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be reused") {
+		t.Fatalf("err=%v, want reusable sandbox rejection", err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RepoRoot != "/original" {
+		t.Fatalf("repo root=%q changed before reusable sandbox validation", claim.RepoRoot)
+	}
+}
+
 func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -609,6 +659,78 @@ func TestSDKClientRunCommandSendsTimeoutMillis(t *testing.T) {
 	}
 }
 
+func TestSDKClientRunCommandRejectsPrematureEOF(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-truncated/endpoints/44772":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/command":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"stdout\",\"data\":\"partial\"}\n\n")
+			_, _ = io.WriteString(w, "data: {\"type\":\"result\",\"data\":\"intermediate\"}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode, err := client.RunCommand(context.Background(), "sb-truncated", runCommandRequest{Command: "true"})
+	if err == nil || !strings.Contains(err.Error(), "stream ended before terminal event") {
+		t.Fatalf("err=%v, want premature EOF failure", err)
+	}
+	if exitCode != 1 {
+		t.Fatalf("exit=%d want 1", exitCode)
+	}
+}
+
+func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-stalled/endpoints/44772":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/command":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.(*sdkOpenSandboxClient).execTimeoutOverride = 20 * time.Millisecond
+
+	start := time.Now()
+	_, err = client.RunCommand(context.Background(), "sb-stalled", runCommandRequest{
+		Command:     "sleep 3600",
+		TimeoutSecs: 3600,
+	})
+	if err == nil {
+		t.Fatal("expected stalled streaming request to time out")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("streaming timeout took %s, want under 1s", elapsed)
+	}
+}
+
 func TestSDKClientRunCommandAddsConfiguredSchemeToBareEndpoint(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	commandHit := false
@@ -653,6 +775,9 @@ func TestCommandEventErrorDefaultsToFailureExit(t *testing.T) {
 	if !result.errorEvent || result.exitCode == nil || *result.exitCode != 1 {
 		t.Fatalf("result=%#v, want default failure exit", result)
 	}
+	if !result.terminal {
+		t.Fatalf("result=%#v, want terminal error event", result)
+	}
 	if !strings.Contains(stderr.String(), "command failed") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
@@ -666,6 +791,20 @@ func TestCommandEventHonorsExplicitExitCode(t *testing.T) {
 	}
 	if result.exitCode == nil || *result.exitCode != 42 {
 		t.Fatalf("result=%#v, want exit 42", result)
+	}
+	if !result.terminal {
+		t.Fatalf("result=%#v, want terminal completion event", result)
+	}
+}
+
+func TestCommandResultWithoutExitCodeIsNotTerminal(t *testing.T) {
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	result, err := client.handleCommandEvent(streamEvent(`{"type":"result","data":"intermediate"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.terminal {
+		t.Fatalf("result=%#v, want nonterminal result without exit code", result)
 	}
 }
 
