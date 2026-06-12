@@ -87,7 +87,7 @@ openSandbox:
   workdir: /workspace/crabbox      # sync target and exec cwd
   cpu: "1"                         # resource limit string; empty = service default
   memory: 2Gi                      # resource limit string; empty = service default
-  timeoutSecs: 0                   # sandbox TTL; also readiness budget when set
+  timeoutSecs: 0                   # 0 = SDK default 600s TTL; positive values also set readiness budget
   execTimeoutSecs: 3600            # command/sync-helper timeout
   platformOS: linux                # empty = service default
   platformArch: amd64              # empty = service default
@@ -188,7 +188,9 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
 ## Live Smoke
 
 The opt-in live smoke script checks prerequisites, builds the local CLI, creates
-a short-lived sandbox, runs a command, checks list/status, and stops it:
+a short-lived sandbox, proves archive sync and off-argv environment forwarding,
+reuses the retained sandbox with staged `sync.delete` replacement, checks
+list/status, and stops it:
 
 ```sh
 CRABBOX_OPENSANDBOX_API_KEY=... \

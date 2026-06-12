@@ -27,7 +27,7 @@ func RegisterOpenSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		Workdir:         fs.String("opensandbox-workdir", defaults.OpenSandbox.Workdir, "Absolute working directory inside the sandbox (also used as sync target)"),
 		CPU:             fs.String("opensandbox-cpu", defaults.OpenSandbox.CPU, "OpenSandbox CPU resource limit string (empty = service default)"),
 		Memory:          fs.String("opensandbox-memory", defaults.OpenSandbox.Memory, "OpenSandbox memory resource limit string (empty = service default)"),
-		TimeoutSecs:     fs.Int("opensandbox-timeout-secs", defaults.OpenSandbox.TimeoutSecs, "OpenSandbox sandbox TTL and readiness budget in seconds (0 = service TTL default, 5m Crabbox readiness wait)"),
+		TimeoutSecs:     fs.Int("opensandbox-timeout-secs", defaults.OpenSandbox.TimeoutSecs, "OpenSandbox sandbox TTL and readiness budget in seconds (0 = SDK default 600s TTL, 5m Crabbox readiness wait)"),
 		ExecTimeoutSecs: fs.Int("opensandbox-exec-timeout-secs", defaults.OpenSandbox.ExecTimeoutSecs, "OpenSandbox command timeout in seconds (0 = Crabbox default 3600)"),
 		PlatformOS:      fs.String("opensandbox-platform-os", defaults.OpenSandbox.PlatformOS, "OpenSandbox platform OS constraint (empty = service default)"),
 		PlatformArch:    fs.String("opensandbox-platform-arch", defaults.OpenSandbox.PlatformArch, "OpenSandbox platform architecture constraint (empty = service default)"),

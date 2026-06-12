@@ -490,7 +490,7 @@ func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTi
 }
 
 func validateOpenSandboxClaimScope(claim LeaseClaim, baseURL string) error {
-	if !strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), openSandboxEndpointScope(baseURL)+"/ownership:") {
+	if !strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), openSandboxEndpointScope(baseURL)+"-own-") {
 		return exit(4, "opensandbox lease %q belongs to a different API endpoint; restore the endpoint used to create it", claim.LeaseID)
 	}
 	return nil
@@ -512,12 +512,12 @@ func newOpenSandboxClaimScope(baseURL string) (string, error) {
 	if _, err := rand.Read(token[:]); err != nil {
 		return "", exit(5, "generate opensandbox ownership token: %v", err)
 	}
-	return openSandboxEndpointScope(baseURL) + "/ownership:" + hex.EncodeToString(token[:]), nil
+	return openSandboxEndpointScope(baseURL) + "-own-" + hex.EncodeToString(token[:]), nil
 }
 
 func openSandboxEndpointScope(baseURL string) string {
 	digest := sha256.Sum256([]byte(baseURL))
-	return "endpoint-sha256:" + hex.EncodeToString(digest[:])
+	return "ep-" + hex.EncodeToString(digest[:8])
 }
 
 func verifyOpenSandboxClaim(ctx context.Context, api openSandboxClient, leaseID, sandboxID string) (sandboxInfo, error) {

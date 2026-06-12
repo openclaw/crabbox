@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,19 @@ func TestOpenSandboxWorkdirRejectsBroadPaths(t *testing.T) {
 				t.Fatalf("err=%v, want too broad rejection", err)
 			}
 		})
+	}
+}
+
+func TestOpenSandboxClaimScopeIsMetadataLabelSafe(t *testing.T) {
+	scope, err := newOpenSandboxClaimScope("https://opensandbox.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope) > 63 {
+		t.Fatalf("scope length=%d want <=63: %q", len(scope), scope)
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`).MatchString(scope) {
+		t.Fatalf("scope is not a valid metadata label value: %q", scope)
 	}
 }
 
@@ -207,7 +221,7 @@ func TestRunVerifiesOwnershipBeforeReclaim(t *testing.T) {
 	fake := newFakeClient()
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"/ownership:local", "", "/original", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/original", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = "different"
@@ -232,10 +246,10 @@ func TestRunResumesPausedSandboxBeforeReuse(t *testing.T) {
 	fake.sandbox.State = "Paused"
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"/ownership:local", "", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	fake.sandbox.Metadata[openSandboxClaimKey] = openSandboxEndpointScope(fake.baseURL) + "/ownership:local"
+	fake.sandbox.Metadata[openSandboxClaimKey] = openSandboxEndpointScope(fake.baseURL) + "-own-local"
 	_, err := backend.Run(context.Background(), RunRequest{
 		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"},
 	})
@@ -252,7 +266,7 @@ func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	fake := newFakeClient()
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"/ownership:local", "", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = "different"
@@ -271,7 +285,7 @@ func TestStopForgetMissingRemovesClaimOnlyWhenExplicit(t *testing.T) {
 	fake.notFound = true
 	backend := newTestBackend(fake)
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "stale", providerName, openSandboxEndpointScope(fake.baseURL)+"/ownership:local", "", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "stale", providerName, openSandboxEndpointScope(fake.baseURL)+"-own-local", "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := backend.Stop(context.Background(), StopRequest{ID: "stale"}); err == nil {
@@ -306,6 +320,7 @@ func TestSDKClientCreateUsesHeadersAndRequestBody(t *testing.T) {
 		ResourceLimits map[string]string `json:"resourceLimits"`
 		Metadata       map[string]string `json:"metadata"`
 		Entrypoint     []string          `json:"entrypoint"`
+		Timeout        int               `json:"timeout"`
 		Platform       struct {
 			OS   string `json:"os"`
 			Arch string `json:"arch"`
@@ -359,8 +374,37 @@ func TestSDKClientCreateUsesHeadersAndRequestBody(t *testing.T) {
 	if gotBody.Image.URI != "ubuntu:test" || gotBody.ResourceLimits["cpu"] != "500m" || gotBody.ResourceLimits["memory"] != "512Mi" || gotBody.Metadata[openSandboxClaimKey] != "scope" || gotBody.Platform.OS != "linux" || gotBody.Platform.Arch != "amd64" {
 		t.Fatalf("body=%#v", gotBody)
 	}
+	if gotBody.Timeout != sdk.DefaultTimeoutSeconds {
+		t.Fatalf("timeout=%d want SDK default %d", gotBody.Timeout, sdk.DefaultTimeoutSeconds)
+	}
 	if strings.Join(gotBody.Entrypoint, "\x00") != strings.Join(sdk.DefaultEntrypoint, "\x00") {
 		t.Fatalf("entrypoint=%#v want %#v", gotBody.Entrypoint, sdk.DefaultEntrypoint)
+	}
+}
+
+func TestSDKClientLifecycleRequestsAreBounded(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdkClient := client.(*sdkOpenSandboxClient)
+	sdkClient.requestTimeoutOverride = 20 * time.Millisecond
+
+	start := time.Now()
+	err = client.Probe(context.Background())
+	if err == nil {
+		t.Fatal("expected stalled lifecycle request to time out")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("lifecycle timeout took %s, want under 1s", elapsed)
 	}
 }
 

@@ -56,11 +56,12 @@ type runCommandRequest struct {
 var errOpenSandboxNotFound = errors.New("opensandbox not found")
 
 type sdkOpenSandboxClient struct {
-	cfg    Config
-	rt     Runtime
-	base   string
-	key    string
-	client *http.Client
+	cfg                    Config
+	rt                     Runtime
+	base                   string
+	key                    string
+	client                 *http.Client
+	requestTimeoutOverride time.Duration
 }
 
 func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
@@ -182,7 +183,9 @@ func effectiveOpenSandboxPort(value *url.URL) string {
 func (c *sdkOpenSandboxClient) BaseURL() string { return c.base }
 
 func (c *sdkOpenSandboxClient) lifecycle() *sdk.LifecycleClient {
-	return sdk.NewLifecycleClient(c.base+"/v1", c.key, sdk.WithHTTPClient(c.client))
+	httpClient := *c.client
+	httpClient.Timeout = c.requestTimeout()
+	return sdk.NewLifecycleClient(c.base+"/v1", c.key, sdk.WithHTTPClient(&httpClient))
 }
 
 func (c *sdkOpenSandboxClient) config() sdk.ConnectionConfig {
@@ -208,9 +211,11 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 	if strings.TrimSpace(opts.Memory) != "" {
 		limits["memory"] = strings.TrimSpace(opts.Memory)
 	}
-	var timeout *int
-	if opts.TimeoutSecs > 0 {
-		timeout = &opts.TimeoutSecs
+	timeoutSecs := opts.TimeoutSecs
+	if timeoutSecs <= 0 {
+		// The low-level request treats nil as manual cleanup, unlike the SDK's
+		// high-level default. Preserve the SDK's bounded 10-minute lifetime.
+		timeoutSecs = sdk.DefaultTimeoutSeconds
 	}
 	var platform *sdk.PlatformSpec
 	if strings.TrimSpace(opts.PlatformOS) != "" || strings.TrimSpace(opts.PlatformArch) != "" {
@@ -222,7 +227,7 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 	req := sdk.CreateSandboxRequest{
 		Image:          &sdk.ImageSpec{URI: opts.Image},
 		Entrypoint:     sdk.DefaultEntrypoint,
-		Timeout:        timeout,
+		Timeout:        &timeoutSecs,
 		ResourceLimits: limits,
 		Metadata:       opts.Metadata,
 		SecureAccess:   opts.SecureAccess,
@@ -275,6 +280,13 @@ func (c *sdkOpenSandboxClient) readyTimeout() time.Duration {
 		return time.Duration(c.cfg.OpenSandbox.TimeoutSecs) * time.Second
 	}
 	return openSandboxReadyTimeout
+}
+
+func (c *sdkOpenSandboxClient) requestTimeout() time.Duration {
+	if c.requestTimeoutOverride > 0 {
+		return c.requestTimeoutOverride
+	}
+	return sdk.DefaultRequestTimeout
 }
 
 func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID string) (*sdk.SandboxInfo, error) {
