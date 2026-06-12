@@ -1153,6 +1153,12 @@ func (c *ProxmoxClient) DeleteServer(ctx context.Context, id string) error {
 	return nil
 }
 
+func (c *ProxmoxClient) DeleteServerOnNode(ctx context.Context, node, id string) error {
+	scoped := *c
+	scoped.Node = node
+	return scoped.DeleteServer(ctx, id)
+}
+
 func (c *ProxmoxClient) GetServer(ctx context.Context, id string) (Server, error) {
 	return c.getServer(ctx, id, false)
 }

@@ -42,6 +42,7 @@ type proxmoxClient interface {
 	GetServerOnNode(context.Context, string, string) (Server, error)
 	VMExistsInCluster(context.Context, string) (bool, error)
 	DeleteServer(context.Context, string) error
+	DeleteServerOnNode(context.Context, string, string) error
 	SetLabels(context.Context, string, map[string]string) error
 }
 
@@ -218,6 +219,19 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 	if claimScope == "" || currentScope == "" || claimScope != currentScope {
 		return LeaseTarget{}, exit(2, "refusing to accept missing Proxmox VM %s from lease=%s with unverified cluster scope", cloudID, claim.LeaseID)
 	}
+	clusterServers, err := client.ListCrabboxServersCluster(ctx)
+	if err != nil {
+		return LeaseTarget{}, fmt.Errorf("locate Proxmox VM %s across cluster: %w", cloudID, err)
+	}
+	for _, server := range clusterServers {
+		if server.CloudID != cloudID {
+			continue
+		}
+		if !isCrabboxLease(server) || strings.TrimSpace(server.Labels["lease"]) != claim.LeaseID {
+			return LeaseTarget{}, exit(2, "refusing to release Proxmox VM %s from stale local claim lease=%s", cloudID, claim.LeaseID)
+		}
+		return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+	}
 	exists, err := client.VMExistsInCluster(ctx, cloudID)
 	if err != nil {
 		return LeaseTarget{}, fmt.Errorf("verify Proxmox VM %s cluster absence: %w", cloudID, err)
@@ -336,7 +350,8 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		if err := b.backfillReleaseClaimScope(leaseID, id, req.Lease.Server); err != nil {
 			return err
 		}
-		if err := client.DeleteServer(ctx, id); err != nil && !core.IsProxmoxNotFound(err) {
+		node := core.Blank(req.Lease.Server.HostID, b.Cfg.Proxmox.Node)
+		if err := client.DeleteServerOnNode(ctx, node, id); err != nil && !core.IsProxmoxNotFound(err) {
 			return err
 		}
 	}
@@ -353,8 +368,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	if deleted.Labels["lease"] == "" {
 		deleted.Labels["lease"] = leaseID
 	}
-	removeCleanupLeaseResidue(ctx, client, deleted, remaining, b.Cfg, b.RT.Stderr)
-	return nil
+	return removeCleanupLeaseResidue(ctx, client, deleted, remaining, b.Cfg, b.RT.Stderr)
 }
 
 func (b *leaseBackend) backfillReleaseClaimScope(leaseID, cloudID string, server Server) error {
@@ -435,6 +449,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		remaining = removeProxmoxServerByCloudID(remaining, server.CloudID)
 	}
 	var verifyErr error
+	var reconcileErr error
 	if failedDelete != nil {
 		disappeared, err := verifyProxmoxDeleteFailure(ctx, client, failedDelete.CloudID, deleteErr)
 		if err != nil {
@@ -459,9 +474,9 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.RT.Stderr, "warning: preserve local lease residue lease=%s reason=ambiguous_delete_verification_failed error=%v\n", proxmoxClaimLabelLeaseID(server), verifyErr)
 			continue
 		}
-		removeCleanupLeaseResidue(ctx, client, server, remaining, b.Cfg, b.RT.Stderr)
+		reconcileErr = errors.Join(reconcileErr, removeCleanupLeaseResidue(ctx, client, server, remaining, b.Cfg, b.RT.Stderr))
 	}
-	return errors.Join(deleteErr, verifyErr)
+	return errors.Join(deleteErr, verifyErr, reconcileErr)
 }
 
 func verifyProxmoxDeleteFailure(ctx context.Context, client proxmoxClient, cloudID string, deleteErr error) (bool, error) {
@@ -511,10 +526,10 @@ func removeProxmoxServerByCloudID(servers []Server, cloudID string) []Server {
 	return servers
 }
 
-func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, deleted Server, inventory []Server, cfg Config, stderr io.Writer) {
+func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, deleted Server, inventory []Server, cfg Config, stderr io.Writer) error {
 	leaseID := proxmoxClaimLabelLeaseID(deleted)
 	if leaseID == "" {
-		return
+		return nil
 	}
 	missingCloudIDs := map[string]bool{deleted.CloudID: true}
 	var survivors []Server
@@ -526,14 +541,14 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 	claim, found, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_read_failed error=%v\n", leaseID, err)
-		return
+		return nil
 	}
 	if found && claim.Provider == "proxmox" {
 		claimScope := strings.TrimSpace(claim.ProviderScope)
 		currentScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", cfg))
 		if claimScope != currentScope && (claimScope != "" || currentScope != "") {
 			fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_scope_mismatch\n", leaseID)
-			return
+			return nil
 		}
 	}
 	if len(survivors) == 1 {
@@ -542,7 +557,7 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 		if err == nil {
 			if proxmoxClaimLabelLeaseID(verified) != leaseID {
 				fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=survivor_ownership_unverified\n", leaseID)
-				return
+				return fmt.Errorf("Proxmox lease %s has an unverified surviving VM", leaseID)
 			}
 			survivors[0] = verified
 		} else if core.IsProxmoxNotFound(err) {
@@ -550,7 +565,7 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 			survivors = nil
 		} else {
 			fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=survivor_verification_failed error=%v\n", leaseID, err)
-			return
+			return fmt.Errorf("verify surviving Proxmox VM for lease %s: %w", leaseID, err)
 		}
 	}
 	if len(survivors) > 0 {
@@ -561,7 +576,7 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 					canRetarget = true
 				} else if err != nil {
 					fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_cloud_verification_failed error=%v\n", leaseID, err)
-					return
+					return fmt.Errorf("verify claimed Proxmox VM for lease %s: %w", leaseID, err)
 				}
 			}
 			if canRetarget {
@@ -571,37 +586,38 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 				}
 				if _, err := core.ReplaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, claim, survivors[0], target); err != nil {
 					fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_retarget_failed error=%v\n", leaseID, err)
-					return
+					return fmt.Errorf("retarget Proxmox lease %s to surviving VM: %w", leaseID, err)
 				}
 			}
 		}
 		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=duplicate_remote_lease_label\n", leaseID)
-		return
+		return fmt.Errorf("Proxmox lease %s still has %d surviving VM(s)", leaseID, len(survivors))
 	}
 	if !found {
 		removeStoredTestboxKey(leaseID)
-		return
+		return nil
 	}
 	if claim.Provider != "proxmox" {
 		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_cloud_mismatch\n", leaseID)
-		return
+		return nil
 	}
 	if claim.CloudID != "" && !missingCloudIDs[claim.CloudID] {
 		if exists, err := client.VMExistsInCluster(ctx, claim.CloudID); err == nil && exists {
 			fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_cloud_still_exists\n", leaseID)
-			return
+			return nil
 		} else if err == nil {
 			missingCloudIDs[claim.CloudID] = true
 		} else {
 			fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_cloud_verification_failed error=%v\n", leaseID, err)
-			return
+			return nil
 		}
 	}
 	if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
 		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_changed error=%v\n", leaseID, err)
-		return
+		return nil
 	}
 	removeStoredTestboxKey(leaseID)
+	return nil
 }
 
 func proxmoxClaimLeaseID(server Server, fallback string) string {
