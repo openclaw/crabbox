@@ -9,8 +9,17 @@ import (
 	"time"
 )
 
+func setExternalRoutingTestHome(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	return root
+}
+
 func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setExternalRoutingTestHome(t)
 	cfg := ExternalConfig{
 		Command:  "node",
 		Args:     []string{"/tmp/provider.mjs", "--token", "secret-arg"},
@@ -43,7 +52,7 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 }
 
 func TestDeclarativeExternalRoutingRoundTrip(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setExternalRoutingTestHome(t)
 	cfg := ExternalConfig{
 		Config: map[string]any{"size": "cpu16"},
 		Lifecycle: ExternalLifecycleConfig{
@@ -104,9 +113,7 @@ func TestLoadExternalRoutingRejectsBroadPermissions(t *testing.T) {
 }
 
 func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	leaseID := "cbx_abcdef123456"
 	oldRouting := ExternalConfig{
 		Command:  "old-provider",
@@ -152,9 +159,7 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 }
 
 func TestAutoRouteExternalLeaseRejectsAmbiguousAlias(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	for _, leaseID := range []string{"cbx_111111111111", "cbx_222222222222"} {
 		if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "provider", WorkRoot: "/work/crabbox"}); err != nil {
 			t.Fatal(err)
@@ -186,9 +191,7 @@ func TestAutoRouteExternalLeaseRejectsAmbiguousAlias(t *testing.T) {
 }
 
 func TestAutoRouteExternalLeaseRejectsCrossProviderAliasCollision(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	if _, err := PersistExternalRouting("cbx_111111111111", ExternalConfig{Command: "provider", WorkRoot: "/work/crabbox"}); err != nil {
 		t.Fatal(err)
 	}
@@ -219,9 +222,7 @@ func TestAutoRouteExternalLeaseRejectsCrossProviderAliasCollision(t *testing.T) 
 }
 
 func TestAutoRouteExternalLeaseFailsClosedWithoutRoutingState(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	leaseID := "cbx_abcdef123456"
 	if err := claimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
 		t.Fatal(err)
@@ -277,9 +278,7 @@ func TestExplicitExternalRoutingRestoresLinuxTarget(t *testing.T) {
 }
 
 func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	var selectedPath string
 	for _, leaseID := range []string{"cbx_111111111111", "cbx_222222222222"} {
 		path, err := PersistExternalRouting(leaseID, ExternalConfig{Command: leaseID, WorkRoot: "/work/crabbox"})
@@ -309,9 +308,7 @@ func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 }
 
 func TestRouteExternalLeaseClaimOverridesAmbientRouting(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	paths := map[string]string{}
 	for _, leaseID := range []string{"cbx_111111111111", "cbx_222222222222"} {
 		path, err := PersistExternalRouting(leaseID, ExternalConfig{Command: leaseID, WorkRoot: "/work/crabbox"})
@@ -339,9 +336,7 @@ func TestRouteExternalLeaseClaimOverridesAmbientRouting(t *testing.T) {
 }
 
 func TestRunExistingExternalLeaseLoadsPersistedRoutingBeforeValidation(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	leaseID := "cbx_abcdef123456"
 	oldRouting := ExternalConfig{Command: "old-provider", WorkRoot: "/old/work"}
 	if _, err := PersistExternalRouting(leaseID, oldRouting); err != nil {
@@ -369,9 +364,7 @@ func TestRunExistingExternalLeaseLoadsPersistedRoutingBeforeValidation(t *testin
 }
 
 func TestResolveLeaseTargetUsesPersistedExternalRouting(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	leaseID := "cbx_abcdef123456"
 	oldRouting := ExternalConfig{Command: "old-provider", WorkRoot: "/old/work"}
 	if _, err := PersistExternalRouting(leaseID, oldRouting); err != nil {
@@ -392,9 +385,7 @@ func TestResolveLeaseTargetUsesPersistedExternalRouting(t *testing.T) {
 }
 
 func TestLeaseTargetConfigPreservesExplicitNonExternalProvider(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	root := setExternalRoutingTestHome(t)
 	leaseID := "cbx_abcdef123456"
 	if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "old-provider", WorkRoot: "/old/work"}); err != nil {
 		t.Fatal(err)
