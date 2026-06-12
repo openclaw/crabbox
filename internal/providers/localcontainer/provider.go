@@ -39,6 +39,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return applyFlags(cfg, fs, values)
 }
 
+func (Provider) CreationOnlyFlagNames() []string {
+	return []string{"local-container-volume"}
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
@@ -131,6 +135,26 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	req.Config.LocalContainer.CheckpointMetadata = metadata
 	core.MarkLocalContainerImageExplicit(req.Config)
 	core.MarkLocalContainerRuntimeExplicit(req.Config)
+	return nil
+}
+
+func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(flagValues)
+	if !ok {
+		return nil
+	}
+	if core.FlagWasSet(fs, "local-container-cpus") {
+		cfg.LocalContainer.CPUs = *v.CPUs
+	}
+	if core.FlagWasSet(fs, "local-container-memory") {
+		cfg.LocalContainer.Memory = *v.Memory
+	}
+	if core.FlagWasSet(fs, "local-container-network") {
+		cfg.LocalContainer.Network = *v.Network
+	}
+	if v.Volumes != nil && len(*v.Volumes) > 0 {
+		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)
+	}
 	return nil
 }
 

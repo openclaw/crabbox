@@ -583,7 +583,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	if *leaseIDFlag != "" {
 		var lease LeaseTarget
-		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim})
+		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
 			applyResolvedLeaseConfig(&cfg, server, &target)
@@ -666,7 +666,11 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim || borrowedPool != nil); err != nil {
+	claimLease := a.claimLeaseTargetForRepoAndRegister
+	if *leaseIDFlag != "" {
+		claimLease = a.claimResolvedLeaseTargetForRepoAndRegister
+	}
+	if err := claimLease(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim || borrowedPool != nil); err != nil {
 		return recordFailure(err)
 	}
 	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, acquired && *keep)
@@ -1713,8 +1717,8 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.Namespace.WorkRoot) != "" {
 			args = append(args, "--namespace-work-root", cfg.Namespace.WorkRoot)
 		}
-		if cfg.Namespace.DeleteOnRelease {
-			args = append(args, "--namespace-delete-on-release")
+		if DeleteOnReleaseExplicit(cfg, "namespace-devbox") {
+			args = append(args, fmt.Sprintf("--namespace-delete-on-release=%t", cfg.Namespace.DeleteOnRelease))
 		}
 	case "daytona":
 		if strings.TrimSpace(cfg.Daytona.APIURL) != "" {
@@ -1742,7 +1746,13 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.Morph.APIURL) != "" {
 			args = append(args, "--morph-api-url", cfg.Morph.APIURL)
 		}
-		args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
+		if DeleteOnReleaseExplicit(cfg, "morph") {
+			args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
+		}
+	case "hostinger":
+		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
+			args = append(args, "--hostinger-url", cfg.Hostinger.APIURL)
+		}
 	case "kubevirt":
 		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
 			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)
@@ -1764,7 +1774,13 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.KubeVirt.Template) != "" {
 			args = append(args, "--kubevirt-template", cfg.KubeVirt.Template)
 		}
-		args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
+		if DeleteOnReleaseExplicit(cfg, "kubevirt") {
+			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
+		}
+	case "incus":
+		if DeleteOnReleaseExplicit(cfg, "incus") {
+			args = append(args, fmt.Sprintf("--incus-delete-on-release=%t", cfg.Incus.DeleteOnRelease))
+		}
 	case "external":
 		if path, err := ExternalRoutingPath(id); err == nil {
 			args = append(args, "--external-routing-file", path)
@@ -2718,13 +2734,16 @@ func (a App) stop(ctx context.Context, args []string) error {
 		return err
 	}
 	cfg.Provider = *provider
+	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
+		return err
+	}
+	if err := autoRouteExternalLease(&cfg, fs, *id); err != nil {
+		return err
+	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))

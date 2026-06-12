@@ -431,7 +431,10 @@ func TestReleaseDeletesGeneratedKey(t *testing.T) {
 	}
 	runner := &recordingRunner{stdout: `{"metadata":{"name":"vm-release","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_release","crabbox.dev/slug":"release"}}}`}
 	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease := core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{Name: "vm-release"}}
+	lease := core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{Name: "vm-release", Labels: map[string]string{"release": "delete"}}}
+	if backend.RetainLeaseClaimAfterRelease(lease) {
+		t.Fatal("delete-on-release backend retained claim")
+	}
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
@@ -446,14 +449,27 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 	cfg.KubeVirt.SSHKey = ""
 	cfg.KubeVirt.SSHPublicKey = ""
 	cfg.KubeVirt.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
 	keyPath, _, err := core.EnsureTestboxKey("cbx_retained")
 	if err != nil {
 		t.Fatal(err)
 	}
 	claimKubeVirtLease(t, cfg, "cbx_retained", "retained", t.TempDir(), cfg.IdleTimeout, false)
+	server := core.Server{
+		CloudID:  cfg.KubeVirt.Namespace + "/vm-retained",
+		Provider: providerName,
+		Name:     "vm-retained",
+		Labels:   map[string]string{"name": "vm-retained", "slug": "retained", "release": "delete", "state": "ready"},
+	}
+	if err := core.UpdateLeaseClaimEndpoint("cbx_retained", server, core.SSHTarget{Host: "vm-retained", Port: "22"}); err != nil {
+		t.Fatal(err)
+	}
 	runner := &recordingRunner{stdout: `{"metadata":{"name":"vm-retained","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_retained","crabbox.dev/slug":"retained"}}}`}
 	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease := core.LeaseTarget{LeaseID: "cbx_retained", Server: core.Server{Name: "vm-retained"}}
+	lease := core.LeaseTarget{LeaseID: "cbx_retained", Server: server}
+	if !backend.RetainLeaseClaimAfterRelease(lease) {
+		t.Fatal("explicit retain policy did not override stored delete policy")
+	}
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
@@ -462,6 +478,31 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 	}
 	if claim, ok, err := core.ResolveLeaseClaimForProvider("retained", providerName); err != nil || !ok || claim.LeaseID != "cbx_retained" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	} else if claim.Labels["state"] != "stopped" || claim.Labels["release"] != "stop" || claim.SSHHost != "" || claim.SSHPort != 0 {
+		t.Fatalf("stopped claim=%#v", claim)
+	}
+	foundPatch := false
+	for _, call := range runner.calls {
+		if strings.Contains(call, " patch ") && strings.Contains(call, `crabbox.dev/release`) && strings.Contains(call, `stop`) {
+			foundPatch = true
+			break
+		}
+	}
+	if !foundPatch {
+		t.Fatalf("release policy annotation not persisted: calls=%#v", runner.calls)
+	}
+}
+
+func TestReleasePolicyExplicitFlagOverridesStoredPolicy(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.KubeVirt.DeleteOnRelease = true
+	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{"release": "stop"}}}
+	if kubeVirtDeleteOnRelease(lease, cfg) {
+		t.Fatal("ambient config overrode stored stop policy")
+	}
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	if !kubeVirtDeleteOnRelease(lease, cfg) {
+		t.Fatal("explicit delete flag did not override stored stop policy")
 	}
 }
 
@@ -756,6 +797,54 @@ func TestResolveIdentityUsesVMLeaseLabels(t *testing.T) {
 	}
 	if !keep {
 		t.Fatal("missing keep annotation should preserve by default")
+	}
+}
+
+func TestResolveChecksRepoClaimBeforeStartingVM(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := testConfig(t)
+	leaseID := "cbx_claimed"
+	slug := "claimed"
+	claimKubeVirtLease(t, cfg, leaseID, slug, t.TempDir(), time.Minute, false)
+	runner := &recordingRunner{stdout: `{"items":[{"metadata":{"name":"vm-claimed","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_claimed","crabbox.dev/slug":"claimed"}},"status":{"printableStatus":"Stopped"}}]}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:   "vm-claimed",
+		Repo: core.Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "virtctl-custom start") {
+			t.Fatalf("claim conflict started VM: calls=%#v", runner.calls)
+		}
+	}
+}
+
+func TestResolveRestoresRepoClaimWhenSSHKeyIsMissing(t *testing.T) {
+	isolateCrabboxState(t)
+	cfg := testConfig(t)
+	cfg.KubeVirt.SSHKey = ""
+	leaseID := "cbx_missing"
+	runner := &recordingRunner{stdout: `{"items":[{"metadata":{"name":"vm-missing","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_missing","crabbox.dev/slug":"missing"}},"status":{"printableStatus":"Stopped"}}]}`}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:   "vm-missing",
+		Repo: core.Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "stored SSH key") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "virtctl-custom start") {
+			t.Fatalf("missing key started VM: calls=%#v", runner.calls)
+		}
 	}
 }
 

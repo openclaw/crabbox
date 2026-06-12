@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net"
 	"os"
@@ -1967,5 +1968,230 @@ func markTestLocalContainerWorkRoot(t *testing.T, root string) {
 	t.Helper()
 	if err := markLocalContainerWorkRoot(root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCreateContainerMountsHostVolumes(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Volumes = []string{
+		"/home/user/.config/myapp:/mnt/myapp-config:ro",
+		"/var/cache/models:/cache",
+		`C:\Users\alice\source:/mnt/windows-source:ro`,
+	}
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	if _, _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_vol", "vol-test", "ssh-ed25519 AAAA test", true); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	for _, vol := range cfg.LocalContainer.Volumes {
+		want := "-v\n" + vol
+		if !strings.Contains(args, want) {
+			t.Fatalf("host volume mount missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestCreateContainerRejectsHostVolumeOverlapWithBootstrapPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		volume  string
+		desktop bool
+		cache   []core.CacheVolumeConfig
+	}{
+		{name: "work root", volume: "/host:/workspace/crabbox:ro"},
+		{name: "work root parent", volume: "/host:/workspace"},
+		{name: "work root child", volume: "/host:/workspace/crabbox/repo"},
+		{name: "ssh config", volume: "/host:/home/runner/.ssh/known_hosts"},
+		{name: "cache root", volume: "/host:/var/cache/crabbox/models"},
+		{name: "bootstrap state", volume: "/host:/var/lib/crabbox"},
+		{name: "system config", volume: "/host:/etc/ssh"},
+		{name: "desktop config windows source", volume: `C:\Users\alice\config:/home/runner/.config/app:ro`, desktop: true},
+		{
+			name:   "configured cache path",
+			volume: "/host:/opt/shared/cache/models",
+			cache:  []core.CacheVolumeConfig{{Key: "models", Path: "/opt/shared/cache"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+			b := testBackend(runner)
+			cfg := b.configForRun()
+			cfg.Desktop = tc.desktop
+			cfg.Cache.Volumes = tc.cache
+			cfg.LocalContainer.Volumes = []string{tc.volume}
+
+			_, _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_overlap", "overlap-test", "ssh-ed25519 AAAA test", true)
+			if err == nil || !strings.Contains(err.Error(), "overlaps bootstrap-managed path") {
+				t.Fatalf("err=%v, want bootstrap-managed path rejection", err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("runtime invoked before volume validation: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestCreateContainerRejectsRelativeWorkRootWithHostVolume(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.WorkRoot = "mnt/app"
+	cfg.LocalContainer.Volumes = []string{"/host/project:/mnt/app"}
+
+	_, _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_relative", "relative-test", "ssh-ed25519 AAAA test", true)
+	if err == nil || !strings.Contains(err.Error(), "work root") || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("err=%v, want absolute work root rejection", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runtime invoked before work root validation: %#v", runner.calls)
+	}
+}
+
+func TestLocalContainerVolumeDestinationRejectsRelativeTarget(t *testing.T) {
+	_, err := localContainerVolumeDestination("/host:relative:ro")
+	if err == nil || !strings.Contains(err.Error(), "absolute container path") {
+		t.Fatalf("err=%v, want absolute destination rejection", err)
+	}
+}
+
+func TestBootstrapChecksHostVolumesAgainstResolvedHomeBeforeMutation(t *testing.T) {
+	guard := strings.Index(bootstrapScript, "CRABBOX_HOST_VOLUME_PATH_")
+	install := strings.Index(bootstrapScript, "apt-get update")
+	if guard < 0 || install < 0 || guard > install {
+		t.Fatalf("host volume guard must run before package or filesystem mutation: guard=%d install=%d", guard, install)
+	}
+	for _, want := range []string{
+		`while IFS=: read -r account _ _ _ _ account_home _`,
+		`check_host_volume_path "$host_path"`,
+		`resolved="$(readlink -f "$probe"`,
+		`host_path="$(resolve_container_path "$1")"`,
+		`managed_path="$(resolve_container_path "$managed_path")"`,
+		`"$work_root" "$home_dir"`,
+		`CRABBOX_CACHE_VOLUME_PATH_`,
+		`useradd -m -d "$home_dir" -s /bin/bash "$user"`,
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Fatalf("bootstrap host volume guard missing %q", want)
+		}
+	}
+}
+
+func TestValidateCheckpointForkWorkdirUsesContainerResolvedPaths(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Volumes = []string{
+		"/host/data:/mnt/data:ro",
+		`C:\Users\alice\cache:/cache`,
+	}
+	lease := core.LeaseTarget{Server: core.Server{CloudID: "container123"}}
+
+	if err := b.ValidateCheckpointForkWorkdir(context.Background(), lease, "/safe/link/.."); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "exec")
+	for _, want := range []string{
+		"container123",
+		"crabbox-validate-checkpoint-workdir",
+		"/safe/link/..",
+		"/mnt/data",
+		"/cache",
+		"checkpoint fork workdir",
+		"os.path.realpath",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("checkpoint workdir validation command missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestValidateCheckpointForkWorkdirPropagatesOverlapFailure(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if slices.Contains(req.Args, "exec") {
+			return core.LocalCommandResult{Stderr: "checkpoint fork workdir /mnt/data overlaps local-container host volume target /mnt/data\n"}, errors.New("exit status 2")
+		}
+		return core.LocalCommandResult{}, nil
+	}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Volumes = []string{"/host/data:/mnt/data"}
+
+	err := b.ValidateCheckpointForkWorkdir(context.Background(), core.LeaseTarget{Server: core.Server{CloudID: "container123"}}, "/mnt/data")
+	if err == nil || !strings.Contains(err.Error(), "overlaps local-container host volume") {
+		t.Fatalf("err=%v, want overlap failure", err)
+	}
+}
+
+func TestCreateContainerNoVolumesWhenEmpty(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Volumes = nil
+	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
+
+	if _, _, err := b.createContainer(context.Background(), cfg, "crabbox-test", "cbx_novol", "novol-test", "ssh-ed25519 AAAA test", true); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "run")
+	lines := strings.Split(args, "\n")
+	for i, line := range lines {
+		if line == "-v" && i+1 < len(lines) {
+			mount := lines[i+1]
+			if !strings.Contains(mount, "docker.sock") &&
+				!strings.HasPrefix(mount, "crabbox-cache-") &&
+				!strings.HasSuffix(mount, ":/tmp/crabbox-bootstrap:ro") {
+				t.Fatalf("unexpected volume mount when Volumes is empty: %s", mount)
+			}
+		}
+	}
+}
+
+func TestVolumeListFlagParsesRepeated(t *testing.T) {
+	var vols volumeListFlag
+	if err := vols.Set("/host/a:/guest/a:ro"); err != nil {
+		t.Fatal(err)
+	}
+	if err := vols.Set("/host/b:/guest/b"); err != nil {
+		t.Fatal(err)
+	}
+	if len(vols) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(vols))
+	}
+	if vols[0] != "/host/a:/guest/a:ro" {
+		t.Fatalf("volume[0]=%q", vols[0])
+	}
+	if vols[1] != "/host/b:/guest/b" {
+		t.Fatalf("volume[1]=%q", vols[1])
+	}
+}
+
+func TestVolumeFlagRejectsLeaseReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag string
+	}{
+		{name: "existing lease", flag: "id"},
+		{name: "ready pool", flag: "pool"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			fs.String(tc.flag, "", "lease reuse")
+			values := registerFlags(fs, core.Config{})
+			if err := fs.Parse([]string{
+				"--" + tc.flag, "cbx_existing",
+				"--local-container-volume", "/host/a:/guest/a:ro",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := core.Config{Provider: providerName}
+			err := applyFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "only applies when creating a new lease") {
+				t.Fatalf("err=%v, want lease reuse rejection", err)
+			}
+		})
 	}
 }

@@ -236,7 +236,9 @@ func claimHasTailscaleMetadata(claim leaseClaim) bool {
 //
 // Capabilities are derived from the provider's own FeatureSet, so a provider
 // opts in to a transport plane by declaring the feature, not by being added
-// to a static table.
+// to a static table. SSH mesh is narrower than FeatureSSH because delegated
+// providers may expose a direct login helper without supporting Crabbox-managed
+// SSH tunnels as their pond transport.
 type ProviderCapabilities struct {
 	Tailscale       bool // bidirectional tailnet peer plane
 	TailscaleEgress bool // outbound-only userspace tailnet access
@@ -255,7 +257,7 @@ func providerCapabilities(provider string) ProviderCapabilities {
 		return ProviderCapabilities{
 			Tailscale:       tailscale && !spec.TailscaleEgressOnly,
 			TailscaleEgress: tailscale && spec.TailscaleEgressOnly,
-			SSHMesh:         featureSetHas(features, FeatureSSH),
+			SSHMesh:         spec.Kind == ProviderKindSSHLease && featureSetHas(features, FeatureSSH),
 			URLBridge:       featureSetHas(features, FeatureURLBridge),
 		}
 	}

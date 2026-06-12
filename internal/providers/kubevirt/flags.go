@@ -82,6 +82,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "kubevirt-delete-on-release") {
 		cfg.KubeVirt.DeleteOnRelease = *v.DeleteOnRelease
+		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 	}
 	return validateConfig(*cfg)
 }

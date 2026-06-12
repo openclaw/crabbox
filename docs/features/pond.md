@@ -155,10 +155,11 @@ implemented for Windows operators. Use foreground `pond connect` on Windows.
 
 ### `pond release`
 
-Stops every lease in the named pond and removes their local claims, iterating
-across all providers represented in the pond — you do not pass `--provider`.
-Individual failures are logged as warnings and do not block the rest; the first
-error is returned so scripts can tell whether the release was clean.
+Stops every lease in the named pond, iterating across all providers represented
+in the pond — you do not pass `--provider`. Claims are removed for destroyed
+resources and retained for reusable stopped resources. Individual failures are
+logged as warnings and do not block the rest; the first error is returned so
+scripts can tell whether the release was clean.
 
 ### `pool` vs `pond`
 

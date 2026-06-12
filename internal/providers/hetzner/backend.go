@@ -43,7 +43,7 @@ type hetznerLeaseBackend struct{ shared.DirectSSHBackend }
 
 func NewHetznerLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
-	return &hetznerLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer}}
+	return &hetznerLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer, StoredLeaseKeys: true}}
 }
 
 func (b *hetznerLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

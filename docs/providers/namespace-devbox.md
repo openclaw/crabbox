@@ -101,8 +101,9 @@ CRABBOX_NAMESPACE_DELETE_ON_RELEASE
 4. It records a local Crabbox lease claim and runs through the normal SSH
    executor.
 5. `crabbox stop` shuts the Devbox down (`devbox shutdown --force`) by default.
-   Set `namespace.deleteOnRelease: true` (or `--namespace-delete-on-release`)
-   to delete it instead (`devbox delete --force`).
+   The local claim and generated SSH files remain available for reuse. Set
+   `namespace.deleteOnRelease: true` (or `--namespace-delete-on-release`) to
+   delete the Devbox and those local SSH files instead (`devbox delete --force`).
 
 ## Capabilities
 
@@ -136,7 +137,8 @@ An empty class resolves to `M`. An explicit `--namespace-size` (or
 - `builtin:base` is the current Namespace built-in base image. Avoid `default`;
   the current CLI treats that as a Docker image reference.
 - Namespace Devboxes can pause/resume outside Crabbox; stopped Devboxes keep
-  their persistent storage.
+  their persistent storage. Crabbox also keeps the stopped lease claim and SSH
+  configuration so later `run`, `ssh`, and `pond connect` commands can resume it.
 - `namespace.repository` asks Namespace to clone a repo on create, but Crabbox
   still syncs your local dirty checkout into `namespace.workRoot`.
 - `namespace.workRoot` must be an absolute path under a dedicated subdirectory;

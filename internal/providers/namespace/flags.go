@@ -64,6 +64,7 @@ func ApplyNamespaceProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	}
 	if flagWasSet(fs, "namespace-delete-on-release") {
 		cfg.Namespace.DeleteOnRelease = *v.DeleteOnRelease
+		markDeleteOnReleaseExplicit(cfg)
 	}
 	return validateNamespaceConfig(*cfg)
 }

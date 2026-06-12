@@ -120,6 +120,43 @@ func TestNamespaceItemToServerMapsCrabboxNames(t *testing.T) {
 	}
 }
 
+func TestListRestoresNamespaceClaimMetadata(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_deadbeef0000"
+	slug := "blue-lobster"
+	name := leaseProviderName(leaseID, slug)
+	if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		CloudID:  name,
+		Provider: namespaceProvider,
+		Name:     name,
+		Labels: map[string]string{
+			"provider":           namespaceProvider,
+			"lease":              leaseID,
+			"slug":               slug,
+			"name":               name,
+			"pond":               "alpha",
+			"pond_exposed_ports": "8080",
+			"release":            "stop",
+			"state":              "stopped",
+		},
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &namespaceQueuedRunner{results: []LocalCommandResult{{Stdout: `{"devboxes":[{"name":"` + name + `","state":"stopped","machine_size":"M"}]}`}}}
+	backend := &namespaceLeaseBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	servers, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].Labels["lease"] != leaseID || servers[0].Labels["pond"] != "alpha" || servers[0].Labels["pond_exposed_ports"] != "8080" {
+		t.Fatalf("servers=%#v", servers)
+	}
+}
+
 func TestResolveNamespaceDevboxNameKeepsClaimedExternalName(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if err := claimLeaseForRepoProvider("nsd_existing-devbox", "existing-devbox", namespaceProvider, t.TempDir(), 0, false); err != nil {
@@ -157,6 +194,50 @@ func TestResolveReleaseOnlySkipsNamespacePrepare(t *testing.T) {
 	}
 	if lease.SSH.Host != "" {
 		t.Fatalf("release-only lease should not prepare SSH: %#v", lease.SSH)
+	}
+}
+
+func TestResolveChecksRepoClaimBeforeNamespacePrepare(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_deadbeef0000"
+	slug := "blue-lobster"
+	if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &namespaceRecordingRunner{}
+	backend := &namespaceLeaseBackend{
+		cfg: Config{Provider: namespaceProvider},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+	}
+
+	req := ResolveRequest{ID: leaseID}
+	req.Repo.Root = t.TempDir()
+	_, err := backend.Resolve(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("claim conflict prepared devbox: %#v", runner.calls)
+	}
+}
+
+func TestResolveRestoresRepoClaimWhenNamespacePrepareFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_deadbeef0000"
+	runner := &namespaceRecordingRunner{failAll: true}
+	backend := &namespaceLeaseBackend{
+		cfg: Config{Provider: namespaceProvider},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+	}
+	req := ResolveRequest{ID: leaseID}
+	req.Repo.Root = t.TempDir()
+
+	_, err := backend.Resolve(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "namespace devbox failed") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
 	}
 }
 
@@ -227,6 +308,86 @@ func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
 		path := filepath.Join(dir, "crabbox-blue-lobster-deadbeef.devbox.namespace"+ext)
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("%s should be removed, err=%v", path, err)
+		}
+	}
+}
+
+func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	leaseID := "cbx_deadbeef0000"
+	slug := "blue-lobster"
+	name := leaseProviderName(leaseID, slug)
+	dir := filepath.Join(home, ".namespace", "ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, ext := range []string{".ssh", ".key"} {
+		if err := os.WriteFile(filepath.Join(dir, name+".devbox.namespace"+ext), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{
+		CloudID:  name,
+		Provider: namespaceProvider,
+		Name:     name,
+		Labels: map[string]string{
+			"provider": namespaceProvider,
+			"lease":    leaseID,
+			"slug":     slug,
+			"name":     name,
+			"release":  "stop",
+			"state":    "ready",
+		},
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{Host: "ssh.namespace.example", Port: "22"}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	claim.Labels["pond"] = "alpha"
+	claim.Labels["pond_exposed_ports"] = "8080"
+	currentServer := namespaceServer(name, leaseID, slug, Config{Namespace: NamespaceConfig{DeleteOnRelease: true}}, true)
+	restoreNamespaceClaimLabels(&currentServer, claim, true, Config{Namespace: NamespaceConfig{DeleteOnRelease: true}})
+	if currentServer.Labels["release"] != "stop" || currentServer.Labels["pond"] != "alpha" || currentServer.Labels["pond_exposed_ports"] != "8080" {
+		t.Fatalf("stored release policy was overwritten: %#v", currentServer.Labels)
+	}
+	explicitCfg := Config{Namespace: NamespaceConfig{DeleteOnRelease: true}}
+	markDeleteOnReleaseExplicit(&explicitCfg)
+	if !namespaceDeleteOnRelease(LeaseTarget{Server: currentServer}, explicitCfg) {
+		t.Fatal("explicit delete flag did not override stored stop policy")
+	}
+	runner := &namespaceRecordingRunner{}
+	backend := &namespaceLeaseBackend{
+		cfg: Config{Namespace: NamespaceConfig{DeleteOnRelease: true}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+	}
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels["release"] != "stop" || !backend.RetainLeaseClaimAfterRelease(lease) {
+		t.Fatalf("resolved lease=%#v", lease)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0] != "devbox shutdown "+name+" --force" {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+	claim, ok, err = resolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.Labels["state"] != "stopped" || claim.SSHHost != "" || claim.SSHPort != 0 {
+		t.Fatalf("stopped claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	for _, ext := range []string{".ssh", ".key"} {
+		path := filepath.Join(dir, name+".devbox.namespace"+ext)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("retained SSH file missing %s: %v", path, err)
 		}
 	}
 }

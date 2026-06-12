@@ -1810,16 +1810,6 @@ func serveLocalSSHProxy(listener net.Listener, vm *vz.VirtualMachine) error {
 	)
 }
 
-func serveReverseSSHProxy(localListener, guestListener net.Listener, maxChannels int) error {
-	return serveReverseSSHProxyWithTimeouts(
-		localListener,
-		guestListener,
-		maxChannels,
-		guestChannelAcquireWait,
-		guestChannelActivateWait,
-	)
-}
-
 func serveReverseSSHProxyWithTimeouts(
 	localListener, guestListener net.Listener,
 	maxChannels int,

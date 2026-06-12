@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -253,28 +254,226 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 	return statusViewFromLeaseTarget(ctx, cfg, lease)
 }
 
-func (a App) resolveLeaseTarget(ctx context.Context, cfg Config, id string) (Server, SSHTarget, string, error) {
-	return a.resolveLeaseTargetWithConfig(ctx, &cfg, id)
+func (a App) resolveLeaseTargetForRepo(ctx context.Context, cfg Config, id string, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
+	return a.resolveLeaseTargetForRepoWithConfig(ctx, &cfg, id, repo, reclaim)
 }
 
-func (a App) resolveLeaseTargetWithConfig(ctx context.Context, cfg *Config, id string) (Server, SSHTarget, string, error) {
+func (a App) resolveLeaseTargetForRepoWithConfig(ctx context.Context, cfg *Config, id string, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
+	return a.resolveLeaseTargetWithRequestConfig(ctx, cfg, ResolveRequest{Repo: repo, ID: id, Reclaim: reclaim})
+}
+
+func (a App) resolveLeaseTargetWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest) (Server, SSHTarget, string, error) {
+	return a.resolveSSHTargetWithRequestConfig(ctx, cfg, req, false)
+}
+
+func (a App) resolveLoginTargetWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest) (Server, SSHTarget, string, error) {
+	return a.resolveSSHTargetWithRequestConfig(ctx, cfg, req, true)
+}
+
+func (a App) resolveSSHTargetWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest, allowLoginOnly bool) (Server, SSHTarget, string, error) {
 	if cfg == nil {
 		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
+	}
+	if err := autoRouteExternalLeaseForConfig(cfg, req.ID); err != nil {
+		return Server{}, SSHTarget{}, "", err
 	}
 	backend, err := loadBackend(*cfg, runtimeForApp(a))
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
-	sshBackend, ok := backend.(SSHLeaseBackend)
+	sshBackend, ok := backend.(SSHLoginBackend)
 	if !ok {
 		return Server{}, SSHTarget{}, "", exit(2, "provider=%s does not expose an SSH target", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(*cfg), ID: id})
+	if !allowLoginOnly {
+		if _, ok := backend.(SSHLeaseBackend); !ok {
+			return Server{}, SSHTarget{}, "", exit(2, "provider=%s exposes SSH login only, not a Crabbox-managed SSH lease", backend.Spec().Name)
+		}
+	}
+	req.Options = leaseOptionsFromConfig(*cfg)
+	req.Options.ProviderScope = providerClaimScope(backend.Spec().Name, *cfg)
+	lease, err := resolveSSHLeaseTarget(ctx, sshBackend, req)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
 	applyResolvedLeaseConfig(cfg, lease.Server, &lease.SSH)
 	return lease.Server, lease.SSH, lease.LeaseID, nil
+}
+
+func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req ResolveRequest) (LeaseTarget, error) {
+	claimsBefore, err := snapshotLeaseClaims()
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	lease, err := backend.Resolve(ctx, req)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	resolvedLeaseID := lease.LeaseID
+	resolvedClaimExistedBefore := false
+	for _, claim := range claimsBefore.claims {
+		if claim.LeaseID == resolvedLeaseID {
+			resolvedClaimExistedBefore = true
+			break
+		}
+	}
+	claimBefore, claimExistedBefore, err := resolvedLeaseClaimBefore(claimsBefore, backend.Spec().Name, req.Options.ProviderScope, req.ID, lease)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	expectedRepoRoot := strings.TrimSpace(req.Repo.Root)
+	if expectedRepoRoot == "" && claimExistedBefore {
+		expectedRepoRoot = strings.TrimSpace(claimBefore.RepoRoot)
+	}
+	if claimExistedBefore {
+		leaseIDChanged := lease.LeaseID != claimBefore.LeaseID
+		var discardedClaim leaseClaim
+		discardedClaimExists := false
+		if leaseIDChanged && !resolvedClaimExistedBefore && validLeaseClaimID(resolvedLeaseID) {
+			resolvedClaim, resolvedClaimExists, err := readLeaseClaimWithPresence(resolvedLeaseID)
+			if err != nil {
+				return LeaseTarget{}, err
+			}
+			if resolvedClaimExists {
+				if !resolvedLeaseClaimAttestsResult(resolvedClaim, lease.Server, expectedRepoRoot, req.Options.ProviderScope) {
+					return LeaseTarget{}, exit(2, "lease %s claim changed during resolve; retry", resolvedLeaseID)
+				}
+				discardedClaim = resolvedClaim
+				discardedClaimExists = true
+			}
+		}
+		lease.LeaseID = claimBefore.LeaseID
+		lease.Server.Labels = cloneStringMap(lease.Server.Labels)
+		if lease.Server.Labels == nil {
+			lease.Server.Labels = map[string]string{}
+		}
+		lease.Server.Labels["lease"] = claimBefore.LeaseID
+		if claimBefore.Slug != "" {
+			lease.Server.Labels["slug"] = claimBefore.Slug
+		}
+		if rebinder, ok := backend.(ResolvedLeaseTargetRebinder); ok && leaseIDChanged {
+			if err := rebinder.RebindResolvedLeaseTarget(&lease, claimBefore.LeaseID); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
+		if leaseIDChanged && !resolvedClaimExistedBefore && validLeaseClaimID(resolvedLeaseID) {
+			if aliasKeyPath, err := testboxKeyPath(resolvedLeaseID); err == nil && lease.SSH.Key == aliasKeyPath {
+				return LeaseTarget{}, exit(2, "lease %s resolved to %s but the canonical stored SSH key is unavailable", resolvedLeaseID, claimBefore.LeaseID)
+			}
+			if discardedClaimExists {
+				if err := removeLeaseClaimIfUnchanged(resolvedLeaseID, discardedClaim); err != nil {
+					return LeaseTarget{}, err
+				}
+			}
+			removeStoredTestboxKey(resolvedLeaseID)
+		}
+	}
+	var claimAfter leaseClaim
+	claimExistsAfter := false
+	if lease.LeaseID != "" {
+		if claimAfter, claimExistsAfter, err = readLeaseClaimWithPresence(lease.LeaseID); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	lease.Server.claimSnapshotSet = true
+	if claimExistsAfter && ((claimExistedBefore && reflect.DeepEqual(claimBefore, claimAfter)) ||
+		(claimExistedBefore && resolvedLeaseClaimMutationAttests(claimBefore, claimAfter, lease.Server, expectedRepoRoot)) ||
+		(!claimExistedBefore && resolvedLeaseClaimAttestsResult(claimAfter, lease.Server, expectedRepoRoot, req.Options.ProviderScope))) {
+		lease.Server.claimSnapshot = cloneLeaseClaim(claimAfter)
+		lease.Server.claimSnapshotExists = true
+	} else if claimExistedBefore {
+		lease.Server.claimSnapshot = cloneLeaseClaim(claimBefore)
+		lease.Server.claimSnapshotExists = true
+	}
+	return lease, nil
+}
+
+func resolvedLeaseClaimBefore(snapshot leaseClaimsSnapshot, provider, providerScope, identifier string, lease LeaseTarget) (leaseClaim, bool, error) {
+	provider = canonicalClaimProvider(provider)
+	providerScope = strings.TrimSpace(providerScope)
+	for _, id := range []string{lease.LeaseID, identifier} {
+		if err := snapshot.invalid[id]; err != nil {
+			return leaseClaim{}, false, err
+		}
+	}
+	providerMatches := func(claim leaseClaim) bool {
+		claimProvider := canonicalClaimProvider(claim.Provider)
+		return claimProvider == "" || claimProvider == provider
+	}
+	scopeMatches := func(claim leaseClaim) bool {
+		return strings.TrimSpace(claim.ProviderScope) == providerScope
+	}
+	for _, claim := range snapshot.claims {
+		if providerMatches(claim) && claim.LeaseID == lease.LeaseID &&
+			(strings.TrimSpace(claim.ProviderScope) == "" || providerScope == "" || scopeMatches(claim)) {
+			return cloneLeaseClaim(claim), true, nil
+		}
+	}
+	findUnique := func(match func(leaseClaim) bool) (leaseClaim, bool, error) {
+		var found leaseClaim
+		for _, claim := range snapshot.claims {
+			if !providerMatches(claim) || !match(claim) {
+				continue
+			}
+			if found.LeaseID != "" && found.LeaseID != claim.LeaseID {
+				return leaseClaim{}, false, exit(2, "multiple provider=%s claims match resolved lease %s", provider, firstNonBlank(lease.LeaseID, identifier))
+			}
+			found = cloneLeaseClaim(claim)
+		}
+		return found, found.LeaseID != "", nil
+	}
+	if lease.Server.CloudID != "" {
+		if claim, ok, err := findUnique(func(candidate leaseClaim) bool {
+			return canonicalClaimProvider(candidate.Provider) == provider && scopeMatches(candidate) && candidate.CloudID == lease.Server.CloudID
+		}); err != nil || ok {
+			return claim, ok, err
+		}
+	}
+	return findUnique(func(candidate leaseClaim) bool {
+		if candidate.LeaseID == identifier {
+			return strings.TrimSpace(candidate.ProviderScope) == "" || providerScope == "" || scopeMatches(candidate)
+		}
+		slug := normalizeLeaseSlug(identifier)
+		if slug != "" && normalizeLeaseSlug(candidate.Slug) == slug {
+			return scopeMatches(candidate) &&
+				(candidate.CloudID == "" || lease.Server.CloudID == "" || candidate.CloudID == lease.Server.CloudID)
+		}
+		return canonicalClaimProvider(candidate.Provider) == provider && scopeMatches(candidate) && candidate.CloudID == identifier
+	})
+}
+
+func resolvedLeaseClaimAttestsResult(claim leaseClaim, server Server, expectedRepoRoot, expectedProviderScope string) bool {
+	claimProvider := canonicalClaimProvider(claim.Provider)
+	serverProvider := canonicalClaimProvider(firstNonBlank(server.Labels["provider"], server.Provider))
+	claimState := strings.ToLower(strings.TrimSpace(claim.Labels["state"]))
+	serverState := strings.ToLower(strings.TrimSpace(firstNonBlank(server.Labels["state"], server.Status)))
+	return (claimProvider == "" || serverProvider == "" || claimProvider == serverProvider) &&
+		(strings.TrimSpace(expectedProviderScope) == "" || strings.TrimSpace(claim.ProviderScope) == strings.TrimSpace(expectedProviderScope)) &&
+		(claim.CloudID == "" || server.CloudID == "" || claim.CloudID == server.CloudID) &&
+		resolvedLeaseClaimStateAttests(claimState, serverState) &&
+		strings.TrimSpace(claim.RepoRoot) == expectedRepoRoot
+}
+
+func resolvedLeaseClaimMutationAttests(before, after leaseClaim, server Server, expectedRepoRoot string) bool {
+	if !resolvedLeaseClaimAttestsResult(after, server, expectedRepoRoot, "") {
+		return false
+	}
+	beforeState := strings.TrimSpace(before.Labels["state"])
+	afterState := strings.TrimSpace(after.Labels["state"])
+	return before.LeaseID == after.LeaseID &&
+		(before.Provider == "" || canonicalClaimProvider(before.Provider) == canonicalClaimProvider(after.Provider)) &&
+		(before.ProviderScope == "" || before.ProviderScope == after.ProviderScope) &&
+		(before.CloudID == "" || before.CloudID == after.CloudID) &&
+		(before.Slug == "" || before.Slug == after.Slug) &&
+		(beforeState == "" || afterState != "")
+}
+
+func resolvedLeaseClaimStateAttests(claimState, serverState string) bool {
+	if claimState == "" || claimState == serverState {
+		return true
+	}
+	return (claimState == "ready" && serverState == "leased") ||
+		(claimState == "leased" && serverState == "ready")
 }
 
 func idleForString(value string, now time.Time) string {

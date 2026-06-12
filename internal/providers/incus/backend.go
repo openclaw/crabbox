@@ -78,6 +78,11 @@ func applyDefaults(cfg *Config) {
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
+func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
+
 func (b *backend) configForRun() Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
@@ -143,6 +148,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	labels["ssh_user"] = cfg.SSHUser
 	labels["ssh_port"] = cfg.SSHPort
 	labels["work_root"] = cfg.WorkRoot
+	labels["release"] = incusReleaseAction(cfg)
 	if port := strings.TrimSpace(cfg.Incus.ProxyListenPort); port != "" {
 		labels["proxy_port"] = port
 		if host := sshHostForConfig(cfg); host != "" {
@@ -238,7 +244,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
 	cfg := b.configForRun()
 	client, err := newClient(cfg)
 	if err != nil {
@@ -250,6 +256,27 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	}
 	if req.ReleaseOnly {
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
+	var previousClaim, preflightClaim core.LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := core.RestoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Incus lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
+	if req.Repo.Root != "" && leaseID != "" {
+		previousClaim, previousClaimExists, err = core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		preflightClaim, err = core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, server.Labels["slug"], providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = true
 	}
 	if req.StatusOnly {
 		state, _, err := client.GetInstanceState(inst.Name)
@@ -302,11 +329,11 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		}
 	}
 	if req.Repo.Root != "" && leaseID != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, server.Labels["slug"], providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		if _, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
 			return LeaseTarget{}, err
 		}
-	}
-	if !req.StatusOnly && leaseID != "" {
+		rollbackClaim = false
+	} else if !req.StatusOnly && leaseID != "" {
 		if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 			return LeaseTarget{}, err
 		}
@@ -381,7 +408,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if err != nil {
 		return err
 	}
-	deleteInstance := cfg.Incus.DeleteOnRelease
+	claim, claimOK, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		return err
+	}
+	deleteInstance := incusDeleteOnRelease(req.Lease, cfg)
 	if deleteInstance {
 		if inst.IsActive() {
 			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: req.Force, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
@@ -392,21 +423,25 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return err
 		}
 	} else {
-		if inst.IsActive() {
-			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
-				return err
-			}
-		}
 		labels := labelsFromInstance(inst)
 		labels["state"] = "stopped"
+		labels["release"] = "stop"
 		delete(labels, "host")
-		if err := setInstanceLabels(ctx, client, inst.Name, labels); err != nil {
-			return err
+		stopAndPersist := func() error {
+			if inst.IsActive() {
+				if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+					return err
+				}
+			}
+			return setInstanceLabels(ctx, client, inst.Name, labels)
 		}
-		if leaseID != "" {
-			if err := core.UpdateLeaseClaimEndpoint(leaseID, core.Server{Labels: labels}, core.SSHTarget{}); err != nil {
+		if leaseID != "" && claimOK {
+			server := core.Server{CloudID: inst.Name, Provider: providerName, Name: inst.Name, Status: "stopped", Labels: labels}
+			if _, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, core.SSHTarget{}, stopAndPersist); err != nil {
 				return err
 			}
+		} else if err := stopAndPersist(); err != nil {
+			return err
 		}
 	}
 	if leaseID != "" && deleteInstance {
@@ -418,10 +453,36 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	instance := core.Blank(core.Blank(lease.Server.CloudID, lease.Server.Name), "-")
-	if b.configForRun().Incus.DeleteOnRelease {
+	if incusDeleteOnRelease(lease, b.configForRun()) {
 		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
 	}
 	return fmt.Sprintf("stopped lease=%s instance=%s retained=true", lease.LeaseID, instance)
+}
+
+func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+	return !incusDeleteOnRelease(lease, b.configForRun())
+}
+
+func incusReleaseAction(cfg Config) string {
+	if cfg.Incus.DeleteOnRelease {
+		return "delete"
+	}
+	return "stop"
+}
+
+func incusDeleteOnRelease(lease LeaseTarget, cfg Config) bool {
+	if core.DeleteOnReleaseExplicit(cfg, providerName) {
+		return cfg.Incus.DeleteOnRelease
+	}
+	if lease.Server.Labels != nil {
+		switch strings.ToLower(strings.TrimSpace(lease.Server.Labels["release"])) {
+		case "delete":
+			return true
+		case "stop":
+			return false
+		}
+	}
+	return cfg.Incus.DeleteOnRelease
 }
 
 func (b *backend) Touch(ctx context.Context, req TouchRequest) (core.Server, error) {

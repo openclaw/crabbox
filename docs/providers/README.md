@@ -24,7 +24,7 @@ SSH-lease providers further differ by how they reach the cloud:
   normal shared-team path. Set with `config set-broker` and a broker URL
   (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same four providers without a configured broker, plus
-  cloud providers that never broker (e.g. `proxmox`, `runpod`, `namespace-devbox`,
+  cloud providers that never broker (e.g. `proxmox`, `hostinger`, `runpod`, `namespace-devbox`,
   `semaphore`, `sprites`, `exe-dev`, `daytona`, `morph`). The CLI talks to the provider
   API itself and cleans up best-effort via provider labels.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
@@ -64,6 +64,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Google Cloud](gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered |
 | [Hetzner](hetzner.md) — `hetzner` | Linux · brokered |
 | [DigitalOcean](digitalocean.md) — `digitalocean` | Linux · direct |
+| [Hostinger](hostinger.md) — `hostinger` | Linux · direct |
 | [Proxmox](proxmox.md) — `proxmox` | Linux · direct |
 | [XCP-ng](xcp-ng.md) — `xcp-ng` | Linux · direct |
 | [Incus](incus.md) — `incus` | Linux · direct |
@@ -147,6 +148,8 @@ reports.
 - DigitalOcean is a direct-only Linux Droplet provider. It uses
   `DIGITALOCEAN_TOKEN`, per-lease SSH keys, and Crabbox-owned flat tags; it does
   not run through the Worker broker in Phase 1.
+- Hostinger is a direct-only Linux VPS provider. Purchases require explicit
+  opt-in; release stops the VPS but does not cancel its subscription.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,
@@ -161,6 +164,7 @@ reports.
 crabbox warmup --provider aws --class beast
 crabbox run --provider hetzner -- pnpm test
 crabbox run --provider digitalocean --type s-1vcpu-1gb -- pnpm test
+crabbox doctor --provider hostinger
 crabbox run --provider docker -- pnpm test
 crabbox run --provider docker-sandbox -- go test ./...
 crabbox run --provider apple-vz -- go test ./...

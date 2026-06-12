@@ -51,7 +51,7 @@ func NewDigitalOceanLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt cor
 	acquireConfigErr := validateDigitalOceanAcquireConfig(cfg, core.OSImageWasExplicit(cfg))
 	applyDigitalOceanDefaults(&cfg)
 	b := &digitalOceanLeaseBackend{
-		DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt},
+		DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true},
 		acquireConfigErr: acquireConfigErr,
 	}
 	b.clientFactory = func(rt core.Runtime) (digitalOceanAPI, error) { return newDigitalOceanClient(rt) }

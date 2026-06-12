@@ -363,6 +363,107 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("HOSTINGER_API_TOKEN", "hostinger-secret-token")
+	if err := os.WriteFile(configPath, []byte(`hostinger:
+  apiUrl: https://hostinger.example.test
+  itemId: hostingercom-vps-kvm1-usd-1m
+  paymentMethodId: "42"
+  templateId: "1077"
+  dataCenterId: "24"
+  hostnamePrefix: cbx
+  user: root
+  workRoot: /work/crabbox
+  allowPurchase: true
+  releaseAction: stop
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "hostinger api_url=https://hostinger.example.test item_id=hostingercom-vps-kvm1-usd-1m payment_method_id=42 template_id=1077 data_center_id=24 hostname_prefix=cbx user=root work_root=/work/crabbox allow_purchase=true release_action=stop auth=configured") {
+		t.Fatalf("config show missing hostinger summary: %q", text)
+	}
+	if strings.Contains(text, "hostinger-secret-token") {
+		t.Fatalf("config show leaked Hostinger token: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Hostinger struct {
+			APIURL          string `json:"apiUrl"`
+			Auth            string `json:"auth"`
+			ItemID          string `json:"itemId"`
+			PaymentMethodID string `json:"paymentMethodId"`
+			TemplateID      string `json:"templateId"`
+			DataCenterID    string `json:"dataCenterId"`
+			HostnamePrefix  string `json:"hostnamePrefix"`
+			User            string `json:"user"`
+			WorkRoot        string `json:"workRoot"`
+			AllowPurchase   bool   `json:"allowPurchase"`
+			ReleaseAction   string `json:"releaseAction"`
+		} `json:"hostinger"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Hostinger.APIURL != "https://hostinger.example.test" ||
+		got.Hostinger.Auth != "configured" ||
+		got.Hostinger.ItemID != "hostingercom-vps-kvm1-usd-1m" ||
+		got.Hostinger.PaymentMethodID != "42" ||
+		got.Hostinger.TemplateID != "1077" ||
+		got.Hostinger.DataCenterID != "24" ||
+		got.Hostinger.HostnamePrefix != "cbx" ||
+		got.Hostinger.User != "root" ||
+		got.Hostinger.WorkRoot != "/work/crabbox" ||
+		!got.Hostinger.AllowPurchase ||
+		got.Hostinger.ReleaseAction != "stop" {
+		t.Fatalf("unexpected hostinger json: %#v", got.Hostinger)
+	}
+	if strings.Contains(stdout.String(), "hostinger-secret-token") {
+		t.Fatalf("config show json leaked Hostinger token: %q", stdout.String())
+	}
+}
+
+func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
+	other := effectiveConfigForShow(baseConfig())
+	if other.Hostinger.WorkRoot != "/home/root/crabbox" ||
+		other.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("unexpected inactive Hostinger defaults: %#v", other)
+	}
+
+	explicit := baseConfig()
+	explicit.Hostinger.WorkRoot = " /home/root/crabbox "
+	if got := effectiveConfigForShow(explicit).Hostinger.WorkRoot; got != explicit.Hostinger.WorkRoot {
+		t.Fatalf("explicit Hostinger work root changed: %q", got)
+	}
+
+	cfg := baseConfig()
+	cfg.Provider = "hostinger"
+	cfg.Hostinger.User = "ubuntu"
+
+	got := effectiveConfigForShow(cfg)
+	if got.WorkRoot != "/home/ubuntu/crabbox" ||
+		got.SSHUser != "ubuntu" ||
+		got.Hostinger.WorkRoot != "/home/ubuntu/crabbox" {
+		t.Fatalf("unexpected effective Hostinger config: %#v", got)
+	}
+}
+
 func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

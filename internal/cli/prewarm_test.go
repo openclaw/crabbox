@@ -96,6 +96,37 @@ cache:
 	}
 }
 
+func TestPrewarmDryRunKeepsLocalContainerVolumeOnWarmupOnly(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{
+		"prewarm",
+		"--dry-run",
+		"--no-hydrate",
+		"--provider", "local-container",
+		"--local-container-volume", "/host/cache:/cache:ro",
+		"--probe-command", "test -r /cache",
+	}); err != nil {
+		t.Fatalf("prewarm dry-run failed: %v\nstderr=%s", err, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("dry-run output lines=%d, want warmup and probe:\n%s", len(lines), stdout.String())
+	}
+	if !strings.Contains(lines[0], "--local-container-volume /host/cache:/cache:ro") {
+		t.Fatalf("warmup plan missing volume flag:\n%s", stdout.String())
+	}
+	if strings.Contains(lines[1], "--local-container-volume") || !strings.Contains(lines[1], "--id '<lease>'") {
+		t.Fatalf("probe plan should reuse the mounted lease without forwarding the creation-only flag:\n%s", stdout.String())
+	}
+}
+
 func TestPrewarmRejectsServiceControlProviderBeforePlan(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

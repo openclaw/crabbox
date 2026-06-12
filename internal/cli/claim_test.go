@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -103,6 +104,43 @@ func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	server := Server{
+		Provider: "aws",
+		CloudID:  "i-1750645",
+		Labels: map[string]string{
+			"provider": "aws",
+			"slug":     "warm",
+		},
+	}
+
+	if err := claimLeaseTargetForConfig("cbx_hostinger123", "warm", cfg, server, SSHTarget{Host: "203.0.113.10"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("cbx_hostinger123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.RepoRoot != "" {
+		t.Fatalf("unexpected unattached provider claim: %#v", claim)
+	}
+
+	repoRoot := t.TempDir()
+	if err := claimLeaseTargetForRepoConfig("cbx_hostinger123", "warm", cfg, server, SSHTarget{Host: "203.0.113.10"}, repoRoot, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("cbx_hostinger123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RepoRoot != repoRoot {
+		t.Fatalf("provider claim was not attached to repo: %#v", claim)
+	}
+}
+
 func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()
@@ -136,6 +174,110 @@ func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	}
 	if claim.Provider != "aws" || claim.CloudID != "i-456" {
 		t.Fatalf("changed claim overwritten: %#v", claim)
+	}
+}
+
+func TestConditionalRepoClaimCanBeRestored(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_transaction123"
+
+	previous, previousExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, "transaction", "kubevirt", "cluster:test", "", "/repo-a", time.Minute, false, previous, previousExists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.RepoRoot != "/repo-a" {
+		t.Fatalf("claimed=%#v", claimed)
+	}
+	if err := restoreLeaseClaimIfUnchanged(leaseID, claimed, previous, previousExists); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("restored absent claim exists=%v err=%v", exists, err)
+	}
+
+	if err := claimLeaseForRepoProviderScope(leaseID, "transaction", "kubevirt", "cluster:test", "/repo-original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	previous, previousExists, err = readLeaseClaimWithPresence(leaseID)
+	if err != nil || !previousExists {
+		t.Fatalf("previous=%#v exists=%v err=%v", previous, previousExists, err)
+	}
+	claimed, err = claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, "transaction", "kubevirt", "cluster:test", "", "/repo-b", time.Minute, true, previous, previousExists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreLeaseClaimIfUnchanged(leaseID, claimed, previous, previousExists); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restored, previous) {
+		t.Fatalf("restored=%#v want %#v", restored, previous)
+	}
+
+	incompleteID := "cbx_incomplete123"
+	path, err := leaseClaimPath(incompleteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous, previousExists, err = readLeaseClaimWithPresence(incompleteID)
+	if err != nil || !previousExists || previous.LeaseID != "" {
+		t.Fatalf("incomplete previous=%#v exists=%v err=%v", previous, previousExists, err)
+	}
+	claimed, err = claimLeaseForRepoProviderScopePondIfUnchanged(incompleteID, "incomplete", "kubevirt", "cluster:test", "", "/repo", time.Minute, false, previous, previousExists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreLeaseClaimIfUnchanged(incompleteID, claimed, previous, previousExists); err != nil {
+		t.Fatal(err)
+	}
+	restored, restoredExists, err := readLeaseClaimWithPresence(incompleteID)
+	if err != nil || !restoredExists || restored.LeaseID != "" {
+		t.Fatalf("restored incomplete=%#v exists=%v err=%v", restored, restoredExists, err)
+	}
+}
+
+func TestReplaceLeaseClaimIfUnchangedPreservesSelectedRuntimeState(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_replace123456"
+	running := Server{
+		Provider: "aws",
+		CloudID:  "i-replace",
+		Labels:   map[string]string{"provider": "aws", "state": "running"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "replace", Config{Provider: "aws"}, running, SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo-b", time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	current, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := cloneLeaseClaim(current)
+	replacement.RepoRoot = "/repo-a"
+	replacement.Labels["state"] = "stopped"
+	replacement.SSHHost = ""
+	replacement.SSHPort = 0
+	if err := replaceLeaseClaimIfUnchanged(leaseID, current, replacement); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.RepoRoot != "/repo-a" || replaced.Labels["state"] != "stopped" || replaced.SSHHost != "" {
+		t.Fatalf("replaced=%#v", replaced)
+	}
+	if err := replaceLeaseClaimIfUnchanged(leaseID, current, replacement); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale replacement err=%v", err)
 	}
 }
 
@@ -290,7 +432,7 @@ func TestReadLeaseClaimWithPresenceDistinguishesEmptyAndMissing(t *testing.T) {
 	}
 }
 
-func TestConditionalClaimDeleteRejectsChangedState(t *testing.T) {
+func TestConditionalClaimActionUpdateRejectsChangedState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_conditionaldelete123"
 	if err := claimLeaseTargetForRepoConfig(leaseID, "first", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-123"}, SSHTarget{}, "/repo", time.Minute, false); err != nil {
@@ -303,8 +445,15 @@ func TestConditionalClaimDeleteRejectsChangedState(t *testing.T) {
 	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeLeaseClaimIfUnchanged(leaseID, expected); err == nil || !strings.Contains(err.Error(), "claim changed") {
-		t.Fatalf("conditional delete err=%v", err)
+	actionCalled := false
+	if _, err := updateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, map[string]string{"state": "stopped"}, func() error {
+		actionCalled = true
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("conditional update err=%v", err)
+	}
+	if actionCalled {
+		t.Fatal("conditional update ran action for changed claim")
 	}
 	changed, err := readLeaseClaim(leaseID)
 	if err != nil {
@@ -313,11 +462,59 @@ func TestConditionalClaimDeleteRejectsChangedState(t *testing.T) {
 	if changed.CloudID != "i-456" {
 		t.Fatalf("changed claim removed: %#v", changed)
 	}
-	if err := removeLeaseClaimIfUnchanged(leaseID, changed); err != nil {
+	updated, err := updateLeaseClaimLabelsIfUnchangedAfter(leaseID, changed, map[string]string{"state": "stopped"}, func() error {
+		actionCalled = true
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if exists, err := leaseClaimExists(leaseID); err != nil || exists {
-		t.Fatalf("claim exists=%v err=%v", exists, err)
+	if !actionCalled {
+		t.Fatal("conditional update did not run action for unchanged claim")
+	}
+	if updated.Labels["state"] != "stopped" {
+		t.Fatalf("updated claim=%#v", updated)
+	}
+}
+
+func TestConditionalClaimEndpointActionUpdatesAtomically(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_conditionalendpoint123"
+	cfg := Config{Provider: "aws"}
+	server := Server{Provider: "aws", CloudID: "i-123", Labels: map[string]string{"provider": "aws", "state": "running"}}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "endpoint", cfg, server, SSHTarget{Host: "203.0.113.10", Port: "22"}, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := server
+	stopped.Labels = map[string]string{"provider": "aws", "state": "stopped"}
+	actionCalled := false
+	updated, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, stopped, SSHTarget{}, func() error {
+		actionCalled = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !actionCalled || updated.Labels["state"] != "stopped" || updated.SSHHost != "" || updated.SSHPort != 0 {
+		t.Fatalf("updated=%#v actionCalled=%v", updated, actionCalled)
+	}
+
+	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	actionCalled = false
+	if _, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, updated, stopped, SSHTarget{}, func() error {
+		actionCalled = true
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("conditional endpoint update err=%v", err)
+	}
+	if actionCalled {
+		t.Fatal("conditional endpoint update ran action for changed claim")
 	}
 }
 
@@ -604,6 +801,33 @@ func TestClaimLeaseForRepoProviderScopePondCacheVolumesStoresInitialClaim(t *tes
 	}
 	if len(claim.CacheVolumes) != 0 {
 		t.Fatalf("cache volumes not cleared on reclaim: %#v", claim.CacheVolumes)
+	}
+}
+
+func TestClaimLeaseForRepoConfigIfUnchangedPreservesEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	leaseID := "cbx_owneronly123"
+	server := Server{
+		CloudID:  "i-owner-only",
+		Provider: "aws",
+		Labels:   map[string]string{"provider": "aws", "slug": "owner-only", "state": "ready"},
+	}
+	target := SSHTarget{Host: "192.0.2.130", Port: "22"}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "owner-only", cfg, server, target, "/repo-a", time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+	expected, expectedExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !expectedExists {
+		t.Fatalf("claim=%#v exists=%v err=%v", expected, expectedExists, err)
+	}
+	claimed, err := claimLeaseForRepoConfigIfUnchanged(leaseID, "owner-only", cfg, "/repo-b", time.Hour, true, expected, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.RepoRoot != "/repo-b" || claimed.SSHHost != target.Host || claimed.SSHPort != 22 {
+		t.Fatalf("claim=%#v", claimed)
 	}
 }
 

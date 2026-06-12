@@ -243,9 +243,10 @@ func (a App) releasePrewarmLeaseAfterPoolFailure(ctx context.Context, backend Ba
 		return
 	}
 	lease, err := sshBackend.Resolve(ctx, ResolveRequest{
-		Repo:    Repo{},
-		Options: leaseOptionsFromConfig(cfg),
-		ID:      leaseID,
+		Repo:        Repo{},
+		Options:     leaseOptionsFromConfig(cfg),
+		ID:          leaseID,
+		ReleaseOnly: true,
 	})
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release skipped: %v\n", leaseID, cause, err)
@@ -356,5 +357,12 @@ func prewarmProviderPassthroughFlags(defaults Config) map[string]bool {
 		}
 		flags[f.Name] = takesValue
 	})
+	for _, provider := range registeredProviders() {
+		if creationOnly, ok := provider.(ProviderCreationOnlyFlagProvider); ok {
+			for _, name := range creationOnly.CreationOnlyFlagNames() {
+				delete(flags, name)
+			}
+		}
+	}
 	return flags
 }

@@ -21,6 +21,7 @@ import (
 func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
 	RegisterProvider(runEnvProfileTestProvider{})
+	RegisterProvider(runPrepareTestProvider{})
 }
 
 type windowsEnvHelperTestProvider struct{}
@@ -140,6 +141,77 @@ func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequ
 }
 func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: b.spec.Name}, nil
+}
+
+type runPrepareTestProvider struct{}
+
+func (runPrepareTestProvider) Name() string { return "run-prepare-test" }
+func (runPrepareTestProvider) Aliases() []string {
+	return nil
+}
+func (runPrepareTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "run-prepare-test",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (runPrepareTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (runPrepareTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p runPrepareTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return runPrepareTestBackend{spec: p.Spec()}, nil
+}
+
+type runPrepareTestBackend struct {
+	spec ProviderSpec
+}
+
+var runPrepareTestResolveRequests []ResolveRequest
+
+func (b runPrepareTestBackend) Spec() ProviderSpec { return b.spec }
+func (b runPrepareTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, exit(9, "unexpected acquire")
+}
+func (b runPrepareTestBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	runPrepareTestResolveRequests = append(runPrepareTestResolveRequests, req)
+	return LeaseTarget{}, exit(9, "resolve captured")
+}
+func (b runPrepareTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b runPrepareTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	return nil
+}
+func (b runPrepareTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	return Server{Provider: b.spec.Name}, nil
+}
+
+func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
+	runPrepareTestResolveRequests = nil
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-prepare-test",
+		"--id", "cbx_existing",
+		"--no-sync",
+		"--",
+		"true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+		t.Fatalf("run error=%v, want resolve-captured exit", err)
+	}
+	if len(runPrepareTestResolveRequests) != 1 {
+		t.Fatalf("resolve requests=%#v, want one", runPrepareTestResolveRequests)
+	}
+	if got := runPrepareTestResolveRequests[0]; got.ID != "cbx_existing" || !got.Prepare {
+		t.Fatalf("resolve request=%#v, want existing id with Prepare", got)
+	}
 }
 
 func TestFormatRunSummary(t *testing.T) {

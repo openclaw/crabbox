@@ -92,8 +92,9 @@ command transport; `stop` shuts the Devbox down (or deletes it when
   SSH host is `<name>.devbox.namespace`.
 - The CLI writes per-host SSH config under `~/.namespace/ssh/`
   (`<host>.ssh` plus a `<host>.key`) and includes it from `~/.ssh/config`.
-- `crabbox stop --provider namespace-devbox` removes that lease's
-  `crabbox-*.devbox.namespace.{ssh,key}` files;
+- `crabbox stop --provider namespace-devbox` keeps that lease's claim and
+  `crabbox-*.devbox.namespace.{ssh,key}` files when it shuts the Devbox down;
+  delete-on-release removes them;
   `crabbox cleanup --provider namespace-devbox` sweeps all Crabbox-owned
   entries under `~/.namespace/ssh/` (use `--dry-run` to preview).
 - `devbox list -o json` prints a non-JSON notice when no Devboxes exist;

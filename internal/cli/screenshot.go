@@ -34,7 +34,7 @@ func (a App) screenshot(ctx context.Context, args []string) error {
 	if err := requireLeaseID(*id, "crabbox screenshot --id <lease-id-or-slug> [--output <path>]", cfg); err != nil {
 		return err
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
 	if err != nil {
 		return err
 	}

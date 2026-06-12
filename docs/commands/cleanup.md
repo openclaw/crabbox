@@ -9,6 +9,7 @@ crabbox cleanup --dry-run
 crabbox cleanup
 crabbox cleanup --provider namespace-devbox --dry-run
 crabbox cleanup --provider namespace-devbox
+crabbox cleanup --provider hostinger --dry-run
 ```
 
 `crabbox machine cleanup` is preserved as a compatibility alias and behaves
@@ -29,9 +30,12 @@ so brokered expiry is owned entirely by the coordinator's TTL alarm. See
 What cleanup does depends on the selected provider:
 
 - **Direct cloud/VM providers** (for example `hetzner`, `aws`, `azure`, `gcp`,
-  `proxmox`, `xcp-ng`, `parallels`, `cloudflare`, `local-container`,
+  `proxmox`, `xcp-ng`, `hostinger`, `parallels`, `cloudflare`, `local-container`,
   `multipass`)
   enumerate the machines they own and decide, per machine, whether to delete it.
+- **`hostinger`** is stop-only: cleanup skips VPSs that are not positively
+  identified as Crabbox-owned and stops matching VPSs; it does not delete VPSs
+  or cancel Hostinger subscriptions.
 - **`namespace-devbox`** removes only Crabbox-owned local Namespace SSH files;
   it does not delete remote Devboxes.
 - Providers that have nothing to sweep return an error rather than acting. For
@@ -79,12 +83,14 @@ prints the same lines but makes no provider calls:
 ```text
 skip server id=12345 name=crabbox-blue-lobster reason=keep=true
 delete server id=67890 name=crabbox-amber-crab
+stop server id=11223 name=crabbox-green-heron
 ```
 
 `skip` lines include a `reason=` (for example `keep=true`, `state=running`,
 `missing expires_at`, `not expired`). Without `--dry-run`, each `delete` line is
 followed by the actual provider delete call; a failed delete returns the provider
-error and stops the sweep.
+error and stops the sweep. Stop-only providers such as Hostinger print `stop`
+instead and make the matching provider stop call.
 
 Namespace local cleanup prints one line per file. `--dry-run` reports the
 intended action instead of removing anything:
@@ -103,7 +109,7 @@ namespace ssh cleanup no crabbox files found
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|xcp-ng|namespace-devbox|cloudflare|multipass
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|multipass
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```

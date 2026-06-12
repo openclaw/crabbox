@@ -524,7 +524,7 @@ type pondKongCmd struct {
 	Peers      pondPeersKongCmd      `cmd:"" passthrough:"" help:"List peer endpoints for a pond on a delegated provider."`
 	Connect    pondConnectKongCmd    `cmd:"" passthrough:"" help:"Open SSH -L forwards to every pond member that declared --expose ports."`
 	Disconnect pondDisconnectKongCmd `cmd:"" passthrough:"" help:"Stop daemonized SSH-mesh forwards for a pond."`
-	Release    pondReleaseKongCmd    `cmd:"" passthrough:"" help:"Stop every lease in the named pond and remove their claims."`
+	Release    pondReleaseKongCmd    `cmd:"" passthrough:"" help:"Stop every lease in the named pond; retain claims for reusable stopped resources."`
 }
 type pondPeersKongCmd struct {
 	Args []string `arg:"" optional:""`

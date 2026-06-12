@@ -33,6 +33,9 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 		return err
 	}
 	cfg.Provider = *provider
+	if err := autoRouteExternalLease(&cfg, fs, *id); err != nil {
+		return err
+	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}

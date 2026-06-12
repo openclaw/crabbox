@@ -36,6 +36,10 @@ type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
 }
 
+type ProviderCreationOnlyFlagProvider interface {
+	CreationOnlyFlagNames() []string
+}
+
 type LeaseClaimEndpointPreparer interface {
 	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
 }
@@ -72,13 +76,26 @@ type DoctorBackend interface {
 	Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error)
 }
 
-type SSHLeaseBackend interface {
+type SSHLoginBackend interface {
 	Backend
-	Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error)
 	Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error)
+}
+
+type LeaseTouchBackend interface {
+	Backend
+	Touch(ctx context.Context, req TouchRequest) (Server, error)
+}
+
+type SSHLeaseBackend interface {
+	SSHLoginBackend
+	LeaseTouchBackend
+	Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error)
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
-	Touch(ctx context.Context, req TouchRequest) (Server, error)
+}
+
+type ResolvedLeaseTargetRebinder interface {
+	RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error
 }
 
 type TailscaleMetadataBackend interface {
@@ -143,6 +160,16 @@ type PausableBackend interface {
 
 type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
+}
+
+type CheckpointForkWorkdirValidator interface {
+	ValidateCheckpointForkWorkdir(ctx context.Context, lease LeaseTarget, workdir string) error
+}
+
+type ReleaseLeaseClaimRetainer interface {
+	// Retained releases must persist terminal state and clear live endpoints
+	// before ReleaseLease returns.
+	RetainLeaseClaimAfterRelease(lease LeaseTarget) bool
 }
 
 type NativeCheckpointCapability struct {
@@ -246,6 +273,10 @@ type NativeCheckpointForkRequest struct {
 
 type NativeCheckpointForkProvider interface {
 	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
+}
+
+type NativeCheckpointForkFlagProvider interface {
+	ApplyNativeCheckpointForkFlags(cfg *Config, fs *flag.FlagSet, values any) error
 }
 
 type JSONListBackend interface {
@@ -447,6 +478,7 @@ type LeaseOptions struct {
 	WindowsMode   string
 	Class         string
 	Pond          string
+	ProviderScope string
 	ServerType    string
 	IdleTimeout   time.Duration
 	TTL           time.Duration
@@ -481,6 +513,7 @@ type ResolveRequest struct {
 	ReleaseOnly bool
 	StatusOnly  bool
 	ReadyProbe  bool
+	Prepare     bool
 }
 
 type ReleaseLeaseRequest struct {
@@ -746,6 +779,9 @@ func applyProviderRoutingFlags(cfg *Config, fs *flag.FlagSet, values providerFla
 }
 
 func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues) error {
+	if flagWasSet(fs, "provider") {
+		cfg.providerExplicit = true
+	}
 	if _, err := routeProviderFlagOverride(cfg, fs, values); err != nil {
 		return err
 	}
@@ -907,6 +943,7 @@ func leaseOptionsFromConfig(cfg Config) LeaseOptions {
 		WindowsMode:   cfg.WindowsMode,
 		Class:         cfg.Class,
 		Pond:          normalizePondName(cfg.Pond),
+		ProviderScope: providerClaimScope(canonicalClaimProvider(cfg.Provider), cfg),
 		ServerType:    cfg.ServerType,
 		IdleTimeout:   cfg.IdleTimeout,
 		TTL:           cfg.TTL,
@@ -1021,7 +1058,7 @@ func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease L
 		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, err)
 		return lease.Server
 	}
-	sshBackend, ok := backend.(SSHLeaseBackend)
+	sshBackend, ok := backend.(LeaseTouchBackend)
 	if !ok {
 		fmt.Fprintf(a.Stderr, "warning: provider=%s does not support lease touch\n", backend.Spec().Name)
 		return lease.Server

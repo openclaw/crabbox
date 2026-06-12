@@ -84,6 +84,7 @@ sync/run/release path. None of them go through the Worker.
 ```text
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 digitalocean     DigitalOcean Droplets                    Linux
+hostinger        Hostinger VPSs over public SSH           Linux
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
 xcp-ng           Self-hosted XCP-ng pool over XAPI        Linux (normal leases)
@@ -148,6 +149,7 @@ railway                 Railway service status and stop controls
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
 - [DigitalOcean](../providers/digitalocean.md): direct Linux Droplet leases.
+- [Hostinger](../providers/hostinger.md): direct Linux VPS leases with explicit purchase opt-in and stop-only release.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
@@ -345,8 +347,10 @@ list, and cleanup.
 
 Delegated-run providers (`cloudflare`, `azure-dynamic-sessions`, `e2b`, `islo`,
 `modal`, `tensorlake`, `upstash-box`, `blacksmith-testbox`, `wandb`) do not use
-the broker or an SSH lease; each owns sandbox lifecycle and command execution and
-syncs through its own API (gzipped archive upload for most). See the linked
+the broker for run execution; each owns sandbox lifecycle and command execution
+and syncs through its own API (gzipped archive upload for most). Islo also
+exposes a direct `crabbox ssh` login helper for kept sandboxes at
+`<sandbox>.islo`, but Islo run/sync remains delegated. See the linked
 provider pages for per-provider auth and configuration.
 
 ## Static SSH targets

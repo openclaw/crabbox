@@ -39,6 +39,22 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
+	if core.FlagWasSet(fs, "external-routing-file") {
+		cfg.External.RoutingFile = *v.RoutingFile
+		routing, err := core.LoadExternalRouting(cfg.External.RoutingFile)
+		if err != nil {
+			return core.Exit(2, "%v", err)
+		}
+		cfg.External = routing
+		cfg.WorkRoot = externalWorkRoot(*cfg)
+	} else if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !core.ExternalRoutingLoaded(cfg.External) {
+		routing, err := core.LoadExternalRouting(path)
+		if err != nil {
+			return core.Exit(2, "%v", err)
+		}
+		cfg.External = routing
+		cfg.WorkRoot = externalWorkRoot(*cfg)
+	}
 	if core.FlagWasSet(fs, "external-command") {
 		cfg.External.Command = *v.Command
 	}
@@ -55,15 +71,6 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "external-work-root") {
 		cfg.External.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
-	}
-	if core.FlagWasSet(fs, "external-routing-file") {
-		cfg.External.RoutingFile = *v.RoutingFile
-		routing, err := core.LoadExternalRouting(cfg.External.RoutingFile)
-		if err != nil {
-			return core.Exit(2, "%v", err)
-		}
-		cfg.External = routing
-		cfg.WorkRoot = externalWorkRoot(*cfg)
 	}
 	return validateConfig(*cfg)
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -82,6 +83,7 @@ func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "morph-delete-on-release") {
 		cfg.Morph.DeleteOnRelease = *v.DeleteOnRelease
+		markDeleteOnReleaseExplicit(cfg)
 	}
 	if flagWasSet(fs, "morph-wake-on-ssh") {
 		cfg.Morph.WakeOnSSH = *v.WakeOnSSH
@@ -110,6 +112,11 @@ func NewMorphBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 }
 
 func (b *morphLeaseBackend) Spec() ProviderSpec { return b.spec }
+
+func (b *morphLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
 
 func (b *morphLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
 	cfg := b.configForRun()
@@ -245,7 +252,7 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	return createdLease, nil
 }
 
-func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
 	cfg := b.configForRun()
 	client, err := b.api()
 	if err != nil {
@@ -258,6 +265,27 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	server := morphServer(instance, cfg, leaseID, slug)
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return LeaseTarget{LeaseID: leaseID, Server: server}, nil
+	}
+	var previousClaim, preflightClaim LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := restoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Morph lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
+	if req.Repo.Root != "" {
+		previousClaim, previousClaimExists, err = readLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		preflightClaim, err = claimLeaseForRepoProviderIfUnchanged(leaseID, slug, providerName, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = true
 	}
 	needsReady := !req.StatusOnly || req.ReadyProbe
 	if needsReady {
@@ -294,6 +322,12 @@ func (b *morphLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 			instance = refreshed
 			server = morphServer(instance, cfg, leaseID, slug)
 		}
+	}
+	if req.Repo.Root != "" {
+		if _, err = updateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, server, target); err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = false
 	}
 	return LeaseTarget{LeaseID: leaseID, Server: server, SSH: target}, nil
 }
@@ -367,26 +401,53 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		removeStoredTestboxKey(blank(leaseID, instanceID))
 		return nil
 	}
-	if cfg.Morph.DeleteOnRelease {
+	claim, claimOK, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		return err
+	}
+	deleteInstance := morphDeleteOnRelease(req.Lease, cfg)
+	if deleteInstance {
 		if err := client.DeleteInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
 			return exit(1, "morph delete instance %s failed: %v", instance.ID, err)
 		}
-	} else if !morphInstancePaused(instance) {
-		if err := client.PauseInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
-			return exit(1, "morph pause instance %s failed: %v", instance.ID, err)
-		}
+		removeLeaseClaim(leaseID)
+		removeStoredTestboxKey(blank(leaseID, instance.ID))
+		return nil
 	}
-	removeLeaseClaim(leaseID)
-	removeStoredTestboxKey(blank(leaseID, instance.ID))
-	return nil
+	wasPaused := morphInstancePaused(instance)
+	instance.Status = "paused"
+	labels := morphLeaseMetadata(cfg, instance, leaseID, req.Lease.Server.Labels["slug"], "paused", true, b.now().UTC(), true)
+	labels["release"] = "pause"
+	pauseAndPersist := func() error {
+		if !wasPaused {
+			if err := client.PauseInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
+				return exit(1, "morph pause instance %s failed: %v", instance.ID, err)
+			}
+		}
+		if err := client.SetInstanceMetadata(ctx, instance.ID, labels); err != nil {
+			return exit(1, "morph persist paused metadata for %s failed: %v", instance.ID, err)
+		}
+		return nil
+	}
+	instance.Metadata = labels
+	server := morphServer(instance, cfg, leaseID, labels["slug"])
+	if claimOK {
+		_, err = updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, pauseAndPersist)
+		return err
+	}
+	return pauseAndPersist()
 }
 
 func (b *morphLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	instance := blank(blank(lease.Server.CloudID, lease.Server.Labels["instance_id"]), "-")
-	if b.configForRun().Morph.DeleteOnRelease {
+	if morphDeleteOnRelease(lease, b.configForRun()) {
 		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
 	}
 	return fmt.Sprintf("paused lease=%s instance=%s retained=true", lease.LeaseID, instance)
+}
+
+func (b *morphLeaseBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+	return !morphDeleteOnRelease(lease, b.configForRun())
 }
 
 func (b *morphLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
@@ -700,6 +761,9 @@ func morphLeaseMetadata(cfg Config, instance morphInstance, leaseID, slug, state
 	if name := leaseProviderName(blank(leaseID, instance.ID), slug); name != "" {
 		labels["lease_name"] = name
 	}
+	if strings.TrimSpace(labels["release"]) == "" {
+		labels["release"] = morphReleaseAction(cfg)
+	}
 	return labels
 }
 
@@ -887,6 +951,28 @@ func morphTTLAction(cfg Config) string {
 		return "stop"
 	}
 	return "pause"
+}
+
+func morphReleaseAction(cfg Config) string {
+	if cfg.Morph.DeleteOnRelease {
+		return "delete"
+	}
+	return "pause"
+}
+
+func morphDeleteOnRelease(lease LeaseTarget, cfg Config) bool {
+	if deleteOnReleaseExplicit(cfg) {
+		return cfg.Morph.DeleteOnRelease
+	}
+	if lease.Server.Labels != nil {
+		switch strings.ToLower(strings.TrimSpace(lease.Server.Labels["release"])) {
+		case "delete":
+			return true
+		case "pause":
+			return false
+		}
+	}
+	return cfg.Morph.DeleteOnRelease
 }
 
 func morphTTLSecondsFromLabels(labels map[string]string, now time.Time) int {

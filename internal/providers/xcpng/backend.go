@@ -117,7 +117,7 @@ func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) c
 	if cfg.ServerType == "" {
 		cfg.ServerType = xcpNgServerTypeForConfig(cfg)
 	}
-	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
+	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

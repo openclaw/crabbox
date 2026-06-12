@@ -13,7 +13,7 @@ The command has four subcommands:
 | `pond peers`        | List every peer in a pond with a transport hint and endpoint.           |
 | `pond connect`      | Open operator-side SSH `-L` forwards to members' `--expose` ports.      |
 | `pond disconnect`   | Stop daemonized SSH-mesh forwards started by `pond connect --export`.   |
-| `pond release`      | Stop every lease in the pond and remove its local claims.               |
+| `pond release`      | Stop every lease; retain claims for reusable stopped resources.         |
 
 ```sh
 crabbox pond peers --pond alpha
@@ -194,10 +194,12 @@ operator hosts.
 crabbox pond release <name>
 ```
 
-Stops every locally claimed lease in the named pond, across all providers, and
-removes their claim sidecars on success. No `--provider` flag is needed — the
-command iterates every local claim whose pond label matches. For each claim it
-loads the provider backend and calls the appropriate stop path
+Stops every locally claimed lease in the named pond, across all providers.
+Claims are removed when release destroys the resource; providers that retain a
+reusable stopped resource keep the claim and report `claim_retained=true`. No
+`--provider` flag is needed — the command iterates every local claim whose pond
+label matches. For each claim it loads the provider backend and calls the
+appropriate stop path
 (`DelegatedRunBackend.Stop` for delegated providers, `ReleaseLease` for SSH-lease
 providers). Leases on providers without a stop-capable backend are skipped with a
 warning. Individual stop failures are logged as warnings and do not block the

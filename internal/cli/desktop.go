@@ -47,19 +47,11 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 		*id = fs.Arg(0)
 		positionalID = true
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
 		return err
 	}
-	cfg.Provider = *provider
-	cfg.Desktop = true
 	cfg.Browser = *browser
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
-		return err
-	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
 		return err
 	}
@@ -69,7 +61,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	if *id == "" && !isStaticProvider(cfg.Provider) {
 		return exit(2, "usage: crabbox desktop launch --id <lease-id-or-slug> [--browser] [--url <url>] -- <command...>")
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, false, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -80,7 +72,7 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -192,16 +184,8 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 		positionalID = true
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
-		return err
-	}
-	cfg.Provider = *provider
-	cfg.Desktop = true
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return err
 	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
@@ -215,7 +199,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		command = command[1:]
 	}
 	command = trimCommandSeparator(command)
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, false, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -229,7 +213,7 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
@@ -384,16 +368,8 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 		positionalID = true
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, Desktop: true})
 	if err != nil {
-		return err
-	}
-	cfg.Provider = *provider
-	cfg.Desktop = true
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
-	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return err
 	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
@@ -407,7 +383,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		command = command[1:]
 	}
 	command = trimCommandSeparator(command)
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, false, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -421,7 +397,7 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
