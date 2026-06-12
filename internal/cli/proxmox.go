@@ -1174,7 +1174,13 @@ func (c *ProxmoxClient) getServer(ctx context.Context, id string, requireConfig 
 	}
 	labels := map[string]string{}
 	var config map[string]any
-	configErr := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), nil, &config)
+	configPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid)
+	var configErr error
+	if requireConfig {
+		configErr = c.doRequired(ctx, http.MethodGet, configPath, nil, &config)
+	} else {
+		configErr = c.do(ctx, http.MethodGet, configPath, nil, &config)
+	}
 	if configErr == nil {
 		if desc, ok := config["description"].(string); ok {
 			labels = proxmoxDescriptionLabels(desc)

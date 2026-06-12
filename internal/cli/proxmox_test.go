@@ -1004,6 +1004,31 @@ func TestProxmoxListCrabboxServersClusterFailsWhenConfigUnreadable(t *testing.T)
 	}
 }
 
+func TestProxmoxListCrabboxServersClusterRejectsNullConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/vms": map[string]any{"VM.Audit": 1}}})
+		case "/api2/json/cluster/resources":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 101, "node": "pve2", "type": "qemu", "name": "crabbox-null-config", "template": 0},
+			}})
+		case "/api2/json/nodes/pve2/qemu/101/status/current":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"vmid": 101, "name": "crabbox-null-config", "status": "running"}})
+		case "/api2/json/nodes/pve2/qemu/101/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": nil})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	if _, err := client.ListCrabboxServersCluster(context.Background()); err == nil || !strings.Contains(err.Error(), "missing required data") {
+		t.Fatalf("err=%v, want null config rejection", err)
+	}
+}
+
 func TestProxmoxVMExistsInClusterRejectsFilteredInventory(t *testing.T) {
 	resourcesCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -167,7 +167,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		if _, err := strconv.Atoi(req.ID); err == nil || strings.HasPrefix(req.ID, "crabbox-") {
 			server, err := client.GetServer(ctx, req.ID)
 			if err != nil {
-				if !core.IsProxmoxNotFound(err) {
+				if !core.IsProxmoxNotFound(err) && !req.ReleaseOnly {
 					return LeaseTarget{}, err
 				}
 			} else {
@@ -178,7 +178,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 			}
 		}
 	}
-	servers, err := client.ListCrabboxServers(ctx)
+	servers, err := client.ListCrabboxServersCluster(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -226,8 +226,6 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 			return LeaseTarget{}, exit(2, "refusing to release Proxmox VM %s from stale local claim lease=%s", cloudID, claim.LeaseID)
 		}
 		return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
-	} else if !core.IsProxmoxNotFound(err) {
-		return LeaseTarget{}, err
 	}
 	claimScope := strings.TrimSpace(claim.ProviderScope)
 	currentScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))

@@ -1235,10 +1235,9 @@ func TestProxmoxReleaseResolvesAndDeletesMigratedTarget(t *testing.T) {
 	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
 		t.Fatal(err)
 	}
-	notFound := &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"}
 	fake := &fakeProxmoxDoctorClient{
 		clusterServers: []Server{migrated},
-		getErrByID:     map[string]error{"101": notFound},
+		getErrByID:     map[string]error{"101": errors.New("source node unavailable")},
 	}
 	oldClient := newClient
 	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
