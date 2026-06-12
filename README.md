@@ -152,6 +152,7 @@ configured); every other provider always runs direct from the CLI.
 | [Cloudflare](docs/providers/cloudflare.md) — `cloudflare` (`cf`) | Linux | Cloudflare Containers via the Worker runtime. |
 | [Docker Sandbox](docs/providers/docker-sandbox.md) — `docker-sandbox` | Linux | Docker Sandboxes through the standalone `sbx` CLI. |
 | [E2B](docs/providers/e2b.md) — `e2b` | Linux | E2B Firecracker sandbox. |
+| [Freestyle](docs/providers/freestyle.md) — `freestyle` | Linux | Freestyle VMs through the Freestyle REST API. |
 | [Islo](docs/providers/islo.md) — `islo` | Linux | Islo sandbox. |
 | [Modal](docs/providers/modal.md) — `modal` | Linux | Modal Sandbox through the local Python client. |
 | [Microsoft Execution Containers](docs/providers/mxc.md) — `mxc` (`execution-container`) | Windows | Policy-driven local Windows process containment. |

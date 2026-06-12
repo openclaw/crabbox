@@ -112,6 +112,7 @@ cloudflare              Cloudflare Containers (Worker runtime)
 azure-dynamic-sessions  Azure Container Apps custom-container Dynamic Sessions
 docker-sandbox          Docker Sandboxes through the standalone sbx CLI
 e2b                     E2B Firecracker sandboxes
+freestyle               Freestyle VMs
 islo                    Islo sandboxes
 modal                   Modal Sandboxes
 opencomputer            OpenComputer Linux VMs
@@ -162,6 +163,7 @@ railway                 Railway service status and stop controls
 - [Anthropic Sandbox Runtime](../providers/anthropic-sandbox-runtime.md): local one-shot delegated execution through `srt` on macOS/Linux.
 - [Islo](../providers/islo.md): delegated Islo sandbox execution.
 - [E2B](../providers/e2b.md): delegated E2B sandbox execution.
+- [Freestyle](../providers/freestyle.md): delegated Freestyle VM execution.
 - [Modal](../providers/modal.md): delegated Modal Sandbox execution.
 - [OpenComputer](../providers/opencomputer.md): delegated OpenComputer Linux VM execution through the OpenComputer REST API.
 - [Tensorlake](../providers/tensorlake.md): delegated Tensorlake Firecracker sandbox execution.
