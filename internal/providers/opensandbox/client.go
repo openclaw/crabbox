@@ -436,13 +436,14 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 	}
 	exitCode := 0
 	terminal := false
+	outputState := commandOutputState{}
 	err = c.runCommandStream(ctx, conn, sdk.RunCommandRequest{
 		Command: strings.TrimSpace(req.Command),
 		Cwd:     req.Workdir,
 		Timeout: int64(req.TimeoutSecs) * int64(time.Second/time.Millisecond),
 		Envs:    req.Env,
 	}, func(event commandStreamEvent) error {
-		result, err := c.handleCommandEvent(event)
+		result, err := c.handleCommandEventWithState(event, &outputState)
 		if result.exitCode != nil {
 			exitCode = *result.exitCode
 		} else if result.errorEvent && exitCode == 0 {
@@ -575,7 +576,16 @@ type commandEventResult struct {
 	terminal   bool
 }
 
+type commandOutputState struct {
+	stdout bool
+	stderr bool
+}
+
 func (c *sdkOpenSandboxClient) handleCommandEvent(event commandStreamEvent) (commandEventResult, error) {
+	return c.handleCommandEventWithState(event, &commandOutputState{})
+}
+
+func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEvent, outputState *commandOutputState) (commandEventResult, error) {
 	if strings.TrimSpace(event.Data) == "" {
 		return commandEventResult{}, nil
 	}
@@ -631,13 +641,13 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event commandStreamEvent) (com
 	}
 	switch eventType {
 	case "stdout":
-		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
+		err := writeCommandOutput(c.rt.Stdout, commandOutput(payload.Text, payload.Data), &outputState.stdout)
 		return commandEventResult{}, err
 	case "result":
 		_, err := io.WriteString(c.rt.Stdout, commandOutput(payload.Text, payload.Data))
 		return commandEventResult{}, err
 	case "stderr":
-		_, err := io.WriteString(c.rt.Stderr, commandOutput(payload.Text, payload.Data))
+		err := writeCommandOutput(c.rt.Stderr, commandOutput(payload.Text, payload.Data), &outputState.stderr)
 		return commandEventResult{}, err
 	case "error":
 		value := payload.EValue
@@ -660,6 +670,19 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event commandStreamEvent) (com
 		return commandEventResult{terminal: true}, nil
 	}
 	return commandEventResult{}, nil
+}
+
+func writeCommandOutput(w io.Writer, value string, previous *bool) error {
+	if *previous {
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(w, value); err != nil {
+		return err
+	}
+	*previous = true
+	return nil
 }
 
 func commandOutput(text, data string) string {

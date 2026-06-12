@@ -1107,6 +1107,25 @@ func TestCommandEventUsesDataFieldForOutput(t *testing.T) {
 	}
 }
 
+func TestCommandEventPreservesStructuredOutputLineBoundaries(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
+	state := commandOutputState{}
+	for _, event := range []commandStreamEvent{
+		streamEvent(`{"type":"stdout","text":"line1"}`),
+		streamEvent(`{"type":"stderr","text":"warn1"}`),
+		streamEvent(`{"type":"stdout","text":"line2"}`),
+		streamEvent(`{"type":"stderr","text":"warn2"}`),
+	} {
+		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stdout.String() != "line1\nline2" || stderr.String() != "warn1\nwarn2" {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestCommandEventPreservesOutputWhitespace(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
