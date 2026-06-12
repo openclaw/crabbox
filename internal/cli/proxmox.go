@@ -649,12 +649,8 @@ func (c *ProxmoxClient) proxmoxPoolCheck(ctx context.Context, cfg Config) Proxmo
 }
 
 func (c *ProxmoxClient) proxmoxInventoryCheck(ctx context.Context) ProxmoxReadinessCheck {
-	nextID, err := c.nextID(ctx)
-	if err != nil {
-		return c.proxmoxFailedReadiness("inventory", "/cluster/nextid", err, map[string]string{"scope": "cluster"})
-	}
-	permissionPath := "/vms/" + strconv.Itoa(nextID)
-	if err := c.requireVMAudit(ctx, permissionPath); err != nil {
+	permissionPath := "/vms"
+	if err := c.requirePropagatedVMAudit(ctx, permissionPath); err != nil {
 		return c.proxmoxFailedReadiness("inventory", "/access/permissions?path="+permissionPath, err, map[string]string{"scope": "cluster", "permissionPath": permissionPath})
 	}
 	vms, err := c.listClusterVMs(ctx)
@@ -841,6 +837,17 @@ func (c *ProxmoxClient) requireVMAudit(ctx context.Context, path string) error {
 	return nil
 }
 
+func (c *ProxmoxClient) requirePropagatedVMAudit(ctx context.Context, path string) error {
+	var permissions map[string]map[string]proxmoxInt
+	if err := c.doRequired(ctx, http.MethodGet, "/access/permissions?path="+url.QueryEscape(path), nil, &permissions); err != nil {
+		return err
+	}
+	if propagated, ok := permissions[path]["VM.Audit"]; !ok || propagated == 0 {
+		return fmt.Errorf("permission denied: authoritative Proxmox inventory requires propagated VM.Audit on %s", path)
+	}
+	return nil
+}
+
 func (c *ProxmoxClient) listQEMU(ctx context.Context) ([]proxmoxVM, error) {
 	var vms []proxmoxVM
 	if err := c.doRequired(ctx, http.MethodGet, "/nodes/"+url.PathEscape(c.Node)+"/qemu", nil, &vms); err != nil {
@@ -874,6 +881,9 @@ func (c *ProxmoxClient) ListCrabboxServers(ctx context.Context) ([]Server, error
 }
 
 func (c *ProxmoxClient) ListCrabboxServersCluster(ctx context.Context) ([]Server, error) {
+	if err := c.requirePropagatedVMAudit(ctx, "/vms"); err != nil {
+		return nil, err
+	}
 	vms, err := c.listClusterVMs(ctx)
 	if err != nil {
 		return nil, err
@@ -908,7 +918,7 @@ func (c *ProxmoxClient) listClusterVMs(ctx context.Context) ([]proxmoxClusterVM,
 func (c *ProxmoxClient) GetServerOnNode(ctx context.Context, node, id string) (Server, error) {
 	scoped := *c
 	scoped.Node = node
-	return scoped.GetServer(ctx, id)
+	return scoped.getServer(ctx, id, true)
 }
 
 func (c *ProxmoxClient) VMExistsInCluster(ctx context.Context, id string) (bool, error) {
@@ -1115,6 +1125,10 @@ func (c *ProxmoxClient) DeleteServer(ctx context.Context, id string) error {
 }
 
 func (c *ProxmoxClient) GetServer(ctx context.Context, id string) (Server, error) {
+	return c.getServer(ctx, id, false)
+}
+
+func (c *ProxmoxClient) getServer(ctx context.Context, id string, requireConfig bool) (Server, error) {
 	vmid, err := strconv.Atoi(strings.TrimSpace(id))
 	if err != nil {
 		return c.getServerByName(ctx, id)
@@ -1125,7 +1139,8 @@ func (c *ProxmoxClient) GetServer(ctx context.Context, id string) (Server, error
 	}
 	labels := map[string]string{}
 	var config map[string]any
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), nil, &config); err == nil {
+	configErr := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), vmid), nil, &config)
+	if configErr == nil {
 		if desc, ok := config["description"].(string); ok {
 			labels = proxmoxDescriptionLabels(desc)
 		}
@@ -1134,6 +1149,8 @@ func (c *ProxmoxClient) GetServer(ctx context.Context, id string) (Server, error
 				status.Name = name
 			}
 		}
+	} else if requireConfig {
+		return Server{}, configErr
 	}
 	ip, _ := c.guestIPv4(ctx, vmid)
 	server := proxmoxVMToServer(c.Node, status, labels, ip)

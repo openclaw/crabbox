@@ -844,6 +844,8 @@ func TestProxmoxVMExistsInCluster(t *testing.T) {
 func TestProxmoxListsCrabboxServersAcrossClusterNodes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/vms": map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/resources":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
 				map[string]any{"vmid": 101, "node": "pve2", "type": "qemu", "name": "crabbox-cross-node", "template": 0},
@@ -873,6 +875,63 @@ func TestProxmoxListsCrabboxServersAcrossClusterNodes(t *testing.T) {
 	}
 }
 
+func TestProxmoxListCrabboxServersClusterRequiresPropagatedVMAudit(t *testing.T) {
+	resourcesCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/vms": map[string]any{"VM.Audit": 0}}})
+		case "/api2/json/cluster/resources":
+			resourcesCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	if _, err := client.ListCrabboxServersCluster(context.Background()); err == nil || !strings.Contains(err.Error(), "propagated VM.Audit") {
+		t.Fatalf("err=%v, want authoritative inventory failure", err)
+	}
+	if resourcesCalled {
+		t.Fatal("cluster inventory queried without propagated VM.Audit")
+	}
+}
+
+func TestProxmoxListCrabboxServersClusterFailsWhenConfigUnreadable(t *testing.T) {
+	agentCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/access/permissions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/vms": map[string]any{"VM.Audit": 1}}})
+		case "/api2/json/cluster/resources":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 101, "node": "pve2", "type": "qemu", "name": "crabbox-cross-node", "template": 0},
+			}})
+		case "/api2/json/nodes/pve2/qemu/101/status/current":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"vmid": 101, "name": "crabbox-cross-node", "status": "running"}})
+		case "/api2/json/nodes/pve2/qemu/101/config":
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": "permission denied"})
+		case "/api2/json/nodes/pve2/qemu/101/agent/network-get-interfaces":
+			agentCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{}})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	if _, err := client.ListCrabboxServersCluster(context.Background()); err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("err=%v, want config read failure", err)
+	}
+	if agentCalled {
+		t.Fatal("guest agent queried after ownership config failed")
+	}
+}
+
 func TestProxmoxVMExistsInClusterRejectsFilteredInventory(t *testing.T) {
 	resourcesCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -898,14 +957,12 @@ func TestProxmoxVMExistsInClusterRejectsFilteredInventory(t *testing.T) {
 	}
 }
 
-func TestProxmoxInventoryReadinessRequiresVMAuditOnNextVM(t *testing.T) {
+func TestProxmoxInventoryReadinessRequiresPropagatedVMAudit(t *testing.T) {
 	resourcesCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api2/json/cluster/nextid":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": 101})
 		case "/api2/json/access/permissions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"Sys.Audit": 1}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/vms": map[string]any{"VM.Audit": 0}}})
 		case "/api2/json/cluster/resources":
 			resourcesCalled = true
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
@@ -921,7 +978,7 @@ func TestProxmoxInventoryReadinessRequiresVMAuditOnNextVM(t *testing.T) {
 		t.Fatalf("inventory check=%#v", check)
 	}
 	if resourcesCalled {
-		t.Fatal("cluster inventory queried without VM.Audit on the next VM path")
+		t.Fatal("cluster inventory queried without propagated VM.Audit")
 	}
 }
 

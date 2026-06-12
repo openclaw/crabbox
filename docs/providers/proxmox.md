@@ -152,11 +152,11 @@ referenced by the template must be active and enabled. VM disk, cloud-init,
 EFI, and TPM stores must support `images`; CD-ROM stores must support `iso`.
 The configured template must have a cloud-init drive and, when no bridge
 override is set, `net0` on an active bridge. A configured pool must be readable.
-The inventory check verifies effective `VM.Audit` on the next available
-`/vms/<vmid>` path before reading cluster-wide QEMU inventory. Release recovery
-checks the exact target `/vms/<vmid>` path before accepting absence, so a
-permission-filtered `/cluster/resources` response is not treated as proof that
-the target VM is absent.
+The inventory check requires propagated `VM.Audit` on `/vms` before reading
+cluster-wide QEMU inventory. Release recovery checks the exact target
+`/vms/<vmid>` path before accepting absence. Cluster reconciliation also fails
+closed if any candidate VM config cannot be read, so a permission-filtered or
+partially unreadable `/cluster/resources` response is not treated as complete.
 The output includes `mutation=false`; it does not clone, configure, start,
 stop, or delete VMs.
 
@@ -245,7 +245,7 @@ bridge     configured bridge or the template net0 bridge is active
 template   /nodes/<node>/qemu and /config show templateId is a QEMU template
 nextid     /cluster/nextid is readable
 pool       configured /pools/<pool> is readable, when set
-inventory  next VM path has effective VM.Audit and cluster inventory is readable
+inventory  /vms has propagated VM.Audit and cluster inventory is readable
 mutation   always reports mutation=false
 ```
 
@@ -270,10 +270,9 @@ for lease lifecycle operations:
 
 The exact least-privilege role depends on the Proxmox VE version and local ACL
 model. If doctor fails with `class=permission`, fix the named endpoint first and
-rerun doctor before attempting `warmup` or `run`. Doctor checks effective
-`VM.Audit` on the next available `/vms/<vmid>` path. Release recovery checks
-the exact target path before treating `/cluster/resources?type=vm` as
-authoritative for that VM.
+rerun doctor before attempting `warmup` or `run`. Doctor requires propagated
+`VM.Audit` on `/vms`. Release recovery checks the exact target path before
+treating `/cluster/resources?type=vm` as authoritative for that VM.
 
 For CI or lab smoke checks after building the local binary:
 

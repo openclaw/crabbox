@@ -505,6 +505,40 @@ func TestProxmoxCleanupPreservesResidueForMismatchedClaimCloudID(t *testing.T) {
 	assertStoredTestboxKeyExists(t, leaseID)
 }
 
+func TestProxmoxCleanupPreservesResidueWhenClusterInventoryFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_cluster_inventory_failure"
+	server := expiredProxmoxServer("101", leaseID)
+	server.Provider = "proxmox"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{
+		servers:        []Server{server},
+		clusterListErr: errors.New("cluster inventory unavailable"),
+	}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	var stderr strings.Builder
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*leaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "cluster inventory unavailable") {
+		t.Fatalf("cleanup error=%v, want cluster inventory failure", err)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v, want preserved", ok, err)
+	}
+	assertStoredTestboxKeyExists(t, leaseID)
+	if !strings.Contains(stderr.String(), "reason=cluster_inventory_refresh_failed") {
+		t.Fatalf("stderr=%q, want cluster reconciliation warning", stderr.String())
+	}
+}
+
 func TestProxmoxCleanupPreservesClaimFromDifferentClusterScope(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
