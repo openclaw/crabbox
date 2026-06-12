@@ -44,13 +44,18 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-resolve_configured_api_url() {
-  "$bin" config show --json 2>/dev/null | jq -r '.proxmox.apiUrl // empty'
+resolve_configured_value() {
+  local field="$1"
+  "$bin" config show --json 2>/dev/null | jq -r --arg field "$field" '.proxmox[$field] // empty'
 }
 
 redaction_api_url="${CRABBOX_PROXMOX_API_URL:-}"
 if [[ -z "$redaction_api_url" ]]; then
-  redaction_api_url="$(resolve_configured_api_url || true)"
+  redaction_api_url="$(resolve_configured_value apiUrl || true)"
+fi
+redaction_token_id="${CRABBOX_PROXMOX_TOKEN_ID:-}"
+if [[ -z "$redaction_token_id" ]]; then
+  redaction_token_id="$(resolve_configured_value tokenId || true)"
 fi
 redaction_api_host="$(
   printf '%s' "$redaction_api_url" |
@@ -58,6 +63,7 @@ redaction_api_host="$(
 )"
 export CRABBOX_PROXMOX_REDACT_API_URL="$redaction_api_url"
 export CRABBOX_PROXMOX_REDACT_API_HOST="$redaction_api_host"
+export CRABBOX_PROXMOX_REDACT_TOKEN_ID="$redaction_token_id"
 
 directory_is_private() {
   local mode=""
@@ -126,7 +132,7 @@ redact_stream() {
   perl -pe '
     BEGIN {
       $token_secret = $ENV{"CRABBOX_PROXMOX_TOKEN_SECRET"} // "";
-      $token_id = $ENV{"CRABBOX_PROXMOX_TOKEN_ID"} // "";
+      $token_id = $ENV{"CRABBOX_PROXMOX_REDACT_TOKEN_ID"} // "";
       $api_url = $ENV{"CRABBOX_PROXMOX_REDACT_API_URL"} // "";
       $api_host = $ENV{"CRABBOX_PROXMOX_REDACT_API_HOST"} // "";
       $inventory_host = $ENV{"CRABBOX_PROXMOX_SSH_INVENTORY_HOST"} // "";

@@ -960,7 +960,7 @@ func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing
 	assertStoredTestboxKeyExists(t, leaseID)
 }
 
-func TestProxmoxReleaseRemovesExactClaimWhenInventoryRefreshFails(t *testing.T) {
+func TestProxmoxReleasePreservesExactClaimWhenInventoryRefreshFails(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_proxmox_release_inventory_failure"
@@ -982,11 +982,12 @@ func TestProxmoxReleaseRemovesExactClaimWhenInventoryRefreshFails(t *testing.T) 
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
-		t.Fatalf("claim ok=%t err=%v, want removed after confirmed deletion", ok, err)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.CloudID != "101" {
+		t.Fatalf("claim=%#v ok=%t err=%v, want preserved until duplicate reconciliation", claim, ok, err)
 	}
-	assertStoredTestboxKeyRemoved(t, leaseID)
-	if !strings.Contains(stderr.String(), "reconcile Proxmox lease after release") {
+	assertStoredTestboxKeyExists(t, leaseID)
+	if !strings.Contains(stderr.String(), "reason=inventory_refresh_failed") {
 		t.Fatalf("stderr=%q, want reconciliation warning", stderr.String())
 	}
 }

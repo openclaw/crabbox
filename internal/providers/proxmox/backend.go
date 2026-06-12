@@ -224,8 +224,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	}
 	remaining, err := client.ListCrabboxServers(ctx)
 	if err != nil {
-		fmt.Fprintf(b.RT.Stderr, "warning: reconcile Proxmox lease after release lease=%s error=%v\n", leaseID, err)
-		removeReleasedLeaseResidueWithoutInventory(leaseID, id, b.RT.Stderr)
+		fmt.Fprintf(b.RT.Stderr, "warning: preserve local lease residue lease=%s reason=inventory_refresh_failed error=%v\n", leaseID, err)
 		return nil
 	}
 	deleted := req.Lease.Server
@@ -238,27 +237,6 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	}
 	removeCleanupLeaseResidue(ctx, client, deleted, remaining, b.Cfg, b.RT.Stderr)
 	return nil
-}
-
-func removeReleasedLeaseResidueWithoutInventory(leaseID, deletedCloudID string, stderr io.Writer) {
-	claim, found, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil {
-		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_read_failed error=%v\n", leaseID, err)
-		return
-	}
-	if !found {
-		removeStoredTestboxKey(leaseID)
-		return
-	}
-	if claim.Provider != "proxmox" || (claim.CloudID != "" && claim.CloudID != deletedCloudID) {
-		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_cloud_mismatch\n", leaseID)
-		return
-	}
-	if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
-		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_changed error=%v\n", leaseID, err)
-		return
-	}
-	removeStoredTestboxKey(leaseID)
 }
 
 func (b *leaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {

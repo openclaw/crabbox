@@ -27,11 +27,11 @@ set -euo pipefail
 printf '%s\\n' "$*" >>"${calls}"
 case "$1" in
   config)
-    printf '{"proxmox":{"apiUrl":"https://config-only.secret.example:8006"}}\\n'
+    printf '{"proxmox":{"apiUrl":"https://config-only.secret.example:8006","tokenId":"config-only@pve!ci"}}\\n'
     ;;
   doctor)
     if [[ "\${FAKE_CRABBOX_FAIL_DOCTOR:-0}" == "1" ]]; then
-      printf '{"ok":false,"provider":"proxmox","checks":[{"status":"failed","check":"storage","message":"url=https://config-only.secret.example:8006 lookup config-only.secret.example"}]}\\n'
+      printf '{"ok":false,"provider":"proxmox","checks":[{"status":"failed","check":"storage","message":"url=https://config-only.secret.example:8006 lookup config-only.secret.example principal=config-only@pve!ci"}]}\\n'
       exit 1
     fi
     printf '{"ok":true,"provider":"proxmox","checks":[{"status":"ok","check":"auth","message":"url=%s token=%s secret=%s"}]}\\n' "\${CRABBOX_PROXMOX_API_URL:-}" "\${CRABBOX_PROXMOX_TOKEN_ID:-}" "\${CRABBOX_PROXMOX_TOKEN_SECRET:-}"
@@ -223,8 +223,8 @@ test("live mode does not mutate when readiness preflight fails", () => {
 	assert.match(calls, /^doctor --provider proxmox --json$/m);
 	assert.doesNotMatch(calls, /^warmup |^status |^ssh |^stop |^cleanup /m);
 	const redacted = fs.readFileSync(path.join(fake.proof, "doctor.redacted.log"), "utf8");
-	assert.doesNotMatch(redacted, /config-only\.secret\.example/);
-	assert.match(redacted, /<proxmox-api-url>.*<proxmox-api-host>/);
+	assert.doesNotMatch(redacted, /config-only\.secret\.example|config-only@pve!ci/);
+	assert.match(redacted, /<proxmox-api-url>.*<proxmox-api-host>.*<proxmox-token-id>/);
 });
 
 test("generated proof directory paths are redacted", () => {
