@@ -66,6 +66,34 @@ func TestConfigSetBrokerRegisteredModeAcceptsDirectProvider(t *testing.T) {
 	}
 }
 
+func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	if err := os.WriteFile(configPath, []byte("broker:\n  url: https://old.example.test\n  mode: registered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{
+		"--url", "https://new.example.test",
+		"--provider", "xcp-ng",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := readFileConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Broker == nil || file.Broker.Mode != "registered" || file.Broker.Provider != "xcp-ng" {
+		t.Fatalf("config=%#v", file)
+	}
+}
+
 func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

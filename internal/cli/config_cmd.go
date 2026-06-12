@@ -497,7 +497,19 @@ func (a App) configSetBroker(args []string) error {
 	if *mode != "" && *mode != string(BrokerModeManaged) && *mode != string(BrokerModeRegistered) {
 		return exit(2, "--mode must be managed or registered")
 	}
-	brokerProvider, err := validateBrokerProviderForMode(*provider, *mode)
+	path := writableConfigPath()
+	if path == "" {
+		return exit(2, "user config directory is unavailable")
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		return err
+	}
+	if file.Broker == nil {
+		file.Broker = &fileBrokerConfig{}
+	}
+	effectiveMode := blank(blank(*mode, file.Broker.Mode), string(BrokerModeManaged))
+	brokerProvider, err := validateBrokerProviderForMode(*provider, effectiveMode)
 	if err != nil {
 		return err
 	}
@@ -522,17 +534,6 @@ func (a App) configSetBroker(args []string) error {
 		if adminToken == "" {
 			return exit(2, "broker admin token from stdin is empty")
 		}
-	}
-	path := writableConfigPath()
-	if path == "" {
-		return exit(2, "user config directory is unavailable")
-	}
-	file, err := readFileConfig(path)
-	if err != nil {
-		return err
-	}
-	if file.Broker == nil {
-		file.Broker = &fileBrokerConfig{}
 	}
 	file.Broker.URL = *url
 	if *mode != "" {
