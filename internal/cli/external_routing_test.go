@@ -245,6 +245,36 @@ func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 	}
 }
 
+func TestRouteExternalLeaseClaimOverridesAmbientRouting(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	paths := map[string]string{}
+	for _, leaseID := range []string{"cbx_111111111111", "cbx_222222222222"} {
+		path, err := PersistExternalRouting(leaseID, ExternalConfig{Command: leaseID, WorkRoot: "/work/crabbox"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths[leaseID] = path
+		if err := claimLeaseForRepoProviderScope(leaseID, leaseID, "external", leaseID, root, time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ambient, err := LoadExternalRouting(paths["cbx_111111111111"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.External = ambient
+	if err := routeExternalLeaseClaim(&cfg, "cbx_222222222222"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.RoutingFile != paths["cbx_222222222222"] || cfg.External.Command != "cbx_222222222222" {
+		t.Fatalf("config=%#v", cfg)
+	}
+}
+
 func TestRunExistingExternalLeaseLoadsPersistedRoutingBeforeValidation(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)

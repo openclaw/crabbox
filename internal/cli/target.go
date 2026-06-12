@@ -306,6 +306,12 @@ func autoRouteExternalLeaseForConfig(cfg *Config, id string) error {
 	return autoRouteExternalLeaseWithHints(cfg, id, false, cfg.targetExplicit, cfg.explicitWindowsMode != "")
 }
 
+func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
+	cfg.External.RoutingFile = ""
+	cfg.External.routingLoaded = false
+	return autoRouteExternalLeaseForConfig(cfg, leaseID)
+}
+
 func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, targetExplicit, windowsModeExplicit bool) error {
 	id = strings.TrimSpace(id)
 	if id == "" || routingExplicit {
