@@ -348,7 +348,10 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 	}
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			if providerSelected {
+				return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
+			}
+			return exit(2, "external routing state is missing for lease %s; select provider=external explicitly only if the current lifecycle still owns it", claim.LeaseID)
 		}
 		return err
 	}
@@ -376,9 +379,9 @@ func loadExternalRoutingConfig(cfg *Config, path string) error {
 func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit bool) error {
 	if !targetExplicit {
 		cfg.TargetOS = targetLinux
-		if !windowsModeExplicit {
-			cfg.WindowsMode = windowsModeNormal
-		}
+	}
+	if !windowsModeExplicit {
+		cfg.WindowsMode = windowsModeNormal
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)

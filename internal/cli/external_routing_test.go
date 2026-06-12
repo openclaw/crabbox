@@ -218,6 +218,39 @@ func TestAutoRouteExternalLeaseRejectsCrossProviderAliasCollision(t *testing.T) 
 	}
 }
 
+func TestAutoRouteExternalLeaseFailsClosedWithoutRoutingState(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	leaseID := "cbx_abcdef123456"
+	if err := claimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	fs := newFlagSet("test", os.Stderr)
+	if err := autoRouteExternalLease(&cfg, fs, "old-box"); err == nil || !strings.Contains(err.Error(), "routing state is missing") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestTargetLinuxClearsAmbientWindowsMode(t *testing.T) {
+	cfg := baseConfig()
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeWSL2
+	cfg.explicitWindowsMode = windowsModeWSL2
+	fs := newFlagSet("test", os.Stderr)
+	flags := registerTargetFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--target", "linux"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyTargetFlagOverrides(&cfg, fs, flags); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal || cfg.explicitWindowsMode != "" {
+		t.Fatalf("config=%#v", cfg)
+	}
+}
+
 func TestAutoRouteExternalLeaseHonorsConfiguredRoutingFile(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)

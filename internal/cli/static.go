@@ -33,6 +33,10 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		cfg.TargetOS = *values.Target
 		cfg.targetExplicit = true
 		cfg.targetFlagExplicit = true
+		if normalizeTargetOS(cfg.TargetOS) != targetWindows && !flagWasSet(fs, "windows-mode") {
+			cfg.WindowsMode = windowsModeNormal
+			cfg.explicitWindowsMode = ""
+		}
 	}
 	if flagWasSet(fs, "windows-mode") {
 		cfg.WindowsMode = *values.WindowsMode
