@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added provider-neutral coordinator registration for direct SSH leases, with owner-scoped inventory and sharing, outbound WebVNC, automatic bridge daemons for kept desktops, and coordinator-safe metadata-only release and expiry.
 - Added provider-optional `crabbox pause` and `crabbox resume` lifecycle commands, with Islo sandbox pause/resume support that preserves local lease claims. Thanks @zozo123.
 - Added `provider: opensandbox` for delegated Linux sandbox runs through the OpenSandbox API, including archive sync, retained lease reuse, off-argv environment forwarding, status, and cleanup. Thanks @coygeek.
 - Added `provider: anthropic-sandbox-runtime` (`srt`) for local one-shot command execution through Anthropic Sandbox Runtime, including filesystem/network policy handoff, doctor checks, config overrides, and live enforcement coverage. Thanks @coygeek.

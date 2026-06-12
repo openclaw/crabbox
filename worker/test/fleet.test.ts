@@ -112,6 +112,148 @@ class FakeWebSocket {
 }
 
 describe("fleet lease identity and idle", () => {
+  it("registers client-owned leases without granting the coordinator provider lifecycle", async () => {
+    const storage = new MemoryStorage();
+    let providerReleases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }, async () => {
+        providerReleases += 1;
+      }),
+    });
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+
+    const registered = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_000000000099/registration", {
+        headers: ownerHeaders,
+        body: {
+          slug: "test-box",
+          provider: "aws",
+          target: "linux",
+          desktop: true,
+          browser: true,
+          code: true,
+          cloudID: "i-registered-test",
+          serverName: "test-box",
+          serverType: "cpu16",
+          host: "test-box.example.com",
+          sshUser: "dev-user",
+          sshPort: "22",
+          exposedPorts: ["3000", "8080"],
+          workRoot: "/var/lib/crabbox/work",
+          ttlSeconds: 14_400,
+          idleTimeoutSeconds: 1_800,
+        },
+      }),
+    );
+    expect(registered.status).toBe(201);
+    await expect(registered.json()).resolves.toMatchObject({
+      lease: {
+        id: "cbx_000000000099",
+        slug: "test-box",
+        provider: "aws",
+        lifecycle: "registered",
+        state: "active",
+        estimatedHourlyUSD: 0,
+        exposedPorts: ["3000", "8080"],
+      },
+    });
+
+    const portal = await fleet.fetch(
+      request("GET", "/portal/leases/test-box", { headers: ownerHeaders }),
+    );
+    expect(portal.status).toBe(200);
+    const portalHTML = await portal.text();
+    expect(portalHTML).toContain("client managed");
+    expect(portalHTML).toContain("remove registration");
+
+    const poolRegistration = await fleet.fetch(
+      request("POST", "/v1/ready-pools/example/register", {
+        headers: ownerHeaders,
+        body: { leaseID: "cbx_000000000099" },
+      }),
+    );
+    expect(poolRegistration.status).toBe(400);
+    await expect(poolRegistration.json()).resolves.toMatchObject({
+      error: "unsupported_lifecycle",
+    });
+
+    const shared = await fleet.fetch(
+      request("PUT", "/v1/leases/test-box/share", {
+        headers: ownerHeaders,
+        body: { users: { "friend@example.com": "use" } },
+      }),
+    );
+    expect(shared.status).toBe(200);
+    const friend = await fleet.fetch(
+      request("GET", "/v1/leases/test-box", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(friend.status).toBe(200);
+
+    const released = await fleet.fetch(
+      request("POST", "/v1/leases/test-box/release", {
+        headers: ownerHeaders,
+        body: { delete: true },
+      }),
+    );
+    expect(released.status).toBe(200);
+    expect(providerReleases).toBe(0);
+    await expect(released.json()).resolves.toMatchObject({
+      lease: { lifecycle: "registered", state: "released" },
+    });
+  });
+
+  it("expires registered leases without invoking a provider", async () => {
+    const storage = new MemoryStorage();
+    let providerReleases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }, async () => {
+        providerReleases += 1;
+      }),
+    });
+    storage.seed(
+      "lease:cbx_000000000098",
+      testLease({
+        id: "cbx_000000000098",
+        provider: "aws",
+        lifecycle: "registered",
+        cloudID: "i-registered-expired",
+        expiresAt: "2026-05-01T00:00:01.000Z",
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(providerReleases).toBe(0);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000098")?.state).toBe("expired");
+  });
+
+  it("does not let registration overwrite another owner or managed lease", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000097",
+      testLease({ id: "cbx_000000000097", owner: "other@example.com" }),
+    );
+    const response = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_000000000097/registration", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { provider: "external", target: "linux", host: "host.example.test" },
+      }),
+    );
+    expect(response.status).toBe(409);
+  });
+
   it("keeps expired leases active when provider cleanup fails and retries later", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {

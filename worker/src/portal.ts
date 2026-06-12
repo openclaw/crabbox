@@ -82,7 +82,8 @@ export interface PortalAdminProviderStatus {
 export interface PortalAdminLeaseSummary {
   id: string;
   slug?: string;
-  provider: Provider;
+  provider: string;
+  lifecycle?: LeaseRecord["lifecycle"];
   state: LeaseRecord["state"];
   target: string;
   owner: string;
@@ -100,7 +101,7 @@ export interface PortalAdminUserSummary {
   orgs: string[];
   activeLeases: number;
   totalLeases: number;
-  providers: Provider[];
+  providers: string[];
   lastSeenAt: string;
 }
 
@@ -402,6 +403,8 @@ function adminLeaseRow(
   const returnPath = `/portal/admin/leases${providerFilter ? `?provider=${encodeURIComponent(providerFilter)}` : ""}`;
   const canEject =
     lease.state === "active" || lease.state === "provisioning" || lease.state === "failed";
+  const releaseLabel =
+    lease.lifecycle === "registered" ? "Remove registration" : "Emergency release";
   return `<tr data-filter-tags="${escapeHTML([stateGroup, lease.state, lease.provider, lease.owner, lease.org, lease.target, lease.serverType].join(" "))}">
     <td><a class="lease-link" href="/portal/leases/${encodeURIComponent(lease.id)}"><strong>${escapeHTML(lease.slug || lease.id)}</strong><small>${escapeHTML(lease.id)}</small></a></td>
     <td><span class="pill" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span></td>
@@ -410,7 +413,7 @@ function adminLeaseRow(
     <td>${targetBadge(lease.target)}</td>
     <td>${escapeHTML(`${lease.class} / ${lease.serverType}`)}</td>
     ${timeCell(lease.state === "active" || lease.state === "provisioning" ? lease.expiresAt : lease.updatedAt)}
-    <td>${canEject ? `<form class="admin-eject-form" method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release?return=${encodeURIComponent(returnPath)}"><button class="admin-eject" type="submit" title="Emergency release ${escapeHTML(lease.slug || lease.id)}" aria-label="Emergency release ${escapeHTML(lease.slug || lease.id)}">${ejectIcon}</button></form>` : ""}</td>
+    <td>${canEject ? `<form class="admin-eject-form" method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release?return=${encodeURIComponent(returnPath)}"><button class="admin-eject" type="submit" title="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}" aria-label="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}">${ejectIcon}</button></form>` : ""}</td>
   </tr>`;
 }
 
@@ -487,6 +490,7 @@ export function portalLeaseDetail(
   const slug = lease.slug || lease.id;
   const target = lease.target || "linux";
   const active = lease.state === "active";
+  const registered = lease.lifecycle === "registered";
   const runRows = runs.length
     ? runs.map((run) => runRow(run)).join("")
     : `<tr><td colspan="8" class="empty">no recorded runs for this lease</td></tr>`;
@@ -522,7 +526,7 @@ export function portalLeaseDetail(
     `${slug} lease`,
     `<main class="portal-shell lease-shell">
       ${portalHeader({
-        meta: `${escapeHTML(slug)} · ${escapeHTML(lease.provider)} ${escapeHTML(target)} lease <span class="mono">${escapeHTML(lease.id)}</span>`,
+        meta: `${escapeHTML(slug)} · ${escapeHTML(lease.provider)} ${escapeHTML(target)} ${registered ? "registered " : ""}lease <span class="mono">${escapeHTML(lease.id)}</span>`,
         actions: `
           ${
             options.canManage
@@ -541,6 +545,7 @@ export function portalLeaseDetail(
           </div>
           <dl class="meta-grid">
             ${metaHTMLRow("provider", providerBadge(lease.provider))}
+            ${metaRow("lifecycle", registered ? "client managed" : "coordinator managed")}
             ${metaHTMLRow("target", targetBadge(target, lease.windowsMode))}
             ${metaRow("class", lease.class)}
             ${metaRow("host", lease.host || "pending")}
@@ -553,7 +558,7 @@ export function portalLeaseDetail(
           ${
             active && options.canManage
               ? `<form method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release" class="stop-form">
-                  <button class="button danger" type="submit">stop lease</button>
+                  <button class="button ${registered ? "secondary" : "danger"}" type="submit">${registered ? "remove registration" : "stop lease"}</button>
                 </form>`
               : ""
           }

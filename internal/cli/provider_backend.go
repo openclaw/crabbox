@@ -865,7 +865,12 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 }
 
 func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
-	return spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
+	return cfg.BrokerMode != BrokerModeRegistered &&
+		spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
+}
+
+func shouldRegisterCoordinatorLease(cfg Config) bool {
+	return cfg.BrokerMode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) != ""
 }
 
 func backendCoordinator(backend Backend) *CoordinatorClient {

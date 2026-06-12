@@ -37,6 +37,8 @@ type Config struct {
 	ServerType                    string
 	ServerTypeExplicit            bool
 	Coordinator                   string
+	BrokerMode                    BrokerMode
+	BrokerAutoWebVNC              bool
 	CoordToken                    string
 	CoordAdminToken               string
 	HostID                        string
@@ -938,6 +940,13 @@ type AccessConfig struct {
 	Token        string
 }
 
+type BrokerMode string
+
+const (
+	BrokerModeManaged    BrokerMode = "managed"
+	BrokerModeRegistered BrokerMode = "registered"
+)
+
 func defaultConfig() Config {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -960,6 +969,9 @@ func loadConfig() (Config, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
 	}
+	if err := normalizeBrokerConfig(&cfg); err != nil {
+		return Config{}, err
+	}
 	canonicalizeConfigProvider(&cfg)
 	if err := routeConfiguredProvider(&cfg); err != nil {
 		return Config{}, err
@@ -978,6 +990,23 @@ func loadConfig() (Config, error) {
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
 	return cfg, nil
+}
+
+func normalizeBrokerConfig(cfg *Config) error {
+	mode := BrokerMode(strings.ToLower(strings.TrimSpace(string(cfg.BrokerMode))))
+	if mode == "" {
+		mode = BrokerModeManaged
+	}
+	switch mode {
+	case BrokerModeManaged, BrokerModeRegistered:
+		cfg.BrokerMode = mode
+	default:
+		return exit(2, "broker.mode must be managed or registered")
+	}
+	if mode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) == "" {
+		return exit(2, "broker.mode=registered requires broker.url or coordinator")
+	}
+	return nil
 }
 
 func canonicalizeConfigProvider(cfg *Config) {
@@ -1354,6 +1383,8 @@ func baseConfig() Config {
 		Network:            NetworkAuto,
 		Class:              class,
 		ServerType:         "",
+		BrokerMode:         BrokerModeManaged,
+		BrokerAutoWebVNC:   true,
 		Location:           "fsn1",
 		Image:              hetznerImage,
 		AWSRegion:          "eu-west-1",
@@ -1709,6 +1740,8 @@ type fileWindowsConfig struct {
 
 type fileBrokerConfig struct {
 	URL        string            `yaml:"url,omitempty"`
+	Mode       string            `yaml:"mode,omitempty"`
+	AutoWebVNC *bool             `yaml:"autoWebVNC,omitempty"`
 	Token      string            `yaml:"token,omitempty"`
 	AdminToken string            `yaml:"adminToken,omitempty"`
 	Provider   string            `yaml:"provider,omitempty"`
@@ -2612,6 +2645,12 @@ func applyFileConfig(cfg *Config, file fileConfig) error {
 		}
 		if file.Broker.Token != "" {
 			cfg.CoordToken = file.Broker.Token
+		}
+		if file.Broker.Mode != "" {
+			cfg.BrokerMode = BrokerMode(file.Broker.Mode)
+		}
+		if file.Broker.AutoWebVNC != nil {
+			cfg.BrokerAutoWebVNC = *file.Broker.AutoWebVNC
 		}
 		if file.Broker.AdminToken != "" {
 			cfg.CoordAdminToken = file.Broker.AdminToken
@@ -4206,6 +4245,10 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.ServerType = getenv("CRABBOX_SERVER_TYPE", cfg.ServerType)
 	cfg.Coordinator = getenv("CRABBOX_COORDINATOR", cfg.Coordinator)
+	cfg.BrokerMode = BrokerMode(getenv("CRABBOX_COORDINATOR_MODE", string(cfg.BrokerMode)))
+	if value, ok := getenvBool("CRABBOX_COORDINATOR_AUTO_WEBVNC"); ok {
+		cfg.BrokerAutoWebVNC = value
+	}
 	cfg.CoordToken = getenv("CRABBOX_COORDINATOR_TOKEN", cfg.CoordToken)
 	cfg.CoordAdminToken = getenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", getenv("CRABBOX_ADMIN_TOKEN", cfg.CoordAdminToken))
 	cfg.HostID = getenv("CRABBOX_HOST_ID", cfg.HostID)

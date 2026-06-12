@@ -107,6 +107,20 @@ func TestGuardMacOSDirectWebVNC(t *testing.T) {
 	}
 }
 
+func TestRegisteredLeaseUsesCoordinatorWebVNC(t *testing.T) {
+	cfg := Config{
+		Provider:    "direct-webvnc-test",
+		Coordinator: "https://broker.example.test",
+		BrokerMode:  BrokerModeRegistered,
+	}
+	if useDirectSSHWebVNC(cfg) {
+		t.Fatal("registered lease should use the coordinator WebVNC bridge")
+	}
+	if !useDirectSSHWebVNC(Config{Provider: "direct-webvnc-test"}) {
+		t.Fatal("unregistered direct provider should keep its local WebVNC bridge")
+	}
+}
+
 func TestIsMacOSDesktopProviderOnlyDedicatedMacOS(t *testing.T) {
 	// tart's only target is macOS -> uses the host-side Screen Sharing bridge.
 	if !isMacOSDesktopProvider(Config{Provider: "tart"}) {

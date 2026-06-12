@@ -91,8 +91,8 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
 	applyResolvedServerConfig(&cfg, server)
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
-		a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		return err
 	}
 	if serverTailscaleMetadata(server).Enabled {
@@ -105,7 +105,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		}
 	}
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
-		a.releaseBackendLeaseBestEffort(ctx, sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		return err
 	} else {
 		target = resolved.Target
@@ -122,6 +122,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s server=%s type=%s ip=%s%s idle_timeout=%s expires=%s\n", leaseID, blank(serverSlug(server), "-"), cfg.Provider, server.DisplayID(), server.ServerType.Name, server.PublicNet.IPv4.IP, tailscaleSummary, cfg.IdleTimeout, blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]))
 	fmt.Fprintf(a.Stdout, "ready ssh=%s@%s:%s network=%s workroot=%s\n", redactedSSHUser(cfg, server, target), target.Host, target.Port, network, cfg.WorkRoot)
+	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, *keep)
 	if *actionsRunner {
 		ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
 		if err != nil {
@@ -520,6 +521,14 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
 	coord := backendCoordinator(backend)
+	var registrationCoord *CoordinatorClient
+	if shouldRegisterCoordinatorLease(cfg) {
+		if client, configured, coordErr := newCoordinatorClient(cfg); coordErr != nil {
+			fmt.Fprintf(a.Stderr, "warning: registered coordinator heartbeat unavailable: %v\n", coordErr)
+		} else if configured {
+			registrationCoord = client
+		}
+	}
 	var script *RunScriptSpec
 	if scriptRequested {
 		script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
@@ -639,7 +648,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			releaseApp.Stderr = io.Discard
 		}
 		cleanup.Attempted = true
-		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
 		cleanup.Stopped = cleanup.Err == nil
 		if cleanup.Err == nil {
 			recorder.Event("lease.released", "released", "")
@@ -655,9 +664,10 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim || borrowedPool != nil); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim || borrowedPool != nil); err != nil {
 		return recordFailure(err)
 	}
+	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, acquired && *keep)
 	if !useCoordinator && leaseID != "" {
 		if touched, touchErr := sshBackend.Touch(ctx, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 			server = touched
@@ -682,7 +692,13 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	defer stopRunHeartbeat()
 	startRunHeartbeat := func(updateIdleTimeout *time.Duration) {
 		stopRunHeartbeat()
-		stopHeartbeat = startCoordinatorHeartbeat(ctx, coord, leaseID, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
+		heartbeatCoord := coord
+		if heartbeatCoord == nil {
+			heartbeatCoord = registrationCoord
+		}
+		if heartbeatCoord != nil {
+			stopHeartbeat = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
+		}
 	}
 	if useCoordinator && leaseID != "" {
 		var heartbeatIdleTimeout *time.Duration
@@ -695,6 +711,8 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			}
 		}
 		startRunHeartbeat(heartbeatIdleTimeout)
+	} else if registrationCoord != nil && leaseID != "" {
+		startRunHeartbeat(nil)
 	}
 
 	if cfg.Sync.BaseRef == "" {
@@ -842,7 +860,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if *timingJSON {
 			releaseApp.Stderr = io.Discard
 		}
-		if err := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, oldLease); err != nil {
+		if err := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease); err != nil {
 			recorder.Event("lease.replace.failed", "leasing", err.Error())
 			return true, exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, err)
 		}
@@ -875,7 +893,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			recorder.AttachLease(leaseID, serverSlug(server), cfg)
 			startRunHeartbeat(nil)
 		}
-		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, repo.Root, cfg.IdleTimeout, *reclaim); err != nil {
+		if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 			return true, err
 		}
 		workdir = remoteJoin(cfg, leaseID, repo.Name)
@@ -2405,13 +2423,14 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 	}
 }
 
-func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, lease LeaseTarget) error {
+func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
 		return err
 	}
+	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
 	return nil
 }
 
@@ -2658,6 +2677,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		return err
 	}
+	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
 	if backendCoordinator(backend) != nil {
 		fmt.Fprintf(a.Stderr, "released lease=%s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 		return nil

@@ -254,6 +254,23 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 }
 
+func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Coordinator = "https://coordinator.example"
+	cfg.BrokerMode = BrokerModeRegistered
+	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(*coordinatorLeaseBackend); ok {
+		t.Fatal("registered broker mode must not transfer lifecycle ownership to the coordinator")
+	}
+	if !shouldRegisterCoordinatorLease(cfg) {
+		t.Fatal("registered broker mode should register direct leases")
+	}
+}
+
 func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

@@ -57,6 +57,7 @@ import type {
   ExternalRunnerRecord,
   ExternalRunnerSyncRequest,
   LeaseRecord,
+  LeaseRegistrationRequest,
   LeaseRequest,
   LeaseShare,
   LeaseShareRole,
@@ -233,7 +234,7 @@ interface CodePendingWebSocketFrame {
 interface LeaseCloudAudit {
   leaseID: string;
   slug?: string;
-  provider: Provider;
+  provider: string;
   state: LeaseRecord["state"];
   target: LeaseRecord["target"];
   owner: string;
@@ -1280,6 +1281,9 @@ export class FleetDurableObject implements DurableObject {
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
     const method = request.method.toUpperCase();
+    if (method === "PUT" && action === "registration") {
+      return await this.registerLease(request, leaseID);
+    }
     if (method === "GET" && action === undefined) {
       const lease = await this.resolveLease(leaseID, request, false);
       return lease ? json({ lease }) : notFound();
@@ -1330,6 +1334,128 @@ export class FleetDurableObject implements DurableObject {
     return json({ error: "not_found" }, { status: 404 });
   }
 
+  private async registerLease(request: Request, leaseID: string): Promise<Response> {
+    if (!validRegisteredLeaseID(leaseID)) {
+      return json({ error: "invalid_lease_id" }, { status: 400 });
+    }
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    const input = await readJson<LeaseRegistrationRequest>(request);
+    const provider = sanitizeRunnerProvider(input.provider);
+    const target = sanitizeRegisteredTarget(input.target);
+    const host = sanitizeRegisteredHost(input.host);
+    if (!provider) {
+      return json({ error: "invalid_provider" }, { status: 400 });
+    }
+    if (!target) {
+      return json({ error: "invalid_target" }, { status: 400 });
+    }
+    if (!host) {
+      return json({ error: "host_required" }, { status: 400 });
+    }
+
+    const existing = await this.getLease(leaseID);
+    if (
+      existing &&
+      (existing.owner !== owner || existing.org !== org || !isRegisteredLease(existing))
+    ) {
+      return json(
+        { error: "lease_id_conflict", message: "lease id belongs to another lifecycle or owner" },
+        { status: 409 },
+      );
+    }
+    if (existing && existing.provider !== provider) {
+      return json(
+        { error: "provider_conflict", message: "registered lease provider cannot change" },
+        { status: 409 },
+      );
+    }
+
+    const leases = await this.leaseRecords();
+    const now = new Date();
+    const nowISO = now.toISOString();
+    const ttlSeconds = clampLeaseSeconds(input.ttlSeconds, 86_400);
+    const idleTimeoutSeconds = clampLeaseSeconds(input.idleTimeoutSeconds, 86_400);
+    const slug =
+      existing?.slug ||
+      allocateLeaseSlug(
+        normalizeLeaseSlug(input.slug) || leaseSlugFromID(leaseID),
+        leaseID,
+        owner,
+        org,
+        leases,
+      );
+    const record: LeaseRecord = {
+      ...existing,
+      id: leaseID,
+      slug,
+      provider,
+      lifecycle: "registered",
+      target,
+      ...(target === "windows"
+        ? { windowsMode: input.windowsMode === "wsl2" ? "wsl2" : "normal" }
+        : {}),
+      desktop: input.desktop === true,
+      desktopEnv: nonSecretString(input.desktopEnv),
+      browser: input.browser === true,
+      code: input.code === true,
+      cloudID: nonSecretString(input.cloudID),
+      owner,
+      org,
+      profile: nonSecretString(input.profile) || "default",
+      class: nonSecretString(input.class) || "registered",
+      serverType: nonSecretString(input.serverType) || "registered",
+      serverID:
+        Number.isSafeInteger(input.serverID) && (input.serverID ?? 0) >= 0
+          ? (input.serverID ?? 0)
+          : 0,
+      serverName: nonSecretString(input.serverName) || slug,
+      providerKey: "",
+      host,
+      sshUser: nonSecretString(input.sshUser) || "crabbox",
+      sshPort: sanitizeRegisteredPort(input.sshPort) || "22",
+      workRoot: nonSecretString(input.workRoot) || "/workspaces/crabbox",
+      keep: true,
+      ttlSeconds,
+      idleTimeoutSeconds,
+      estimatedHourlyUSD: 0,
+      maxEstimatedUSD: 0,
+      state: "active",
+      createdAt: existing?.createdAt || nowISO,
+      registeredAt: existing?.registeredAt || nowISO,
+      updatedAt: nowISO,
+      lastTouchedAt: nowISO,
+      expiresAt: registeredLeaseExpiresAt(now, ttlSeconds, idleTimeoutSeconds).toISOString(),
+    };
+    if (input.pond) {
+      record.pond = nonSecretString(input.pond);
+    } else {
+      delete record.pond;
+    }
+    if (target !== "windows") {
+      delete record.windowsMode;
+    }
+    const fallbackPorts = sanitizeRegisteredPorts(input.sshFallbackPorts);
+    if (fallbackPorts) {
+      record.sshFallbackPorts = fallbackPorts;
+    } else {
+      delete record.sshFallbackPorts;
+    }
+    const exposedPorts = sanitizeRegisteredPorts(input.exposedPorts);
+    if (exposedPorts) {
+      record.exposedPorts = exposedPorts;
+    } else {
+      delete record.exposedPorts;
+    }
+    delete record.endedAt;
+    delete record.releasedAt;
+    delete record.releaseDeletesServer;
+    clearLeaseCleanupMetadata(record);
+    await this.putLease(record);
+    await this.scheduleAlarm();
+    return json({ lease: record }, { status: existing ? 200 : 201 });
+  }
+
   private async applyLeaseHeartbeat(
     lease: LeaseRecord,
     input: {
@@ -1357,8 +1483,9 @@ export class FleetDurableObject implements DurableObject {
     lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
     clearLeaseCleanupMetadata(lease);
     const requestCIDRs = request ? requestSourceCIDRs(request) : [];
-    if (requestCIDRs.length > 0) {
-      const provider = this.provider(lease.provider, lease.region, lease.providerProject);
+    const managedProvider = managedLeaseProvider(lease);
+    if (requestCIDRs.length > 0 && managedProvider) {
+      const provider = this.provider(managedProvider, lease.region, lease.providerProject);
       const leases = await this.leaseRecords();
       const accessContext = providerAccessContext(
         requestCIDRs,
@@ -1803,7 +1930,9 @@ export class FleetDurableObject implements DurableObject {
   ): Promise<PortalAdminProviderStatus[]> {
     const providerSet = new Set<Provider>(coordinatorProviders);
     for (const lease of leases) {
-      providerSet.add(lease.provider);
+      if (isCoordinatorProvider(lease.provider)) {
+        providerSet.add(lease.provider);
+      }
     }
     return await Promise.all(
       [...providerSet]
@@ -1817,7 +1946,9 @@ export class FleetDurableObject implements DurableObject {
     leases: PortalAdminLeaseSummary[],
   ): Promise<PortalAdminProviderStatus> {
     const readiness = this.providerConfigurationReadiness(provider);
-    const providerLeases = leases.filter((lease) => lease.provider === provider);
+    const providerLeases = leases.filter(
+      (lease) => lease.provider === provider && lease.lifecycle !== "registered",
+    );
     const activeLeases = providerLeases.filter((lease) => lease.state === "active").length;
     const users = new Set(providerLeases.map((lease) => lease.owner || "unknown")).size;
     const recentLeases = providerLeases
@@ -1873,6 +2004,7 @@ export class FleetDurableObject implements DurableObject {
         id: lease.id,
         ...(lease.slug ? { slug: lease.slug } : {}),
         provider: lease.provider,
+        lifecycle: lease.lifecycle,
         state: lease.state,
         target: lease.target || "linux",
         owner: lease.owner,
@@ -3394,6 +3526,15 @@ export class FleetDurableObject implements DurableObject {
     if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
+    if (isRegisteredLease(lease)) {
+      return json(
+        {
+          error: "unsupported_lifecycle",
+          message: "registered leases cannot join coordinator-managed ready pools",
+        },
+        { status: 400 },
+      );
+    }
     if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
@@ -3680,7 +3821,7 @@ export class FleetDurableObject implements DurableObject {
     const org = url.searchParams.get("org") ?? "";
     const limit = clampLimit(url.searchParams.get("limit"), 100);
     const leases = (await this.leaseRecords())
-      .filter((lease) => lease.provider === provider)
+      .filter((lease) => lease.provider === provider && !isRegisteredLease(lease))
       .filter((lease) => !state || lease.state === state)
       .filter((lease) => !owner || lease.owner === owner)
       .filter((lease) => !org || lease.org === org)
@@ -4508,7 +4649,17 @@ export class FleetDurableObject implements DurableObject {
     if (!lease) {
       return notFound();
     }
-    const provider = this.provider(lease.provider, lease.region, lease.providerProject);
+    const managedProvider = managedLeaseProvider(lease);
+    if (!managedProvider) {
+      return json(
+        {
+          error: "unsupported_provider",
+          message: "registered leases do not support coordinator-managed images",
+        },
+        { status: 400 },
+      );
+    }
+    const provider = this.provider(managedProvider, lease.region, lease.providerProject);
     if (!lease.cloudID || !provider.supportsNativeImages()) {
       return json(
         {
@@ -4628,6 +4779,15 @@ export class FleetDurableObject implements DurableObject {
           return;
         }
         const nowISO = new Date().toISOString();
+        if (isRegisteredLease(lease)) {
+          lease.state = "expired";
+          lease.updatedAt = nowISO;
+          lease.endedAt = nowISO;
+          delete lease.releaseDeletesServer;
+          clearLeaseCleanupMetadata(lease);
+          await this.putLease(lease);
+          return;
+        }
         if (lease.state === "provisioning" && !lease.cloudID) {
           lease.state = "failed";
           lease.updatedAt = nowISO;
@@ -4776,7 +4936,7 @@ export class FleetDurableObject implements DurableObject {
     const startedAt = new Date().toISOString();
     const leases = [...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values()];
     const activeAWSLeases = leases.filter(
-      (lease) => lease.provider === "aws" && leaseIsLive(lease),
+      (lease) => lease.provider === "aws" && !isRegisteredLease(lease) && leaseIsLive(lease),
     );
     const activeLeases = new Map(activeAWSLeases.map((lease) => [lease.id, lease]));
     const activeCloudIDs = new Set(activeAWSLeases.map((lease) => lease.cloudID).filter(Boolean));
@@ -4954,7 +5114,7 @@ export class FleetDurableObject implements DurableObject {
     const startedAt = new Date().toISOString();
     const leases = [...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values()];
     const liveAzureLeases = leases.filter(
-      (lease) => lease.provider === "azure" && leaseIsLive(lease),
+      (lease) => lease.provider === "azure" && !isRegisteredLease(lease) && leaseIsLive(lease),
     );
     const liveLeases = new Map(liveAzureLeases.map((lease) => [lease.id, lease]));
     const liveCloudIDs = new Set(liveAzureLeases.map((lease) => lease.cloudID).filter(Boolean));
@@ -5381,7 +5541,11 @@ export class FleetDurableObject implements DurableObject {
   }
 
   private async deleteLeaseServer(lease: LeaseRecord): Promise<void> {
-    await this.provider(lease.provider, lease.region, lease.providerProject).releaseLease(lease);
+    const provider = managedLeaseProvider(lease);
+    if (!provider) {
+      return;
+    }
+    await this.provider(provider, lease.region, lease.providerProject).releaseLease(lease);
   }
 
   private async abortProvisionedLeaseAfterStateChange(
@@ -5445,8 +5609,9 @@ export class FleetDurableObject implements DurableObject {
     options: { deleteServer: boolean; keep?: boolean },
   ): Promise<LeaseRecord> {
     this.clearEgressLease(lease.id);
+    const deleteServer = options.deleteServer && !isRegisteredLease(lease);
     if (
-      options.deleteServer &&
+      deleteServer &&
       lease.cloudID &&
       (leaseIsLive(lease) || lease.releaseDeletesServer !== undefined || lease.cleanupError)
     ) {
@@ -5460,8 +5625,8 @@ export class FleetDurableObject implements DurableObject {
     lease.releasedAt = now;
     lease.endedAt = now;
     if (wasUnprovisionedRelease) {
-      lease.releaseDeletesServer = options.deleteServer;
-    } else if (lease.releaseDeletesServer === false && !options.deleteServer) {
+      lease.releaseDeletesServer = deleteServer;
+    } else if (lease.releaseDeletesServer === false && !deleteServer) {
       lease.releaseDeletesServer = false;
     } else {
       delete lease.releaseDeletesServer;
@@ -5975,6 +6140,10 @@ function validLeaseID(value: string | undefined): value is string {
   return typeof value === "string" && /^cbx_[a-f0-9]{12}$/.test(value);
 }
 
+function validRegisteredLeaseID(value: string | undefined): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/.test(value);
+}
+
 function validWebVNCTicket(value: string | undefined): value is string {
   return typeof value === "string" && /^wvnc_[a-f0-9]{32}$/.test(value);
 }
@@ -6287,6 +6456,29 @@ function mergeTailscaleMetadata(
 
 function nonSecretString(value: unknown): string {
   return typeof value === "string" ? value.trim().slice(0, 256) : "";
+}
+
+function sanitizeRegisteredHost(value: unknown): string {
+  const host = nonSecretString(value);
+  return host.length <= 255 && /^[A-Za-z0-9._:[\]%-]+$/.test(host) ? host : "";
+}
+
+function sanitizeRegisteredTarget(value: unknown): TargetOS | undefined {
+  return value === "linux" || value === "macos" || value === "windows" ? value : undefined;
+}
+
+function sanitizeRegisteredPort(value: unknown): string {
+  const raw = nonSecretString(value);
+  const port = Number(raw);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535 ? String(port) : "";
+}
+
+function sanitizeRegisteredPorts(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const ports = [...new Set(value.map(sanitizeRegisteredPort).filter(Boolean))].slice(0, 10);
+  return ports.length > 0 ? ports : undefined;
 }
 
 function sanitizeRunnerProvider(value: unknown): string {
@@ -7023,6 +7215,14 @@ function leaseIdleTimeoutSeconds(lease: LeaseRecord): number {
 }
 
 function recomputeLeaseExpiresAt(lease: LeaseRecord, fallbackNow: Date): Date {
+  if (isRegisteredLease(lease)) {
+    const touchedAt = parseLeaseDate(lease.lastTouchedAt, fallbackNow);
+    return registeredLeaseExpiresAt(
+      touchedAt,
+      leaseTTLSeconds(lease),
+      leaseIdleTimeoutSeconds(lease),
+    );
+  }
   const createdAt = parseLeaseDate(lease.createdAt, fallbackNow);
   const touchedAt = parseLeaseDate(lease.lastTouchedAt, createdAt);
   return leaseExpiresAt(
@@ -7030,6 +7230,16 @@ function recomputeLeaseExpiresAt(lease: LeaseRecord, fallbackNow: Date): Date {
     touchedAt,
     leaseTTLSeconds(lease),
     leaseIdleTimeoutSeconds(lease),
+  );
+}
+
+function registeredLeaseExpiresAt(
+  touchedAt: Date,
+  ttlSeconds: number,
+  idleTimeoutSeconds: number,
+): Date {
+  return new Date(
+    touchedAt.getTime() + Math.min(Math.max(1, ttlSeconds), Math.max(1, idleTimeoutSeconds)) * 1000,
   );
 }
 
@@ -7236,6 +7446,17 @@ function activeSlugCollision(
 
 function leaseIsLive(lease: LeaseRecord): boolean {
   return lease.state === "active" || lease.state === "provisioning";
+}
+
+function isRegisteredLease(lease: LeaseRecord): boolean {
+  return lease.lifecycle === "registered";
+}
+
+function managedLeaseProvider(lease: LeaseRecord): Provider | undefined {
+  // A registered record never grants provider authority, even when its name is aws/azure/etc.
+  return !isRegisteredLease(lease) && isCoordinatorProvider(lease.provider)
+    ? lease.provider
+    : undefined;
 }
 
 function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
@@ -7482,7 +7703,9 @@ function withLeaseSSHSourceCIDRs(
 function activeAWSSSHSourceCIDRs(leases: LeaseRecord[], cidrs: string[]): string[] {
   return uniqueNonEmpty([
     ...leases.flatMap((lease) =>
-      lease.provider === "aws" && leaseIsLive(lease) ? (lease.network?.sshSourceCIDRs ?? []) : [],
+      lease.provider === "aws" && !isRegisteredLease(lease) && leaseIsLive(lease)
+        ? (lease.network?.sshSourceCIDRs ?? [])
+        : [],
     ),
     ...cidrs,
   ]);
@@ -7492,6 +7715,7 @@ function hasUnknownActiveAWSSSHSource(leases: LeaseRecord[]): boolean {
   return leases.some(
     (lease) =>
       lease.provider === "aws" &&
+      !isRegisteredLease(lease) &&
       leaseIsLive(lease) &&
       (lease.network?.sshSourceCIDRs?.length ?? 0) === 0 &&
       !lease.network?.sshSourceCIDRsComplete,
@@ -7934,7 +8158,7 @@ class AzureProvider implements CloudProvider {
   ): Promise<ProviderImage> {
     return this.client.createDiskSnapshot(
       lease.cloudID,
-      providerImageResourceName(lease.provider, name, lease.id),
+      providerImageResourceName("azure", name, lease.id),
     );
   }
 
@@ -8049,13 +8273,10 @@ class GCPProvider implements CloudProvider {
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage> {
     return strategy === "image"
-      ? this.client.createImage(
-          lease.cloudID,
-          providerImageResourceName(lease.provider, name, lease.id),
-        )
+      ? this.client.createImage(lease.cloudID, providerImageResourceName("gcp", name, lease.id))
       : this.client.createDiskSnapshot(
           lease.cloudID,
-          providerImageResourceName(lease.provider, name, lease.id),
+          providerImageResourceName("gcp", name, lease.id),
         );
   }
 

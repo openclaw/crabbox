@@ -15,6 +15,8 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"CRABBOX_COORDINATOR",
+		"CRABBOX_COORDINATOR_MODE",
+		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
 		"CRABBOX_COORDINATOR_TOKEN",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
@@ -1609,6 +1611,8 @@ func TestLoadConfigFromUserFile(t *testing.T) {
 	}
 	if err := os.WriteFile(path, []byte(`broker:
   url: https://crabbox.example.test
+  mode: registered
+  autoWebVNC: false
   token: secret
   adminToken: admin-secret
   provider: aws
@@ -1865,6 +1869,9 @@ ssh:
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" || cfg.CoordAdminToken != "admin-secret" {
 		t.Fatalf("broker config not loaded: %#v", cfg)
 	}
+	if cfg.BrokerMode != BrokerModeRegistered || cfg.BrokerAutoWebVNC {
+		t.Fatalf("broker registration config not loaded: mode=%q autoWebVNC=%t", cfg.BrokerMode, cfg.BrokerAutoWebVNC)
+	}
 	if cfg.HostID != "h-neutral-file" {
 		t.Fatalf("host id not loaded: %q", cfg.HostID)
 	}
@@ -1982,6 +1989,30 @@ ssh:
 	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Name != "pnpm-store" || cfg.Cache.Volumes[0].Key != "my-app-linux-amd64-node24-pnpm10-lock" || cfg.Cache.Volumes[0].Path != "/var/cache/crabbox/pnpm" || cfg.Cache.Volumes[0].SizeGB != 80 || !cfg.Cache.Volumes[0].Required {
 		t.Fatalf("cache volumes config not loaded: %#v", cfg.Cache.Volumes)
 	}
+}
+
+func TestNormalizeBrokerConfig(t *testing.T) {
+	t.Run("defaults to managed", func(t *testing.T) {
+		cfg := Config{}
+		if err := normalizeBrokerConfig(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.BrokerMode != BrokerModeManaged {
+			t.Fatalf("mode=%q", cfg.BrokerMode)
+		}
+	})
+	t.Run("registered requires coordinator", func(t *testing.T) {
+		cfg := Config{BrokerMode: BrokerModeRegistered}
+		if err := normalizeBrokerConfig(&cfg); err == nil || !strings.Contains(err.Error(), "requires broker.url") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("rejects unknown mode", func(t *testing.T) {
+		cfg := Config{BrokerMode: "mirror"}
+		if err := normalizeBrokerConfig(&cfg); err == nil || !strings.Contains(err.Error(), "managed or registered") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestLoadConfigExeDevWorkRootDefaults(t *testing.T) {

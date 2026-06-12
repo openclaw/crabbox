@@ -170,6 +170,32 @@ export interface LeaseRequest {
   exposedPorts?: string[];
 }
 
+export interface LeaseRegistrationRequest {
+  slug?: string;
+  provider?: string;
+  target?: TargetOS;
+  windowsMode?: WindowsMode;
+  desktop?: boolean;
+  desktopEnv?: string;
+  browser?: boolean;
+  code?: boolean;
+  cloudID?: string;
+  serverID?: number;
+  serverName?: string;
+  serverType?: string;
+  host?: string;
+  sshUser?: string;
+  sshPort?: string;
+  sshFallbackPorts?: string[];
+  workRoot?: string;
+  profile?: string;
+  class?: string;
+  pond?: string;
+  exposedPorts?: string[];
+  ttlSeconds?: number;
+  idleTimeoutSeconds?: number;
+}
+
 export const coordinatorProviderRegistry = [
   {
     provider: "hetzner",
@@ -224,6 +250,7 @@ export function coordinatorProviderSpec(provider: Provider): CoordinatorProvider
 
 export type TargetOS = "linux" | "macos" | "windows";
 export type WindowsMode = "normal" | "wsl2";
+export type LeaseLifecycle = "managed" | "registered";
 
 export interface LeaseTelemetry {
   capturedAt: string;
@@ -249,7 +276,8 @@ export interface RunTelemetrySummary {
 export interface LeaseRecord {
   id: string;
   slug?: string;
-  provider: Provider;
+  provider: string;
+  lifecycle?: LeaseLifecycle;
   target: TargetOS;
   os?: string;
   windowsMode?: WindowsMode;
@@ -303,6 +331,7 @@ export interface LeaseRecord {
   releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;
+  registeredAt?: string;
 }
 
 export type ReadyPoolEntryState = "ready" | "busy" | "draining" | "stale";
@@ -318,7 +347,7 @@ export interface ReadyPoolEntry {
   commit?: string;
   fingerprint?: string;
   image?: string;
-  provider?: Provider;
+  provider?: string;
   target?: TargetOS;
   windowsMode?: WindowsMode;
   class?: string;
@@ -449,7 +478,7 @@ export interface RunRecord {
   slug?: string;
   owner: string;
   org: string;
-  provider: Provider;
+  provider: string;
   target?: TargetOS;
   windowsMode?: WindowsMode;
   class: string;
@@ -476,7 +505,7 @@ export interface RunRecord {
 
 export interface RunCreateRequest {
   leaseID?: string;
-  provider?: Provider;
+  provider?: string;
   target?: TargetOS;
   windowsMode?: WindowsMode;
   class?: string;
@@ -559,7 +588,7 @@ export interface RunEventRecord {
   data?: string;
   leaseID?: string;
   slug?: string;
-  provider?: Provider;
+  provider?: string;
   target?: TargetOS;
   windowsMode?: WindowsMode;
   class?: string;
@@ -576,7 +605,7 @@ export interface RunEventRequest {
   data?: string;
   leaseID?: string;
   slug?: string;
-  provider?: Provider;
+  provider?: string;
   target?: TargetOS;
   windowsMode?: WindowsMode;
   class?: string;
