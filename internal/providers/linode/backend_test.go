@@ -181,6 +181,49 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 	}
 }
 
+func TestAcquireRejectsInvalidFirewallBeforeCreate(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	backend.Cfg.Linode.FirewallID = "prod-ssh"
+
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "bad-firewall"})
+	if err == nil || !strings.Contains(err.Error(), "linode firewall must be a positive numeric firewall ID") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.createRequests) != 0 {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+}
+
+func TestAcquireRejectsUnsupportedExplicitPortableOSBeforeCreate(t *testing.T) {
+	home := t.TempDir()
+	configPath := home + "/config.yaml"
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte("provider: linode\nos: ubuntu:26.04\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := core.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Linode.Image != "" {
+		t.Fatalf("Linode.Image=%q, want unresolved provider image", cfg.Linode.Image)
+	}
+	api := &fakeLinodeAPI{}
+	backend := newLinodeLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard})
+	backend.clientFactory = func(core.Runtime) (linodeAPI, error) { return api, nil }
+
+	_, err = backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "bad-os"})
+	if err == nil || !strings.Contains(err.Error(), `provider=linode does not support os "ubuntu:26.04"`) {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if len(api.createRequests) != 0 {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+}
+
 func TestListFiltersForeignAndPartialLinodes(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

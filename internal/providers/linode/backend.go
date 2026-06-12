@@ -88,6 +88,10 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	if cfg.Tailscale.Enabled && cfg.Tailscale.AuthKey == "" {
 		return core.LeaseTarget{}, core.Exit(2, "direct --tailscale requires %s to contain a Tailscale auth key", cfg.Tailscale.AuthKeyEnv)
 	}
+	firewallID, err := parseLinodeFirewallID(cfg.Linode.FirewallID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -158,7 +162,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 		Tags:           leaseTags(cfg, leaseID, slug, "provisioning", req.Keep, now),
 		AuthorizedKeys: []string{publicKey},
 		Metadata:       &linodeMetadata{UserData: linodeUserData(cfg, publicKey)},
-		FirewallID:     parseLinodeFirewallID(cfg.Linode.FirewallID),
+		FirewallID:     firewallID,
 	})
 	if err != nil {
 		if isLinodeCreateAmbiguous(err) {
@@ -920,16 +924,16 @@ func parseLinodeID(id string) (int64, bool) {
 	return parsed, true
 }
 
-func parseLinodeFirewallID(value string) int64 {
+func parseLinodeFirewallID(value string) (int64, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return 0
+		return 0, nil
 	}
 	id, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || id <= 0 {
-		return 0
+		return 0, core.Exit(2, "linode firewall must be a positive numeric firewall ID")
 	}
-	return id
+	return id, nil
 }
 
 func providerKeyForLease(leaseID string) string {

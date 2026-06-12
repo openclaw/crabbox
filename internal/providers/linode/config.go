@@ -63,11 +63,17 @@ func validateFoundationConfig(cfg core.Config) error {
 	if strings.TrimSpace(linodeRegionForConfig(cfg)) == "" {
 		return core.Exit(2, "linode region is required")
 	}
+	if core.OSImageWasExplicit(cfg) && strings.TrimSpace(cfg.Linode.Image) == "" {
+		return core.Exit(2, "provider=linode does not support os %q; set linode.image or CRABBOX_LINODE_IMAGE to an explicit Linode image", cfg.OSImage)
+	}
 	if strings.TrimSpace(linodeImageForConfig(cfg)) == "" {
 		return core.Exit(2, "linode image is required")
 	}
 	if strings.TrimSpace(linodeServerTypeForConfig(cfg)) == "" {
 		return core.Exit(2, "linode type is required")
+	}
+	if _, err := parseLinodeFirewallID(cfg.Linode.FirewallID); err != nil {
+		return err
 	}
 	return nil
 }
