@@ -1755,6 +1755,46 @@ func TestSDKClientRunCommandRejectsPrematureEOF(t *testing.T) {
 	}
 }
 
+func TestSDKClientRunCommandBoundsEndpointDiscovery(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	commandHit := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-discovery-stalled/endpoints/44772":
+			<-r.Context().Done()
+		case r.Method == http.MethodPost && r.URL.Path == "/command":
+			commandHit = true
+			http.Error(w, "unexpected command", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.(*sdkOpenSandboxClient).execTimeoutOverride = 20 * time.Millisecond
+
+	start := time.Now()
+	_, err = client.RunCommand(context.Background(), "sb-discovery-stalled", runCommandRequest{
+		Command:     "true",
+		TimeoutSecs: 3600,
+	})
+	if err == nil {
+		t.Fatal("expected stalled endpoint discovery to time out")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("endpoint discovery timeout took %s, want under 1s", elapsed)
+	}
+	if commandHit {
+		t.Fatal("command request started after endpoint discovery timed out")
+	}
+}
+
 func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	var interrupted string

@@ -521,14 +521,14 @@ func (c *sdkOpenSandboxClient) UploadFile(ctx context.Context, sandboxID, remote
 }
 
 func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string, req runCommandRequest) (int, error) {
-	conn, err := c.resolveExecd(ctx, sandboxID)
-	if err != nil {
-		return 1, err
-	}
 	if timeout := c.execRequestTimeout(req.TimeoutSecs); timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
+	}
+	conn, err := c.resolveExecd(ctx, sandboxID)
+	if err != nil {
+		return 1, err
 	}
 	exitCode := 0
 	terminal := false
