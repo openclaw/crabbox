@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: crabbox_demo
+      POSTGRES_PASSWORD: crabbox_demo
+      POSTGRES_USER: crabbox_demo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crabbox_demo -d crabbox_demo"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.12-alpine
+    environment:
+      CLICKHOUSE_DB: crabbox_demo
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      CLICKHOUSE_PASSWORD: crabbox_demo
+      CLICKHOUSE_USER: crabbox_demo
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

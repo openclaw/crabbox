@@ -1,3 +1,19 @@
 blacksmith:
   workflow: .github/workflows/blacksmith-testbox.yml
   job: go
+
+dataRuns:
+  postgres-clickhouse-demo:
+    provider: islo
+    target: linux
+    shell: true
+    command: ./examples/data-runs/postgres-clickhouse/run.sh
+    manifest: reports/data/postgres-clickhouse/manifest.json
+    requiredArtifacts:
+      - reports/data/postgres-clickhouse/quality.json
+    policy:
+      sourceIdentity: demo:postgres.orders
+      sinkIdentity: demo:clickhouse.daily_sales
+      egress: local-compose-only
+      promotion: manual
+      enforcement: declared-only
