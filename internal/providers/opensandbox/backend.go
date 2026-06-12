@@ -157,16 +157,9 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	shouldStop = acquired && !req.Keep
 	if shouldStop {
 		defer func() {
-			if !shouldStop {
-				return
+			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
 			}
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			defer cancel()
-			if killErr := api.DeleteSandbox(cleanupCtx, sandboxID); killErr != nil && !isOpenSandboxNotFound(killErr) {
-				fmt.Fprintf(b.rt.Stderr, "warning: opensandbox delete failed for %s: %v\n", sandboxID, killErr)
-				return
-			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
@@ -214,6 +207,9 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			result.ExitCode = 1
 		}
 		if req.TimingJSON {
+			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
+			}
 			if err := writeTimingJSON(b.rt.Stderr, timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
@@ -284,6 +280,9 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		}
 	}
 	if req.TimingJSON {
+		if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
+		}
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
@@ -655,6 +654,20 @@ func (b *openSandboxBackend) warnOpenSandboxActivityRefresh(leaseID string, shou
 	if err := b.refreshOpenSandboxActivityIfRetained(leaseID, shouldStop); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: refresh opensandbox lease activity failed lease=%s: %v\n", leaseID, err)
 	}
+}
+
+func (b *openSandboxBackend) cleanupCreatedRun(ctx context.Context, api openSandboxClient, leaseID, sandboxID string, shouldStop *bool) error {
+	if !*shouldStop {
+		return nil
+	}
+	*shouldStop = false
+	cleanupCtx, cancel := b.cleanupContext(ctx)
+	defer cancel()
+	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isOpenSandboxNotFound(err) {
+		return fmt.Errorf("opensandbox delete failed for %s: %w", sandboxID, err)
+	}
+	removeLeaseClaim(leaseID)
+	return nil
 }
 
 func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxClient, repo Repo, reclaim bool, requestedSlug string) (string, string, string, sandboxInfo, func(), error) {

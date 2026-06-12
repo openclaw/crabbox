@@ -64,8 +64,26 @@ type commandStreamEvent struct {
 }
 
 type execdConnection struct {
-	baseURL string
-	headers map[string]string
+	baseURL  string
+	rawQuery string
+	headers  map[string]string
+}
+
+type openSandboxQueryTransport struct {
+	base     http.RoundTripper
+	rawQuery string
+}
+
+func (t openSandboxQueryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cloned := req.Clone(req.Context())
+	requestURL := *req.URL
+	if requestURL.RawQuery == "" {
+		requestURL.RawQuery = t.rawQuery
+	} else if t.rawQuery != "" {
+		requestURL.RawQuery = t.rawQuery + "&" + requestURL.RawQuery
+	}
+	cloned.URL = &requestURL
+	return t.base.RoundTrip(cloned)
 }
 
 var errOpenSandboxNotFound = errors.New("opensandbox not found")
@@ -465,7 +483,11 @@ func (c *sdkOpenSandboxClient) runCommandStream(ctx context.Context, conn execdC
 	if err != nil {
 		return fmt.Errorf("opensandbox marshal command request: %w", err)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(conn.baseURL, "/")+"/command", bytes.NewReader(body))
+	commandURL, err := appendOpenSandboxExecdPath(conn.baseURL, "/command")
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, commandURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("opensandbox create command request: %w", err)
 	}
@@ -475,7 +497,7 @@ func (c *sdkOpenSandboxClient) runCommandStream(ctx context.Context, conn execdC
 	for key, value := range conn.headers {
 		request.Header.Set(key, value)
 	}
-	response, err := c.client.Do(request)
+	response, err := c.execdHTTPClient(conn).Do(request)
 	if err != nil {
 		return fmt.Errorf("opensandbox send command request: %w", err)
 	}
@@ -703,7 +725,7 @@ func (c *sdkOpenSandboxClient) execd(ctx context.Context, sandboxID string) (*sd
 	if err != nil {
 		return nil, err
 	}
-	return sdk.NewExecdClient(conn.baseURL, "", sdk.WithHTTPClient(c.client), sdk.WithHeaders(conn.headers)), nil
+	return sdk.NewExecdClient(conn.baseURL, "", sdk.WithHTTPClient(c.execdHTTPClient(conn)), sdk.WithHeaders(conn.headers)), nil
 }
 
 func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID string) (execdConnection, error) {
@@ -714,7 +736,7 @@ func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID strin
 	}
 	conn := c.config()
 	endpointURL := conn.RewriteEndpointURL(endpoint.Endpoint)
-	endpointURL, err = validateOpenSandboxExecdURL(endpointURL, conn.GetProtocol())
+	endpointURL, rawQuery, err := validateOpenSandboxExecdURL(endpointURL, conn.GetProtocol())
 	if err != nil {
 		return execdConnection{}, err
 	}
@@ -722,29 +744,51 @@ func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID strin
 	if c.cfg.OpenSandbox.UseServerProxy && headers["X-EXECD-ACCESS-TOKEN"] == "" && c.key != "" {
 		headers["X-EXECD-ACCESS-TOKEN"] = c.key
 	}
-	return execdConnection{baseURL: endpointURL, headers: headers}, nil
+	return execdConnection{baseURL: endpointURL, rawQuery: rawQuery, headers: headers}, nil
 }
 
-func validateOpenSandboxExecdURL(raw, defaultProtocol string) (string, error) {
+func validateOpenSandboxExecdURL(raw, defaultProtocol string) (string, string, error) {
 	raw = strings.TrimSpace(raw)
 	if !strings.Contains(raw, "://") {
 		raw = strings.TrimSpace(defaultProtocol) + "://" + raw
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(5, "opensandbox execd endpoint must be an absolute HTTP(S) URL")
+		return "", "", exit(5, "opensandbox execd endpoint must be an absolute HTTP(S) URL")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", exit(5, "opensandbox execd endpoint must use HTTP(S)")
+		return "", "", exit(5, "opensandbox execd endpoint must use HTTP(S)")
 	}
 	if parsed.User != nil || parsed.Fragment != "" {
-		return "", exit(5, "opensandbox execd endpoint must not contain userinfo or a fragment")
+		return "", "", exit(5, "opensandbox execd endpoint must not contain userinfo or a fragment")
 	}
 	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
-		return "", exit(5, "opensandbox execd endpoint host %q must use HTTPS unless it is loopback", parsed.Host)
+		return "", "", exit(5, "opensandbox execd endpoint host %q must use HTTPS unless it is loopback", parsed.Host)
 	}
-	return strings.TrimRight(parsed.String(), "/"), nil
+	rawQuery := parsed.RawQuery
+	parsed.RawQuery = ""
+	parsed.ForceQuery = false
+	return strings.TrimRight(parsed.String(), "/"), rawQuery, nil
+}
+
+func (c *sdkOpenSandboxClient) execdHTTPClient(conn execdConnection) *http.Client {
+	client := *c.client
+	client.Transport = openSandboxQueryTransport{
+		base:     client.Transport,
+		rawQuery: conn.rawQuery,
+	}
+	return &client
+}
+
+func appendOpenSandboxExecdPath(baseURL, suffix string) (string, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("opensandbox parse execd base URL: %w", err)
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + strings.TrimLeft(suffix, "/")
+	parsed.RawPath = ""
+	return parsed.String(), nil
 }
 
 func sdkSandboxInfo(info *sdk.SandboxInfo) sandboxInfo {

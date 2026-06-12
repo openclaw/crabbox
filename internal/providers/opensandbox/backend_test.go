@@ -349,6 +349,29 @@ func TestRunTimingJSONRemainsFinalLineWhenActivityRefreshFails(t *testing.T) {
 	}
 }
 
+func TestRunTimingJSONRemainsFinalLineWhenCleanupFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.deleteErr = errors.New("provider delete unavailable")
+	backend := newTestBackend(fake)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+
+	if _, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"}, TimingJSON: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report map[string]any
+	if jsonErr := json.Unmarshal([]byte(lines[len(lines)-1]), &report); jsonErr != nil {
+		t.Fatalf("final stderr line is not timing JSON: %q: %v", lines[len(lines)-1], jsonErr)
+	}
+	if !strings.Contains(stderr.String(), "provider delete unavailable") {
+		t.Fatalf("stderr=%q want cleanup warning", stderr.String())
+	}
+}
+
 func TestRunPreservesBashLoginShellForExplicitInvocation(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -1266,6 +1289,45 @@ func TestSDKClientRejectsPlaintextPublicExecdEndpoint(t *testing.T) {
 	}
 }
 
+func TestSDKClientPreservesExecdEndpointQueryAcrossPaths(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	var pingQuery, commandQuery string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-signed/endpoints/44772":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`/exec?signature=secret-value","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/exec/ping":
+			pingQuery = r.URL.RawQuery
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/command":
+			commandQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"execution_complete\",\"exit_code\":0}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.PingSandbox(context.Background(), "sb-signed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RunCommand(context.Background(), "sb-signed", runCommandRequest{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if pingQuery != "signature=secret-value" || commandQuery != "signature=secret-value" {
+		t.Fatalf("ping query=%q command query=%q", pingQuery, commandQuery)
+	}
+}
+
 func TestSDKClientRunCommandSendsTimeoutMillis(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	var gotTimeout int64
@@ -1666,6 +1728,7 @@ type fakeOpenSandboxClient struct {
 	createExpiresIn      time.Duration
 	deleteStarted        chan struct{}
 	deleteRelease        chan struct{}
+	deleteErr            error
 	afterRun             func(runCommandRequest)
 	runStarted           chan struct{}
 	runRelease           chan struct{}
@@ -1726,6 +1789,9 @@ func (f *fakeOpenSandboxClient) DeleteSandbox(_ context.Context, sandboxID strin
 	}
 	if f.deleteRelease != nil {
 		<-f.deleteRelease
+	}
+	if f.deleteErr != nil {
+		return f.deleteErr
 	}
 	if f.notFound {
 		return errOpenSandboxNotFound
