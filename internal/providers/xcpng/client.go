@@ -1154,7 +1154,7 @@ func (c *xapiClient) DeleteServer(ctx context.Context, id string) error {
 }
 
 func (c *xapiClient) DeleteFreshServer(ctx context.Context, id, vtpmRef string) error {
-	return c.deleteServer(ctx, id, false, vtpmRef)
+	return c.deleteServer(ctx, id, true, vtpmRef)
 }
 
 func (c *xapiClient) deleteServer(ctx context.Context, id string, forceDisks bool, vtpmRefs ...string) error {

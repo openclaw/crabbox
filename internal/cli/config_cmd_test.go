@@ -66,6 +66,29 @@ func TestConfigSetBrokerRegisteredModeAcceptsDirectProvider(t *testing.T) {
 	}
 }
 
+func TestConfigSetBrokerRegisteredModeRejectsUnknownProvider(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	err := app.configSetBroker([]string{
+		"--url", "https://broker.example.test",
+		"--provider", "missing-provider",
+		"--mode", "registered",
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("config should not be written, stat err=%v", statErr)
+	}
+}
+
 func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

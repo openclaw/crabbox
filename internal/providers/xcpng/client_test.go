@@ -2016,20 +2016,16 @@ func TestDeleteServerRemovesLeaseConfigDriveVDI(t *testing.T) {
 	}
 }
 
-func TestDeleteFreshServerDestroysVTPMAfterHaltBeforeVM(t *testing.T) {
+func TestDeleteFreshServerForcesUnlabeledAllocationCleanup(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := readXMLRPCMethod(t, r)
 		methods = append(methods, method)
 		switch method {
 		case "VM.get_record":
-			writeXMLRPCVMRecord(t, w, "cbx_lease")
-		case "VM.get_guest_metrics":
-			writeXMLRPCFault(t, w, "HANDLE_INVALID")
+			writeXMLRPCUnmanagedVMRecord(t, w)
 		case "VM.get_VBDs":
 			writeXMLRPCStringArray(t, w, nil)
-		case "VDI.get_all_records":
-			writeXMLRPCEmptyRecordMap(t, w)
 		case "VM.get_power_state":
 			writeXMLRPCString(t, w, "Halted")
 		case "VTPM.destroy", "VM.destroy":

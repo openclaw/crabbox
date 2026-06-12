@@ -592,10 +592,14 @@ func validateBrokerProviderForMode(provider, mode string) (string, error) {
 	if provider == "" {
 		return "", nil
 	}
-	if resolved, err := ProviderFor(provider); err == nil {
-		return resolved.Name(), nil
+	if normalizeProviderName(provider) == "external" {
+		return "external", nil
 	}
-	return provider, nil
+	resolved, err := ProviderFor(provider)
+	if err != nil {
+		return "", err
+	}
+	return resolved.Name(), nil
 }
 
 func tokenState(token string) string {
