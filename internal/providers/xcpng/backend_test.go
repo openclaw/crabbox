@@ -678,18 +678,26 @@ func countCalls(calls []string, want string) int {
 	return count
 }
 
-func TestResolveByAliasReturnsGuestIPLookupErrorWhenHostMissing(t *testing.T) {
+func TestResolveByAliasFallsBackToMACDiscoveryWhenGuestMetricsFail(t *testing.T) {
 	managed := crabboxServer(xcpNgTestVMUUID, "cbx_lease", "ready", time.Now().Add(time.Hour))
 	managed.PublicNet.IPv4.IP = ""
 	managed.PrivateNet.IPv4.IP = ""
 	fake := &fakeLifecycleClient{
-		servers:   []Server{managed},
-		getServer: map[string]Server{xcpNgTestVMUUID: managed},
-		errOn:     map[string]error{"guest-ip": errors.New("guest metrics unavailable")},
+		servers:      []Server{managed},
+		getServer:    map[string]Server{xcpNgTestVMUUID: managed},
+		discoveredIP: "192.0.2.77",
+		errOn:        map[string]error{"guest-ip": errors.New("guest metrics unavailable")},
 	}
 	backend := newTestBackend(t, fake)
-	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "lease"}); err == nil || !strings.Contains(err.Error(), "guest metrics unavailable") {
-		t.Fatalf("err=%v", err)
+	target, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "lease"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.SSH.Host != "192.0.2.77" || target.Server.PublicNet.IPv4.IP != "192.0.2.77" {
+		t.Fatalf("target=%#v", target)
+	}
+	if countCalls(fake.calls, "guest-ip-by-id") != 1 || countCalls(fake.calls, "discover-guest-ip") != 1 {
+		t.Fatalf("calls=%v", fake.calls)
 	}
 	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "lease", ReleaseOnly: true}); err != nil {
 		t.Fatalf("release-only resolve err=%v", err)

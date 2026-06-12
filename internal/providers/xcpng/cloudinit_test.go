@@ -14,7 +14,7 @@ func TestCloudInitPayloadIncludesSSHUserKeyAndBootstrap(t *testing.T) {
 	}
 	for _, want := range []string{
 		"#cloud-config",
-		"name: crabbox",
+		"name: 'crabbox'",
 		"ssh-ed25519 AAAATEST crabbox",
 		"NOPASSWD",
 		"openssh-server",
@@ -103,6 +103,25 @@ func TestCloudInitPayloadQuotesWorkRootInRunCommands(t *testing.T) {
 		if !strings.Contains(payload.UserData, want) {
 			t.Fatalf("user-data missing %q:\n%s", want, payload.UserData)
 		}
+	}
+}
+
+func TestCloudInitPayloadQuotesYAMLSpecialUsername(t *testing.T) {
+	cfg := testConfig()
+	cfg.XCPNg.User = "null"
+	payload, err := newCloudInitPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(payload.UserData, "  - name: 'null'\n") {
+		t.Fatalf("user-data username is not quoted:\n%s", payload.UserData)
+	}
+	autoinstall, err := newLinuxAutoinstallPayload(cfg, "cbx_lease", "blue", "ssh-ed25519 AAAATEST crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(autoinstall.UserData, "      - name: 'null'\n") {
+		t.Fatalf("autoinstall username is not quoted:\n%s", autoinstall.UserData)
 	}
 }
 

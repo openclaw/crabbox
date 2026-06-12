@@ -371,7 +371,6 @@ func TestXAPICallReconnectsOnHostIsSlaveRedirect(t *testing.T) {
 }
 
 func TestGuestIPv4SkipsLoopbackAndNonIPv4(t *testing.T) {
-	client := &xapiClient{session: "OpaqueRef:session"}
 	value := xmlRPCValue{Struct: []xmlRPCMember{
 		{Name: "0/ip", Value: xmlRPCValue{String: "127.0.0.1"}},
 		{Name: "1/ip", Value: xmlRPCValue{String: "2001:db8::1"}},
@@ -391,7 +390,25 @@ func TestGuestIPv4SkipsLoopbackAndNonIPv4(t *testing.T) {
 	if ip := usableIPv4(networks["3/ip"]); ip != "192.0.2.55" {
 		t.Fatalf("ip=%s", ip)
 	}
-	_ = client
+}
+
+func TestGuestIPv4FromNetworksSelectsPrimaryOrConfiguredNetwork(t *testing.T) {
+	networks := map[string]string{
+		"0/ip":     "192.0.2.55",
+		"0/ipv4/0": "192.0.2.55",
+		"1/ip":     "10.0.0.55",
+	}
+	ip, err := guestIPv4FromNetworks(networks, "")
+	if err != nil || ip != "192.0.2.55" {
+		t.Fatalf("primary ip=%q err=%v", ip, err)
+	}
+	ip, err = guestIPv4FromNetworks(networks, "10.0.0.0/24")
+	if err != nil || ip != "10.0.0.55" {
+		t.Fatalf("cidr ip=%q err=%v", ip, err)
+	}
+	if _, err := guestIPv4FromNetworks(map[string]string{"1/ip": "192.0.2.55", "2/ip": "10.0.0.55"}, ""); err == nil || !strings.Contains(err.Error(), "multiple guest ipv4") {
+		t.Fatalf("ambiguity err=%v", err)
+	}
 }
 
 func TestXMLRPCFaultReturnsError(t *testing.T) {
@@ -1211,8 +1228,8 @@ func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 		case "task.destroy":
 			writeXMLRPCString(t, w, "true")
 		case "VBD.create":
-			if !strings.Contains(body, "<name>mode</name><value><string>RO</string>") {
-				t.Fatalf("VBD.create must attach config drive read-only, body=%s", body)
+			if !strings.Contains(body, "<name>mode</name><value><string>RW</string>") {
+				t.Fatalf("VBD.create must attach HVM config drive read-write, body=%s", body)
 			}
 			for _, want := range []string{"qos_algorithm_type", "qos_algorithm_params", "qos_supported_algorithms"} {
 				if !strings.Contains(body, "<name>"+want+"</name>") {
@@ -1572,6 +1589,47 @@ func TestGuestIPv4ForIDResolvesUUIDToFreshRef(t *testing.T) {
 		t.Fatalf("ip=%q", ip)
 	}
 	if got := strings.Join(methods, ","); got != "VM.get_by_uuid,VM.get_guest_metrics,VM_guest_metrics.get_networks" {
+		t.Fatalf("methods=%s", got)
+	}
+}
+
+func TestDiscoverGuestIPv4ResolvesUUIDToFreshRef(t *testing.T) {
+	oldReadARPTable := xcpNgReadARPTable
+	xcpNgReadARPTable = func(context.Context) (map[string]string, error) {
+		return map[string]string{"02:00:00:00:00:55": "192.0.2.55"}, nil
+	}
+	t.Cleanup(func() {
+		xcpNgReadARPTable = oldReadARPTable
+	})
+
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, body := readXMLRPCBodyAndMethod(t, r)
+		methods = append(methods, method)
+		switch method {
+		case "VM.get_by_uuid":
+			writeXMLRPCString(t, w, "OpaqueRef:vm-fresh")
+		case "VM.get_VIFs":
+			if !strings.Contains(body, "<string>OpaqueRef:vm-fresh</string>") {
+				t.Fatalf("VM.get_VIFs did not use resolved ref, body=%s", body)
+			}
+			writeXMLRPCStringArray(t, w, []string{"OpaqueRef:vif"})
+		case "VIF.get_MAC":
+			writeXMLRPCString(t, w, "02:00:00:00:00:55")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+	ip, err := client.DiscoverGuestIPv4(context.Background(), xapiRef(xcpNgTestVMUUID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "192.0.2.55" {
+		t.Fatalf("ip=%q", ip)
+	}
+	if got := strings.Join(methods, ","); got != "VM.get_by_uuid,VM.get_VIFs,VIF.get_MAC" {
 		t.Fatalf("methods=%s", got)
 	}
 }

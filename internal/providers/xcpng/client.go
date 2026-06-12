@@ -663,7 +663,7 @@ func (c *xapiClient) AttachConfigDrive(ctx context.Context, req xcpNgConfigDrive
 		"VDI":                      vdiRef,
 		"userdevice":               "autodetect",
 		"bootable":                 false,
-		"mode":                     "RO",
+		"mode":                     "RW",
 		"type":                     "Disk",
 		"empty":                    false,
 		"unpluggable":              true,
@@ -737,22 +737,65 @@ func (c *xapiClient) GuestIPv4(ctx context.Context, ref xapiRef) (string, error)
 	if err != nil {
 		return "", err
 	}
-	networkMap := xmlValueToStringMap(value)
+	return guestIPv4FromNetworks(xmlValueToStringMap(value), c.guestCIDR)
+}
+
+func guestIPv4FromNetworks(networkMap map[string]string, guestCIDR string) (string, error) {
+	var guestNetwork *net.IPNet
+	if guestCIDR = strings.TrimSpace(guestCIDR); guestCIDR != "" {
+		parsedIP, parsedNetwork, err := net.ParseCIDR(guestCIDR)
+		if err != nil || parsedIP.To4() == nil {
+			return "", guestProbeConfigError{message: fmt.Sprintf("invalid CRABBOX_XCP_NG_GUEST_CIDR %q", guestCIDR)}
+		}
+		guestNetwork = parsedNetwork
+	}
 	keys := make([]string, 0, len(networkMap))
 	for key := range networkMap {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	type candidate struct {
+		ip      string
+		primary bool
+	}
+	candidates := make([]candidate, 0, len(keys))
+	candidateByIP := make(map[string]int, len(keys))
 	for _, key := range keys {
-		if ip := usableIPv4(networkMap[key]); ip != "" {
-			return ip, nil
+		ip := usableIPv4(networkMap[key])
+		if ip == "" || guestNetwork != nil && !guestNetwork.Contains(net.ParseIP(ip)) {
+			continue
 		}
+		if index, ok := candidateByIP[ip]; ok {
+			candidates[index].primary = candidates[index].primary || strings.HasPrefix(key, "0/")
+			continue
+		}
+		candidateByIP[ip] = len(candidates)
+		candidates = append(candidates, candidate{ip: ip, primary: strings.HasPrefix(key, "0/")})
+	}
+	if len(candidates) == 1 {
+		return candidates[0].ip, nil
+	}
+	primary := make([]candidate, 0, 1)
+	for _, candidate := range candidates {
+		if candidate.primary {
+			primary = append(primary, candidate)
+		}
+	}
+	if len(primary) == 1 {
+		return primary[0].ip, nil
+	}
+	if len(candidates) > 1 {
+		return "", errors.New("multiple guest ipv4 addresses reported by XCP-ng guest metrics; set CRABBOX_XCP_NG_GUEST_CIDR to select one")
 	}
 	return "", errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
 }
 
 func (c *xapiClient) DiscoverGuestIPv4(ctx context.Context, ref xapiRef) (string, error) {
-	macs, err := c.vmVIFMACs(ctx, ref.value())
+	resolvedRef, err := c.vmRefForID(ctx, ref.value())
+	if err != nil {
+		return "", err
+	}
+	macs, err := c.vmVIFMACs(ctx, resolvedRef)
 	if err != nil {
 		return "", err
 	}

@@ -41,7 +41,7 @@ func newCloudInitPayload(cfg Config, leaseID, slug, publicKey string) (xcpNgClou
 	var userData bytes.Buffer
 	fmt.Fprintf(&userData, "#cloud-config\n")
 	fmt.Fprintf(&userData, "users:\n")
-	fmt.Fprintf(&userData, "  - name: %s\n", shellSafeCloudInitScalar(user))
+	fmt.Fprintf(&userData, "  - name: %s\n", yamlSingleQuotedScalar(user))
 	fmt.Fprintf(&userData, "    groups: [sudo]\n")
 	fmt.Fprintf(&userData, "    shell: /bin/bash\n")
 	fmt.Fprintf(&userData, "    sudo: ['ALL=(ALL) NOPASSWD:ALL']\n")
@@ -124,7 +124,7 @@ func newLinuxAutoinstallPayload(cfg Config, leaseID, slug, publicKey string) (xc
 	fmt.Fprintf(&userData, "    package_upgrade: false\n")
 	fmt.Fprintf(&userData, "    users:\n")
 	fmt.Fprintf(&userData, "      - default\n")
-	fmt.Fprintf(&userData, "      - name: %s\n", shellSafeCloudInitScalar(user))
+	fmt.Fprintf(&userData, "      - name: %s\n", yamlSingleQuotedScalar(user))
 	fmt.Fprintf(&userData, "        gecos: Crabbox ISO E2E\n")
 	fmt.Fprintf(&userData, "        groups: [adm, sudo]\n")
 	fmt.Fprintf(&userData, "        shell: /bin/bash\n")

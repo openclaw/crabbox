@@ -387,11 +387,24 @@ func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClien
 	if firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP) != "" || releaseOnly {
 		return server, nil
 	}
-	ip, err := client.GuestIPv4ForID(ctx, server.CloudID)
-	if err != nil {
-		return Server{}, err
+	ip, guestErr := client.GuestIPv4ForID(ctx, server.CloudID)
+	if ip == "" {
+		if discoverer, ok := client.(guestIPv4Discoverer); ok {
+			discovered, discoverErr := discoverer.DiscoverGuestIPv4(ctx, xapiRef(server.CloudID))
+			if discoverErr == nil && discovered != "" {
+				ip = discovered
+			} else if discoverErr != nil {
+				if guestErr == nil {
+					guestErr = errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
+				}
+				return Server{}, errors.Join(guestErr, discoverErr)
+			}
+		}
 	}
 	if ip == "" {
+		if guestErr != nil {
+			return Server{}, guestErr
+		}
 		return Server{}, errors.New("no guest ipv4 address reported by XCP-ng guest metrics")
 	}
 	server.PublicNet.IPv4.IP = ip
