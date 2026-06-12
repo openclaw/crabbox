@@ -370,6 +370,35 @@ if [[ "$failure" -ne 0 ]]; then
   exit 1
 fi
 
+cleanup_armed=1
+cleanup_on_exit() {
+  local original_status=$?
+  local cleanup_index=0
+  trap - EXIT INT TERM HUP
+  if [[ "$cleanup_armed" == "1" ]]; then
+    if [[ -f "$proof_dir/warmup.raw.log" ]]; then
+      extract_owned_lease_ids
+    fi
+    if [[ -s "$owned_lease_ids" ]]; then
+      while IFS= read -r owned_lease; do
+        [[ -n "$owned_lease" ]] || continue
+        cleanup_index=$((cleanup_index + 1))
+        run_step "exit-stop-${cleanup_index}" "$bin" stop --provider proxmox --id "$owned_lease" || true
+      done <"$owned_lease_ids"
+    else
+      run_step exit-list "$bin" list --provider proxmox --json || true
+      if [[ -f "$proof_dir/exit-list.raw.log" ]]; then
+        reconcile_new_smoke_lease "$proof_dir/exit-list.raw.log" || true
+      fi
+    fi
+  fi
+  exit "$original_status"
+}
+trap cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 warmup_status=0
 run_step warmup "$bin" warmup --provider proxmox --slug "$slug" --keep || warmup_status=$?
 extract_owned_lease_ids
@@ -408,7 +437,9 @@ else
   if reconcile_new_smoke_lease "$proof_dir/list-after.raw.log"; then
     list_final_status=0
     run_step list-final "$bin" list --provider proxmox --json || list_final_status=$?
-    if [[ "$list_final_status" -ne 0 ]] || ! verify_no_new_smoke_lease "$proof_dir/list-final.raw.log"; then
+    if [[ "$list_final_status" -eq 0 ]] && verify_no_new_smoke_lease "$proof_dir/list-final.raw.log"; then
+      cleanup_armed=0
+    else
       failure=1
     fi
   else

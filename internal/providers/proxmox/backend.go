@@ -597,7 +597,7 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 			}
 			if canRetarget {
 				target := sshTargetFromConfig(cfg, survivors[0].PublicNet.IPv4.IP)
-				if claim.SSHPort > 0 {
+				if target.Port == "" && claim.SSHPort > 0 {
 					target.Port = strconv.Itoa(claim.SSHPort)
 				}
 				if _, err := core.ReplaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, claim, survivors[0], target); err != nil {

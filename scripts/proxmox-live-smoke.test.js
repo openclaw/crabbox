@@ -88,6 +88,11 @@ case "$1" in
     if [[ "\${FAKE_CRABBOX_OMIT_LEASE_OUTPUT:-0}" != "1" ]]; then
       printf 'leased cbx_test123 slug=proxmox-live-smoke provider=proxmox server=100 type=template-9400 ip=192.0.2.10 idle_timeout=30m expires=later\\n'
     fi
+    if [[ "\${FAKE_CRABBOX_SIGNAL_PARENT:-0}" == "1" ]]; then
+      kill -TERM "$PPID"
+      sleep 1
+      exit 143
+    fi
     printf 'ready ssh=crabbox@192.0.2.10:22 network=public workroot=/work/crabbox\\n'
     ;;
   status)
@@ -210,6 +215,26 @@ test("live mode runs lifecycle and read-only cleanup proof", () => {
 		const mode = fs.statSync(path.join(fake.proof, name)).mode & 0o777;
 		assert.equal(mode & 0o077, 0, `${name} should not be accessible by group or other users`);
 	}
+});
+
+test("live mode releases the recorded lease when interrupted", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_SIGNAL_PARENT: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 143);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
+	assert.equal(fs.existsSync(fake.leaseState), false);
 });
 
 test("live mode does not stop or cleanup when warmup fails before lease ownership", () => {

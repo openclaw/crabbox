@@ -434,9 +434,10 @@ func proxmoxTemplateStorageNames(requirements []proxmoxTemplateStorageRequiremen
 
 func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
 	path := "/nodes/" + url.PathEscape(c.Node) + "/network"
+	inventoryPath := path + "?type=include_sdn"
 	var networks []proxmoxNetwork
-	if err := c.doRequired(ctx, http.MethodGet, path, nil, &networks); err != nil {
-		return c.proxmoxFailedReadiness("bridge", path, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
+	if err := c.doRequired(ctx, http.MethodGet, inventoryPath, nil, &networks); err != nil {
+		return c.proxmoxFailedReadiness("bridge", inventoryPath, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
 	}
 	bridges := []string{strings.TrimSpace(cfg.Proxmox.Bridge)}
 	source := "config"
@@ -525,7 +526,7 @@ func proxmoxBridgeReadiness(bridge string, network proxmoxNetwork, endpoint stri
 		bridgeType = "bridge"
 	}
 	switch strings.ToLower(bridgeType) {
-	case "bridge", "ovsbridge":
+	case "bridge", "ovsbridge", "vnet":
 	default:
 		return ProxmoxReadinessCheck{
 			Status:  "failed",

@@ -741,8 +741,8 @@ func TestProxmoxCleanupRetargetsClaimToSoleSurvivingDuplicate(t *testing.T) {
 		t.Fatalf("cleanup error=%v, want surviving VM failure", err)
 	}
 	claim, ok, err := core.ResolveLeaseClaim(leaseID)
-	if err != nil || !ok || claim.CloudID != "202" || claim.SSHHost != "192.0.2.202" || claim.SSHPort != 22 {
-		t.Fatalf("claim=%#v ok=%t err=%v, want surviving cloud id with known working SSH port", claim, ok, err)
+	if err != nil || !ok || claim.CloudID != "202" || claim.SSHHost != "192.0.2.202" || claim.SSHPort != 2222 {
+		t.Fatalf("claim=%#v ok=%t err=%v, want surviving cloud id with current configured SSH port", claim, ok, err)
 	}
 	assertStoredTestboxKeyExists(t, leaseID)
 }

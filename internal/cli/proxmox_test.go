@@ -268,6 +268,27 @@ func TestProxmoxDoctorReadinessAcceptsOVSBridge(t *testing.T) {
 	}
 }
 
+func TestProxmoxDoctorReadinessAcceptsSDNVNet(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/pve1/network" || r.URL.Query().Get("type") != "include_sdn" {
+			t.Fatalf("unexpected %s", r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"iface": "ci-vnet", "type": "vnet", "active": 1},
+		}})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.Bridge = "ci-vnet"
+	check := client.proxmoxNetworkCheck(context.Background(), cfg)
+	if check.Status != "ok" || check.Details["type"] != "vnet" {
+		t.Fatalf("bridge check=%#v", check)
+	}
+}
+
 func TestProxmoxDoctorReadinessRequiresUsableTemplateBridgeWhenUnset(t *testing.T) {
 	tests := []struct {
 		name       string
