@@ -238,6 +238,21 @@ exposes a direct `crabbox ssh` login helper for kept sandboxes at
 `<sandbox>.islo`, but Islo run/sync remains delegated. See the linked
 provider pages for per-provider auth and configuration.
 
+Module-runtime delegated providers are a narrower category for Worker-isolate
+style runtimes. They should advertise `target=worker-runtime` and
+`feature=module-run`, accept `crabbox run --script <file>` or
+`--script-stdin` as source module input, and reject trailing `-- <command>`
+argv rather than implying Linux shell semantics. A module-runtime target does
+not imply SSH, rsync, archive sync, VNC, browser desktop, code-server, ports, or
+POSIX filesystem behavior unless a provider explicitly documents and advertises
+those capabilities.
+
+`cloudflare-dynamic-workers` is the Cloudflare-family module-runtime provider.
+It is distinct from `cloudflare`, which runs Linux commands in Cloudflare
+Containers. Dynamic Workers support `module-run`, local claim cleanup, and
+run-session metadata, but not SSH, Crabbox sync, Actions hydration, browser,
+desktop, code-server, ports, or container instance classes.
+
 ## Static SSH targets
 
 `provider: ssh` (aliases `static`, `static-ssh`) attaches to a preexisting host —

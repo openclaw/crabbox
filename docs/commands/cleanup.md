@@ -40,6 +40,10 @@ What cleanup does depends on the selected provider:
   it does not delete remote Devboxes.
 - **`namespace-instance`** destroys only Namespace Compute instances carrying
   Crabbox ownership labels and removes claims for instances already gone.
+- **`cloudflare-dynamic-workers`** checks local Dynamic Workers claims against
+  the loader and removes only stale local claims whose loader metadata is
+  missing or terminal. It does not enumerate or delete every Dynamic Worker in
+  the Cloudflare account.
 - Providers that have nothing to sweep return an error rather than acting. For
   example `provider=ssh` (static / bring-your-own hosts) reports:
 
@@ -111,7 +115,7 @@ namespace ssh cleanup no crabbox files found
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|multipass
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|cloudflare-dynamic-workers|multipass
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```

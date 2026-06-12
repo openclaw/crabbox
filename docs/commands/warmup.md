@@ -180,6 +180,15 @@ auto` resolves to managed.
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
 
+### cloudflare-dynamic-workers
+
+`--provider cloudflare-dynamic-workers` runs a readiness check against the
+Dynamic Workers loader. With `--keep` or `--slug`, warmup records a local claim
+for the Worker-runtime run identity so later `status`, `list`, `stop`, and
+`cleanup` commands can resolve it. It does not start a Linux machine and does
+not support Actions runner registration, SSH, desktop, browser, code-server,
+ports, `--class`, or `--type`.
+
 ### aws — macOS
 
 `--provider aws --target macos --desktop` launches an EC2 Mac instance on an

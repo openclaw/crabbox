@@ -202,6 +202,9 @@ function readiness(env: Env): Response {
     ok: true,
     runner: runnerName,
     loader: true,
+    loaderBinding: true,
+    compatibilityDate: defaultCompatibilityDate,
+    egress: "blocked",
     defaultEgress: "blocked",
     cacheModes: supportedCacheModes,
     tokenSource: tokenSource(env),
@@ -427,10 +430,13 @@ function parseRunRequest(body: Record<string, unknown>, url: URL): ParsedRunRequ
   );
   if (!egress) return json({ error: "egress must be blocked or intercept" }, 400);
 
-  const modules = parseModules(body["modules"]);
+  const moduleCompat = parseModuleCompat(body["module"]);
+  if (moduleCompat instanceof Response) return moduleCompat;
+
+  const modules = moduleCompat?.modules ?? parseModules(body["modules"]);
   if (modules instanceof Response) return modules;
 
-  const mainModule = stringField(body, "mainModule") ?? "index.js";
+  const mainModule = moduleCompat?.mainModule ?? stringField(body, "mainModule") ?? "index.js";
   if (!(mainModule in modules)) return json({ error: "mainModule must exist in modules" }, 400);
 
   const compatibilityDate = cleanCompatibilityDate(
@@ -492,6 +498,25 @@ function parseModules(value: unknown): Record<string, WorkerModule> | Response {
 
   if (Object.keys(modules).length === 0) return json({ error: "modules must not be empty" }, 400);
   return modules;
+}
+
+function parseModuleCompat(
+  value: unknown,
+): { mainModule: string; modules: Record<string, WorkerModule> } | Response | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return json({ error: "module must be an object" }, 400);
+
+  const source = stringField(value, "source");
+  if (source === undefined) return json({ error: "module.source must be a string" }, 400);
+  const name = stringField(value, "name") ?? "index.js";
+  if (!cleanModuleName(name)) return json({ error: "module.name is invalid" }, 400);
+
+  return {
+    mainModule: name,
+    modules: {
+      [name]: source,
+    },
+  };
 }
 
 function parseTypedModule(value: Record<string, unknown>): WorkerModule | null {
@@ -670,10 +695,15 @@ function errorMessage(error: unknown): string {
 }
 
 function runResponse(record: RunRecord): Record<string, unknown> {
+  const exitCode =
+    record.state === "succeeded" && record.result !== undefined && record.result.status < 400
+      ? 0
+      : 1;
   return {
     id: record.id,
     workerId: record.workerId,
     status: record.state,
+    exitCode,
     cacheMode: record.cacheMode,
     egress: record.egress,
     createdAt: record.createdAt,
@@ -682,7 +712,10 @@ function runResponse(record: RunRecord): Record<string, unknown> {
     durationMs: record.durationMs,
     result: record.result,
     error: record.error,
-    logs: record.logs,
+    body: record.result?.body,
+    stderr: record.error?.message,
+    logs: record.logs.map((log) => log.message).join("\n"),
+    logEvents: record.logs,
   };
 }
 

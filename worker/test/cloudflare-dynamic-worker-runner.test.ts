@@ -145,6 +145,9 @@ describe("Cloudflare Dynamic Workers runner", () => {
       ok: true,
       runner: "cloudflare-dynamic-workers",
       loader: true,
+      loaderBinding: true,
+      compatibilityDate: "2026-06-12",
+      egress: "blocked",
       defaultEgress: "blocked",
       cacheModes: ["one-shot", "stable", "explicit"],
       tokenSource: "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN",
@@ -206,8 +209,10 @@ describe("Cloudflare Dynamic Workers runner", () => {
       id: "run_1",
       workerId: "run_1",
       status: "succeeded",
+      exitCode: 0,
       cacheMode: "one-shot",
       egress: "blocked",
+      body: "done",
       result: {
         status: 201,
         statusText: "Created",
@@ -254,7 +259,45 @@ describe("Cloudflare Dynamic Workers runner", () => {
     await expect(response.json()).resolves.toMatchObject({
       id: "run_stable",
       workerId: "worker:v1",
+      exitCode: 0,
       cacheMode: "stable",
+    });
+  });
+
+  it("accepts the Go provider module compatibility payload", async () => {
+    const loader = new MockLoader();
+    const response = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          id: "run_go_payload",
+          cacheMode: "stable",
+          module: {
+            name: "worker.mjs",
+            source: "export default { fetch() { return new Response('go'); } };",
+          },
+          limits: { cpuMs: 25, subrequests: 4 },
+        }),
+      }),
+      env(loader),
+      ctx(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      id: "run_go_payload",
+      workerId: "run_go_payload",
+      status: "succeeded",
+      exitCode: 0,
+      body: "ok",
+    });
+    expect(loader.getCalls).toEqual([{ id: "run_go_payload" }]);
+    expect(loader.worker?.code).toMatchObject({
+      mainModule: "worker.mjs",
+      modules: {
+        "worker.mjs": "export default { fetch() { return new Response('go'); } };",
+      },
+      limits: { cpuMs: 25, subRequests: 4 },
     });
   });
 
@@ -306,7 +349,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
     await expect(status.json()).resolves.toMatchObject({
       id: "run_meta",
       status: "succeeded",
-      logs: [
+      logEvents: [
         { level: "info", message: "run started" },
         { level: "info", message: "run completed with HTTP 200" },
       ],
@@ -364,6 +407,8 @@ describe("Cloudflare Dynamic Workers runner", () => {
     await expect(failed.json()).resolves.toMatchObject({
       id: "run_failed",
       status: "failed",
+      exitCode: 1,
+      stderr: "runtime saw [redacted]",
       error: { message: "runtime saw [redacted]" },
     });
   });
