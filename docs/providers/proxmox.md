@@ -147,9 +147,11 @@ For self-signed private clusters, set `CRABBOX_PROXMOX_INSECURE_TLS=1` or pass
 `doctor --provider proxmox` is read-only. It checks authentication with
 `/version`, then verifies the configured node status, storage list, network
 bridge list, template VM/config, `/cluster/nextid`, and QEMU inventory. An
-explicit target storage must support `images`, and the configured template must
-have a cloud-init drive. The output includes `mutation=false`; it does not clone,
-configure, start, stop, or delete VMs.
+explicit target storage must support `images`; without an override, every
+storage referenced by the template disks must be active, enabled, and
+image-capable. The configured template must have a cloud-init drive and, when
+no bridge override is set, a NIC on an active bridge. The output includes
+`mutation=false`; it does not clone, configure, start, stop, or delete VMs.
 
 ## Configuration
 
@@ -231,8 +233,8 @@ Expected Proxmox-specific checks:
 ```text
 auth       /version accepts the API token
 node       /nodes/<node>/status is readable
-storage    /nodes/<node>/storage is readable, and configured storage is active
-bridge     /nodes/<node>/network is readable, and configured bridge exists
+storage    configured or template disk storage is active and image-capable
+bridge     configured or template NIC bridge exists and is active
 template   /nodes/<node>/qemu and /config show templateId is a QEMU template
 nextid     /cluster/nextid is readable
 inventory  /nodes/<node>/qemu is readable for Crabbox VM inventory
@@ -299,19 +301,20 @@ CRABBOX_PROXMOX_LIVE_SMOKE_SLUG=proxmox-live-smoke \
 scripts/proxmox-live-smoke.sh
 ```
 
-The configured smoke slug is a prefix. The script appends a per-process run
-identifier so concurrent proofs cannot claim or reconcile each other's leases.
+The configured smoke slug is a prefix. The script appends the UTC epoch and a
+random host-independent nonce so concurrent proofs do not share a requested
+slug.
 
 Live mode runs the public CLI surface: `warmup --keep`, `status --json`, `ssh`
 to print the pasteable command, `stop`, `cleanup --dry-run`, and a final
 `list --json`. The smoke script never runs provider-wide mutating cleanup; the
 owned lease is released by `stop`, and the cleanup dry-run remains evidence that
-other Proxmox leases would not be changed by the proof. If warmup fails or its
-lease ID cannot be parsed, the script compares pre/post inventories and stops
-only one uniquely new lease with the requested slug or its provider-assigned
-collision suffix. The final inventory comparison runs after successful
-lifecycles too, so a leaked earlier warmup attempt is reconciled before the proof
-can report completion.
+other Proxmox leases would not be changed by the proof. The script records every
+lease ID emitted by warmup and reconciles only those IDs; when no ID is emitted,
+it may reconcile one uniquely new lease with the exact random requested slug.
+It never treats a slug suffix alone as ownership proof. The final inventory
+comparison runs after successful lifecycles too, so a recorded leaked warmup
+attempt is reconciled before the proof can report completion.
 
 Proof artifacts are written to `CRABBOX_PROXMOX_LIVE_SMOKE_DIR` when set, or a
 new system temporary directory otherwise. The directory and logs use owner-only

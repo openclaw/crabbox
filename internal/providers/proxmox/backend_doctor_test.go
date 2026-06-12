@@ -1024,7 +1024,7 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	leaseID := "cbx_proxmox_release_inventory_failure"
 	server := expiredProxmoxServer("101", leaseID)
 	server.Provider = "proxmox"
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
@@ -1045,8 +1045,8 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	if err != nil || !ok || claim.CloudID != "101" {
 		t.Fatalf("claim=%#v ok=%t err=%v, want preserved until duplicate reconciliation", claim, ok, err)
 	}
-	if claim.ProviderScope != core.ProviderClaimScope("proxmox", cfg) {
-		t.Fatalf("claim scope=%q, want legacy claim backfilled before deletion", claim.ProviderScope)
+	if claim.ProviderScope != core.ProviderClaimScope("proxmox", cfg) || claim.CloudID != "101" {
+		t.Fatalf("claim scope=%q cloudID=%q, want legacy claim backfilled before deletion", claim.ProviderScope, claim.CloudID)
 	}
 	assertStoredTestboxKeyExists(t, leaseID)
 	if !strings.Contains(stderr.String(), "reason=inventory_refresh_failed") {

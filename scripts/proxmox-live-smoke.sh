@@ -56,7 +56,12 @@ slug_prefix="$(
 if [[ -z "$slug_prefix" ]]; then
   slug_prefix="proxmox-live-smoke"
 fi
-slug="${slug_prefix:0:20}-$(date -u +%s)-$$"
+nonce="$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')"
+if [[ ! "$nonce" =~ ^[0-9a-f]{12}$ ]]; then
+  echo "could not generate live smoke ownership nonce" >&2
+  exit 2
+fi
+slug="${slug_prefix:0:20}-$(date -u +%s)-${nonce}"
 
 resolve_configured_value() {
   local field="$1"
@@ -225,9 +230,21 @@ run_node_inventory() {
 }
 
 lease_id=""
-extract_lease_id() {
+owned_lease_ids="$proof_dir/owned-lease-ids.txt"
+extract_owned_lease_ids() {
   local raw="$proof_dir/warmup.raw.log"
-  lease_id="$(sed -n 's/^leased \([^[:space:]]*\).*/\1/p' "$raw" | tail -1)"
+  secure_log_file "$owned_lease_ids"
+  sed -n 's/.*leased \([^[:space:]]*\).*/\1/p' "$raw" | sort -u >"$owned_lease_ids"
+  lease_id="$(tail -1 "$owned_lease_ids")"
+}
+
+is_owned_smoke_lease() {
+  local candidate_lease="$1"
+  local candidate_slug="$2"
+  if grep -Fqx -- "$candidate_lease" "$owned_lease_ids"; then
+    return 0
+  fi
+  [[ "$candidate_slug" == "$slug" ]]
 }
 
 extract_list_inventory() {
@@ -264,7 +281,7 @@ reconcile_new_smoke_lease() {
     return 1
   fi
   while IFS=$'\t' read -r candidate candidate_slug cloud_id; do
-    [[ "$candidate_slug" == "$slug" || "$candidate_slug" == "$slug"-* ]] || continue
+    is_owned_smoke_lease "$candidate" "$candidate_slug" || continue
     if awk -F '\t' -v id="$cloud_id" '$3 == id { found = 1 } END { exit !found }' "$baseline_inventory"; then
       continue
     fi
@@ -296,8 +313,8 @@ verify_no_new_smoke_lease() {
     echo "step=lease-final-verify status=fail reason=list_json_invalid" | tee -a "$summary"
     return 1
   fi
-  while IFS=$'\t' read -r _ candidate_slug cloud_id; do
-    [[ "$candidate_slug" == "$slug" || "$candidate_slug" == "$slug"-* ]] || continue
+  while IFS=$'\t' read -r candidate candidate_slug cloud_id; do
+    is_owned_smoke_lease "$candidate" "$candidate_slug" || continue
     if awk -F '\t' -v id="$cloud_id" '$3 == id { found = 1 } END { exit !found }' "$baseline_inventory"; then
       continue
     fi
@@ -344,7 +361,7 @@ fi
 
 warmup_status=0
 run_step warmup "$bin" warmup --provider proxmox --slug "$slug" --keep || warmup_status=$?
-extract_lease_id
+extract_owned_lease_ids
 if [[ "$warmup_status" -ne 0 ]]; then
   echo "step=lifecycle status=fail reason=warmup_failed" | tee -a "$summary"
   failure=1

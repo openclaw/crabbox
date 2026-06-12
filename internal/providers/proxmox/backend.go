@@ -341,6 +341,9 @@ func (b *leaseBackend) backfillReleaseClaimScope(leaseID, cloudID string, server
 	}
 	replacement := claim
 	replacement.ProviderScope = scope
+	if replacement.CloudID == "" {
+		replacement.CloudID = cloudID
+	}
 	return core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, replacement)
 }
 

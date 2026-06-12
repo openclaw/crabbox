@@ -77,6 +77,9 @@ case "$1" in
     printf '%s\\n' "$requested_slug" >"${leaseState}"
     if [[ "\${FAKE_CRABBOX_EXTRA_LEAK:-0}" == "1" ]]; then
       printf '%s-retry\\n' "$requested_slug" >"${extraLeaseState}"
+      printf 'leased cbx_leaked slug=%s-retry provider=proxmox server=101\\n' "$requested_slug"
+    elif [[ "\${FAKE_CRABBOX_FOREIGN_SUFFIX:-0}" == "1" ]]; then
+      printf '%s-foreign\\n' "$requested_slug" >"${extraLeaseState}"
     fi
     if [[ "\${FAKE_CRABBOX_OMIT_LEASE_OUTPUT:-0}" != "1" ]]; then
       printf 'leased cbx_test123 slug=proxmox-live-smoke provider=proxmox server=100 type=template-9400 ip=192.0.2.10 idle_timeout=30m expires=later\\n'
@@ -125,7 +128,7 @@ printf 'ssh %s\\n' "$*" >>"${calls}"
 printf '{"data":{"version":"test"}}\\n'
 `,
 	);
-	return { dir, tools, calls, proof, fakeCrabbox };
+	return { dir, tools, calls, proof, leaseState, extraLeaseState, fakeCrabbox };
 }
 
 test("preflight mode is read-only and redacts local proof logs", () => {
@@ -180,7 +183,7 @@ test("live mode runs lifecycle and read-only cleanup proof", () => {
 	assert.match(result.stdout, /classification=live_proof_complete/);
 	const calls = fs.readFileSync(fake.calls, "utf8").trim().split("\n");
 	const dryRunIndex = calls.indexOf("cleanup --provider proxmox --dry-run");
-	assert.ok(calls.some((line) => /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-\d+ --keep$/.test(line)));
+	assert.ok(calls.some((line) => /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-[0-9a-f]{12} --keep$/.test(line)));
 	assert.ok(calls.indexOf("status --provider proxmox --id cbx_test123 --json") > -1);
 	assert.ok(calls.indexOf("ssh --provider proxmox --id cbx_test123") > -1);
 	assert.ok(calls.indexOf("stop --provider proxmox --id cbx_test123") > -1);
@@ -221,7 +224,7 @@ test("live mode does not stop or cleanup when warmup fails before lease ownershi
 	assert.match(result.stdout, /reason=no_new_matching_lease/);
 	assert.match(result.stdout, /classification=environment_blocked/);
 	const calls = fs.readFileSync(fake.calls, "utf8");
-	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-\d+ --keep$/m);
+	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke-\d+-[0-9a-f]{12} --keep$/m);
 	assert.match(calls, /^list --provider proxmox --json$/m);
 	assert.doesNotMatch(calls, /^status |^ssh |^stop |^cleanup /m);
 });
@@ -242,7 +245,7 @@ test("live mode releases a uniquely created lease after warmup fails", () => {
 
 	assert.equal(result.status, 1);
 	assert.match(result.stdout, /reason=warmup_failed/);
-	assert.match(result.stdout, /status=attempt lease=cbx_test123/);
+	assert.match(result.stdout, /step=stop-reconciled status=pass/);
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
 	assert.equal(fs.existsSync(path.join(fake.dir, "lease.state")), false);
@@ -264,7 +267,7 @@ test("live mode reconciles a collision-suffixed lease slug", () => {
 	});
 
 	assert.equal(result.status, 1);
-	assert.match(result.stdout, /status=attempt lease=cbx_test123/);
+	assert.match(result.stdout, /step=stop-reconciled status=pass/);
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
 	assert.equal(fs.existsSync(path.join(fake.dir, "lease.state")), false);
@@ -289,6 +292,26 @@ test("live mode reconciles a leaked earlier attempt after a successful lifecycle
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^stop --provider proxmox --id cbx_leaked$/m);
 	assert.equal(fs.existsSync(path.join(fake.dir, "extra-lease.state")), false);
+});
+
+test("live mode does not reconcile an unrecorded suffix-shaped lease", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_FOREIGN_SUFFIX: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.doesNotMatch(calls, /^stop --provider proxmox --id cbx_leaked$/m);
+	assert.equal(fs.existsSync(fake.extraLeaseState), true);
 });
 
 test("live mode fails when final inventory still contains a reconciled lease", () => {
