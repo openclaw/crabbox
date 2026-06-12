@@ -1335,13 +1335,6 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func (c *xapiClient) vmRefForID(ctx context.Context, id string) (string, error) {
 	if looksLikeUUID(id) {
 		resolved, err := c.getByUUID(ctx, "VM", id)
