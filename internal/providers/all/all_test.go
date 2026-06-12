@@ -150,6 +150,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"namespace-devbox",
 		"opencomputer",
 		"opensandbox",
+		"ovh",
 		"parallels",
 		"proxmox",
 		"railway",

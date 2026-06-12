@@ -34,6 +34,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
 	_ "github.com/openclaw/crabbox/internal/providers/opencomputer"
 	_ "github.com/openclaw/crabbox/internal/providers/opensandbox"
+	_ "github.com/openclaw/crabbox/internal/providers/ovh"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/railway"

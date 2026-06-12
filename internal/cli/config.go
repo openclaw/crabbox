@@ -101,6 +101,7 @@ type Config struct {
 	Linode                        LinodeConfig
 	linodeImageExplicit           bool
 	linodeTypeExplicit            bool
+	OVH                           OVHConfig
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	XCPNg                         XCPNgConfig
@@ -228,6 +229,17 @@ type LinodeConfig struct {
 	Type       string
 	FirewallID string
 	SSHCIDRs   []string
+}
+
+// OVHConfig contains non-secret OVHcloud Public Cloud settings. OVH
+// application credentials are intentionally read from environment variables by
+// the provider client and are not persisted in Crabbox config.
+type OVHConfig struct {
+	Endpoint  string
+	ProjectID string
+	Region    string
+	Image     string
+	Flavor    string
 }
 
 type ActionsConfig struct {
@@ -1226,6 +1238,42 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "ovh" {
+		if cfg.OVH.Endpoint == "" {
+			cfg.OVH.Endpoint = "https://api.us.ovhcloud.com/1.0"
+		}
+		if cfg.OVH.Image == "" {
+			cfg.OVH.Image = "Ubuntu 24.04"
+		}
+		if cfg.OVH.Flavor == "" {
+			cfg.OVH.Flavor = "b3-8"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = baseConfig().SSHUser
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = baseConfig().SSHPort
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
@@ -1657,6 +1705,11 @@ func baseConfig() Config {
 			Image:  linodeImage,
 			Type:   "g6-standard-1",
 		},
+		OVH: OVHConfig{
+			Endpoint: "https://api.us.ovhcloud.com/1.0",
+			Image:    "Ubuntu 24.04",
+			Flavor:   "b3-8",
+		},
 		Incus: IncusConfig{
 			Remote:          "local",
 			Project:         "",
@@ -1960,6 +2013,7 @@ type fileConfig struct {
 	Hetzner              *fileHetznerConfig                 `yaml:"hetzner,omitempty"`
 	DigitalOcean         *fileDigitalOceanConfig            `yaml:"digitalocean,omitempty"`
 	Linode               *fileLinodeConfig                  `yaml:"linode,omitempty"`
+	OVH                  *fileOVHConfig                     `yaml:"ovh,omitempty"`
 	AWS                  *fileAWSConfig                     `yaml:"aws,omitempty"`
 	Azure                *fileAzureConfig                   `yaml:"azure,omitempty"`
 	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
@@ -2063,6 +2117,14 @@ type fileLinodeConfig struct {
 	Type       string   `yaml:"type,omitempty"`
 	FirewallID string   `yaml:"firewall,omitempty"`
 	SSHCIDRs   []string `yaml:"sshCIDRs,omitempty"`
+}
+
+type fileOVHConfig struct {
+	Endpoint  string `yaml:"endpoint,omitempty"`
+	ProjectID string `yaml:"projectId,omitempty"`
+	Region    string `yaml:"region,omitempty"`
+	Image     string `yaml:"image,omitempty"`
+	Flavor    string `yaml:"flavor,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -3092,6 +3154,23 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if len(file.Linode.SSHCIDRs) > 0 {
 			cfg.Linode.SSHCIDRs = file.Linode.SSHCIDRs
+		}
+	}
+	if file.OVH != nil {
+		if trusted && file.OVH.Endpoint != "" {
+			cfg.OVH.Endpoint = file.OVH.Endpoint
+		}
+		if file.OVH.ProjectID != "" {
+			cfg.OVH.ProjectID = file.OVH.ProjectID
+		}
+		if file.OVH.Region != "" {
+			cfg.OVH.Region = file.OVH.Region
+		}
+		if file.OVH.Image != "" {
+			cfg.OVH.Image = file.OVH.Image
+		}
+		if file.OVH.Flavor != "" {
+			cfg.OVH.Flavor = file.OVH.Flavor
 		}
 	}
 	if file.AWS != nil {
@@ -5002,6 +5081,11 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); cidrs != "" {
 		cfg.Linode.SSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.OVH.Endpoint = getenv("OVH_ENDPOINT", cfg.OVH.Endpoint)
+	cfg.OVH.ProjectID = getenv("CRABBOX_OVH_PROJECT_ID", cfg.OVH.ProjectID)
+	cfg.OVH.Region = getenv("CRABBOX_OVH_REGION", cfg.OVH.Region)
+	cfg.OVH.Image = getenv("CRABBOX_OVH_IMAGE", cfg.OVH.Image)
+	cfg.OVH.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.OVH.Flavor)
 	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
 	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)
 	cfg.Proxmox.TokenSecret = getenv("CRABBOX_PROXMOX_TOKEN_SECRET", cfg.Proxmox.TokenSecret)
