@@ -168,7 +168,60 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		target.LeaseID = leaseID
 		return target, nil
 	}
+	if req.ReleaseOnly {
+		return b.releaseTargetFromClaim(req.ID)
+	}
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+}
+
+func (b *leaseBackend) releaseTargetFromClaim(id string) (LeaseTarget, error) {
+	var (
+		claim core.LeaseClaim
+		ok    bool
+		err   error
+	)
+	if _, numeric := strconv.ParseInt(strings.TrimSpace(id), 10, 64); numeric == nil {
+		claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, "proxmox")
+	} else {
+		var exact bool
+		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, "proxmox")
+		if err == nil && exact && (!ok || claim.LeaseID != id) {
+			return LeaseTarget{}, exit(2, "proxmox exact lease identifier %q does not match a valid Proxmox claim", id)
+		}
+	}
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !ok || claim.LeaseID == "" || !core.LeaseClaimMatchesIdentifier(claim, id) {
+		return LeaseTarget{}, exit(4, "lease/server not found: %s", id)
+	}
+	cloudID := strings.TrimSpace(claim.CloudID)
+	vmid, err := strconv.ParseInt(cloudID, 10, 64)
+	if err != nil || vmid <= 0 {
+		return LeaseTarget{}, exit(2, "proxmox lease claim has invalid VM identity for lease=%s", claim.LeaseID)
+	}
+	labels := make(map[string]string, len(claim.Labels)+2)
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	if leaseLabel := strings.TrimSpace(labels["lease"]); leaseLabel != "" && leaseLabel != claim.LeaseID {
+		return LeaseTarget{}, exit(2, "proxmox lease claim label mismatch for lease=%s", claim.LeaseID)
+	}
+	if providerLabel := strings.TrimSpace(labels["provider"]); providerLabel != "" && providerLabel != "proxmox" {
+		return LeaseTarget{}, exit(2, "proxmox lease claim provider label mismatch for lease=%s", claim.LeaseID)
+	}
+	labels["lease"] = claim.LeaseID
+	labels["provider"] = "proxmox"
+	return LeaseTarget{
+		LeaseID: claim.LeaseID,
+		Server: Server{
+			CloudID:  cloudID,
+			Provider: "proxmox",
+			ID:       vmid,
+			Name:     claim.Slug,
+			Labels:   labels,
+		},
+	}, nil
 }
 
 func (b *leaseBackend) targetForServer(server Server) LeaseTarget {
@@ -305,7 +358,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 }
 
 func verifyProxmoxDeleteFailure(ctx context.Context, client proxmoxClient, cloudID string, deleteErr error) (bool, error) {
-	if core.IsProxmoxDeleteTaskError(deleteErr) {
+	if core.IsProxmoxDeleteTaskError(deleteErr) || core.IsProxmoxDeleteRequestError(deleteErr) {
 		return waitForProxmoxDeleteReconciliation(ctx, client, cloudID)
 	}
 	_, err := client.GetServer(ctx, cloudID)

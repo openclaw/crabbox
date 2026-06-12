@@ -408,6 +408,35 @@ func TestProxmoxTemplateReadinessRequiresConfigData(t *testing.T) {
 	}
 }
 
+func TestProxmoxDeleteServerWrapsAmbiguousRequestFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/status/stop"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"errors":"not found"}`))
+		case r.Method == http.MethodDelete:
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("response writer does not support hijacking")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.Close()
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	err := client.DeleteServer(context.Background(), "101")
+	if err == nil || !IsProxmoxDeleteRequestError(err) {
+		t.Fatalf("err=%v, want ambiguous delete request error", err)
+	}
+}
+
 func TestProxmoxWaitTaskRequiresOKExitStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

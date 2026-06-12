@@ -862,6 +862,51 @@ func TestProxmoxCleanupReconcilesDeleteThatCompletesAfterInitialVerification(t *
 	assertStoredTestboxKeyRemoved(t, leaseID)
 }
 
+func TestProxmoxCleanupPollsAmbiguousDeleteRequestUntilVMDisappears(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	oldPollInterval := proxmoxDeleteVerifyPollInterval
+	oldTimeout := proxmoxDeleteVerifyTimeout
+	proxmoxDeleteVerifyPollInterval = time.Millisecond
+	proxmoxDeleteVerifyTimeout = time.Second
+	t.Cleanup(func() {
+		proxmoxDeleteVerifyPollInterval = oldPollInterval
+		proxmoxDeleteVerifyTimeout = oldTimeout
+	})
+	leaseID := "cbx_proxmox_ambiguous_request"
+	server := expiredProxmoxServer("101", leaseID)
+	server.Provider = "proxmox"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	notFound := &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"}
+	fake := &fakeProxmoxDoctorClient{
+		servers:               []Server{server},
+		deleteAcceptedErrByID: map[string]error{"101": &core.ProxmoxDeleteRequestError{Err: errors.New("delete request timeout")}},
+		preserveOnDeleteByID:  map[string]bool{"101": true},
+		getErrSequenceByID:    map[string][]error{"101": {nil, notFound}},
+	}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	err := backend.Cleanup(context.Background(), CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "delete request timeout") {
+		t.Fatalf("cleanup error=%v, want ambiguous request failure", err)
+	}
+	if fake.getCallsByID["101"] != 2 {
+		t.Fatalf("getCalls=%d, want polling until not-found", fake.getCallsByID["101"])
+	}
+	if _, ok, resolveErr := core.ResolveLeaseClaim(leaseID); resolveErr != nil || ok {
+		t.Fatalf("claim ok=%t err=%v, want removed after eventual disappearance", ok, resolveErr)
+	}
+	assertStoredTestboxKeyRemoved(t, leaseID)
+}
+
 func TestProxmoxReleaseRemovesClaimAndStoredKeyAfterDelete(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -996,7 +1041,14 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	fake.deleteErrByID = map[string]error{
 		"101": &core.ProxmoxError{Method: "DELETE", Path: "/nodes/pve1/qemu/101", StatusCode: 404, Body: "not found"},
 	}
-	if err := backend.ReleaseLease(context.Background(), req); err != nil {
+	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatalf("retry resolve: %v", err)
+	}
+	if resolved.LeaseID != leaseID || resolved.Server.CloudID != "101" {
+		t.Fatalf("retry target=%#v", resolved)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatalf("retry release: %v", err)
 	}
 	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {

@@ -57,6 +57,13 @@ type ProxmoxDeleteTaskError struct {
 func (e *ProxmoxDeleteTaskError) Error() string { return e.Err.Error() }
 func (e *ProxmoxDeleteTaskError) Unwrap() error { return e.Err }
 
+type ProxmoxDeleteRequestError struct {
+	Err error
+}
+
+func (e *ProxmoxDeleteRequestError) Error() string { return e.Err.Error() }
+func (e *ProxmoxDeleteRequestError) Unwrap() error { return e.Err }
+
 type proxmoxTaskWaitError struct {
 	err error
 }
@@ -735,11 +742,15 @@ func (c *ProxmoxClient) DeleteServer(ctx context.Context, id string) error {
 	q := url.Values{}
 	q.Set("purge", "1")
 	var upid string
-	if err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d?%s", url.PathEscape(c.Node), vmid, q.Encode()), nil, &upid); err != nil {
+	if err := c.doRequired(ctx, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d?%s", url.PathEscape(c.Node), vmid, q.Encode()), nil, &upid); err != nil {
 		if IsProxmoxNotFound(err) {
 			return nil
 		}
-		return err
+		var proxErr *ProxmoxError
+		if errors.As(err, &proxErr) {
+			return err
+		}
+		return &ProxmoxDeleteRequestError{Err: err}
 	}
 	if err := c.waitTask(ctx, upid); err != nil {
 		var waitErr *proxmoxTaskWaitError
@@ -943,6 +954,11 @@ func IsProxmoxNotFound(err error) bool {
 func IsProxmoxDeleteTaskError(err error) bool {
 	var taskErr *ProxmoxDeleteTaskError
 	return errors.As(err, &taskErr)
+}
+
+func IsProxmoxDeleteRequestError(err error) bool {
+	var requestErr *ProxmoxDeleteRequestError
+	return errors.As(err, &requestErr)
 }
 
 func proxmoxDescription(labels map[string]string) string {
