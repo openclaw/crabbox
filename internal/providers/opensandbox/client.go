@@ -105,7 +105,7 @@ func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
 		rt:     rt,
 		base:   baseURL,
 		key:    apiKey,
-		client: secureOpenSandboxHTTPClient(httpClient, baseURL),
+		client: secureOpenSandboxHTTPClient(httpClient),
 	}, nil
 }
 
@@ -156,15 +156,14 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func secureOpenSandboxHTTPClient(source *http.Client, baseURL string) *http.Client {
+func secureOpenSandboxHTTPClient(source *http.Client) *http.Client {
 	client := *source
 	if client.Transport == nil {
 		client.Transport = sdk.DefaultTransport()
 	}
-	trusted, _ := url.Parse(baseURL)
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOpenSandboxOrigin(trusted, req.URL) {
+		if len(via) == 0 || !sameOpenSandboxOrigin(via[0].URL, req.URL) {
 			return fmt.Errorf("opensandbox refused cross-origin redirect to %s", req.URL.Redacted())
 		}
 		if originalCheckRedirect != nil {
@@ -593,10 +592,10 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 	if !event.Structured {
 		switch explicitType {
 		case "stdout":
-			_, err := io.WriteString(c.rt.Stdout, event.Data)
+			err := writeCommandOutput(c.rt.Stdout, event.Data, &outputState.stdout)
 			return commandEventResult{}, err
 		case "stderr":
-			_, err := io.WriteString(c.rt.Stderr, event.Data)
+			err := writeCommandOutput(c.rt.Stderr, event.Data, &outputState.stderr)
 			return commandEventResult{}, err
 		}
 	}
@@ -615,19 +614,19 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 		case "result", "error", "execution_complete":
 			return commandEventResult{}, fmt.Errorf("decode opensandbox %s event: %w", event.Event, err)
 		case "stderr":
-			_, writeErr := io.WriteString(c.rt.Stderr, event.Data)
+			writeErr := writeCommandOutput(c.rt.Stderr, event.Data, &outputState.stderr)
 			return commandEventResult{}, writeErr
 		}
-		_, writeErr := io.WriteString(c.rt.Stdout, event.Data)
+		writeErr := writeCommandOutput(c.rt.Stdout, event.Data, &outputState.stdout)
 		return commandEventResult{}, writeErr
 	}
 	if payload.Type == "" {
 		switch explicitType {
 		case "stdout":
-			_, err := io.WriteString(c.rt.Stdout, event.Data)
+			err := writeCommandOutput(c.rt.Stdout, event.Data, &outputState.stdout)
 			return commandEventResult{}, err
 		case "stderr":
-			_, err := io.WriteString(c.rt.Stderr, event.Data)
+			err := writeCommandOutput(c.rt.Stderr, event.Data, &outputState.stderr)
 			return commandEventResult{}, err
 		}
 	}

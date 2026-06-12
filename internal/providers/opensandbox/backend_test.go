@@ -624,13 +624,62 @@ func TestNewOpenSandboxClientRequiresExplicitAPIURL(t *testing.T) {
 }
 
 func TestSecureOpenSandboxHTTPClientInstallsSDKTransport(t *testing.T) {
-	client := secureOpenSandboxHTTPClient(&http.Client{}, "https://opensandbox.example.test")
+	client := secureOpenSandboxHTTPClient(&http.Client{})
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok || transport.TLSClientConfig == nil {
 		t.Fatalf("transport=%T want SDK HTTP transport", client.Transport)
 	}
 	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 || transport.TLSClientConfig.VerifyConnection == nil {
 		t.Fatalf("TLS config=%#v want SDK TLS hardening", transport.TLSClientConfig)
+	}
+}
+
+func TestSecureOpenSandboxHTTPClientAllowsRedirectsRelativeToRequestOrigin(t *testing.T) {
+	var redirected bool
+	execd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/ready", http.StatusTemporaryRedirect)
+			return
+		}
+		redirected = r.URL.Path == "/ready"
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer execd.Close()
+
+	client := secureOpenSandboxHTTPClient(execd.Client())
+	response, err := client.Get(execd.URL + "/start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if !redirected {
+		t.Fatal("same-origin execd redirect was not followed")
+	}
+}
+
+func TestSecureOpenSandboxHTTPClientRejectsCrossOriginRedirect(t *testing.T) {
+	var destinationHit bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destinationHit = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer destination.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	client := secureOpenSandboxHTTPClient(source.Client())
+	request, err := http.NewRequest(http.MethodGet, source.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-EXECD-ACCESS-TOKEN", "secret")
+	if _, err := client.Do(request); err == nil || !strings.Contains(err.Error(), "cross-origin redirect") {
+		t.Fatalf("err=%v, want cross-origin redirect rejection", err)
+	}
+	if destinationHit {
+		t.Fatal("cross-origin redirect forwarded the request")
 	}
 }
 
@@ -1151,6 +1200,25 @@ func TestCommandEventPreservesStructuredOutputLineBoundaries(t *testing.T) {
 		streamEvent(`{"type":"stderr","text":"warn1"}`),
 		streamEvent(`{"type":"stdout","text":"line2"}`),
 		streamEvent(`{"type":"stderr","text":"warn2"}`),
+	} {
+		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stdout.String() != "line1\nline2" || stderr.String() != "warn1\nwarn2" {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCommandEventPreservesStandardSSEOutputLineBoundaries(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: &stderr}}
+	state := commandOutputState{}
+	for _, event := range []commandStreamEvent{
+		{Event: "stdout", Data: "line1"},
+		{Event: "stderr", Data: "warn1"},
+		{Event: "stdout", Data: "line2"},
+		{Event: "stderr", Data: "warn2"},
 	} {
 		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
 			t.Fatal(err)
