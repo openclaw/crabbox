@@ -57,6 +57,108 @@ func TestNewProxmoxClientStripsAPIPathAndUsesTokenAuth(t *testing.T) {
 	}
 }
 
+func TestProxmoxRequiredResponseDataFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing data", body: `{}`},
+		{name: "null data", body: `{"data":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api2/json/cluster/nextid" {
+					t.Fatalf("path=%s", r.URL.Path)
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			client := testProxmoxClient(t, server.URL)
+			if _, err := client.nextID(context.Background()); err == nil || !strings.Contains(err.Error(), "missing required data") {
+				t.Fatalf("err=%v, want missing required data", err)
+			}
+		})
+	}
+}
+
+func TestProxmoxWaitTaskRequiresOKExitStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statusData map[string]any
+		want       string
+	}{
+		{
+			name:       "missing exitstatus",
+			statusData: map[string]any{"status": "stopped"},
+			want:       "missing exitstatus",
+		},
+		{
+			name:       "failed exitstatus",
+			statusData: map[string]any{"status": "stopped", "exitstatus": "ERROR"},
+			want:       "UPID:pve1:test failed: ERROR",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api2/json/nodes/pve1/tasks/UPID:pve1:test/status" {
+					t.Fatalf("%s %s", r.Method, r.URL.String())
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": tc.statusData})
+			}))
+			defer server.Close()
+
+			client := testProxmoxClient(t, server.URL)
+			err := client.waitTask(context.Background(), "UPID:pve1:test")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestProxmoxGuestIPv4FiltersNonRoutableInterfaces(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api2/json/nodes/pve1/qemu/101/agent/network-get-interfaces" {
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"result": []any{
+			map[string]any{"name": "lo", "ip-addresses": []any{map[string]any{"ip-address-type": "ipv4", "ip-address": "127.0.0.1"}}},
+			map[string]any{"name": "docker0", "ip-addresses": []any{map[string]any{"ip-address-type": "ipv4", "ip-address": "172.17.0.1"}}},
+			map[string]any{"name": "veth123", "ip-addresses": []any{map[string]any{"ip-address-type": "ipv4", "ip-address": "169.254.1.2"}}},
+			map[string]any{"name": "eth0", "ip-addresses": []any{
+				map[string]any{"ip-address-type": "ipv6", "ip-address": "2001:db8::1"},
+				map[string]any{"ip-address-type": "ipv4", "ip-address": "192.0.2.44"},
+			}},
+		}}})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	got, err := client.guestIPv4(context.Background(), 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "192.0.2.44" {
+		t.Fatalf("ip=%q, want 192.0.2.44", got)
+	}
+}
+
+func TestProxmoxConfigureVMAcceptsNullSuccessData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api2/json/nodes/pve1/qemu/101/config" {
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": nil})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	if err := client.configureVM(context.Background(), 101, url.Values{"description": {"crabbox labels\n"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProxmoxCreateServerFlow(t *testing.T) {
 	var forms []url.Values
 	var events []string
@@ -211,6 +313,22 @@ func TestProxmoxCreateServerCleansUpCloneOnConfigFailure(t *testing.T) {
 	if !stopped || !deleted {
 		t.Fatalf("cleanup stopped=%v deleted=%v", stopped, deleted)
 	}
+}
+
+func testProxmoxClient(t *testing.T, serverURL string) *ProxmoxClient {
+	t.Helper()
+	cfg := baseConfig()
+	cfg.Provider = "proxmox"
+	cfg.Proxmox.APIURL = serverURL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9000
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
 
 func readForm(t *testing.T, r *http.Request) url.Values {

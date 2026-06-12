@@ -2,7 +2,9 @@ package proxmox
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +20,10 @@ type fakeProxmoxDoctorClient struct {
 	mutated     bool
 	servers     []Server
 	created     Server
+	createErr   error
+	deleteErr   error
 	setLabels   []map[string]string
+	leaseIDs    []string
 }
 
 func (c *fakeProxmoxDoctorClient) ListCrabboxServers(context.Context) ([]Server, error) {
@@ -26,8 +31,12 @@ func (c *fakeProxmoxDoctorClient) ListCrabboxServers(context.Context) ([]Server,
 	return c.servers, nil
 }
 
-func (c *fakeProxmoxDoctorClient) CreateServer(context.Context, Config, string, string, string, bool) (Server, error) {
+func (c *fakeProxmoxDoctorClient) CreateServer(_ context.Context, _ Config, _ string, leaseID string, _ string, _ bool) (Server, error) {
 	c.mutated = true
+	c.leaseIDs = append(c.leaseIDs, leaseID)
+	if c.createErr != nil {
+		return Server{}, c.createErr
+	}
 	if c.created.CloudID != "" {
 		return c.created, nil
 	}
@@ -48,6 +57,9 @@ func (c *fakeProxmoxDoctorClient) DeleteServer(_ context.Context, id string) err
 	c.deleteCalls++
 	c.deletedIDs = append(c.deletedIDs, id)
 	c.mutated = true
+	if c.deleteErr != nil {
+		return c.deleteErr
+	}
 	return nil
 }
 
@@ -154,10 +166,74 @@ func TestProxmoxAcquireInitializesNilLabels(t *testing.T) {
 	}
 }
 
+func TestProxmoxAcquireSSHFailureRemovesStoredKeyAfterDelete(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	created := Server{CloudID: "101"}
+	created.PublicNet.IPv4.IP = "192.0.2.10"
+	fake := &fakeProxmoxDoctorClient{created: created}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+	oldWait := waitForSSHReadyFunc
+	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return errors.New("ssh unavailable")
+	}
+	t.Cleanup(func() { waitForSSHReadyFunc = oldWait })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root"}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if _, err := backend.Acquire(context.Background(), AcquireRequest{}); err == nil {
+		t.Fatal("expected ssh readiness failure")
+	}
+	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "101" {
+		t.Fatalf("deletedIDs=%v, want [101]", fake.deletedIDs)
+	}
+	if len(fake.leaseIDs) != 1 {
+		t.Fatalf("leaseIDs=%v, want one generated lease", fake.leaseIDs)
+	}
+	assertStoredTestboxKeyRemoved(t, fake.leaseIDs[0])
+}
+
+func TestProxmoxAcquirePreservesStoredKeyWhenDeleteFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	created := Server{CloudID: "101"}
+	created.PublicNet.IPv4.IP = "192.0.2.10"
+	fake := &fakeProxmoxDoctorClient{created: created, deleteErr: errors.New("delete failed")}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+	oldWait := waitForSSHReadyFunc
+	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return errors.New("ssh unavailable")
+	}
+	t.Cleanup(func() { waitForSSHReadyFunc = oldWait })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{SSHUser: "root"}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if _, err := backend.Acquire(context.Background(), AcquireRequest{}); err == nil {
+		t.Fatal("expected ssh readiness failure")
+	}
+	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "101" {
+		t.Fatalf("deletedIDs=%v, want [101]", fake.deletedIDs)
+	}
+	if len(fake.leaseIDs) != 1 {
+		t.Fatalf("leaseIDs=%v, want one generated lease", fake.leaseIDs)
+	}
+	assertStoredTestboxKeyExists(t, fake.leaseIDs[0])
+}
+
 func TestProxmoxCleanupRemovesClaimAfterDelete(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_proxmox_cleanup"
 	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeProxmoxDoctorClient{servers: []Server{expiredProxmoxServer("101", leaseID)}}
@@ -180,12 +256,17 @@ func TestProxmoxCleanupRemovesClaimAfterDelete(t *testing.T) {
 	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
 		t.Fatalf("claim ok=%t err=%v, want removed", ok, err)
 	}
+	assertStoredTestboxKeyRemoved(t, leaseID)
 }
 
 func TestProxmoxCleanupDryRunPreservesClaim(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_proxmox_dryrun"
 	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeProxmoxDoctorClient{servers: []Server{expiredProxmoxServer("101", leaseID)}}
@@ -205,6 +286,72 @@ func TestProxmoxCleanupDryRunPreservesClaim(t *testing.T) {
 	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v, want preserved", ok, err)
 	}
+	assertStoredTestboxKeyExists(t, leaseID)
+}
+
+func TestProxmoxReleaseRemovesClaimAndStoredKeyAfterDelete(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_release"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	req := ReleaseLeaseRequest{Lease: LeaseTarget{
+		LeaseID: leaseID,
+		Server:  expiredProxmoxServer("101", leaseID),
+	}}
+	if err := backend.ReleaseLease(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "101" {
+		t.Fatalf("deletedIDs=%v, want [101]", fake.deletedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok {
+		t.Fatalf("claim ok=%t err=%v, want removed", ok, err)
+	}
+	assertStoredTestboxKeyRemoved(t, leaseID)
+}
+
+func TestProxmoxReleasePreservesLocalResidueWhenDeleteFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_release_fail"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", "proxmox", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{deleteErr: errors.New("delete failed")}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) {
+		return fake, nil
+	}
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	req := ReleaseLeaseRequest{Lease: LeaseTarget{
+		LeaseID: leaseID,
+		Server:  expiredProxmoxServer("101", leaseID),
+	}}
+	if err := backend.ReleaseLease(context.Background(), req); err == nil {
+		t.Fatal("expected delete failure")
+	}
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v, want preserved", ok, err)
+	}
+	assertStoredTestboxKeyExists(t, leaseID)
 }
 
 func TestProxmoxCleanupIgnoresInvalidClaimLabel(t *testing.T) {
@@ -262,5 +409,27 @@ func expiredProxmoxServer(id, leaseID string) Server {
 			"state":      "ready",
 			"expires_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 		},
+	}
+}
+
+func assertStoredTestboxKeyExists(t *testing.T, leaseID string) {
+	t.Helper()
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key %s stat error: %v", keyPath, err)
+	}
+}
+
+func assertStoredTestboxKeyRemoved(t *testing.T, leaseID string) {
+	t.Helper()
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key %s stat err=%v, want not exist", keyPath, err)
 	}
 }
