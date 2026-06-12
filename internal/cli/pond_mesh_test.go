@@ -566,6 +566,40 @@ func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
 	}
 }
 
+func TestCollectPondMembersRefreshesRetainedStoppedClaim(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	leaseID := "cbx_web_retained"
+	server := Server{
+		CloudID:  "server-web",
+		Provider: "hetzner",
+		Name:     "server-web",
+		Labels: map[string]string{
+			"provider":               "hetzner",
+			"lease":                  leaseID,
+			"slug":                   "web",
+			"state":                  "stopped",
+			pondLabelKey:             "alpha",
+			pondExposedPortsLabelKey: "8080",
+		},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	members, err := collectPondMembers(context.Background(), &pondMeshResolveRecordingBackend{}, Config{}, []Server{server}, "alpha")
+	if err != nil {
+		t.Fatalf("collectPondMembers: %v", err)
+	}
+	if len(members) != 1 || members[0].SSH.Host != leaseID+".example" {
+		t.Fatalf("members=%#v", members)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+	if err != nil || !ok || claim.Labels["state"] != "ready" || claim.SSHHost != leaseID+".example" || claim.SSHPort != 22 {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
 func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

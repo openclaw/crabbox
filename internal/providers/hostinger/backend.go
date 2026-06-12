@@ -392,7 +392,9 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		}
 	}
 	if started {
-		if _, err := b.updateClaimStateIfUnchanged(restartClaim, cfg, "running", false); err != nil {
+		server := lease.Server
+		server.Labels = touchDirectLeaseLabels(restartClaim.Labels, cfg, "running", time.Now().UTC())
+		if _, err := updateLeaseClaimEndpointIfUnchanged(restartClaim.LeaseID, restartClaim, server, lease.SSH); err != nil {
 			return LeaseTarget{}, b.rollbackStartedVM(client, vm.IDString(), restartClaim, cfg, err)
 		}
 	}

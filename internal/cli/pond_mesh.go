@@ -514,20 +514,26 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 			out = append(out, pondMember{Name: name, Ports: ports, Lease: resolveID})
 			continue
 		}
+		expectedClaim, expectedClaimed, err := resolveLeaseClaim(resolveID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s claim: %w", server.Name, err)
+		}
 		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: resolveID, Prepare: true})
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", server.Name, err)
 		}
-		claim, claimed, err := resolveLeaseClaim(lease.LeaseID)
-		if err != nil {
-			return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, err)
-		}
-		if claimed {
-			if claimEndpointInactiveState(claim.Labels["state"]) {
-				return nil, fmt.Errorf("refresh %s claim endpoint: lease %s became inactive during resolve", server.Name, lease.LeaseID)
-			}
-			if _, err := updateLeaseClaimEndpointIfUnchanged(lease.LeaseID, claim, lease.Server, lease.SSH); err != nil {
-				return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, err)
+		if expectedClaimed && expectedClaim.LeaseID == lease.LeaseID {
+			if _, err := updateLeaseClaimEndpointIfUnchanged(lease.LeaseID, expectedClaim, lease.Server, lease.SSH); err != nil {
+				current, claimed, resolveErr := resolveLeaseClaim(lease.LeaseID)
+				if resolveErr != nil {
+					return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, resolveErr)
+				}
+				if claimed && claimEndpointInactiveState(current.Labels["state"]) {
+					return nil, fmt.Errorf("refresh %s claim endpoint: lease %s became inactive during resolve", server.Name, lease.LeaseID)
+				}
+				if !claimed || !leaseClaimHasEndpoint(current, lease) {
+					return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, err)
+				}
 			}
 		}
 		if name == "" {
@@ -542,6 +548,19 @@ func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+func leaseClaimHasEndpoint(claim leaseClaim, lease LeaseTarget) bool {
+	if lease.Server.CloudID != "" && claim.CloudID != lease.Server.CloudID {
+		return false
+	}
+	if lease.SSH.Host != "" && claim.SSHHost != lease.SSH.Host {
+		return false
+	}
+	if port, err := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); err == nil && port > 0 && claim.SSHPort != port {
+		return false
+	}
+	return true
 }
 
 func disambiguatePondMemberNames(members []pondMember) []pondMember {
