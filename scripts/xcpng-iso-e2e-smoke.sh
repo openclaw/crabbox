@@ -180,10 +180,13 @@ mkdir -p "$evidence_dir"
 chmod 700 "$evidence_dir"
 
 timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
-run_log="$evidence_dir/${timestamp}-run.json"
-summary_log="$evidence_dir/${timestamp}-summary.json"
-stdout_log="$evidence_dir/${timestamp}-stdout.log"
-stderr_log="$evidence_dir/${timestamp}-stderr.log"
+run_marker="$(mktemp "$evidence_dir/${timestamp}-XXXXXX")"
+run_id="$(basename "$run_marker")"
+rm -f "$run_marker"
+run_log="$evidence_dir/${run_id}-run.json"
+summary_log="$evidence_dir/${run_id}-summary.json"
+stdout_log="$evidence_dir/${run_id}-stdout.log"
+stderr_log="$evidence_dir/${run_id}-stderr.log"
 
 redact_file() {
   local src="$1"

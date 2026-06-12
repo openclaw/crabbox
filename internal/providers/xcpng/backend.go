@@ -319,6 +319,11 @@ func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleCli
 }
 
 func (b *leaseBackend) cleanupFailedLease(ctx context.Context, client lifecycleClient, vmID string, drive xcpNgConfigDrive) (bool, error) {
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, xcpNgRollbackCleanupTimeout)
+		defer cancel()
+	}
 	var cleanupErr error
 	if drive.VBDRef != "" || drive.VDIRef != "" {
 		if err := client.DeleteConfigDrive(ctx, drive); err != nil {
@@ -713,6 +718,7 @@ var waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Wri
 var bootstrapWaitTimeout = func(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 var guestIPPollInterval = 5 * time.Second
 var guestIPDiscoverInterval = 15 * time.Second
+var xcpNgRollbackCleanupTimeout = 11 * time.Minute
 var findServerByAlias = func(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }

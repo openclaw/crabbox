@@ -1108,9 +1108,26 @@ func writeLinuxSeedISO(ctx context.Context, evidenceDir string, payload xcpNgLin
 	if err := os.WriteFile(filepath.Join(workDir, "meta-data"), []byte(payload.MetaData), 0o600); err != nil {
 		return "", err
 	}
-	path := filepath.Join(evidenceDir, fmt.Sprintf("%s-linux-seed.iso", isoE2ECurrentTime().Format("20060102t150405z")))
+	path, err := reserveISOArtifactPath(evidenceDir, "linux-seed-*.iso")
+	if err != nil {
+		return "", err
+	}
 	if err := buildDataISO(ctx, path, workDir, "CIDATA"); err != nil {
+		_ = os.Remove(path)
 		return "", fmt.Errorf("build Linux seed ISO: %w", err)
+	}
+	return path, nil
+}
+
+func reserveISOArtifactPath(evidenceDir, pattern string) (string, error) {
+	file, err := os.CreateTemp(evidenceDir, pattern)
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
 	}
 	return path, nil
 }
@@ -1277,13 +1294,18 @@ func remasterUbuntuAutoinstallISO(ctx context.Context, srcISO, evidenceDir strin
 	} else if modified {
 		mappings = append(mappings, [2]string{loopbackPath, "/boot/grub/loopback.cfg"})
 	}
-	outputISO := filepath.Join(evidenceDir, fmt.Sprintf("%s-linux-installer-autoinstall.iso", isoE2ECurrentTime().Format("20060102t150405z")))
+	outputISO, err := reserveISOArtifactPath(evidenceDir, "linux-installer-autoinstall-*.iso")
+	if err != nil {
+		return "", err
+	}
 	xorriso, err := findXorrisoBinary()
 	if err != nil {
+		_ = os.Remove(outputISO)
 		return "", err
 	}
 	args := ubuntuAutoinstallRemasterArgs(srcISO, outputISO, mappings)
 	if out, err := exec.CommandContext(ctx, xorriso, args...).CombinedOutput(); err != nil {
+		_ = os.Remove(outputISO)
 		return "", fmt.Errorf("remaster installer ISO with autoinstall boot arg: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return outputISO, nil

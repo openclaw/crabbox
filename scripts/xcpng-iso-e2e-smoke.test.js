@@ -233,3 +233,40 @@ test("xcpng iso e2e smoke emits required summary keys", () => {
     assert.ok(key in summary, `missing ${key}: ${result.stdout}`);
   }
 });
+
+test("xcpng iso e2e smoke preserves repeated run artifacts", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-xcpng-iso-e2e-"));
+  const evidenceDir = path.join(dir, "evidence");
+  const helper = makeHelper(dir, `(args) => ({
+    classification: "read_only_passed",
+    mutation: false,
+    os: args[args.indexOf("--os") + 1],
+    iso: args[args.indexOf("--iso") + 1],
+    phase: "read_only_validation",
+    cleanup: "not_needed",
+    evidence: {}
+  })`);
+  const options = {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_XCP_NG_ISO_E2E_DIR: evidenceDir,
+      CRABBOX_XCP_NG_ISO_E2E_HELPER: helper,
+    },
+    encoding: "utf8",
+  };
+
+  for (let run = 0; run < 2; run += 1) {
+    const result = spawnSync(
+      "bash",
+      ["scripts/xcpng-iso-e2e-smoke.sh", "--read-only", "--os", "linux", "--iso", "ubuntu.iso"],
+      options,
+    );
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  }
+
+  const files = fs.readdirSync(evidenceDir);
+  assert.equal(files.filter((name) => name.endsWith("-summary.json")).length, 2);
+  assert.equal(files.filter((name) => name.endsWith("-stdout.log")).length, 2);
+  assert.equal(files.filter((name) => name.endsWith("-stderr.log")).length, 2);
+});

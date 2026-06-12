@@ -481,6 +481,9 @@ func TestAcquireCleansUpVMAndConfigDriveOnGuestIPFailure(t *testing.T) {
 	if !reflect.DeepEqual(removedKeys, []string{"cbx_testlease", "cbx_testlease"}) {
 		t.Fatalf("removed keys=%v", removedKeys)
 	}
+	if !fake.deleteBounded || !fake.deleteCDBounded {
+		t.Fatalf("rollback cleanup contexts: delete=%v delete-config-drive=%v", fake.deleteBounded, fake.deleteCDBounded)
+	}
 }
 
 func TestAcquireRetainsKeyWhenVMRollbackFails(t *testing.T) {
@@ -1342,6 +1345,21 @@ func TestISOE2ECleanupUsesBoundedContext(t *testing.T) {
 	}
 	if isoE2ECleanupTimeout <= 2*xcpNgShutdownTimeout {
 		t.Fatalf("cleanup timeout %s must reserve deletion time after graceful and forced shutdown", isoE2ECleanupTimeout)
+	}
+}
+
+func TestReserveISOArtifactPathDoesNotReuseNames(t *testing.T) {
+	dir := t.TempDir()
+	first, err := reserveISOArtifactPath(dir, "linux-seed-*.iso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := reserveISOArtifactPath(dir, "linux-seed-*.iso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("artifact path reused: %s", first)
 	}
 }
 
