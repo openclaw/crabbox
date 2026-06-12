@@ -1704,6 +1704,33 @@ func TestApplyNativeCheckpointForkConfigDoesNotReapplyIdentityFlags(t *testing.T
 	}
 }
 
+type checkpointWorkdirValidatorBackend struct {
+	testSSHBackend
+	gotLease    LeaseTarget
+	gotWorkdirs []string
+	err         error
+}
+
+func (b *checkpointWorkdirValidatorBackend) ValidateCheckpointForkWorkdir(_ context.Context, lease LeaseTarget, workdir string) error {
+	b.gotLease = lease
+	b.gotWorkdirs = append(b.gotWorkdirs, workdir)
+	return b.err
+}
+
+func TestValidateCheckpointForkWorkdirUsesProviderHook(t *testing.T) {
+	backend := &checkpointWorkdirValidatorBackend{
+		testSSHBackend: testSSHBackend{spec: ProviderSpec{Name: "local-container"}},
+	}
+	lease := LeaseTarget{LeaseID: "cbx_checkpoint", Server: Server{CloudID: "container123"}}
+
+	if err := validateCheckpointForkWorkdirs(context.Background(), backend, lease, "/source/work", "/destination/work"); err != nil {
+		t.Fatal(err)
+	}
+	if backend.gotLease.LeaseID != lease.LeaseID || len(backend.gotWorkdirs) != 2 || backend.gotWorkdirs[0] != "/source/work" || backend.gotWorkdirs[1] != "/destination/work" {
+		t.Fatalf("validation request lease=%#v workdirs=%#v", backend.gotLease, backend.gotWorkdirs)
+	}
+}
+
 func TestParseInterspersedFlagsAllowsCheckpointBeforeFlags(t *testing.T) {
 	fs := newFlagSet("checkpoint restore", io.Discard)
 	id := fs.String("id", "", "lease id")

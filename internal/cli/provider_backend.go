@@ -149,6 +149,10 @@ type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
 
+type CheckpointForkWorkdirValidator interface {
+	ValidateCheckpointForkWorkdir(ctx context.Context, lease LeaseTarget, workdir string) error
+}
+
 type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool

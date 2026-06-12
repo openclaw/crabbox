@@ -2080,6 +2080,51 @@ func TestBootstrapChecksHostVolumesAgainstResolvedHomeBeforeMutation(t *testing.
 	}
 }
 
+func TestValidateCheckpointForkWorkdirUsesContainerResolvedPaths(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Volumes = []string{
+		"/host/data:/mnt/data:ro",
+		`C:\Users\alice\cache:/cache`,
+	}
+	lease := core.LeaseTarget{Server: core.Server{CloudID: "container123"}}
+
+	if err := b.ValidateCheckpointForkWorkdir(context.Background(), lease, "/safe/link/.."); err != nil {
+		t.Fatal(err)
+	}
+	args := recordedArgsForCommand(t, runner, "exec")
+	for _, want := range []string{
+		"container123",
+		"crabbox-validate-checkpoint-workdir",
+		"/safe/link/..",
+		"/mnt/data",
+		"/cache",
+		"checkpoint fork workdir",
+		"os.path.realpath",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("checkpoint workdir validation command missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestValidateCheckpointForkWorkdirPropagatesOverlapFailure(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if slices.Contains(req.Args, "exec") {
+			return core.LocalCommandResult{Stderr: "checkpoint fork workdir /mnt/data overlaps local-container host volume target /mnt/data\n"}, errors.New("exit status 2")
+		}
+		return core.LocalCommandResult{}, nil
+	}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Volumes = []string{"/host/data:/mnt/data"}
+
+	err := b.ValidateCheckpointForkWorkdir(context.Background(), core.LeaseTarget{Server: core.Server{CloudID: "container123"}}, "/mnt/data")
+	if err == nil || !strings.Contains(err.Error(), "overlaps local-container host volume") {
+		t.Fatalf("err=%v, want overlap failure", err)
+	}
+}
+
 func TestCreateContainerNoVolumesWhenEmpty(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)

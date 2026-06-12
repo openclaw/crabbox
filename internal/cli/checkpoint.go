@@ -757,6 +757,10 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	}
 	if isNativeCheckpointKind(record.Kind) {
 		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, *workdirOverride)
+		if err := validateCheckpointForkWorkdirs(ctx, backend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, record.Workdir, workdir); err != nil {
+			a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+			return err
+		}
 		if err := relocateNativeCheckpointWorkdir(ctx, target, record.Workdir, workdir); err != nil {
 			a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 			return err
@@ -768,11 +772,31 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if workdir == "" {
 		workdir = defaultCheckpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir)
 	}
+	if err := validateCheckpointForkWorkdirs(ctx, backend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, workdir); err != nil {
+		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		return err
+	}
 	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, *clear); err != nil {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), workdir)
+	return nil
+}
+
+func validateCheckpointForkWorkdirs(ctx context.Context, backend Backend, lease LeaseTarget, workdirs ...string) error {
+	validator, ok := backend.(CheckpointForkWorkdirValidator)
+	if !ok {
+		return nil
+	}
+	for _, workdir := range workdirs {
+		if strings.TrimSpace(workdir) == "" {
+			continue
+		}
+		if err := validator.ValidateCheckpointForkWorkdir(ctx, lease, workdir); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

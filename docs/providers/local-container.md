@@ -211,7 +211,9 @@ metadata updates.
   relocates the saved workspace into the new lease path, and persists the scope
   for later lease commands even when ambient Docker settings change. The source
   container user and work root are also replayed so relocation keeps ownership
-  and path semantics intact.
+  and path semantics intact. When host volumes are attached to a fork, Crabbox
+  resolves the restore workdir inside the container and rejects any overlap
+  before clearing or extracting checkpoint data.
 - `warmup --actions-runner` is not supported. Use plain `crabbox run` for local
   container smoke tests, or a remote SSH provider for GitHub runner registration.
 - Socket pass-through is opt-in and grants the lease access to the host

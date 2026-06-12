@@ -452,6 +452,34 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	return server, nil
 }
 
+func (b *backend) ValidateCheckpointForkWorkdir(ctx context.Context, lease core.LeaseTarget, workdir string) error {
+	cfg := b.configForRun()
+	if len(cfg.LocalContainer.Volumes) == 0 {
+		return nil
+	}
+	workdir = strings.TrimSpace(workdir)
+	if !path.IsAbs(workdir) {
+		return core.Exit(2, "local-container checkpoint fork workdir %q must be an absolute container path", workdir)
+	}
+	containerID := strings.TrimSpace(lease.Server.CloudID)
+	if containerID == "" {
+		return core.Exit(2, "local-container checkpoint fork workdir validation requires a container id")
+	}
+	args := []string{"exec", containerID, "/bin/sh", "-c", validateCheckpointForkWorkdirScript, "crabbox-validate-checkpoint-workdir", workdir}
+	for _, volume := range cfg.LocalContainer.Volumes {
+		destination, err := localContainerVolumeDestination(volume)
+		if err != nil {
+			return err
+		}
+		args = append(args, destination)
+	}
+	result, err := b.docker(ctx, args, nil, nil)
+	if err != nil {
+		return commandError("validate local-container checkpoint fork workdir", result, err)
+	}
+	return nil
+}
+
 func (b *backend) configForRun() core.Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
@@ -2374,4 +2402,31 @@ if [ "${CRABBOX_BROWSER:-0}" = "1" ]; then
   chmod 0644 /var/lib/crabbox/browser.env
 fi
 exec /usr/sbin/sshd -D -e -p "$ssh_port"
+`
+
+const validateCheckpointForkWorkdirScript = `
+set -eu
+resolve_path() {
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+paths_overlap() {
+  left="${1%/}"
+  right="${2%/}"
+  [ -n "$left" ] || left=/
+  [ -n "$right" ] || right=/
+  [ "$left" = "$right" ] && return 0
+  { [ "$left" = / ] || [ "$right" = / ]; } && return 0
+  case "$left/" in "$right/"*) return 0 ;; esac
+  case "$right/" in "$left/"*) return 0 ;; esac
+  return 1
+}
+workdir="$(resolve_path "$1")"
+shift
+for mount_path in "$@"; do
+  mount_path="$(resolve_path "$mount_path")"
+  if paths_overlap "$workdir" "$mount_path"; then
+    echo "checkpoint fork workdir $workdir overlaps local-container host volume target $mount_path" >&2
+    exit 2
+  fi
+done
 `
