@@ -64,7 +64,10 @@ func (c *coderClient) whoami(ctx context.Context) error {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return ExitError{Code: result.ExitCode, Message: "coder credential unavailable: run `coder login <url>`; mutation=false detail=" + msg}
+		if coderWhoamiMissingLogin(msg) {
+			return ExitError{Code: result.ExitCode, Message: "coder credential unavailable: run `coder login <url>`; mutation=false detail=" + msg}
+		}
+		return ExitError{Code: result.ExitCode, Message: "coder credential check failed: mutation=false detail=" + msg}
 	}
 	return nil
 }
@@ -155,8 +158,12 @@ type coderAgent struct {
 }
 
 func parseCoderWorkspaces(out string) ([]coderWorkspace, error) {
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" || strings.EqualFold(trimmed, "No workspaces found!") {
+		return nil, nil
+	}
 	var raw any
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 		return nil, exit(5, "coder list returned invalid JSON: %v", err)
 	}
 	switch value := raw.(type) {

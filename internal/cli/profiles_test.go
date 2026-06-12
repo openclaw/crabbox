@@ -740,6 +740,25 @@ func TestRunStopCommandIncludesSemaphoreRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesCoderDeleteFlag(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "coder",
+		TargetOS: targetLinux,
+		Coder: CoderConfig{
+			DeleteOnRelease: true,
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider coder",
+		"--coder-delete-on-release=true",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRunStopCommandIncludesExeDevRoutingFlags(t *testing.T) {
 	got := runStopCommand(Config{
 		Provider: "exe-dev",

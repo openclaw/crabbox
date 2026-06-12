@@ -1894,6 +1894,8 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if DeleteOnReleaseExplicit(cfg, "namespace-devbox") {
 			args = append(args, fmt.Sprintf("--namespace-delete-on-release=%t", cfg.Namespace.DeleteOnRelease))
 		}
+	case "coder":
+		args = append(args, fmt.Sprintf("--coder-delete-on-release=%t", cfg.Coder.DeleteOnRelease))
 	case "daytona":
 		if strings.TrimSpace(cfg.Daytona.APIURL) != "" {
 			args = append(args, "--daytona-api-url", cfg.Daytona.APIURL)

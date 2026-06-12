@@ -87,9 +87,11 @@ the Coder template or preset.
 ## Lifecycle
 
 New leases create a Coder workspace with a Coder-safe name derived from the
-Crabbox slug and `coder.workspacePrefix`. Workspace names are lowercase,
-hyphenated, 1-32 characters, and avoid Coder's reserved `new` and `create`
-names.
+Crabbox slug, `coder.workspacePrefix`, and a short lease hash suffix. The local
+Crabbox slug remains the friendly lookup handle, while the Coder workspace name
+is lease-unique so failed provisioning rollback cannot stop or delete another
+same-slug workspace. Workspace names are lowercase, hyphenated, 1-32 characters,
+and avoid Coder's reserved `new` and `create` names.
 
 Crabbox can resolve a Coder lease by Crabbox lease ID, local slug, Coder
 workspace name, or `owner/workspace` when the Coder inventory contains a unique
@@ -101,11 +103,19 @@ Release is conservative:
   local Crabbox claim.
 - Deletion requires `coder.deleteOnRelease: true` or
   `--coder-delete-on-release`, which runs `coder delete --yes <workspace>`.
+  New local claims persist that release action so later cleanup does not turn an
+  originally stop-on-release workspace into a delete-on-cleanup workspace after
+  a config change.
 
-Cleanup is also conservative. It only acts on workspaces that look
-Crabbox-owned through the configured workspace prefix or Crabbox labels in
-Coder JSON. `crabbox cleanup --provider coder --dry-run` prints the intended
-stop/delete actions without mutating workspaces.
+Cleanup is also conservative. It lists workspaces that look Crabbox-owned
+through the configured workspace prefix or Crabbox labels in Coder JSON, but it
+only stops or deletes workspaces that also have a local Crabbox claim with
+cleanup metadata. Prefix-owned workspaces without a local claim are skipped,
+because stopped Coder workspaces are normal reusable environments and Coder does
+not expose a generic `coder create` label flag for Crabbox-owned lifecycle
+metadata. `crabbox cleanup --provider coder --dry-run` prints the intended
+stop/delete actions without mutating workspaces. Older local claims that do not
+record a Coder release action default to stop during cleanup.
 
 ## SSH
 
@@ -118,6 +128,12 @@ ProxyCommand coder ssh --stdio --wait yes <workspace>
 Crabbox marks the target as proxy-backed instead of trying to discover a raw
 host or port. The ready check verifies the standard Crabbox sync prerequisites:
 `git`, `rsync`, and `tar`.
+
+Coder SSH targets use stable synthetic host aliases for SSH config reuse, but
+their `known_hosts` entries are isolated under Crabbox's Coder config directory
+and keyed by the Coder workspace identity when available. This avoids stale
+global host keys when a disposable workspace is deleted and later recreated with
+the same name.
 
 ## Examples
 

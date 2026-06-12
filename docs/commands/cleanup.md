@@ -56,10 +56,12 @@ What cleanup does depends on the selected provider:
   provider scope. It deletes idle-expired Crabbox-owned sandboxes and keeps
   missing-or-inaccessible claims unless
   `--cloudflare-sandbox-forget-missing` is explicit.
-- **`coder`** lists Coder workspaces and acts only on workspaces with Crabbox
-  ownership evidence: the configured workspace prefix or Crabbox labels in
-  Coder JSON. It stops by default and deletes only with `coder.deleteOnRelease`
-  or `--coder-delete-on-release`.
+- **`coder`** lists workspaces with Crabbox ownership evidence, such as the
+  configured workspace prefix or Crabbox labels in Coder JSON, but mutates only
+  workspaces that also have a local Crabbox claim with cleanup metadata. It
+  uses the release action persisted in each local claim: new delete-on-release
+  claims delete, stop-on-release claims stop, and older claims without that
+  metadata default to stop.
 - Providers that have nothing to sweep return an error rather than acting. For
   example `provider=ssh` (static / bring-your-own hosts) reports:
 
@@ -128,7 +130,7 @@ When no matching files exist:
 namespace ssh cleanup no crabbox files found
 ```
 
-Coder cleanup prints one line per owned workspace:
+Coder cleanup prints one line per cleanup-eligible claimed workspace:
 
 ```text
 coder cleanup stop workspace=crabbox-blue dry_run=true
