@@ -18,7 +18,7 @@ function setupFakeCrabbox() {
 	const calls = path.join(dir, "calls.log");
 	const proof = path.join(dir, "proof");
 	fs.mkdirSync(tools);
-	fs.mkdirSync(proof);
+	fs.mkdirSync(proof, { mode: 0o700 });
 	const fakeCrabbox = path.join(dir, "crabbox");
 	writeExecutable(
 		fakeCrabbox,
@@ -27,6 +27,10 @@ set -euo pipefail
 printf '%s\\n' "$*" >>"${calls}"
 case "$1" in
   doctor)
+    if [[ "\${FAKE_CRABBOX_FAIL_DOCTOR:-0}" == "1" ]]; then
+      printf '{"ok":false,"provider":"proxmox","checks":[{"status":"failed","check":"storage","message":"url=https://config-only.secret.example:8006"}]}\\n'
+      exit 1
+    fi
     printf '{"ok":true,"provider":"proxmox","checks":[{"status":"ok","check":"auth","message":"url=%s token=%s secret=%s"}]}\\n' "\${CRABBOX_PROXMOX_API_URL:-}" "\${CRABBOX_PROXMOX_TOKEN_ID:-}" "\${CRABBOX_PROXMOX_TOKEN_SECRET:-}"
     ;;
   list)
@@ -144,6 +148,10 @@ test("live mode runs lifecycle and dry-run cleanup before optional cleanup", () 
 	assert.doesNotMatch(redacted, new RegExp(fake.proof.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	assert.match(redacted, /<ip>|<local-home-path>|<local-temp-path>/);
 	assert.match(redacted, /classification=live_proof_complete proof_dir=<proof-dir>/);
+	for (const name of fs.readdirSync(fake.proof)) {
+		const mode = fs.statSync(path.join(fake.proof, name)).mode & 0o777;
+		assert.equal(mode & 0o077, 0, `${name} should not be accessible by group or other users`);
+	}
 });
 
 test("live mode does not stop or cleanup when warmup fails before lease ownership", () => {
@@ -168,4 +176,122 @@ test("live mode does not stop or cleanup when warmup fails before lease ownershi
 	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke --keep$/m);
 	assert.match(calls, /^list --provider proxmox --json$/m);
 	assert.doesNotMatch(calls, /^status |^ssh |^stop |^cleanup /m);
+});
+
+test("live mode does not mutate when readiness preflight fails", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_FAIL_DOCTOR: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /reason=preflight_failed/);
+	assert.match(result.stdout, /classification=environment_blocked/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^doctor --provider proxmox --json$/m);
+	assert.doesNotMatch(calls, /^warmup |^status |^ssh |^stop |^cleanup /m);
+	const redacted = fs.readFileSync(path.join(fake.proof, "doctor.redacted.log"), "utf8");
+	assert.doesNotMatch(redacted, /config-only\.secret\.example/);
+	assert.match(redacted, /<url>/);
+});
+
+test("caller-supplied proof directories replace pre-existing log symlinks", () => {
+	const fake = setupFakeCrabbox();
+	const external = path.join(fake.dir, "external.log");
+	fs.writeFileSync(external, "do not overwrite", { mode: 0o644 });
+	fs.symlinkSync(external, path.join(fake.proof, "doctor.raw.log"));
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			CRABBOX_PROXMOX_TOKEN_SECRET: "super-secret-token",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.equal(fs.readFileSync(external, "utf8"), "do not overwrite");
+	assert.equal(fs.lstatSync(path.join(fake.proof, "doctor.raw.log")).isSymbolicLink(), false);
+	assert.equal(fs.statSync(path.join(fake.proof, "doctor.raw.log")).mode & 0o077, 0);
+});
+
+test("caller-supplied proof directory symlinks are rejected without chmodding the target", () => {
+	const fake = setupFakeCrabbox();
+	const victim = path.join(fake.dir, "victim");
+	const link = path.join(fake.dir, "proof-link");
+	fs.mkdirSync(victim, { mode: 0o755 });
+	fs.symlinkSync(victim, link);
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: link,
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 2);
+	assert.match(result.stderr, /refusing symlink proof directory/);
+	assert.equal(fs.statSync(victim).mode & 0o777, 0o755);
+});
+
+test("caller-supplied nested proof directories are created privately", () => {
+	const fake = setupFakeCrabbox();
+	const proof = path.join(fake.dir, "nested", "proof", "run-1");
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: proof,
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.equal(fs.statSync(proof).mode & 0o777, 0o700);
+	assert.equal(fs.existsSync(path.join(proof, "summary.redacted.log")), true);
+});
+
+test("caller-supplied proof directories support GNU stat fallback", () => {
+	const fake = setupFakeCrabbox();
+	writeExecutable(
+		path.join(fake.tools, "stat"),
+		`#!/usr/bin/env bash
+if [[ "$1" == "-f" ]]; then
+  printf '?p\\n'
+  exit 0
+fi
+if [[ "$1" == "-c" ]]; then
+  printf '700\\n'
+  exit 0
+fi
+exit 2
+`,
+	);
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			PATH: `${fake.tools}${path.delimiter}${process.env.PATH ?? ""}`,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /classification=external_user_owned/);
 });

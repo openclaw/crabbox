@@ -264,14 +264,18 @@ func prepareLeaseClaimEndpoint(existing leaseClaim, providerName, slug string, s
 }
 
 func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected leaseClaim, server Server, target SSHTarget) (leaseClaim, error) {
-	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, false)
+	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, false, false)
 }
 
 func updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected leaseClaim, server Server, target SSHTarget) (leaseClaim, error) {
-	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, true)
+	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, true, false)
 }
 
-func updateLeaseClaimEndpointIfUnchangedMode(leaseID string, expected leaseClaim, server Server, target SSHTarget, allowProviderMetadata bool) (leaseClaim, error) {
+func replaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected leaseClaim, server Server, target SSHTarget) (leaseClaim, error) {
+	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, true, true)
+}
+
+func updateLeaseClaimEndpointIfUnchangedMode(leaseID string, expected leaseClaim, server Server, target SSHTarget, allowProviderMetadata, replaceEndpoint bool) (leaseClaim, error) {
 	if leaseID == "" {
 		return leaseClaim{}, nil
 	}
@@ -285,7 +289,19 @@ func updateLeaseClaimEndpointIfUnchangedMode(leaseID string, expected leaseClaim
 		if err != nil {
 			return err
 		}
+		if replaceEndpoint {
+			clearLeaseClaimTailscaleFields(claim)
+			claim.BridgeURL = ""
+		}
 		applyLeaseClaimEndpoint(claim, prepared, target)
+		if replaceEndpoint {
+			claim.SSHHost = target.Host
+			if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
+				claim.SSHPort = port
+			} else {
+				claim.SSHPort = 0
+			}
+		}
 		updated = cloneLeaseClaim(*claim)
 		return nil
 	})

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u -o pipefail
+umask 077
 
 usage() {
   cat <<'EOF'
@@ -45,12 +46,37 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
+directory_is_private() {
+  local mode=""
+  mode="$(stat -f '%Lp' "$1" 2>/dev/null)" || mode=""
+  if [[ "$mode" == "700" || "$mode" == "0700" ]]; then
+    return 0
+  fi
+  mode="$(stat -c '%a' "$1" 2>/dev/null)" || mode=""
+  [[ "$mode" == "700" || "$mode" == "0700" ]]
+}
+
 if [[ -n "${CRABBOX_PROXMOX_LIVE_SMOKE_DIR:-}" ]]; then
   proof_dir="${CRABBOX_PROXMOX_LIVE_SMOKE_DIR}"
-  mkdir -p "$proof_dir" || {
-    echo "could not create proof directory: $proof_dir" >&2
+  if [[ -L "$proof_dir" ]]; then
+    echo "refusing symlink proof directory: $proof_dir" >&2
     exit 2
-  }
+  fi
+  if [[ -e "$proof_dir" ]]; then
+    if [[ ! -d "$proof_dir" || ! -O "$proof_dir" ]] || ! directory_is_private "$proof_dir"; then
+      echo "proof directory must be an owner-owned mode-700 directory: $proof_dir" >&2
+      exit 2
+    fi
+  else
+    mkdir -p "$proof_dir" || {
+      echo "could not create proof directory: $proof_dir" >&2
+      exit 2
+    }
+    if [[ -L "$proof_dir" || ! -d "$proof_dir" || ! -O "$proof_dir" ]] || ! directory_is_private "$proof_dir"; then
+      echo "created proof directory is not an owner-owned mode-700 directory: $proof_dir" >&2
+      exit 2
+    fi
+  fi
 else
   proof_dir="$(mktemp -d "${TMPDIR:-/tmp}/crabbox-proxmox-live-proof.XXXXXX")" || {
     echo "could not create proof directory" >&2
@@ -58,9 +84,26 @@ else
   }
 fi
 
+secure_log_file() {
+  local file="$1"
+  rm -f -- "$file" || {
+    echo "could not replace proof log: $file" >&2
+    exit 2
+  }
+  : >"$file" || {
+    echo "could not create proof log: $file" >&2
+    exit 2
+  }
+  chmod 600 "$file" || {
+    echo "could not secure proof log: $file" >&2
+    exit 2
+  }
+}
+
 known_hosts="$proof_dir/proxmox-node-known-hosts"
 summary="$proof_dir/summary.redacted.log"
-: >"$summary"
+secure_log_file "$summary"
+rm -f -- "$known_hosts"
 
 redact_stream() {
   local token_secret="${CRABBOX_PROXMOX_TOKEN_SECRET:-}"
@@ -83,6 +126,7 @@ redact_stream() {
     s/\Q$proof_dir\E/<proof-dir>/g if length($proof_dir);
     s/\Q$bin\E/<crabbox-bin>/g if length($bin) && $bin =~ m#/#;
     s/PVEAPIToken=[^[:space:]]+/PVEAPIToken=<redacted>/g;
+    s#https?://[^[:space:]'"'"'"]+#<url>#g;
     s#/(?:Users|home)/[^'"'"'"\n]+#<local-home-path>#g;
     s#/tmp/crabbox-[^[:space:]'"'"'"]+#<local-temp-path>#g;
     s#(?:\b\d{1,3}\.){3}\d{1,3}\b#<ip>#g;
@@ -101,6 +145,7 @@ run_step() {
   local redacted="$proof_dir/${name}.redacted.log"
   local status=0
 
+  secure_log_file "$raw"
   {
     printf '$'
     printf ' %q' "$@"
@@ -108,6 +153,7 @@ run_step() {
     "$@"
   } >"$raw" 2>&1 || status=$?
 
+  secure_log_file "$redacted"
   redact_stream <"$raw" >"$redacted"
   if [[ "$status" -eq 0 ]]; then
     printf 'step=%s status=pass log=%s\n' "$name" "$(summary_log_path "$redacted")" | tee -a "$summary"
@@ -157,6 +203,13 @@ if [[ "$live" != "1" ]]; then
   echo "classification=external_user_owned reason=CRABBOX_PROXMOX_LIVE_SMOKE not set to 1; no mutating lease proof attempted" | tee -a "$summary"
   echo "proof_dir=<proof-dir>"
   exit "$failure"
+fi
+
+if [[ "$failure" -ne 0 ]]; then
+  echo "step=lifecycle status=skip reason=preflight_failed" | tee -a "$summary"
+  echo "classification=environment_blocked proof_dir=<proof-dir>" | tee -a "$summary"
+  echo "proof_dir=<proof-dir>"
+  exit 1
 fi
 
 warmup_status=0

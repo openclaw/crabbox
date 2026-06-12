@@ -348,6 +348,27 @@ func TestConditionalClaimHelpersAndExactResolution(t *testing.T) {
 	if updated.CloudID != "i-456" || updated.SSHHost != "203.0.113.10" || updated.Labels["state"] != "ready" {
 		t.Fatalf("updated claim=%#v", updated)
 	}
+	if err := mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		claim.TailscaleIPv4 = "100.64.0.1"
+		claim.TailscaleFQDN = "old.tail.example"
+		claim.BridgeURL = "https://old.example"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.CloudID = "i-789"
+	replaced, err := replaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, updated, server, SSHTarget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.CloudID != "i-789" || replaced.SSHHost != "" || replaced.SSHPort != 0 || replaced.TailscaleIPv4 != "" || replaced.TailscaleFQDN != "" || replaced.BridgeURL != "" {
+		t.Fatalf("replaced claim=%#v", replaced)
+	}
+	updated = replaced
 
 	labels := cloneStringMap(updated.Labels)
 	labels["state"] = "cleanup"
@@ -384,7 +405,7 @@ func TestConditionalClaimHelpersAndExactResolution(t *testing.T) {
 	for identifier, want := range map[string]bool{
 		"":            false,
 		leaseID:       true,
-		"i-456":       true,
+		"i-789":       true,
 		slug:          true,
 		"not-a-match": false,
 	} {

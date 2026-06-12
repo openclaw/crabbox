@@ -50,6 +50,20 @@ func (e *ProxmoxError) Error() string {
 	return fmt.Sprintf("proxmox %s %s: http %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
 }
 
+type ProxmoxDeleteTaskError struct {
+	Err error
+}
+
+func (e *ProxmoxDeleteTaskError) Error() string { return e.Err.Error() }
+func (e *ProxmoxDeleteTaskError) Unwrap() error { return e.Err }
+
+type proxmoxTaskWaitError struct {
+	err error
+}
+
+func (e *proxmoxTaskWaitError) Error() string { return e.err.Error() }
+func (e *proxmoxTaskWaitError) Unwrap() error { return e.err }
+
 func NewProxmoxClient(cfg Config) (*ProxmoxClient, error) {
 	apiURL := strings.TrimSpace(cfg.Proxmox.APIURL)
 	if apiURL == "" {
@@ -214,11 +228,25 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 		return c.proxmoxFailedReadiness("storage", path, err, map[string]string{"storage": cfg.Proxmox.Storage})
 	}
 	if cfg.Proxmox.Storage == "" {
+		usable := 0
+		for _, storage := range storages {
+			if storage.Enabled != 0 && storage.Active != 0 {
+				usable++
+			}
+		}
+		if usable == 0 {
+			return ProxmoxReadinessCheck{
+				Status:  "failed",
+				Check:   "storage",
+				Message: fmt.Sprintf("storage=any class=missing_resource hint=grant_or_enable_proxmox_storage count=%d usable=0", len(storages)),
+				Details: map[string]string{"storage": "any", "class": "missing_resource", "hint": "grant_or_enable_proxmox_storage", "count": strconv.Itoa(len(storages)), "usable": "0", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+			}
+		}
 		return ProxmoxReadinessCheck{
 			Status:  "ok",
 			Check:   "storage",
-			Message: fmt.Sprintf("storage=any count=%d", len(storages)),
-			Details: map[string]string{"storage": "any", "count": strconv.Itoa(len(storages)), "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+			Message: fmt.Sprintf("storage=any count=%d usable=%d", len(storages), usable),
+			Details: map[string]string{"storage": "any", "count": strconv.Itoa(len(storages)), "usable": strconv.Itoa(usable), "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
 		}
 	}
 	for _, storage := range storages {
@@ -713,7 +741,14 @@ func (c *ProxmoxClient) DeleteServer(ctx context.Context, id string) error {
 		}
 		return err
 	}
-	return c.waitTask(ctx, upid)
+	if err := c.waitTask(ctx, upid); err != nil {
+		var waitErr *proxmoxTaskWaitError
+		if errors.As(err, &waitErr) {
+			return &ProxmoxDeleteTaskError{Err: err}
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *ProxmoxClient) GetServer(ctx context.Context, id string) (Server, error) {
@@ -795,7 +830,7 @@ func (c *ProxmoxClient) waitTask(ctx context.Context, upid string) error {
 	for {
 		var status proxmoxTaskStatus
 		if err := c.doRequired(ctx, http.MethodGet, path, nil, &status); err != nil {
-			return err
+			return &proxmoxTaskWaitError{err: err}
 		}
 		if status.Status == "stopped" {
 			if status.ExitStatus == "OK" {
@@ -807,11 +842,11 @@ func (c *ProxmoxClient) waitTask(ctx context.Context, upid string) error {
 			return fmt.Errorf("proxmox task %s failed: %s", upid, status.ExitStatus)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for proxmox task %s", upid)
+			return &proxmoxTaskWaitError{err: fmt.Errorf("timeout waiting for proxmox task %s", upid)}
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return &proxmoxTaskWaitError{err: ctx.Err()}
 		case <-time.After(2 * time.Second):
 		}
 	}
@@ -903,6 +938,11 @@ func IsCrabboxProxmoxLease(server Server) bool {
 func IsProxmoxNotFound(err error) bool {
 	var proxErr *ProxmoxError
 	return errors.As(err, &proxErr) && proxErr.StatusCode == http.StatusNotFound
+}
+
+func IsProxmoxDeleteTaskError(err error) bool {
+	var taskErr *ProxmoxDeleteTaskError
+	return errors.As(err, &taskErr)
 }
 
 func proxmoxDescription(labels map[string]string) string {

@@ -229,6 +229,45 @@ func TestProxmoxDoctorReadinessRejectsInactiveBridge(t *testing.T) {
 	}
 }
 
+func TestProxmoxDoctorReadinessRejectsEmptyStorageInventory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/pve1/storage" {
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	check := client.proxmoxStorageCheck(context.Background(), cfg)
+	if check.Status != "failed" || check.Details["count"] != "0" || check.Details["usable"] != "0" || check.Details["hint"] != "grant_or_enable_proxmox_storage" {
+		t.Fatalf("storage check=%#v", check)
+	}
+}
+
+func TestProxmoxDoctorReadinessRejectsStorageInventoryWithoutUsableStorage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/nodes/pve1/storage" {
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"storage": "disabled", "active": 1, "enabled": 0},
+			map[string]any{"storage": "inactive", "active": 0, "enabled": 1},
+		}})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	check := client.proxmoxStorageCheck(context.Background(), cfg)
+	if check.Status != "failed" || check.Details["count"] != "2" || check.Details["usable"] != "0" || check.Details["hint"] != "grant_or_enable_proxmox_storage" {
+		t.Fatalf("storage check=%#v", check)
+	}
+}
+
 func TestProxmoxDoctorReadinessReportsMissingTemplateIDAsCheck(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -322,7 +361,25 @@ func TestProxmoxWaitTaskRequiresOKExitStatus(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v, want %q", err, tc.want)
 			}
+			var waitErr *proxmoxTaskWaitError
+			if errors.As(err, &waitErr) {
+				t.Fatalf("terminal task failure classified as ambiguous: %v", err)
+			}
 		})
+	}
+}
+
+func TestProxmoxWaitTaskClassifiesStatusReadFailureAsAmbiguous(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	err := client.waitTask(context.Background(), "UPID:pve1:test")
+	var waitErr *proxmoxTaskWaitError
+	if !errors.As(err, &waitErr) {
+		t.Fatalf("err=%v, want ambiguous task wait error", err)
 	}
 }
 

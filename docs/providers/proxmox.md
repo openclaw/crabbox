@@ -304,8 +304,10 @@ to print the pasteable command, `stop`, `cleanup --dry-run`, and a final
 evidence even when no actual cleanup is needed.
 
 Proof artifacts are written to `CRABBOX_PROXMOX_LIVE_SMOKE_DIR` when set, or a
-new directory under `/tmp` otherwise. Files ending in `.raw.log` are private
-operator evidence. Use only `.redacted.log` files and
+new directory under `/tmp` otherwise. The directory and logs use owner-only
+permissions, endpoint URLs are redacted, and live mode refuses to mutate when a
+readiness preflight fails. Files ending in `.raw.log` are private operator
+evidence. Use only `.redacted.log` files and
 `summary.redacted.log` for public PR text, and still review them before
 posting. The redactor removes the configured API URL, token ID, token secret,
 optional SSH inventory host, `PVEAPIToken=...` values, local home paths, and
