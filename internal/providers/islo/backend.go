@@ -580,6 +580,11 @@ func resolveIsloLeaseID(id, repoRoot string, reclaim bool) (string, string, stri
 		if claim, ok, err := resolveExactIsloLeaseClaim(id); err != nil {
 			return "", "", "", err
 		} else if ok {
+			if repoRoot != "" {
+				if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, isloProvider, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
+					return "", "", "", err
+				}
+			}
 			return claim.LeaseID, name, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), nil
 		}
 		return id, name, newLeaseSlug(id), nil

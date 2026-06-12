@@ -443,7 +443,7 @@ func (a App) resolveNetworkSSHTargetWithRepoConfig(ctx context.Context, cfg *Con
 }
 
 func resolveSSHTargetNetwork(ctx context.Context, cfg Config, server Server, target SSHTarget, allowLoginOnly bool) (resolvedNetworkTarget, error) {
-	if allowLoginOnly && target.SSHConfigProxy {
+	if allowLoginOnly && target.SSHConfigProxy && providerCapabilities(cfg.Provider).TailscaleEgress {
 		return resolvedNetworkTarget{Target: target, Network: NetworkPublic}, nil
 	}
 	return resolveNetworkTarget(ctx, cfg, server, target)

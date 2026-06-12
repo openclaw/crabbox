@@ -346,6 +346,34 @@ func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
 	}
 }
 
+func TestIsloResolveSSHRejectsForeignClaimBeforeResume(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-repo-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:   leaseID,
+		Repo: Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "--reclaim") {
+		t.Fatalf("expected ownership error, got %v", err)
+	}
+	if client.resumeCalls != 0 {
+		t.Fatalf("resumeCalls=%d, want 0", client.resumeCalls)
+	}
+}
+
 func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
 	client := &fakeIsloSyncClient{
 		getSandboxes: []*gosdk.SandboxResponse{

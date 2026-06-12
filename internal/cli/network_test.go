@@ -35,6 +35,7 @@ func TestNetworkTailscaleRequiresMetadata(t *testing.T) {
 
 func TestLoginOnlySSHConfigProxyIgnoresInboundTailscaleSelection(t *testing.T) {
 	cfg := baseConfig()
+	cfg.Provider = "islo"
 	cfg.Network = NetworkTailscale
 	server := Server{Labels: map[string]string{
 		"lease":          "isb_crabbox-repo-abcdef",
@@ -48,6 +49,16 @@ func TestLoginOnlySSHConfigProxyIgnoresInboundTailscaleSelection(t *testing.T) {
 	}
 	if got.Target.Host != target.Host || !got.Target.SSHConfigProxy {
 		t.Fatalf("login proxy target=%#v", got.Target)
+	}
+}
+
+func TestSSHConfigProxyStillHonorsInboundTailscaleSelection(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Network = NetworkTailscale
+	target := SSHTarget{Host: "proxy.example", Port: "22", SSHConfigProxy: true}
+	if _, err := resolveSSHTargetNetwork(context.Background(), cfg, Server{}, target, true); err == nil {
+		t.Fatal("expected non-egress-only proxy target to require tailnet metadata")
 	}
 }
 
