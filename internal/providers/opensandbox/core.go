@@ -36,6 +36,7 @@ type SyncManifest = core.SyncManifest
 const (
 	providerName    = "opensandbox"
 	leasePrefix     = "osbx_"
+	recoveryPrefix  = "osbxr_"
 	namePrefix      = "crabbox-"
 	defaultAPIURL   = "http://localhost:8080"
 	defaultWorkdir  = "/workspace/crabbox"
@@ -98,6 +99,18 @@ func readLeaseClaim(leaseID string) (core.LeaseClaim, error) {
 
 func listOpenSandboxLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaimsWithPrefix(leasePrefix)
+}
+
+func listOpenSandboxCleanupClaims() ([]core.LeaseClaim, error) {
+	claims, err := listOpenSandboxLeaseClaims()
+	if err != nil {
+		return nil, err
+	}
+	recoveries, err := core.ListLeaseClaimsWithPrefix(recoveryPrefix)
+	if err != nil {
+		return nil, err
+	}
+	return append(claims, recoveries...), nil
 }
 
 func removeLeaseClaim(leaseID string) {

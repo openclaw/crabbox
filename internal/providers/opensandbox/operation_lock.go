@@ -25,8 +25,9 @@ func newOpenSandboxOperationSemaphore() *openSandboxOperationSemaphore {
 }
 
 func lockOpenSandboxLeaseOperation(ctx context.Context, leaseID string) (func(), error) {
-	if !strings.HasPrefix(leaseID, leasePrefix) || strings.TrimPrefix(leaseID, leasePrefix) == "" ||
-		filepath.Base(leaseID) != leaseID || leaseID == "." {
+	validLeaseID := strings.HasPrefix(leaseID, leasePrefix) && strings.TrimPrefix(leaseID, leasePrefix) != ""
+	validRecoveryID := strings.HasPrefix(leaseID, recoveryPrefix) && strings.TrimPrefix(leaseID, recoveryPrefix) != ""
+	if (!validLeaseID && !validRecoveryID) || filepath.Base(leaseID) != leaseID || leaseID == "." {
 		return nil, exit(2, "invalid opensandbox lease id %q", leaseID)
 	}
 	stateDir, err := core.CrabboxStateDir()

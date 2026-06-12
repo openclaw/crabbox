@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ type openSandboxBackend struct {
 	rt                     Runtime
 	newClient              func(Config, Runtime) (openSandboxClient, error)
 	cleanupTimeoutOverride time.Duration
+	reconcilePollOverride  time.Duration
 	statusPollOverride     time.Duration
 	statusProbeOverride    time.Duration
 }
@@ -41,6 +43,9 @@ func (b *openSandboxBackend) client() (openSandboxClient, error) {
 func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+	}
+	if req.Options.Tailscale.Enabled {
+		return exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
 	}
 	if err := validateOpenSandboxRunConfig(b.cfg); err != nil {
 		return err
@@ -92,6 +97,9 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 }
 
 func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	if req.Options.Tailscale.Enabled {
+		return RunResult{}, exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
+	}
 	if req.ID == "" {
 		if err := validateOpenSandboxRequestConfig(b.cfg, req); err != nil {
 			return RunResult{}, err
@@ -542,7 +550,7 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 	if err != nil {
 		return err
 	}
-	claims, err := listOpenSandboxLeaseClaims()
+	claims, err := listOpenSandboxCleanupClaims()
 	if err != nil {
 		return err
 	}
@@ -569,6 +577,10 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 				return nil
 			}
 			checkedOne = true
+			if strings.HasPrefix(claim.LeaseID, recoveryPrefix) {
+				removedOne, claimRemovedOne, err = b.cleanupOpenSandboxRecovery(ctx, api, claim, now, req.DryRun)
+				return err
+			}
 			sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
 			sb, getErr := api.GetSandbox(ctx, sandboxID)
 			if getErr != nil {
@@ -629,6 +641,71 @@ func (b *openSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) er
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
 	}
 	return nil
+}
+
+func (b *openSandboxBackend) cleanupOpenSandboxRecovery(ctx context.Context, api openSandboxClient, claim LeaseClaim, now time.Time, dryRun bool) (bool, bool, error) {
+	sandboxes, err := api.ListSandboxes(ctx, map[string]string{openSandboxClaimKey: claim.ProviderScope})
+	if err != nil {
+		return false, false, err
+	}
+	matches := make([]sandboxInfo, 0, len(sandboxes))
+	for _, sb := range sandboxes {
+		if sb.Metadata[openSandboxClaimKey] != claim.ProviderScope {
+			continue
+		}
+		if strings.TrimSpace(sb.ID) == "" {
+			return false, false, exit(5, "opensandbox recovery %s matched a sandbox without an id", claim.LeaseID)
+		}
+		matches = append(matches, sb)
+	}
+	if len(matches) == 0 {
+		expired, err := openSandboxRecoveryExpired(claim, now)
+		if err != nil {
+			return false, false, err
+		}
+		if !expired {
+			fmt.Fprintf(b.rt.Stderr, "skip recovery=%s reason=awaiting sandbox visibility or expiration\n", claim.LeaseID)
+			return false, false, nil
+		}
+		if dryRun {
+			fmt.Fprintf(b.rt.Stdout, "would remove recovery=%s reason=sandbox lifetime elapsed\n", claim.LeaseID)
+			return false, false, nil
+		}
+		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			return false, false, err
+		}
+		fmt.Fprintf(b.rt.Stdout, "remove recovery=%s reason=sandbox lifetime elapsed\n", claim.LeaseID)
+		return false, true, nil
+	}
+	if dryRun {
+		for _, sb := range matches {
+			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s recovery=%s reason=ambiguous create\n", sb.ID, claim.LeaseID)
+		}
+		return false, false, nil
+	}
+	for _, sb := range matches {
+		if err := api.DeleteSandbox(ctx, sb.ID); err != nil && !isOpenSandboxNotFound(err) {
+			return false, false, err
+		}
+	}
+	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		return false, false, err
+	}
+	for _, sb := range matches {
+		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s recovery=%s reason=ambiguous create\n", sb.ID, claim.LeaseID)
+	}
+	return true, false, nil
+}
+
+func openSandboxRecoveryExpired(claim LeaseClaim, now time.Time) (bool, error) {
+	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.ClaimedAt))
+	if err != nil {
+		return false, exit(5, "opensandbox recovery %s has invalid claimed time", claim.LeaseID)
+	}
+	if claim.IdleTimeoutSeconds <= 0 {
+		return false, exit(5, "opensandbox recovery %s has no sandbox lifetime", claim.LeaseID)
+	}
+	return !now.Before(createdAt.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)), nil
 }
 
 func openSandboxClaimMatchesEndpoint(claim LeaseClaim, baseURL string) bool {
@@ -727,7 +804,15 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 		},
 	})
 	if err != nil {
-		return "", "", "", sandboxInfo{}, nil, err
+		var ambiguous *ambiguousOpenSandboxCreateError
+		if !errors.As(err, &ambiguous) {
+			return "", "", "", sandboxInfo{}, nil, err
+		}
+		recoveryLeaseID, recoveryErr := b.recordAmbiguousCreate(providerScope, repo)
+		if recoveryErr != nil {
+			return "", "", "", sandboxInfo{}, nil, fmt.Errorf("%w; persist opensandbox create recovery scope=%s: %v", err, providerScope, recoveryErr)
+		}
+		return "", "", "", sandboxInfo{}, nil, b.reconcileAmbiguousCreateFailure(ctx, api, providerScope, recoveryLeaseID, err)
 	}
 	leaseID := leasePrefix + sb.ID
 	unlockOperation, err := lockOpenSandboxLeaseOperation(ctx, leaseID)
@@ -746,6 +831,114 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 		return leaseID, sb.ID, slug, sandboxInfo{}, nil, cleanupErr
 	}
 	return leaseID, sb.ID, slug, sb, unlockOperation, nil
+}
+
+func (b *openSandboxBackend) recordAmbiguousCreate(providerScope string, repo Repo) (string, error) {
+	if strings.TrimSpace(repo.Root) == "" {
+		return "", errors.New("repository root is required")
+	}
+	recoveryLeaseID := openSandboxRecoveryLeaseID(providerScope)
+	if err := claimLeaseForRepoProviderScopePond(
+		recoveryLeaseID,
+		"",
+		providerName,
+		providerScope,
+		"",
+		repo.Root,
+		b.sandboxLifetime(),
+		false,
+	); err != nil {
+		return "", err
+	}
+	return recoveryLeaseID, nil
+}
+
+func (b *openSandboxBackend) reconcileAmbiguousCreateFailure(ctx context.Context, api openSandboxClient, providerScope, recoveryLeaseID string, cause error) error {
+	cleanupCtx, cancel := b.cleanupContext(ctx)
+	defer cancel()
+	unlockOperation, err := lockOpenSandboxLeaseOperation(cleanupCtx, recoveryLeaseID)
+	if err != nil {
+		return fmt.Errorf("%w; lock opensandbox create recovery=%s: %v", cause, recoveryLeaseID, err)
+	}
+	defer unlockOperation()
+	recoveryClaim, err := readLeaseClaim(recoveryLeaseID)
+	if err != nil {
+		return fmt.Errorf("%w; read opensandbox create recovery=%s: %v", cause, recoveryLeaseID, err)
+	}
+	if recoveryClaim.LeaseID == "" {
+		return cause
+	}
+	if recoveryClaim.Provider != providerName || recoveryClaim.ProviderScope != providerScope {
+		return fmt.Errorf("%w; opensandbox create recovery=%s changed before reconciliation", cause, recoveryLeaseID)
+	}
+	pollInterval := 250 * time.Millisecond
+	if b.reconcilePollOverride > 0 {
+		pollInterval = b.reconcilePollOverride
+	}
+	var lastTransient error
+	for {
+		sandboxes, err := api.ListSandboxes(cleanupCtx, map[string]string{openSandboxClaimKey: providerScope})
+		if err != nil {
+			if !isOpenSandboxAmbiguousCreateError(err) {
+				return fmt.Errorf("%w; reconcile ambiguous opensandbox create recovery=%s failed: %v", cause, recoveryLeaseID, err)
+			}
+			lastTransient = err
+		} else {
+			lastTransient = nil
+			var cleanupErrors []error
+			matched := false
+			for _, sb := range sandboxes {
+				if sb.Metadata[openSandboxClaimKey] != providerScope {
+					continue
+				}
+				matched = true
+				if strings.TrimSpace(sb.ID) == "" {
+					cleanupErrors = append(cleanupErrors, errors.New("matched sandbox omitted its id"))
+					continue
+				}
+				if err := api.DeleteSandbox(cleanupCtx, sb.ID); err != nil && !isOpenSandboxNotFound(err) {
+					if isOpenSandboxAmbiguousCreateError(err) {
+						lastTransient = err
+						continue
+					}
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("delete sandbox %s: %w", sb.ID, err))
+				}
+			}
+			if err := errors.Join(cleanupErrors...); err != nil {
+				return fmt.Errorf("%w; reconcile ambiguous opensandbox create recovery=%s cleanup failed: %v", cause, recoveryLeaseID, err)
+			}
+			if matched && lastTransient == nil {
+				if err := removeOpenSandboxRecoveryClaim(recoveryLeaseID, providerScope); err != nil {
+					return fmt.Errorf("%w; remove opensandbox create recovery=%s: %v", cause, recoveryLeaseID, err)
+				}
+				return cause
+			}
+		}
+		select {
+		case <-cleanupCtx.Done():
+			if lastTransient != nil {
+				return fmt.Errorf("%w; reconcile ambiguous opensandbox create recovery=%s timed out: %v", cause, recoveryLeaseID, lastTransient)
+			}
+			return fmt.Errorf("%w; unresolved opensandbox create retained as recovery=%s", cause, recoveryLeaseID)
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func openSandboxRecoveryLeaseID(providerScope string) string {
+	digest := sha256.Sum256([]byte(providerScope))
+	return recoveryPrefix + hex.EncodeToString(digest[:8])
+}
+
+func removeOpenSandboxRecoveryClaim(leaseID, providerScope string) error {
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" || claim.Provider != providerName || claim.ProviderScope != providerScope {
+		return nil
+	}
+	return removeLeaseClaimIfUnchanged(leaseID, claim)
 }
 
 func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
@@ -1083,6 +1276,36 @@ func isOpenSandboxReadinessPending(err error) bool {
 		errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, syscall.EHOSTUNREACH) ||
 		errors.Is(err, syscall.ENETUNREACH)
+}
+
+func isOpenSandboxAmbiguousCreateError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var apiErr *sdk.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusRequestTimeout ||
+			apiErr.StatusCode == http.StatusTooManyRequests ||
+			apiErr.StatusCode >= http.StatusInternalServerError
+	}
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 func (b *openSandboxBackend) statusPollInterval() time.Duration {

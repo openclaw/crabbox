@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,13 @@ type openSandboxClient interface {
 	RunCommand(context.Context, string, runCommandRequest) (int, error)
 	Probe(context.Context) error
 }
+
+type ambiguousOpenSandboxCreateError struct {
+	cause error
+}
+
+func (e *ambiguousOpenSandboxCreateError) Error() string { return e.cause.Error() }
+func (e *ambiguousOpenSandboxCreateError) Unwrap() error { return e.cause }
 
 type createSandboxOptions struct {
 	Image          string
@@ -301,9 +309,21 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 		SecureAccess:   opts.SecureAccess,
 		Platform:       platform,
 	}
+	if err := ctx.Err(); err != nil {
+		return sandboxInfo{}, fmt.Errorf("opensandbox create sandbox: %w", err)
+	}
 	info, err := c.lifecycle().CreateSandbox(ctx, req)
 	if err != nil {
-		return sandboxInfo{}, fmt.Errorf("opensandbox create sandbox: %w", err)
+		createErr := fmt.Errorf("opensandbox create sandbox: %w", err)
+		if isOpenSandboxAmbiguousCreateError(err) {
+			return sandboxInfo{}, &ambiguousOpenSandboxCreateError{cause: createErr}
+		}
+		return sandboxInfo{}, createErr
+	}
+	if strings.TrimSpace(info.ID) == "" {
+		return sandboxInfo{}, &ambiguousOpenSandboxCreateError{
+			cause: errors.New("opensandbox create sandbox: successful response omitted sandbox id"),
+		}
 	}
 	sandboxID := info.ID
 	readyCtx, cancel := c.readinessContext(ctx, info.ExpiresAt)
@@ -768,11 +788,14 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 		if payload.Error != nil && payload.Error.EValue != "" {
 			value = payload.Error.EValue
 		}
-		if value != "" {
-			_, _ = io.WriteString(c.rt.Stderr, value)
-		}
 		if code, ok := parseExitCode(value); ok {
 			return commandEventResult{exitCode: &code, errorEvent: true, terminal: true}, nil
+		}
+		if value != "" {
+			_, _ = io.WriteString(c.rt.Stderr, value)
+			if !strings.HasSuffix(value, "\n") {
+				_, _ = io.WriteString(c.rt.Stderr, "\n")
+			}
 		}
 		code := 1
 		return commandEventResult{exitCode: &code, errorEvent: true, terminal: true}, nil
@@ -983,11 +1006,11 @@ func parseExitCode(value string) (int, bool) {
 	if value == "" {
 		return 0, false
 	}
-	var code int
-	if _, err := fmt.Sscanf(value, "%d", &code); err == nil {
-		return code, true
+	code, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
 	}
-	return 0, false
+	return code, true
 }
 
 func exitCodeOrDefault(code int) int {

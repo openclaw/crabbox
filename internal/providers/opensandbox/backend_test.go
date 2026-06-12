@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -130,6 +131,43 @@ func TestWarmupRejectsInvalidWorkdirBeforeCreate(t *testing.T) {
 	}
 }
 
+func TestRunAndWarmupRejectTailscaleBeforeCreate(t *testing.T) {
+	t.Run("run", func(t *testing.T) {
+		fake := newFakeClient()
+		backend := newTestBackend(fake)
+		_, err := backend.Run(context.Background(), RunRequest{
+			Repo: Repo{Name: "my-app", Root: "/repo"},
+			Options: core.LeaseOptions{
+				Tailscale: core.TailscaleConfig{Enabled: true},
+			},
+			Command: []string{"true"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "does not support Tailscale") {
+			t.Fatalf("err=%v, want Tailscale rejection", err)
+		}
+		if fake.created.Image != "" {
+			t.Fatalf("created=%#v, want validation before create", fake.created)
+		}
+	})
+
+	t.Run("warmup", func(t *testing.T) {
+		fake := newFakeClient()
+		backend := newTestBackend(fake)
+		err := backend.Warmup(context.Background(), WarmupRequest{
+			Repo: Repo{Name: "my-app", Root: "/repo"},
+			Options: core.LeaseOptions{
+				Tailscale: core.TailscaleConfig{Enabled: true},
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "does not support Tailscale") {
+			t.Fatalf("err=%v, want Tailscale rejection", err)
+		}
+		if fake.created.Image != "" {
+			t.Fatalf("created=%#v, want validation before create", fake.created)
+		}
+	})
+}
+
 func TestWarmupCleansUpWhenActualExpirationCannotFitRun(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -185,6 +223,218 @@ func TestRunRejectsRequestBudgetBeforeCreate(t *testing.T) {
 	}
 	if fake.created.Image != "" {
 		t.Fatalf("created=%#v, want validation before create", fake.created)
+	}
+}
+
+func TestRunReconcilesAmbiguousCreateFailureByOwnershipMetadata(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+	backend := newTestBackend(fake)
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want ambiguous create cause", err)
+	}
+	if len(fake.listFilters) != 1 {
+		t.Fatalf("list filters=%#v, want ownership reconciliation", fake.listFilters)
+	}
+	scope := fake.created.Metadata[openSandboxClaimKey]
+	if scope == "" || fake.listFilters[0][openSandboxClaimKey] != scope {
+		t.Fatalf("scope=%q list filters=%#v", scope, fake.listFilters)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("deleted=%#v, want ambiguous sandbox cleanup", fake.deleted)
+	}
+	if claim, claimErr := readLeaseClaim(leasePrefix + fake.sandbox.ID); claimErr != nil {
+		t.Fatal(claimErr)
+	} else if claim.LeaseID != "" {
+		t.Fatalf("claim=%#v, want no local claim after ambiguous create", claim)
+	}
+	if claims, claimErr := listOpenSandboxLeaseClaims(); claimErr != nil {
+		t.Fatal(claimErr)
+	} else if len(claims) != 0 {
+		t.Fatalf("claims=%#v, want reconciled recovery removed", claims)
+	}
+}
+
+func TestRunReconcilesAmbiguousCreateAfterDelayedVisibility(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+	fake.listEmptyCount = 1
+	backend := newTestBackend(fake)
+	backend.cleanupTimeoutOverride = 200 * time.Millisecond
+	backend.reconcilePollOverride = time.Millisecond
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want ambiguous create cause", err)
+	}
+	if len(fake.listFilters) != 2 {
+		t.Fatalf("list filters=%#v, want delayed ownership reconciliation", fake.listFilters)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("deleted=%#v, want delayed ambiguous sandbox cleanup", fake.deleted)
+	}
+}
+
+func TestRunRetriesTransientAmbiguousCreateReconciliationFailures(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+	fake.listErr = context.DeadlineExceeded
+	fake.listErrCount = 1
+	fake.deleteErr = context.DeadlineExceeded
+	fake.deleteErrCount = 1
+	backend := newTestBackend(fake)
+	backend.cleanupTimeoutOverride = 200 * time.Millisecond
+	backend.reconcilePollOverride = time.Millisecond
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want ambiguous create cause", err)
+	}
+	if len(fake.listFilters) != 3 {
+		t.Fatalf("list filters=%#v, want retries after transient list and delete failures", fake.listFilters)
+	}
+	if len(fake.deleted) != 2 {
+		t.Fatalf("deleted=%#v, want delete retry", fake.deleted)
+	}
+}
+
+func TestRunDoesNotReconcileUnmarkedCreateFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.createErr = context.DeadlineExceeded
+	backend := newTestBackend(fake)
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want create cause", err)
+	}
+	if len(fake.listFilters) != 0 || len(fake.deleted) != 0 {
+		t.Fatalf("list filters=%#v deleted=%#v, want no reconciliation for a client-cleaned failure", fake.listFilters, fake.deleted)
+	}
+}
+
+func TestRunRetainsAmbiguousCreateRecoveryForLaterCleanup(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+	fake.listEmptyCount = 1000
+	backend := newTestBackend(fake)
+	backend.cleanupTimeoutOverride = 5 * time.Millisecond
+	backend.reconcilePollOverride = time.Millisecond
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want ambiguous create cause", err)
+	}
+	if claims, claimErr := listOpenSandboxLeaseClaims(); claimErr != nil {
+		t.Fatal(claimErr)
+	} else if len(claims) != 0 {
+		t.Fatalf("claims=%#v, recovery must not appear as a normal lease", claims)
+	}
+	claims, claimErr := listOpenSandboxCleanupClaims()
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if len(claims) != 1 || !strings.HasPrefix(claims[0].LeaseID, recoveryPrefix) {
+		t.Fatalf("claims=%#v, want retained recovery", claims)
+	}
+	if claims[0].ProviderScope != fake.created.Metadata[openSandboxClaimKey] || !strings.Contains(err.Error(), claims[0].LeaseID) {
+		t.Fatalf("claim=%#v err=%v, want discoverable ownership recovery", claims[0], err)
+	}
+	if claims[0].Pond != "" {
+		t.Fatalf("claim=%#v, recovery must not join a pond", claims[0])
+	}
+	if claim, ok, resolveErr := resolveOpenSandboxLeaseClaim(claims[0].LeaseID, fake.BaseURL()); resolveErr != nil || ok {
+		t.Fatalf("claim=%#v ok=%t err=%v, recovery must not resolve as a normal lease", claim, ok, resolveErr)
+	}
+
+	fake.listEmptyCount = 0
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("deleted=%#v, want recovered sandbox cleanup", fake.deleted)
+	}
+	if claims, claimErr = listOpenSandboxCleanupClaims(); claimErr != nil {
+		t.Fatal(claimErr)
+	} else if len(claims) != 0 {
+		t.Fatalf("claims=%#v, want recovery removed after cleanup", claims)
+	}
+}
+
+func TestAmbiguousCreateReconciliationUsesRecoveryOperationLock(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	backend := newTestBackend(fake)
+	backend.cleanupTimeoutOverride = 5 * time.Millisecond
+	scope := testOpenSandboxScope(t, fake.BaseURL())
+	recoveryLeaseID, err := backend.recordAmbiguousCreate(scope, Repo{Root: tempGitRepo(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockOpenSandboxLeaseOperation(context.Background(), recoveryLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	cause := &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+	err = backend.reconcileAmbiguousCreateFailure(context.Background(), fake, scope, recoveryLeaseID, cause)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "lock opensandbox create recovery") {
+		t.Fatalf("err=%v, want retained cause and lock failure", err)
+	}
+	if len(fake.listFilters) != 0 || len(fake.deleted) != 0 {
+		t.Fatalf("list filters=%#v deleted=%#v, reconciliation must not run without the recovery lock", fake.listFilters, fake.deleted)
+	}
+}
+
+func TestOpenSandboxCreateAmbiguityClassification(t *testing.T) {
+	for _, err := range []error{
+		context.DeadlineExceeded,
+		io.ErrUnexpectedEOF,
+		syscall.ECONNRESET,
+		syscall.EPIPE,
+	} {
+		if !isOpenSandboxAmbiguousCreateError(err) {
+			t.Errorf("err=%v, want ambiguous", err)
+		}
+	}
+	for _, err := range []error{
+		syscall.ECONNREFUSED,
+		syscall.EHOSTUNREACH,
+		syscall.ENETUNREACH,
+	} {
+		if isOpenSandboxAmbiguousCreateError(err) {
+			t.Errorf("err=%v, want definitive pre-request failure", err)
+		}
+	}
+}
+
+func TestOpenSandboxReadinessRetriesStartupConnectionFailures(t *testing.T) {
+	for _, err := range []error{
+		syscall.ECONNREFUSED,
+		syscall.ECONNRESET,
+		syscall.EHOSTUNREACH,
+		syscall.ENETUNREACH,
+	} {
+		if !isOpenSandboxReadinessPending(err) {
+			t.Errorf("err=%v, want retryable readiness failure", err)
+		}
 	}
 }
 
@@ -1234,6 +1484,143 @@ func TestSDKClientLifecycleRequestsAreBounded(t *testing.T) {
 	}
 }
 
+func TestSDKClientMarksCreateRequestTimeoutAsAmbiguous(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.(*sdkOpenSandboxClient).requestTimeoutOverride = 20 * time.Millisecond
+
+	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+	})
+	var ambiguous *ambiguousOpenSandboxCreateError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("err=%v, want ambiguous create marker", err)
+	}
+}
+
+func TestSDKClientMarksSuccessfulCreateDecodeFailuresAsAmbiguous(t *testing.T) {
+	for name, response := range map[string]string{
+		"syntax": "{",
+		"type":   "[]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/sandboxes" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, response)
+			}))
+			defer server.Close()
+
+			cfg := testConfig()
+			cfg.OpenSandbox.APIURL = server.URL
+			client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+				Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+			})
+			var ambiguous *ambiguousOpenSandboxCreateError
+			if !errors.As(err, &ambiguous) {
+				t.Fatalf("err=%v, want ambiguous create marker", err)
+			}
+		})
+	}
+}
+
+func TestSDKClientMarksSuccessfulCreateWithoutIDAsAmbiguous(t *testing.T) {
+	tests := map[string]struct {
+		status int
+		body   string
+	}{
+		"empty object": {status: http.StatusOK, body: "{}"},
+		"null":         {status: http.StatusOK, body: "null"},
+		"no content":   {status: http.StatusNoContent},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/sandboxes" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+
+			cfg := testConfig()
+			cfg.OpenSandbox.APIURL = server.URL
+			client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+				Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+			})
+			var ambiguous *ambiguousOpenSandboxCreateError
+			if !errors.As(err, &ambiguous) {
+				t.Fatalf("err=%v, want ambiguous create marker", err)
+			}
+		})
+	}
+}
+
+func TestSDKClientDoesNotDispatchPreCanceledCreate(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+	hit := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hit <- struct{}{}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = client.CreateSandbox(ctx, createSandboxOptions{
+		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want canceled", err)
+	}
+	var ambiguous *ambiguousOpenSandboxCreateError
+	if errors.As(err, &ambiguous) {
+		t.Fatalf("err=%v, pre-dispatch cancellation must not be ambiguous", err)
+	}
+	select {
+	case <-hit:
+		t.Fatal("pre-canceled create reached the server")
+	default:
+	}
+}
+
 func TestSDKClientCreateWaitsForRunningAndExecdPing(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
 	statusPolls := 0
@@ -1894,6 +2281,36 @@ func TestCommandEventErrorDefaultsToFailureExit(t *testing.T) {
 	}
 }
 
+func TestCommandNumericErrorEventDoesNotWriteExitMetadataToStderr(t *testing.T) {
+	var stderr bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: io.Discard, Stderr: &stderr}}
+	result, err := client.handleCommandEvent(streamEvent(`{"type":"error","error":{"evalue":"7"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.exitCode == nil || *result.exitCode != 7 || !result.terminal {
+		t.Fatalf("result=%#v, want terminal exit 7", result)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr=%q, want no numeric exit metadata", stderr.String())
+	}
+}
+
+func TestCommandNumericPrefixErrorRemainsVisibleDiagnostic(t *testing.T) {
+	var stderr bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: io.Discard, Stderr: &stderr}}
+	result, err := client.handleCommandEvent(streamEvent(`{"type":"error","error":{"evalue":"7 files failed"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.exitCode == nil || *result.exitCode != 1 || !result.terminal {
+		t.Fatalf("result=%#v, want default terminal failure", result)
+	}
+	if stderr.String() != "7 files failed\n" {
+		t.Fatalf("stderr=%q, want visible diagnostic", stderr.String())
+	}
+}
+
 func TestCommandEventHonorsExplicitExitCode(t *testing.T) {
 	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
 	result, err := client.handleCommandEvent(streamEvent(`{"type":"execution_complete","exit_code":42}`))
@@ -2214,6 +2631,7 @@ type fakeOpenSandboxClient struct {
 	uploads              []string
 	runExit              int
 	runErr               error
+	createErr            error
 	notFound             bool
 	pingCalls            int
 	pingFailures         int
@@ -2225,6 +2643,11 @@ type fakeOpenSandboxClient struct {
 	deleteStarted        chan struct{}
 	deleteRelease        chan struct{}
 	deleteErr            error
+	deleteErrCount       int
+	listFilters          []map[string]string
+	listEmptyCount       int
+	listErr              error
+	listErrCount         int
 	afterResume          func()
 	afterRun             func(runCommandRequest)
 	runStarted           chan struct{}
@@ -2261,10 +2684,29 @@ func (f *fakeOpenSandboxClient) CreateSandbox(_ context.Context, req createSandb
 	if f.omitCreateExpiration {
 		created.ExpiresAt = nil
 	}
+	if f.createErr != nil {
+		return sandboxInfo{}, f.createErr
+	}
 	return created, nil
 }
 
-func (f *fakeOpenSandboxClient) ListSandboxes(context.Context, map[string]string) ([]sandboxInfo, error) {
+func (f *fakeOpenSandboxClient) ListSandboxes(_ context.Context, metadata map[string]string) ([]sandboxInfo, error) {
+	f.listFilters = append(f.listFilters, cloneStringMap(metadata))
+	if f.listErr != nil {
+		if f.listErrCount > 0 {
+			f.listErrCount--
+			err := f.listErr
+			if f.listErrCount == 0 {
+				f.listErr = nil
+			}
+			return nil, err
+		}
+		return nil, f.listErr
+	}
+	if f.listEmptyCount > 0 {
+		f.listEmptyCount--
+		return nil, nil
+	}
 	return []sandboxInfo{f.sandbox}, nil
 }
 
@@ -2288,6 +2730,14 @@ func (f *fakeOpenSandboxClient) DeleteSandbox(_ context.Context, sandboxID strin
 		<-f.deleteRelease
 	}
 	if f.deleteErr != nil {
+		if f.deleteErrCount > 0 {
+			f.deleteErrCount--
+			err := f.deleteErr
+			if f.deleteErrCount == 0 {
+				f.deleteErr = nil
+			}
+			return err
+		}
 		return f.deleteErr
 	}
 	if f.notFound {

@@ -77,6 +77,7 @@ printf 'remove-me\n' >stale.txt
 git add .crabbox.yaml proof.txt stale.txt
 git commit -qm "test: seed OpenSandbox smoke fixture"
 
+trap - ERR
 if run_output="$("$bin" run --provider opensandbox --keep --slug "$slug" --timing-json \
   --allow-env CRABBOX_OPENSANDBOX_SMOKE_VALUE -- \
   /bin/sh -lc 'test "$(cat proof.txt)" = v1 && test -f stale.txt && test "$CRABBOX_OPENSANDBOX_SMOKE_VALUE" = forwarded-ok && printf OPEN_SANDBOX_SMOKE_V1_OK' 2>&1)"; then
@@ -84,6 +85,7 @@ if run_output="$("$bin" run --provider opensandbox --keep --slug "$slug" --timin
 else
   run_status=$?
 fi
+trap 'classify_unexpected_failure "$?" "$LINENO"' ERR
 if [[ $run_status -ne 0 ]]; then
   if grep -Eiq 'quota|capacity|rate limit|too many requests|429|insufficient' <<<"$run_output"; then
     classify_and_exit quota_blocked "$run_output"
@@ -105,12 +107,14 @@ printf 'second\n' >second.txt
 git add proof.txt second.txt
 git rm -q stale.txt
 
+trap - ERR
 if reuse_output="$("$bin" run --provider opensandbox --id "$slug" --timing-json -- \
   /bin/sh -lc 'test "$(cat proof.txt)" = v2 && test -f second.txt && test ! -e stale.txt && printf OPEN_SANDBOX_SMOKE_V2_OK' 2>&1)"; then
   reuse_status=0
 else
   reuse_status=$?
 fi
+trap 'classify_unexpected_failure "$?" "$LINENO"' ERR
 if [[ $reuse_status -ne 0 ]]; then
   classify_and_exit diagnostic_only "$reuse_output"
 fi
