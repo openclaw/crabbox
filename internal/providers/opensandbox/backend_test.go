@@ -44,6 +44,9 @@ func TestProviderSpec(t *testing.T) {
 	if !spec.Features.Has(core.FeatureArchiveSync) {
 		t.Fatalf("features=%#v want archive-sync", spec.Features)
 	}
+	if !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("features=%#v want cleanup", spec.Features)
+	}
 }
 
 func TestProviderForResolvesNameOnly(t *testing.T) {
@@ -947,9 +950,13 @@ func TestNewOpenSandboxClientRequiresExplicitAPIURL(t *testing.T) {
 
 func TestSecureOpenSandboxHTTPClientInstallsSDKTransport(t *testing.T) {
 	client := secureOpenSandboxHTTPClient(&http.Client{})
-	transport, ok := client.Transport.(*http.Transport)
+	redirectTransport, ok := client.Transport.(openSandboxRedirectTransport)
+	if !ok {
+		t.Fatalf("transport=%T want redirect guard", client.Transport)
+	}
+	transport, ok := redirectTransport.base.(*http.Transport)
 	if !ok || transport.TLSClientConfig == nil {
-		t.Fatalf("transport=%T want SDK HTTP transport", client.Transport)
+		t.Fatalf("transport=%T want SDK HTTP transport", redirectTransport.base)
 	}
 	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 || transport.TLSClientConfig.VerifyConnection == nil {
 		t.Fatalf("TLS config=%#v want SDK TLS hardening", transport.TLSClientConfig)
@@ -987,7 +994,7 @@ func TestSecureOpenSandboxHTTPClientRejectsCrossOriginRedirect(t *testing.T) {
 	}))
 	defer destination.Close()
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+		http.Redirect(w, r, destination.URL+"/redirect?signature=secret-value", http.StatusTemporaryRedirect)
 	}))
 	defer source.Close()
 
@@ -999,6 +1006,8 @@ func TestSecureOpenSandboxHTTPClientRejectsCrossOriginRedirect(t *testing.T) {
 	request.Header.Set("X-EXECD-ACCESS-TOKEN", "secret")
 	if _, err := client.Do(request); err == nil || !strings.Contains(err.Error(), "cross-origin redirect") {
 		t.Fatalf("err=%v, want cross-origin redirect rejection", err)
+	} else if strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("redirect error leaked signature: %v", err)
 	}
 	if destinationHit {
 		t.Fatal("cross-origin redirect forwarded the request")
@@ -1259,6 +1268,40 @@ func TestSDKClientProxyExecdAddsAccessTokenWhenEndpointOmitsIt(t *testing.T) {
 	}
 	if gotExecdAuth != "proxy-key" {
 		t.Fatalf("X-EXECD-ACCESS-TOKEN=%q want proxy-key", gotExecdAuth)
+	}
+}
+
+func TestSDKClientProxyExecdHonorsCaseInsensitiveAccessTokenHeader(t *testing.T) {
+	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "proxy-key")
+	var gotExecdAuth string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-proxy-case/endpoints/44772":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"x-execd-access-token":"endpoint-key"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/command":
+			gotExecdAuth = r.Header.Get("X-EXECD-ACCESS-TOKEN")
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"execution_complete\",\"exit_code\":0}\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	cfg.OpenSandbox.UseServerProxy = true
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RunCommand(context.Background(), "sb-proxy-case", runCommandRequest{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotExecdAuth != "endpoint-key" {
+		t.Fatalf("X-EXECD-ACCESS-TOKEN=%q want endpoint-key", gotExecdAuth)
 	}
 }
 
@@ -1628,6 +1671,24 @@ func TestCommandEventPreservesOutputWhitespace(t *testing.T) {
 	}
 	if stdout.String() != "  ok\n" || stderr.String() != "\n" {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCommandEventPreservesRawSSEBlankLines(t *testing.T) {
+	var stdout bytes.Buffer
+	client := &sdkOpenSandboxClient{rt: Runtime{Stdout: &stdout, Stderr: io.Discard}}
+	state := commandOutputState{}
+	for _, event := range []commandStreamEvent{
+		{Event: "stdout", Data: ""},
+		{Event: "stdout", Data: "  "},
+		{Event: "stdout", Data: "done"},
+	} {
+		if _, err := client.handleCommandEventWithState(event, &state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stdout.String() != "\n  \ndone" {
+		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
 

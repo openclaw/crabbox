@@ -74,6 +74,36 @@ type openSandboxQueryTransport struct {
 	rawQuery string
 }
 
+type openSandboxRedirectTransport struct {
+	base http.RoundTripper
+}
+
+func (t openSandboxRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	switch response.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return response, nil
+	}
+	location := response.Header.Get("Location")
+	if location == "" {
+		return response, nil
+	}
+	destination, err := req.URL.Parse(location)
+	if err != nil {
+		response.Body.Close()
+		return nil, errors.New("opensandbox received an invalid redirect location")
+	}
+	if sameOpenSandboxOrigin(req.URL, destination) {
+		return response, nil
+	}
+	response.Body.Close()
+	return nil, fmt.Errorf("opensandbox refused cross-origin redirect to %s://%s", destination.Scheme, destination.Host)
+}
+
 func (t openSandboxQueryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	cloned := req.Clone(req.Context())
 	requestURL := *req.URL
@@ -179,11 +209,9 @@ func secureOpenSandboxHTTPClient(source *http.Client) *http.Client {
 	if client.Transport == nil {
 		client.Transport = sdk.DefaultTransport()
 	}
+	client.Transport = openSandboxRedirectTransport{base: client.Transport}
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) == 0 || !sameOpenSandboxOrigin(via[0].URL, req.URL) {
-			return fmt.Errorf("opensandbox refused cross-origin redirect to %s", req.URL.Redacted())
-		}
 		if originalCheckRedirect != nil {
 			return originalCheckRedirect(req, via)
 		}
@@ -607,9 +635,6 @@ func (c *sdkOpenSandboxClient) handleCommandEvent(event commandStreamEvent) (com
 }
 
 func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEvent, outputState *commandOutputState) (commandEventResult, error) {
-	if strings.TrimSpace(event.Data) == "" {
-		return commandEventResult{}, nil
-	}
 	explicitType := strings.ToLower(strings.TrimSpace(event.Event))
 	if !event.Structured {
 		switch explicitType {
@@ -620,6 +645,9 @@ func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEv
 			err := writeCommandOutput(c.rt.Stderr, event.Data, &outputState.stderr)
 			return commandEventResult{}, err
 		}
+	}
+	if event.Data == "" {
+		return commandEventResult{}, nil
 	}
 	var payload struct {
 		Type     string `json:"type"`
@@ -740,11 +768,33 @@ func (c *sdkOpenSandboxClient) resolveExecd(ctx context.Context, sandboxID strin
 	if err != nil {
 		return execdConnection{}, err
 	}
-	headers := cloneStringMap(endpoint.Headers)
-	if c.cfg.OpenSandbox.UseServerProxy && headers["X-EXECD-ACCESS-TOKEN"] == "" && c.key != "" {
-		headers["X-EXECD-ACCESS-TOKEN"] = c.key
+	headers, err := normalizeOpenSandboxEndpointHeaders(endpoint.Headers)
+	if err != nil {
+		return execdConnection{}, err
+	}
+	execdAuthHeader := http.CanonicalHeaderKey("X-EXECD-ACCESS-TOKEN")
+	if c.cfg.OpenSandbox.UseServerProxy && headers[execdAuthHeader] == "" && c.key != "" {
+		headers[execdAuthHeader] = c.key
 	}
 	return execdConnection{baseURL: endpointURL, rawQuery: rawQuery, headers: headers}, nil
+}
+
+func normalizeOpenSandboxEndpointHeaders(values map[string]string) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	headers := make(map[string]string, len(values))
+	for key, value := range values {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if canonical == "" {
+			return nil, exit(5, "opensandbox execd endpoint returned an invalid empty header name")
+		}
+		if existing, ok := headers[canonical]; ok && existing != value {
+			return nil, exit(5, "opensandbox execd endpoint returned conflicting values for header %s", canonical)
+		}
+		headers[canonical] = value
+	}
+	return headers, nil
 }
 
 func validateOpenSandboxExecdURL(raw, defaultProtocol string) (string, string, error) {
