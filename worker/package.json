@@ -6,11 +6,13 @@
   "scripts": {
     "build": "wrangler deploy --dry-run --outdir dist",
     "build:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --dry-run --outdir dist-cloudflare",
+    "build:cloudflare-dynamic-workers": "wrangler deploy --config wrangler.cloudflare-dynamic-workers.jsonc --dry-run --outdir dist-cloudflare-dynamic-workers",
     "build:node": "node scripts/build-node.mjs",
     "check": "tsgo --noEmit",
     "check:node": "tsgo --noEmit -p tsconfig.node.json",
     "deploy": "wrangler deploy",
     "deploy:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --containers-rollout=immediate",
+    "deploy:cloudflare-dynamic-workers": "wrangler deploy --config wrangler.cloudflare-dynamic-workers.jsonc",
     "prebuild": "node scripts/vendor-novnc.mjs",
     "prebuild:node": "node scripts/vendor-novnc.mjs",
     "predeploy": "node scripts/vendor-novnc.mjs",

@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "crabbox-cloudflare-dynamic-workers-runner",
+  "main": "src/cloudflare-dynamic-worker-runner.ts",
+  "compatibility_date": "2026-06-12",
+  "workers_dev": true,
+  "preview_urls": false,
+  "worker_loaders": [
+    {
+      "binding": "LOADER",
+    },
+  ],
+  "observability": {
+    "enabled": true,
+  },
+}
