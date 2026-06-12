@@ -1,7 +1,6 @@
 package blaxel
 
 import (
-	"context"
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -70,23 +69,3 @@ type backend struct {
 }
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
-
-func (b *backend) Warmup(context.Context, WarmupRequest) error {
-	return exit(2, "provider=blaxel lifecycle is not implemented yet")
-}
-
-func (b *backend) Run(context.Context, RunRequest) (RunResult, error) {
-	return RunResult{}, exit(2, "provider=blaxel run is not implemented yet")
-}
-
-func (b *backend) List(context.Context, ListRequest) ([]LeaseView, error) {
-	return nil, exit(2, "provider=blaxel list is not implemented yet")
-}
-
-func (b *backend) Status(context.Context, StatusRequest) (StatusView, error) {
-	return StatusView{}, exit(2, "provider=blaxel status is not implemented yet")
-}
-
-func (b *backend) Stop(context.Context, StopRequest) error {
-	return exit(2, "provider=blaxel stop is not implemented yet")
-}

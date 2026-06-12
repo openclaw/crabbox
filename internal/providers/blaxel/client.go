@@ -3,6 +3,7 @@ package blaxel
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ type Client interface {
 	CreateSandbox(context.Context, CreateSandboxRequest) (Sandbox, error)
 	GetSandbox(context.Context, string) (Sandbox, error)
 	ListSandboxes(context.Context, ListSandboxesRequest) (ListSandboxesResult, error)
+	UpdateSandboxLabels(context.Context, string, map[string]string) (Sandbox, error)
 	DeleteSandbox(context.Context, string) error
 	ExecuteProcess(context.Context, string, ExecuteProcessRequest) (Process, error)
 	GetProcess(context.Context, string, string) (Process, error)
@@ -281,6 +283,12 @@ func (c *restClient) ListSandboxes(ctx context.Context, req ListSandboxesRequest
 	return parseSandboxList(body)
 }
 
+func (c *restClient) UpdateSandboxLabels(ctx context.Context, id string, labels map[string]string) (Sandbox, error) {
+	var out Sandbox
+	_, err := c.do(ctx, http.MethodPatch, "/v1/sandboxes/"+url.PathEscape(id), nil, map[string]any{"labels": labels}, &out)
+	return out, err
+}
+
 func (c *restClient) DeleteSandbox(ctx context.Context, id string) error {
 	_, err := c.do(ctx, http.MethodDelete, "/v1/sandboxes/"+url.PathEscape(id), nil, nil, nil)
 	return err
@@ -319,7 +327,7 @@ func (c *restClient) UploadFile(ctx context.Context, sandbox, remotePath string,
 	if err != nil {
 		return err
 	}
-	req := WriteFileRequest{Path: remotePath, Content: string(body)}
+	req := WriteFileRequest{Path: remotePath, Content: base64.StdEncoding.EncodeToString(body), Encoding: "base64"}
 	return c.WriteFile(ctx, sandbox, req)
 }
 

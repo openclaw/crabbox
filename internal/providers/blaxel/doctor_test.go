@@ -32,6 +32,9 @@ func (f *fakeClient) ListSandboxes(context.Context, ListSandboxesRequest) (ListS
 	f.listCalls++
 	return f.listResult, f.listErr
 }
+func (f *fakeClient) UpdateSandboxLabels(context.Context, string, map[string]string) (Sandbox, error) {
+	return Sandbox{}, errors.New("unexpected mutation")
+}
 func (f *fakeClient) DeleteSandbox(context.Context, string) error {
 	return errors.New("unexpected mutation")
 }
