@@ -329,6 +329,63 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	}
 }
 
+func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = defaultType
+	cfg.TTL = time.Hour
+	cfg.IdleTimeout = time.Minute
+	item := linodeInstance{ID: 99, Label: core.LeaseProviderName("cbx_abcdef123456", "touch-me"), Status: "running", Type: defaultType, IPv4: []string{"203.0.113.10"}, Tags: leaseTags(cfg, "cbx_abcdef123456", "touch-me", "ready", false, time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC))}
+	server := serverFromLinode(item, cfg)
+	server.Labels["tailscale_ipv4"] = "100.64.1.1"
+	server.Labels["tailscale_fqdn"] = "stale.example.ts.net"
+	server.Labels["tailscale_state"] = "requested"
+	server.Labels["tailscale_tags"] = "tag:stale"
+	server.Labels["tailscale_exit_node"] = "stale.example.ts.net"
+	server.Labels[linodeAccountLabel] = "team:test-account"
+	liveLabels := normalizedLinodeLabels(item.Tags)
+	liveLabels["tailscale_ipv4"] = "100.64.1.2"
+	liveLabels["tailscale_fqdn"] = "touch-me.example.ts.net"
+	liveLabels["tailscale_state"] = "ready"
+	liveLabels["tailscale_error"] = "last probe failed: retrying"
+	liveLabels["tailscale_tags"] = "tag:ci,tag:crabbox"
+	liveLabels["tailscale_exit_node"] = "exit.example.ts.net"
+	item.Tags = tagsFromLabels(liveLabels)
+	api := &fakeLinodeAPI{linodes: []linodeInstance{item}}
+	backend := newTestBackend(t, api)
+	backend.RT.Clock = fakeClock{t: time.Date(2026, 6, 10, 12, 10, 0, 0, time.UTC)}
+
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease:       core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
+		State:       "running",
+		IdleTimeout: 20 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if touched.Labels["state"] != "running" || touched.Labels["idle_timeout_secs"] != "1200" {
+		t.Fatalf("touched labels=%v", touched.Labels)
+	}
+	if touched.Labels[linodeAccountLabel] != "team:test-account" {
+		t.Fatalf("account label=%q", touched.Labels[linodeAccountLabel])
+	}
+	if len(api.updated) != 1 || api.updated[0] != 99 {
+		t.Fatalf("updated=%v", api.updated)
+	}
+	decoded := labelsFromTags(api.updatedTags[0])
+	if decoded["state"] != "running" ||
+		decoded["idle_timeout_secs"] != "1200" ||
+		decoded["tailscale_ipv4"] != "100.64.1.2" ||
+		decoded["tailscale_fqdn"] != "touch-me.example.ts.net" ||
+		decoded["tailscale_state"] != "ready" ||
+		decoded["tailscale_error"] != "last probe failed: retrying" ||
+		decoded["tailscale_tags"] != "tag:ci,tag:crabbox" ||
+		decoded["tailscale_exit_node"] != "exit.example.ts.net" {
+		t.Fatalf("persisted labels=%v tags=%v", decoded, api.updatedTags[0])
+	}
+}
+
 func TestAmbiguousCreatePersistsRecoveryClaimAndRetainsKey(t *testing.T) {
 	api := &fakeLinodeAPI{createErr: &linodeAPIError{Status: 500, Body: "server error"}}
 	backend := newTestBackend(t, api)

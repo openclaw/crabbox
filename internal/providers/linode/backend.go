@@ -540,7 +540,28 @@ func (b *linodeLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (
 	if err := validateLiveLinode(item, server); err != nil {
 		return core.Server{}, err
 	}
-	labels := core.TouchDirectLeaseLabels(normalizedLinodeLabels(item.Tags), b.Cfg, req.State, b.now())
+	cfg := b.Cfg
+	labels := normalizedLinodeLabels(item.Tags)
+	liveTailscale := map[string]string{}
+	for _, key := range tagLabelKeys() {
+		if value, ok := labels[key]; ok && exactTagValueKey(key) {
+			liveTailscale[key] = value
+		}
+	}
+	if req.IdleTimeout > 0 {
+		cfg.IdleTimeout = req.IdleTimeout
+		updated := make(map[string]string, len(labels))
+		for key, value := range labels {
+			updated[key] = value
+		}
+		labels = updated
+		delete(labels, "idle_timeout")
+		delete(labels, "idle_timeout_secs")
+	}
+	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
+	for key, value := range liveTailscale {
+		labels[key] = value
+	}
 	if accountID := strings.TrimSpace(server.Labels[linodeAccountLabel]); accountID != "" {
 		labels[linodeAccountLabel] = accountID
 	}
