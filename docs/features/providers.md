@@ -84,6 +84,7 @@ sync/run/release path. None of them go through the Worker.
 ```text
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 digitalocean     DigitalOcean Droplets                    Linux
+hostinger        Hostinger VPSs over public SSH           Linux
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
 xcp-ng           Self-hosted XCP-ng pool over XAPI        Linux (normal leases)
@@ -148,6 +149,7 @@ railway                 Railway service status and stop controls
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
 - [DigitalOcean](../providers/digitalocean.md): direct Linux Droplet leases.
+- [Hostinger](../providers/hostinger.md): direct Linux VPS leases with explicit purchase opt-in and stop-only release.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.

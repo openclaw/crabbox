@@ -112,7 +112,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, true)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -595,7 +595,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 					fmt.Fprintf(a.Stdout, "would restore checkpoint id=%s lease=%s snapshot=%s\n", record.ID, *id, record.Native.ImageID)
 					return nil
 				}
-				server, _, _, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
+				server, _, _, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, true, *reclaim)
 				if err != nil {
 					return err
 				}
@@ -640,7 +640,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "would restore checkpoint id=%s lease=%s workdir=%s clear=%t\n", record.ID, leaseID, workdir, *clear)
 		return nil
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, true)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
 	if err != nil {
 		return err
 	}

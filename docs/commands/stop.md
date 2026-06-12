@@ -45,6 +45,8 @@ Crabbox lease ID and local slug:
   `sbx rm --force`. This is destructive cleanup, not Docker Sandbox pause, and
   it remains the manual cleanup path for clone-mode Docker Sandbox runs that
   Crabbox keeps after a successful one-shot command.
+- `hostinger` — stops the VPS and retains its local claim and SSH key for later
+  reuse. Hostinger still owns the subscription and may continue billing it.
 - `ssh` (static hosts) — removes the local claim for the configured static
   target; it never deletes the host.
 - `xcp-ng` — accepts a Crabbox lease ID or local slug for a Crabbox-managed VM,
@@ -65,7 +67,8 @@ The action `stop` takes depends on how the lease was created:
   when their `*.deleteOnRelease` setting is `false` (some providers print a
   provider-specific release message instead, for example
   `stopped lease=<id> instance=<name> retained=true` for retained Incus
-  instances).
+  instances). Hostinger is stop-only and prints `billing=still-owned`; it does
+  not delete or cancel the subscription.
 - **Delegated runners** — call the provider's own teardown for the resolved
   sandbox.
 
@@ -102,6 +105,8 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --sprites-api-url <url>                  Sprites API URL
 --e2b-api-url <url>                      E2B API URL
 --e2b-domain <domain>                    E2B sandbox domain
+--hostinger-url <url>                    Hostinger API URL
+--hostinger-release-action stop          Hostinger release action; only stop is supported
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
 ```
 

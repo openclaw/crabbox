@@ -583,7 +583,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	if *leaseIDFlag != "" {
 		var lease LeaseTarget
-		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim})
+		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
 			applyResolvedLeaseConfig(&cfg, server, &target)

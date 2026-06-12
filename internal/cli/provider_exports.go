@@ -114,6 +114,12 @@ func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Serv
 	return claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
 
+// ClaimLeaseTargetForConfig records a provider resource that is not yet
+// attached to a repository.
+func ClaimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration) error {
+	return claimLeaseTargetForConfig(leaseID, slug, cfg, server, target, idleTimeout)
+}
+
 func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
 }
@@ -165,6 +171,12 @@ func UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, exp
 
 func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
 	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
+}
+
+// UpdateLeaseClaimLabelsIfUnchangedAfter holds the claim lock while action
+// runs, then updates labels only if the claim still matches expected.
+func UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected LeaseClaim, labels map[string]string, action func() error) (LeaseClaim, error) {
+	return updateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, labels, action)
 }
 
 // UpdateLeaseClaimTailscale records a tailnet endpoint (IPv4 and/or FQDN) on an

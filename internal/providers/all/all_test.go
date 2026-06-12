@@ -117,6 +117,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"freestyle",
 		"gcp",
 		"hetzner",
+		"hostinger",
 		"incus",
 		"islo",
 		"kubevirt",

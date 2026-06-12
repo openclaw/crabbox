@@ -103,6 +103,43 @@ func TestClaimLeaseTargetForRepoConfigStoresEndpointMetadata(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	server := Server{
+		Provider: "aws",
+		CloudID:  "i-1750645",
+		Labels: map[string]string{
+			"provider": "aws",
+			"slug":     "warm",
+		},
+	}
+
+	if err := claimLeaseTargetForConfig("cbx_hostinger123", "warm", cfg, server, SSHTarget{Host: "203.0.113.10"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim("cbx_hostinger123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Provider != "aws" || claim.CloudID != "i-1750645" || claim.RepoRoot != "" {
+		t.Fatalf("unexpected unattached provider claim: %#v", claim)
+	}
+
+	repoRoot := t.TempDir()
+	if err := claimLeaseTargetForRepoConfig("cbx_hostinger123", "warm", cfg, server, SSHTarget{Host: "203.0.113.10"}, repoRoot, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = readLeaseClaim("cbx_hostinger123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RepoRoot != repoRoot {
+		t.Fatalf("provider claim was not attached to repo: %#v", claim)
+	}
+}
+
 func TestConditionalClaimMutationRejectsChangedState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()
@@ -290,7 +327,7 @@ func TestReadLeaseClaimWithPresenceDistinguishesEmptyAndMissing(t *testing.T) {
 	}
 }
 
-func TestConditionalClaimDeleteRejectsChangedState(t *testing.T) {
+func TestConditionalClaimActionUpdateRejectsChangedState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_conditionaldelete123"
 	if err := claimLeaseTargetForRepoConfig(leaseID, "first", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-123"}, SSHTarget{}, "/repo", time.Minute, false); err != nil {
@@ -303,8 +340,15 @@ func TestConditionalClaimDeleteRejectsChangedState(t *testing.T) {
 	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeLeaseClaimIfUnchanged(leaseID, expected); err == nil || !strings.Contains(err.Error(), "claim changed") {
-		t.Fatalf("conditional delete err=%v", err)
+	actionCalled := false
+	if _, err := updateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, map[string]string{"state": "stopped"}, func() error {
+		actionCalled = true
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("conditional update err=%v", err)
+	}
+	if actionCalled {
+		t.Fatal("conditional update ran action for changed claim")
 	}
 	changed, err := readLeaseClaim(leaseID)
 	if err != nil {
@@ -313,11 +357,18 @@ func TestConditionalClaimDeleteRejectsChangedState(t *testing.T) {
 	if changed.CloudID != "i-456" {
 		t.Fatalf("changed claim removed: %#v", changed)
 	}
-	if err := removeLeaseClaimIfUnchanged(leaseID, changed); err != nil {
+	updated, err := updateLeaseClaimLabelsIfUnchangedAfter(leaseID, changed, map[string]string{"state": "stopped"}, func() error {
+		actionCalled = true
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if exists, err := leaseClaimExists(leaseID); err != nil || exists {
-		t.Fatalf("claim exists=%v err=%v", exists, err)
+	if !actionCalled {
+		t.Fatal("conditional update did not run action for unchanged claim")
+	}
+	if updated.Labels["state"] != "stopped" {
+		t.Fatalf("updated claim=%#v", updated)
 	}
 }
 

@@ -243,9 +243,10 @@ func (a App) releasePrewarmLeaseAfterPoolFailure(ctx context.Context, backend Ba
 		return
 	}
 	lease, err := sshBackend.Resolve(ctx, ResolveRequest{
-		Repo:    Repo{},
-		Options: leaseOptionsFromConfig(cfg),
-		ID:      leaseID,
+		Repo:        Repo{},
+		Options:     leaseOptionsFromConfig(cfg),
+		ID:          leaseID,
+		ReleaseOnly: true,
 	})
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release skipped: %v\n", leaseID, cause, err)

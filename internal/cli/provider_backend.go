@@ -493,6 +493,7 @@ type ResolveRequest struct {
 	ReleaseOnly bool
 	StatusOnly  bool
 	ReadyProbe  bool
+	Prepare     bool
 }
 
 type ReleaseLeaseRequest struct {

@@ -124,6 +124,8 @@ type Config struct {
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	Runpod                        RunpodConfig
+	Hostinger                     HostingerConfig
+	hostingerWorkRootExplicit     bool
 	Wandb                         WandbConfig
 	Islo                          IsloConfig
 	isloImageExplicit             bool
@@ -389,6 +391,20 @@ type RunpodConfig struct {
 	DiskGB     int
 	User       string
 	WorkRoot   string
+}
+
+type HostingerConfig struct {
+	APIToken        string
+	APIURL          string
+	ItemID          string
+	PaymentMethodID string
+	TemplateID      string
+	DataCenterID    string
+	HostnamePrefix  string
+	User            string
+	WorkRoot        string
+	AllowPurchase   bool
+	ReleaseAction   string
 }
 
 // WandbConfig drives the W&B Sandboxes (CoreWeave Sandboxes) provider. The
@@ -1407,6 +1423,22 @@ func MarkSSHPortExplicit(cfg *Config) {
 	cfg.explicitSSHPort = cfg.SSHPort
 }
 
+func IsWorkRootExplicit(cfg *Config) bool {
+	return cfg.explicitWorkRoot != ""
+}
+
+func MarkWorkRootExplicit(cfg *Config) {
+	cfg.explicitWorkRoot = cfg.WorkRoot
+}
+
+func IsHostingerWorkRootExplicit(cfg *Config) bool {
+	return cfg.hostingerWorkRootExplicit
+}
+
+func MarkHostingerWorkRootExplicit(cfg *Config) {
+	cfg.hostingerWorkRootExplicit = true
+}
+
 func baseConfig() Config {
 	home, _ := os.UserHomeDir()
 	sshKey := ""
@@ -1549,6 +1581,13 @@ func baseConfig() Config {
 			InstanceID: "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500",
 			Image:      "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04",
 			DiskGB:     20,
+		},
+		Hostinger: HostingerConfig{
+			APIURL:         "https://developers.hostinger.com",
+			HostnamePrefix: "crabbox",
+			User:           "root",
+			WorkRoot:       defaultPOSIXWorkRoot,
+			ReleaseAction:  "stop",
 		},
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
@@ -1750,6 +1789,7 @@ type fileConfig struct {
 	ExeDev               *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
 	Railway              *fileRailwayConfig                 `yaml:"railway,omitempty"`
 	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
+	Hostinger            *fileHostingerConfig               `yaml:"hostinger,omitempty"`
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Freestyle            *fileFreestyleConfig               `yaml:"freestyle,omitempty"`
@@ -2123,6 +2163,20 @@ type fileRunpodConfig struct {
 	DiskGB     int    `yaml:"diskGB,omitempty"`
 	User       string `yaml:"user,omitempty"`
 	WorkRoot   string `yaml:"workRoot,omitempty"`
+}
+
+type fileHostingerConfig struct {
+	APIToken        string `yaml:"apiToken,omitempty"`
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	ItemID          string `yaml:"itemId,omitempty"`
+	PaymentMethodID string `yaml:"paymentMethodId,omitempty"`
+	TemplateID      string `yaml:"templateId,omitempty"`
+	DataCenterID    string `yaml:"dataCenterId,omitempty"`
+	HostnamePrefix  string `yaml:"hostnamePrefix,omitempty"`
+	User            string `yaml:"user,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	AllowPurchase   *bool  `yaml:"allowPurchase,omitempty"`
+	ReleaseAction   string `yaml:"releaseAction,omitempty"`
 }
 
 type fileWandbConfig struct {
@@ -3467,6 +3521,43 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Runpod.WorkRoot = file.Runpod.WorkRoot
 		}
 	}
+	if file.Hostinger != nil {
+		if trusted && file.Hostinger.APIToken != "" {
+			cfg.Hostinger.APIToken = file.Hostinger.APIToken
+		}
+		if trusted && file.Hostinger.APIURL != "" {
+			cfg.Hostinger.APIURL = file.Hostinger.APIURL
+		}
+		if trusted && file.Hostinger.ItemID != "" {
+			cfg.Hostinger.ItemID = file.Hostinger.ItemID
+		}
+		if trusted && file.Hostinger.PaymentMethodID != "" {
+			cfg.Hostinger.PaymentMethodID = file.Hostinger.PaymentMethodID
+		}
+		if trusted && file.Hostinger.TemplateID != "" {
+			cfg.Hostinger.TemplateID = file.Hostinger.TemplateID
+		}
+		if trusted && file.Hostinger.DataCenterID != "" {
+			cfg.Hostinger.DataCenterID = file.Hostinger.DataCenterID
+		}
+		if file.Hostinger.HostnamePrefix != "" {
+			cfg.Hostinger.HostnamePrefix = file.Hostinger.HostnamePrefix
+		}
+		if file.Hostinger.User != "" {
+			cfg.Hostinger.User = file.Hostinger.User
+			MarkHostingerUserExplicit(cfg)
+		}
+		if file.Hostinger.WorkRoot != "" {
+			cfg.Hostinger.WorkRoot = file.Hostinger.WorkRoot
+			MarkHostingerWorkRootExplicit(cfg)
+		}
+		if file.Hostinger.AllowPurchase != nil && (trusted || !*file.Hostinger.AllowPurchase) {
+			cfg.Hostinger.AllowPurchase = *file.Hostinger.AllowPurchase
+		}
+		if file.Hostinger.ReleaseAction != "" {
+			cfg.Hostinger.ReleaseAction = file.Hostinger.ReleaseAction
+		}
+	}
 	if file.Wandb != nil {
 		if file.Wandb.APIKey != "" {
 			cfg.Wandb.APIKey = file.Wandb.APIKey
@@ -4725,6 +4816,22 @@ func applyEnv(cfg *Config) error {
 	cfg.Runpod.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.Runpod.DiskGB)
 	cfg.Runpod.User = getenv("CRABBOX_RUNPOD_USER", cfg.Runpod.User)
 	cfg.Runpod.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.Runpod.WorkRoot)
+	cfg.Hostinger.APIToken = getenv("CRABBOX_HOSTINGER_API_TOKEN", getenv("HOSTINGER_API_TOKEN", cfg.Hostinger.APIToken))
+	cfg.Hostinger.APIURL = getenv("CRABBOX_HOSTINGER_API_URL", getenv("HOSTINGER_API_URL", cfg.Hostinger.APIURL))
+	cfg.Hostinger.ItemID = getenv("CRABBOX_HOSTINGER_ITEM_ID", cfg.Hostinger.ItemID)
+	cfg.Hostinger.PaymentMethodID = getenv("CRABBOX_HOSTINGER_PAYMENT_METHOD_ID", cfg.Hostinger.PaymentMethodID)
+	cfg.Hostinger.TemplateID = getenv("CRABBOX_HOSTINGER_TEMPLATE_ID", cfg.Hostinger.TemplateID)
+	cfg.Hostinger.DataCenterID = getenv("CRABBOX_HOSTINGER_DATA_CENTER_ID", cfg.Hostinger.DataCenterID)
+	cfg.Hostinger.HostnamePrefix = getenv("CRABBOX_HOSTINGER_HOSTNAME_PREFIX", cfg.Hostinger.HostnamePrefix)
+	cfg.Hostinger.User = getenv("CRABBOX_HOSTINGER_USER", cfg.Hostinger.User)
+	if workRoot := os.Getenv("CRABBOX_HOSTINGER_WORK_ROOT"); workRoot != "" {
+		cfg.Hostinger.WorkRoot = workRoot
+		MarkHostingerWorkRootExplicit(cfg)
+	}
+	if value, ok := getenvBool("CRABBOX_HOSTINGER_ALLOW_PURCHASE"); ok {
+		cfg.Hostinger.AllowPurchase = value
+	}
+	cfg.Hostinger.ReleaseAction = getenv("CRABBOX_HOSTINGER_RELEASE_ACTION", cfg.Hostinger.ReleaseAction)
 	// WANDB_API_KEY is resolved by the W&B client after file config so a
 	// generic shell login cannot override an explicit wandb.apiKey value.
 	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)

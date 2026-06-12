@@ -41,7 +41,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if *openClient && isStaticProvider(cfg.Provider) && !*hostManaged {
 		return exit(2, "static %s VNC is an existing host, not a Crabbox-created box; rerun with --host-managed only if you want to open that host's OS login prompt", cfg.TargetOS)
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, true, *reclaim)
 	if err != nil {
 		return err
 	}

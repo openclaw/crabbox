@@ -103,7 +103,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) error {
 	if cfg.Actions.Workflow == "" {
 		return exit(2, "actions hydrate requires --workflow or actions.workflow")
 	}
-	server, target, leaseID, slug, err := a.resolveLeaseTargetForActions(ctx, cfg, *leaseIDFlag)
+	server, target, leaseID, slug, err := a.resolveLeaseTargetForActions(ctx, cfg, *leaseIDFlag, repo, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -277,7 +277,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	server, target, leaseID, slug, err := a.resolveLeaseTargetForActions(ctx, cfg, *leaseIDFlag)
+	server, target, leaseID, slug, err := a.resolveLeaseTargetForActions(ctx, cfg, *leaseIDFlag, repo, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -377,8 +377,8 @@ func targetWithConfigDefaults(target SSHTarget, cfg Config) SSHTarget {
 	return target
 }
 
-func (a App) resolveLeaseTargetForActions(ctx context.Context, cfg Config, id string) (Server, SSHTarget, string, string, error) {
-	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, id)
+func (a App) resolveLeaseTargetForActions(ctx context.Context, cfg Config, id string, repo Repo, reclaim bool) (Server, SSHTarget, string, string, error) {
+	server, target, leaseID, err := a.resolveLeaseTargetForRepo(ctx, cfg, id, repo, reclaim)
 	return server, target, leaseID, serverSlug(server), err
 }
 

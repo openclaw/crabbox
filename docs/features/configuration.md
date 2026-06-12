@@ -334,6 +334,42 @@ hetzner:
   image: <hetzner-image>
 ```
 
+### Hostinger
+
+```yaml
+provider: hostinger
+target: linux
+hostinger:
+  apiUrl: https://developers.hostinger.com
+  itemId: "<hostinger-priced-item-id>"
+  paymentMethodId: "<hostinger-payment-method-id>"
+  templateId: "<hostinger-template-id>"
+  dataCenterId: "<hostinger-data-center-id>"
+  hostnamePrefix: crabbox
+  user: root
+  workRoot: /work/crabbox
+  allowPurchase: false
+  releaseAction: stop
+```
+
+Keep `HOSTINGER_API_TOKEN` or `CRABBOX_HOSTINGER_API_TOKEN` in the shell or a
+private user config, not in repo YAML or command lines. `itemId` is the
+purchasable priced item id, for example `hostingercom-vps-kvm2-usd-1m`, not the
+parent catalog family id. `allowPurchase` defaults to `false`; billable `warmup`
+and `run` operations require
+`--hostinger-allow-purchase`, `CRABBOX_HOSTINGER_ALLOW_PURCHASE=true`, or
+`hostinger.allowPurchase: true` in the private user config selected by
+`CRABBOX_CONFIG`. Repo-local config cannot authorize a purchase. Release action
+is stop-only (`releaseAction: stop`), and Hostinger billing/subscription state
+remains account-owned after Crabbox release. Repo-local config also cannot
+set the API token, API URL, item, payment method, template, data center, or
+purchase opt-in. Put those account and purchase selections in environment
+variables, CLI flags, private user config, or an explicit `CRABBOX_CONFIG`
+file. `paymentMethodId` may be omitted only when the account has exactly one
+active default payment method; otherwise set it explicitly. Use
+`crabbox doctor --provider hostinger --json` to discover available ids without
+making a purchase.
+
 ### Google Cloud
 
 ```yaml

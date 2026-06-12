@@ -143,6 +143,7 @@ type claimMetadata struct {
 	guard                 func(leaseClaim, bool) error
 	result                *leaseClaim
 	allowProviderMetadata bool
+	allowEmptyRepoRoot    bool
 }
 
 func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -150,7 +151,7 @@ func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, provider
 }
 
 func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, metadata claimMetadata) error {
-	if leaseID == "" || repoRoot == "" {
+	if leaseID == "" || (repoRoot == "" && !metadata.allowEmptyRepoRoot) {
 		return nil
 	}
 	guard := metadata.guard
@@ -215,6 +216,18 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 			*metadata.result = cloneLeaseClaim(*existing)
 		}
 		return nil
+	})
+}
+
+func claimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration) error {
+	provider, staticDetails := claimProviderDetailsForConfig(cfg)
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, "", idleTimeout, false, claimMetadata{
+		setCacheVolumes:    true,
+		cacheVolumes:       CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
+		setEndpoint:        true,
+		server:             server,
+		target:             target,
+		allowEmptyRepoRoot: true,
 	})
 }
 
@@ -304,6 +317,38 @@ func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected leaseClaim, labe
 		claim.Labels = cloneStringMap(labels)
 		updated = cloneLeaseClaim(*claim)
 		return nil
+	})
+	return updated, err
+}
+
+func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim, labels map[string]string, action func() error) (leaseClaim, error) {
+	if leaseID == "" {
+		return leaseClaim{}, nil
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return leaseClaim{}, err
+	}
+	var updated leaseClaim
+	err = withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
+			return err
+		}
+		if action != nil {
+			if err := action(); err != nil {
+				return err
+			}
+		}
+		claim.Labels = cloneStringMap(labels)
+		updated = cloneLeaseClaim(claim)
+		return writeLeaseClaimAtomic(path, claim)
 	})
 	return updated, err
 }

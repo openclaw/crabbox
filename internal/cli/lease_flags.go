@@ -370,10 +370,30 @@ func (a App) resolveNetworkLeaseTarget(ctx context.Context, cfg Config, id strin
 }
 
 func (a App) resolveNetworkLeaseTargetWithConfig(ctx context.Context, cfg *Config, id string, printFallback bool) (Server, SSHTarget, string, error) {
+	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, cfg, id, printFallback, Repo{}, false)
+}
+
+func (a App) resolveNetworkLeaseTargetForRepo(ctx context.Context, cfg Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
+	return a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, id, printFallback, reclaim)
+}
+
+func (a App) resolveNetworkLeaseTargetForRepoWithConfig(ctx context.Context, cfg *Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
+	repo, err := findRepo()
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, cfg, id, printFallback, repo, reclaim)
+}
+
+func (a App) resolveNetworkLeaseTargetWithRepo(ctx context.Context, cfg Config, id string, printFallback bool, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
+	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, &cfg, id, printFallback, repo, reclaim)
+}
+
+func (a App) resolveNetworkLeaseTargetWithRepoConfig(ctx context.Context, cfg *Config, id string, printFallback bool, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
 	if cfg == nil {
 		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
 	}
-	server, target, leaseID, err := a.resolveLeaseTargetWithConfig(ctx, cfg, id)
+	server, target, leaseID, err := a.resolveLeaseTargetForRepoWithConfig(ctx, cfg, id, repo, reclaim)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}

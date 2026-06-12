@@ -25,7 +25,7 @@ import (
 // Apple (ARD) authentication with credentials fetched into browser memory only
 // after the viewer proves its ephemeral session token.
 func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort string, openViewer, reclaim bool) error {
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, id, false, reclaim)
 	if err != nil {
 		return err
 	}
