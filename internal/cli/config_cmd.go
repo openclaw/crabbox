@@ -403,11 +403,13 @@ func sanitizedMalformedConfigURL(parseValue string, addedScheme bool) string {
 	sanitized := parseValue
 	if i := strings.Index(sanitized, "://"); i >= 0 {
 		rest := sanitized[i+3:]
-		if at := strings.Index(rest, "@"); at >= 0 {
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
 			sanitized = sanitized[:i+3] + rest[at+1:]
 		}
-	} else if at := strings.Index(sanitized, "@"); at >= 0 {
-		sanitized = sanitized[at+1:]
+	} else {
+		if at := strings.LastIndex(sanitized, "@"); at >= 0 {
+			sanitized = sanitized[at+1:]
+		}
 	}
 	if addedScheme {
 		sanitized = strings.TrimPrefix(sanitized, "https://")

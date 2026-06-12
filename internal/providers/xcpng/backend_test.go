@@ -1293,6 +1293,9 @@ func TestISOE2ECleanupUsesBoundedContext(t *testing.T) {
 	if !fake.deleteBounded || !fake.deleteCDBounded {
 		t.Fatalf("cleanup contexts: delete=%v delete-config-drive=%v", fake.deleteBounded, fake.deleteCDBounded)
 	}
+	if isoE2ECleanupTimeout <= 2*xcpNgShutdownTimeout {
+		t.Fatalf("cleanup timeout %s must reserve deletion time after graceful and forced shutdown", isoE2ECleanupTimeout)
+	}
 }
 
 func TestISOE2ELeaseIDIsCollisionResistantUnlessOverridden(t *testing.T) {

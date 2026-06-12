@@ -543,12 +543,17 @@ func TestRedactedConfigURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 		{"full URL with bad escape in host", "https://pool-user:pool-pass@%zz"},
 		{"full URL with bad escape in path", "https://pool-user:pool-pass@xcp-ng.example.test/%zz"},
 		{"full URL with bad port", "https://pool-user:pool-pass@xcp-ng.example.test:abc"},
+		{"full URL with extra at in password", "https://pool-user:pool@pass@%zz"},
+		{"full URL with slash in password", "https://pool-user:pool/pass@host/%zz"},
+		{"full URL with query delimiter in password", "https://pool-user:pool?pass@host/%zz"},
+		{"full URL with fragment delimiter in password", "https://pool-user:pool#pass@host/%zz"},
 		{"scheme-less URL with bad escape in host", "pool-user:pool-pass@%zz"},
+		{"scheme-less URL with extra at in password", "pool-user:pool@pass@%zz"},
 		{"scheme-less URL with bad escape in path", "pool-user:pool-pass@%zz/path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := redactedConfigURL(tc.raw)
-			for _, secret := range []string{"pool-user", "pool-pass", "pool-user:pool-pass"} {
+			for _, secret := range []string{"pool-user", "pool-pass", "pool/pass", "pool?pass", "pool#pass", "pool@pass", "pool-user:pool-pass"} {
 				if strings.Contains(got, secret) {
 					t.Fatalf("redacted URL leaked %q for %q: %s", secret, tc.raw, got)
 				}

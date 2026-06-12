@@ -2872,21 +2872,39 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.XCPNg.Template != "" {
 			cfg.XCPNg.Template = file.XCPNg.Template
+			if file.XCPNg.TemplateUUID == "" {
+				cfg.XCPNg.TemplateUUID = ""
+			}
 		}
 		if file.XCPNg.TemplateUUID != "" {
 			cfg.XCPNg.TemplateUUID = file.XCPNg.TemplateUUID
+			if file.XCPNg.Template == "" {
+				cfg.XCPNg.Template = ""
+			}
 		}
 		if file.XCPNg.SR != "" {
 			cfg.XCPNg.SR = file.XCPNg.SR
+			if file.XCPNg.SRUUID == "" {
+				cfg.XCPNg.SRUUID = ""
+			}
 		}
 		if file.XCPNg.SRUUID != "" {
 			cfg.XCPNg.SRUUID = file.XCPNg.SRUUID
+			if file.XCPNg.SR == "" {
+				cfg.XCPNg.SR = ""
+			}
 		}
 		if file.XCPNg.Network != "" {
 			cfg.XCPNg.Network = file.XCPNg.Network
+			if file.XCPNg.NetworkUUID == "" {
+				cfg.XCPNg.NetworkUUID = ""
+			}
 		}
 		if file.XCPNg.NetworkUUID != "" {
 			cfg.XCPNg.NetworkUUID = file.XCPNg.NetworkUUID
+			if file.XCPNg.Network == "" {
+				cfg.XCPNg.Network = ""
+			}
 		}
 		if file.XCPNg.Host != "" {
 			cfg.XCPNg.Host = file.XCPNg.Host
@@ -4323,12 +4341,45 @@ func applyEnv(cfg *Config) error {
 	cfg.XCPNg.APIURL = getenv("CRABBOX_XCP_NG_API_URL", cfg.XCPNg.APIURL)
 	cfg.XCPNg.Username = getenv("CRABBOX_XCP_NG_USERNAME", cfg.XCPNg.Username)
 	cfg.XCPNg.Password = getenv("CRABBOX_XCP_NG_PASSWORD", cfg.XCPNg.Password)
-	cfg.XCPNg.Template = getenv("CRABBOX_XCP_NG_TEMPLATE", cfg.XCPNg.Template)
-	cfg.XCPNg.TemplateUUID = getenv("CRABBOX_XCP_NG_TEMPLATE_UUID", cfg.XCPNg.TemplateUUID)
-	cfg.XCPNg.SR = getenv("CRABBOX_XCP_NG_SR", cfg.XCPNg.SR)
-	cfg.XCPNg.SRUUID = getenv("CRABBOX_XCP_NG_SR_UUID", cfg.XCPNg.SRUUID)
-	cfg.XCPNg.Network = getenv("CRABBOX_XCP_NG_NETWORK", cfg.XCPNg.Network)
-	cfg.XCPNg.NetworkUUID = getenv("CRABBOX_XCP_NG_NETWORK_UUID", cfg.XCPNg.NetworkUUID)
+	xcpNgTemplate, xcpNgTemplateUUID := os.Getenv("CRABBOX_XCP_NG_TEMPLATE"), os.Getenv("CRABBOX_XCP_NG_TEMPLATE_UUID")
+	if xcpNgTemplate != "" {
+		cfg.XCPNg.Template = xcpNgTemplate
+		if xcpNgTemplateUUID == "" {
+			cfg.XCPNg.TemplateUUID = ""
+		}
+	}
+	if xcpNgTemplateUUID != "" {
+		cfg.XCPNg.TemplateUUID = xcpNgTemplateUUID
+		if xcpNgTemplate == "" {
+			cfg.XCPNg.Template = ""
+		}
+	}
+	xcpNgSR, xcpNgSRUUID := os.Getenv("CRABBOX_XCP_NG_SR"), os.Getenv("CRABBOX_XCP_NG_SR_UUID")
+	if xcpNgSR != "" {
+		cfg.XCPNg.SR = xcpNgSR
+		if xcpNgSRUUID == "" {
+			cfg.XCPNg.SRUUID = ""
+		}
+	}
+	if xcpNgSRUUID != "" {
+		cfg.XCPNg.SRUUID = xcpNgSRUUID
+		if xcpNgSR == "" {
+			cfg.XCPNg.SR = ""
+		}
+	}
+	xcpNgNetwork, xcpNgNetworkUUID := os.Getenv("CRABBOX_XCP_NG_NETWORK"), os.Getenv("CRABBOX_XCP_NG_NETWORK_UUID")
+	if xcpNgNetwork != "" {
+		cfg.XCPNg.Network = xcpNgNetwork
+		if xcpNgNetworkUUID == "" {
+			cfg.XCPNg.NetworkUUID = ""
+		}
+	}
+	if xcpNgNetworkUUID != "" {
+		cfg.XCPNg.NetworkUUID = xcpNgNetworkUUID
+		if xcpNgNetwork == "" {
+			cfg.XCPNg.Network = ""
+		}
+	}
 	cfg.XCPNg.Host = getenv("CRABBOX_XCP_NG_HOST", cfg.XCPNg.Host)
 	cfg.XCPNg.User = getenv("CRABBOX_XCP_NG_USER", cfg.XCPNg.User)
 	cfg.XCPNg.WorkRoot = getenv("CRABBOX_XCP_NG_WORK_ROOT", cfg.XCPNg.WorkRoot)

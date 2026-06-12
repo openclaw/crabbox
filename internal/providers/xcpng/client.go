@@ -1243,12 +1243,12 @@ func redactedURL(u *url.URL) string {
 func redactURLUserinfo(raw string) string {
 	if i := strings.Index(raw, "://"); i >= 0 {
 		rest := raw[i+3:]
-		if at := strings.Index(rest, "@"); at >= 0 {
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
 			return raw[:i+3] + rest[at+1:]
 		}
 		return raw
 	}
-	if at := strings.Index(raw, "@"); at >= 0 {
+	if at := strings.LastIndex(raw, "@"); at >= 0 {
 		return raw[at+1:]
 	}
 	return raw
@@ -1821,10 +1821,12 @@ func xapiEndpoint(raw string) (string, error) {
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
-	raw = redactURLUserinfo(raw)
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", err
+		u, err = url.Parse(redactURLUserinfo(raw))
+		if err != nil {
+			return "", err
+		}
 	}
 	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
 		return "", exit(3, "xcp-ng api URL must use https; insecureTls only disables certificate verification")
@@ -1840,10 +1842,14 @@ func xapiEndpoint(raw string) (string, error) {
 }
 
 func xapiEndpointForMaster(current, master string) (string, error) {
-	currentURL, err := url.Parse(redactURLUserinfo(current))
+	currentURL, err := url.Parse(current)
 	if err != nil {
-		return "", err
+		currentURL, err = url.Parse(redactURLUserinfo(current))
+		if err != nil {
+			return "", err
+		}
 	}
+	currentURL.User = nil
 	master = strings.Trim(strings.TrimSpace(master), " \t\r\n,;[]()")
 	if master == "" {
 		return "", exit(3, "xcp-ng pool master redirect did not include a host")

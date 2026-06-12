@@ -1449,6 +1449,40 @@ func TestRepoConfigCannotRedirectInheritedXCPNgCredentials(t *testing.T) {
 	}
 }
 
+func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.XCPNg.TemplateUUID = "old-template-uuid"
+	cfg.XCPNg.SRUUID = "old-sr-uuid"
+	cfg.XCPNg.NetworkUUID = "old-network-uuid"
+	if err := applyFileConfig(&cfg, fileConfig{XCPNg: &fileXCPNgConfig{
+		Template: "new-template",
+		SR:       "new-sr",
+		Network:  "new-network",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
+		t.Fatalf("file names did not clear inherited UUIDs: %#v", cfg.XCPNg)
+	}
+
+	cfg.XCPNg.TemplateUUID = "old-template-uuid"
+	cfg.XCPNg.SRUUID = "old-sr-uuid"
+	cfg.XCPNg.NetworkUUID = "old-network-uuid"
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE", "env-template")
+	t.Setenv("CRABBOX_XCP_NG_TEMPLATE_UUID", "")
+	t.Setenv("CRABBOX_XCP_NG_SR", "env-sr")
+	t.Setenv("CRABBOX_XCP_NG_SR_UUID", "")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK", "env-network")
+	t.Setenv("CRABBOX_XCP_NG_NETWORK_UUID", "")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
+		t.Fatalf("environment names did not clear inherited UUIDs: %#v", cfg.XCPNg)
+	}
+}
+
 func TestCacheVolumesOmittedKeepsInheritedConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

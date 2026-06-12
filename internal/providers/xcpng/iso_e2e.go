@@ -72,7 +72,7 @@ const (
 	isoE2EInstallerTimeout      = 55 * time.Minute
 	isoE2EWindowsInstallTimeout = 70 * time.Minute
 	isoE2EGuestMetricsTimeout   = 20 * time.Minute
-	isoE2ECleanupTimeout        = 5 * time.Minute
+	isoE2ECleanupTimeout        = 11 * time.Minute
 	isoE2EInstallDiskBytes      = 24 * 1024 * 1024 * 1024
 )
 
