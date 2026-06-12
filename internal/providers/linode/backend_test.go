@@ -160,6 +160,9 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 	if len(req.AuthorizedKeys) != 1 || !strings.HasPrefix(req.AuthorizedKeys[0], "ssh-ed25519 ") {
 		t.Fatalf("authorized_keys=%v", req.AuthorizedKeys)
 	}
+	if req.RootPass == "" || len(req.RootPass) < 16 {
+		t.Fatalf("root_pass not generated safely: %q", req.RootPass)
+	}
 	if req.Metadata == nil || req.Metadata.UserData == "" {
 		t.Fatalf("metadata=%#v", req.Metadata)
 	}

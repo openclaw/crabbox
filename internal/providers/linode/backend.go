@@ -2,6 +2,8 @@ package linode
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -119,6 +121,10 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	rootPass, err := generateLinodeRootPass()
+	if err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("generate linode root password: %w", err)
+	}
 	now := b.now()
 	created := linodeInstance{}
 	committed := false
@@ -161,6 +167,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 		Label:          core.LeaseProviderName(leaseID, slug),
 		Tags:           leaseTags(cfg, leaseID, slug, "provisioning", req.Keep, now),
 		AuthorizedKeys: []string{publicKey},
+		RootPass:       rootPass,
 		Metadata:       &linodeMetadata{UserData: linodeUserData(cfg, publicKey)},
 		FirewallID:     firewallID,
 	})
@@ -934,6 +941,14 @@ func parseLinodeFirewallID(value string) (int64, error) {
 		return 0, core.Exit(2, "linode firewall must be a positive numeric firewall ID")
 	}
 	return id, nil
+}
+
+func generateLinodeRootPass() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return "Cbx1!" + base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func providerKeyForLease(leaseID string) string {
