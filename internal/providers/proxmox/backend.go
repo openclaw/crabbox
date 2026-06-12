@@ -169,12 +169,12 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return target, nil
 	}
 	if req.ReleaseOnly {
-		return b.releaseTargetFromClaim(req.ID)
+		return b.releaseTargetFromClaim(ctx, client, req.ID)
 	}
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
 }
 
-func (b *leaseBackend) releaseTargetFromClaim(id string) (LeaseTarget, error) {
+func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmoxClient, id string) (LeaseTarget, error) {
 	var (
 		claim core.LeaseClaim
 		ok    bool
@@ -199,6 +199,14 @@ func (b *leaseBackend) releaseTargetFromClaim(id string) (LeaseTarget, error) {
 	vmid, err := strconv.ParseInt(cloudID, 10, 64)
 	if err != nil || vmid <= 0 {
 		return LeaseTarget{}, exit(2, "proxmox lease claim has invalid VM identity for lease=%s", claim.LeaseID)
+	}
+	if server, err := client.GetServer(ctx, cloudID); err == nil {
+		if !isCrabboxLease(server) || strings.TrimSpace(server.Labels["lease"]) != claim.LeaseID {
+			return LeaseTarget{}, exit(2, "refusing to release Proxmox VM %s from stale local claim lease=%s", cloudID, claim.LeaseID)
+		}
+		return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+	} else if !core.IsProxmoxNotFound(err) {
+		return LeaseTarget{}, err
 	}
 	labels := make(map[string]string, len(claim.Labels)+2)
 	for key, value := range claim.Labels {

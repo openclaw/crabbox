@@ -17,6 +17,7 @@ function setupFakeCrabbox() {
 	const tools = path.join(dir, "tools");
 	const calls = path.join(dir, "calls.log");
 	const proof = path.join(dir, "proof");
+	const leaseState = path.join(dir, "lease.state");
 	fs.mkdirSync(tools);
 	fs.mkdirSync(proof, { mode: 0o700 });
 	const fakeCrabbox = path.join(dir, "crabbox");
@@ -37,14 +38,26 @@ case "$1" in
     printf '{"ok":true,"provider":"proxmox","checks":[{"status":"ok","check":"auth","message":"url=%s token=%s secret=%s"}]}\\n' "\${CRABBOX_PROXMOX_API_URL:-}" "\${CRABBOX_PROXMOX_TOKEN_ID:-}" "\${CRABBOX_PROXMOX_TOKEN_SECRET:-}"
     ;;
   list)
-    printf '[{"provider":"proxmox","name":"crabbox-test","note":"/tmp/private/api.md"}]\\n'
+    if [[ -f "${leaseState}" ]]; then
+      printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"},{"Provider":"proxmox","CloudID":"100","name":"crabbox-proxmox-live-smoke","labels":{"lease":"cbx_test123","slug":"proxmox-live-smoke","provider":"proxmox"}}]\\n'
+    else
+      printf '[{"Provider":"proxmox","CloudID":"99","name":"crabbox-existing","labels":{"lease":"cbx_existing","slug":"existing","provider":"proxmox"},"note":"/tmp/private/api.md"}]\\n'
+    fi
     ;;
   warmup)
+    if [[ "\${FAKE_CRABBOX_FAIL_WARMUP_WITH_LEASE:-0}" == "1" ]]; then
+      touch "${leaseState}"
+      printf 'warmup failed after leased cbx_test123\\n' >&2
+      exit 1
+    fi
     if [[ "\${FAKE_CRABBOX_FAIL_WARMUP:-0}" == "1" ]]; then
       printf 'warmup failed before lease creation\\n' >&2
       exit 1
     fi
-    printf 'leased cbx_test123 slug=proxmox-live-smoke provider=proxmox server=100 type=template-9400 ip=192.0.2.10 idle_timeout=30m expires=later\\n'
+    touch "${leaseState}"
+    if [[ "\${FAKE_CRABBOX_OMIT_LEASE_OUTPUT:-0}" != "1" ]]; then
+      printf 'leased cbx_test123 slug=proxmox-live-smoke provider=proxmox server=100 type=template-9400 ip=192.0.2.10 idle_timeout=30m expires=later\\n'
+    fi
     printf 'ready ssh=crabbox@192.0.2.10:22 network=public workroot=/work/crabbox\\n'
     ;;
   status)
@@ -54,6 +67,7 @@ case "$1" in
     printf 'ssh -i /tmp/crabbox-ssh-test/key crabbox@192.0.2.10\\n'
     ;;
   stop)
+    rm -f "${leaseState}"
     printf 'released lease=cbx_test123 server=100\\n'
     ;;
   cleanup)
@@ -174,12 +188,57 @@ test("live mode does not stop or cleanup when warmup fails before lease ownershi
 	});
 
 	assert.equal(result.status, 1);
-	assert.match(result.stdout, /warmup_failed_no_owned_lease/);
+	assert.match(result.stdout, /reason=warmup_failed/);
+	assert.match(result.stdout, /reason=no_new_matching_lease/);
 	assert.match(result.stdout, /classification=environment_blocked/);
 	const calls = fs.readFileSync(fake.calls, "utf8");
 	assert.match(calls, /^warmup --provider proxmox --slug proxmox-live-smoke --keep$/m);
 	assert.match(calls, /^list --provider proxmox --json$/m);
 	assert.doesNotMatch(calls, /^status |^ssh |^stop |^cleanup /m);
+});
+
+test("live mode releases a uniquely created lease after warmup fails", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_FAIL_WARMUP_WITH_LEASE: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /reason=warmup_failed/);
+	assert.match(result.stdout, /status=attempt lease=cbx_test123/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
+	assert.equal(fs.existsSync(path.join(fake.dir, "lease.state")), false);
+});
+
+test("live mode releases a uniquely created lease when warmup output omits its ID", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_OMIT_LEASE_OUTPUT: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /reason=warmup output did not include an owned lease id/);
+	assert.match(result.stdout, /status=attempt lease=cbx_test123/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^stop --provider proxmox --id cbx_test123$/m);
+	assert.equal(fs.existsSync(path.join(fake.dir, "lease.state")), false);
 });
 
 test("live mode reports cleanup dry-run failure without mutating cleanup", () => {

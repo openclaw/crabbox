@@ -301,7 +301,9 @@ Live mode runs the public CLI surface: `warmup --keep`, `status --json`, `ssh`
 to print the pasteable command, `stop`, `cleanup --dry-run`, and a final
 `list --json`. The smoke script never runs provider-wide mutating cleanup; the
 owned lease is released by `stop`, and the cleanup dry-run remains evidence that
-other Proxmox leases would not be changed by the proof.
+other Proxmox leases would not be changed by the proof. If warmup fails or its
+lease ID cannot be parsed, the script compares pre/post inventories and stops
+only one uniquely new lease with the requested slug.
 
 Proof artifacts are written to `CRABBOX_PROXMOX_LIVE_SMOKE_DIR` when set, or a
 new system temporary directory otherwise. The directory and logs use owner-only

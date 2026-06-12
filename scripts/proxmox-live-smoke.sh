@@ -220,6 +220,60 @@ extract_lease_id() {
   lease_id="$(sed -n 's/^leased \([^[:space:]]*\).*/\1/p' "$raw" | tail -1)"
 }
 
+extract_list_inventory() {
+  local raw="$1"
+  awk 'NR > 1 { print }' "$raw" |
+    jq -r '
+      if type != "array" then error("expected list array") else . end
+      | .[]
+      | (.labels // .Labels // {}) as $labels
+      | (.provider // .Provider // $labels.provider // "") as $provider
+      | (.leaseId // $labels.lease // "") as $lease
+      | (.slug // $labels.slug // "") as $slug
+      | (.CloudID // .cloudId // .id // "") as $cloud_id
+      | select($provider == "proxmox" and ($lease | type) == "string" and ($lease | length) > 0)
+      | select(($cloud_id | tostring | length) > 0)
+      | [$lease, ($slug | tostring), ($cloud_id | tostring)]
+      | @tsv
+    '
+}
+
+baseline_inventory="$proof_dir/list-before.inventory.tsv"
+
+reconcile_new_smoke_lease() {
+  local after_raw="$1"
+  local after_inventory="$proof_dir/list-reconcile.inventory.tsv"
+  local candidate_lease=""
+  local candidate_count=0
+  local candidate_slug=""
+  local cloud_id=""
+
+  secure_log_file "$after_inventory"
+  if ! extract_list_inventory "$after_raw" | sort -u >"$after_inventory"; then
+    echo "step=lease-reconcile status=fail reason=list_json_invalid" | tee -a "$summary"
+    return 1
+  fi
+  while IFS=$'\t' read -r candidate candidate_slug cloud_id; do
+    [[ "$candidate_slug" == "$slug" ]] || continue
+    if awk -F '\t' -v id="$cloud_id" '$3 == id { found = 1 } END { exit !found }' "$baseline_inventory"; then
+      continue
+    fi
+    candidate_lease="$candidate"
+    candidate_count=$((candidate_count + 1))
+  done <"$after_inventory"
+
+  if [[ "$candidate_count" -eq 0 ]]; then
+    echo "step=lease-reconcile status=pass reason=no_new_matching_lease" | tee -a "$summary"
+    return 0
+  fi
+  if [[ "$candidate_count" -ne 1 ]]; then
+    echo "step=lease-reconcile status=fail reason=ambiguous_new_matching_leases count=$candidate_count" | tee -a "$summary"
+    return 1
+  fi
+  echo "step=lease-reconcile status=attempt lease=$candidate_lease" | tee -a "$summary"
+  run_step stop-reconciled "$bin" stop --provider proxmox --id "$candidate_lease"
+}
+
 failure=0
 
 run_step doctor "$bin" doctor --provider proxmox --json || failure=1
@@ -230,7 +284,13 @@ if [[ -f "$proof_dir/doctor.raw.log" ]]; then
   }
 fi
 
-run_step list-before "$bin" list --provider proxmox --json || failure=1
+list_before_status=0
+run_step list-before "$bin" list --provider proxmox --json || list_before_status=$?
+secure_log_file "$baseline_inventory"
+if [[ "$list_before_status" -ne 0 ]] || ! extract_list_inventory "$proof_dir/list-before.raw.log" | sort -u >"$baseline_inventory"; then
+  echo "step=list-before-json status=fail" | tee -a "$summary"
+  failure=1
+fi
 run_node_inventory || failure=1
 
 if [[ "$live" != "1" ]]; then
@@ -248,29 +308,51 @@ fi
 
 warmup_status=0
 run_step warmup "$bin" warmup --provider proxmox --slug "$slug" --keep || warmup_status=$?
+extract_lease_id
+needs_reconcile=0
 if [[ "$warmup_status" -ne 0 ]]; then
-  echo "step=lifecycle status=skip reason=warmup_failed_no_owned_lease" | tee -a "$summary"
+  echo "step=lifecycle status=fail reason=warmup_failed" | tee -a "$summary"
   failure=1
-else
-  extract_lease_id
 fi
 
 if [[ "$warmup_status" -eq 0 && -n "$lease_id" ]]; then
   run_step status "$bin" status --provider proxmox --id "$lease_id" --json || failure=1
   run_step ssh-command "$bin" ssh --provider proxmox --id "$lease_id" || failure=1
-  run_step stop "$bin" stop --provider proxmox --id "$lease_id" || failure=1
+  stop_status=0
+  run_step stop "$bin" stop --provider proxmox --id "$lease_id" || stop_status=$?
+  if [[ "$stop_status" -ne 0 ]]; then
+    failure=1
+    needs_reconcile=1
+  fi
   cleanup_dry_run_status=0
   run_step cleanup-dry-run "$bin" cleanup --provider proxmox --dry-run || cleanup_dry_run_status=$?
   if [[ "$cleanup_dry_run_status" -ne 0 ]]; then
     failure=1
+  fi
+elif [[ -n "$lease_id" ]]; then
+  stop_status=0
+  run_step stop-reconciled "$bin" stop --provider proxmox --id "$lease_id" || stop_status=$?
+  if [[ "$stop_status" -ne 0 ]]; then
+    needs_reconcile=1
   fi
 else
   if [[ "$warmup_status" -eq 0 ]]; then
     echo "step=lease-id status=fail reason=warmup output did not include an owned lease id" | tee -a "$summary"
     failure=1
   fi
+  needs_reconcile=1
 fi
-run_step list-after "$bin" list --provider proxmox --json || failure=1
+list_after_status=0
+run_step list-after "$bin" list --provider proxmox --json || list_after_status=$?
+if [[ "$list_after_status" -ne 0 ]]; then
+  failure=1
+elif [[ "$needs_reconcile" -eq 1 ]]; then
+  if reconcile_new_smoke_lease "$proof_dir/list-after.raw.log"; then
+    run_step list-final "$bin" list --provider proxmox --json || failure=1
+  else
+    failure=1
+  fi
+fi
 
 if [[ "$failure" -eq 0 ]]; then
   echo "classification=live_proof_complete proof_dir=<proof-dir>" | tee -a "$summary"

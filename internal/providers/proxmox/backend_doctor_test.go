@@ -1041,6 +1041,9 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 	fake.deleteErrByID = map[string]error{
 		"101": &core.ProxmoxError{Method: "DELETE", Path: "/nodes/pve1/qemu/101", StatusCode: 404, Body: "not found"},
 	}
+	fake.getErrByID = map[string]error{
+		"101": &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"},
+	}
 	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatalf("retry resolve: %v", err)
@@ -1055,6 +1058,30 @@ func TestProxmoxReleaseRetriesReconciliationAfterInventoryRefreshFails(t *testin
 		t.Fatalf("claim ok=%t err=%v, want removed after successful retry reconciliation", ok, err)
 	}
 	assertStoredTestboxKeyRemoved(t, leaseID)
+}
+
+func TestProxmoxReleaseOnlyClaimRecoveryRejectsReusedVMID(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_reused_vmid"
+	claimed := expiredProxmoxServer("101", leaseID)
+	claimed.Provider = "proxmox"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, claimed, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	reused := Server{CloudID: "101", Provider: "proxmox", ID: 101, Name: "unrelated-vm", Labels: map[string]string{"crabbox": "false"}}
+	fake := &fakeProxmoxDoctorClient{getServerByID: map[string]Server{"101": reused}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if _, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "stale local claim") {
+		t.Fatalf("resolve error=%v, want stale claim rejection", err)
+	}
+	if fake.deleteCalls != 0 {
+		t.Fatalf("deleteCalls=%d, want no deletion", fake.deleteCalls)
+	}
 }
 
 func TestProxmoxReleasePreservesDifferentClaimWhenInventoryRefreshFails(t *testing.T) {
