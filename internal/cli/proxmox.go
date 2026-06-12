@@ -391,10 +391,12 @@ func proxmoxTemplateStorages(config map[string]any) []proxmoxTemplateStorageRequ
 			continue
 		}
 		requiredContent := "images"
-		for _, item := range strings.Split(text, ",") {
-			name, value, found := strings.Cut(item, "=")
-			if found && strings.EqualFold(strings.TrimSpace(name), "media") && strings.EqualFold(strings.TrimSpace(value), "cdrom") {
-				requiredContent = "iso"
+		if !strings.Contains(strings.ToLower(text), "cloudinit") {
+			for _, item := range strings.Split(text, ",") {
+				name, value, found := strings.Cut(item, "=")
+				if found && strings.EqualFold(strings.TrimSpace(name), "media") && strings.EqualFold(strings.TrimSpace(value), "cdrom") {
+					requiredContent = "iso"
+				}
 			}
 		}
 		requirement := proxmoxTemplateStorageRequirement{Name: storage, Content: requiredContent}

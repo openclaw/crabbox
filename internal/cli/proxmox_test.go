@@ -472,11 +472,13 @@ func TestProxmoxDoctorReadinessAcceptsTemplateISOStorage(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
 				map[string]any{"storage": "source", "active": 1, "enabled": 1, "content": "images"},
 				map[string]any{"storage": "local", "active": 1, "enabled": 1, "content": "iso,backup"},
+				map[string]any{"storage": "local-lvm", "active": 1, "enabled": 1, "content": "images"},
 			}})
 		case "/api2/json/nodes/pve1/qemu/9400/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
 				"scsi0": "source:vm-9400-disk-0,size=8G",
 				"ide0":  "local:iso/installer.iso,media=cdrom",
+				"ide2":  "local-lvm:cloudinit,media=cdrom",
 			}})
 		default:
 			t.Fatalf("unexpected %s", r.URL.Path)
@@ -490,7 +492,7 @@ func TestProxmoxDoctorReadinessAcceptsTemplateISOStorage(t *testing.T) {
 	cfg.Proxmox.TemplateID = 9400
 	cfg.Proxmox.Storage = ""
 	check := client.proxmoxStorageCheck(context.Background(), cfg)
-	if check.Status != "ok" || check.Details["storage"] != "local,source" {
+	if check.Status != "ok" || check.Details["storage"] != "local,local-lvm,source" {
 		t.Fatalf("storage check=%#v", check)
 	}
 }

@@ -464,6 +464,41 @@ func TestProxmoxCleanupPreservesResidueForMismatchedClaimCloudID(t *testing.T) {
 	assertStoredTestboxKeyExists(t, leaseID)
 }
 
+func TestProxmoxCleanupPreservesClaimFromDifferentClusterScope(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_scope_mismatch"
+	cfgA := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve-a.example.test:8006", Node: "pve1"}}
+	cfgB := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve-b.example.test:8006", Node: "pve1"}}
+	claimed := expiredProxmoxServer("101", leaseID)
+	claimed.Provider = "proxmox"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", cfgA, claimed, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	copied := expiredProxmoxServer("202", leaseID)
+	fake := &fakeProxmoxDoctorClient{servers: []Server{copied}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	var stderr strings.Builder
+	backend := NewLeaseBackend(Provider{}.Spec(), cfgB, Runtime{Stdout: io.Discard, Stderr: &stderr}).(*leaseBackend)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.CloudID != "101" || claim.ProviderScope != core.ProviderClaimScope("proxmox", cfgA) {
+		t.Fatalf("claim=%#v ok=%t err=%v, want cluster A claim preserved", claim, ok, err)
+	}
+	if !strings.Contains(stderr.String(), "reason=claim_scope_mismatch") {
+		t.Fatalf("stderr=%q, want scope mismatch warning", stderr.String())
+	}
+	assertStoredTestboxKeyExists(t, leaseID)
+}
+
 func TestProxmoxCleanupRemovesMismatchedClaimWhenClaimedVMIsAlsoMissing(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

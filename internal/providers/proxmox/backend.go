@@ -417,6 +417,12 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if req.DryRun {
 			continue
 		}
+		if strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg)) != "" {
+			if err := b.backfillReleaseClaimScope(proxmoxClaimLabelLeaseID(server), server.CloudID, server); err != nil {
+				deleteErr = err
+				break
+			}
+		}
 		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 			deleteErr = err
 			failed := server
@@ -509,6 +515,14 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_read_failed error=%v\n", leaseID, err)
 		return
+	}
+	if found && claim.Provider == "proxmox" {
+		claimScope := strings.TrimSpace(claim.ProviderScope)
+		currentScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", cfg))
+		if claimScope != currentScope && (claimScope != "" || currentScope != "") {
+			fmt.Fprintf(stderr, "warning: preserve local lease residue lease=%s reason=claim_scope_mismatch\n", leaseID)
+			return
+		}
 	}
 	if len(survivors) == 1 {
 		verified, err := client.GetServer(ctx, survivors[0].CloudID)
