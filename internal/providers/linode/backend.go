@@ -154,7 +154,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
 	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
-		cfg.ServerType = linodeServerTypeForClass(cfg.Class)
+		cfg.ServerType = linodeServerTypeForConfig(cfg)
 	}
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
@@ -665,7 +665,7 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 		}
 	}
 	foreignClaim := claim.Provider != providerName
-	if server.ID != 0 {
+	if item.ID != 0 {
 		if err := client.DeleteLinode(ctx, server.ID); err != nil {
 			return err
 		}

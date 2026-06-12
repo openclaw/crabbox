@@ -184,6 +184,30 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 	}
 }
 
+func TestAcquireRecordsConfiguredLinodeTypeInMetadata(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	backend.Cfg.Linode.Type = "g6-standard-2"
+
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "custom-type"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(api.createRequests) != 1 || api.createRequests[0].Type != "g6-standard-2" {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+	if lease.Server.ServerType.Name != "g6-standard-2" || lease.Server.Labels["server_type"] != "g6-standard-2" {
+		t.Fatalf("lease server type=%#v labels=%v", lease.Server.ServerType, lease.Server.Labels)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("custom-type", providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	if claim.Labels["server_type"] != "g6-standard-2" {
+		t.Fatalf("claim labels=%v", claim.Labels)
+	}
+}
+
 func TestAcquireRejectsInvalidFirewallBeforeCreate(t *testing.T) {
 	api := &fakeLinodeAPI{}
 	backend := newTestBackend(t, api)
@@ -293,6 +317,44 @@ func TestReleaseRefusesAccountMismatch(t *testing.T) {
 	}
 	if len(api.deleted) != 0 {
 		t.Fatalf("deleted=%v", api.deleted)
+	}
+}
+
+func TestReleaseMissingLiveLinodeFinalizesLocalClaim(t *testing.T) {
+	leaseID := "cbx_missing"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	labels := core.DirectLeaseLabels(cfg, leaseID, "gone", providerName, "", false, time.Now())
+	labels[linodeAccountLabel] = "email:alice@example.com"
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  "123",
+		ID:       123,
+		Name:     core.LeaseProviderName(leaseID, "gone"),
+		Labels:   labels,
+	}
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "gone", cfg, server, core.SSHTarget{}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 0 {
+		t.Fatalf("deleted missing linode=%v", api.deleted)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+		t.Fatalf("claim after release ok=%v err=%v", ok, err)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("local key retained after release: %v", statErr)
 	}
 }
 
