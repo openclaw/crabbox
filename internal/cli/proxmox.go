@@ -201,7 +201,7 @@ func (c *ProxmoxClient) DoctorReadiness(ctx context.Context, cfg Config) ([]Prox
 func (c *ProxmoxClient) proxmoxAuthCheck(ctx context.Context) ProxmoxReadinessCheck {
 	path := "/version"
 	var version map[string]any
-	if err := c.do(ctx, http.MethodGet, path, nil, &version); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, path, nil, &version); err != nil {
 		return c.proxmoxFailedReadiness("auth", path, err, nil)
 	}
 	return ProxmoxReadinessCheck{Status: "ok", Check: "auth", Message: "auth=ready endpoint=/version", Details: map[string]string{"auth": "ready", "endpoint": path}}
@@ -210,7 +210,7 @@ func (c *ProxmoxClient) proxmoxAuthCheck(ctx context.Context) ProxmoxReadinessCh
 func (c *ProxmoxClient) proxmoxNodeCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
 	path := "/nodes/" + url.PathEscape(c.Node) + "/status"
 	var status map[string]any
-	if err := c.do(ctx, http.MethodGet, path, nil, &status); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, path, nil, &status); err != nil {
 		return c.proxmoxFailedReadiness("node", path, err, map[string]string{"node": cfg.Proxmox.Node})
 	}
 	return ProxmoxReadinessCheck{
@@ -224,7 +224,7 @@ func (c *ProxmoxClient) proxmoxNodeCheck(ctx context.Context, cfg Config) Proxmo
 func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
 	path := "/nodes/" + url.PathEscape(c.Node) + "/storage"
 	var storages []proxmoxStorage
-	if err := c.do(ctx, http.MethodGet, path, nil, &storages); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, path, nil, &storages); err != nil {
 		return c.proxmoxFailedReadiness("storage", path, err, map[string]string{"storage": cfg.Proxmox.Storage})
 	}
 	if cfg.Proxmox.Storage == "" {
@@ -279,7 +279,7 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {
 	path := "/nodes/" + url.PathEscape(c.Node) + "/network"
 	var networks []proxmoxNetwork
-	if err := c.do(ctx, http.MethodGet, path, nil, &networks); err != nil {
+	if err := c.doRequired(ctx, http.MethodGet, path, nil, &networks); err != nil {
 		return c.proxmoxFailedReadiness("bridge", path, err, map[string]string{"bridge": cfg.Proxmox.Bridge})
 	}
 	if cfg.Proxmox.Bridge == "" {
@@ -352,7 +352,7 @@ func (c *ProxmoxClient) proxmoxTemplateCheck(ctx context.Context, cfg Config) Pr
 		}
 		configPath := fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(c.Node), cfg.Proxmox.TemplateID)
 		var config map[string]any
-		if err := c.do(ctx, http.MethodGet, configPath, nil, &config); err != nil {
+		if err := c.doRequired(ctx, http.MethodGet, configPath, nil, &config); err != nil {
 			return c.proxmoxFailedReadiness("template", configPath, err, map[string]string{"templateId": strconv.Itoa(cfg.Proxmox.TemplateID)})
 		}
 		return ProxmoxReadinessCheck{

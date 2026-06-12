@@ -926,6 +926,39 @@ func TestProxmoxReleasePreservesLocalResidueWhenDeleteFails(t *testing.T) {
 	assertStoredTestboxKeyExists(t, leaseID)
 }
 
+func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_proxmox_release_duplicate"
+	first := expiredProxmoxServer("101", leaseID)
+	first.Provider = "proxmox"
+	first.PublicNet.IPv4.IP = "192.0.2.101"
+	survivor := expiredProxmoxServer("202", leaseID)
+	survivor.Provider = "proxmox"
+	survivor.PublicNet.IPv4.IP = "192.0.2.202"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, first, SSHTarget{Host: first.PublicNet.IPv4.IP, Port: "22"}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{first, survivor}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), Config{}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	req := ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: first}}
+	if err := backend.ReleaseLease(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.CloudID != "202" || claim.SSHHost != "192.0.2.202" {
+		t.Fatalf("claim=%#v ok=%t err=%v, want surviving duplicate", claim, ok, err)
+	}
+	assertStoredTestboxKeyExists(t, leaseID)
+}
+
 func TestProxmoxCleanupIgnoresInvalidClaimLabel(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeProxmoxDoctorClient{servers: []Server{expiredProxmoxServer("101", "../target")}}

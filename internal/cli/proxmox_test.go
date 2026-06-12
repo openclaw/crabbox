@@ -330,6 +330,84 @@ func TestProxmoxRequiredResponseDataFailsClosed(t *testing.T) {
 	}
 }
 
+func TestProxmoxDoctorReadinessRequiresResponseData(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		path  string
+		check func(context.Context, *ProxmoxClient, Config) ProxmoxReadinessCheck
+	}{
+		{
+			name: "auth",
+			path: "/api2/json/version",
+			check: func(ctx context.Context, client *ProxmoxClient, _ Config) ProxmoxReadinessCheck {
+				return client.proxmoxAuthCheck(ctx)
+			},
+		},
+		{
+			name: "node",
+			path: "/api2/json/nodes/pve1/status",
+			check: func(ctx context.Context, client *ProxmoxClient, cfg Config) ProxmoxReadinessCheck {
+				return client.proxmoxNodeCheck(ctx, cfg)
+			},
+		},
+		{
+			name: "storage",
+			path: "/api2/json/nodes/pve1/storage",
+			check: func(ctx context.Context, client *ProxmoxClient, cfg Config) ProxmoxReadinessCheck {
+				return client.proxmoxStorageCheck(ctx, cfg)
+			},
+		},
+		{
+			name: "bridge",
+			path: "/api2/json/nodes/pve1/network",
+			check: func(ctx context.Context, client *ProxmoxClient, cfg Config) ProxmoxReadinessCheck {
+				return client.proxmoxNetworkCheck(ctx, cfg)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path {
+					t.Fatalf("path=%s, want %s", r.URL.Path, tc.path)
+				}
+				_, _ = w.Write([]byte(`{"data":null}`))
+			}))
+			defer server.Close()
+
+			client := testProxmoxClient(t, server.URL)
+			cfg := baseConfig()
+			cfg.Proxmox.Node = "pve1"
+			check := tc.check(context.Background(), client, cfg)
+			if check.Status != "failed" || !strings.Contains(check.Details["error"], "missing_required_data") {
+				t.Fatalf("check=%#v, want missing required data failure", check)
+			}
+		})
+	}
+}
+
+func TestProxmoxTemplateReadinessRequiresConfigData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/qemu":
+			_, _ = w.Write([]byte(`{"data":[{"vmid":9000,"name":"template","template":1}]}`))
+		case "/api2/json/nodes/pve1/qemu/9000/config":
+			_, _ = w.Write([]byte(`{"data":null}`))
+		default:
+			t.Fatalf("unexpected path=%s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9000
+	check := client.proxmoxTemplateCheck(context.Background(), cfg)
+	if check.Status != "failed" || !strings.Contains(check.Details["error"], "missing_required_data") {
+		t.Fatalf("check=%#v, want missing required data failure", check)
+	}
+}
+
 func TestProxmoxWaitTaskRequiresOKExitStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

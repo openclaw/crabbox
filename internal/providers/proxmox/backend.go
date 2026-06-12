@@ -222,7 +222,19 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	if err := client.DeleteServer(ctx, id); err != nil {
 		return err
 	}
-	removeLocalLeaseResidue(leaseID)
+	remaining, err := client.ListCrabboxServers(ctx)
+	if err != nil {
+		return fmt.Errorf("reconcile Proxmox lease after release: %w", err)
+	}
+	deleted := req.Lease.Server
+	deleted.CloudID = id
+	if deleted.Labels == nil {
+		deleted.Labels = map[string]string{}
+	}
+	if deleted.Labels["lease"] == "" {
+		deleted.Labels["lease"] = leaseID
+	}
+	removeCleanupLeaseResidue(ctx, client, deleted, remaining, b.Cfg, b.RT.Stderr)
 	return nil
 }
 

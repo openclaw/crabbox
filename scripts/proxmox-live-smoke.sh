@@ -46,6 +46,21 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
+resolve_configured_api_url() {
+  "$bin" config show --json 2>/dev/null | jq -r '.proxmox.apiUrl // empty'
+}
+
+redaction_api_url="${CRABBOX_PROXMOX_API_URL:-}"
+if [[ -z "$redaction_api_url" ]]; then
+  redaction_api_url="$(resolve_configured_api_url || true)"
+fi
+redaction_api_host="$(
+  printf '%s' "$redaction_api_url" |
+    perl -ne 'if (m{^[a-z][a-z0-9+.-]*://(?:[^@/]+@)?(\[[^]]+\]|[^:/]+)}i) { print "$1\n" }'
+)"
+export CRABBOX_PROXMOX_REDACT_API_URL="$redaction_api_url"
+export CRABBOX_PROXMOX_REDACT_API_HOST="$redaction_api_host"
+
 directory_is_private() {
   local mode=""
   mode="$(stat -f '%Lp' "$1" 2>/dev/null)" || mode=""
@@ -108,13 +123,13 @@ rm -f -- "$known_hosts"
 redact_stream() {
   local token_secret="${CRABBOX_PROXMOX_TOKEN_SECRET:-}"
   local token_id="${CRABBOX_PROXMOX_TOKEN_ID:-}"
-  local api_url="${CRABBOX_PROXMOX_API_URL:-}"
   local inventory_host="${CRABBOX_PROXMOX_SSH_INVENTORY_HOST:-}"
   perl -pe '
     BEGIN {
       $token_secret = $ENV{"CRABBOX_PROXMOX_TOKEN_SECRET"} // "";
       $token_id = $ENV{"CRABBOX_PROXMOX_TOKEN_ID"} // "";
-      $api_url = $ENV{"CRABBOX_PROXMOX_API_URL"} // "";
+      $api_url = $ENV{"CRABBOX_PROXMOX_REDACT_API_URL"} // "";
+      $api_host = $ENV{"CRABBOX_PROXMOX_REDACT_API_HOST"} // "";
       $inventory_host = $ENV{"CRABBOX_PROXMOX_SSH_INVENTORY_HOST"} // "";
       $proof_dir = $ENV{"CRABBOX_PROXMOX_LIVE_SMOKE_DIR"} // "";
       $bin = $ENV{"CRABBOX_BIN"} // "";
@@ -122,6 +137,7 @@ redact_stream() {
     s/\Q$token_secret\E/<proxmox-token-secret>/g if length($token_secret);
     s/\Q$token_id\E/<proxmox-token-id>/g if length($token_id);
     s/\Q$api_url\E/<proxmox-api-url>/g if length($api_url);
+    s/\Q$api_host\E/<proxmox-api-host>/g if length($api_host);
     s/\Q$inventory_host\E/<proxmox-ssh-host>/g if length($inventory_host);
     s/\Q$proof_dir\E/<proof-dir>/g if length($proof_dir);
     s/\Q$bin\E/<crabbox-bin>/g if length($bin) && $bin =~ m#/#;
@@ -225,9 +241,15 @@ if [[ "$warmup_status" -eq 0 && -n "$lease_id" ]]; then
   run_step status "$bin" status --provider proxmox --id "$lease_id" --json || failure=1
   run_step ssh-command "$bin" ssh --provider proxmox --id "$lease_id" || failure=1
   run_step stop "$bin" stop --provider proxmox --id "$lease_id" || failure=1
-  run_step cleanup-dry-run "$bin" cleanup --provider proxmox --dry-run || failure=1
-  if [[ "$allow_cleanup" == "1" ]]; then
+  cleanup_dry_run_status=0
+  run_step cleanup-dry-run "$bin" cleanup --provider proxmox --dry-run || cleanup_dry_run_status=$?
+  if [[ "$cleanup_dry_run_status" -ne 0 ]]; then
+    failure=1
+  fi
+  if [[ "$allow_cleanup" == "1" && "$cleanup_dry_run_status" -eq 0 ]]; then
     run_step cleanup "$bin" cleanup --provider proxmox || failure=1
+  elif [[ "$allow_cleanup" == "1" ]]; then
+    echo "step=cleanup status=skip reason=cleanup_dry_run_failed" | tee -a "$summary"
   else
     echo "step=cleanup status=skip reason=CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP not set to 1 after dry-run" | tee -a "$summary"
   fi

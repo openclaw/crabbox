@@ -26,9 +26,12 @@ function setupFakeCrabbox() {
 set -euo pipefail
 printf '%s\\n' "$*" >>"${calls}"
 case "$1" in
+  config)
+    printf '{"proxmox":{"apiUrl":"https://config-only.secret.example:8006"}}\\n'
+    ;;
   doctor)
     if [[ "\${FAKE_CRABBOX_FAIL_DOCTOR:-0}" == "1" ]]; then
-      printf '{"ok":false,"provider":"proxmox","checks":[{"status":"failed","check":"storage","message":"url=https://config-only.secret.example:8006"}]}\\n'
+      printf '{"ok":false,"provider":"proxmox","checks":[{"status":"failed","check":"storage","message":"url=https://config-only.secret.example:8006 lookup config-only.secret.example"}]}\\n'
       exit 1
     fi
     printf '{"ok":true,"provider":"proxmox","checks":[{"status":"ok","check":"auth","message":"url=%s token=%s secret=%s"}]}\\n' "\${CRABBOX_PROXMOX_API_URL:-}" "\${CRABBOX_PROXMOX_TOKEN_ID:-}" "\${CRABBOX_PROXMOX_TOKEN_SECRET:-}"
@@ -55,6 +58,10 @@ case "$1" in
     ;;
   cleanup)
     if [[ "$*" == *"--dry-run"* ]]; then
+      if [[ "\${FAKE_CRABBOX_FAIL_CLEANUP_DRY_RUN:-0}" == "1" ]]; then
+        printf 'cleanup dry-run failed\\n' >&2
+        exit 1
+      fi
       printf 'cleanup dry-run provider=proxmox delete=0\\n'
     else
       printf 'cleanup provider=proxmox delete=0\\n'
@@ -178,6 +185,28 @@ test("live mode does not stop or cleanup when warmup fails before lease ownershi
 	assert.doesNotMatch(calls, /^status |^ssh |^stop |^cleanup /m);
 });
 
+test("live mode skips real cleanup when cleanup dry-run fails", () => {
+	const fake = setupFakeCrabbox();
+	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
+		cwd: repoRoot,
+		env: {
+			...process.env,
+			CRABBOX_BIN: fake.fakeCrabbox,
+			CRABBOX_PROXMOX_LIVE_SMOKE: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_CLEANUP: "1",
+			CRABBOX_PROXMOX_LIVE_SMOKE_DIR: fake.proof,
+			FAKE_CRABBOX_FAIL_CLEANUP_DRY_RUN: "1",
+		},
+		encoding: "utf8",
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /reason=cleanup_dry_run_failed/);
+	const calls = fs.readFileSync(fake.calls, "utf8");
+	assert.match(calls, /^cleanup --provider proxmox --dry-run$/m);
+	assert.doesNotMatch(calls, /^cleanup --provider proxmox$/m);
+});
+
 test("live mode does not mutate when readiness preflight fails", () => {
 	const fake = setupFakeCrabbox();
 	const result = spawnSync("bash", ["scripts/proxmox-live-smoke.sh"], {
@@ -201,7 +230,7 @@ test("live mode does not mutate when readiness preflight fails", () => {
 	assert.doesNotMatch(calls, /^warmup |^status |^ssh |^stop |^cleanup /m);
 	const redacted = fs.readFileSync(path.join(fake.proof, "doctor.redacted.log"), "utf8");
 	assert.doesNotMatch(redacted, /config-only\.secret\.example/);
-	assert.match(redacted, /<url>/);
+	assert.match(redacted, /<proxmox-api-url>.*<proxmox-api-host>/);
 });
 
 test("caller-supplied proof directories replace pre-existing log symlinks", () => {
