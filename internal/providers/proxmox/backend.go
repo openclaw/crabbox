@@ -519,7 +519,7 @@ func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, delete
 	missingCloudIDs := map[string]bool{deleted.CloudID: true}
 	var survivors []Server
 	for _, server := range inventory {
-		if server.CloudID != deleted.CloudID && proxmoxClaimLabelLeaseID(server) == leaseID {
+		if proxmoxClaimLabelLeaseID(server) == leaseID {
 			survivors = append(survivors, server)
 		}
 	}

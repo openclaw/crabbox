@@ -915,6 +915,7 @@ func TestProxmoxCleanupReconcilesDeleteAcceptedBeforePollingFailure(t *testing.T
 	}
 	fake := &fakeProxmoxDoctorClient{
 		servers:               []Server{server},
+		clusterServers:        []Server{},
 		deleteAcceptedErrByID: map[string]error{"101": &core.ProxmoxDeleteTaskError{Err: errors.New("task status timeout")}},
 		getErrByID: map[string]error{
 			"101": &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"},
@@ -961,6 +962,7 @@ func TestProxmoxCleanupReconcilesDeleteThatCompletesAfterInitialVerification(t *
 	notFound := &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"}
 	fake := &fakeProxmoxDoctorClient{
 		servers:               []Server{server},
+		clusterServers:        []Server{},
 		deleteAcceptedErrByID: map[string]error{"101": &core.ProxmoxDeleteTaskError{Err: errors.New("task status timeout")}},
 		preserveOnDeleteByID:  map[string]bool{"101": true},
 		getErrSequenceByID:    map[string][]error{"101": {nil, notFound}},
@@ -1006,6 +1008,7 @@ func TestProxmoxCleanupPollsAmbiguousDeleteRequestUntilVMDisappears(t *testing.T
 	notFound := &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"}
 	fake := &fakeProxmoxDoctorClient{
 		servers:               []Server{server},
+		clusterServers:        []Server{},
 		deleteAcceptedErrByID: map[string]error{"101": &core.ProxmoxDeleteRequestError{Err: errors.New("delete request timeout")}},
 		preserveOnDeleteByID:  map[string]bool{"101": true},
 		getErrSequenceByID:    map[string][]error{"101": {nil, notFound}},
@@ -1127,6 +1130,40 @@ func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing
 	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok || claim.CloudID != "202" || claim.SSHHost != "192.0.2.202" {
 		t.Fatalf("claim=%#v ok=%t err=%v, want surviving duplicate", claim, ok, err)
+	}
+	assertStoredTestboxKeyExists(t, leaseID)
+}
+
+func TestProxmoxReleasePreservesMigratedTargetWithSameVMID(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
+	leaseID := "cbx_proxmox_release_migrated"
+	first := expiredProxmoxServer("101", leaseID)
+	first.Provider = "proxmox"
+	first.HostID = "pve1"
+	first.PublicNet.IPv4.IP = "192.0.2.101"
+	migrated := first
+	migrated.HostID = "pve2"
+	migrated.PublicNet.IPv4.IP = "192.0.2.202"
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", cfg, first, SSHTarget{Host: first.PublicNet.IPv4.IP, Port: "22"}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{first}, clusterServers: []Server{migrated}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: first}}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
+	if err != nil || !ok || claim.CloudID != "101" || claim.SSHHost != "192.0.2.202" {
+		t.Fatalf("claim=%#v ok=%t err=%v, want migrated target", claim, ok, err)
 	}
 	assertStoredTestboxKeyExists(t, leaseID)
 }
