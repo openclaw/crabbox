@@ -577,6 +577,83 @@ func TestRunDoesNotResumePausedSandboxBeforeRepoAuthorization(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotResumeOrReclaimPausedSandboxBeforeLifetimePreflight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.sandbox.State = "Paused"
+	expiresAt := time.Now().Add(5 * time.Minute)
+	fake.sandbox.ExpiresAt = &expiresAt
+	backend := newTestBackend(fake)
+	stderr := &bytes.Buffer{}
+	backend.rt.Stderr = stderr
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, Reclaim: true, NoSync: true, KeepOnFailure: true, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "sync/command budget") {
+		t.Fatalf("err=%v, want lifetime preflight rejection", err)
+	}
+	if len(fake.resumed) != 0 {
+		t.Fatalf("resumed=%#v, want no remote mutation before lifetime preflight", fake.resumed)
+	}
+	if strings.Contains(stderr.String(), "rerun:") {
+		t.Fatalf("stderr=%q, want no unusable pre-reclaim rerun hint", stderr.String())
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RepoRoot != "/original" {
+		t.Fatalf("repo root=%q changed before lifetime preflight", claim.RepoRoot)
+	}
+}
+
+func TestRunRechecksLifetimeAfterResumeBeforeReclaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	now := time.Now()
+	fake := newFakeClient()
+	fake.sandbox.State = "Paused"
+	expiresAt := now.Add(25 * time.Minute)
+	fake.sandbox.ExpiresAt = &expiresAt
+	backend := newTestBackend(fake)
+	backend.rt.Clock = fixedClock{now: now}
+	fake.afterResume = func() {
+		backend.rt.Clock = fixedClock{now: now.Add(10 * time.Minute)}
+	}
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, Reclaim: true, NoSync: true, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "remaining after resume") {
+		t.Fatalf("err=%v, want post-resume lifetime rejection", err)
+	}
+	if len(fake.resumed) != 1 {
+		t.Fatalf("resumed=%#v, want one validated resume attempt", fake.resumed)
+	}
+	if len(fake.runs) != 0 {
+		t.Fatalf("runs=%#v, want no command after post-resume lifetime rejection", fake.runs)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RepoRoot != "/original" {
+		t.Fatalf("repo root=%q changed before post-resume lifetime preflight", claim.RepoRoot)
+	}
+}
+
 func TestRunReclaimPersistsOnlyAfterReusableSandboxValidation(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeClient()
@@ -2108,6 +2185,7 @@ type fakeOpenSandboxClient struct {
 	deleteStarted        chan struct{}
 	deleteRelease        chan struct{}
 	deleteErr            error
+	afterResume          func()
 	afterRun             func(runCommandRequest)
 	runStarted           chan struct{}
 	runRelease           chan struct{}
@@ -2181,6 +2259,9 @@ func (f *fakeOpenSandboxClient) DeleteSandbox(_ context.Context, sandboxID strin
 func (f *fakeOpenSandboxClient) ResumeSandbox(_ context.Context, sandboxID string) error {
 	f.resumed = append(f.resumed, sandboxID)
 	f.sandbox.State = "Running"
+	if f.afterResume != nil {
+		f.afterResume()
+	}
 	return nil
 }
 

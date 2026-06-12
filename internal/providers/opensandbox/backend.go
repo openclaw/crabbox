@@ -108,6 +108,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	}
 	leaseID, sandboxID, slug := "", "", ""
 	sb := sandboxInfo{}
+	deadline := time.Time{}
 	acquired := false
 	shouldStop := false
 	var unlockOperation func()
@@ -147,8 +148,32 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if err := authorizeOpenSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim); err != nil {
 			return RunResult{}, err
 		}
+		if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
+			sb, err = verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
+			if err != nil {
+				return RunResult{}, err
+			}
+		}
+		deadline, err = openSandboxExpiration(sb)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if !deadline.After(b.now()) {
+			return RunResult{}, exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL", sandboxID)
+		}
+		if remaining, required := deadline.Sub(b.now()), b.runLifetimeBudget(req); remaining < required {
+			runErr := exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
+			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, runErr
+		}
 		if err := b.ensureReusableSandbox(ctx, api, sandboxID, sb); err != nil {
 			return RunResult{}, err
+		}
+		if !deadline.After(b.now()) {
+			return RunResult{}, exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL while resuming", sandboxID)
+		}
+		if remaining, required := deadline.Sub(b.now()), b.runLifetimeBudget(req); remaining < required {
+			runErr := exit(5, "opensandbox sandbox %s has %s remaining after resume before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
+			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, runErr
 		}
 		_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
 		if err != nil {
@@ -163,23 +188,25 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			}
 		}()
 	}
-	if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
-		sb, err = verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
+	if acquired {
+		if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
+			sb, err = verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
+			if err != nil {
+				return RunResult{}, err
+			}
+		}
+		deadline, err = openSandboxExpiration(sb)
 		if err != nil {
 			return RunResult{}, err
 		}
-	}
-	deadline, err := openSandboxExpiration(sb)
-	if err != nil {
-		return RunResult{}, err
-	}
-	if !deadline.After(b.now()) {
-		return RunResult{}, exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL", sandboxID)
-	}
-	if remaining, required := deadline.Sub(b.now()), b.runLifetimeBudget(req); remaining < required {
-		runErr := exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, runErr
+		if !deadline.After(b.now()) {
+			return RunResult{}, exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL", sandboxID)
+		}
+		if remaining, required := deadline.Sub(b.now()), b.runLifetimeBudget(req); remaining < required {
+			runErr := exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
+			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, runErr
+		}
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
 
