@@ -297,3 +297,31 @@ func TestResolveLeaseTargetUsesPersistedExternalRouting(t *testing.T) {
 		t.Fatalf("config=%#v server=%#v lease=%q", cfg, server, gotLeaseID)
 	}
 }
+
+func TestLeaseTargetConfigPreservesExplicitNonExternalProvider(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	leaseID := "cbx_abcdef123456"
+	if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "old-provider", WorkRoot: "/old/work"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProviderScope(leaseID, "old-box", "external", "old-scope", root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defaults := baseConfig()
+	fs := newFlagSet("code", os.Stderr)
+	provider := fs.String("provider", defaults.Provider, "")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, []string{"--provider", "aws"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "old-box"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "aws" || cfg.External.RoutingFile != "" || !cfg.providerExplicit {
+		t.Fatalf("config=%#v", cfg)
+	}
+}
