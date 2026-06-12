@@ -162,7 +162,7 @@ func (a App) cacheTarget(ctx context.Context, id string, reclaim bool) (SSHTarge
 	if err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}
-	server, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, id)
+	server, target, leaseID, err := a.resolveLeaseTargetWithConfig(ctx, &cfg, id)
 	if err == nil {
 		repo, repoErr := findRepo()
 		if repoErr != nil {

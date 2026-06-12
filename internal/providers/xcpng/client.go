@@ -853,7 +853,15 @@ func discoverIPv4ByMAC(ctx context.Context, macs []string, guestCIDR string) (st
 	if len(macs) == 0 {
 		return "", errors.New("xcp-ng guest IP fallback requires at least one VIF MAC")
 	}
-	if ip, err := matchIPv4ByMAC(ctx, macs); ip != "" || err != nil {
+	var guestNetwork *net.IPNet
+	if strings.TrimSpace(guestCIDR) != "" {
+		var err error
+		guestNetwork, err = parseGuestProbeNetwork(guestCIDR)
+		if err != nil {
+			return "", err
+		}
+	}
+	if ip, err := matchIPv4ByMAC(ctx, macs, guestNetwork); ip != "" || err != nil {
 		return ip, err
 	}
 	networks, err := xcpNgLocalIPv4Networks()
@@ -868,23 +876,41 @@ func discoverIPv4ByMAC(ctx context.Context, macs []string, guestCIDR string) (st
 		return "", errors.New("xcp-ng guest IP fallback found no local IPv4 networks to probe")
 	}
 	probeLocalNetworks(ctx, networks)
-	return matchIPv4ByMAC(ctx, macs)
+	return matchIPv4ByMAC(ctx, macs, guestNetwork)
 }
 
-func matchIPv4ByMAC(ctx context.Context, macs []string) (string, error) {
+func matchIPv4ByMAC(ctx context.Context, macs []string, guestNetwork *net.IPNet) (string, error) {
 	table, err := xcpNgReadARPTable(ctx)
 	if err != nil {
 		return "", err
 	}
 	for _, mac := range macs {
-		if ip, ok := table[mac]; ok && usableIPv4(ip) != "" {
-			return usableIPv4(ip), nil
+		if ip, ok := table[mac]; ok {
+			ip = usableIPv4(ip)
+			if ip != "" && (guestNetwork == nil || guestNetwork.Contains(net.ParseIP(ip))) {
+				return ip, nil
+			}
 		}
 	}
 	return "", nil
 }
 
 func guestProbeNetworks(networks []net.IPNet, guestCIDR string) ([]net.IPNet, error) {
+	guestNetwork, err := parseGuestProbeNetwork(guestCIDR)
+	if err != nil {
+		return nil, err
+	}
+	first := guestNetwork.IP.To4()
+	last := ipv4FromUint32(binaryIPv4(first) | ^binaryIPv4(net.IP(guestNetwork.Mask)))
+	for _, localNetwork := range networks {
+		if localNetwork.Contains(first) && localNetwork.Contains(last) {
+			return []net.IPNet{*guestNetwork}, nil
+		}
+	}
+	return nil, guestProbeConfigError{message: fmt.Sprintf("CRABBOX_XCP_NG_GUEST_CIDR %q is not attached to a local interface", strings.TrimSpace(guestCIDR))}
+}
+
+func parseGuestProbeNetwork(guestCIDR string) (*net.IPNet, error) {
 	guestCIDR = strings.TrimSpace(guestCIDR)
 	if guestCIDR == "" {
 		return nil, errors.New("xcp-ng active guest IP discovery is disabled; set CRABBOX_XCP_NG_GUEST_CIDR to opt in")
@@ -897,14 +923,7 @@ func guestProbeNetworks(networks []net.IPNet, guestCIDR string) ([]net.IPNet, er
 	if bits != 32 || ones < 24 {
 		return nil, guestProbeConfigError{message: "CRABBOX_XCP_NG_GUEST_CIDR must be an IPv4 /24 or narrower range"}
 	}
-	first := guestNetwork.IP.To4()
-	last := ipv4FromUint32(binaryIPv4(first) | ^binaryIPv4(net.IP(guestNetwork.Mask)))
-	for _, localNetwork := range networks {
-		if localNetwork.Contains(first) && localNetwork.Contains(last) {
-			return []net.IPNet{*guestNetwork}, nil
-		}
-	}
-	return nil, guestProbeConfigError{message: fmt.Sprintf("CRABBOX_XCP_NG_GUEST_CIDR %q is not attached to a local interface", guestCIDR)}
+	return guestNetwork, nil
 }
 
 func probeLocalNetworks(ctx context.Context, networks []net.IPNet) {

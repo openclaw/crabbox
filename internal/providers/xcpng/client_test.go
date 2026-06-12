@@ -2131,6 +2131,27 @@ func TestDeleteServerRefusesUnmanagedTemplateBeforeDiskCleanup(t *testing.T) {
 	}
 }
 
+func TestDiscoverIPv4ByMACFiltersNeighborEntriesByGuestCIDR(t *testing.T) {
+	oldReadARPTable := xcpNgReadARPTable
+	xcpNgReadARPTable = func(context.Context) (map[string]string, error) {
+		return map[string]string{
+			"aa:bb:cc:dd:ee:01": "10.0.0.88",
+			"aa:bb:cc:dd:ee:02": "192.0.2.88",
+		}, nil
+	}
+	t.Cleanup(func() {
+		xcpNgReadARPTable = oldReadARPTable
+	})
+
+	ip, err := discoverIPv4ByMAC(context.Background(), []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}, "192.0.2.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip != "192.0.2.88" {
+		t.Fatalf("ip=%q", ip)
+	}
+}
+
 func TestDeleteConfigDriveTreatsAlreadyDetachedVBDAsCleanedUp(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

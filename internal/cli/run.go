@@ -586,6 +586,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		lease, err = sshBackend.Resolve(ctx, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			applyResolvedLeaseConfig(&cfg, server, &target)
 			if borrowedPool != nil {
 				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
 			}
@@ -2353,6 +2354,15 @@ func applyResolvedServerConfig(cfg *Config, server Server) {
 	if root := server.Labels["work_root"]; root != "" {
 		cfg.WorkRoot = root
 	}
+	if targetOS := strings.TrimSpace(server.Labels["target"]); targetOS != "" {
+		cfg.TargetOS = targetOS
+	}
+	if windowsMode := strings.TrimSpace(server.Labels["windows_mode"]); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+	} else if cfg.TargetOS != targetWindows {
+		cfg.WindowsMode = ""
+	}
+	normalizeTargetConfig(cfg)
 	if cfg.Provider == "local-container" || server.Provider == "local-container" {
 		if root := server.Labels["work_root"]; root != "" {
 			cfg.LocalContainer.WorkRoot = root

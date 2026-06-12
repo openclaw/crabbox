@@ -704,6 +704,27 @@ func TestResolveByAliasFallsBackToMACDiscoveryWhenGuestMetricsFail(t *testing.T)
 	}
 }
 
+func TestTargetForServerRestoresStoredTargetLabels(t *testing.T) {
+	backend := newTestBackend(t, &fakeLifecycleClient{})
+	backend.Cfg.TargetOS = "macos"
+	backend.Cfg.WindowsMode = "normal"
+	server := crabboxServer(xcpNgTestVMUUID, "cbx_lease", "ready", time.Now().Add(time.Hour))
+	server.Labels["target"] = "linux"
+	server.Labels["work_root"] = "/srv/crabbox"
+
+	target := backend.targetForServer(server)
+	if target.SSH.TargetOS != "linux" || target.SSH.WindowsMode != "" {
+		t.Fatalf("ssh target=%#v", target.SSH)
+	}
+
+	server.Labels["target"] = "windows"
+	server.Labels["windows_mode"] = "wsl2"
+	target = backend.targetForServer(server)
+	if target.SSH.TargetOS != "windows" || target.SSH.WindowsMode != "wsl2" {
+		t.Fatalf("windows ssh target=%#v", target.SSH)
+	}
+}
+
 func TestListResolveTouchReleaseUseOnlyCrabboxMetadata(t *testing.T) {
 	managed := crabboxServer(xcpNgTestVMUUID, "cbx_lease", "ready", time.Now().Add(time.Hour))
 	unmanaged := Server{CloudID: "OpaqueRef:vm-2", Name: "crabbox-prefix-only", Labels: map[string]string{"provider": "xcp-ng"}}
@@ -837,7 +858,12 @@ func TestRunISOE2EMutateRequiresNetworkBeforeCreatingVM(t *testing.T) {
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
 	t.Cleanup(func() { newLifecycleClient = oldClient })
 
-	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	cfg := testConfig()
+	cfg.TargetOS = "windows"
+	cfg.WindowsMode = "normal"
+	cfg.WorkRoot = `C:\crabbox`
+	cfg.XCPNg.WorkRoot = `C:\crabbox`
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: cfg, Mode: "mutate", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
 	if err == nil || !strings.Contains(err.Error(), "requires xcpNg.network") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1234,6 +1260,9 @@ func TestRunISOE2EWindowsMutateFallsBackToSourceUncoveredWithProvidedAnswerISO(t
 	if !strings.Contains(summary.Reason, "remote command proof remains uncovered") {
 		t.Fatalf("summary=%#v", summary)
 	}
+	if fake.freshReq.Labels["target"] != "windows" || fake.freshReq.Labels["windows_mode"] != "normal" || fake.freshReq.Labels["work_root"] != `C:\crabbox` {
+		t.Fatalf("fresh VM labels=%#v", fake.freshReq.Labels)
+	}
 }
 
 func TestRunISOE2EWindowsMutateClassifiesGuestMetricsBlocker(t *testing.T) {
@@ -1330,6 +1359,9 @@ func TestRunISOE2ELinuxMutatePassesWithImportedMediaAndSSHProof(t *testing.T) {
 	}
 	if summary.Details["answer_iso_source"] != "generated-config-drive" {
 		t.Fatalf("summary=%#v", summary)
+	}
+	if fake.freshReq.Labels["target"] != "linux" || fake.freshReq.Labels["windows_mode"] != "" || fake.freshReq.Labels["work_root"] != "/work/crabbox" {
+		t.Fatalf("fresh VM labels=%#v", fake.freshReq.Labels)
 	}
 }
 

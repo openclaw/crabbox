@@ -251,7 +251,16 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 	result = summary
 	now := isoE2ECurrentTime()
 	leaseID := isoE2ELeaseID()
-	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
+	labelCfg := opts.Config
+	labelCfg.TargetOS = core.TargetWindows
+	labelCfg.WindowsMode = core.WindowsModeNormal
+	workRoot := strings.TrimSpace(firstNonBlank(labelCfg.XCPNg.WorkRoot, labelCfg.WorkRoot))
+	if workRoot == "" || strings.HasPrefix(workRoot, "/") {
+		workRoot = `C:\crabbox`
+	}
+	labelCfg.WorkRoot = workRoot
+	labels := core.DirectLeaseLabels(labelCfg, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
+	labels["work_root"] = workRoot
 	installerIdentity, err := client.ResolveISOMedia(ctx, xcpNgProviderConfig(opts.Config), opts.ISO)
 	if err != nil {
 		result.Classification = "environment_blocked"
@@ -379,7 +388,18 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 	result = summary
 	now := isoE2ECurrentTime()
 	leaseID := isoE2ELeaseID()
-	labels := core.DirectLeaseLabels(opts.Config, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
+	guestCfg := opts.Config
+	guestCfg.TargetOS = core.TargetLinux
+	guestCfg.WindowsMode = ""
+	workRoot := strings.TrimSpace(firstNonBlank(guestCfg.XCPNg.WorkRoot, guestCfg.WorkRoot))
+	if workRoot == "" || !strings.HasPrefix(workRoot, "/") {
+		workRoot = "/work/crabbox"
+	}
+	guestCfg.WorkRoot = workRoot
+	guestCfg.XCPNg.WorkRoot = workRoot
+	opts.Config = guestCfg
+	labels := core.DirectLeaseLabels(guestCfg, leaseID, strings.TrimPrefix(opts.NamePrefix, "crabbox-"), "xcp-ng", "", true, now)
+	labels["work_root"] = workRoot
 	runtime := &isoE2ERuntime{
 		client:       client,
 		placement:    placement,

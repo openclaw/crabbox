@@ -161,6 +161,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	cfg.ServerType = xcpNgServerTypeForConfig(cfg)
 	now := currentTime(b.RT).UTC()
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, "xcp-ng", "", keep, now)
+	labels["work_root"] = firstNonBlank(cfg.XCPNg.WorkRoot, cfg.WorkRoot)
 
 	resolved, err := b.resolvePlacement(ctx, client)
 	if err != nil {
@@ -414,6 +415,18 @@ func (b *leaseBackend) ensureServerIP(ctx context.Context, client lifecycleClien
 
 func (b *leaseBackend) targetForServer(server Server) LeaseTarget {
 	cfg := b.Cfg
+	if storedTarget := strings.TrimSpace(server.Labels["target"]); storedTarget != "" {
+		cfg.TargetOS = storedTarget
+		if !strings.EqualFold(storedTarget, "windows") {
+			cfg.WindowsMode = ""
+		}
+	}
+	if storedWindowsMode := strings.TrimSpace(server.Labels["windows_mode"]); storedWindowsMode != "" {
+		cfg.WindowsMode = storedWindowsMode
+	}
+	if storedWorkRoot := strings.TrimSpace(server.Labels["work_root"]); storedWorkRoot != "" {
+		cfg.WorkRoot = storedWorkRoot
+	}
 	target := sshTargetFromConfig(cfg, firstNonBlank(server.PublicNet.IPv4.IP, server.PrivateNet.IPv4.IP))
 	leaseID := core.Blank(server.Labels["lease"], server.CloudID)
 	useStoredTestboxKey(&target, leaseID)

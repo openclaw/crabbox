@@ -254,7 +254,14 @@ func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView
 }
 
 func (a App) resolveLeaseTarget(ctx context.Context, cfg Config, id string) (Server, SSHTarget, string, error) {
-	backend, err := loadBackend(cfg, runtimeForApp(a))
+	return a.resolveLeaseTargetWithConfig(ctx, &cfg, id)
+}
+
+func (a App) resolveLeaseTargetWithConfig(ctx context.Context, cfg *Config, id string) (Server, SSHTarget, string, error) {
+	if cfg == nil {
+		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
+	}
+	backend, err := loadBackend(*cfg, runtimeForApp(a))
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
@@ -262,10 +269,11 @@ func (a App) resolveLeaseTarget(ctx context.Context, cfg Config, id string) (Ser
 	if !ok {
 		return Server{}, SSHTarget{}, "", exit(2, "provider=%s does not expose an SSH target", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(*cfg), ID: id})
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
+	applyResolvedLeaseConfig(cfg, lease.Server, &lease.SSH)
 	return lease.Server, lease.SSH, lease.LeaseID, nil
 }
 

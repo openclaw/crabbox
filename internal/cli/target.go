@@ -330,6 +330,48 @@ func isWindowsWSL2Target(target SSHTarget) bool {
 	return target.TargetOS == targetWindows && target.WindowsMode == windowsModeWSL2
 }
 
+func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
+	if cfg == nil || target == nil {
+		return
+	}
+	configuredSSHUser := cfg.SSHUser
+	if targetOS := firstNonBlank(server.Labels["target"], target.TargetOS); targetOS != "" {
+		cfg.TargetOS = targetOS
+	}
+	if windowsMode := firstNonBlank(server.Labels["windows_mode"], target.WindowsMode); windowsMode != "" {
+		cfg.WindowsMode = windowsMode
+	} else if cfg.TargetOS != targetWindows {
+		cfg.WindowsMode = ""
+	}
+	if workRoot := strings.TrimSpace(server.Labels["work_root"]); workRoot != "" {
+		cfg.WorkRoot = workRoot
+	}
+	normalizeTargetConfig(cfg)
+	target.TargetOS = cfg.TargetOS
+	target.WindowsMode = cfg.WindowsMode
+	if target.User == "" || target.User == configuredSSHUser {
+		target.User = cfg.SSHUser
+	}
+}
+
+func applyStoredLeaseClaimConfig(cfg *Config, claim leaseClaim) {
+	if cfg == nil {
+		return
+	}
+	labels := cloneStringMap(claim.Labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if labels["work_root"] == "" {
+		labels["work_root"] = strings.TrimSpace(claim.StaticWorkRoot)
+	}
+	target := SSHTarget{
+		TargetOS:    claim.TargetOS,
+		WindowsMode: claim.WindowsMode,
+	}
+	applyResolvedLeaseConfig(cfg, Server{Labels: labels}, &target)
+}
+
 func remoteJoin(cfg Config, parts ...string) string {
 	values := make([]string, 0, len(parts)+1)
 	if cfg.WorkRoot != "" {

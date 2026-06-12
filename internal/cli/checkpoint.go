@@ -112,7 +112,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, true)
 	if err != nil {
 		return err
 	}
@@ -626,18 +626,25 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 		return err
 	}
 	leaseID := strings.TrimSpace(*id)
-	workdir := strings.TrimSpace(*workdirOverride)
-	if workdir == "" {
-		workdir = defaultCheckpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir)
-	}
+	workdirOverrideValue := strings.TrimSpace(*workdirOverride)
 	if *dryRun {
+		claim, ok, claimErr := resolveLeaseClaimForProvider(leaseID, canonicalClaimProvider(cfg.Provider))
+		if claimErr != nil {
+			return claimErr
+		}
+		if ok {
+			applyStoredLeaseClaimConfig(&cfg, claim)
+			leaseID = firstNonBlank(claim.LeaseID, leaseID)
+		}
+		workdir := checkpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir, workdirOverrideValue)
 		fmt.Fprintf(a.Stdout, "would restore checkpoint id=%s lease=%s workdir=%s clear=%t\n", record.ID, leaseID, workdir, *clear)
 		return nil
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, true)
 	if err != nil {
 		return err
 	}
+	workdir := checkpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir, workdirOverrideValue)
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
@@ -1357,6 +1364,14 @@ func validCheckpointStrategy(strategy string) bool {
 
 func defaultCheckpointRestoreWorkdir(cfg Config, leaseID, repoName, savedWorkdir string) string {
 	return firstNonBlank(remoteJoin(cfg, leaseID, repoName), savedWorkdir)
+}
+
+func checkpointRestoreWorkdir(cfg Config, leaseID, repoName, savedWorkdir, override string) string {
+	override = strings.TrimSpace(override)
+	if override != "" {
+		return override
+	}
+	return defaultCheckpointRestoreWorkdir(cfg, leaseID, repoName, savedWorkdir)
 }
 
 func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string) string {
