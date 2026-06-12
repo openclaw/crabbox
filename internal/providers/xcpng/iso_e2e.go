@@ -71,6 +71,7 @@ const (
 	isoE2EInstallerTimeout      = 55 * time.Minute
 	isoE2EWindowsInstallTimeout = 70 * time.Minute
 	isoE2EGuestMetricsTimeout   = 20 * time.Minute
+	isoE2ECleanupTimeout        = 5 * time.Minute
 	isoE2EInstallDiskBytes      = 24 * 1024 * 1024 * 1024
 )
 
@@ -834,7 +835,9 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 		summary.Cleanup = "skipped"
 		return
 	}
-	cleanupErr := r.client.DeleteServer(ctx, r.vm.VM.Ref)
+	cleanupCtx, cancel := context.WithTimeout(ctx, isoE2ECleanupTimeout)
+	defer cancel()
+	cleanupErr := r.client.DeleteServer(cleanupCtx, r.vm.VM.Ref)
 	seen := map[string]struct{}{}
 	for _, drive := range []xcpNgConfigDrive{r.answerDrive, r.installerDrive, r.importedAnswer, r.importedInstaller} {
 		if !drive.DestroyVDI || drive.VDIRef == "" {
@@ -845,7 +848,7 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 			continue
 		}
 		seen[key] = struct{}{}
-		if err := r.client.DeleteConfigDrive(ctx, drive); err != nil && cleanupErr == nil {
+		if err := r.client.DeleteConfigDrive(cleanupCtx, drive); err != nil && cleanupErr == nil {
 			cleanupErr = err
 		}
 	}

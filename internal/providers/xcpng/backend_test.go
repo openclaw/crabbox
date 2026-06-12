@@ -18,28 +18,30 @@ import (
 const xcpNgTestVMUUID = "11111111-1111-1111-1111-111111111111"
 
 type fakeLifecycleClient struct {
-	calls        []string
-	servers      []Server
-	templateRef  string
-	srRef        string
-	networkRef   string
-	hostRef      string
-	iso          xcpNgISOMediaRef
-	cloneVM      xapiVM
-	freshVM      xcpNgFreshVMResult
-	freshReq     xcpNgFreshVMRequest
-	drive        xcpNgConfigDrive
-	importedISO  xcpNgConfigDrive
-	attachedDisk xcpNgConfigDrive
-	guestIP      string
-	discoveredIP string
-	getServer    map[string]Server
-	errOn        map[string]error
-	mutated      bool
-	deleted      []string
-	deletedCD    []xcpNgConfigDrive
-	setLabels    map[string]map[string]string
-	afterGuestIP func()
+	calls           []string
+	servers         []Server
+	templateRef     string
+	srRef           string
+	networkRef      string
+	hostRef         string
+	iso             xcpNgISOMediaRef
+	cloneVM         xapiVM
+	freshVM         xcpNgFreshVMResult
+	freshReq        xcpNgFreshVMRequest
+	drive           xcpNgConfigDrive
+	importedISO     xcpNgConfigDrive
+	attachedDisk    xcpNgConfigDrive
+	guestIP         string
+	discoveredIP    string
+	getServer       map[string]Server
+	errOn           map[string]error
+	mutated         bool
+	deleted         []string
+	deletedCD       []xcpNgConfigDrive
+	deleteBounded   bool
+	deleteCDBounded bool
+	setLabels       map[string]map[string]string
+	afterGuestIP    func()
 }
 
 func (f *fakeLifecycleClient) record(call string) {
@@ -288,17 +290,19 @@ func (f *fakeLifecycleClient) SetLabels(_ context.Context, id string, labels map
 	return f.fail("set-labels")
 }
 
-func (f *fakeLifecycleClient) DeleteServer(_ context.Context, id string) error {
+func (f *fakeLifecycleClient) DeleteServer(ctx context.Context, id string) error {
 	f.record("delete")
 	f.mutated = true
 	f.deleted = append(f.deleted, id)
+	_, f.deleteBounded = ctx.Deadline()
 	return f.fail("delete")
 }
 
-func (f *fakeLifecycleClient) DeleteConfigDrive(_ context.Context, drive xcpNgConfigDrive) error {
+func (f *fakeLifecycleClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDrive) error {
 	f.record("delete-config-drive")
 	f.mutated = true
 	f.deletedCD = append(f.deletedCD, drive)
+	_, f.deleteCDBounded = ctx.Deadline()
 	return f.fail("delete-config-drive")
 }
 
@@ -1008,6 +1012,35 @@ func TestRunISOE2ELinuxMutateCleansImportedInstallerWhenAttachFails(t *testing.T
 	}
 	if len(fake.deletedCD) == 0 || fake.deletedCD[0].VDIRef != "OpaqueRef:imported-vdi" {
 		t.Fatalf("deleted config drives=%#v", fake.deletedCD)
+	}
+}
+
+func TestISOE2ECleanupUsesBoundedContext(t *testing.T) {
+	fake := &fakeLifecycleClient{}
+	runtime := isoE2ERuntime{
+		client: fake,
+		vm:     xcpNgFreshVMResult{VM: xapiVM{Ref: "OpaqueRef:vm"}},
+		installerDrive: xcpNgConfigDrive{
+			VDIRef:     "OpaqueRef:installer",
+			DestroyVDI: true,
+		},
+	}
+	summary := ISOE2ESummary{
+		Classification: "linux_install_passed",
+		Details:        map[string]string{},
+	}
+	var runErr error
+
+	runtime.cleanup(context.Background(), &summary, &runErr)
+
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if summary.Cleanup != "cleaned" {
+		t.Fatalf("cleanup=%q", summary.Cleanup)
+	}
+	if !fake.deleteBounded || !fake.deleteCDBounded {
+		t.Fatalf("cleanup contexts: delete=%v delete-config-drive=%v", fake.deleteBounded, fake.deleteCDBounded)
 	}
 }
 
