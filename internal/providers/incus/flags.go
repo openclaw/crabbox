@@ -93,6 +93,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "incus-delete-on-release") {
 		cfg.Incus.DeleteOnRelease = *v.DeleteOnRelease
+		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 	}
 	if core.FlagWasSet(fs, "incus-start-timeout") {
 		if err := core.ApplyLeaseDuration(&cfg.Incus.StartTimeout, *v.StartTimeout); err != nil {

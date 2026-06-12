@@ -143,6 +143,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	labels["ssh_user"] = cfg.SSHUser
 	labels["ssh_port"] = cfg.SSHPort
 	labels["work_root"] = cfg.WorkRoot
+	labels["release"] = incusReleaseAction(cfg)
 	if port := strings.TrimSpace(cfg.Incus.ProxyListenPort); port != "" {
 		labels["proxy_port"] = port
 		if host := sshHostForConfig(cfg); host != "" {
@@ -381,7 +382,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if err != nil {
 		return err
 	}
-	deleteInstance := cfg.Incus.DeleteOnRelease
+	claim, claimOK, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		return err
+	}
+	deleteInstance := incusDeleteOnRelease(req.Lease, cfg)
 	if deleteInstance {
 		if inst.IsActive() {
 			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: req.Force, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
@@ -399,12 +404,13 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		}
 		labels := labelsFromInstance(inst)
 		labels["state"] = "stopped"
+		labels["release"] = "stop"
 		delete(labels, "host")
 		if err := setInstanceLabels(ctx, client, inst.Name, labels); err != nil {
 			return err
 		}
-		if leaseID != "" {
-			if err := core.UpdateLeaseClaimEndpoint(leaseID, core.Server{Labels: labels}, core.SSHTarget{}); err != nil {
+		if leaseID != "" && claimOK {
+			if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, claim, core.Server{Labels: labels}, core.SSHTarget{}); err != nil {
 				return err
 			}
 		}
@@ -418,10 +424,36 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	instance := core.Blank(core.Blank(lease.Server.CloudID, lease.Server.Name), "-")
-	if b.configForRun().Incus.DeleteOnRelease {
+	if incusDeleteOnRelease(lease, b.configForRun()) {
 		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
 	}
 	return fmt.Sprintf("stopped lease=%s instance=%s retained=true", lease.LeaseID, instance)
+}
+
+func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+	return !incusDeleteOnRelease(lease, b.configForRun())
+}
+
+func incusReleaseAction(cfg Config) string {
+	if cfg.Incus.DeleteOnRelease {
+		return "delete"
+	}
+	return "stop"
+}
+
+func incusDeleteOnRelease(lease LeaseTarget, cfg Config) bool {
+	if core.DeleteOnReleaseExplicit(cfg, providerName) {
+		return cfg.Incus.DeleteOnRelease
+	}
+	if lease.Server.Labels != nil {
+		switch strings.ToLower(strings.TrimSpace(lease.Server.Labels["release"])) {
+		case "delete":
+			return true
+		case "stop":
+			return false
+		}
+	}
+	return cfg.Incus.DeleteOnRelease
 }
 
 func (b *backend) Touch(ctx context.Context, req TouchRequest) (core.Server, error) {

@@ -11,6 +11,7 @@ import (
 
 type Config = core.Config
 type NamespaceConfig = core.NamespaceConfig
+type LeaseClaim = core.LeaseClaim
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
@@ -46,6 +47,14 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
+}
+
+func deleteOnReleaseExplicit(cfg Config) bool {
+	return core.DeleteOnReleaseExplicit(cfg, namespaceProvider)
+}
+
+func markDeleteOnReleaseExplicit(cfg *Config) {
+	core.MarkDeleteOnReleaseExplicit(cfg, namespaceProvider)
 }
 
 func newLeaseID() string {
@@ -84,8 +93,20 @@ func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
+func listLeaseClaims() ([]LeaseClaim, error) {
+	return core.ListLeaseClaims()
+}
+
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
+}
+
+func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
+}
+
+func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
 }
 
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {

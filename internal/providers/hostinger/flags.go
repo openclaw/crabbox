@@ -55,6 +55,8 @@ func ApplyHostingerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	}
 	if flagWasSet(fs, "hostinger-user") {
 		cfg.Hostinger.User = *v.User
+		cfg.SSHUser = *v.User
+		markHostingerUserExplicit(cfg)
 	}
 	if flagWasSet(fs, "hostinger-work-root") {
 		cfg.Hostinger.WorkRoot = *v.WorkRoot

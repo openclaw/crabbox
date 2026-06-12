@@ -400,14 +400,18 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 	}
 	if target.Host != "" {
 		claim.SSHHost = target.Host
-	} else if statusTerminalState(server.Labels["state"]) {
+	} else if claimEndpointInactiveState(server.Labels["state"]) {
 		claim.SSHHost = ""
 	}
 	if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
 		claim.SSHPort = port
-	} else if statusTerminalState(server.Labels["state"]) {
+	} else if claimEndpointInactiveState(server.Labels["state"]) {
 		claim.SSHPort = 0
 	}
+}
+
+func claimEndpointInactiveState(state string) bool {
+	return statusTerminalState(state) || strings.EqualFold(strings.TrimSpace(state), "paused")
 }
 
 // updateLeaseClaimTailscale records a tailnet endpoint on an existing claim.

@@ -77,6 +77,10 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
 }
 
+func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
+}
+
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
@@ -107,6 +111,18 @@ func effectiveHostingerWorkRoot(cfg Config) string {
 
 func markHostingerWorkRootExplicit(cfg *Config) {
 	core.MarkHostingerWorkRootExplicit(cfg)
+}
+
+func hostingerWorkRootExplicit(cfg *Config) bool {
+	return core.IsHostingerWorkRootExplicit(cfg) || core.IsWorkRootExplicit(cfg)
+}
+
+func markHostingerUserExplicit(cfg *Config) {
+	core.MarkHostingerUserExplicit(cfg)
+}
+
+func hostingerUserExplicit(cfg *Config) bool {
+	return core.IsHostingerUserExplicit(cfg)
 }
 
 func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {

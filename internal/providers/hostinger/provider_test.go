@@ -798,6 +798,9 @@ func TestAcquireResolveListReleaseCleanupDoctorWithFakeAPI(t *testing.T) {
 	if err != nil || !ok || claim.CloudID != "vm-new" || claim.Labels["state"] != "stopped" {
 		t.Fatalf("stopped claim=%#v ok=%v err=%v", claim, ok, err)
 	}
+	if claim.SSHHost != "" || claim.SSHPort != 0 {
+		t.Fatalf("stopped claim endpoint=%s:%d want cleared", claim.SSHHost, claim.SSHPort)
+	}
 	restarted, err := backend.Resolve(context.Background(), core.ResolveRequest{
 		ID:   resolved.LeaseID,
 		Repo: core.Repo{Root: t.TempDir()},
@@ -1250,6 +1253,124 @@ func TestResolveStartsStoppedHostingerVMForSSHCommands(t *testing.T) {
 	}
 	if api.startCalls != 1 || api.started[0] != "vm-stopped" || lease.SSH.Host == "" || waitCalls != 1 {
 		t.Fatalf("lease=%#v starts=%v", lease, api.started)
+	}
+}
+
+func TestResolveRestoresStoredSSHConfiguration(t *testing.T) {
+	isolateHostingerTestState(t)
+	vm := hostingerVM{
+		ID:       "vm-custom-ssh",
+		Hostname: "crabbox-custom-abcdef123456",
+		State:    "running",
+		IPv4:     hostingerIPAddresses{"203.0.113.90"},
+	}
+	storedCfg := core.BaseConfig()
+	storedCfg.Provider = providerName
+	storedCfg.Hostinger.User = "ubuntu"
+	storedCfg.Hostinger.WorkRoot = "/opt/crabbox/project"
+	applyDefaults(&storedCfg)
+	server := hostingerServer(vm, "cbx_abcdef123456", "custom", storedCfg, true)
+	if server.Labels["ssh_user"] != "ubuntu" || server.Labels["work_root"] != "/opt/crabbox/project" {
+		t.Fatalf("stored labels=%#v", server.Labels)
+	}
+	if err := core.ClaimLeaseTargetForConfig(
+		"cbx_abcdef123456",
+		"custom",
+		storedCfg,
+		server,
+		core.SSHTarget{},
+		time.Hour,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	api := &fakeAPI{vms: []hostingerVM{vm}}
+	backend := NewLeaseBackend(Provider{}.Spec(), core.Config{
+		Provider: providerName,
+		Hostinger: core.HostingerConfig{
+			APIToken: "token",
+		},
+	}, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+
+	oldRunSSHQuiet := hostingerRunSSHQuiet
+	var bootstrapTarget SSHTarget
+	var bootstrapCommand string
+	hostingerRunSSHQuiet = func(_ context.Context, target SSHTarget, command string) error {
+		bootstrapTarget = target
+		bootstrapCommand = command
+		return nil
+	}
+	t.Cleanup(func() { hostingerRunSSHQuiet = oldRunSSHQuiet })
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:      "cbx_abcdef123456",
+		Prepare: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.User != "ubuntu" ||
+		bootstrapTarget.User != "ubuntu" ||
+		!strings.Contains(lease.SSH.ReadyCheck, "test -w '/opt/crabbox/project'") ||
+		!strings.Contains(bootstrapCommand, "/opt/crabbox/project") {
+		t.Fatalf("lease=%#v bootstrapTarget=%#v command=%q", lease, bootstrapTarget, bootstrapCommand)
+	}
+
+	explicitCfg := core.BaseConfig()
+	explicitCfg.Provider = providerName
+	explicitCfg.Hostinger.APIToken = "token"
+	explicitCfg.Hostinger.User = "alice"
+	explicitCfg.Hostinger.WorkRoot = "/home/alice/crabbox"
+	applyDefaults(&explicitCfg)
+	core.MarkHostingerUserExplicit(&explicitCfg)
+	core.MarkHostingerWorkRootExplicit(&explicitCfg)
+	explicitBackend := NewLeaseBackend(Provider{}.Spec(), explicitCfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	explicitBackend.client = api
+	explicitBackend.skipSSHWait = true
+	explicitLease, err := explicitBackend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_abcdef123456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitLease.SSH.User != "alice" || !strings.Contains(explicitLease.SSH.ReadyCheck, "test -w '/home/alice/crabbox'") {
+		t.Fatalf("explicit lease=%#v", explicitLease)
+	}
+	if explicitLease.Server.Labels["ssh_user"] != "alice" || explicitLease.Server.Labels["work_root"] != "/home/alice/crabbox" {
+		t.Fatalf("explicit labels=%#v", explicitLease.Server.Labels)
+	}
+
+	userOnlyCfg := core.BaseConfig()
+	userOnlyCfg.Provider = providerName
+	userOnlyCfg.Hostinger.APIToken = "token"
+	userOnlyCfg.Hostinger.User = "alice"
+	applyDefaults(&userOnlyCfg)
+	core.MarkHostingerUserExplicit(&userOnlyCfg)
+	userOnlyBackend := NewLeaseBackend(Provider{}.Spec(), userOnlyCfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	userOnlyBackend.client = api
+	userOnlyBackend.skipSSHWait = true
+	userOnlyLease, err := userOnlyBackend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_abcdef123456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userOnlyLease.SSH.User != "alice" || userOnlyLease.Server.Labels["work_root"] != "/home/alice/crabbox" {
+		t.Fatalf("user-only lease=%#v", userOnlyLease)
+	}
+
+	sameUserCfg := core.BaseConfig()
+	sameUserCfg.Provider = providerName
+	sameUserCfg.Hostinger.APIToken = "token"
+	sameUserCfg.Hostinger.User = "ubuntu"
+	applyDefaults(&sameUserCfg)
+	core.MarkHostingerUserExplicit(&sameUserCfg)
+	sameUserBackend := NewLeaseBackend(Provider{}.Spec(), sameUserCfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	sameUserBackend.client = api
+	sameUserBackend.skipSSHWait = true
+	sameUserLease, err := sameUserBackend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_abcdef123456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameUserLease.Server.Labels["work_root"] != "/opt/crabbox/project" {
+		t.Fatalf("same-user lease=%#v", sameUserLease)
 	}
 }
 

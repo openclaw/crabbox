@@ -156,7 +156,9 @@ func (a App) pondPeers(ctx context.Context, args []string) error {
 	return nil
 }
 
-// pondRelease stops every lease in the named pond and removes their claims.
+// pondRelease stops every lease in the named pond and removes claims for
+// providers whose release destroys the resource. Providers that retain a
+// reusable stopped resource keep their claims.
 // It iterates across all providers represented in the pond — the caller does
 // not need to pass --provider. Individual stop failures are logged as warnings
 // and do not block the remaining peers; the function returns the first error
@@ -234,11 +236,20 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 			}
 			fmt.Fprintf(a.Stderr, "warning: %s/%s release failed: %v\n", claim.Provider, claim.LeaseID, lerr)
 		} else {
-			removeLeaseClaim(claim.LeaseID)
-			fmt.Fprintf(a.Stderr, "released %s/%s slug=%s\n", claim.Provider, claim.LeaseID, blank(claim.Slug, "-"))
+			retained := finalizePondReleaseClaim(backend, lease, claim)
+			fmt.Fprintf(a.Stderr, "released %s/%s slug=%s claim_retained=%t\n", claim.Provider, claim.LeaseID, blank(claim.Slug, "-"), retained)
 		}
 	}
 	return firstErr
+}
+
+func finalizePondReleaseClaim(backend Backend, lease LeaseTarget, claim leaseClaim) bool {
+	retainer, ok := backend.(ReleaseLeaseClaimRetainer)
+	retained := ok && retainer.RetainLeaseClaimAfterRelease(lease)
+	if !retained {
+		removeLeaseClaim(claim.LeaseID)
+	}
+	return retained
 }
 
 // pondPeersJSON wraps the peer list so the JSON output matches the

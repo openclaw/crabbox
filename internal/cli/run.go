@@ -1713,8 +1713,8 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.Namespace.WorkRoot) != "" {
 			args = append(args, "--namespace-work-root", cfg.Namespace.WorkRoot)
 		}
-		if cfg.Namespace.DeleteOnRelease {
-			args = append(args, "--namespace-delete-on-release")
+		if DeleteOnReleaseExplicit(cfg, "namespace-devbox") {
+			args = append(args, fmt.Sprintf("--namespace-delete-on-release=%t", cfg.Namespace.DeleteOnRelease))
 		}
 	case "daytona":
 		if strings.TrimSpace(cfg.Daytona.APIURL) != "" {
@@ -1742,7 +1742,9 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.Morph.APIURL) != "" {
 			args = append(args, "--morph-api-url", cfg.Morph.APIURL)
 		}
-		args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
+		if DeleteOnReleaseExplicit(cfg, "morph") {
+			args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
+		}
 	case "kubevirt":
 		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
 			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)
@@ -1764,7 +1766,13 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.KubeVirt.Template) != "" {
 			args = append(args, "--kubevirt-template", cfg.KubeVirt.Template)
 		}
-		args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
+		if DeleteOnReleaseExplicit(cfg, "kubevirt") {
+			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
+		}
+	case "incus":
+		if DeleteOnReleaseExplicit(cfg, "incus") {
+			args = append(args, fmt.Sprintf("--incus-delete-on-release=%t", cfg.Incus.DeleteOnRelease))
+		}
 	case "external":
 		if path, err := ExternalRoutingPath(id); err == nil {
 			args = append(args, "--external-routing-file", path)

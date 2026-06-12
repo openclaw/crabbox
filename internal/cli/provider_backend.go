@@ -153,6 +153,12 @@ type CheckpointForkWorkdirValidator interface {
 	ValidateCheckpointForkWorkdir(ctx context.Context, lease LeaseTarget, workdir string) error
 }
 
+type ReleaseLeaseClaimRetainer interface {
+	// Retained releases must persist terminal state and clear live endpoints
+	// before ReleaseLease returns.
+	RetainLeaseClaimAfterRelease(lease LeaseTarget) bool
+}
+
 type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool

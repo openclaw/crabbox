@@ -243,6 +243,11 @@ and readiness checks before command execution. Root or passwordless-sudo SSH
 users can also install the optional system readiness helper; non-root users keep
 to the configured work root and existing SSH tools.
 
+The lease claim stores the effective Hostinger SSH user and work root. Values
+supplied only on the original acquire command therefore remain attached to that
+VPS and do not need to be repeated on later `run`, `ssh`, `status`, or `stop`
+commands.
+
 ```sh
 crabbox list --provider hostinger
 crabbox list --provider hostinger --all

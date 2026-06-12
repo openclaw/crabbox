@@ -272,6 +272,10 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	cfg, err = b.configForLeaseClaim(cfg, leaseID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	if req.ReleaseOnly {
 		server, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
@@ -293,7 +297,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		}
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
-	if vm.Stopped() && req.Repo.Root == "" {
+	if vm.Stopped() && req.Repo.Root == "" && !req.Prepare {
 		server, err := b.serverFromVMWithClaim(vm, leaseID, slug, cfg, true)
 		if err != nil {
 			return LeaseTarget{}, err
@@ -416,10 +420,18 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		}
 	}
 	if claimOK {
-		if _, err := updateLeaseClaimLabelsIfUnchangedAfter(claim.LeaseID, claim, hostingerStoppedClaimLabels(claim.Labels), func() error {
+		updated, err := updateLeaseClaimLabelsIfUnchangedAfter(claim.LeaseID, claim, hostingerStoppedClaimLabels(claim.Labels), func() error {
 			return b.stopVMAndWait(ctx, client, vmID)
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("finalize hostinger release lease=%s: %w", claim.LeaseID, err)
+		}
+		server := req.Lease.Server
+		server.CloudID = vmID
+		server.Provider = providerName
+		server.Labels = updated.Labels
+		if _, err := updateLeaseClaimEndpointIfUnchanged(claim.LeaseID, updated, server, SSHTarget{}); err != nil {
+			return fmt.Errorf("clear hostinger release endpoint lease=%s: %w", claim.LeaseID, err)
 		}
 		return nil
 	}
@@ -428,6 +440,10 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 
 func (b *leaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("stopped lease=%s vm=%s name=%s billing=still-owned", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
+}
+
+func (b *leaseBackend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
+	return true
 }
 
 func validateHostingerReleaseAction(cfg Config) error {
@@ -1063,6 +1079,28 @@ func (b *leaseBackend) updateClaimState(leaseID string, cfg Config, state string
 	return err
 }
 
+func (b *leaseBackend) configForLeaseClaim(cfg Config, leaseID string) (Config, error) {
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok {
+		return cfg, err
+	}
+	userExplicit := hostingerUserExplicit(&cfg)
+	storedUser := strings.TrimSpace(claim.Labels["ssh_user"])
+	if storedUser != "" && !userExplicit {
+		cfg.Hostinger.User = storedUser
+		cfg.SSHUser = storedUser
+	}
+	userChanged := userExplicit && storedUser != strings.TrimSpace(cfg.SSHUser)
+	if workRoot := claim.Labels["work_root"]; workRoot != "" && !userChanged && !hostingerWorkRootExplicit(&cfg) {
+		cfg.Hostinger.WorkRoot = workRoot
+		cfg.WorkRoot = workRoot
+	}
+	if err := validateHostingerWorkRoot(cfg); err != nil {
+		return Config{}, exit(2, "hostinger lease %s has invalid stored SSH configuration: %v", leaseID, err)
+	}
+	return cfg, nil
+}
+
 func (b *leaseBackend) rollbackStartedVM(client hostingerAPI, id, leaseID string, cfg Config, cause error) error {
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1224,6 +1262,8 @@ func (b *leaseBackend) leaseFromVM(cfg Config, vm hostingerVM, leaseID, slug str
 func hostingerServer(vm hostingerVM, leaseID, slug string, cfg Config, keep bool) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["release"] = "stop"
+	labels["ssh_user"] = cfg.SSHUser
+	labels["work_root"] = cfg.WorkRoot
 	if state := strings.ToLower(firstNonBlank(vm.State, vm.Status)); state != "" {
 		labels["state"] = state
 	}
@@ -1264,6 +1304,8 @@ func (b *leaseBackend) serverFromVMWithClaim(vm hostingerVM, leaseID, slug strin
 	labels["lease"] = leaseID
 	labels["slug"] = slug
 	labels["release"] = "stop"
+	labels["ssh_user"] = cfg.SSHUser
+	labels["work_root"] = cfg.WorkRoot
 	if state := strings.ToLower(firstNonBlank(vm.State, vm.Status)); state != "" {
 		labels["state"] = state
 	}

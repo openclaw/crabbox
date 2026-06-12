@@ -133,14 +133,15 @@ crabbox stop --provider morph blue-lobster
 - Morph uses API-returned credentials per instance. If the private key is
   passphrase-protected, Crabbox decrypts it in memory with the returned
   password, stores the usable key under the normal per-lease path with mode
-  `0600`, and removes it when the lease is released. The password is not passed
-  in command-line arguments or retained on disk.
+  `0600`, and keeps it while the instance is paused for reuse. Deleting the
+  instance removes the key. The password is not passed in command-line
+  arguments or retained on disk.
 - SSH host keys for the shared Morph gateway persist in
   `~/.config/crabbox/morph/known_hosts` (or the platform user config
   equivalent), so trust-on-first-use survives lease cleanup.
 - `stop` pauses by default. Paused instances can be reused later by `run`,
   `ssh`, or `status --wait`; with `wakeOnSSH=true`, SSH can wake them through
-  the gateway.
+  the gateway. The local claim and SSH key remain until the instance is deleted.
 - `morph.snapshot` is required for new leases. Existing leases can still be
   resolved by lease id, slug, or instance id.
 - The SSH hostname is the shared gateway, not the instance-specific hostname,

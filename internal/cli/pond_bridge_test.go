@@ -54,6 +54,18 @@ type fakeTailnetBridgeProvider struct {
 	validateErr error
 }
 
+type pondReleaseRetentionBackend struct {
+	retain bool
+}
+
+func (b pondReleaseRetentionBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "test"}
+}
+
+func (b pondReleaseRetentionBackend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
+	return b.retain
+}
+
 func (f *fakeTailnetBridgeProvider) ValidateTailnetPeer(context.Context, string) (TailscaleMetadata, error) {
 	return f.meta, f.validateErr
 }
@@ -642,6 +654,36 @@ func TestPondReleaseKongStripsCommandPath(t *testing.T) {
 	}
 	if strings.Contains(out.String(), `pond "pond-release-alpha"`) {
 		t.Fatalf("Kong command path leaked into pond name: %q", out.String())
+	}
+}
+
+func TestFinalizePondReleaseClaimUsesProviderPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		retain bool
+	}{
+		{name: "remove", retain: false},
+		{name: "retain", retain: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := leaseClaim{LeaseID: "cbx_retained", Slug: "retained", Provider: "test", Pond: "demo", RepoRoot: "/repo"}
+			withTempClaims(t, []leaseClaim{claim})
+			lease := LeaseTarget{LeaseID: claim.LeaseID}
+
+			if got := finalizePondReleaseClaim(pondReleaseRetentionBackend{retain: tc.retain}, lease, claim); got != tc.retain {
+				t.Fatalf("retained=%v want %v", got, tc.retain)
+			}
+			claims, err := listLeaseClaims()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.retain && len(claims) != 1 {
+				t.Fatalf("retained claim missing: %#v", claims)
+			}
+			if !tc.retain && len(claims) != 0 {
+				t.Fatalf("released claim remains: %#v", claims)
+			}
+		})
 	}
 }
 

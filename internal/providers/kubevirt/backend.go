@@ -74,7 +74,15 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		return core.LeaseTarget{}, err
 	}
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: b.server(name, leaseID, slug, keep), LeaseID: leaseID}, nil
+		server := b.server(name, leaseID, slug, keep)
+		persistedLabels, err := b.persistedVMLabels(ctx, name, leaseID, slug)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		for key, value := range persistedLabels {
+			server.Labels[key] = value
+		}
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	keyPath, err := b.resolveSSHKey(leaseID)
 	if err != nil {
@@ -151,21 +159,46 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 	if _, _, _, _, err := b.validateVMIdentity(ctx, name, req.Lease.LeaseID, expectedSlug); err != nil {
 		return err
 	}
-	var err error
-	if b.cfg.KubeVirt.DeleteOnRelease {
+	claim, claimOK, err := core.ResolveLeaseClaimForProvider(req.Lease.LeaseID, providerName)
+	if err != nil {
+		return err
+	}
+	deleteVM := kubeVirtDeleteOnRelease(req.Lease, b.cfg)
+	if deleteVM {
 		err = b.deleteVM(ctx, name)
 	} else {
 		err = b.stopVM(ctx, name)
 	}
-	if err == nil && b.cfg.KubeVirt.DeleteOnRelease {
+	if err == nil && deleteVM {
 		b.removeLeaseClaim(req.Lease.LeaseID)
 		b.removeGeneratedKey(req.Lease.LeaseID)
+	} else if err == nil {
+		server := req.Lease.Server
+		if server.Labels == nil {
+			server.Labels = map[string]string{}
+		}
+		server.CloudID = b.cfg.KubeVirt.Namespace + "/" + name
+		server.Provider = providerName
+		server.Name = name
+		server.Status = "stopped"
+		server.Labels["state"] = "stopped"
+		server.Labels["release"] = "stop"
+		if patchErr := b.patchVMAnnotations(ctx, name, server.Labels); patchErr != nil {
+			return patchErr
+		}
+		if claimOK {
+			_, err = core.UpdateLeaseClaimEndpointIfUnchanged(req.Lease.LeaseID, claim, server, core.SSHTarget{})
+		}
 	}
 	return err
 }
 
 func (b *leaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("released KubeVirt lease=%s name=%s", lease.LeaseID, lease.Server.Name)
+}
+
+func (b *leaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
+	return !kubeVirtDeleteOnRelease(lease, b.cfg)
 }
 
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -611,9 +644,32 @@ func (b *leaseBackend) server(name, leaseID, slug string, keep bool) core.Server
 	labels["namespace"] = b.cfg.KubeVirt.Namespace
 	labels["target"] = core.TargetLinux
 	labels["state"] = "starting"
+	labels["release"] = kubeVirtReleaseAction(b.cfg)
 	server := core.Server{CloudID: b.cfg.KubeVirt.Namespace + "/" + name, Provider: providerName, Name: name, Status: "starting", Labels: labels}
 	server.ServerType.Name = "virtualmachine"
 	return server
+}
+
+func kubeVirtReleaseAction(cfg core.Config) string {
+	if cfg.KubeVirt.DeleteOnRelease {
+		return "delete"
+	}
+	return "stop"
+}
+
+func kubeVirtDeleteOnRelease(lease core.LeaseTarget, cfg core.Config) bool {
+	if core.DeleteOnReleaseExplicit(cfg, providerName) {
+		return cfg.KubeVirt.DeleteOnRelease
+	}
+	if lease.Server.Labels != nil {
+		switch strings.ToLower(strings.TrimSpace(lease.Server.Labels["release"])) {
+		case "delete":
+			return true
+		case "stop":
+			return false
+		}
+	}
+	return cfg.KubeVirt.DeleteOnRelease
 }
 
 func (b *leaseBackend) itemToServer(item kubeVirtItem) core.Server {

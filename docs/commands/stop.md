@@ -28,9 +28,13 @@ Crabbox lease ID and local slug:
 
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug and forwards to
   `blacksmith testbox stop`.
-- `namespace-devbox` — shuts down the Namespace Devbox by default and removes
-  the local claim. Set `namespace.deleteOnRelease` (or pass
-  `--namespace-delete-on-release`) to delete the Devbox instead.
+- `namespace-devbox` — shuts down the Namespace Devbox by default and retains
+  its local claim and SSH files for reuse. Set `namespace.deleteOnRelease` (or
+  pass `--namespace-delete-on-release`) to delete the Devbox and local SSH
+  files instead.
+- `morph` — pauses the instance by default and retains its local claim and SSH
+  key for reuse. Set `morph.deleteOnRelease` (or pass
+  `--morph-delete-on-release`) to delete the instance and key instead.
 - `exe-dev` — accepts a Crabbox lease ID, local slug, or exe.dev VM name and
   deletes the VM through `ssh exe.dev rm`.
 - `semaphore` — stops the Semaphore CI job and removes the local claim.
@@ -63,7 +67,8 @@ The action `stop` takes depends on how the lease was created:
   `stop` warns and still attempts the release by ID.
 - **Direct cloud and local providers** — usually delete the backing server and
   print `deleted lease=<id> server=<id> name=<name>`, but retain-capable
-  providers such as `namespace-devbox`, `kubevirt`, and `incus` stop instead
+  providers such as `namespace-devbox`, `morph`, `kubevirt`, and `incus` stop
+  or pause instead
   when their `*.deleteOnRelease` setting is `false` (some providers print a
   provider-specific release message instead, for example
   `stopped lease=<id> instance=<name> retained=true` for retained Incus

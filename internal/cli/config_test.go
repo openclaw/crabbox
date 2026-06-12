@@ -316,8 +316,8 @@ func TestHostingerConfigDefaultsFileAndEnv(t *testing.T) {
 		!cfg.Hostinger.AllowPurchase {
 		t.Fatalf("file hostinger config not applied: %#v", cfg.Hostinger)
 	}
-	if !IsHostingerWorkRootExplicit(&cfg) {
-		t.Fatal("file hostinger work root not marked explicit")
+	if !IsHostingerUserExplicit(&cfg) || !IsHostingerWorkRootExplicit(&cfg) {
+		t.Fatal("file hostinger SSH settings not marked explicit")
 	}
 
 	t.Setenv("HOSTINGER_API_TOKEN", "fallback-token")
@@ -327,6 +327,7 @@ func TestHostingerConfigDefaultsFileAndEnv(t *testing.T) {
 	t.Setenv("CRABBOX_HOSTINGER_PAYMENT_METHOD_ID", "84")
 	t.Setenv("CRABBOX_HOSTINGER_TEMPLATE_ID", "789")
 	t.Setenv("CRABBOX_HOSTINGER_DATA_CENTER_ID", "321")
+	t.Setenv("CRABBOX_HOSTINGER_USER", "admin")
 	t.Setenv("CRABBOX_HOSTINGER_WORK_ROOT", "/srv/hostinger")
 	t.Setenv("CRABBOX_HOSTINGER_ALLOW_PURCHASE", "false")
 	if err := applyEnv(&cfg); err != nil {
@@ -338,9 +339,53 @@ func TestHostingerConfigDefaultsFileAndEnv(t *testing.T) {
 		cfg.Hostinger.PaymentMethodID != "84" ||
 		cfg.Hostinger.TemplateID != "789" ||
 		cfg.Hostinger.DataCenterID != "321" ||
+		cfg.Hostinger.User != "admin" ||
 		cfg.Hostinger.WorkRoot != "/srv/hostinger" ||
 		cfg.Hostinger.AllowPurchase {
 		t.Fatalf("env hostinger config not applied: %#v", cfg.Hostinger)
+	}
+	if !IsHostingerUserExplicit(&cfg) {
+		t.Fatal("env hostinger user not marked explicit")
+	}
+}
+
+func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
+	value := true
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Incus:     &fileIncusConfig{DeleteOnRelease: &value},
+		KubeVirt:  &fileKubeVirtConfig{DeleteOnRelease: &value},
+		Namespace: &fileNamespaceConfig{DeleteOnRelease: &value},
+		Morph:     &fileMorphConfig{DeleteOnRelease: &value},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+		if !DeleteOnReleaseExplicit(cfg, provider) {
+			t.Fatalf("file release policy not explicit for %s", provider)
+		}
+	}
+	if DeleteOnReleaseExplicit(cfg, "hostinger") {
+		t.Fatal("release policy leaked across providers")
+	}
+
+	clearConfigEnv(t)
+	envCfg := baseConfig()
+	for _, key := range []string{
+		"CRABBOX_INCUS_DELETE_ON_RELEASE",
+		"CRABBOX_KUBEVIRT_DELETE_ON_RELEASE",
+		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_DELETE_ON_RELEASE",
+	} {
+		t.Setenv(key, "false")
+	}
+	if err := applyEnv(&envCfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+		if !DeleteOnReleaseExplicit(envCfg, provider) {
+			t.Fatalf("environment release policy not explicit for %s", provider)
+		}
 	}
 }
 

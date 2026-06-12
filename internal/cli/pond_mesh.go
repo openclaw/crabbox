@@ -497,26 +497,37 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 	return members, ineligible, nil
 }
 
-// collectPondMembers narrows a backend's list output to the pond of interest
-// and resolves each member's SSHTarget. Servers without an exposed-ports
-// label are kept in the projection (Ports is empty) so the no-op case is
-// observable to callers and to doctor.
+// collectPondMembers narrows a backend's list output to the pond of interest.
+// It resolves SSH targets only for members with exposed ports, avoiding a
+// provider lifecycle change when pond connect has nothing to forward.
 func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config, servers []Server, pond string) ([]pondMember, error) {
 	servers = filterServersByPond(servers, pond)
 	out := make([]pondMember, 0, len(servers))
 	for _, server := range servers {
-		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: pondResolveIDForServer(server)})
+		resolveID := pondResolveIDForServer(server)
+		name := strings.TrimSpace(serverSlug(server))
+		if name == "" {
+			name = resolveID
+		}
+		ports := parseExposedPortsLabel(server.Labels[pondExposedPortsLabelKey])
+		if len(ports) == 0 {
+			out = append(out, pondMember{Name: name, Ports: ports, Lease: resolveID})
+			continue
+		}
+		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: resolveID, Prepare: true})
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", server.Name, err)
 		}
-		name := strings.TrimSpace(serverSlug(server))
+		if err := updateLeaseClaimEndpoint(lease.LeaseID, lease.Server, lease.SSH); err != nil {
+			return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, err)
+		}
 		if name == "" {
 			name = lease.LeaseID
 		}
 		out = append(out, pondMember{
 			Name:  name,
 			SSH:   lease.SSH,
-			Ports: parseExposedPortsLabel(server.Labels[pondExposedPortsLabelKey]),
+			Ports: ports,
 			Lease: lease.LeaseID,
 		})
 	}

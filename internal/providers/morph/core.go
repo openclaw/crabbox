@@ -78,8 +78,20 @@ func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim,
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
+func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
+}
+
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
+}
+
+func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
+}
+
+func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) error {
+	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
 }
 
 func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
@@ -104,6 +116,14 @@ func bootstrapWaitTimeout(cfg Config) time.Duration {
 
 func isDefaultWorkRoot(value string) bool {
 	return core.IsDefaultWorkRoot(value)
+}
+
+func deleteOnReleaseExplicit(cfg Config) bool {
+	return core.DeleteOnReleaseExplicit(cfg, providerName)
+}
+
+func markDeleteOnReleaseExplicit(cfg *Config) {
+	core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 }
 
 func testboxKeyPath(leaseID string) (string, error) {

@@ -116,6 +116,7 @@ type Config struct {
 	Actions                       ActionsConfig
 	Blacksmith                    BlacksmithConfig
 	KubeVirt                      KubeVirtConfig
+	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
 	Morph                         MorphConfig
@@ -125,6 +126,7 @@ type Config struct {
 	Railway                       RailwayConfig
 	Runpod                        RunpodConfig
 	Hostinger                     HostingerConfig
+	hostingerUserExplicit         bool
 	hostingerWorkRootExplicit     bool
 	Wandb                         WandbConfig
 	Islo                          IsloConfig
@@ -1435,8 +1437,27 @@ func IsHostingerWorkRootExplicit(cfg *Config) bool {
 	return cfg.hostingerWorkRootExplicit
 }
 
+func IsHostingerUserExplicit(cfg *Config) bool {
+	return cfg.hostingerUserExplicit
+}
+
+func MarkHostingerUserExplicit(cfg *Config) {
+	cfg.hostingerUserExplicit = true
+}
+
 func MarkHostingerWorkRootExplicit(cfg *Config) {
 	cfg.hostingerWorkRootExplicit = true
+}
+
+func DeleteOnReleaseExplicit(cfg Config, provider string) bool {
+	return cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)]
+}
+
+func MarkDeleteOnReleaseExplicit(cfg *Config, provider string) {
+	if cfg.deleteOnReleaseExplicit == nil {
+		cfg.deleteOnReleaseExplicit = map[string]bool{}
+	}
+	cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)] = true
 }
 
 func EffectiveHostingerWorkRoot(cfg Config) string {
@@ -3001,6 +3022,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Incus.DeleteOnRelease != nil {
 			cfg.Incus.DeleteOnRelease = *file.Incus.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "incus")
 		}
 		if file.Incus.StartTimeout != "" {
 			applyLeaseDuration(&cfg.Incus.StartTimeout, file.Incus.StartTimeout)
@@ -3356,6 +3378,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.KubeVirt.DeleteOnRelease != nil {
 			cfg.KubeVirt.DeleteOnRelease = *file.KubeVirt.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 		}
 	}
 	if file.External != nil {
@@ -3403,6 +3426,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Namespace.DeleteOnRelease != nil {
 			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 		}
 	}
 	if file.Morph != nil {
@@ -3423,6 +3447,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Morph.DeleteOnRelease != nil {
 			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "morph")
 		}
 		if file.Morph.WakeOnSSH != nil {
 			cfg.Morph.WakeOnSSH = *file.Morph.WakeOnSSH
@@ -4600,6 +4625,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Incus.WorkRoot = getenv("CRABBOX_INCUS_WORK_ROOT", cfg.Incus.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_INCUS_DELETE_ON_RELEASE"); ok {
 		cfg.Incus.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "incus")
 	}
 	if timeout := os.Getenv("CRABBOX_INCUS_START_TIMEOUT"); timeout != "" {
 		applyLeaseDuration(&cfg.Incus.StartTimeout, timeout)
@@ -4759,6 +4785,7 @@ func applyEnv(cfg *Config) error {
 	cfg.KubeVirt.WorkRoot = getenv("CRABBOX_KUBEVIRT_WORK_ROOT", cfg.KubeVirt.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
 		cfg.KubeVirt.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 	}
 	cfg.External.Command = getenv("CRABBOX_EXTERNAL_COMMAND", cfg.External.Command)
 	if arg := os.Getenv("CRABBOX_EXTERNAL_ARG"); arg != "" {
@@ -4777,6 +4804,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Namespace.WorkRoot = getenv("CRABBOX_NAMESPACE_WORK_ROOT", cfg.Namespace.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
 		cfg.Namespace.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 	}
 	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
 	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
@@ -4785,6 +4813,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
 		cfg.Morph.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "morph")
 	}
 	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
 		cfg.Morph.WakeOnSSH = value
@@ -4836,7 +4865,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Hostinger.TemplateID = getenv("CRABBOX_HOSTINGER_TEMPLATE_ID", cfg.Hostinger.TemplateID)
 	cfg.Hostinger.DataCenterID = getenv("CRABBOX_HOSTINGER_DATA_CENTER_ID", cfg.Hostinger.DataCenterID)
 	cfg.Hostinger.HostnamePrefix = getenv("CRABBOX_HOSTINGER_HOSTNAME_PREFIX", cfg.Hostinger.HostnamePrefix)
-	cfg.Hostinger.User = getenv("CRABBOX_HOSTINGER_USER", cfg.Hostinger.User)
+	if user := os.Getenv("CRABBOX_HOSTINGER_USER"); user != "" {
+		cfg.Hostinger.User = user
+		MarkHostingerUserExplicit(cfg)
+	}
 	if workRoot := os.Getenv("CRABBOX_HOSTINGER_WORK_ROOT"); workRoot != "" {
 		cfg.Hostinger.WorkRoot = workRoot
 		MarkHostingerWorkRootExplicit(cfg)

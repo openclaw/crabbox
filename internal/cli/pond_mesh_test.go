@@ -507,7 +507,16 @@ func (b *pondMeshResolveRecordingBackend) Acquire(context.Context, AcquireReques
 }
 func (b *pondMeshResolveRecordingBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
 	b.ids = append(b.ids, req.ID)
-	return LeaseTarget{LeaseID: req.ID, SSH: SSHTarget{User: "ubuntu", Host: req.ID + ".example", Port: "22"}}, nil
+	return LeaseTarget{
+		LeaseID: req.ID,
+		Server: Server{
+			CloudID:  req.ID,
+			Provider: "hetzner",
+			Name:     req.ID,
+			Labels:   map[string]string{"provider": "hetzner", "lease": req.ID, "slug": req.ID, "state": "ready"},
+		},
+		SSH: SSHTarget{User: "ubuntu", Host: req.ID + ".example", Port: "22"},
+	}, nil
 }
 func (b *pondMeshResolveRecordingBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
@@ -520,10 +529,18 @@ func (b *pondMeshResolveRecordingBackend) Touch(context.Context, TouchRequest) (
 }
 
 func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	backend := &pondMeshResolveRecordingBackend{}
 	servers := []Server{
 		{Name: "server-a", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web_a", pondExposedPortsLabelKey: "8080"}},
 		{Name: "server-b", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web_b", pondExposedPortsLabelKey: "9090"}},
+	}
+	for _, leaseID := range []string{"cbx_web_a", "cbx_web_b"} {
+		if err := claimLeaseForRepoProvider(leaseID, leaseID, "hetzner", t.TempDir(), time.Hour, false); err != nil {
+			t.Fatal(err)
+		}
 	}
 	members, err := collectPondMembers(context.Background(), backend, Config{}, servers, "alpha")
 	if err != nil {
@@ -533,6 +550,30 @@ func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
 		t.Fatalf("resolve IDs=%v, want lease IDs before duplicate slug", backend.ids)
 	}
 	if members[0].Lease != "cbx_web_a" || members[1].Lease != "cbx_web_b" {
+		t.Fatalf("members=%#v", members)
+	}
+	for _, leaseID := range []string{"cbx_web_a", "cbx_web_b"} {
+		claim, ok, err := resolveLeaseClaimForProvider(leaseID, "hetzner")
+		if err != nil || !ok || claim.SSHHost != leaseID+".example" || claim.SSHPort != 22 {
+			t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+		}
+	}
+}
+
+func TestCollectPondMembersDoesNotPreparePortlessMembers(t *testing.T) {
+	backend := &pondMeshResolveRecordingBackend{}
+	servers := []Server{
+		{Name: "client", Labels: map[string]string{pondLabelKey: "alpha", "slug": "client", "lease": "cbx_client"}},
+		{Name: "web", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web", pondExposedPortsLabelKey: "8080"}},
+	}
+	members, err := collectPondMembers(context.Background(), backend, Config{}, servers, "alpha")
+	if err != nil {
+		t.Fatalf("collectPondMembers: %v", err)
+	}
+	if !reflect.DeepEqual(backend.ids, []string{"cbx_web"}) {
+		t.Fatalf("resolve IDs=%v, want only exposed member", backend.ids)
+	}
+	if len(members) != 2 || members[0].Name != "client" || members[0].Lease != "cbx_client" || len(members[0].Ports) != 0 || members[0].SSH.Host != "" {
 		t.Fatalf("members=%#v", members)
 	}
 }
