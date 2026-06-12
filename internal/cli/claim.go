@@ -284,6 +284,43 @@ func updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, exp
 	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, true)
 }
 
+func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected leaseClaim, server Server, target SSHTarget, action func() error) (leaseClaim, error) {
+	if leaseID == "" {
+		return leaseClaim{}, nil
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return leaseClaim{}, err
+	}
+	var updated leaseClaim
+	err = withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true))(claim, exists); err != nil {
+			return err
+		}
+		if action != nil {
+			if err := action(); err != nil {
+				return err
+			}
+		}
+		provider := firstNonBlank(server.Labels["provider"], server.Provider)
+		prepared, err := prepareLeaseClaimEndpoint(claim, provider, server.Labels["slug"], server, false)
+		if err != nil {
+			return err
+		}
+		applyLeaseClaimEndpoint(&claim, prepared, target)
+		updated = cloneLeaseClaim(claim)
+		return writeLeaseClaimAtomic(path, claim)
+	})
+	return updated, err
+}
+
 func updateLeaseClaimEndpointIfUnchangedMode(leaseID string, expected leaseClaim, server Server, target SSHTarget, allowProviderMetadata bool) (leaseClaim, error) {
 	if leaseID == "" {
 		return leaseClaim{}, nil

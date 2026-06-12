@@ -377,30 +377,32 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		if err := client.DeleteInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
 			return exit(1, "morph delete instance %s failed: %v", instance.ID, err)
 		}
-	} else if !morphInstancePaused(instance) {
-		if err := client.PauseInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
-			return exit(1, "morph pause instance %s failed: %v", instance.ID, err)
-		}
-	}
-	if deleteInstance {
 		removeLeaseClaim(leaseID)
 		removeStoredTestboxKey(blank(leaseID, instance.ID))
 		return nil
 	}
+	wasPaused := morphInstancePaused(instance)
 	instance.Status = "paused"
 	labels := morphLeaseMetadata(cfg, instance, leaseID, req.Lease.Server.Labels["slug"], "paused", true, b.now().UTC(), true)
 	labels["release"] = "pause"
-	if err := client.SetInstanceMetadata(ctx, instance.ID, labels); err != nil {
-		return exit(1, "morph persist paused metadata for %s failed: %v", instance.ID, err)
+	pauseAndPersist := func() error {
+		if !wasPaused {
+			if err := client.PauseInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
+				return exit(1, "morph pause instance %s failed: %v", instance.ID, err)
+			}
+		}
+		if err := client.SetInstanceMetadata(ctx, instance.ID, labels); err != nil {
+			return exit(1, "morph persist paused metadata for %s failed: %v", instance.ID, err)
+		}
+		return nil
 	}
 	instance.Metadata = labels
 	server := morphServer(instance, cfg, leaseID, labels["slug"])
 	if claimOK {
-		if _, err := updateLeaseClaimEndpointIfUnchanged(leaseID, claim, server, SSHTarget{}); err != nil {
-			return err
-		}
+		_, err = updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, pauseAndPersist)
+		return err
 	}
-	return nil
+	return pauseAndPersist()
 }
 
 func (b *morphLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {

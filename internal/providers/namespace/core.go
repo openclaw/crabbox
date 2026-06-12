@@ -109,6 +109,10 @@ func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, se
 	return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
 }
 
+func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
+}
+
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
 }

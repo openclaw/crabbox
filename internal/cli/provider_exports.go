@@ -173,6 +173,12 @@ func UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, exp
 	return updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
 }
 
+// UpdateLeaseClaimEndpointIfUnchangedAfter holds the claim lock while action
+// runs, then updates the endpoint only if the claim still matches expected.
+func UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {
+	return updateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
+}
+
 func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
 	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
 }

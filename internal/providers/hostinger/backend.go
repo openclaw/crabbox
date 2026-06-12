@@ -130,9 +130,28 @@ func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (lease L
 		if !req.Keep {
 			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			stopErr := b.stopVMAndWait(stopCtx, client, purchasedVMID)
+			claimErr := error(nil)
+			if stopErr == nil && claimPersisted {
+				claim, ok, resolveErr := resolveLeaseClaimForProvider(leaseID, providerName)
+				if resolveErr != nil {
+					claimErr = resolveErr
+				} else if ok && (claim.CloudID == "" || claim.CloudID == purchasedVMID) {
+					server := Server{
+						CloudID:  purchasedVMID,
+						Provider: providerName,
+						Name:     hostname,
+						Status:   "stopped",
+						Labels:   hostingerStoppedClaimLabels(claim.Labels),
+					}
+					_, claimErr = updateLeaseClaimEndpointIfUnchanged(claim.LeaseID, claim, server, SSHTarget{})
+				}
+			}
 			cancel()
 			if stopErr == nil {
 				rollback = "stopped"
+				if claimErr != nil {
+					rollback += "; claim-update-failed: " + claimErr.Error()
+				}
 			} else {
 				rollback = "stop-failed: " + stopErr.Error()
 			}
@@ -420,18 +439,14 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		}
 	}
 	if claimOK {
-		updated, err := updateLeaseClaimLabelsIfUnchangedAfter(claim.LeaseID, claim, hostingerStoppedClaimLabels(claim.Labels), func() error {
-			return b.stopVMAndWait(ctx, client, vmID)
-		})
-		if err != nil {
-			return fmt.Errorf("finalize hostinger release lease=%s: %w", claim.LeaseID, err)
-		}
 		server := req.Lease.Server
 		server.CloudID = vmID
 		server.Provider = providerName
-		server.Labels = updated.Labels
-		if _, err := updateLeaseClaimEndpointIfUnchanged(claim.LeaseID, updated, server, SSHTarget{}); err != nil {
-			return fmt.Errorf("clear hostinger release endpoint lease=%s: %w", claim.LeaseID, err)
+		server.Status = "stopped"
+		server.Labels = hostingerStoppedClaimLabels(claim.Labels)
+		_, err := b.stopClaimedVM(ctx, client, claim, vmID, server)
+		if err != nil {
+			return fmt.Errorf("finalize hostinger release lease=%s: %w", claim.LeaseID, err)
 		}
 		return nil
 	}
@@ -490,6 +505,16 @@ func hostingerStoppedClaimLabels(labels map[string]string) map[string]string {
 	}
 	stopped["state"] = "stopped"
 	return stopped
+}
+
+func (b *leaseBackend) stopClaimedVM(ctx context.Context, client hostingerAPI, claim LeaseClaim, vmID string, server Server) (LeaseClaim, error) {
+	server.CloudID = vmID
+	server.Provider = providerName
+	server.Status = "stopped"
+	server.Labels = hostingerStoppedClaimLabels(server.Labels)
+	return updateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, server, SSHTarget{}, func() error {
+		return b.stopVMAndWait(ctx, client, vmID)
+	})
 }
 
 func (b *leaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
@@ -553,9 +578,9 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 		fmt.Fprintf(b.rt.Stderr, "stop server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 		if !req.DryRun {
-			if _, err := updateLeaseClaimLabelsIfUnchangedAfter(leaseID, claim, hostingerStoppedClaimLabels(claim.Labels), func() error {
-				return b.stopVMAndWait(ctx, client, server.CloudID)
-			}); err != nil {
+			server.Status = "stopped"
+			server.Labels = hostingerStoppedClaimLabels(claim.Labels)
+			if _, err := b.stopClaimedVM(ctx, client, claim, server.CloudID, server); err != nil {
 				return fmt.Errorf("finalize hostinger cleanup lease=%s: %w", leaseID, err)
 			}
 		}

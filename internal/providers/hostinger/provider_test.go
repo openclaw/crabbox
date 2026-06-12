@@ -1188,12 +1188,57 @@ func TestAcquireFailureStopsPaidVPSButRetainsRecoveryState(t *testing.T) {
 	if claim.CloudID != "vm-new" {
 		t.Fatalf("claim=%#v", claim)
 	}
+	if claim.Labels["state"] != "stopped" || claim.SSHHost != "" || claim.SSHPort != 0 {
+		t.Fatalf("rollback claim=%#v", claim)
+	}
 	keyPath, keyErr := core.TestboxKeyPath(claim.LeaseID)
 	if keyErr != nil {
 		t.Fatal(keyErr)
 	}
 	if _, statErr := os.Stat(keyPath); statErr != nil {
 		t.Fatalf("recovery key missing: %v", statErr)
+	}
+}
+
+func TestAcquireFailureStopsPaidVPSEvenWhenClaimDisappears(t *testing.T) {
+	isolateHostingerTestState(t)
+	api := &fakeAPI{}
+	cfg := core.Config{Hostinger: core.HostingerConfig{
+		APIToken:       "token",
+		ItemID:         "hostingercom-vps-kvm2-usd-1m",
+		TemplateID:     "2",
+		DataCenterID:   "3",
+		HostnamePrefix: "crabbox",
+		AllowPurchase:  true,
+	}}
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	backend.client = api
+	ctx, cancel := context.WithCancel(context.Background())
+
+	oldRunSSHQuiet := hostingerRunSSHQuiet
+	oldSleep := hostingerSleep
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+		claims, err := core.ListLeaseClaims()
+		if err != nil {
+			return err
+		}
+		for _, claim := range claims {
+			core.RemoveLeaseClaim(claim.LeaseID)
+		}
+		return errors.New("ssh unavailable")
+	}
+	hostingerSleep = func(time.Duration) { cancel() }
+	t.Cleanup(func() {
+		hostingerRunSSHQuiet = oldRunSSHQuiet
+		hostingerSleep = oldSleep
+	})
+
+	_, err := backend.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "missing-claim"})
+	if err == nil || !strings.Contains(err.Error(), "rollback=stopped") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if api.stopCalls != 1 || api.stopped[0] != "vm-new" {
+		t.Fatalf("stops=%v", api.stopped)
 	}
 }
 
@@ -1670,8 +1715,8 @@ func TestReleaseRejectsChangedClaimBeforeStop(t *testing.T) {
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
 	backend.client = api
 
-	oldUpdate := updateLeaseClaimLabelsIfUnchangedAfter
-	updateLeaseClaimLabelsIfUnchangedAfter = func(id string, expected core.LeaseClaim, labels map[string]string, action func() error) (core.LeaseClaim, error) {
+	oldUpdate := updateLeaseClaimEndpointIfUnchangedAfter
+	updateLeaseClaimEndpointIfUnchangedAfter = func(id string, expected core.LeaseClaim, server core.Server, target core.SSHTarget, action func() error) (core.LeaseClaim, error) {
 		refreshed := make(map[string]string, len(expected.Labels))
 		for key, value := range expected.Labels {
 			refreshed[key] = value
@@ -1681,9 +1726,9 @@ func TestReleaseRejectsChangedClaimBeforeStop(t *testing.T) {
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(id, expected, refreshed); err != nil {
 			return core.LeaseClaim{}, err
 		}
-		return oldUpdate(id, expected, labels, action)
+		return oldUpdate(id, expected, server, target, action)
 	}
-	t.Cleanup(func() { updateLeaseClaimLabelsIfUnchangedAfter = oldUpdate })
+	t.Cleanup(func() { updateLeaseClaimEndpointIfUnchangedAfter = oldUpdate })
 
 	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
 		Lease: core.LeaseTarget{LeaseID: leaseID, Server: server},
@@ -1941,8 +1986,8 @@ func TestCleanupRejectsChangedClaimBeforeStop(t *testing.T) {
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
 	backend.client = api
 
-	oldUpdate := updateLeaseClaimLabelsIfUnchangedAfter
-	updateLeaseClaimLabelsIfUnchangedAfter = func(id string, expected core.LeaseClaim, labels map[string]string, action func() error) (core.LeaseClaim, error) {
+	oldUpdate := updateLeaseClaimEndpointIfUnchangedAfter
+	updateLeaseClaimEndpointIfUnchangedAfter = func(id string, expected core.LeaseClaim, server core.Server, target core.SSHTarget, action func() error) (core.LeaseClaim, error) {
 		refreshed := make(map[string]string, len(expected.Labels))
 		for key, value := range expected.Labels {
 			refreshed[key] = value
@@ -1952,9 +1997,9 @@ func TestCleanupRejectsChangedClaimBeforeStop(t *testing.T) {
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(id, expected, refreshed); err != nil {
 			return core.LeaseClaim{}, err
 		}
-		return oldUpdate(id, expected, labels, action)
+		return oldUpdate(id, expected, server, target, action)
 	}
-	t.Cleanup(func() { updateLeaseClaimLabelsIfUnchangedAfter = oldUpdate })
+	t.Cleanup(func() { updateLeaseClaimEndpointIfUnchangedAfter = oldUpdate })
 
 	err := backend.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
@@ -2005,7 +2050,7 @@ func TestCleanupSkipsManualHostingerVMs(t *testing.T) {
 	if err := core.ClaimLeaseForRepoProvider("cbx_abcdef123456", "green", providerName, t.TempDir(), time.Hour, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.UpdateLeaseClaimEndpoint("cbx_abcdef123456", core.Server{CloudID: "vm-crabbox", Provider: providerName, Labels: labels}, core.SSHTarget{}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint("cbx_abcdef123456", core.Server{CloudID: "vm-crabbox", Provider: providerName, Labels: labels}, core.SSHTarget{Host: "203.0.113.32", Port: "22"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
@@ -2017,6 +2062,9 @@ func TestCleanupSkipsManualHostingerVMs(t *testing.T) {
 	claim, ok, err := core.ResolveLeaseClaimForProvider("cbx_abcdef123456", providerName)
 	if err != nil || !ok || claim.Labels["state"] != "stopped" {
 		t.Fatalf("cleanup claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	if claim.SSHHost != "" || claim.SSHPort != 0 {
+		t.Fatalf("cleanup claim endpoint=%s:%d want cleared", claim.SSHHost, claim.SSHPort)
 	}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)

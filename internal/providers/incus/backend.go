@@ -397,22 +397,25 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return err
 		}
 	} else {
-		if inst.IsActive() {
-			if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
-				return err
-			}
-		}
 		labels := labelsFromInstance(inst)
 		labels["state"] = "stopped"
 		labels["release"] = "stop"
 		delete(labels, "host")
-		if err := setInstanceLabels(ctx, client, inst.Name, labels); err != nil {
-			return err
+		stopAndPersist := func() error {
+			if inst.IsActive() {
+				if err := client.SetInstanceState(inst.Name, api.InstanceStatePut{Action: "stop", Force: true, Timeout: durationSecondsCeil(cfg.Incus.StartTimeout)}, ""); err != nil {
+					return err
+				}
+			}
+			return setInstanceLabels(ctx, client, inst.Name, labels)
 		}
 		if leaseID != "" && claimOK {
-			if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, claim, core.Server{Labels: labels}, core.SSHTarget{}); err != nil {
+			server := core.Server{CloudID: inst.Name, Provider: providerName, Name: inst.Name, Status: "stopped", Labels: labels}
+			if _, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, core.SSHTarget{}, stopAndPersist); err != nil {
 				return err
 			}
+		} else if err := stopAndPersist(); err != nil {
+			return err
 		}
 	}
 	if leaseID != "" && deleteInstance {

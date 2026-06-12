@@ -224,10 +224,6 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 		if err := b.deleteDevbox(ctx, name); err != nil {
 			return err
 		}
-	} else if err := b.shutdownDevbox(ctx, name); err != nil {
-		return err
-	}
-	if deleteDevbox {
 		removeLeaseClaim(req.Lease.LeaseID)
 		if err := cleanupNamespaceSSHFiles(name, false, b.rt.Stdout); err != nil {
 			return err
@@ -245,9 +241,12 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 	server.Labels["state"] = "stopped"
 	server.Labels["release"] = "stop"
 	if claimOK {
-		_, err = updateLeaseClaimEndpointIfUnchanged(req.Lease.LeaseID, claim, server, SSHTarget{})
+		_, err = updateLeaseClaimEndpointIfUnchangedAfter(req.Lease.LeaseID, claim, server, SSHTarget{}, func() error {
+			return b.shutdownDevbox(ctx, name)
+		})
+		return err
 	}
-	return err
+	return b.shutdownDevbox(ctx, name)
 }
 
 func (b *namespaceLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {

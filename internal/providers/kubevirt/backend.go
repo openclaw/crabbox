@@ -166,13 +166,13 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 	deleteVM := kubeVirtDeleteOnRelease(req.Lease, b.cfg)
 	if deleteVM {
 		err = b.deleteVM(ctx, name)
-	} else {
-		err = b.stopVM(ctx, name)
+		if err == nil {
+			b.removeLeaseClaim(req.Lease.LeaseID)
+			b.removeGeneratedKey(req.Lease.LeaseID)
+		}
+		return err
 	}
-	if err == nil && deleteVM {
-		b.removeLeaseClaim(req.Lease.LeaseID)
-		b.removeGeneratedKey(req.Lease.LeaseID)
-	} else if err == nil {
+	{
 		server := req.Lease.Server
 		if server.Labels == nil {
 			server.Labels = map[string]string{}
@@ -183,11 +183,16 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 		server.Status = "stopped"
 		server.Labels["state"] = "stopped"
 		server.Labels["release"] = "stop"
-		if patchErr := b.patchVMAnnotations(ctx, name, server.Labels); patchErr != nil {
-			return patchErr
+		stopAndPersist := func() error {
+			if err := b.stopVM(ctx, name); err != nil {
+				return err
+			}
+			return b.patchVMAnnotations(ctx, name, server.Labels)
 		}
 		if claimOK {
-			_, err = core.UpdateLeaseClaimEndpointIfUnchanged(req.Lease.LeaseID, claim, server, core.SSHTarget{})
+			_, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(req.Lease.LeaseID, claim, server, core.SSHTarget{}, stopAndPersist)
+		} else {
+			err = stopAndPersist()
 		}
 	}
 	return err
