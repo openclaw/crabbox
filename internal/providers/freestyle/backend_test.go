@@ -218,6 +218,28 @@ func TestResolveFreestyleLeaseIDClaimsRawSandboxForRepo(t *testing.T) {
 	}
 }
 
+func TestResolveFreestyleLeaseIDAcceptsListedIdentifiers(t *testing.T) {
+	vm := freestyleVM{
+		ID:    "vm123",
+		Name:  "crabbox-repo-abc123",
+		State: "running",
+	}
+	client := &fakeFreestyleClient{listVMs: []freestyleVM{vm}}
+	backend := &freestyleBackend{}
+	leaseID := freestyleLeasePrefix + vm.ID
+	for _, id := range []string{vm.ID, vm.Name, newLeaseSlug(leaseID)} {
+		t.Run(id, func(t *testing.T) {
+			gotLeaseID, gotVMID, err := backend.resolveLeaseID(context.Background(), client, id, "", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotLeaseID != leaseID || gotVMID != vm.ID {
+				t.Fatalf("resolve %q lease=%q vm=%q", id, gotLeaseID, gotVMID)
+			}
+		})
+	}
+}
+
 func TestFreestyleWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
 	cfg := Config{Freestyle: FreestyleConfig{}}
 	if got, err := freestyleWorkspacePath(cfg); err != nil || got != "/workspace/crabbox" {
@@ -786,6 +808,117 @@ func TestFreestyleSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 }
 
+func TestFreestyleSyncDeleteStagesBeforeReplacingWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	client := &fakeFreestyleClient{}
+	backend := &freestyleBackend{
+		cfg: Config{
+			Freestyle: FreestyleConfig{Workdir: "repo"},
+			Sync:      SyncConfig{Delete: true},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
+		Repo: Repo{Root: root, Name: "repo"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	extractIndex, replaceIndex := -1, -1
+	for i, command := range client.execCommands {
+		if strings.Contains(command, "rm -rf '/workspace/repo'") {
+			t.Fatalf("sync deleted live workspace directly: %q", command)
+		}
+		if strings.Contains(command, "tar -xzf") && strings.Contains(command, ".repo.crabbox-sync-") {
+			extractIndex = i
+		}
+		if strings.Contains(command, "if mv ") && strings.Contains(command, "'/workspace/repo'") {
+			replaceIndex = i
+		}
+	}
+	if extractIndex < 0 || replaceIndex <= extractIndex {
+		t.Fatalf("commands=%#v, want staged extract before replacement", client.execCommands)
+	}
+}
+
+func TestFreestyleSyncDeletePreservesWorkspaceWhenFallbackUploadFails(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	client := &fakeFreestyleClient{
+		writeFileErr: errors.New("file api upload failed"),
+		execErrAt:    4,
+	}
+	backend := &freestyleBackend{
+		cfg: Config{
+			Freestyle: FreestyleConfig{Workdir: "repo"},
+			Sync:      SyncConfig{Delete: true},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
+		Repo: Repo{Root: root, Name: "repo"},
+	}); err == nil || !strings.Contains(err.Error(), "exec failed") {
+		t.Fatalf("syncWorkspace err=%v, want fallback upload failure", err)
+	}
+	for _, command := range client.execCommands {
+		if strings.Contains(command, "if mv ") || strings.Contains(command, "rm -rf '/workspace/repo'") {
+			t.Fatalf("failed sync touched live workspace: %q", command)
+		}
+	}
+}
+
+func TestFreestyleSyncHonorsConfiguredTimeout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	client := &fakeFreestyleClient{writeFileBlock: true}
+	backend := &freestyleBackend{
+		cfg: Config{
+			Freestyle: FreestyleConfig{Workdir: "repo"},
+			Sync:      SyncConfig{Timeout: 100 * time.Millisecond},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	started := time.Now()
+	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
+		Repo: Repo{Root: root, Name: "repo"},
+	}); err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("syncWorkspace err=%v, want timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("syncWorkspace took %s, timeout should bound transfer", elapsed)
+	}
+}
+
 func TestFreestyleFallbackUploadCleansPartialArchiveAfterChunkFailure(t *testing.T) {
 	client := &fakeFreestyleClient{execErrAt: 2}
 	backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
@@ -886,11 +1019,14 @@ type fakeFreestyleClient struct {
 	createReq         *freestyleCreateVMRequest
 	getVM             freestyleVM
 	getVMErr          error
+	listVMs           []freestyleVM
+	listVMsErr        error
 	prepareCommands   []string
 	writeFilePath     string
 	writeFileContent  string
 	writeFileEncoding string
 	writeFileErr      error
+	writeFileBlock    bool
 	execCommands      []string
 	deleteIDs         []string
 	deleteErr         error
@@ -919,7 +1055,7 @@ func (f *fakeFreestyleClient) GetVM(_ context.Context, id string) (freestyleVM, 
 }
 
 func (f *fakeFreestyleClient) ListVMs(_ context.Context) ([]freestyleVM, error) {
-	return nil, nil
+	return f.listVMs, f.listVMsErr
 }
 
 func (f *fakeFreestyleClient) DeleteVM(ctx context.Context, id string) error {
@@ -928,20 +1064,27 @@ func (f *fakeFreestyleClient) DeleteVM(ctx context.Context, id string) error {
 	return f.deleteErr
 }
 
-func (f *fakeFreestyleClient) Exec(_ context.Context, _ string, command string, _, _ io.Writer) (int, error) {
+func (f *fakeFreestyleClient) Exec(ctx context.Context, _ string, command string, _, _ io.Writer) (int, error) {
 	f.execCalls++
 	f.execCommands = append(f.execCommands, command)
 	f.prepareCommands = append(f.prepareCommands, command)
+	if err := ctx.Err(); err != nil {
+		return 1, err
+	}
 	if f.execCalls == f.execErrAt {
 		return 1, errors.New("exec failed")
 	}
 	return 0, nil
 }
 
-func (f *fakeFreestyleClient) WriteFile(_ context.Context, _ string, path, content, encoding string) error {
+func (f *fakeFreestyleClient) WriteFile(ctx context.Context, _ string, path, content, encoding string) error {
 	f.writeFilePath = path
 	f.writeFileContent = content
 	f.writeFileEncoding = encoding
+	if f.writeFileBlock {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if f.writeFileErr != nil {
 		return f.writeFileErr
 	}

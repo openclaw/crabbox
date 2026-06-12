@@ -19,6 +19,13 @@ const maxFreestyleArchiveUploadBytes = 64 << 20
 
 func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAPI, name string, req RunRequest) ([]timingPhase, time.Duration, error) {
 	start := b.now()
+	syncCtx := ctx
+	cancel := func() {}
+	if b.cfg.Sync.Timeout > 0 {
+		syncCtx, cancel = context.WithTimeout(ctx, b.cfg.Sync.Timeout)
+	}
+	defer cancel()
+
 	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
 		return nil, 0, err
@@ -35,7 +42,7 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 	}
 	preflightDuration := b.now().Sub(preflightStarted)
 	archiveStarted := b.now()
-	archive, err := createFreestyleSyncArchive(ctx, req.Repo, manifest, b.rt.Stderr)
+	archive, err := createFreestyleSyncArchive(syncCtx, req.Repo, manifest, b.rt.Stderr)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -53,8 +60,20 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 	if err != nil {
 		return nil, 0, err
 	}
+	extractDir := workspace
+	stagingDir := ""
+	if b.cfg.Sync.Delete {
+		stagingDir = path.Join(path.Dir(workspace), "."+path.Base(workspace)+".crabbox-sync-"+freestyleRandomSuffix())
+		extractDir = stagingDir
+	}
+	cleanupStaging := stagingDir != ""
+	defer func() {
+		if cleanupStaging {
+			b.cleanupFreestyleWorkspace(client, name, stagingDir)
+		}
+	}()
 	prepareStarted := b.now()
-	if err := b.prepareWorkspace(ctx, client, name, workspace, b.cfg.Sync.Delete); err != nil {
+	if err := b.prepareWorkspace(syncCtx, client, name, extractDir, stagingDir != ""); err != nil {
 		return nil, 0, err
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
@@ -62,27 +81,40 @@ func (b *freestyleBackend) syncWorkspace(ctx context.Context, client freestyleAP
 	b64Content := base64.StdEncoding.EncodeToString(archiveData)
 	suffix := freestyleRandomSuffix()
 	remoteArchive := "/tmp/crabbox-" + suffix + ".tgz"
-	if err := client.WriteFile(ctx, name, remoteArchive, b64Content, "base64"); err != nil {
+	if err := client.WriteFile(syncCtx, name, remoteArchive, b64Content, "base64"); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: freestyle file API upload failed; falling back to exec upload: %v\n", err)
 		b.cleanupFreestyleUpload(client, name, remoteArchive)
-		if fallbackErr := b.uploadArchiveViaExec(ctx, client, name, workspace, archiveData); fallbackErr != nil {
+		if fallbackErr := b.uploadArchiveViaExec(syncCtx, client, name, extractDir, archiveData); fallbackErr != nil {
 			return nil, 0, fallbackErr
 		}
 	} else {
-		if err := b.extractFreestyleArchive(ctx, client, name, remoteArchive, workspace); err != nil {
+		if err := b.extractFreestyleArchive(syncCtx, client, name, remoteArchive, extractDir); err != nil {
 			return nil, 0, err
 		}
 	}
 	uploadDuration := b.now().Sub(uploadStarted)
+	replaceDuration := time.Duration(0)
+	if stagingDir != "" {
+		replaceStarted := b.now()
+		if err := b.replaceFreestyleWorkspace(syncCtx, client, name, stagingDir, workspace); err != nil {
+			return nil, 0, err
+		}
+		cleanupStaging = false
+		replaceDuration = b.now().Sub(replaceStarted)
+	}
 	total := b.now().Sub(start)
-	return []timingPhase{
+	phases := []timingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
 		{Name: "archive", Ms: archiveDuration.Milliseconds()},
 		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
 		{Name: "upload", Ms: uploadDuration.Milliseconds()},
-		{Name: "freestyle_sync", Ms: total.Milliseconds()},
-	}, total, nil
+	}
+	if stagingDir != "" {
+		phases = append(phases, timingPhase{Name: "replace", Ms: replaceDuration.Milliseconds()})
+	}
+	phases = append(phases, timingPhase{Name: "freestyle_sync", Ms: total.Milliseconds()})
+	return phases, total, nil
 }
 
 func (b *freestyleBackend) prepareWorkspace(ctx context.Context, client freestyleAPI, name, workspace string, delete bool) error {
@@ -157,6 +189,34 @@ func (b *freestyleBackend) cleanupFreestyleUpload(client freestyleAPI, name stri
 	if err := b.execShell(cleanupCtx, client, name, "rm -f "+strings.Join(quoted, " ")); err != nil && b.rt.Stderr != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: freestyle upload cleanup failed for %s: %v\n", name, err)
 	}
+}
+
+func (b *freestyleBackend) cleanupFreestyleWorkspace(client freestyleAPI, name, workspace string) {
+	if strings.TrimSpace(workspace) == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), freestyleCleanupTimeout)
+	defer cancel()
+	if err := b.execShell(cleanupCtx, client, name, "rm -rf "+shellQuote(workspace)); err != nil && b.rt.Stderr != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: freestyle staging cleanup failed for %s: %v\n", name, err)
+	}
+}
+
+func (b *freestyleBackend) replaceFreestyleWorkspace(ctx context.Context, client freestyleAPI, name, stagingDir, workspace string) error {
+	backupDir := stagingDir + ".previous"
+	command := "rm -rf " + shellQuote(backupDir) +
+		" && if [ -e " + shellQuote(workspace) + " ]; then mv " + shellQuote(workspace) + " " + shellQuote(backupDir) + "; fi" +
+		" && if mv " + shellQuote(stagingDir) + " " + shellQuote(workspace) +
+		"; then exit 0" +
+		"; else rc=$?; if [ -e " + shellQuote(backupDir) + " ]; then mv " + shellQuote(backupDir) + " " + shellQuote(workspace) +
+		"; fi; exit \"$rc\"; fi"
+	if err := b.execShell(ctx, client, name, command); err != nil {
+		return err
+	}
+	if err := b.execShell(ctx, client, name, "rm -rf "+shellQuote(backupDir)); err != nil && b.rt.Stderr != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: freestyle previous workspace cleanup failed path=%s: %v\n", backupDir, err)
+	}
+	return nil
 }
 
 func readFreestyleArchiveForUpload(r io.Reader) ([]byte, error) {

@@ -464,26 +464,53 @@ func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleA
 		}
 		return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, freestyleLeasePrefix), nil
 	}
-	if strings.HasPrefix(id, freestyleLeasePrefix) {
-		vmID := strings.TrimPrefix(id, freestyleLeasePrefix)
+	leaseID := id
+	vmID := ""
+	var vm freestyleVM
+	if strings.HasPrefix(leaseID, freestyleLeasePrefix) {
+		vmID = strings.TrimPrefix(leaseID, freestyleLeasePrefix)
 		if vmID == "" {
 			return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox", id)
 		}
-		vm, err := client.GetVM(ctx, vmID)
+		var err error
+		vm, err = client.GetVM(ctx, vmID)
 		if err != nil {
 			return "", "", freestyleError("get vm", err)
 		}
-		if !isCrabboxFreestyleSandboxName(vm.Name) {
-			return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox", id)
+	} else {
+		vms, err := client.ListVMs(ctx)
+		if err != nil {
+			return "", "", freestyleError("list vms", err)
 		}
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProviderPond(id, newLeaseSlug(id), freestyleProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
-				return "", "", err
+		normalizedID := normalizeLeaseSlug(id)
+		for _, candidate := range vms {
+			if !isCrabboxFreestyleSandboxName(candidate.Name) {
+				continue
 			}
+			candidateLeaseID := freestyleLeasePrefix + candidate.ID
+			if candidate.ID != id && candidate.Name != id && newLeaseSlug(candidateLeaseID) != normalizedID {
+				continue
+			}
+			if vmID != "" {
+				return "", "", exit(4, "freestyle identifier %q is ambiguous", id)
+			}
+			vm = candidate
+			vmID = candidate.ID
+			leaseID = candidateLeaseID
 		}
-		return id, blank(vm.ID, vmID), nil
+		if vmID == "" {
+			return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox; use an id, name, slug, or claimed lease from `crabbox list --provider freestyle`", id)
+		}
 	}
-	return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox; use a Crabbox slug or claimed Freestyle lease id", id)
+	if !isCrabboxFreestyleSandboxName(vm.Name) {
+		return "", "", exit(4, "freestyle vm %q is not claimed by Crabbox", id)
+	}
+	if repoRoot != "" {
+		if err := claimLeaseForRepoProviderPond(leaseID, newLeaseSlug(leaseID), freestyleProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
+			return "", "", err
+		}
+	}
+	return leaseID, blank(vm.ID, vmID), nil
 }
 
 func freestyleVMToServer(vm freestyleVM) Server {

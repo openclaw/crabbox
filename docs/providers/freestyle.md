@@ -116,9 +116,17 @@ Freestyle advertises archive sync (`FeatureArchiveSync`). Crabbox supports
 Crabbox creates Freestyle VMs with an explicit empty external-port list. No
 guest service is publicly exposed by default.
 
+When `sync.delete` is enabled, Crabbox extracts into a staging directory and
+replaces the retained workspace only after extraction succeeds. Failed uploads
+leave the prior workspace intact. `sync.timeout` bounds archive creation,
+upload, extraction, and replacement.
+
 Archive upload tries Freestyle's file API first. When that endpoint is
 unavailable, Crabbox falls back to chunked base64 upload through exec. Sync still
 completes reliably through the fallback path.
+
+The raw VM ID, Crabbox VM name, and generated slug shown by `crabbox list` can
+recover a Crabbox-owned VM after local claim state is lost.
 
 `--checksum` is not supported because Freestyle uses archive sync rather than
 Crabbox rsync checksum mode.
