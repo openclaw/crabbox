@@ -225,7 +225,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			views = append(views, claimServer(claim, "unknown"))
 			continue
 		}
-		views = append(views, runServer(claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), status, claim.Labels))
+		views = append(views, runServer(claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), status, mergeRunLabels(claim.Labels, status.Metadata)))
 	}
 	return views, nil
 }
@@ -414,6 +414,17 @@ func runMetadata(configured map[string]string, req RunRequest) map[string]string
 	return out
 }
 
+func mergeRunLabels(local, live map[string]string) map[string]string {
+	labels := make(map[string]string, len(local)+len(live))
+	for key, value := range local {
+		labels[key] = value
+	}
+	for key, value := range live {
+		labels[key] = value
+	}
+	return labels
+}
+
 func writeRunOutput(stdout, stderr io.Writer, run runResponse) {
 	if run.Stdout != "" && stdout != nil {
 		_, _ = io.WriteString(stdout, run.Stdout)
@@ -504,6 +515,7 @@ func runServer(leaseID, slug string, status runStatus, extra map[string]string) 
 			labels[key] = value
 		}
 	}
+	labels["state"] = blank(status.Status, "unknown")
 	server := Server{
 		Provider: providerName,
 		CloudID:  leaseID,

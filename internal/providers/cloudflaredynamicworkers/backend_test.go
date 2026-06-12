@@ -249,6 +249,36 @@ func TestStopMissingRemoteRemovesStaleLocalClaim(t *testing.T) {
 	}
 }
 
+func TestListRefreshUsesLiveStatusOverLocalClaimState(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/runs/cfdw_live" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(runStatus{
+			ID:       "cfdw_live",
+			Status:   "failed",
+			Metadata: map[string]string{"team": "platform"},
+		})
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	if err := claimLease("cfdw_live", "live-claim", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_live", "live-claim", runStatus{ID: "cfdw_live", Status: "ready"}, map[string]string{"state": "ready"})); err != nil {
+		t.Fatal(err)
+	}
+	views, err := backend.List(context.Background(), ListRequest{Refresh: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("views=%#v", views)
+	}
+	if views[0].Status != "failed" || views[0].Labels["state"] != "failed" || views[0].Labels["team"] != "platform" {
+		t.Fatalf("view=%#v", views[0])
+	}
+}
+
 func TestClientRedactsConfiguredTokenFromErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad bearer test-token Authorization: Bearer test-token"}`, http.StatusUnauthorized)

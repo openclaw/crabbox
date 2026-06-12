@@ -128,6 +128,7 @@ type RunRecord = {
   startedAt: string;
   completedAt: string;
   durationMs: number;
+  metadata?: Record<string, string>;
   result?: RunResult;
   error?: RunError;
   logs: RunLog[];
@@ -250,6 +251,7 @@ async function createRun(
     durationMs: 0,
     logs: [log],
   };
+  if (parsed.metadata !== undefined) record.metadata = parsed.metadata;
   await persistRun(env, record);
 
   try {
@@ -405,6 +407,7 @@ type ParsedRunRequest = {
   env?: Record<string, unknown>;
   limits?: WorkerLimits;
   timeoutMs?: number;
+  metadata?: Record<string, string>;
   gateway: {
     allowHostnames: string[];
   };
@@ -459,6 +462,9 @@ function parseRunRequest(body: Record<string, unknown>, url: URL): ParsedRunRequ
   const env = parseOptionalRecord(body["env"]);
   if (env instanceof Response) return env;
 
+  const metadata = parseMetadata(body["metadata"]);
+  if (metadata instanceof Response) return metadata;
+
   const requestSpec = parseInvocationRequest(body["request"]);
   if (requestSpec instanceof Response) return requestSpec;
 
@@ -480,6 +486,7 @@ function parseRunRequest(body: Record<string, unknown>, url: URL): ParsedRunRequ
   if (env !== undefined) parsed.env = env;
   if (limits !== undefined) parsed.limits = limits;
   if (timeoutMs !== undefined) parsed.timeoutMs = timeoutMs;
+  if (metadata !== undefined) parsed.metadata = metadata;
   return parsed;
 }
 
@@ -622,6 +629,18 @@ function parseOptionalRecord(value: unknown): Record<string, unknown> | Response
   return value;
 }
 
+function parseMetadata(value: unknown): Record<string, string> | Response | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return json({ error: "metadata must be an object" }, 400);
+  const metadata: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== "string") return json({ error: "metadata values must be strings" }, 400);
+    const trimmed = key.trim();
+    if (trimmed !== "") metadata[trimmed] = raw;
+  }
+  return metadata;
+}
+
 function parsePositiveInteger(value: unknown): number | Response | undefined {
   if (value === undefined) return undefined;
   return typeof value === "number" && Number.isInteger(value) && value > 0
@@ -715,6 +734,7 @@ function runResponse(record: RunRecord): Record<string, unknown> {
     durationMs: record.durationMs,
     result: record.result,
     error: record.error,
+    metadata: record.metadata,
     body: record.result?.body,
     stderr: record.error?.message,
     logs: record.logs.map((log) => log.message).join("\n"),
@@ -729,6 +749,7 @@ function runSummary(record: RunRecord): Record<string, unknown> {
     status: record.state,
     cacheMode: record.cacheMode,
     egress: record.egress,
+    metadata: record.metadata,
     createdAt: record.createdAt,
     completedAt: record.completedAt,
     durationMs: record.durationMs,

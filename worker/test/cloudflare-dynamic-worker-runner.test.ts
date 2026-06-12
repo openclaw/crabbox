@@ -306,6 +306,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
         body: JSON.stringify({
           id: "run_go_payload",
           cacheMode: "stable",
+          metadata: { team: "platform" },
           module: {
             name: "worker.mjs",
             source: "export default { fetch() { return new Response('go'); } };",
@@ -324,6 +325,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
       status: "succeeded",
       exitCode: 0,
       body: "ok",
+      metadata: { team: "platform" },
     });
     expect(loader.getCalls).toEqual([{ id: "run_go_payload" }]);
     expect(loader.worker?.code).toMatchObject({
@@ -401,7 +403,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
     const create = await worker.fetch(
       authedRequest("/v1/runs", {
         method: "POST",
-        body: JSON.stringify(runPayload({ id: "run_meta" })),
+        body: JSON.stringify(runPayload({ id: "run_meta", metadata: { team: "platform" } })),
       }),
       testEnv,
       testCtx,
@@ -414,6 +416,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
     await expect(status.json()).resolves.toMatchObject({
       id: "run_meta",
       status: "succeeded",
+      metadata: { team: "platform" },
       logEvents: [
         { level: "info", message: "run started" },
         { level: "info", message: "run completed with HTTP 200" },
@@ -430,7 +433,13 @@ describe("Cloudflare Dynamic Workers runner", () => {
     expect(runs.listCalls).toEqual([{ prefix: "runs:" }]);
     const listBody = (await list.json()) as { runs: Array<{ id: string; status: string }> };
     expect(listBody.runs).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: "run_meta", status: "succeeded" })]),
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "run_meta",
+          status: "succeeded",
+          metadata: { team: "platform" },
+        }),
+      ]),
     );
 
     const stopped = await worker.fetch(
