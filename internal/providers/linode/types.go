@@ -20,18 +20,18 @@ type linodeInstance struct {
 }
 
 type createLinodeRequest struct {
-	Region         string             `json:"region"`
-	Type           string             `json:"type"`
-	Image          string             `json:"image"`
-	Label          string             `json:"label,omitempty"`
-	Tags           []string           `json:"tags,omitempty"`
-	AuthorizedKeys []string           `json:"authorized_keys,omitempty"`
-	RootPass       string             `json:"root_pass,omitempty"`
-	Metadata       *linodeMetadata    `json:"metadata,omitempty"`
-	FirewallID     int64              `json:"firewall_id,omitempty"`
-	Interfaces     []linodeInterface  `json:"interfaces,omitempty"`
-	PrivateIP      bool               `json:"private_ip,omitempty"`
-	StackScriptID  int64              `json:"stackscript_id,omitempty"`
+	Region          string            `json:"region"`
+	Type            string            `json:"type"`
+	Image           string            `json:"image"`
+	Label           string            `json:"label,omitempty"`
+	Tags            []string          `json:"tags,omitempty"`
+	AuthorizedKeys  []string          `json:"authorized_keys,omitempty"`
+	RootPass        string            `json:"root_pass,omitempty"`
+	Metadata        *linodeMetadata   `json:"metadata,omitempty"`
+	FirewallID      int64             `json:"firewall_id,omitempty"`
+	Interfaces      []linodeInterface `json:"interfaces,omitempty"`
+	PrivateIP       bool              `json:"private_ip,omitempty"`
+	StackScriptID   int64             `json:"stackscript_id,omitempty"`
 	StackScriptData map[string]string `json:"stackscript_data,omitempty"`
 }
 
@@ -45,15 +45,15 @@ type linodeInterface struct {
 }
 
 type linodeType struct {
-	ID       string  `json:"id"`
-	Label    string  `json:"label"`
-	Class    string  `json:"class"`
-	Memory   int     `json:"memory"`
-	Disk     int     `json:"disk"`
-	VCPUs    int     `json:"vcpus"`
-	Network  int     `json:"network_out"`
-	Price    linodePrice `json:"price"`
-	Addons   any     `json:"addons,omitempty"`
+	ID      string      `json:"id"`
+	Label   string      `json:"label"`
+	Class   string      `json:"class"`
+	Memory  int         `json:"memory"`
+	Disk    int         `json:"disk"`
+	VCPUs   int         `json:"vcpus"`
+	Network int         `json:"network_out"`
+	Price   linodePrice `json:"price"`
+	Addons  any         `json:"addons,omitempty"`
 }
 
 type linodePrice struct {
@@ -72,11 +72,11 @@ type linodeImage struct {
 }
 
 type linodeRegion struct {
-	ID      string   `json:"id"`
-	Label   string   `json:"label"`
-	Country string   `json:"country"`
-	Status  string   `json:"status"`
-	SiteType string   `json:"site_type"`
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	Country      string   `json:"country"`
+	Status       string   `json:"status"`
+	SiteType     string   `json:"site_type"`
 	Capabilities []string `json:"capabilities"`
 }
 
