@@ -79,10 +79,16 @@ func TestProxmoxDoctorReadinessChecksNonMutatingPrerequisites(t *testing.T) {
 				map[string]any{"vmid": 9400, "name": "crabbox-template", "status": "stopped", "template": 1},
 				map[string]any{"vmid": 101, "name": "crabbox-blue-abcdef12", "status": "running", "template": 0},
 			}})
+		case "/api2/json/cluster/resources":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 9400, "name": "crabbox-template", "node": "pve1", "type": "qemu", "template": 1},
+				map[string]any{"vmid": 101, "name": "crabbox-blue-abcdef12", "node": "pve2", "type": "qemu", "template": 0},
+			}})
 		case "/api2/json/nodes/pve1/qemu/9400/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "crabbox-template", "ide2": "local-lvm:cloudinit"}})
 		case "/api2/json/access/permissions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
+			permissionPath := r.URL.Query().Get("path")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{permissionPath: map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": "102"})
 		default:
@@ -141,10 +147,13 @@ func TestProxmoxDoctorReadinessClassifiesPermissionGaps(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 1}}})
 		case "/api2/json/nodes/pve1/qemu":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"vmid": 9400, "name": "tmpl", "template": 1}}})
+		case "/api2/json/cluster/resources":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
 		case "/api2/json/nodes/pve1/qemu/9400/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "tmpl"}})
 		case "/api2/json/access/permissions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
+			permissionPath := r.URL.Query().Get("path")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{permissionPath: map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
 		default:
@@ -201,10 +210,13 @@ func TestProxmoxDoctorReadinessRejectsInactiveBridge(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"iface": "vmbr0", "type": "bridge", "active": 0}}})
 		case "/api2/json/nodes/pve1/qemu":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"vmid": 9400, "name": "tmpl", "template": 1}}})
+		case "/api2/json/cluster/resources":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
 		case "/api2/json/nodes/pve1/qemu/9400/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"name": "tmpl"}})
 		case "/api2/json/access/permissions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
+			permissionPath := r.URL.Query().Get("path")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{permissionPath: map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
 		default:
@@ -343,6 +355,25 @@ func TestProxmoxDoctorReadinessClassifiesACLHiddenBridgeAsPermission(t *testing.
 	check := client.proxmoxNetworkCheck(context.Background(), cfg)
 	if check.Status != "failed" || check.Details["class"] != "permission" || check.Details["hint"] != "grant_proxmox_network_audit" {
 		t.Fatalf("bridge check=%#v", check)
+	}
+}
+
+func TestProxmoxDoctorReadinessValidatesConfiguredPool(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api2/json/pools/ci" {
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"errors": "pool does not exist"})
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Pool = "ci"
+	check := client.proxmoxPoolCheck(context.Background(), cfg)
+	if check.Status != "failed" || check.Details["class"] != "missing_resource" || check.Details["pool"] != "ci" {
+		t.Fatalf("pool check=%#v", check)
 	}
 }
 
@@ -504,10 +535,11 @@ func TestProxmoxDoctorReadinessReportsMissingTemplateIDAsCheck(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"version": "8.2.0"}})
 		case "/api2/json/nodes/pve1/status":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "online"}})
-		case "/api2/json/nodes/pve1/storage", "/api2/json/nodes/pve1/network", "/api2/json/nodes/pve1/qemu":
+		case "/api2/json/nodes/pve1/storage", "/api2/json/nodes/pve1/network", "/api2/json/nodes/pve1/qemu", "/api2/json/cluster/resources":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
 		case "/api2/json/access/permissions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"VM.Audit": 1}}})
+			permissionPath := r.URL.Query().Get("path")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{permissionPath: map[string]any{"VM.Audit": 1}}})
 		case "/api2/json/cluster/nextid":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": 102})
 		default:
@@ -809,6 +841,38 @@ func TestProxmoxVMExistsInCluster(t *testing.T) {
 	}
 }
 
+func TestProxmoxListsCrabboxServersAcrossClusterNodes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/cluster/resources":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"vmid": 101, "node": "pve2", "type": "qemu", "name": "crabbox-cross-node", "template": 0},
+			}})
+		case "/api2/json/nodes/pve2/qemu/101/status/current":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"vmid": 101, "name": "crabbox-cross-node", "status": "running"}})
+		case "/api2/json/nodes/pve2/qemu/101/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"description": proxmoxDescription(map[string]string{"crabbox": "true", "provider": "proxmox", "lease": "cbx_cross_node", "slug": "cross-node"}),
+			}})
+		case "/api2/json/nodes/pve2/qemu/101/agent/network-get-interfaces":
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": "guest agent unavailable"})
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	servers, err := client.ListCrabboxServersCluster(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].CloudID != "101" || servers[0].HostID != "pve2" || servers[0].Labels["lease"] != "cbx_cross_node" {
+		t.Fatalf("servers=%#v", servers)
+	}
+}
+
 func TestProxmoxVMExistsInClusterRejectsFilteredInventory(t *testing.T) {
 	resourcesCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -830,18 +894,20 @@ func TestProxmoxVMExistsInClusterRejectsFilteredInventory(t *testing.T) {
 		t.Fatalf("err=%v, want non-authoritative inventory rejection", err)
 	}
 	if resourcesCalled {
-		t.Fatal("cluster resources queried without root VM.Audit")
+		t.Fatal("cluster resources queried without effective VM.Audit on the target")
 	}
 }
 
-func TestProxmoxInventoryReadinessRequiresRootVMAudit(t *testing.T) {
-	qemuCalled := false
+func TestProxmoxInventoryReadinessRequiresVMAuditOnNextVM(t *testing.T) {
+	resourcesCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api2/json/cluster/nextid":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": 101})
 		case "/api2/json/access/permissions":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"/": map[string]any{"Sys.Audit": 1}}})
-		case "/api2/json/nodes/pve1/qemu":
-			qemuCalled = true
+		case "/api2/json/cluster/resources":
+			resourcesCalled = true
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}})
 		default:
 			t.Fatalf("%s %s", r.Method, r.URL.String())
@@ -854,8 +920,8 @@ func TestProxmoxInventoryReadinessRequiresRootVMAudit(t *testing.T) {
 	if check.Status != "failed" || check.Details["hint"] != "grant_proxmox_cluster_vm_audit" {
 		t.Fatalf("inventory check=%#v", check)
 	}
-	if qemuCalled {
-		t.Fatal("node inventory queried without root VM.Audit")
+	if resourcesCalled {
+		t.Fatal("cluster inventory queried without VM.Audit on the next VM path")
 	}
 }
 

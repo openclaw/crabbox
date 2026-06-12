@@ -151,11 +151,12 @@ explicit target storage must support `images`, and every source storage
 referenced by the template must be active and enabled. VM disk, cloud-init,
 EFI, and TPM stores must support `images`; CD-ROM stores must support `iso`.
 The configured template must have a cloud-init drive and, when no bridge
-override is set, `net0` on an active bridge. Cluster inventory recovery also
-requires propagated `VM.Audit` on `/`, so a permission-filtered
-`/cluster/resources` response is never treated as proof that a VM is absent.
-Release recovery also verifies effective `VM.Audit` on the exact
-`/vms/<vmid>` path before accepting absence.
+override is set, `net0` on an active bridge. A configured pool must be readable.
+The inventory check verifies effective `VM.Audit` on the next available
+`/vms/<vmid>` path before reading cluster-wide QEMU inventory. Release recovery
+checks the exact target `/vms/<vmid>` path before accepting absence, so a
+permission-filtered `/cluster/resources` response is not treated as proof that
+the target VM is absent.
 The output includes `mutation=false`; it does not clone, configure, start,
 stop, or delete VMs.
 
@@ -243,7 +244,8 @@ storage    clone target and all template source stores are image-capable
 bridge     configured bridge or the template net0 bridge is active
 template   /nodes/<node>/qemu and /config show templateId is a QEMU template
 nextid     /cluster/nextid is readable
-inventory  root VM.Audit is propagated and VM inventory is readable
+pool       configured /pools/<pool> is readable, when set
+inventory  next VM path has effective VM.Audit and cluster inventory is readable
 mutation   always reports mutation=false
 ```
 
@@ -262,16 +264,16 @@ for lease lifecycle operations:
 /nodes/<node>/storage/<storage>
 /nodes/<node>/qemu/<templateId>
 /sdn or /nodes/<node>/network, depending on how the bridge is managed
-/
+/pool/<pool>, when a pool is configured
+/vms/<vmid>
 ```
 
 The exact least-privilege role depends on the Proxmox VE version and local ACL
 model. If doctor fails with `class=permission`, fix the named endpoint first and
-rerun doctor before attempting `warmup` or `run`. The root ACL needs propagated
-`VM.Audit` so `/access/permissions?path=/` can establish that
-cluster-wide inventory should be available. Release recovery additionally
-checks `/access/permissions?path=/vms/<vmid>` before treating
-`/cluster/resources?type=vm` as authoritative for that VM.
+rerun doctor before attempting `warmup` or `run`. Doctor checks effective
+`VM.Audit` on the next available `/vms/<vmid>` path. Release recovery checks
+the exact target path before treating `/cluster/resources?type=vm` as
+authoritative for that VM.
 
 For CI or lab smoke checks after building the local binary:
 

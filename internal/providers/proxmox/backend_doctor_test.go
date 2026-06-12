@@ -15,11 +15,13 @@ import (
 type fakeProxmoxDoctorClient struct {
 	listCalls             int
 	listErr               error
+	clusterListErr        error
 	getCalls              int
 	deleteCalls           int
 	deletedIDs            []string
 	mutated               bool
 	servers               []Server
+	clusterServers        []Server
 	created               Server
 	createErr             error
 	deleteErr             error
@@ -43,6 +45,16 @@ func (c *fakeProxmoxDoctorClient) DoctorReadiness(context.Context, Config) ([]co
 
 func (c *fakeProxmoxDoctorClient) ListCrabboxServers(context.Context) ([]Server, error) {
 	c.listCalls++
+	return c.servers, c.listErr
+}
+
+func (c *fakeProxmoxDoctorClient) ListCrabboxServersCluster(context.Context) ([]Server, error) {
+	if c.clusterListErr != nil {
+		return nil, c.clusterListErr
+	}
+	if c.clusterServers != nil {
+		return c.clusterServers, nil
+	}
 	return c.servers, c.listErr
 }
 
@@ -89,11 +101,37 @@ func (c *fakeProxmoxDoctorClient) GetServer(_ context.Context, id string) (Serve
 	return server, nil
 }
 
+func (c *fakeProxmoxDoctorClient) GetServerOnNode(ctx context.Context, node, id string) (Server, error) {
+	for _, server := range c.clusterServers {
+		if server.CloudID == id && (server.HostID == "" || server.HostID == node) {
+			return server, nil
+		}
+	}
+	return c.GetServer(ctx, id)
+}
+
 func (c *fakeProxmoxDoctorClient) VMExistsInCluster(_ context.Context, id string) (bool, error) {
 	if c.clusterExistsErr != nil {
 		return false, c.clusterExistsErr
 	}
-	return c.clusterExistsByID[id], nil
+	if exists, ok := c.clusterExistsByID[id]; ok {
+		return exists, nil
+	}
+	if err := c.getErrByID[id]; err != nil {
+		if core.IsProxmoxNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if _, ok := c.getServerByID[id]; ok {
+		return true, nil
+	}
+	for _, server := range append(append([]Server(nil), c.servers...), c.clusterServers...) {
+		if server.CloudID == id {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *fakeProxmoxDoctorClient) DeleteServer(_ context.Context, id string) error {
@@ -449,7 +487,10 @@ func TestProxmoxCleanupPreservesResidueForMismatchedClaimCloudID(t *testing.T) {
 	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeProxmoxDoctorClient{servers: []Server{expiredProxmoxServer("101", leaseID)}}
+	fake := &fakeProxmoxDoctorClient{
+		servers:           []Server{expiredProxmoxServer("101", leaseID)},
+		clusterExistsByID: map[string]bool{"202": true},
+	}
 	oldClient := newClient
 	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
 	t.Cleanup(func() { newClient = oldClient })
@@ -540,7 +581,9 @@ func TestProxmoxCleanupPreservesResidueForDuplicateRemoteLeaseLabel(t *testing.T
 	delete(active.Labels, "expires_at")
 	active.Labels["keep"] = "true"
 	active.Provider = "proxmox"
+	active.HostID = "pve2"
 	active.PublicNet.IPv4.IP = "192.0.2.202"
+	expired.HostID = "pve1"
 	expired.PublicNet.IPv4.IP = "192.0.2.101"
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, active, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
@@ -548,7 +591,7 @@ func TestProxmoxCleanupPreservesResidueForDuplicateRemoteLeaseLabel(t *testing.T
 	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeProxmoxDoctorClient{servers: []Server{expired, active}}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{expired}, clusterServers: []Server{active}}
 	oldClient := newClient
 	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
 	t.Cleanup(func() { newClient = oldClient })
@@ -1028,14 +1071,16 @@ func TestProxmoxReleaseRetargetsClaimAndPreservesKeyForDuplicateLabel(t *testing
 	first.PublicNet.IPv4.IP = "192.0.2.101"
 	survivor := expiredProxmoxServer("202", leaseID)
 	survivor.Provider = "proxmox"
+	survivor.HostID = "pve2"
 	survivor.PublicNet.IPv4.IP = "192.0.2.202"
+	first.HostID = "pve1"
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", Config{Provider: "proxmox"}, first, SSHTarget{Host: first.PublicNet.IPv4.IP, Port: "22"}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := core.EnsureTestboxKeyForConfig(Config{}, leaseID); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeProxmoxDoctorClient{servers: []Server{first, survivor}}
+	fake := &fakeProxmoxDoctorClient{servers: []Server{first}, clusterServers: []Server{survivor}}
 	oldClient := newClient
 	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
 	t.Cleanup(func() { newClient = oldClient })
