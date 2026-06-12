@@ -77,10 +77,12 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 	}
 }
 
-func TestProviderHelpAllIncludesWandbAndMorph(t *testing.T) {
-	all := providerHelpAll()
-	if !strings.Contains(all, "wandb") || !strings.Contains(all, "morph") {
-		t.Fatalf("providerHelpAll() = %q, want wandb and morph", all)
+func TestProviderHelpAllIncludesDelegatedProviders(t *testing.T) {
+	help := providerHelpAll()
+	for _, provider := range []string{"freestyle", "morph", "wandb"} {
+		if !strings.Contains(help, provider) {
+			t.Fatalf("providerHelpAll() = %q, want %s", help, provider)
+		}
 	}
 	if strings.Contains(providerHelpSSH(), "azure-dynamic-sessions") {
 		t.Fatalf("providerHelpSSH() = %q, want only ssh-capable providers", providerHelpSSH())
@@ -259,6 +261,23 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		t.Fatalf("backend=%T, want ssh lease backend", backend)
+	}
+}
+
+func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Coordinator = "https://coordinator.example"
+	cfg.BrokerMode = BrokerModeRegistered
+	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := backend.(*coordinatorLeaseBackend); ok {
+		t.Fatal("registered broker mode must not transfer lifecycle ownership to the coordinator")
+	}
+	if !shouldRegisterCoordinatorLease(cfg) {
+		t.Fatal("registered broker mode should register direct leases")
 	}
 }
 

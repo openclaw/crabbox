@@ -108,10 +108,17 @@ crabbox vnc --id blue-lobster --network tailscale
 crabbox vnc --id blue-lobster --open
 ```
 
-WebVNC is available on coordinator-backed Hetzner, AWS, and Azure desktop
-leases, and on local Docker container leases. It is not available for static
-hosts, direct KubeVirt/external leases, or Blacksmith. Native `crabbox vnc`
-works against every managed and host-managed desktop in the support matrix.
+WebVNC is available on coordinator-managed desktop leases and on direct desktop
+providers. Direct providers normally use a localhost viewer. With
+`broker.mode: registered`, direct leases instead use the outbound coordinator
+bridge, so KubeVirt, external, static SSH, local Docker, and other SSH desktop
+leases can appear in and be shared from the portal. Blacksmith remains
+unsupported. Native `crabbox vnc` works against every managed and host-managed
+desktop in the support matrix.
+
+For kept registered desktop leases, `broker.autoWebVNC: true` starts the bridge
+daemon automatically. The daemon heartbeats the registration while connected;
+`crabbox stop` stops it and removes the registration after provider cleanup.
 
 ### Collaborative WebVNC
 

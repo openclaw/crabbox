@@ -251,7 +251,7 @@ func (a App) releasePrewarmLeaseAfterPoolFailure(ctx context.Context, backend Ba
 		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release skipped: %v\n", leaseID, cause, err)
 		return
 	}
-	if err := a.releaseBackendLeaseBestEffort(ctx, sshBackend, lease); err != nil {
+	if err := a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, lease); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release failed: %v\n", leaseID, cause, err)
 	}
 }

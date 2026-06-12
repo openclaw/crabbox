@@ -97,6 +97,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Cloudflare](cloudflare.md) — `cloudflare` (`cf`) | Linux |
 | [Docker Sandbox](docker-sandbox.md) — `docker-sandbox` | Linux |
 | [E2B](e2b.md) — `e2b` | Linux |
+| [Freestyle](freestyle.md) — `freestyle` | Linux |
 | [Islo](islo.md) — `islo` | Linux |
 | [Modal](modal.md) — `modal` | Linux |
 | [Microsoft Execution Containers](mxc.md) — `mxc` (`execution-container`) | Windows |

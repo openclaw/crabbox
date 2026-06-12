@@ -37,6 +37,8 @@ type Config struct {
 	ServerType                    string
 	ServerTypeExplicit            bool
 	Coordinator                   string
+	BrokerMode                    BrokerMode
+	BrokerAutoWebVNC              bool
 	CoordToken                    string
 	CoordAdminToken               string
 	HostID                        string
@@ -124,6 +126,7 @@ type Config struct {
 	Wandb                         WandbConfig
 	Islo                          IsloConfig
 	isloImageExplicit             bool
+	Freestyle                     FreestyleConfig
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
@@ -405,6 +408,14 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+}
+
+type FreestyleConfig struct {
+	APIKey   string
+	APIURL   string
+	Workdir  string
+	VCPUs    int
+	MemoryGB int
 }
 
 type TenkiConfig struct {
@@ -926,6 +937,13 @@ type AccessConfig struct {
 	Token        string
 }
 
+type BrokerMode string
+
+const (
+	BrokerModeManaged    BrokerMode = "managed"
+	BrokerModeRegistered BrokerMode = "registered"
+)
+
 func defaultConfig() Config {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -937,11 +955,18 @@ func defaultConfig() Config {
 func loadConfig() (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
+		freestyleAPIURL := cfg.Freestyle.APIURL
 		if err := applyConfigFile(&cfg, path); err != nil {
 			return Config{}, err
 		}
+		if !trustedProviderEndpointConfigPath(path) {
+			cfg.Freestyle.APIURL = freestyleAPIURL
+		}
 	}
 	if err := applyEnv(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := normalizeBrokerConfig(&cfg); err != nil {
 		return Config{}, err
 	}
 	canonicalizeConfigProvider(&cfg)
@@ -962,6 +987,23 @@ func loadConfig() (Config, error) {
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
 	return cfg, nil
+}
+
+func normalizeBrokerConfig(cfg *Config) error {
+	mode := BrokerMode(strings.ToLower(strings.TrimSpace(string(cfg.BrokerMode))))
+	if mode == "" {
+		mode = BrokerModeManaged
+	}
+	switch mode {
+	case BrokerModeManaged, BrokerModeRegistered:
+		cfg.BrokerMode = mode
+	default:
+		return exit(2, "broker.mode must be managed or registered")
+	}
+	if mode == BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) == "" {
+		return exit(2, "broker.mode=registered requires broker.url or coordinator")
+	}
+	return nil
 }
 
 func canonicalizeConfigProvider(cfg *Config) {
@@ -1347,6 +1389,8 @@ func baseConfig() Config {
 		Network:            NetworkAuto,
 		Class:              class,
 		ServerType:         "",
+		BrokerMode:         BrokerModeManaged,
+		BrokerAutoWebVNC:   true,
 		Location:           "fsn1",
 		Image:              hetznerImage,
 		AWSRegion:          "eu-west-1",
@@ -1472,6 +1516,10 @@ func baseConfig() Config {
 			VCPUs:    2,
 			MemoryMB: 4096,
 			DiskGB:   20,
+		},
+		Freestyle: FreestyleConfig{
+			APIURL:  "https://api.freestyle.sh",
+			Workdir: "crabbox",
 		},
 		Tenki: TenkiConfig{
 			CLIPath:  "tenki",
@@ -1651,6 +1699,7 @@ type fileConfig struct {
 	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
+	Freestyle            *fileFreestyleConfig               `yaml:"freestyle,omitempty"`
 	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
@@ -1689,6 +1738,8 @@ type fileWindowsConfig struct {
 
 type fileBrokerConfig struct {
 	URL        string            `yaml:"url,omitempty"`
+	Mode       string            `yaml:"mode,omitempty"`
+	AutoWebVNC *bool             `yaml:"autoWebVNC,omitempty"`
 	Token      string            `yaml:"token,omitempty"`
 	AdminToken string            `yaml:"adminToken,omitempty"`
 	Provider   string            `yaml:"provider,omitempty"`
@@ -1982,6 +2033,13 @@ type fileAzureDynamicSessionsConfig struct {
 	APIVersion  string `yaml:"apiVersion,omitempty"`
 	Workdir     string `yaml:"workdir,omitempty"`
 	TimeoutSecs int    `yaml:"timeoutSecs,omitempty"`
+}
+
+type fileFreestyleConfig struct {
+	APIURL   string `yaml:"apiUrl,omitempty"`
+	Workdir  string `yaml:"workdir,omitempty"`
+	VCPUs    int    `yaml:"vcpus,omitempty"`
+	MemoryGB int    `yaml:"memoryGB,omitempty"`
 }
 
 type fileExeDevConfig struct {
@@ -2434,6 +2492,13 @@ func configPaths() []string {
 	return paths
 }
 
+func trustedProviderEndpointConfigPath(path string) bool {
+	if explicit := os.Getenv("CRABBOX_CONFIG"); explicit != "" {
+		return path == explicit
+	}
+	return path == userConfigPath()
+}
+
 func userConfigPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -2593,6 +2658,12 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Broker.Token != "" {
 			cfg.CoordToken = file.Broker.Token
+		}
+		if file.Broker.Mode != "" {
+			cfg.BrokerMode = BrokerMode(file.Broker.Mode)
+		}
+		if file.Broker.AutoWebVNC != nil {
+			cfg.BrokerAutoWebVNC = *file.Broker.AutoWebVNC
 		}
 		if file.Broker.AdminToken != "" {
 			cfg.CoordAdminToken = file.Broker.AdminToken
@@ -3363,6 +3434,20 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Islo.DiskGB > 0 {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
+		}
+	}
+	if file.Freestyle != nil {
+		if file.Freestyle.APIURL != "" {
+			cfg.Freestyle.APIURL = file.Freestyle.APIURL
+		}
+		if file.Freestyle.Workdir != "" {
+			cfg.Freestyle.Workdir = file.Freestyle.Workdir
+		}
+		if file.Freestyle.VCPUs > 0 {
+			cfg.Freestyle.VCPUs = file.Freestyle.VCPUs
+		}
+		if file.Freestyle.MemoryGB > 0 {
+			cfg.Freestyle.MemoryGB = file.Freestyle.MemoryGB
 		}
 	}
 	if file.Tenki != nil {
@@ -4196,6 +4281,10 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.ServerType = getenv("CRABBOX_SERVER_TYPE", cfg.ServerType)
 	cfg.Coordinator = getenv("CRABBOX_COORDINATOR", cfg.Coordinator)
+	cfg.BrokerMode = BrokerMode(getenv("CRABBOX_COORDINATOR_MODE", string(cfg.BrokerMode)))
+	if value, ok := getenvBool("CRABBOX_COORDINATOR_AUTO_WEBVNC"); ok {
+		cfg.BrokerAutoWebVNC = value
+	}
 	cfg.CoordToken = getenv("CRABBOX_COORDINATOR_TOKEN", cfg.CoordToken)
 	cfg.CoordAdminToken = getenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", getenv("CRABBOX_ADMIN_TOKEN", cfg.CoordAdminToken))
 	cfg.HostID = getenv("CRABBOX_HOST_ID", cfg.HostID)
@@ -4539,6 +4628,11 @@ func applyEnv(cfg *Config) error {
 	cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
 	cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
 	cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+	cfg.Freestyle.APIKey = getenv("CRABBOX_FREESTYLE_API_KEY", getenv("FREESTYLE_API_KEY", cfg.Freestyle.APIKey))
+	cfg.Freestyle.APIURL = getenv("CRABBOX_FREESTYLE_API_URL", getenv("FREESTYLE_API_URL", cfg.Freestyle.APIURL))
+	cfg.Freestyle.Workdir = getenv("CRABBOX_FREESTYLE_WORKDIR", cfg.Freestyle.Workdir)
+	cfg.Freestyle.VCPUs = getenvInt("CRABBOX_FREESTYLE_VCPUS", cfg.Freestyle.VCPUs)
+	cfg.Freestyle.MemoryGB = getenvInt("CRABBOX_FREESTYLE_MEMORY_GB", cfg.Freestyle.MemoryGB)
 	cfg.Tenki.CLIPath = getenv("CRABBOX_TENKI_CLI", getenv("TENKI_CLI", cfg.Tenki.CLIPath))
 	cfg.Tenki.Endpoint = getenv("CRABBOX_TENKI_ENDPOINT", getenv("TENKI_ENDPOINT", cfg.Tenki.Endpoint))
 	cfg.Tenki.Gateway = getenv("CRABBOX_TENKI_GATEWAY", getenv("TENKI_GATEWAY", cfg.Tenki.Gateway))

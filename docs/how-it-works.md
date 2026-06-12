@@ -137,6 +137,12 @@ is useful for diagnosing the broker itself, and it is the only mode for the many
 direct-only adapters (sandbox runners, static SSH hosts, local containers, and
 the rest of the provider set).
 
+With `broker.mode: registered`, the provider path stays direct but the CLI
+mirrors owner-scoped lease metadata and heartbeats to the coordinator. That adds
+portal inventory, opt-in sharing, and outbound WebVNC without moving provider
+credentials or cleanup authority into the broker. Registered records do not
+count toward managed provider quotas, costs, images, pools, or maintenance.
+
 Static SSH targets (`provider: ssh`) point at a preexisting machine and bypass
 the broker even when a broker URL exists in config. macOS and Windows WSL2
 targets use the POSIX rsync contract; native Windows uses a PowerShell plus tar

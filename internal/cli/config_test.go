@@ -15,6 +15,8 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"CRABBOX_COORDINATOR",
+		"CRABBOX_COORDINATOR_MODE",
+		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
 		"CRABBOX_COORDINATOR_TOKEN",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
@@ -91,6 +93,13 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_FREESTYLE_API_KEY",
+		"FREESTYLE_API_KEY",
+		"CRABBOX_FREESTYLE_API_URL",
+		"FREESTYLE_API_URL",
+		"CRABBOX_FREESTYLE_WORKDIR",
+		"CRABBOX_FREESTYLE_VCPUS",
+		"CRABBOX_FREESTYLE_MEMORY_GB",
 		"CRABBOX_TENKI_CLI",
 		"TENKI_CLI",
 		"CRABBOX_TENKI_ENDPOINT",
@@ -1483,6 +1492,50 @@ func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
 	}
 }
 
+func TestRepoConfigCannotOverrideFreestyleAPIURL(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_DEFAULT_CLASS", "")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("freestyle:\n  apiUrl: https://trusted.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".crabbox.yaml", []byte("freestyle:\n  apiUrl: https://untrusted.example.test\n  workdir: repo-workdir\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Freestyle.APIURL != "https://trusted.example.test" {
+		t.Fatalf("Freestyle.APIURL=%q, want trusted user endpoint", cfg.Freestyle.APIURL)
+	}
+	if cfg.Freestyle.Workdir != "repo-workdir" {
+		t.Fatalf("Freestyle.Workdir=%q, want repository config applied", cfg.Freestyle.Workdir)
+	}
+}
+
 func TestCacheVolumesOmittedKeepsInheritedConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -1622,6 +1675,8 @@ func TestLoadConfigFromUserFile(t *testing.T) {
 	}
 	if err := os.WriteFile(path, []byte(`broker:
   url: https://crabbox.example.test
+  mode: registered
+  autoWebVNC: false
   token: secret
   adminToken: admin-secret
   provider: aws
@@ -1746,6 +1801,11 @@ islo:
   vcpus: 4
   memoryMB: 8192
   diskGB: 40
+freestyle:
+  apiUrl: https://freestyle.example.test
+  workdir: team/repo
+  vcpus: 4
+  memoryGB: 8
 tenki:
   cliPath: /usr/local/bin/tenki
   endpoint: https://api.tenki.example.test
@@ -1875,6 +1935,9 @@ ssh:
 	if cfg.Coordinator != "https://crabbox.example.test" || cfg.CoordToken != "secret" || cfg.CoordAdminToken != "admin-secret" {
 		t.Fatalf("broker config not loaded: %#v", cfg)
 	}
+	if cfg.BrokerMode != BrokerModeRegistered || cfg.BrokerAutoWebVNC {
+		t.Fatalf("broker registration config not loaded: mode=%q autoWebVNC=%t", cfg.BrokerMode, cfg.BrokerAutoWebVNC)
+	}
 	if cfg.HostID != "h-neutral-file" {
 		t.Fatalf("host id not loaded: %q", cfg.HostID)
 	}
@@ -1947,6 +2010,9 @@ ssh:
 	if cfg.Islo.BaseURL != "https://islo.example.test" || cfg.Islo.Image != "docker.io/library/ubuntu:24.04" || cfg.Islo.Workdir != "crabbox" || cfg.Islo.GatewayProfile != "default" || cfg.Islo.SnapshotName != "snap-ready" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 || cfg.Islo.DiskGB != 40 {
 		t.Fatalf("islo config not loaded: %#v", cfg.Islo)
 	}
+	if cfg.Freestyle.APIURL != "https://freestyle.example.test" || cfg.Freestyle.Workdir != "team/repo" || cfg.Freestyle.VCPUs != 4 || cfg.Freestyle.MemoryGB != 8 {
+		t.Fatalf("freestyle config not loaded: %#v", cfg.Freestyle)
+	}
 	if cfg.Tenki.CLIPath != "/usr/local/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki.example.test" || cfg.Tenki.Gateway != "wss://gateway.tenki.example.test" || cfg.Tenki.Workspace != "ws_file" || cfg.Tenki.Project != "proj_file" || cfg.Tenki.Image != "ubuntu:tenki" || cfg.Tenki.WorkRoot != "/home/tenki/test" || cfg.Tenki.CPUs != 4 || cfg.Tenki.MemoryMB != 8192 || cfg.Tenki.DiskGB != 40 {
 		t.Fatalf("tenki config not loaded: %#v", cfg.Tenki)
 	}
@@ -1989,6 +2055,30 @@ ssh:
 	if len(cfg.Cache.Volumes) != 1 || cfg.Cache.Volumes[0].Name != "pnpm-store" || cfg.Cache.Volumes[0].Key != "my-app-linux-amd64-node24-pnpm10-lock" || cfg.Cache.Volumes[0].Path != "/var/cache/crabbox/pnpm" || cfg.Cache.Volumes[0].SizeGB != 80 || !cfg.Cache.Volumes[0].Required {
 		t.Fatalf("cache volumes config not loaded: %#v", cfg.Cache.Volumes)
 	}
+}
+
+func TestNormalizeBrokerConfig(t *testing.T) {
+	t.Run("defaults to managed", func(t *testing.T) {
+		cfg := Config{}
+		if err := normalizeBrokerConfig(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.BrokerMode != BrokerModeManaged {
+			t.Fatalf("mode=%q", cfg.BrokerMode)
+		}
+	})
+	t.Run("registered requires coordinator", func(t *testing.T) {
+		cfg := Config{BrokerMode: BrokerModeRegistered}
+		if err := normalizeBrokerConfig(&cfg); err == nil || !strings.Contains(err.Error(), "requires broker.url") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("rejects unknown mode", func(t *testing.T) {
+		cfg := Config{BrokerMode: "mirror"}
+		if err := normalizeBrokerConfig(&cfg); err == nil || !strings.Contains(err.Error(), "managed or registered") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestLoadConfigExeDevWorkRootDefaults(t *testing.T) {
@@ -2242,6 +2332,13 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
+	t.Setenv("FREESTYLE_API_KEY", "freestyle-key-file")
+	t.Setenv("CRABBOX_FREESTYLE_API_KEY", "freestyle-key-env")
+	t.Setenv("FREESTYLE_API_URL", "https://freestyle-file.example")
+	t.Setenv("CRABBOX_FREESTYLE_API_URL", "https://freestyle-env.example")
+	t.Setenv("CRABBOX_FREESTYLE_WORKDIR", "env/repo")
+	t.Setenv("CRABBOX_FREESTYLE_VCPUS", "6")
+	t.Setenv("CRABBOX_FREESTYLE_MEMORY_GB", "16")
 	t.Setenv("TENKI_CLI", "/usr/bin/tenki-file")
 	t.Setenv("CRABBOX_TENKI_CLI", "/opt/tenki/bin/tenki")
 	t.Setenv("TENKI_ENDPOINT", "https://api.tenki-file.example")
@@ -2442,6 +2539,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
+	}
+	if cfg.Freestyle.APIKey != "freestyle-key-env" || cfg.Freestyle.APIURL != "https://freestyle-env.example" || cfg.Freestyle.Workdir != "env/repo" || cfg.Freestyle.VCPUs != 6 || cfg.Freestyle.MemoryGB != 16 {
+		t.Fatalf("unexpected freestyle env: %#v", cfg.Freestyle)
 	}
 	if cfg.Tenki.CLIPath != "/opt/tenki/bin/tenki" || cfg.Tenki.Endpoint != "https://api.tenki-env.example" || cfg.Tenki.Gateway != "wss://gateway.tenki-env.example" || cfg.Tenki.Workspace != "ws_env" || cfg.Tenki.Project != "proj_env" || cfg.Tenki.Image != "ubuntu:tenki-env" || cfg.Tenki.Snapshot != "snap-env" || cfg.Tenki.WorkRoot != "/home/tenki/env" || cfg.Tenki.CPUs != 8 || cfg.Tenki.MemoryMB != 16384 || cfg.Tenki.DiskGB != 80 {
 		t.Fatalf("unexpected tenki env: %#v", cfg.Tenki)
