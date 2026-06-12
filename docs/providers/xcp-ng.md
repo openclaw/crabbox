@@ -307,6 +307,10 @@ Mutating mode requires an explicit gate:
 CRABBOX_XCP_NG_ISO_E2E_MUTATE=1 scripts/xcpng-iso-e2e-smoke.sh --mutate --os linux --iso ~/Desktop/xcp/ISOs/ubuntu-26.04-live-server-amd64.iso
 ```
 
+Fresh ISO VMs do not inherit template VIFs, so mutating ISO runs also require
+`xcpNg.network` or `xcpNg.networkUuid`. These fields remain optional for normal
+template-based leases, where leaving them unset preserves the template network.
+
 Linux mutating mode now performs the guarded Ubuntu Server acceptance flow:
 
 - generates a per-run NoCloud seed ISO with Ubuntu autoinstall user-data;

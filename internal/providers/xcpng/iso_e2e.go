@@ -197,6 +197,12 @@ func RunISOE2E(ctx context.Context, opts ISOE2EOptions) (summary ISOE2ESummary, 
 		summary.Phase = "gate"
 		return summary, core.Exit(3, "CRABBOX_XCP_NG_ISO_E2E_MUTATE=1 is required for --mutate")
 	}
+	if placement.networkRef == "" {
+		summary.Classification = "environment_blocked"
+		summary.Reason = "xcp-ng ISO mutation requires xcpNg.network or xcpNg.networkUuid so the fresh VM has a VIF"
+		summary.Phase = "placement"
+		return summary, core.Exit(3, "%s", summary.Reason)
+	}
 	if opts.OS == "windows" {
 		return runISOE2EWindows(ctx, client, placement, opts, summary)
 	}

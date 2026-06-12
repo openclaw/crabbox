@@ -788,6 +788,32 @@ func TestRunISOE2ELinuxReadOnlyAcceptsLocalInstallerPath(t *testing.T) {
 	}
 }
 
+func TestRunISOE2EMutateRequiresNetworkBeforeCreatingVM(t *testing.T) {
+	dir := t.TempDir()
+	isoPath := filepath.Join(dir, "ubuntu.iso")
+	if err := os.WriteFile(isoPath, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeLifecycleClient{
+		srRef:   "OpaqueRef:sr",
+		hostRef: "OpaqueRef:host",
+	}
+	oldClient := newLifecycleClient
+	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
+	t.Cleanup(func() { newLifecycleClient = oldClient })
+
+	summary, err := RunISOE2E(context.Background(), ISOE2EOptions{Config: testConfig(), Mode: "mutate", OS: "linux", ISO: isoPath, EvidenceDir: filepath.Join(dir, "evidence"), MutateGate: true})
+	if err == nil || !strings.Contains(err.Error(), "requires xcpNg.network") {
+		t.Fatalf("err=%v", err)
+	}
+	if summary.Classification != "environment_blocked" || summary.Phase != "placement" {
+		t.Fatalf("summary=%#v", summary)
+	}
+	if fake.mutated {
+		t.Fatalf("network validation mutated provider state: calls=%v", fake.calls)
+	}
+}
+
 func TestRunISOE2EReportsLogoutFailureInSummary(t *testing.T) {
 	dir := t.TempDir()
 	isoPath := filepath.Join(dir, "ubuntu.iso")
