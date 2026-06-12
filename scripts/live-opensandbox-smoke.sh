@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
+set -Eeuo pipefail
 
 classification="diagnostic_only"
+classification_emitted=0
 slug="crabbox-opensandbox-smoke-$$"
-bin="${CRABBOX_BIN:-$repo_root/bin/crabbox}"
-smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/crabbox-opensandbox-smoke.XXXXXX")"
-smoke_repo="$smoke_root/repo"
-export XDG_STATE_HOME="$smoke_root/state"
-export CRABBOX_OPENSANDBOX_SMOKE_VALUE="forwarded-ok"
+repo_root=""
+bin=""
+smoke_root=""
+smoke_repo=""
 
 classify_and_exit() {
+  trap - ERR
+  if [[ $classification_emitted -ne 0 ]]; then
+    exit 1
+  fi
+  classification_emitted=1
   classification="$1"
   message="${2:-}"
   if [[ -n "$message" ]]; then
@@ -27,13 +29,31 @@ classify_and_exit() {
   esac
 }
 
+classify_unexpected_failure() {
+  local status="$1"
+  local line="$2"
+  classify_and_exit diagnostic_only "unexpected failure status=$status line=$line"
+}
+
 cleanup() {
-  if [[ -x "$bin" ]]; then
+  if [[ -n "$bin" && -x "$bin" ]]; then
     "$bin" stop --provider opensandbox --opensandbox-forget-missing "$slug" >/dev/null 2>&1 || true
   fi
-  rm -rf -- "$smoke_root"
+  if [[ -n "$smoke_root" ]]; then
+    rm -rf -- "$smoke_root"
+  fi
 }
 trap cleanup EXIT
+trap 'classify_unexpected_failure "$?" "$LINENO"' ERR
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+bin="${CRABBOX_BIN:-$repo_root/bin/crabbox}"
+smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/crabbox-opensandbox-smoke.XXXXXX")"
+smoke_repo="$smoke_root/repo"
+export XDG_STATE_HOME="$smoke_root/state"
+export CRABBOX_OPENSANDBOX_SMOKE_VALUE="forwarded-ok"
 
 if [[ -z "${CRABBOX_OPENSANDBOX_API_KEY:-${OPEN_SANDBOX_API_KEY:-}}" ]]; then
   classify_and_exit environment_blocked "missing CRABBOX_OPENSANDBOX_API_KEY or OPEN_SANDBOX_API_KEY"
@@ -57,12 +77,13 @@ printf 'remove-me\n' >stale.txt
 git add .crabbox.yaml proof.txt stale.txt
 git commit -qm "test: seed OpenSandbox smoke fixture"
 
-set +e
-run_output="$("$bin" run --provider opensandbox --keep --slug "$slug" --timing-json \
+if run_output="$("$bin" run --provider opensandbox --keep --slug "$slug" --timing-json \
   --allow-env CRABBOX_OPENSANDBOX_SMOKE_VALUE -- \
-  /bin/sh -lc 'test "$(cat proof.txt)" = v1 && test -f stale.txt && test "$CRABBOX_OPENSANDBOX_SMOKE_VALUE" = forwarded-ok && printf OPEN_SANDBOX_SMOKE_V1_OK' 2>&1)"
-run_status=$?
-set -e
+  /bin/sh -lc 'test "$(cat proof.txt)" = v1 && test -f stale.txt && test "$CRABBOX_OPENSANDBOX_SMOKE_VALUE" = forwarded-ok && printf OPEN_SANDBOX_SMOKE_V1_OK' 2>&1)"; then
+  run_status=0
+else
+  run_status=$?
+fi
 if [[ $run_status -ne 0 ]]; then
   if grep -Eiq 'quota|capacity|rate limit|too many requests|429|insufficient' <<<"$run_output"; then
     classify_and_exit quota_blocked "$run_output"
@@ -84,11 +105,12 @@ printf 'second\n' >second.txt
 git add proof.txt second.txt
 git rm -q stale.txt
 
-set +e
-reuse_output="$("$bin" run --provider opensandbox --id "$slug" --timing-json -- \
-  /bin/sh -lc 'test "$(cat proof.txt)" = v2 && test -f second.txt && test ! -e stale.txt && printf OPEN_SANDBOX_SMOKE_V2_OK' 2>&1)"
-reuse_status=$?
-set -e
+if reuse_output="$("$bin" run --provider opensandbox --id "$slug" --timing-json -- \
+  /bin/sh -lc 'test "$(cat proof.txt)" = v2 && test -f second.txt && test ! -e stale.txt && printf OPEN_SANDBOX_SMOKE_V2_OK' 2>&1)"; then
+  reuse_status=0
+else
+  reuse_status=$?
+fi
 if [[ $reuse_status -ne 0 ]]; then
   classify_and_exit diagnostic_only "$reuse_output"
 fi
