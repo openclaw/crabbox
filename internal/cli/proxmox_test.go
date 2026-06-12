@@ -465,6 +465,36 @@ func TestProxmoxDoctorReadinessValidatesTemplateSourceWithStorageOverride(t *tes
 	}
 }
 
+func TestProxmoxDoctorReadinessAcceptsTemplateISOStorage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/storage":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+				map[string]any{"storage": "source", "active": 1, "enabled": 1, "content": "images"},
+				map[string]any{"storage": "local", "active": 1, "enabled": 1, "content": "iso,backup"},
+			}})
+		case "/api2/json/nodes/pve1/qemu/9400/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"scsi0": "source:vm-9400-disk-0,size=8G",
+				"ide0":  "local:iso/installer.iso,media=cdrom",
+			}})
+		default:
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9400
+	cfg.Proxmox.Storage = ""
+	check := client.proxmoxStorageCheck(context.Background(), cfg)
+	if check.Status != "ok" || check.Details["storage"] != "local,source" {
+		t.Fatalf("storage check=%#v", check)
+	}
+}
+
 func TestProxmoxDoctorReadinessReportsMissingTemplateIDAsCheck(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

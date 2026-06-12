@@ -184,7 +184,7 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 		err   error
 	)
 	if _, numeric := strconv.ParseInt(strings.TrimSpace(id), 10, 64); numeric == nil {
-		claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, "proxmox")
+		claim, ok, err = b.resolveNumericClaim(id)
 	} else {
 		var exact bool
 		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, "proxmox")
@@ -246,6 +246,40 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 			Labels:   labels,
 		},
 	}, nil
+}
+
+func (b *leaseBackend) resolveNumericClaim(cloudID string) (core.LeaseClaim, bool, error) {
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	currentScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))
+	var scoped, legacy []core.LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider != "proxmox" || strings.TrimSpace(claim.CloudID) != cloudID {
+			continue
+		}
+		scope := strings.TrimSpace(claim.ProviderScope)
+		switch {
+		case scope != "" && scope == currentScope:
+			scoped = append(scoped, claim)
+		case scope == "":
+			legacy = append(legacy, claim)
+		}
+	}
+	if len(scoped) > 1 {
+		return core.LeaseClaim{}, false, exit(2, "multiple provider=proxmox claims in the current scope match cloud id %s", cloudID)
+	}
+	if len(scoped) == 1 {
+		return scoped[0], true, nil
+	}
+	if len(legacy) > 1 {
+		return core.LeaseClaim{}, false, exit(2, "multiple unscoped provider=proxmox claims match cloud id %s", cloudID)
+	}
+	if len(legacy) == 1 {
+		return legacy[0], true, nil
+	}
+	return core.LeaseClaim{}, false, nil
 }
 
 func (b *leaseBackend) targetForServer(server Server) LeaseTarget {

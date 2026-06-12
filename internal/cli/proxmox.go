@@ -252,7 +252,7 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 			}
 		}
 	} else {
-		check := proxmoxNamedStorageReadiness(cfg.Proxmox.Storage, storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
+		check := proxmoxNamedStorageReadiness(cfg.Proxmox.Storage, "images", storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
 		if check.Status != "ok" {
 			return check
 		}
@@ -262,20 +262,21 @@ func (c *ProxmoxClient) proxmoxStorageCheck(ctx context.Context, cfg Config) Pro
 	if failure != nil {
 		return *failure
 	}
+	requiredNames := proxmoxTemplateStorageNames(required)
 	if destination != nil {
 		destination.Details["source"] = "configured"
-		destination.Details["templateStorages"] = strings.Join(required, ",")
+		destination.Details["templateStorages"] = strings.Join(requiredNames, ",")
 		return *destination
 	}
 	return ProxmoxReadinessCheck{
 		Status:  "ok",
 		Check:   "storage",
-		Message: fmt.Sprintf("storage=%s source=template active=1 enabled=1", strings.Join(required, ",")),
-		Details: map[string]string{"storage": strings.Join(required, ","), "source": "template", "active": "1", "enabled": "1", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
+		Message: fmt.Sprintf("storage=%s source=template active=1 enabled=1", strings.Join(requiredNames, ",")),
+		Details: map[string]string{"storage": strings.Join(requiredNames, ","), "source": "template", "active": "1", "enabled": "1", "endpoint": "/nodes/" + cfg.Proxmox.Node + "/storage"},
 	}
 }
 
-func (c *ProxmoxClient) proxmoxTemplateStorageReadiness(ctx context.Context, cfg Config, storages []proxmoxStorage) ([]string, *ProxmoxReadinessCheck) {
+func (c *ProxmoxClient) proxmoxTemplateStorageReadiness(ctx context.Context, cfg Config, storages []proxmoxStorage) ([]proxmoxTemplateStorageRequirement, *ProxmoxReadinessCheck) {
 	if cfg.Proxmox.TemplateID <= 0 {
 		check := ProxmoxReadinessCheck{
 			Status:  "failed",
@@ -302,7 +303,7 @@ func (c *ProxmoxClient) proxmoxTemplateStorageReadiness(ctx context.Context, cfg
 		return nil, &check
 	}
 	for _, name := range required {
-		check := proxmoxNamedStorageReadiness(name, storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
+		check := proxmoxNamedStorageReadiness(name.Name, name.Content, storages, "/nodes/"+cfg.Proxmox.Node+"/storage")
 		check.Details["source"] = "template"
 		if check.Status != "ok" {
 			return nil, &check
@@ -311,7 +312,7 @@ func (c *ProxmoxClient) proxmoxTemplateStorageReadiness(ctx context.Context, cfg
 	return required, nil
 }
 
-func proxmoxNamedStorageReadiness(name string, storages []proxmoxStorage, endpoint string) ProxmoxReadinessCheck {
+func proxmoxNamedStorageReadiness(name, requiredContent string, storages []proxmoxStorage, endpoint string) ProxmoxReadinessCheck {
 	for _, storage := range storages {
 		if storage.Storage != name {
 			continue
@@ -324,12 +325,13 @@ func proxmoxNamedStorageReadiness(name string, storages []proxmoxStorage, endpoi
 				Details: map[string]string{"storage": name, "class": "missing_resource", "hint": "enable_proxmox_storage", "active": strconv.Itoa(int(storage.Active)), "enabled": strconv.Itoa(int(storage.Enabled)), "endpoint": endpoint},
 			}
 		}
-		if !proxmoxStorageSupportsImages(storage.Content) {
+		if !proxmoxStorageSupportsContent(storage.Content, requiredContent) {
+			hint := "enable_proxmox_storage_" + requiredContent
 			return ProxmoxReadinessCheck{
 				Status:  "failed",
 				Check:   "storage",
-				Message: fmt.Sprintf("storage=%s class=missing_resource hint=enable_proxmox_storage_images", name),
-				Details: map[string]string{"storage": name, "class": "missing_resource", "hint": "enable_proxmox_storage_images", "content": storage.Content, "endpoint": endpoint},
+				Message: fmt.Sprintf("storage=%s class=missing_resource hint=%s", name, hint),
+				Details: map[string]string{"storage": name, "class": "missing_resource", "hint": hint, "content": storage.Content, "requiredContent": requiredContent, "endpoint": endpoint},
 			}
 		}
 		return ProxmoxReadinessCheck{
@@ -348,17 +350,26 @@ func proxmoxNamedStorageReadiness(name string, storages []proxmoxStorage, endpoi
 }
 
 func proxmoxStorageSupportsImages(content string) bool {
+	return proxmoxStorageSupportsContent(content, "images")
+}
+
+func proxmoxStorageSupportsContent(content, required string) bool {
 	for _, item := range strings.Split(content, ",") {
-		if strings.EqualFold(strings.TrimSpace(item), "images") {
+		if strings.EqualFold(strings.TrimSpace(item), required) {
 			return true
 		}
 	}
 	return false
 }
 
-func proxmoxTemplateStorages(config map[string]any) []string {
-	seen := map[string]bool{}
-	var storages []string
+type proxmoxTemplateStorageRequirement struct {
+	Name    string
+	Content string
+}
+
+func proxmoxTemplateStorages(config map[string]any) []proxmoxTemplateStorageRequirement {
+	seen := map[proxmoxTemplateStorageRequirement]bool{}
+	var storages []proxmoxTemplateStorageRequirement
 	for key, value := range config {
 		lowerKey := strings.ToLower(key)
 		diskKey := strings.HasPrefix(lowerKey, "ide") ||
@@ -376,14 +387,42 @@ func proxmoxTemplateStorages(config map[string]any) []string {
 		}
 		storage, _, found := strings.Cut(text, ":")
 		storage = strings.TrimSpace(storage)
-		if !found || storage == "" || storage == "none" || seen[storage] {
+		if !found || storage == "" || storage == "none" {
 			continue
 		}
-		seen[storage] = true
-		storages = append(storages, storage)
+		requiredContent := "images"
+		for _, item := range strings.Split(text, ",") {
+			name, value, found := strings.Cut(item, "=")
+			if found && strings.EqualFold(strings.TrimSpace(name), "media") && strings.EqualFold(strings.TrimSpace(value), "cdrom") {
+				requiredContent = "iso"
+			}
+		}
+		requirement := proxmoxTemplateStorageRequirement{Name: storage, Content: requiredContent}
+		if seen[requirement] {
+			continue
+		}
+		seen[requirement] = true
+		storages = append(storages, requirement)
 	}
-	sort.Strings(storages)
+	sort.Slice(storages, func(i, j int) bool {
+		if storages[i].Name == storages[j].Name {
+			return storages[i].Content < storages[j].Content
+		}
+		return storages[i].Name < storages[j].Name
+	})
 	return storages
+}
+
+func proxmoxTemplateStorageNames(requirements []proxmoxTemplateStorageRequirement) []string {
+	var names []string
+	last := ""
+	for _, requirement := range requirements {
+		if requirement.Name != last {
+			names = append(names, requirement.Name)
+			last = requirement.Name
+		}
+	}
+	return names
 }
 
 func (c *ProxmoxClient) proxmoxNetworkCheck(ctx context.Context, cfg Config) ProxmoxReadinessCheck {

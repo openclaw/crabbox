@@ -148,7 +148,8 @@ For self-signed private clusters, set `CRABBOX_PROXMOX_INSECURE_TLS=1` or pass
 `/version`, then verifies the configured node status, storage list, network
 bridge list, template VM/config, `/cluster/nextid`, and QEMU inventory. An
 explicit target storage must support `images`, and every source storage
-referenced by the template disks must be active, enabled, and image-capable.
+referenced by the template must be active and enabled. VM disk, cloud-init,
+EFI, and TPM stores must support `images`; CD-ROM stores must support `iso`.
 The configured template must have a cloud-init drive and, when no bridge
 override is set, `net0` on an active bridge. Cluster inventory recovery also
 requires propagated `VM.Audit` on `/`, so a permission-filtered

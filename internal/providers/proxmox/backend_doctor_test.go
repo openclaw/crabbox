@@ -1219,6 +1219,39 @@ func TestProxmoxCleanupWithoutLeaseLabelPreservesNumericClaim(t *testing.T) {
 	}
 }
 
+func TestProxmoxReleaseOnlyNumericClaimUsesCurrentClusterScope(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfgA := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve-a.example.test:8006", Node: "pve1"}}
+	cfgB := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve-b.example.test:8006", Node: "pve1"}}
+	for _, item := range []struct {
+		leaseID string
+		cfg     Config
+	}{
+		{leaseID: "cbx_cluster_a", cfg: cfgA},
+		{leaseID: "cbx_cluster_b", cfg: cfgB},
+	} {
+		server := expiredProxmoxServer("101", item.leaseID)
+		server.Provider = "proxmox"
+		if err := core.ClaimLeaseTargetForRepoConfig(item.leaseID, "old", item.cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notFound := &core.ProxmoxError{Method: "GET", Path: "/nodes/pve1/qemu/101/status/current", StatusCode: 404, Body: "not found"}
+	fake := &fakeProxmoxDoctorClient{getErrByID: map[string]error{"101": notFound}}
+	oldClient := newClient
+	newClient = func(Config) (proxmoxClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldClient })
+
+	backend := NewLeaseBackend(Provider{}.Spec(), cfgA, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+	target, err := backend.Resolve(context.Background(), ResolveRequest{ID: "101", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.LeaseID != "cbx_cluster_a" || target.Server.CloudID != "101" {
+		t.Fatalf("target=%#v, want current-cluster claim", target)
+	}
+}
+
 func expiredProxmoxServer(id, leaseID string) Server {
 	return Server{
 		CloudID: id,
