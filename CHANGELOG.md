@@ -8,6 +8,7 @@
 - Added `provider: anthropic-sandbox-runtime` (`srt`) for local one-shot command execution through Anthropic Sandbox Runtime, including filesystem/network policy handoff, doctor checks, config overrides, and live enforcement coverage. Thanks @coygeek.
 - Added `provider: apple-vz` for full ARM64 Ubuntu VMs through Apple's `Virtualization.framework`, including verified cloud images, secret-safe signed URL handling, loopback VSOCK SSH, retained leases, native helper packaging, failure rollback, and live lifecycle coverage. Thanks @coygeek.
 - Added `provider: digitalocean` for direct Linux SSH leases backed by DigitalOcean Droplets, including flat-tag ownership, per-lease SSH keys, docs, and guarded live smoke coverage. Thanks @coygeek.
+- Added a delegated Freestyle provider that runs commands in Freestyle VMs through the Freestyle REST API, with env-only authentication, archive sync, and automatic VM cleanup. Thanks @zozo123.
 - Added `provider: hyperv` for local Windows VM SSH leases through Microsoft Hyper-V, including differencing-disk provisioning, OpenSSH and MinGit bootstrap, password-less dev-image initialization, retained lease reuse, and cleanup. Thanks @anagnorisis2peripeteia.
 - Added an opt-in Islo userspace Tailscale plane with tailnet-aware pond peers, proxy-routed tailnet traffic, and URL-bridge fallback for leases without `--tailscale`. Thanks @zozo123.
 
