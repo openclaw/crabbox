@@ -244,10 +244,10 @@ func runISOE2EWindows(ctx context.Context, client lifecycleClient, placement xcp
 		return result, err
 	}
 	defer finalizeLocalArtifacts(runtime, &result, &err)
+	defer runtime.cleanup(context.Background(), &result, &err)
 	if err = runtime.createBaseVM(ctx, opts, &result); err != nil {
 		return result, err
 	}
-	defer runtime.cleanup(context.Background(), &result, &err)
 	if err = runtime.attachInstallDisk(ctx); err != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "windows_install_disk"
@@ -369,10 +369,10 @@ func runISOE2ELinux(ctx context.Context, client lifecycleClient, placement xcpNg
 		return result, err
 	}
 	defer finalizeLocalArtifacts(runtime, &result, &err)
+	defer runtime.cleanup(context.Background(), &result, &err)
 	if err = runtime.createBaseVM(ctx, opts, &result); err != nil {
 		return result, err
 	}
-	defer runtime.cleanup(context.Background(), &result, &err)
 	if err = runtime.attachInstallDisk(ctx); err != nil {
 		result.Classification = "environment_blocked"
 		result.Phase = "linux_install_disk"
@@ -615,16 +615,18 @@ func (r *isoE2ERuntime) createBaseVM(ctx context.Context, opts ISOE2EOptions, su
 			return boot
 		}(),
 	})
+	if created.VM.Ref != "" {
+		r.vm = created
+		summary.VMUUID = created.VM.UUID
+		summary.VMRef = created.VM.Ref
+		summary.Cleanup = "pending"
+	}
 	if err != nil {
 		summary.Classification = "environment_blocked"
 		summary.Phase = "create_vm"
 		summary.Reason = err.Error()
 		return err
 	}
-	r.vm = created
-	summary.VMUUID = created.VM.UUID
-	summary.VMRef = created.VM.Ref
-	summary.Cleanup = "pending"
 	return nil
 }
 
@@ -659,13 +661,15 @@ func (r *isoE2ERuntime) resolveInstallerMedia(ctx context.Context, summary *ISOE
 		Labels:      r.labels,
 		DestroyVDI:  true,
 	})
+	if imported.VDIRef != "" {
+		r.importedInstaller = imported
+	}
 	if importErr != nil {
 		summary.Classification = "environment_blocked"
 		summary.Phase = "installer_iso"
 		summary.Reason = importErr.Error()
 		return xcpNgISOMediaRef{}, importErr
 	}
-	r.importedInstaller = imported
 	summary.Evidence["installer_iso_imported"] = imported.Name
 	return xcpNgISOMediaRef{VDIRef: imported.VDIRef, NameLabel: imported.Name, Source: "imported-local-file"}, nil
 }
@@ -682,10 +686,12 @@ func (r *isoE2ERuntime) attachInstallDisk(ctx context.Context) error {
 		Unpluggable: true,
 		DestroyVDI:  true,
 	})
+	if disk.VDIRef != "" || disk.VBDRef != "" {
+		r.installDisk = disk
+	}
 	if err != nil {
 		return err
 	}
-	r.installDisk = disk
 	return nil
 }
 
@@ -722,13 +728,15 @@ func (r *isoE2ERuntime) attachAnswerMedia(ctx context.Context, opts ISOE2EOption
 			Payload: r.linuxSeedPayload,
 			Labels:  r.labels,
 		})
+		if drive.VDIRef != "" || drive.VBDRef != "" {
+			r.answerDrive = drive
+		}
 		if err != nil {
 			summary.Classification = "environment_blocked"
 			summary.Phase = "answer_iso"
 			summary.Reason = err.Error()
 			return err
 		}
-		r.answerDrive = drive
 		summary.Details["answer_iso_source"] = "generated-config-drive"
 		return nil
 	}
@@ -757,13 +765,15 @@ func (r *isoE2ERuntime) attachAnswerMedia(ctx context.Context, opts ISOE2EOption
 		Labels:      r.labels,
 		DestroyVDI:  true,
 	})
+	if imported.VDIRef != "" {
+		r.importedAnswer = imported
+	}
 	if importErr != nil {
 		summary.Classification = "environment_blocked"
 		summary.Phase = "answer_iso"
 		summary.Reason = importErr.Error()
 		return importErr
 	}
-	r.importedAnswer = imported
 	summary.Details["answer_iso_source"] = "generated-local-file"
 	return r.attachAnswerISO(ctx, xcpNgISOMediaRef{VDIRef: imported.VDIRef, NameLabel: imported.Name, Source: "generated-local-file"}, "4")
 }
@@ -885,7 +895,7 @@ func (r *isoE2ERuntime) cleanup(ctx context.Context, summary *ISOE2ESummary, run
 	defer cancel()
 	cleanupErr := r.client.DeleteServer(cleanupCtx, r.vm.VM.Ref)
 	seen := map[string]struct{}{}
-	for _, drive := range []xcpNgConfigDrive{r.answerDrive, r.installerDrive, r.importedAnswer, r.importedInstaller} {
+	for _, drive := range []xcpNgConfigDrive{r.installDisk, r.answerDrive, r.installerDrive, r.importedAnswer, r.importedInstaller} {
 		if !drive.DestroyVDI || drive.VDIRef == "" {
 			continue
 		}

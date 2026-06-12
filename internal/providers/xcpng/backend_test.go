@@ -129,7 +129,7 @@ func (f *fakeLifecycleClient) CreateFreshVM(_ context.Context, req xcpNgFreshVMR
 	f.mutated = true
 	f.freshReq = req
 	if err := f.fail("create-fresh-vm"); err != nil {
-		return xcpNgFreshVMResult{}, err
+		return f.freshVM, err
 	}
 	result := f.freshVM
 	if result.VM.Ref == "" {
@@ -152,7 +152,7 @@ func (f *fakeLifecycleClient) ImportISO(_ context.Context, req xcpNgImportISOReq
 	f.record("import-iso")
 	f.mutated = true
 	if err := f.fail("import-iso"); err != nil {
-		return xcpNgConfigDrive{}, err
+		return f.importedISO, err
 	}
 	drive := f.importedISO
 	if drive.VDIRef == "" {
@@ -172,7 +172,7 @@ func (f *fakeLifecycleClient) AttachDisk(_ context.Context, req xcpNgDiskAttachR
 	f.record("attach-disk")
 	f.mutated = true
 	if err := f.fail("attach-disk"); err != nil {
-		return xcpNgConfigDrive{}, err
+		return f.attachedDisk, err
 	}
 	drive := f.attachedDisk
 	if drive.VDIRef == "" {
@@ -195,7 +195,7 @@ func (f *fakeLifecycleClient) AttachConfigDrive(_ context.Context, req xcpNgConf
 	f.record("attach-config-drive")
 	f.mutated = true
 	if err := f.fail("attach-config-drive"); err != nil {
-		return xcpNgConfigDrive{}, err
+		return f.drive, err
 	}
 	if !strings.Contains(req.Payload.UserData, req.PublicKeyNotAvailableForTests()) {
 		// Keep the fake focused on cloud-init being non-empty without coupling to key text.
@@ -1292,6 +1292,36 @@ func TestISOE2ECleanupUsesBoundedContext(t *testing.T) {
 	}
 	if !fake.deleteBounded || !fake.deleteCDBounded {
 		t.Fatalf("cleanup contexts: delete=%v delete-config-drive=%v", fake.deleteBounded, fake.deleteCDBounded)
+	}
+}
+
+func TestISOE2ERuntimeKeepsRecoveryHandlesFromFailedAllocations(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		freshVM:      xcpNgFreshVMResult{VM: xapiVM{Ref: "OpaqueRef:vm"}},
+		attachedDisk: xcpNgConfigDrive{VDIRef: "OpaqueRef:disk", DestroyVDI: true},
+		errOn: map[string]error{
+			"create-fresh-vm": errors.New("create failed"),
+			"attach-disk":     errors.New("attach failed"),
+		},
+	}
+	runtime := isoE2ERuntime{
+		client:    fake,
+		placement: xcpNgPlacement{srRef: "OpaqueRef:sr"},
+		labels:    map[string]string{"lease": "cbx_recovery"},
+	}
+	summary := ISOE2ESummary{Details: map[string]string{}}
+
+	if err := runtime.createBaseVM(context.Background(), ISOE2EOptions{}, &summary); err == nil {
+		t.Fatal("expected create failure")
+	}
+	if runtime.vm.VM.Ref != "OpaqueRef:vm" || summary.VMRef != "OpaqueRef:vm" {
+		t.Fatalf("vm recovery handle runtime=%#v summary=%#v", runtime.vm, summary)
+	}
+	if err := runtime.attachInstallDisk(context.Background()); err == nil {
+		t.Fatal("expected attach failure")
+	}
+	if runtime.installDisk.VDIRef != "OpaqueRef:disk" || !runtime.installDisk.DestroyVDI {
+		t.Fatalf("disk recovery handle=%#v", runtime.installDisk)
 	}
 }
 

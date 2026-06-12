@@ -1042,6 +1042,76 @@ func TestAttachDiskCreatesRawVDI(t *testing.T) {
 	}
 }
 
+func TestAttachDiskReturnsRecoveryHandleWhenRollbackFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch method := readXMLRPCMethod(t, r); method {
+		case "VDI.create":
+			writeXMLRPCString(t, w, "OpaqueRef:vdi")
+		case "VBD.create":
+			writeXMLRPCFault(t, w, "SR_BACKEND_FAILURE")
+		case "VDI.destroy":
+			writeXMLRPCFault(t, w, "VDI_IN_USE")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+
+	drive, err := client.AttachDisk(context.Background(), xcpNgDiskAttachRequest{
+		VMRef:      "OpaqueRef:vm",
+		SRRef:      "OpaqueRef:sr",
+		DestroyVDI: true,
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "rollback xcp-ng drive OpaqueRef:vdi") {
+		t.Fatalf("err=%v", err)
+	}
+	if drive.VDIRef != "OpaqueRef:vdi" || !drive.DestroyVDI {
+		t.Fatalf("recovery drive=%#v", drive)
+	}
+}
+
+func TestImportISOReturnsRecoveryHandleWhenRollbackFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "installer.iso")
+	if err := os.WriteFile(path, []byte("iso"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == "/import_raw_vdi/" {
+			http.Error(w, "upload failed", http.StatusInternalServerError)
+			return
+		}
+		switch method := readXMLRPCMethod(t, r); method {
+		case "VDI.create":
+			writeXMLRPCString(t, w, "OpaqueRef:vdi")
+		case "task.create":
+			writeXMLRPCString(t, w, "OpaqueRef:task")
+		case "task.destroy":
+			writeXMLRPCString(t, w, "true")
+		case "VDI.destroy":
+			writeXMLRPCFault(t, w, "VDI_IN_USE")
+		default:
+			t.Fatalf("unexpected method %s", method)
+		}
+	}))
+	defer server.Close()
+	client := &xapiClient{endpoint: server.URL, session: "OpaqueRef:session", http: server.Client()}
+
+	drive, err := client.ImportISO(context.Background(), xcpNgImportISORequest{
+		SRRef:      "OpaqueRef:sr",
+		Path:       path,
+		DestroyVDI: true,
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "rollback xcp-ng drive OpaqueRef:vdi") {
+		t.Fatalf("err=%v", err)
+	}
+	if drive.VDIRef != "OpaqueRef:vdi" || !drive.DestroyVDI {
+		t.Fatalf("recovery drive=%#v", drive)
+	}
+}
+
 func TestAttachConfigDriveCreatesImportsAndAttachesVDI(t *testing.T) {
 	var methods []string
 	var imported bool
