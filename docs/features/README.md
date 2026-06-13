@@ -34,6 +34,7 @@ Read when:
 - [Telemetry](telemetry.md): lightweight Linux load, memory, disk, uptime, and per-run resource samples.
 - [History and logs](history-logs.md): coordinator run records, events, and retained remote output.
 - [Cost and usage](cost-usage.md): guardrails, provider-backed pricing, and reporting.
+- [Marketplace credits gateway](marketplace-credits.md): one customer credit balance and smart routing across brokered providers.
 - [Lifecycle cleanup](lifecycle-cleanup.md): release, expiry, keep mode, and direct cleanup.
 
 ## Providers
@@ -152,5 +153,6 @@ Provider deep-dives that live here in `features/`:
 - [inspect](../commands/inspect.md) — detailed lease info
 - [providers](../commands/providers.md) — show the provider capability matrix
 - [usage](../commands/usage.md) — cost and usage reports
+- [marketplace](../commands/marketplace.md) — credits gateway and smart routing quote preview
 - [admin](../commands/admin.md) — admin operations
 - [azure](../commands/azure.md) — Azure-specific commands

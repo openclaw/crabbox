@@ -198,6 +198,19 @@ type CoordinatorUsageResponse struct {
 	Limits CoordinatorCostLimits   `json:"limits"`
 }
 
+type CoordinatorMarketplaceStatusResponse struct {
+	Marketplace CoordinatorMarketplaceStatus `json:"marketplace"`
+	Owner       string                       `json:"owner,omitempty"`
+	Org         string                       `json:"org,omitempty"`
+}
+
+type CoordinatorMarketplaceQuoteResponse struct {
+	Quote       CoordinatorMarketplaceQuote  `json:"quote"`
+	Marketplace CoordinatorMarketplaceStatus `json:"marketplace"`
+	Owner       string                       `json:"owner,omitempty"`
+	Org         string                       `json:"org,omitempty"`
+}
+
 type CoordinatorWhoami struct {
 	Owner          string `json:"owner"`
 	Org            string `json:"org"`
@@ -616,6 +629,71 @@ type CoordinatorCostLimits struct {
 	MaxMonthlyUSD                   float64  `json:"maxMonthlyUSD"`
 	MaxMonthlyUSDPerOwner           float64  `json:"maxMonthlyUSDPerOwner"`
 	MaxMonthlyUSDPerOrg             float64  `json:"maxMonthlyUSDPerOrg"`
+}
+
+type CoordinatorMarketplaceStatus struct {
+	Enabled                 bool                             `json:"enabled"`
+	Mode                    string                           `json:"mode"`
+	Currency                string                           `json:"currency"`
+	CreditUnit              string                           `json:"creditUnit"`
+	RequireCreditsForLeases bool                             `json:"requireCreditsForLeases"`
+	SupportedProviders      []string                         `json:"supportedProviders"`
+	Features                CoordinatorMarketplaceFeatures   `json:"features"`
+	Settlement              CoordinatorMarketplaceSettlement `json:"settlement"`
+	DecisionsRequired       []string                         `json:"decisionsRequired"`
+}
+
+type CoordinatorMarketplaceFeatures struct {
+	Quotes           bool `json:"quotes"`
+	Bidding          bool `json:"bidding"`
+	Payments         bool `json:"payments"`
+	CreditLedger     bool `json:"creditLedger"`
+	LeaseEnforcement bool `json:"leaseEnforcement"`
+}
+
+type CoordinatorMarketplaceSettlement struct {
+	PaymentProvider    string `json:"paymentProvider"`
+	LedgerProvider     string `json:"ledgerProvider"`
+	ProviderSettlement string `json:"providerSettlement"`
+}
+
+type CoordinatorMarketplaceQuoteRequest struct {
+	Provider   string   `json:"provider,omitempty"`
+	Providers  []string `json:"providers,omitempty"`
+	Class      string   `json:"class,omitempty"`
+	ServerType string   `json:"serverType,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	TTLSeconds int      `json:"ttlSeconds,omitempty"`
+	MaxCredits float64  `json:"maxCredits,omitempty"`
+	Strategy   string   `json:"strategy,omitempty"`
+}
+
+type CoordinatorMarketplaceQuote struct {
+	ID         string                                 `json:"id"`
+	Mode       string                                 `json:"mode"`
+	Currency   string                                 `json:"currency"`
+	CreditUnit string                                 `json:"creditUnit"`
+	Strategy   string                                 `json:"strategy"`
+	TTLSeconds int                                    `json:"ttlSeconds"`
+	Candidates []CoordinatorMarketplaceQuoteCandidate `json:"candidates"`
+	Selected   *CoordinatorMarketplaceQuoteCandidate  `json:"selected,omitempty"`
+	Warnings   []string                               `json:"warnings"`
+}
+
+type CoordinatorMarketplaceQuoteCandidate struct {
+	Provider          string  `json:"provider"`
+	Target            string  `json:"target"`
+	Class             string  `json:"class"`
+	ServerType        string  `json:"serverType"`
+	TTLSeconds        int     `json:"ttlSeconds"`
+	CostHourlyUSD     float64 `json:"costHourlyUSD"`
+	RetailHourlyUSD   float64 `json:"retailHourlyUSD"`
+	EstimatedCostUSD  float64 `json:"estimatedCostUSD"`
+	Credits           float64 `json:"credits"`
+	MarginUSD         float64 `json:"marginUSD"`
+	RouteKey          string  `json:"routeKey"`
+	Available         bool    `json:"available"`
+	UnavailableReason string  `json:"unavailableReason,omitempty"`
 }
 
 type CoordinatorID string
@@ -1037,6 +1115,18 @@ func (c *CoordinatorClient) Usage(ctx context.Context, scope, owner, org, month 
 		path += "?" + encoded
 	}
 	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) MarketplaceStatus(ctx context.Context) (CoordinatorMarketplaceStatusResponse, error) {
+	var res CoordinatorMarketplaceStatusResponse
+	err := c.do(ctx, http.MethodGet, "/v1/marketplace/status", nil, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) MarketplaceQuote(ctx context.Context, input CoordinatorMarketplaceQuoteRequest) (CoordinatorMarketplaceQuoteResponse, error) {
+	var res CoordinatorMarketplaceQuoteResponse
+	err := c.do(ctx, http.MethodPost, "/v1/marketplace/quotes", input, &res)
 	return res, err
 }
 

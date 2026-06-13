@@ -193,6 +193,7 @@ Commands:
   unshare     Remove lease sharing
   image       Create provider images and promote brokered AWS runner images
   usage       Show cost and usage estimates by user, org, or fleet
+  marketplace  Preview the Crabbox credits gateway and smart routing quotes
   admin       Lease admin controls for trusted operators
   actions     Hydrate boxes from repo workflows or GitHub runners
   capsule     Capture and replay lightweight failure capsules
@@ -256,6 +257,7 @@ Common Flows:
   crabbox cache volumes
   crabbox pool ready
   crabbox usage --scope org
+  crabbox marketplace quote --provider auto --class beast --ttl 1h --max-credits 5
   crabbox admin leases --state active
   crabbox admin lease-audit --state expired --provider aws
   crabbox admin providers identity --provider aws --region eu-west-1

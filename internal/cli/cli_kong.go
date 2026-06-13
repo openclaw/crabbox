@@ -11,59 +11,60 @@ import (
 type crabboxKongCLI struct {
 	Version kong.VersionFlag `name:"version" short:"v" help:"Print version."`
 
-	VersionCmd versionKongCmd    `cmd:"" name:"version" help:"Print version."`
-	Init       initKongCmd       `cmd:"" passthrough:"" help:"Onboard the current repo for Crabbox."`
-	Login      loginKongCmd      `cmd:"" passthrough:"" help:"Open GitHub login, store broker credentials, verify access."`
-	Logout     logoutKongCmd     `cmd:"" passthrough:"" help:"Remove the stored broker token."`
-	Whoami     whoamiKongCmd     `cmd:"" passthrough:"" help:"Show broker identity."`
-	Doctor     doctorKongCmd     `cmd:"" passthrough:"" help:"Check local and broker/provider readiness."`
-	Warmup     warmupKongCmd     `cmd:"" passthrough:"" help:"Lease a box and wait until it is ready."`
-	Prewarm    prewarmKongCmd    `cmd:"" passthrough:"" help:"Lease and hydrate a reusable test-ready box."`
-	Run        runKongCmd        `cmd:"" passthrough:"" help:"Sync the repo, run a remote command, stream output."`
-	Bench      benchKongCmd      `cmd:"" help:"Record and report local benchmark timings."`
-	Job        jobKongCmd        `cmd:"" help:"Run named repo-local Crabbox jobs."`
-	Desktop    desktopKongCmd    `cmd:"" help:"Launch apps into a visible desktop session."`
-	Media      mediaKongCmd      `cmd:"" help:"Create preview artifacts from recorded desktop videos."`
-	Artifacts  artifactsKongCmd  `cmd:"" help:"Collect, transform, and publish QA artifacts."`
-	SyncPlan   syncPlanKongCmd   `cmd:"" name:"sync-plan" passthrough:"" help:"Show local sync manifest size hotspots."`
-	Providers  providersKongCmd  `cmd:"" passthrough:"" help:"Show provider capabilities and recommendations."`
-	History    historyKongCmd    `cmd:"" passthrough:"" help:"List recorded remote runs."`
-	Logs       logsKongCmd       `cmd:"" passthrough:"" help:"Print recorded run logs."`
-	Events     eventsKongCmd     `cmd:"" passthrough:"" help:"Print recorded run events."`
-	Attach     attachKongCmd     `cmd:"" passthrough:"" help:"Follow recorded events for an active run."`
-	Results    resultsKongCmd    `cmd:"" passthrough:"" help:"Show recorded test result summaries."`
-	Cache      cacheKongCmd      `cmd:"" help:"Inspect, purge, or warm remote caches."`
-	Status     statusKongCmd     `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
-	List       listKongCmd       `cmd:"" passthrough:"" help:"List Crabbox machines."`
-	Ports      portsKongCmd      `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
-	Cp         cpKongCmd         `cmd:"" name:"cp" passthrough:"" help:"Copy files between host and a delegated sandbox."`
-	Share      shareKongCmd      `cmd:"" passthrough:"" help:"Share a lease with users or the owning org."`
-	Unshare    unshareKongCmd    `cmd:"" passthrough:"" help:"Remove lease sharing."`
-	Image      imageKongCmd      `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
-	Usage      usageKongCmd      `cmd:"" passthrough:"" help:"Show cost and usage estimates by user, org, or fleet."`
-	Admin      adminKongCmd      `cmd:"" help:"Lease admin controls for trusted operators."`
-	Actions    actionsKongCmd    `cmd:"" help:"Register GitHub Actions runners or dispatch workflows."`
-	Capsule    capsuleKongCmd    `cmd:"" help:"Capture and replay lightweight failure capsules."`
-	Checkpoint checkpointKongCmd `cmd:"" help:"Create, restore, and fork VM or workspace checkpoints."`
-	Ssh        sshKongCmd        `cmd:"" name:"ssh" passthrough:"" help:"Print the SSH command for a lease."`
-	Connect    connectKongCmd    `cmd:"" passthrough:"" help:"Open an interactive SSH session to a lease."`
-	Vnc        vncKongCmd        `cmd:"" name:"vnc" passthrough:"" help:"Print or open VNC connection details for a desktop lease."`
-	Webvnc     webvncKongCmd     `cmd:"" name:"webvnc" passthrough:"" help:"Open a desktop lease or local VNC tunnel in a browser."`
-	Code       codeKongCmd       `cmd:"" passthrough:"" help:"Bridge a code lease into the authenticated web portal."`
-	Egress     egressKongCmd     `cmd:"" passthrough:"" help:"Bridge lease browser/app traffic through this machine."`
-	Screenshot screenshotKongCmd `cmd:"" passthrough:"" help:"Capture a PNG from a desktop lease."`
-	Inspect    inspectKongCmd    `cmd:"" passthrough:"" help:"Print lease/provider details; add --json for scripts."`
-	Stop       stopKongCmd       `cmd:"" passthrough:"" help:"Release a lease or delete a direct-provider machine."`
-	Release    releaseKongCmd    `cmd:"" passthrough:"" help:"Alias for stop."`
-	Pause      pauseKongCmd      `cmd:"" passthrough:"" help:"Pause a lease, freeing remote compute while preserving state (provider-dependent)."`
-	Resume     resumeKongCmd     `cmd:"" passthrough:"" help:"Resume a previously paused lease."`
-	Cleanup    cleanupKongCmd    `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines or local provider state."`
-	Azure      azureKongCmd      `cmd:"" help:"Azure provider setup and login."`
-	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
-	Adapter    adapterKongCmd    `cmd:"" help:"Serve or connect the Crabfleet runtime adapter."`
-	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
-	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
-	Pond       pondKongCmd       `cmd:"" help:"Pond bridge plane: peer discovery for delegated providers."`
+	VersionCmd  versionKongCmd     `cmd:"" name:"version" help:"Print version."`
+	Init        initKongCmd        `cmd:"" passthrough:"" help:"Onboard the current repo for Crabbox."`
+	Login       loginKongCmd       `cmd:"" passthrough:"" help:"Open GitHub login, store broker credentials, verify access."`
+	Logout      logoutKongCmd      `cmd:"" passthrough:"" help:"Remove the stored broker token."`
+	Whoami      whoamiKongCmd      `cmd:"" passthrough:"" help:"Show broker identity."`
+	Doctor      doctorKongCmd      `cmd:"" passthrough:"" help:"Check local and broker/provider readiness."`
+	Warmup      warmupKongCmd      `cmd:"" passthrough:"" help:"Lease a box and wait until it is ready."`
+	Prewarm     prewarmKongCmd     `cmd:"" passthrough:"" help:"Lease and hydrate a reusable test-ready box."`
+	Run         runKongCmd         `cmd:"" passthrough:"" help:"Sync the repo, run a remote command, stream output."`
+	Bench       benchKongCmd       `cmd:"" help:"Record and report local benchmark timings."`
+	Job         jobKongCmd         `cmd:"" help:"Run named repo-local Crabbox jobs."`
+	Desktop     desktopKongCmd     `cmd:"" help:"Launch apps into a visible desktop session."`
+	Media       mediaKongCmd       `cmd:"" help:"Create preview artifacts from recorded desktop videos."`
+	Artifacts   artifactsKongCmd   `cmd:"" help:"Collect, transform, and publish QA artifacts."`
+	SyncPlan    syncPlanKongCmd    `cmd:"" name:"sync-plan" passthrough:"" help:"Show local sync manifest size hotspots."`
+	Providers   providersKongCmd   `cmd:"" passthrough:"" help:"Show provider capabilities and recommendations."`
+	History     historyKongCmd     `cmd:"" passthrough:"" help:"List recorded remote runs."`
+	Logs        logsKongCmd        `cmd:"" passthrough:"" help:"Print recorded run logs."`
+	Events      eventsKongCmd      `cmd:"" passthrough:"" help:"Print recorded run events."`
+	Attach      attachKongCmd      `cmd:"" passthrough:"" help:"Follow recorded events for an active run."`
+	Results     resultsKongCmd     `cmd:"" passthrough:"" help:"Show recorded test result summaries."`
+	Cache       cacheKongCmd       `cmd:"" help:"Inspect, purge, or warm remote caches."`
+	Status      statusKongCmd      `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
+	List        listKongCmd        `cmd:"" passthrough:"" help:"List Crabbox machines."`
+	Ports       portsKongCmd       `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
+	Cp          cpKongCmd          `cmd:"" name:"cp" passthrough:"" help:"Copy files between host and a delegated sandbox."`
+	Share       shareKongCmd       `cmd:"" passthrough:"" help:"Share a lease with users or the owning org."`
+	Unshare     unshareKongCmd     `cmd:"" passthrough:"" help:"Remove lease sharing."`
+	Image       imageKongCmd       `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
+	Usage       usageKongCmd       `cmd:"" passthrough:"" help:"Show cost and usage estimates by user, org, or fleet."`
+	Marketplace marketplaceKongCmd `cmd:"" help:"Preview the Crabbox credits gateway and smart routing quotes."`
+	Admin       adminKongCmd       `cmd:"" help:"Lease admin controls for trusted operators."`
+	Actions     actionsKongCmd     `cmd:"" help:"Register GitHub Actions runners or dispatch workflows."`
+	Capsule     capsuleKongCmd     `cmd:"" help:"Capture and replay lightweight failure capsules."`
+	Checkpoint  checkpointKongCmd  `cmd:"" help:"Create, restore, and fork VM or workspace checkpoints."`
+	Ssh         sshKongCmd         `cmd:"" name:"ssh" passthrough:"" help:"Print the SSH command for a lease."`
+	Connect     connectKongCmd     `cmd:"" passthrough:"" help:"Open an interactive SSH session to a lease."`
+	Vnc         vncKongCmd         `cmd:"" name:"vnc" passthrough:"" help:"Print or open VNC connection details for a desktop lease."`
+	Webvnc      webvncKongCmd      `cmd:"" name:"webvnc" passthrough:"" help:"Open a desktop lease or local VNC tunnel in a browser."`
+	Code        codeKongCmd        `cmd:"" passthrough:"" help:"Bridge a code lease into the authenticated web portal."`
+	Egress      egressKongCmd      `cmd:"" passthrough:"" help:"Bridge lease browser/app traffic through this machine."`
+	Screenshot  screenshotKongCmd  `cmd:"" passthrough:"" help:"Capture a PNG from a desktop lease."`
+	Inspect     inspectKongCmd     `cmd:"" passthrough:"" help:"Print lease/provider details; add --json for scripts."`
+	Stop        stopKongCmd        `cmd:"" passthrough:"" help:"Release a lease or delete a direct-provider machine."`
+	Release     releaseKongCmd     `cmd:"" passthrough:"" help:"Alias for stop."`
+	Pause       pauseKongCmd       `cmd:"" passthrough:"" help:"Pause a lease, freeing remote compute while preserving state (provider-dependent)."`
+	Resume      resumeKongCmd      `cmd:"" passthrough:"" help:"Resume a previously paused lease."`
+	Cleanup     cleanupKongCmd     `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines or local provider state."`
+	Azure       azureKongCmd       `cmd:"" help:"Azure provider setup and login."`
+	Config      configKongCmd      `cmd:"" help:"Show or update user config."`
+	Adapter     adapterKongCmd     `cmd:"" help:"Serve or connect the Crabfleet runtime adapter."`
+	Pool        poolKongCmd        `cmd:"" help:"Alias commands for machine pools."`
+	Machine     machineKongCmd     `cmd:"" help:"Alias commands for direct-provider machines."`
+	Pond        pondKongCmd        `cmd:"" help:"Pond bridge plane: peer discovery for delegated providers."`
 }
 
 type kongExit struct {
@@ -126,7 +127,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "adapter", "admin", "artifacts", "azure", "bench", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "adapter", "admin", "artifacts", "azure", "bench", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "marketplace", "media", "pool":
 		return true
 	default:
 		return false
@@ -221,6 +222,16 @@ type unshareKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type usageKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type marketplaceKongCmd struct {
+	Status marketplaceStatusKongCmd `cmd:"" passthrough:"" help:"Show credits gateway status."`
+	Quote  marketplaceQuoteKongCmd  `cmd:"" passthrough:"" help:"Preview smart-routing provider quotes."`
+}
+type marketplaceStatusKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type marketplaceQuoteKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type sshKongCmd struct {
@@ -616,12 +627,18 @@ func (c *listKongCmd) Run(ctx context.Context, app App) error      { return app.
 func (c *shareKongCmd) Run(ctx context.Context, app App) error     { return app.share(ctx, c.Args) }
 func (c *unshareKongCmd) Run(ctx context.Context, app App) error   { return app.unshare(ctx, c.Args) }
 func (c *usageKongCmd) Run(ctx context.Context, app App) error     { return app.usage(ctx, c.Args) }
-func (c *sshKongCmd) Run(ctx context.Context, app App) error       { return app.ssh(ctx, c.Args) }
-func (c *connectKongCmd) Run(ctx context.Context, app App) error   { return app.connect(ctx, c.Args) }
-func (c *vncKongCmd) Run(ctx context.Context, app App) error       { return app.vnc(ctx, c.Args) }
-func (c *webvncKongCmd) Run(ctx context.Context, app App) error    { return app.webvnc(ctx, c.Args) }
-func (c *codeKongCmd) Run(ctx context.Context, app App) error      { return app.webCode(ctx, c.Args) }
-func (c *egressKongCmd) Run(ctx context.Context, app App) error    { return app.egress(ctx, c.Args) }
+func (c *marketplaceStatusKongCmd) Run(ctx context.Context, app App) error {
+	return app.marketplaceStatus(ctx, c.Args)
+}
+func (c *marketplaceQuoteKongCmd) Run(ctx context.Context, app App) error {
+	return app.marketplaceQuote(ctx, c.Args)
+}
+func (c *sshKongCmd) Run(ctx context.Context, app App) error     { return app.ssh(ctx, c.Args) }
+func (c *connectKongCmd) Run(ctx context.Context, app App) error { return app.connect(ctx, c.Args) }
+func (c *vncKongCmd) Run(ctx context.Context, app App) error     { return app.vnc(ctx, c.Args) }
+func (c *webvncKongCmd) Run(ctx context.Context, app App) error  { return app.webvnc(ctx, c.Args) }
+func (c *codeKongCmd) Run(ctx context.Context, app App) error    { return app.webCode(ctx, c.Args) }
+func (c *egressKongCmd) Run(ctx context.Context, app App) error  { return app.egress(ctx, c.Args) }
 func (c *screenshotKongCmd) Run(ctx context.Context, app App) error {
 	return app.screenshot(ctx, c.Args)
 }

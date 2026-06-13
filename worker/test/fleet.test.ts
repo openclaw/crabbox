@@ -11394,7 +11394,7 @@ describe("fleet lease identity and idle", () => {
       request("GET", `/v1/usage?scope=all&owner=peter@example.com&month=${createdAt.slice(0, 7)}`, {
         headers: {
           "x-crabbox-owner": "friend@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -11405,6 +11405,87 @@ describe("fleet lease identity and idle", () => {
     expect(body.usage.scope).toBe("user");
     expect(body.usage.owner).toBe("friend@example.com");
     expect(body.usage.leases).toBe(1);
+  });
+
+  it("reports marketplace gateway status with credits disabled by default", async () => {
+    const fleet = testFleet(new MemoryStorage());
+    const response = await fleet.fetch(
+      request("GET", "/v1/marketplace/status", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      marketplace: {
+        enabled: boolean;
+        mode: string;
+        features: { payments: boolean; creditLedger: boolean; leaseEnforcement: boolean };
+      };
+      owner: string;
+      org: string;
+    };
+    expect(body.owner).toBe("friend@example.com");
+    expect(body.org).toBe("example-org");
+    expect(body.marketplace).toMatchObject({
+      enabled: false,
+      mode: "disabled",
+      features: {
+        payments: false,
+        creditLedger: false,
+        leaseEnforcement: false,
+      },
+    });
+  });
+
+  it("returns marketplace preview quotes for smart routing candidates", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_MARKETPLACE_ENABLED: "1",
+        CRABBOX_MARKETPLACE_BIDDING_ENABLED: "1",
+        CRABBOX_MARKETPLACE_ALLOWED_PROVIDERS: "aws,hetzner",
+        CRABBOX_MARKETPLACE_RATE_CARD_JSON: JSON.stringify({
+          "aws:beast": { costHourlyUSD: 2, retailHourlyUSD: 3 },
+          "hetzner:beast": { costHourlyUSD: 1, retailHourlyUSD: 1.5 },
+        }),
+      },
+    );
+    const response = await fleet.fetch(
+      request("POST", "/v1/marketplace/quotes", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          provider: "auto",
+          class: "beast",
+          ttlSeconds: 7200,
+          strategy: "cheapest",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      quote: {
+        selected?: { provider: string; credits: number };
+        candidates: Array<{ provider: string; credits: number }>;
+        warnings: string[];
+      };
+      marketplace: { features: { bidding: boolean } };
+    };
+    expect(body.marketplace.features.bidding).toBe(true);
+    expect(body.quote.selected).toMatchObject({ provider: "hetzner", credits: 3 });
+    expect(body.quote.candidates.map((candidate) => candidate.provider)).toEqual([
+      "hetzner",
+      "aws",
+    ]);
+    expect(body.quote.warnings[0]).toContain("preview quote only");
   });
 
   it("resolves owner-scoped slugs and heartbeat extends idle expiry", async () => {

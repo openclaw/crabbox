@@ -35,6 +35,7 @@ same order as the CLI help.
 - [unshare](unshare.md)
 - [image](image.md)
 - [usage](usage.md)
+- [marketplace](marketplace.md)
 - [admin](admin.md)
 - [actions](actions.md)
 - [capsule](capsule.md)

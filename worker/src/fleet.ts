@@ -52,6 +52,12 @@ import {
   sshPublicKeyIdentity,
 } from "./hetzner";
 import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
+import {
+  MarketplaceInputError,
+  marketplaceQuote,
+  marketplaceStatus,
+  type MarketplaceQuoteRequest,
+} from "./marketplace";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
@@ -776,6 +782,12 @@ export class FleetCoordinator {
       }
       if (method === "GET" && parts.join("/") === "v1/usage") {
         return await this.usage(request);
+      }
+      if (method === "GET" && parts.join("/") === "v1/marketplace/status") {
+        return this.marketplaceStatus(request);
+      }
+      if (method === "POST" && parts.join("/") === "v1/marketplace/quotes") {
+        return await this.marketplaceQuote(request);
       }
       if (method === "GET" && parts.join("/") === "v1/whoami") {
         return this.whoami(request);
@@ -9185,6 +9197,42 @@ export class FleetCoordinator {
       : requestOrg(request, this.env);
     const usage = usageSummary(await this.leaseRecords(), { scope, owner, org, month }, new Date());
     return json({ usage, limits: costLimits(this.env) });
+  }
+
+  private marketplaceStatus(request: Request): Response {
+    return json({
+      marketplace: marketplaceStatus(this.env),
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+    });
+  }
+
+  private async marketplaceQuote(request: Request): Promise<Response> {
+    const status = marketplaceStatus(this.env);
+    if (!status.enabled) {
+      return json(
+        {
+          error: "marketplace_disabled",
+          message: "marketplace preview is disabled",
+          marketplace: status,
+        },
+        { status: 409 },
+      );
+    }
+    try {
+      const input = await readJson<MarketplaceQuoteRequest>(request);
+      return json({
+        quote: marketplaceQuote(this.env, input),
+        marketplace: status,
+        owner: requestOwner(request),
+        org: requestOrg(request, this.env),
+      });
+    } catch (error) {
+      if (error instanceof MarketplaceInputError) {
+        return json({ error: error.code, message: error.message }, { status: 400 });
+      }
+      throw error;
+    }
   }
 
   private async createImage(request: Request): Promise<Response> {
