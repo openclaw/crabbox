@@ -136,6 +136,59 @@ func TestPondACLEnsureAcceptsHuJSONPolicy(t *testing.T) {
 	}
 }
 
+func TestPondACLMergePolicyPreservesHuJSONStructure(t *testing.T) {
+	tag := pondTailscaleTag("alice", "pr-42")
+	input := `// policy header
+{
+  // owners stay commented
+  "tagOwners": {
+    "tag:crabbox": ["autogroup:admin"], // existing owner
+  },
+  "tests": [
+    // unrelated test section must survive
+    { "src": "alice@example.com", "accept": ["tag:crabbox:*"], },
+  ],
+  "grants": [
+    { "src": ["tag:crabbox"], "dst": ["tag:crabbox"], "ip": ["*"], },
+  ],
+  "ssh": [
+    { "action": "check", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot"], },
+  ],
+  "unknownTopLevel": {
+    "kept": true,
+  },
+}`
+
+	merged, err := pondACLMergePolicy(input, tag)
+	if err != nil {
+		t.Fatalf("pondACLMergePolicy: %v", err)
+	}
+	for _, want := range []string{
+		"// policy header",
+		"// owners stay commented",
+		"// existing owner",
+		"// unrelated test section must survive",
+		`"tests"`,
+		`"ssh"`,
+		`"unknownTopLevel"`,
+		tag,
+	} {
+		if !strings.Contains(merged, want) {
+			t.Fatalf("merged policy missing %q:\n%s", want, merged)
+		}
+	}
+	if !pondACLRowPresent(merged, tag) {
+		t.Fatalf("merged policy should pass pondACLRowPresent:\n%s", merged)
+	}
+	again, err := pondACLMergePolicy(merged, tag)
+	if err != nil {
+		t.Fatalf("second pondACLMergePolicy: %v", err)
+	}
+	if again != merged {
+		t.Fatalf("merge should be idempotent\nfirst:\n%s\nsecond:\n%s", merged, again)
+	}
+}
+
 func TestPondACLEnsureRefusesTrulyMalformedPolicy(t *testing.T) {
 	// Genuinely malformed input (not JSON, not HuJSON) must still be
 	// refused so we never overwrite an operator's policy on garbage.
@@ -147,8 +200,8 @@ func TestPondACLEnsureRefusesTrulyMalformedPolicy(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on truly malformed policy")
 	}
-	if !strings.Contains(err.Error(), "non-JSON") {
-		t.Fatalf("expected non-JSON error, got %v", err)
+	if !strings.Contains(err.Error(), "non-HuJSON") {
+		t.Fatalf("expected non-HuJSON error, got %v", err)
 	}
 	if atomic.LoadInt32(&stub.puts) != 0 {
 		t.Fatalf("must not PUT when merge fails, got %d puts", stub.puts)

@@ -35,6 +35,10 @@ type TailscaleMetadata struct {
 	Tags                   []string `json:"tags,omitempty"`
 	State                  string   `json:"state,omitempty"`
 	Error                  string   `json:"error,omitempty"`
+	Version                string   `json:"version,omitempty"`
+	DeviceID               string   `json:"deviceID,omitempty"`
+	CleanupState           string   `json:"cleanupState,omitempty"`
+	CleanupError           string   `json:"cleanupError,omitempty"`
 	ExitNode               string   `json:"exitNode,omitempty"`
 	ExitNodeAllowLANAccess bool     `json:"exitNodeAllowLanAccess,omitempty"`
 }
@@ -289,6 +293,10 @@ func serverTailscaleMetadata(server Server) TailscaleMetadata {
 		IPv4:                   labels["tailscale_ipv4"],
 		State:                  labels["tailscale_state"],
 		Error:                  labels["tailscale_error"],
+		Version:                labels["tailscale_version"],
+		DeviceID:               labels["tailscale_device_id"],
+		CleanupState:           labels["tailscale_cleanup_state"],
+		CleanupError:           labels["tailscale_cleanup_error"],
 		ExitNode:               labels["tailscale_exit_node"],
 		ExitNodeAllowLANAccess: labelBool(labels["tailscale_exit_node_allow_lan_access"]),
 	}
@@ -322,6 +330,18 @@ func applyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
 	}
 	if meta.Error != "" {
 		server.Labels["tailscale_error"] = meta.Error
+	}
+	if meta.Version != "" {
+		server.Labels["tailscale_version"] = meta.Version
+	}
+	if meta.DeviceID != "" {
+		server.Labels["tailscale_device_id"] = meta.DeviceID
+	}
+	if meta.CleanupState != "" {
+		server.Labels["tailscale_cleanup_state"] = meta.CleanupState
+	}
+	if meta.CleanupError != "" {
+		server.Labels["tailscale_cleanup_error"] = meta.CleanupError
 	}
 	if meta.ExitNode != "" {
 		server.Labels["tailscale_exit_node"] = meta.ExitNode
@@ -376,7 +396,11 @@ if [ -f /var/lib/crabbox/tailscale-fqdn ]; then cat /var/lib/crabbox/tailscale-f
 printf '\n'
 if [ -f /var/lib/crabbox/tailscale-exit-node ]; then cat /var/lib/crabbox/tailscale-exit-node; fi
 printf '\n'
-if [ -f /var/lib/crabbox/tailscale-exit-node-allow-lan-access ]; then cat /var/lib/crabbox/tailscale-exit-node-allow-lan-access; fi`)
+if [ -f /var/lib/crabbox/tailscale-exit-node-allow-lan-access ]; then cat /var/lib/crabbox/tailscale-exit-node-allow-lan-access; fi
+printf '\n'
+if [ -f /var/lib/crabbox/tailscale-version ]; then cat /var/lib/crabbox/tailscale-version; fi
+printf '\n'
+if [ -f /var/lib/crabbox/tailscale-device-id ]; then cat /var/lib/crabbox/tailscale-device-id; fi`)
 	if err != nil {
 		return TailscaleMetadata{}, err
 	}
@@ -397,10 +421,33 @@ if [ -f /var/lib/crabbox/tailscale-exit-node-allow-lan-access ]; then cat /var/l
 	if len(lines) > 4 {
 		meta.ExitNodeAllowLANAccess = labelBool(strings.TrimSpace(lines[4]))
 	}
+	if len(lines) > 5 {
+		meta.Version = strings.TrimSpace(lines[5])
+	}
+	if len(lines) > 6 {
+		meta.DeviceID = strings.TrimSpace(lines[6])
+	}
 	if meta.IPv4 == "" {
 		return TailscaleMetadata{}, fmt.Errorf("remote tailscale metadata missing ipv4")
 	}
 	return meta, nil
+}
+
+func (a App) logoutRemoteTailscaleBestEffort(ctx context.Context, lease LeaseTarget) {
+	if lease.SSH.Host == "" || !serverTailscaleMetadata(lease.Server).Enabled {
+		return
+	}
+	logoutCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if out, err := runSSHCombinedOutput(logoutCtx, lease.SSH, `if command -v tailscale >/dev/null 2>&1; then tailscale logout >/dev/null 2>&1 || exit $?; fi`); err != nil {
+		detail := strings.TrimSpace(out)
+		if detail == "" {
+			detail = err.Error()
+		}
+		fmt.Fprintf(a.Stderr, "warning: tailscale logout failed for %s: %s\n", lease.LeaseID, detail)
+		return
+	}
+	fmt.Fprintf(a.Stderr, "tailscale logout attempted for %s\n", lease.LeaseID)
 }
 
 func validateTailscaleExitNodeEgress(ctx context.Context, server Server, target SSHTarget) error {

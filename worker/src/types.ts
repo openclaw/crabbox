@@ -89,6 +89,10 @@ export interface Env {
   CRABBOX_TAILSCALE_CLIENT_SECRET?: string;
   CRABBOX_TAILSCALE_TAILNET?: string;
   CRABBOX_TAILSCALE_TAGS?: string;
+  CRABBOX_TAILSCALE_INSTALL_MODE?: string;
+  CRABBOX_TAILSCALE_VERSION?: string;
+  CRABBOX_TAILSCALE_SHA256_AMD64?: string;
+  CRABBOX_TAILSCALE_SHA256_ARM64?: string;
   CRABBOX_ARTIFACTS_BACKEND?: string;
   CRABBOX_ARTIFACTS_BUCKET?: string;
   CRABBOX_ARTIFACTS_PREFIX?: string;
@@ -428,6 +432,10 @@ export interface TailscaleMetadata {
   tags?: string[];
   state?: "requested" | "ready" | "failed";
   error?: string;
+  version?: string;
+  deviceID?: string;
+  cleanupState?: "missing_device_id" | "api_delete_succeeded" | "api_delete_failed";
+  cleanupError?: string;
   exitNode?: string;
   exitNodeAllowLanAccess?: boolean;
 }

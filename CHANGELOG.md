@@ -9,6 +9,7 @@
 - Added confirmed lifecycle actions to portal lease rows, with provider shutdown for coordinator-managed boxes and explicitly metadata-only deregistration for client-managed boxes.
 - Added `provider: superserve` for delegated Linux sandbox runs through the Superserve control and data planes, including archive sync, retained leases, ownership-guarded lifecycle operations, and credentialed live smoke coverage. Thanks @coygeek.
 - Added `provider: namespace-instance` (`namespace-compute`) for short-lived Namespace Compute Linux leases through `nsc`, including per-lease SSH keys, proxy-backed sync/run, duration safeguards, ownership-filtered cleanup, and guarded live smoke coverage. Thanks @coygeek.
+- Added comprehensive guides for deploying the portable Node/PostgreSQL coordinator and integrating private control planes through generic external providers, registered inventory, sharing, and outbound WebVNC.
 - Added `provider: linode` for direct Linux SSH leases with per-lease keys, account-bound cleanup, preserved operator tags, interface-aware existing firewalls, and guarded live smoke coverage. Thanks @coygeek.
 - Added `provider: windows-sandbox` for disposable native Windows runs through Microsoft Windows Sandbox, including mapped workspace sync, streamed output, timeout and cancellation cleanup, and keep-on-failure inspection. Thanks @zozo123.
 - Added `provider: smolvm` for delegated Linux microVM runs through the hosted smolfleet API, including archive sync, retained leases, status, cleanup, and repository-scoped ownership checks. Thanks @zozo123.
@@ -20,7 +21,12 @@
 
 ### Fixed
 
+- Fixed pond ACL auto-bootstrap to preserve HuJSON comments, field ordering, and unrelated policy sections while adding only the missing pond tag owner and self-peering row.
+- Fixed Tailscale bootstrap and cleanup determinism with opt-in pinned static installs, recorded client/device metadata, coordinator preflight smoke coverage, and best-effort device cleanup on release.
+- Fixed brokered Tailscale tag-ownership failures to return actionable exact-match and `tagOwners` guidance while preserving the raw API error.
+- Fixed managed Linux Tailscale bootstrap to deliver auth keys through stdin instead of exposing them in `tailscale up` process arguments.
 - Fixed trusted reverse-proxy identity deployments to support a secret-bound assertion when direct coordinator access cannot be network-isolated.
+- Fixed direct VNC and WebVNC SSH forwards to bind explicitly to workstation loopback even when user SSH configuration enables gateway ports.
 - Fixed the portal and connected WebVNC desktops to default to the current system appearance by migrating away from legacy two-state browser theme preferences.
 - Fixed Cloudflare container runs to fail when streamed stdout or stderr cannot be written instead of silently reporting success after output loss.
 - Fixed Proxmox bridge readiness on PVE 8 by falling back to its compatible local-bridge and SDN-vnet inventory filter.

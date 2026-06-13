@@ -259,8 +259,11 @@ is **opt-in**. To let lease creation auto-install the rows, set both:
 When enabled, Crabbox reads the policy with an ETag, merges in the missing
 `tagOwners` entry and a self-peering rule (grants-shape if the policy already
 uses grants, otherwise a legacy `acls` row), and writes it back with `If-Match`
-so concurrent edits fail fast. If the control plane does not expose a
-Tailscale-compatible policy API (e.g. Headscale), lease creation is not blocked.
+so concurrent edits fail fast. The merge preserves HuJSON comments, field
+ordering, unknown top-level sections, `tests`, and `ssh` rules instead of
+rewriting the whole policy as plain JSON. If the control plane does not expose
+a Tailscale-compatible policy API (e.g. Headscale), lease creation is not
+blocked.
 
 Without the opt-in, `crabbox doctor --pond <name>` verifies the required policy
 row (using `TS_API_KEY` read-only) and points you at this document if it is

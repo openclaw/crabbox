@@ -78,7 +78,7 @@ crabbox screenshot --provider tart --id <lease-id> --output desktop.png
 `crabbox webvnc` runs a host-side bridge: it SSH-tunnels to the guest's Screen Sharing port, creates a self-contained mode-0600 noVNC viewer file, and opens that file in the browser — no noVNC/`websockify` tooling on the guest. The temporary viewer talks only to literal `127.0.0.1`, fetches the account credentials with an authenticated POST, and authenticates the WebSocket relay with a per-session subprotocol, keeping the bearer out of process arguments and browser URLs. The file contains only the ephemeral bridge token and is removed when the bridge exits. `crabbox screenshot` uses the same locally configured account credentials for noninteractive capture. noVNC authenticates via macOS Apple (ARD) auth with the lease account credentials (handed to the local viewer only). Prefer a native VNC client instead? Tunnel and connect directly:
 
 ```sh
-ssh -i <lease-key> -L 5900:127.0.0.1:5900 admin@<lease-ip>
+ssh -i <lease-key> -o GatewayPorts=no -L 127.0.0.1:5900:127.0.0.1:5900 admin@<lease-ip>
 open vnc://127.0.0.1:5900    # macOS Screen Sharing, or any VNC client
 ```
 
@@ -88,13 +88,13 @@ The VM still starts with `--no-graphics` (the local display is not needed); for 
 
 ```sh
 # on the controller (the guest IP is printed by `crabbox warmup`):
-ssh -L 5900:<guest-tart-ip>:5900 <user>@<mac-host>
+ssh -o GatewayPorts=no -L 127.0.0.1:5900:<guest-tart-ip>:5900 <user>@<mac-host>
 open vnc://127.0.0.1:5900    # native VNC client on the controller
 ```
 
 **Exposure boundary:** macOS Screen Sharing binds all guest interfaces, so the VNC server is reachable at the guest's address on the tart host network (not localhost-only), gated by account authentication. tart's network is host-local (only the Mac can reach the guest), so the effective boundary is "account-authenticated VNC, reachable from the tart host." The SSH tunnels above keep the viewer side on `127.0.0.1`.
 
-> The browser viewer is a **host-side** bridge (the guest needs no noVNC/`websockify`). For the remote control-plane case, run `crabbox webvnc` on the Mac, tunnel the printed web port to your machine with `ssh -L <port>:127.0.0.1:<port> <user>@<mac>`, copy the printed handoff file to your machine with `scp`, and open the copied file while the bridge is running. The `webvnc status`/`reset`/`daemon` subcommands (the Linux noVNC-daemon model) remain unsupported for macOS and point you to `crabbox webvnc`.
+> The browser viewer is a **host-side** bridge (the guest needs no noVNC/`websockify`). For the remote control-plane case, run `crabbox webvnc` on the Mac, tunnel the printed web port to your machine with `ssh -o GatewayPorts=no -L 127.0.0.1:<port>:127.0.0.1:<port> <user>@<mac>`, copy the printed handoff file to your machine with `scp`, and open the copied file while the bridge is running. The `webvnc status`/`reset`/`daemon` subcommands (the Linux noVNC-daemon model) remain unsupported for macOS and point you to `crabbox webvnc`.
 
 ## Not yet supported
 

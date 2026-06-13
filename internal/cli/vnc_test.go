@@ -18,7 +18,10 @@ func TestVNCTunnelCommandQuotesKeyPath(t *testing.T) {
 	if !strings.Contains(got, "IdentitiesOnly=yes") {
 		t.Fatalf("key-backed tunnel should restrict SSH identities: %q", got)
 	}
-	if !strings.Contains(got, "'-L' '5907:127.0.0.1:5900'") {
+	if !strings.Contains(got, "GatewayPorts=no") {
+		t.Fatalf("tunnel should disable wildcard gateway binding: %q", got)
+	}
+	if !strings.Contains(got, "'-L' '127.0.0.1:5907:127.0.0.1:5900'") {
 		t.Fatalf("tunnel should forward VNC loopback: %q", got)
 	}
 }

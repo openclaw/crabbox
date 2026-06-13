@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/tailscale/hujson"
 )
 
 // pondACLEnsureTimeout bounds each request made by pondACLEnsure so the auth-
@@ -132,29 +134,33 @@ func pondACLEnsure(ctx context.Context, client pondTailnetACLClient, tailnet, ow
 	return fmt.Errorf("pond acl: ETag race persisted after %d attempts: %w", pondACLMaxAttempts, lastPutErr)
 }
 
-// pondACLMergePolicy parses the policy as JSON, ensures both the tagOwners
-// entry and a self-peering grant for the tag, and returns the re-serialized
-// document. Returns a clear error when the policy is not valid JSON (e.g.
-// contains HuJSON comments) so the caller falls back to manual setup.
+// pondACLMergePolicy parses the policy as HuJSON, ensures both the tagOwners
+// entry and a self-peering grant for the tag, and returns a minimally patched
+// document. Existing comments, ordering, and unrelated sections are preserved.
 func pondACLMergePolicy(body, tag string) (string, error) {
 	trimmed := strings.TrimSpace(body)
 	if trimmed == "" {
 		return "", fmt.Errorf("pond acl: empty policy body")
 	}
-	// Tailscale policies are HuJSON; standardize them before using stdlib JSON.
-	standardized, hjErr := hujsonStandardize(trimmed)
-	if hjErr != nil {
-		standardized = trimmed
+	if pondACLRowPresent(trimmed, tag) {
+		return trimmed, nil
 	}
+	value, err := hujson.Parse([]byte(trimmed))
+	if err != nil {
+		return "", fmt.Errorf("pond acl: cannot merge non-HuJSON policy (add the tag:cbx-pond-... rows manually): %w", err)
+	}
+	standardized := value.Clone()
+	standardized.Standardize()
 	var policy map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(standardized), &policy); err != nil {
+	if err := json.Unmarshal(standardized.Pack(), &policy); err != nil {
 		return "", fmt.Errorf("pond acl: cannot merge non-JSON policy (add the tag:cbx-pond-... rows manually): %w", err)
 	}
 	if policy == nil {
 		policy = map[string]json.RawMessage{}
 	}
 
-	// Merge tagOwners.
+	var patch []map[string]any
+
 	tagOwners := map[string]json.RawMessage{}
 	if raw, ok := policy["tagOwners"]; ok && len(raw) > 0 {
 		if err := json.Unmarshal(raw, &tagOwners); err != nil {
@@ -162,31 +168,31 @@ func pondACLMergePolicy(body, tag string) (string, error) {
 		}
 	}
 	if _, ok := tagOwners[tag]; !ok {
-		owners, err := json.Marshal([]string{"autogroup:admin"})
-		if err != nil {
-			return "", err
+		if _, ok := policy["tagOwners"]; ok {
+			patch = append(patch, map[string]any{
+				"op":    "add",
+				"path":  "/tagOwners/" + jsonPointerEscape(tag),
+				"value": []string{"autogroup:admin"},
+			})
+		} else {
+			patch = append(patch, map[string]any{
+				"op":    "add",
+				"path":  "/tagOwners",
+				"value": map[string][]string{tag: []string{"autogroup:admin"}},
+			})
 		}
-		tagOwners[tag] = owners
 	}
-	updatedOwners, err := json.Marshal(tagOwners)
-	if err != nil {
-		return "", err
-	}
-	policy["tagOwners"] = updatedOwners
 
-	// Prefer grants when the policy already uses that shape, otherwise
-	// append a legacy acls row. We never down-convert grants→acls.
 	if raw, ok := policy["grants"]; ok && len(raw) > 0 {
 		var grants []map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &grants); err != nil {
 			return "", fmt.Errorf("pond acl: cannot parse grants: %w", err)
 		}
-		grants = append(grants, pondGrantEntry(tag))
-		updatedGrants, err := json.Marshal(grants)
-		if err != nil {
-			return "", err
-		}
-		policy["grants"] = updatedGrants
+		patch = append(patch, map[string]any{
+			"op":    "add",
+			"path":  "/grants/-",
+			"value": pondGrantEntryValue(tag),
+		})
 	} else {
 		var acls []map[string]json.RawMessage
 		if raw, ok := policy["acls"]; ok && len(raw) > 0 {
@@ -194,40 +200,50 @@ func pondACLMergePolicy(body, tag string) (string, error) {
 				return "", fmt.Errorf("pond acl: cannot parse acls: %w", err)
 			}
 		}
-		acls = append(acls, pondACLEntry(tag))
-		updatedACLs, err := json.Marshal(acls)
-		if err != nil {
-			return "", err
+		if _, ok := policy["acls"]; ok {
+			patch = append(patch, map[string]any{
+				"op":    "add",
+				"path":  "/acls/-",
+				"value": pondACLEntryValue(tag),
+			})
+		} else {
+			patch = append(patch, map[string]any{
+				"op":    "add",
+				"path":  "/acls",
+				"value": []map[string]any{pondACLEntryValue(tag)},
+			})
 		}
-		policy["acls"] = updatedACLs
 	}
 
-	out, err := json.MarshalIndent(policy, "", "  ")
+	patchBytes, err := json.Marshal(patch)
 	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	if err := value.Patch(patchBytes); err != nil {
+		return "", fmt.Errorf("pond acl: patch policy: %w", err)
+	}
+	return string(value.Pack()), nil
 }
 
-func pondGrantEntry(tag string) map[string]json.RawMessage {
-	src, _ := json.Marshal([]string{tag})
-	dst, _ := json.Marshal([]string{tag})
-	ip, _ := json.Marshal([]string{"*"})
-	return map[string]json.RawMessage{
-		"src": src,
-		"dst": dst,
-		"ip":  ip,
+func jsonPointerEscape(value string) string {
+	value = strings.ReplaceAll(value, "~", "~0")
+	value = strings.ReplaceAll(value, "/", "~1")
+	return value
+}
+
+func pondGrantEntryValue(tag string) map[string]any {
+	return map[string]any{
+		"src": []string{tag},
+		"dst": []string{tag},
+		"ip":  []string{"*"},
 	}
 }
 
-func pondACLEntry(tag string) map[string]json.RawMessage {
-	action, _ := json.Marshal("accept")
-	src, _ := json.Marshal([]string{tag})
-	dst, _ := json.Marshal([]string{tag + ":*"})
-	return map[string]json.RawMessage{
-		"action": action,
-		"src":    src,
-		"dst":    dst,
+func pondACLEntryValue(tag string) map[string]any {
+	return map[string]any{
+		"action": "accept",
+		"src":    []string{tag},
+		"dst":    []string{tag + ":*"},
 	}
 }
 
@@ -328,98 +344,8 @@ func tailscaleAPIError(status int, body []byte) error {
 }
 
 // hujsonStandardize strips HuJSON-only syntax (// and /* */ comments,
-// trailing commas) so the result parses as standard JSON. Minimal shim to
-// avoid pulling in tailscale.com/util/hujson as a new dependency — the
-// trade is correctness on the policy shapes Tailscale actually emits via
-// the API. Real-world policies use // line comments and trailing commas;
-// neither survives stdlib encoding/json. This shim handles both without
-// blocking string/escape-aware parsing.
+// trailing commas) so the result parses as standard JSON.
 func hujsonStandardize(body string) (string, error) {
-	var b strings.Builder
-	b.Grow(len(body))
-	inString := false
-	escaped := false
-	i := 0
-	for i < len(body) {
-		ch := body[i]
-		if inString {
-			b.WriteByte(ch)
-			if escaped {
-				escaped = false
-			} else if ch == '\\' {
-				escaped = true
-			} else if ch == '"' {
-				inString = false
-			}
-			i++
-			continue
-		}
-		if ch == '"' {
-			inString = true
-			b.WriteByte(ch)
-			i++
-			continue
-		}
-		// Line comment: //...\n
-		if ch == '/' && i+1 < len(body) && body[i+1] == '/' {
-			i += 2
-			for i < len(body) && body[i] != '\n' {
-				i++
-			}
-			continue
-		}
-		// Block comment: /* ... */
-		if ch == '/' && i+1 < len(body) && body[i+1] == '*' {
-			i += 2
-			for i+1 < len(body) && !(body[i] == '*' && body[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(body) {
-				i += 2
-			} else {
-				return body, fmt.Errorf("hujson: unterminated block comment")
-			}
-			continue
-		}
-		b.WriteByte(ch)
-		i++
-	}
-	// Trailing-comma stripping: walk once, drop any `,` that is followed by
-	// optional whitespace and then `]` or `}`. String/escape aware so commas
-	// inside string literals are kept.
-	out := b.String()
-	var b2 strings.Builder
-	b2.Grow(len(out))
-	inStr := false
-	esc := false
-	for i := 0; i < len(out); i++ {
-		ch := out[i]
-		if inStr {
-			b2.WriteByte(ch)
-			if esc {
-				esc = false
-			} else if ch == '\\' {
-				esc = true
-			} else if ch == '"' {
-				inStr = false
-			}
-			continue
-		}
-		if ch == '"' {
-			inStr = true
-			b2.WriteByte(ch)
-			continue
-		}
-		if ch == ',' {
-			j := i + 1
-			for j < len(out) && (out[j] == ' ' || out[j] == '\t' || out[j] == '\n' || out[j] == '\r') {
-				j++
-			}
-			if j < len(out) && (out[j] == ']' || out[j] == '}') {
-				continue // drop trailing comma
-			}
-		}
-		b2.WriteByte(ch)
-	}
-	return b2.String(), nil
+	out, err := hujson.Standardize([]byte(body))
+	return string(out), err
 }

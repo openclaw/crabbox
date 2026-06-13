@@ -253,7 +253,9 @@ bake/promote, Mac-host management, identity) are invoked through admin routes.
 
 - [Architecture](../architecture.md)
 - [Orchestrator](../orchestrator.md)
-- [Portable coordinator runtime proposal](../plan/portable-coordinator.md)
+- [Portable coordinator deployment](portable-coordinator.md)
+- [Bring your own infrastructure](bring-your-own-infrastructure.md)
+- [Portable coordinator design history](../plan/portable-coordinator.md)
 - [CLI](../cli.md)
 - [Browser portal](portal.md)
 - [usage command](../commands/usage.md)

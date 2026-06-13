@@ -1,6 +1,8 @@
 # Portable Coordinator Runtime
 
-Status: Node/PostgreSQL and Cloudflare adapters implemented.
+Status: Node/PostgreSQL and Cloudflare adapters implemented. This file is the
+design history and remaining scale/migration plan. For the shipped operator
+guide, read [Portable Coordinator](../features/portable-coordinator.md).
 
 Read when:
 

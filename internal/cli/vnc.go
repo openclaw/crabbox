@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const vncLoopbackHost = "127.0.0.1"
+
 func (a App) vnc(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("vnc", a.Stderr)
@@ -93,7 +95,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if endpoint.Direct {
 		fmt.Fprintf(a.Stdout, "  %s:%s\n", endpoint.Host, endpoint.Port)
 	} else {
-		fmt.Fprintf(a.Stdout, "  localhost:%s\n", *localPort)
+		fmt.Fprintf(a.Stdout, "  %s:%s\n", vncLoopbackHost, *localPort)
 	}
 	if strings.TrimSpace(password) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
@@ -129,7 +131,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 			} else {
 				fmt.Fprintln(a.Stdout, "tunnel: started in background")
 			}
-			url = fmt.Sprintf("vnc://localhost:%s", *localPort)
+			url = fmt.Sprintf("vnc://%s:%s", vncLoopbackHost, *localPort)
 		}
 		if err := openLocalURL(url); err != nil {
 			return err
@@ -162,12 +164,12 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 		if ctx.Err() != nil {
 			return 0, context.Cause(ctx)
 		}
-		if tcpReachable(ctx, "127.0.0.1", localPort, 200*time.Millisecond) {
+		if tcpReachable(ctx, vncLoopbackHost, localPort, 200*time.Millisecond) {
 			return 0, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return 0, exit(5, "timed out starting VNC SSH tunnel on localhost:%s", localPort)
+	return 0, exit(5, "timed out starting VNC SSH tunnel on %s:%s", vncLoopbackHost, localPort)
 }
 
 func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {
@@ -178,6 +180,7 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 		"-o", "ConnectTimeout=10",
 		"-o", "ConnectionAttempts=1",
 		"-o", "ExitOnForwardFailure=yes",
+		"-o", "GatewayPorts=no",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
@@ -190,7 +193,7 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 	}
 	args = append(args,
 		"-N",
-		"-L", fmt.Sprintf("%s:%s:%s", localPort, remoteHost, remotePort),
+		"-L", fmt.Sprintf("%s:%s:%s:%s", vncLoopbackHost, localPort, remoteHost, remotePort),
 		target.User+"@"+target.Host,
 	)
 	return args
