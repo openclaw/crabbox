@@ -68,8 +68,9 @@ resolved in this order (`worker/src/auth.ts`):
    `CRABBOX_SHARED_TOKEN`). Issued by GitHub OAuth login; default 30-day expiry.
    Carries `owner`, `org`, and GitHub `login`.
 4. **Trusted reverse-proxy identity** — opt-in through
-   `CRABBOX_TRUSTED_USER_HEADER`; intended only when an authenticated ingress
-   strips caller-supplied copies of that header.
+   `CRABBOX_TRUSTED_USER_HEADER` on the Node runtime, accepted only from peers in
+   `CRABBOX_TRUSTED_PROXY_CIDRS`; the authenticated ingress must also strip
+   caller-supplied copies of that header.
 
 An optional Cloudflare Access JWT (`cf-access-jwt-assertion`, verified against
 `CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD`) supplies the verified

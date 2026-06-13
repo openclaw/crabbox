@@ -16,6 +16,7 @@ import {
   drainAndStop,
   fleetRequestQueue,
   isReadinessRequestMethod,
+  isTrustedProxySource,
   readNodeRequestBody,
   requestBodyLimit,
   settlesWithin,
@@ -50,6 +51,12 @@ const server = createServer((request, response) => {
 async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   try {
     const requestMetadata = webRequestFromNode(request);
+    const authContext = {
+      trustedProxy: isTrustedProxySource(
+        request.socket.remoteAddress,
+        env.CRABBOX_TRUSTED_PROXY_CIDRS,
+      ),
+    };
     if (new URL(requestMetadata.url).pathname === "/v1/ready") {
       let result: Response;
       if (isReadinessRequestMethod(requestMetadata.method)) {
@@ -73,7 +80,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       await writeResponse(response, asset);
       return;
     }
-    const prepared = await prepareCoordinatorRequest(requestMetadata, env);
+    const prepared = await prepareCoordinatorRequest(requestMetadata, env, authContext);
     if ("response" in prepared) {
       const readBody = shouldReadUnauthenticatedRequestBody(request.method);
       if (readBody) {
@@ -121,8 +128,14 @@ async function handleUpgrade(
   const context: NodeUpgradeContext = { request, socket, head, upgraded: false };
   try {
     const webRequest = webRequestFromNode(request);
+    const authContext = {
+      trustedProxy: isTrustedProxySource(
+        request.socket.remoteAddress,
+        env.CRABBOX_TRUSTED_PROXY_CIDRS,
+      ),
+    };
     const response = await runtime.runWithUpgrade(context, () =>
-      routeCoordinatorRequest(webRequest, env, runFleetRequest),
+      routeCoordinatorRequest(webRequest, env, runFleetRequest, authContext),
     );
     if (!context.upgraded) {
       await writeUpgradeResponse(socket, response);

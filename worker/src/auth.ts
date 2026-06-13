@@ -16,6 +16,10 @@ export interface AuthContext {
   tokenExpiresAt?: string;
 }
 
+export interface AuthRequestContext {
+  trustedProxy?: boolean;
+}
+
 interface UserTokenPayload {
   typ: "crabbox-user";
   owner: string;
@@ -42,9 +46,10 @@ export async function authenticateRequest(
     | "CRABBOX_TRUSTED_USER_HEADER"
     | "CRABBOX_TRUSTED_USER_ORG"
   >,
+  context: AuthRequestContext = {},
 ): Promise<AuthContext | undefined> {
   const token = bearerToken(request);
-  const trustedIdentity = trustedProxyIdentity(request, env);
+  const trustedIdentity = context.trustedProxy ? trustedProxyIdentity(request, env) : undefined;
   const accessIdentity = await verifiedAccessIdentity(request, env).catch(() => undefined);
   if (env.CRABBOX_ADMIN_TOKEN && token === env.CRABBOX_ADMIN_TOKEN) {
     return {

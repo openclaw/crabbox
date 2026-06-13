@@ -114,11 +114,15 @@ second Crabbox login by forwarding the verified user in a header:
 ```text
 CRABBOX_TRUSTED_USER_HEADER=X-Authenticated-User
 CRABBOX_TRUSTED_USER_ORG=example-org
+CRABBOX_TRUSTED_PROXY_CIDRS=10.0.0.0/8,fd00::/8
 ```
 
-Enable this only when Crabbox is unreachable except through that ingress and the
-ingress removes caller-supplied copies of the configured header. The forwarded
-identity receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate.
+The Node runtime accepts the identity only when the connection peer is within
+`CRABBOX_TRUSTED_PROXY_CIDRS`. Enable this only when the ingress removes
+caller-supplied copies of the configured identity header. The forwarded identity
+receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate. The Cloudflare
+Worker runtime does not expose a trusted socket peer, so use its verified Access
+JWT support instead.
 
 ### GitHub browser login
 
@@ -514,6 +518,8 @@ CRABBOX_GITHUB_ADMIN_OWNERS, CRABBOX_GITHUB_ADMIN_LOGINS (optional)
 CRABBOX_SESSION_SECRET
 CRABBOX_DEFAULT_ORG
 CRABBOX_ACCESS_TEAM_DOMAIN, CRABBOX_ACCESS_AUD   # Cloudflare Access route
+CRABBOX_TRUSTED_USER_HEADER, CRABBOX_TRUSTED_USER_ORG
+CRABBOX_TRUSTED_PROXY_CIDRS              # Node runtime peer allowlist
 CRABBOX_PUBLIC_URL                       # canonical coordinator URL for OAuth callback
 
 # Cost / limits

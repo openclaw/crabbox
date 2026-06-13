@@ -1,4 +1,5 @@
 import type { IncomingMessage, Server } from "node:http";
+import { BlockList, isIP } from "node:net";
 import type { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 
@@ -82,6 +83,45 @@ export function shouldReadUnauthenticatedRequestBody(method: string | undefined)
 export function isReadinessRequestMethod(method: string | undefined): boolean {
   const normalized = (method || "GET").toUpperCase();
   return normalized === "GET" || normalized === "HEAD";
+}
+
+export function isTrustedProxySource(
+  address: string | undefined,
+  configuredCIDRs: string | undefined,
+): boolean {
+  const normalizedAddress = normalizeIPAddress(address);
+  const family = isIP(normalizedAddress);
+  if (family === 0 || !configuredCIDRs?.trim()) return false;
+
+  const blockList = new BlockList();
+  try {
+    for (const rawEntry of configuredCIDRs.split(",")) {
+      const entry = rawEntry.trim();
+      if (!entry) continue;
+      const separator = entry.lastIndexOf("/");
+      const subnet = normalizeIPAddress(separator === -1 ? entry : entry.slice(0, separator));
+      const subnetFamily = isIP(subnet);
+      if (subnetFamily === 0) return false;
+      const type = subnetFamily === 4 ? "ipv4" : "ipv6";
+      if (separator === -1) {
+        blockList.addAddress(subnet, type);
+        continue;
+      }
+      const prefix = Number(entry.slice(separator + 1));
+      const maxPrefix = subnetFamily === 4 ? 32 : 128;
+      if (!Number.isInteger(prefix) || prefix < 0 || prefix > maxPrefix) return false;
+      blockList.addSubnet(subnet, prefix, type);
+    }
+  } catch {
+    return false;
+  }
+  return blockList.check(normalizedAddress, family === 4 ? "ipv4" : "ipv6");
+}
+
+function normalizeIPAddress(address: string | undefined): string {
+  const value = address?.trim() ?? "";
+  const mappedIPv4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(value);
+  return mappedIPv4?.[1] ?? value;
 }
 
 export async function readNodeRequestBody(

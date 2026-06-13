@@ -11,6 +11,7 @@ import {
   authenticatedRequestBodyBytes,
   fleetRequestQueue,
   isReadinessRequestMethod,
+  isTrustedProxySource,
   readNodeRequestBody,
   requestBodyLimit,
   runFinishRequestBodyBytes,
@@ -134,6 +135,16 @@ describe("Node server support", () => {
     expect(isReadinessRequestMethod("GET")).toBe(true);
     expect(isReadinessRequestMethod("HEAD")).toBe(true);
     expect(isReadinessRequestMethod("POST")).toBe(false);
+  });
+
+  it("trusts reverse-proxy identities only from configured peer networks", () => {
+    const ranges = "127.0.0.1,10.0.0.0/8,2001:db8::/32";
+    expect(isTrustedProxySource("127.0.0.1", ranges)).toBe(true);
+    expect(isTrustedProxySource("::ffff:10.4.5.6", ranges)).toBe(true);
+    expect(isTrustedProxySource("2001:db8::42", ranges)).toBe(true);
+    expect(isTrustedProxySource("192.0.2.10", ranges)).toBe(false);
+    expect(isTrustedProxySource("10.4.5.6", undefined)).toBe(false);
+    expect(isTrustedProxySource("10.4.5.6", "invalid,10.0.0.0/8")).toBe(false);
   });
 
   it("rejects declared oversized bodies without reading their stream", async () => {

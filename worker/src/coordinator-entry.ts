@@ -1,4 +1,4 @@
-import { authenticateRequest, requestWithAuthContext } from "./auth";
+import { authenticateRequest, requestWithAuthContext, type AuthRequestContext } from "./auth";
 import { json } from "./http";
 import type { Env } from "./types";
 
@@ -11,8 +11,9 @@ export async function routeCoordinatorRequest(
   request: Request,
   env: Env,
   fleetFetch: CoordinatorFetch,
+  authContext: AuthRequestContext = {},
 ): Promise<Response> {
-  const prepared = await prepareCoordinatorRequest(request, env);
+  const prepared = await prepareCoordinatorRequest(request, env, authContext);
   if ("response" in prepared) {
     return prepared.response;
   }
@@ -22,6 +23,7 @@ export async function routeCoordinatorRequest(
 export async function prepareCoordinatorRequest(
   request: Request,
   env: Env,
+  authContext: AuthRequestContext = {},
 ): Promise<PreparedCoordinatorRequest> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/v1/health") {
@@ -58,7 +60,7 @@ export async function prepareCoordinatorRequest(
   }
   const portal = url.pathname.startsWith("/portal");
   const authRequest = portal ? requestWithPortalCookie(request) : request;
-  const auth = await authenticateRequest(authRequest, env);
+  const auth = await authenticateRequest(authRequest, env, authContext);
   if (!auth?.authorized) {
     if (portal && request.method === "GET" && request.headers.get("upgrade") !== "websocket") {
       const login = new URL("/portal/login", url.origin);
