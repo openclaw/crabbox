@@ -239,7 +239,8 @@ minted Access JWT in `CRABBOX_ACCESS_TOKEN`.
 
 For brokered Tailscale reachability, the coordinator mints one ephemeral, pre-approved
 auth key per lease and injects it only into cloud-init. Lease records store only
-non-secret Tailscale metadata (hostname, FQDN, 100.x address, state, tags).
+non-secret Tailscale metadata (hostname, FQDN, 100.x address, client version,
+device id, state, tags, and cleanup result).
 
 Create a Tailscale OAuth client with the `auth_keys` scope, limited to the tags
 Crabbox may assign (typically `tag:crabbox`), and inject the credentials as
@@ -251,6 +252,10 @@ CRABBOX_TAILSCALE_CLIENT_ID
 CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
 CRABBOX_TAILSCALE_TAGS=tag:crabbox      # requested-tag allowlist/default
+CRABBOX_TAILSCALE_INSTALL_MODE=package  # or pinned
+CRABBOX_TAILSCALE_VERSION=1.98.4        # pinned mode
+CRABBOX_TAILSCALE_SHA256_AMD64=...      # pinned mode
+CRABBOX_TAILSCALE_SHA256_ARM64=...      # pinned mode
 ```
 
 For one tag, assign the same tag to the OAuth client. For multiple tags, either
@@ -259,7 +264,8 @@ client tag owns every subset tag Crabbox may request. Prefer one dedicated
 deployment-owner tag over broad OAuth permissions. Tailscale rejects unowned subset
 requests even when every tag is present in `CRABBOX_TAILSCALE_TAGS`.
 
-Verify end to end with `crabbox warmup --tailscale --network tailscale`. See
+Preflight the coordinator with `scripts/live-tailscale-smoke.sh --json`, then verify
+end to end with `crabbox warmup --tailscale --network tailscale`. See
 [Tailscale](features/tailscale.md).
 
 ### Deploy token scope

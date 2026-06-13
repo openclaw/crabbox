@@ -27,6 +27,12 @@ export interface LeaseConfig {
   tailscaleTags: string[];
   tailscaleHostname: string;
   tailscaleAuthKey: string;
+  tailscaleInstallMode?: "package" | "pinned";
+  tailscaleVersion?: string;
+  tailscaleSHA256?: {
+    amd64: string;
+    arm64: string;
+  };
   tailscaleExitNode: string;
   tailscaleExitNodeAllowLanAccess: boolean;
   profile: string;
@@ -243,6 +249,9 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     tailscaleTags: normalizeTailscaleTags(input.tailscaleTags ?? ["tag:crabbox"]),
     tailscaleHostname: input.tailscaleHostname ?? "",
     tailscaleAuthKey: "",
+    tailscaleInstallMode: "package",
+    tailscaleVersion: "",
+    tailscaleSHA256: { amd64: "", arm64: "" },
     tailscaleExitNode,
     tailscaleExitNodeAllowLanAccess,
     profile: input.profile ?? "default",

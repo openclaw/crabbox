@@ -373,9 +373,12 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"https://tailscale.com/install.sh",
+		"/usr/local/bin/crabbox-tailscale-logout",
 		"install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox",
 		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
 		"printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
+		"tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version",
+		"jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id",
 		"printf '%s\\n' 'mac-studio.tailnet.ts.net' > /var/lib/crabbox/tailscale-exit-node",
 		"printf '%s\\n' 'true' > /var/lib/crabbox/tailscale-exit-node-allow-lan-access",
 		"chown 'runner:runner' /var/lib/crabbox/tailscale-* || true",
@@ -391,6 +394,34 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 	if strings.Contains(cloudInit(baseConfig(), "ssh-ed25519 test"), "tailscale up") {
 		t.Fatal("cloudInit should not install Tailscale by default")
+	}
+}
+
+func TestCloudInitTailscalePinnedStaticInstall(t *testing.T) {
+	t.Setenv("CRABBOX_TAILSCALE_INSTALL_MODE", "pinned")
+	t.Setenv("CRABBOX_TAILSCALE_VERSION", "1.98.4")
+	t.Setenv("CRABBOX_TAILSCALE_SHA256_AMD64", "amd64sum")
+	t.Setenv("CRABBOX_TAILSCALE_SHA256_ARM64", "arm64sum")
+	cfg := baseConfig()
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "tskey-secret"
+	cfg.Tailscale.Hostname = "crabbox-blue-lobster"
+	cfg.Tailscale.Tags = []string{"tag:crabbox"}
+	got := cloudInit(cfg, "ssh-ed25519 test")
+	for _, want := range []string{
+		"TS_VERSION='1.98.4'",
+		"x86_64) TS_ARCH=amd64; TS_SHA256='amd64sum'",
+		"aarch64|arm64) TS_ARCH=arm64; TS_SHA256='arm64sum'",
+		"https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz",
+		"sha256sum -c -",
+		"/etc/systemd/system/tailscaled.service",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloudInit(tailscale pinned) missing %q", want)
+		}
+	}
+	if strings.Contains(got, "https://tailscale.com/install.sh") {
+		t.Fatal("pinned Tailscale install should not use package install script")
 	}
 }
 

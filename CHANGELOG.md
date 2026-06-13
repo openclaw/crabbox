@@ -21,6 +21,7 @@
 ### Fixed
 
 - Fixed pond ACL bootstrap to preserve Tailscale HuJSON comments, ordering, trailing commas, and unrelated policy sections while failing closed on ambiguous shapes. Thanks @coygeek.
+- Fixed Tailscale bootstrap and cleanup determinism with opt-in pinned static installs, recorded client/device metadata, coordinator preflight smoke coverage, and best-effort device cleanup on release.
 - Fixed brokered Tailscale tag-ownership failures to return actionable exact-match and `tagOwners` guidance while preserving the raw API error.
 - Fixed managed Linux Tailscale bootstrap to deliver auth keys through stdin instead of exposing them in `tailscale up` process arguments.
 - Fixed trusted reverse-proxy identity deployments to support a secret-bound assertion when direct coordinator access cannot be network-isolated.

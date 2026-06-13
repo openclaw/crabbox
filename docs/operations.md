@@ -210,6 +210,10 @@ CRABBOX_TAILSCALE_CLIENT_SECRET   required for brokered --tailscale
 CRABBOX_TAILSCALE_TAILNET         optional
 CRABBOX_TAILSCALE_TAGS            optional
 CRABBOX_TAILSCALE_ENABLED         optional; set 0 to disable brokered Tailscale
+CRABBOX_TAILSCALE_INSTALL_MODE    optional; package or pinned
+CRABBOX_TAILSCALE_VERSION         optional pinned static build version
+CRABBOX_TAILSCALE_SHA256_AMD64    optional pinned amd64 archive checksum
+CRABBOX_TAILSCALE_SHA256_ARM64    optional pinned arm64 archive checksum
 CRABBOX_ARTIFACTS_BACKEND         optional; enables brokered artifact publishing
 CRABBOX_ARTIFACTS_BUCKET          required when artifact backend is enabled
 CRABBOX_ARTIFACTS_PREFIX          optional

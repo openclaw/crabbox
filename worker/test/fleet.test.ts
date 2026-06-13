@@ -1954,6 +1954,103 @@ describe("fleet lease identity and idle", () => {
     expect(updated.lease.tailscale?.state).toBe("ready");
   });
 
+  it("exposes admin Tailscale preflight without leaking minted keys", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+          return jsonResponse({ access_token: "oauth-token" });
+        }
+        if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+          return jsonResponse({ key: "tskey-preflight-secret" });
+        }
+        return jsonResponse({ message: `unexpected ${url}` }, 500);
+      }),
+    );
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:ci",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/admin/tailscale-preflight", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('"status":"ok"');
+    expect(text).not.toContain("tskey-preflight-secret");
+  });
+
+  it("cleans up recorded Tailscale devices before provider release", async () => {
+    const storage = new MemoryStorage();
+    const cleanupOrder: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+          return jsonResponse({ access_token: "oauth-token" });
+        }
+        if (url === "https://api.tailscale.com/api/v2/device/node-123") {
+          cleanupOrder.push(`tailscale:${init?.method ?? "GET"}`);
+          return new Response("");
+        }
+        return jsonResponse({ message: `unexpected ${url}` }, 500);
+      }),
+    );
+    storage.seed(
+      "lease:cbx_tailscale_cleanup",
+      testLease({
+        id: "cbx_tailscale_cleanup",
+        slug: "tailscale-cleanup",
+        owner: "alice@example.com",
+        org: "example-org",
+        provider: "hetzner",
+        serverID: 4242,
+        state: "active",
+        keep: false,
+        tailscale: {
+          enabled: true,
+          state: "ready",
+          ipv4: "100.64.0.12",
+          deviceID: "node-123",
+        },
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(undefined, {}, async (id) => {
+          cleanupOrder.push(`provider:${id}`);
+        }),
+      },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_tailscale_cleanup/release", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(cleanupOrder).toEqual(["tailscale:DELETE", "provider:4242"]);
+    const stored = storage.value<LeaseRecord>("lease:cbx_tailscale_cleanup");
+    expect(stored?.tailscale?.cleanupState).toBe("api_delete_succeeded");
+  });
+
   it("does not hold the state transition lock while minting a Tailscale key", async () => {
     const storage = new MemoryStorage();
     const accessSnapshots = new Map<string, LeaseRecord[]>();

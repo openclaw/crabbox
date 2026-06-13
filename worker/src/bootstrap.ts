@@ -1416,6 +1416,74 @@ function indentRuncmdScript(script: string): string {
     .join("\n");
 }
 
+function tailscaleInstallBootstrap(config: LeaseConfig): string {
+  if (config.tailscaleInstallMode !== "pinned") {
+    return "retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'";
+  }
+  const version = shellQuote(config.tailscaleVersion || "1.98.4");
+  const amd64SHA = shellQuote(config.tailscaleSHA256?.amd64 || "");
+  const arm64SHA = shellQuote(config.tailscaleSHA256?.arm64 || "");
+  return `TS_VERSION=${version}
+    case "$(uname -m)" in
+      x86_64) TS_ARCH=amd64; TS_SHA256=${amd64SHA} ;;
+      aarch64|arm64) TS_ARCH=arm64; TS_SHA256=${arm64SHA} ;;
+      *) echo "unsupported Tailscale architecture: $(uname -m)" >&2; exit 3 ;;
+    esac
+    TS_INSTALL_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TS_INSTALL_DIR"' EXIT
+    TS_ARCHIVE="$TS_INSTALL_DIR/tailscale.tgz"
+    retry sh -c "curl -fsSL -o \\"$TS_ARCHIVE\\" \\"https://pkgs.tailscale.com/stable/tailscale_\${TS_VERSION}_\${TS_ARCH}.tgz\\""
+    printf '%s  %s\\n' "$TS_SHA256" "$TS_ARCHIVE" | sha256sum -c -
+    tar -xzf "$TS_ARCHIVE" -C "$TS_INSTALL_DIR" --strip-components=1
+    install -m 0755 "$TS_INSTALL_DIR/tailscale" /usr/local/bin/tailscale
+    install -m 0755 "$TS_INSTALL_DIR/tailscaled" /usr/local/sbin/tailscaled
+    install -d -m 0755 /var/lib/tailscale /run/tailscale
+    {
+      printf '%s\\n' '[Unit]'
+      printf '%s\\n' 'Description=Tailscale node agent'
+      printf '%s\\n' 'After=network-online.target'
+      printf '%s\\n' 'Wants=network-online.target'
+      printf '%s\\n' ''
+      printf '%s\\n' '[Service]'
+      printf '%s\\n' 'ExecStart=/usr/local/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock'
+      printf '%s\\n' 'Restart=on-failure'
+      printf '%s\\n' 'RuntimeDirectory=tailscale'
+      printf '%s\\n' 'StateDirectory=tailscale'
+      printf '%s\\n' ''
+      printf '%s\\n' '[Install]'
+      printf '%s\\n' 'WantedBy=multi-user.target'
+    } >/etc/systemd/system/tailscaled.service
+    systemctl daemon-reload || true`;
+}
+
+function tailscaleLogoutBootstrap(): string {
+  return `{
+      printf '%s\\n' '#!/usr/bin/env sh'
+      printf '%s\\n' 'if command -v tailscale >/dev/null 2>&1; then'
+      printf '%s\\n' '  tailscale logout >/dev/null 2>&1 || true'
+      printf '%s\\n' 'fi'
+    } >/usr/local/bin/crabbox-tailscale-logout
+    chmod 0755 /usr/local/bin/crabbox-tailscale-logout
+    if command -v systemctl >/dev/null 2>&1; then
+      {
+        printf '%s\\n' '[Unit]'
+        printf '%s\\n' 'Description=Crabbox Tailscale logout on shutdown'
+        printf '%s\\n' 'DefaultDependencies=no'
+        printf '%s\\n' 'Before=shutdown.target reboot.target halt.target'
+        printf '%s\\n' ''
+        printf '%s\\n' '[Service]'
+        printf '%s\\n' 'Type=oneshot'
+        printf '%s\\n' 'ExecStart=/usr/local/bin/crabbox-tailscale-logout'
+        printf '%s\\n' 'TimeoutStartSec=20'
+        printf '%s\\n' ''
+        printf '%s\\n' '[Install]'
+        printf '%s\\n' 'WantedBy=halt.target reboot.target shutdown.target'
+      } >/etc/systemd/system/crabbox-tailscale-logout.service
+      systemctl daemon-reload || true
+      systemctl enable crabbox-tailscale-logout.service || true
+    fi`;
+}
+
 function tailscaleBootstrap(config: LeaseConfig): string {
   if (!config.tailscaleAuthKey) {
     return `    echo "tailscale requested but no auth key was injected" >&2
@@ -1433,8 +1501,9 @@ function tailscaleBootstrap(config: LeaseConfig): string {
       upArgs.push("--exit-node-allow-lan-access");
     }
   }
-  return `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+  return `    ${tailscaleInstallBootstrap(config)}
     systemctl enable --now tailscaled || service tailscaled start || true
+    ${tailscaleLogoutBootstrap()}
     install -d -m 0750 -o ${shellQuote(sshUser)} -g ${shellQuote(sshUser)} /var/lib/crabbox
     set +x
     TS_AUTHKEY=${shellQuote(config.tailscaleAuthKey)}
@@ -1450,12 +1519,14 @@ function tailscaleBootstrap(config: LeaseConfig): string {
     test -n "$ts_ip"
     printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
     printf '%s\\n' ${shellQuote(config.tailscaleHostname)} > /var/lib/crabbox/tailscale-hostname
+    tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version || true
     if [ -n ${shellQuote(config.tailscaleExitNode)} ]; then
       printf '%s\\n' ${shellQuote(config.tailscaleExitNode)} > /var/lib/crabbox/tailscale-exit-node
       printf '%s\\n' ${shellQuote(String(config.tailscaleExitNodeAllowLanAccess))} > /var/lib/crabbox/tailscale-exit-node-allow-lan-access
     fi
     if tailscale status --json >/var/lib/crabbox/tailscale-status.json 2>/dev/null; then
       jq -r '.Self.DNSName // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-fqdn || true
+      jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id || true
     fi
     chown ${shellQuote(`${sshUser}:${sshUser}`)} /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`;

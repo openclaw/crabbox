@@ -21,6 +21,12 @@ const config: LeaseConfig = {
   tailscaleTags: ["tag:crabbox"],
   tailscaleHostname: "",
   tailscaleAuthKey: "",
+  tailscaleInstallMode: "package",
+  tailscaleVersion: "1.98.4",
+  tailscaleSHA256: {
+    amd64: "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b",
+    arm64: "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7",
+  },
   tailscaleExitNode: "",
   tailscaleExitNodeAllowLanAccess: false,
   profile: "project-check",
@@ -365,6 +371,7 @@ describe("cloud-init bootstrap", () => {
       tailscaleExitNodeAllowLanAccess: true,
     });
     expect(got).toContain("https://tailscale.com/install.sh");
+    expect(got).toContain("/usr/local/bin/crabbox-tailscale-logout");
     expect(got).toContain("install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox");
     expect(got).toContain(
       "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
@@ -372,6 +379,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain('--auth-key="$TS_AUTHKEY"');
     expect(got).toContain(
       "printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
+    );
+    expect(got).toContain(
+      "tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version",
+    );
+    expect(got).toContain(
+      "jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id",
     );
     expect(got).toContain(
       "printf '%s\\n' 'mac-studio.tailnet.ts.net' > /var/lib/crabbox/tailscale-exit-node",
@@ -382,6 +395,31 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("chown 'runner:runner' /var/lib/crabbox/tailscale-* || true");
     expect(got).toContain("test -s /var/lib/crabbox/tailscale-ipv4");
     expect(got).toContain("grep -Eq '^100\\.' /var/lib/crabbox/tailscale-ipv4");
+  });
+
+  it("can install a pinned static Tailscale build with checksums", () => {
+    const got = cloudInit({
+      ...config,
+      tailscale: true,
+      tailscaleTags: ["tag:crabbox"],
+      tailscaleHostname: "crabbox-blue-lobster",
+      tailscaleAuthKey: "tskey-secret",
+      tailscaleInstallMode: "pinned",
+      tailscaleVersion: "1.98.4",
+      tailscaleSHA256: {
+        amd64: "amd64sum",
+        arm64: "arm64sum",
+      },
+    });
+    expect(got).not.toContain("https://tailscale.com/install.sh");
+    expect(got).toContain("TS_VERSION='1.98.4'");
+    expect(got).toContain("x86_64) TS_ARCH=amd64; TS_SHA256='amd64sum'");
+    expect(got).toContain("aarch64|arm64) TS_ARCH=arm64; TS_SHA256='arm64sum'");
+    expect(got).toContain(
+      "https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz",
+    );
+    expect(got).toContain("sha256sum -c -");
+    expect(got).toContain("/etc/systemd/system/tailscaled.service");
   });
 
   it("builds Windows EC2Launch user data for managed VNC", () => {

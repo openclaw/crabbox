@@ -2530,6 +2530,7 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
@@ -2780,6 +2781,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if lease.SSH.Host != "" {
 		a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
 	}
+	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		return err
 	}

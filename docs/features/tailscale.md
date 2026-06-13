@@ -137,6 +137,10 @@ CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET    optional, defaults to "-"
 CRABBOX_TAILSCALE_TAGS       default/allowed comma-separated tags (default tag:crabbox)
 CRABBOX_TAILSCALE_ENABLED    set 0 to force-disable, 1 to force-enable
+CRABBOX_TAILSCALE_INSTALL_MODE package or pinned (default package)
+CRABBOX_TAILSCALE_VERSION       pinned static build version
+CRABBOX_TAILSCALE_SHA256_AMD64  pinned amd64 archive checksum
+CRABBOX_TAILSCALE_SHA256_ARM64  pinned arm64 archive checksum
 ```
 
 The OAuth client's tags and each requested lease tag must also satisfy Tailscale's
@@ -180,7 +184,7 @@ Flow:
 4. The key is injected only into the runner's cloud-init user-data.
 5. The runner installs Tailscale, runs `tailscale up` with the requested hostname and
    tags, and writes non-secret metadata under `/var/lib/crabbox` (`tailscale-ipv4`,
-   `-hostname`, `-fqdn`, and exit-node markers).
+   `-hostname`, `-fqdn`, `-version`, `-device-id`, and exit-node markers).
 6. After SSH readiness, the CLI reads that metadata and posts it back to the
    coordinator so the lease record carries the tailnet address.
 
@@ -188,9 +192,28 @@ The auth key is never stored in lease records, provider labels, run logs, or loc
 config. The short-lived key can still appear in user-data at the provider, so the
 Worker only mints one-off ephemeral keys — never long-lived reusable keys.
 
+The default installer mode runs Tailscale's package install script. Set
+`CRABBOX_TAILSCALE_INSTALL_MODE=pinned` to download a static Tailscale archive,
+verify the configured SHA-256 checksum, install the `tailscale` and `tailscaled`
+binaries, and record the client version. The built-in pinned defaults track the
+Islo Tailscale build so both bootstrap paths use the same binary version.
+
+On release, `crabbox stop` attempts a best-effort remote `tailscale logout` before
+provider cleanup when SSH is still reachable. Coordinator cleanup also attempts a
+best-effort Tailscale device delete when the lease record has a `deviceID`; missing
+device ids or Tailscale API failures are recorded in lease metadata without blocking
+provider deletion.
+
 If Tailscale rejects a requested subset or unowned tag, the coordinator returns
 `invalid_tailscale_tags` with exact-match/`tagOwners` guidance and preserves the raw
 Tailscale HTTP status and response body for diagnosis.
+
+Preflight the coordinator without leasing a machine:
+
+```sh
+CRABBOX_TAILSCALE_ENABLED=0 scripts/live-tailscale-smoke.sh --json
+CRABBOX_LIVE=1 CRABBOX_COORDINATOR=https://broker.example.com CRABBOX_ADMIN_TOKEN=replace-me scripts/live-tailscale-smoke.sh --json
+```
 
 ## SSH and VNC
 

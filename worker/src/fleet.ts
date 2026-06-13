@@ -52,9 +52,12 @@ import {
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import {
   createTailscaleAuthKey,
+  deleteTailscaleDevice,
   renderTailscaleHostname,
   tailscaleAllowed,
   tailscaleDefaultTags,
+  tailscaleInstallConfig,
+  tailscalePreflight,
   tailscaleTagOwnershipErrorMessage,
   validateTailscaleTags,
 } from "./tailscale";
@@ -514,6 +517,9 @@ export class FleetCoordinator {
       }
       if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
         return await this.adminProviderIdentity(request);
+      }
+      if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {
+        return await this.adminTailscalePreflight();
       }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
         return await this.adminHostsRoute(request, parts[3]);
@@ -1766,6 +1772,10 @@ export class FleetCoordinator {
       if (!config.tailscaleExitNode) {
         config.tailscaleExitNodeAllowLanAccess = false;
       }
+      const install = tailscaleInstallConfig(this.env);
+      config.tailscaleInstallMode = install.mode;
+      config.tailscaleVersion = install.version;
+      config.tailscaleSHA256 = install.sha256;
       config.tailscaleAuthKey = await createTailscaleAuthKey(this.env, {
         hostname: config.tailscaleHostname,
         tags: config.tailscaleTags,
@@ -4126,6 +4136,10 @@ export class FleetCoordinator {
     return await this.adminAWSIdentity(request);
   }
 
+  private async adminTailscalePreflight(): Promise<Response> {
+    return json({ tailscale: await tailscalePreflight(this.env) });
+  }
+
   private async adminHostsRoute(request: Request, hostID?: string): Promise<Response> {
     const url = new URL(request.url);
     const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
@@ -5087,6 +5101,7 @@ export class FleetCoordinator {
         const cleanup = async () => {
           let failure: string | undefined;
           try {
+            await this.cleanupLeaseTailscaleDevice(lease, claim);
             await this.deleteLeaseServer(lease);
           } catch (error) {
             failure = errorMessage(error);
@@ -6178,6 +6193,51 @@ export class FleetCoordinator {
     await this.provider(provider, lease.region, lease.providerProject).releaseLease(lease);
   }
 
+  private async cleanupLeaseTailscaleDevice(lease: LeaseRecord, claim: string): Promise<void> {
+    const metadata = lease.tailscale;
+    if (!metadata?.enabled) {
+      return;
+    }
+    const deviceID = metadata.deviceID?.trim();
+    if (!deviceID) {
+      await this.recordTailscaleCleanupResult(lease.id, claim, "missing_device_id");
+      return;
+    }
+    try {
+      await deleteTailscaleDevice(this.env, deviceID);
+      await this.recordTailscaleCleanupResult(lease.id, claim, "api_delete_succeeded");
+    } catch (error) {
+      await this.recordTailscaleCleanupResult(
+        lease.id,
+        claim,
+        "api_delete_failed",
+        errorMessage(error),
+      );
+    }
+  }
+
+  private async recordTailscaleCleanupResult(
+    leaseID: string,
+    claim: string,
+    cleanupState: NonNullable<TailscaleMetadata["cleanupState"]>,
+    cleanupError?: string,
+  ): Promise<void> {
+    await this.state.runExclusive(async () => {
+      const current = await this.getLease(leaseID);
+      if (!current || current.cleanupStartedAt !== claim || !current.tailscale?.enabled) {
+        return;
+      }
+      current.tailscale = { ...current.tailscale, cleanupState };
+      if (cleanupError) {
+        current.tailscale.cleanupError = cleanupError;
+      } else {
+        delete current.tailscale.cleanupError;
+      }
+      current.updatedAt = new Date().toISOString();
+      await this.putLease(current);
+    });
+  }
+
   private async abortProvisionedLeaseAfterStateChange(
     record: LeaseRecord,
     config: LeaseConfig,
@@ -6237,6 +6297,7 @@ export class FleetCoordinator {
       );
     }
     try {
+      await this.cleanupLeaseTailscaleDevice(preparation.lease, preparation.cleanupStartedAt);
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
       const failure = await this.state.runExclusive(async () => {
@@ -6380,6 +6441,7 @@ export class FleetCoordinator {
       return preparation.lease;
     }
     try {
+      await this.cleanupLeaseTailscaleDevice(preparation.lease, preparation.claim);
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
       await this.state.runExclusive(async () => {
@@ -7229,6 +7291,9 @@ function isAdminRoute(method: string, parts: string[]): boolean {
   if (method === "GET" && parts.join("/") === "v1/admin/providers/identity") {
     return true;
   }
+  if (method === "POST" && parts.join("/") === "v1/admin/tailscale-preflight") {
+    return true;
+  }
   if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
     return true;
   }
@@ -7272,6 +7337,9 @@ function mergeTailscaleMetadata(
   const fqdn = nonSecretString(input.fqdn) || current?.fqdn;
   const ipv4 = nonSecretString(input.ipv4) || current?.ipv4;
   const error = nonSecretString(input.error) || current?.error;
+  const version = nonSecretString(input.version) || current?.version;
+  const deviceID = nonSecretString(input.deviceID) || current?.deviceID;
+  const cleanupError = nonSecretString(input.cleanupError) || current?.cleanupError;
   const exitNode = nonSecretString(input.exitNode) || current?.exitNode;
   if (hostname) {
     merged.hostname = hostname;
@@ -7285,6 +7353,24 @@ function mergeTailscaleMetadata(
   if (error) {
     merged.error = error;
   }
+  if (version) {
+    merged.version = version;
+  }
+  if (deviceID) {
+    merged.deviceID = deviceID;
+  }
+  if (
+    input.cleanupState === "missing_device_id" ||
+    input.cleanupState === "api_delete_succeeded" ||
+    input.cleanupState === "api_delete_failed"
+  ) {
+    merged.cleanupState = input.cleanupState;
+  } else if (current?.cleanupState) {
+    merged.cleanupState = current.cleanupState;
+  }
+  if (cleanupError) {
+    merged.cleanupError = cleanupError;
+  }
   if (exitNode) {
     merged.exitNode = exitNode;
     merged.exitNodeAllowLanAccess =
@@ -7292,6 +7378,9 @@ function mergeTailscaleMetadata(
   }
   if (merged.state !== "failed") {
     delete merged.error;
+  }
+  if (merged.cleanupState !== "api_delete_failed") {
+    delete merged.cleanupError;
   }
   return merged;
 }

@@ -8,10 +8,13 @@ import (
 )
 
 const (
-	tightVNCMSIURL        = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
-	gitForWindowsSetupURL = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
-	openSSHWin64ZipURL    = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
-	ubuntuWSLRootFSURL    = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+	tightVNCMSIURL              = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
+	gitForWindowsSetupURL       = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
+	openSSHWin64ZipURL          = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
+	ubuntuWSLRootFSURL          = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+	defaultTailscaleVersion     = "1.98.4"
+	defaultTailscaleAMD64SHA256 = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
+	defaultTailscaleARM64SHA256 = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
 )
 
 func awsUserData(cfg Config, publicKey string) string {
@@ -1507,8 +1510,9 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 		loginServerExport = "TS_LOGIN_SERVER=" + shellQuote(controlURL) + "\n    "
 	}
 	loginServerFlag := `${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`
-	tailscaleUpScript := `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+	tailscaleUpScript := `    ` + cloudInitTailscaleInstallBootstrap() + `
     systemctl enable --now tailscaled || service tailscaled start || true
+    ` + cloudInitTailscaleLogoutBootstrap() + `
     install -d -m 0750 -o ` + sshUserOwner + ` -g ` + sshUserGroup + ` /var/lib/crabbox
     set +x
     ` + loginServerExport + `TS_AUTHKEY=` + shellQuote(authKey) + `
@@ -1524,12 +1528,14 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
     test -n "$ts_ip"
     printf '%s\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
     printf '%s\n' ` + shellQuote(hostname) + ` > /var/lib/crabbox/tailscale-hostname
+    tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version || true
     if [ -n ` + shellQuote(exitNode) + ` ]; then
       printf '%s\n' ` + shellQuote(exitNode) + ` > /var/lib/crabbox/tailscale-exit-node
       printf '%s\n' ` + shellQuote(fmt.Sprint(cfg.Tailscale.ExitNodeAllowLANAccess)) + ` > /var/lib/crabbox/tailscale-exit-node-allow-lan-access
     fi
     if tailscale status --json >/var/lib/crabbox/tailscale-status.json 2>/dev/null; then
       jq -r '.Self.DNSName // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-fqdn || true
+      jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id || true
     fi
     chown ` + sshUserChown + ` /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`
@@ -1537,6 +1543,74 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 		tailscaleUpScript += "\n" + cloudInitPondHostsBootstrap(cfg.Pond)
 	}
 	return tailscaleUpScript
+}
+
+func cloudInitTailscaleInstallBootstrap() string {
+	if strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_INSTALL_MODE")) != "pinned" {
+		return "retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'"
+	}
+	version := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_VERSION")), defaultTailscaleVersion)
+	amd64SHA := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_SHA256_AMD64")), defaultTailscaleAMD64SHA256)
+	arm64SHA := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_SHA256_ARM64")), defaultTailscaleARM64SHA256)
+	return `TS_VERSION=` + shellQuote(version) + `
+    case "$(uname -m)" in
+      x86_64) TS_ARCH=amd64; TS_SHA256=` + shellQuote(amd64SHA) + ` ;;
+      aarch64|arm64) TS_ARCH=arm64; TS_SHA256=` + shellQuote(arm64SHA) + ` ;;
+      *) echo "unsupported Tailscale architecture: $(uname -m)" >&2; exit 3 ;;
+    esac
+    TS_INSTALL_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TS_INSTALL_DIR"' EXIT
+    TS_ARCHIVE="$TS_INSTALL_DIR/tailscale.tgz"
+    retry sh -c "curl -fsSL -o \"$TS_ARCHIVE\" \"https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz\""
+    printf '%s  %s\n' "$TS_SHA256" "$TS_ARCHIVE" | sha256sum -c -
+    tar -xzf "$TS_ARCHIVE" -C "$TS_INSTALL_DIR" --strip-components=1
+    install -m 0755 "$TS_INSTALL_DIR/tailscale" /usr/local/bin/tailscale
+    install -m 0755 "$TS_INSTALL_DIR/tailscaled" /usr/local/sbin/tailscaled
+    install -d -m 0755 /var/lib/tailscale /run/tailscale
+    {
+      printf '%s\n' '[Unit]'
+      printf '%s\n' 'Description=Tailscale node agent'
+      printf '%s\n' 'After=network-online.target'
+      printf '%s\n' 'Wants=network-online.target'
+      printf '%s\n' ''
+      printf '%s\n' '[Service]'
+      printf '%s\n' 'ExecStart=/usr/local/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock'
+      printf '%s\n' 'Restart=on-failure'
+      printf '%s\n' 'RuntimeDirectory=tailscale'
+      printf '%s\n' 'StateDirectory=tailscale'
+      printf '%s\n' ''
+      printf '%s\n' '[Install]'
+      printf '%s\n' 'WantedBy=multi-user.target'
+    } >/etc/systemd/system/tailscaled.service
+    systemctl daemon-reload || true`
+}
+
+func cloudInitTailscaleLogoutBootstrap() string {
+	return `{
+      printf '%s\n' '#!/usr/bin/env sh'
+      printf '%s\n' 'if command -v tailscale >/dev/null 2>&1; then'
+      printf '%s\n' '  tailscale logout >/dev/null 2>&1 || true'
+      printf '%s\n' 'fi'
+    } >/usr/local/bin/crabbox-tailscale-logout
+    chmod 0755 /usr/local/bin/crabbox-tailscale-logout
+    if command -v systemctl >/dev/null 2>&1; then
+      {
+        printf '%s\n' '[Unit]'
+        printf '%s\n' 'Description=Crabbox Tailscale logout on shutdown'
+        printf '%s\n' 'DefaultDependencies=no'
+        printf '%s\n' 'Before=shutdown.target reboot.target halt.target'
+        printf '%s\n' ''
+        printf '%s\n' '[Service]'
+        printf '%s\n' 'Type=oneshot'
+        printf '%s\n' 'ExecStart=/usr/local/bin/crabbox-tailscale-logout'
+        printf '%s\n' 'TimeoutStartSec=20'
+        printf '%s\n' ''
+        printf '%s\n' '[Install]'
+        printf '%s\n' 'WantedBy=halt.target reboot.target shutdown.target'
+      } >/etc/systemd/system/crabbox-tailscale-logout.service
+      systemctl daemon-reload || true
+      systemctl enable crabbox-tailscale-logout.service || true
+    fi`
 }
 
 // cloudInitPondHostsBootstrap installs /usr/local/bin/crabbox-pond-hosts and a
