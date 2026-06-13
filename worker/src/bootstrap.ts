@@ -45,6 +45,7 @@ export function cloudInit(config: LeaseConfig): string {
     .map((port) => `      Port ${port}`)
     .join("\n");
   const readyChecks = optionalReadyChecks(config);
+  const sshHostKeyFiles = optionalSSHHostKeyFiles(config);
   const writeFiles = optionalWriteFiles(config);
   const bootstrap = optionalBootstrap(config);
   return `#cloud-config
@@ -63,6 +64,7 @@ write_files:
     content: |
 ${portLines}
       PasswordAuthentication no
+${sshHostKeyFiles}
   - path: /usr/local/bin/crabbox-ready
     permissions: '0755'
     content: |
@@ -96,7 +98,7 @@ runcmd:
       done
     }
     retry apt-get update
-    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
+    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq tmux
     mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox
@@ -372,7 +374,7 @@ Acquire::https::Timeout "30";
 APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git rsync jq
+apt-get install -y --no-install-recommends ca-certificates curl git rsync jq tmux
 if [ -d /proc/sys/fs/binfmt_misc ]; then
   if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
     mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
@@ -641,6 +643,23 @@ function optionalReadyChecks(config: LeaseConfig): string {
     );
   }
   return lines.join("\n");
+}
+
+function optionalSSHHostKeyFiles(config: LeaseConfig): string {
+  if (!config.sshHostPrivateKey || !config.sshHostPublicKey) {
+    return "";
+  }
+  return `  - path: /etc/ssh/ssh_host_ed25519_key
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: ${btoa(config.sshHostPrivateKey)}
+  - path: /etc/ssh/ssh_host_ed25519_key.pub
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: ${btoa(config.sshHostPublicKey)}
+`;
 }
 
 function optionalWriteFiles(config: LeaseConfig): string {

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +10,7 @@ import {
   FleetDurableObject,
   HetznerProvider,
   bridgeTicketFromRequest,
+  boundedSocketReason,
   codeForwardHeaders,
   codeResponseHeaders,
   flushPendingWebVNC,
@@ -16,6 +18,7 @@ import {
   resetWebVNCBridge,
   recordAzureDeferredCleanup,
   shouldActivateEgressSession,
+  workspaceTerminalOriginAllowed,
   type WebVNCBuffer,
 } from "../src/fleet";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
@@ -400,6 +403,8 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     let createdClass = "";
     let createdProviderKey = "";
+    let createdHostPrivateKey = "";
+    let createdHostPublicKey = "";
     let providerReleases = 0;
     const fleet = testFleet(
       storage,
@@ -408,6 +413,8 @@ describe("fleet lease identity and idle", () => {
           (config) => {
             createdClass = config.class;
             createdProviderKey = config.providerKey;
+            createdHostPrivateKey = config.sshHostPrivateKey;
+            createdHostPublicKey = config.sshHostPublicKey;
           },
           {},
           async () => {
@@ -416,7 +423,9 @@ describe("fleet lease identity and idle", () => {
         ),
       },
       {
+        CRABBOX_PUBLIC_URL: "https://crabbox.example.com",
         CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test",
+        CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
       },
     );
     const headers = {
@@ -426,6 +435,9 @@ describe("fleet lease identity and idle", () => {
     const profile = "profile-".padEnd(100, "x");
     const body = {
       id: "fleet-is-101",
+      repo: "openclaw/crabbox",
+      branch: "main",
+      command: 'bash -lc "echo workspace-ready; sleep 300"',
       runtime: "crabbox",
       profile,
       ttlSeconds: 1800,
@@ -468,10 +480,43 @@ describe("fleet lease identity and idle", () => {
     expect(createdProviderKey).toBe(
       `crabbox-workspace-${(await sha256HexForTest("ssh-ed25519 workspace-test")).slice(0, 12)}`,
     );
+    expect(createdHostPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
+    expect(createdHostPublicKey).toMatch(/^ssh-ed25519 /);
+    expect(
+      storage.value<{ sshHostKeySha256?: string }>(
+        "workspace:example-org:alice%40example.com:fleet-is-101",
+      )?.sshHostKeySha256,
+    ).toMatch(/^[a-f0-9]{64}$/);
     const ready = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
-    await expect(ready.json()).resolves.toMatchObject({
+    const readyBody = (await ready.json()) as {
+      attachUrl: string;
+      capabilities: { terminal: boolean };
+      providerResourceId: string;
+      status: string;
+    };
+    expect(readyBody).toMatchObject({
       providerResourceId: created.providerResourceId,
       status: "ready",
+      capabilities: { terminal: true },
+    });
+    const terminalURL = new URL(readyBody.attachUrl);
+    expect(terminalURL.origin).toBe("wss://crabbox.example.com");
+    expect(terminalURL.pathname).toBe("/v1/workspaces/fleet-is-101/terminal");
+    expect(terminalURL.search).toBe("?flow=ack-v1");
+
+    const oversizedRepo = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers,
+        body: {
+          ...body,
+          id: "fleet-oversized-repo",
+          repo: `openclaw/${"x".repeat(101)}`,
+        },
+      }),
+    );
+    expect(oversizedRepo.status).toBe(400);
+    await expect(oversizedRepo.json()).resolves.toMatchObject({
+      error: "invalid_workspace_request",
     });
 
     const leaseKey = `lease:${created.providerResourceId}`;
@@ -568,6 +613,61 @@ describe("fleet lease identity and idle", () => {
     await expect(invalidJSON.json()).resolves.toMatchObject({
       error: "invalid_workspace_request",
     });
+    const oversizedProfile = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers,
+        body: {
+          id: "fleet-invalid-profile",
+          profile: "x".repeat(121),
+        },
+      }),
+    );
+    expect(oversizedProfile.status).toBe(400);
+    await expect(oversizedProfile.json()).resolves.toMatchObject({
+      error: "invalid_profile",
+    });
+    await Promise.all(
+      [
+        ["fleet-lock-component", "foo.lock/bar"],
+        ["fleet-dot-component", "foo/.bar"],
+      ].map(async ([id, branch]) => {
+        const invalidBranch = await fleet.fetch(
+          request("POST", "/v1/workspaces", {
+            headers,
+            body: { id, branch },
+          }),
+        );
+        expect(invalidBranch.status).toBe(400);
+        await expect(invalidBranch.json()).resolves.toMatchObject({
+          error: "invalid_workspace_request",
+        });
+      }),
+    );
+    const oversizedCommand = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers,
+        body: {
+          id: "fleet-command-too-large",
+          command: "x".repeat(3_001),
+          runtime: "crabbox",
+        },
+      }),
+    );
+    expect(oversizedCommand.status).toBe(400);
+    await expect(oversizedCommand.json()).resolves.toMatchObject({
+      error: "invalid_workspace_request",
+    });
+    const oversizedQuotedCommand = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers,
+        body: {
+          id: "fleet-quoted-command-too-large",
+          command: "'".repeat(200),
+          runtime: "crabbox",
+        },
+      }),
+    );
+    expect(oversizedQuotedCommand.status).toBe(400);
   });
 
   it("keeps delete pending until concurrent workspace provisioning settles", async () => {
@@ -1086,6 +1186,203 @@ describe("fleet lease identity and idle", () => {
     expect(providerCreates).toBe(0);
     const stopped = await fleet.fetch(request("GET", "/v1/workspaces/fleet-is-126", { headers }));
     await expect(stopped.json()).resolves.toMatchObject({ status: "stopped" });
+  });
+
+  it("revokes workspace terminals from the shared release transition", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const key = "workspace:example-org:alice%40example.com:fleet-is-127";
+    const now = new Date().toISOString();
+    const lease = testLease({
+      id: "cbx_abcdef123457",
+      slug: "fleet-is-127",
+      workspaceID: "fleet-is-127",
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "active",
+      createdAt: now,
+      updatedAt: now,
+      lastTouchedAt: now,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(key, {
+      id: "fleet-is-127",
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      profile: "default",
+      repo: "openclaw/crabbox",
+      branch: "main",
+      command: "exec bash -l",
+      provider: lease.provider,
+      class: lease.class,
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const close = vi.fn<(code?: number, reason?: string) => void>();
+    const socket = { readyState: WebSocket.OPEN, close } as unknown as WebSocket;
+    const internals = fleet as unknown as {
+      workspaceTerminals: Map<string, Set<WebSocket>>;
+      markWorkspaceReleaseRequested(lease: LeaseRecord): Promise<void>;
+    };
+    internals.workspaceTerminals.set(key, new Set([socket]));
+
+    await internals.markWorkspaceReleaseRequested(lease);
+
+    expect(close).toHaveBeenCalledWith(1008, "workspace stopping");
+    expect(internals.workspaceTerminals.has(key)).toBe(false);
+  });
+
+  it("caps concurrent workspace terminal attachments before upgrading", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        CRABBOX_PUBLIC_URL: "https://crabbox.example.com",
+        CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "workspace-private-key",
+      },
+    );
+    const key = "workspace:example-org:alice%40example.com:fleet-is-128";
+    const now = new Date().toISOString();
+    const lease = testLease({
+      id: "cbx_abcdef123458",
+      slug: "fleet-is-128",
+      workspaceID: "fleet-is-128",
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "active",
+      host: "192.0.2.10",
+      createdAt: now,
+      updatedAt: now,
+      lastTouchedAt: now,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    storage.seed(key, {
+      id: "fleet-is-128",
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      profile: "default",
+      repo: "",
+      branch: "main",
+      command: "exec bash -l",
+      provider: lease.provider,
+      class: lease.class,
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      createdAt: now,
+      updatedAt: now,
+      sshHostKeySha256: "a".repeat(64),
+    });
+    const internals = fleet as unknown as {
+      workspaceTerminals: Map<string, Set<WebSocket>>;
+    };
+    internals.workspaceTerminals.set(
+      key,
+      new Set(
+        Array.from({ length: 4 }, () => ({ readyState: WebSocket.OPEN }) as unknown as WebSocket),
+      ),
+    );
+
+    const response = await fleet.fetch(
+      request("GET", "/v1/workspaces/fleet-is-128/terminal", {
+        headers: {
+          connection: "upgrade",
+          upgrade: "websocket",
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": lease.org,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "terminal_connection_limit",
+    });
+  });
+
+  it("rejects cross-origin browser terminal handshakes", () => {
+    const env = { CRABBOX_PUBLIC_URL: "https://crabbox.example.com" } as Env;
+
+    expect(
+      workspaceTerminalOriginAllowed(
+        new Request("https://crabbox.example.com/v1/workspaces/fleet-is-128/terminal"),
+        env,
+      ),
+    ).toBe(true);
+    expect(
+      workspaceTerminalOriginAllowed(
+        new Request("https://crabbox.example.com/v1/workspaces/fleet-is-128/terminal", {
+          headers: { origin: "https://crabbox.example.com" },
+        }),
+        env,
+      ),
+    ).toBe(true);
+    expect(
+      workspaceTerminalOriginAllowed(
+        new Request("https://crabbox.example.com/v1/workspaces/fleet-is-128/terminal", {
+          headers: { origin: "https://attacker.example" },
+        }),
+        env,
+      ),
+    ).toBe(false);
+  });
+
+  it("bounds WebSocket close reasons by UTF-8 bytes", () => {
+    const reason = boundedSocketReason("🔥".repeat(100));
+
+    expect(new TextEncoder().encode(reason).byteLength).toBeLessThanOrEqual(120);
+    expect(reason.endsWith("\uFFFD")).toBe(false);
+  });
+
+  it("bounds terminal output until the client acknowledges forwarded bytes", async () => {
+    const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
+    const start = source.indexOf("private async connectWorkspaceTerminal");
+    const end = source.indexOf("private trackWorkspaceTerminal", start);
+    const terminal = source.slice(start, end);
+
+    expect(terminal).toContain("queuedOutputFrames >= workspaceTerminalMaxBufferedFrames");
+    expect(terminal).toContain("queuedOutputBytes + unacknowledgedOutputBytes + data.byteLength");
+    expect(terminal).toContain("unacknowledgedOutputBytes += data.byteLength");
+    expect(terminal).toContain("workspaceTerminalAcknowledgement(value)");
+    expect(terminal).toContain("bytes > unacknowledgedOutputBytes");
+    expect(terminal).toContain("workspaceTerminalSocketBufferedBytes(socket)");
+    expect(source).toContain("value.length > workspaceTerminalMaxBufferedBytes");
+  });
+
+  it("tries every configured SSH port before delaying terminal readiness", async () => {
+    const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
+    const start = source.indexOf("private async connectWorkspaceTerminal");
+    const end = source.indexOf("private trackWorkspaceTerminal", start);
+    const terminal = source.slice(start, end);
+
+    expect(terminal).toContain("...(lease.sshFallbackPorts ?? [])");
+    expect(terminal).toContain("for (const port of terminalPorts)");
+    expect(terminal).toContain('Number.parseInt(port || "22", 10)');
+    expect(terminal).toContain("connectingClient?.end()");
+    expect(terminal.indexOf("for (const port of terminalPorts)")).toBeLessThan(
+      terminal.indexOf("setTimeout(resolve, 2_000)"),
+    );
+  });
+
+  it("recovers incomplete clones in a neutral Crabbox workspace", async () => {
+    const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
+    const start = source.indexOf("function workspaceTerminalBootstrapCommand");
+    const end = source.indexOf("function shellQuote", start);
+    const bootstrap = source.slice(start, end);
+
+    expect(bootstrap).toContain("/workspaces");
+    expect(bootstrap).toContain("crabbox-workspace-");
+    expect(bootstrap).toContain("rev-parse --verify 'HEAD^{commit}'");
+    expect(bootstrap).toContain(".clone.XXXXXX");
+    expect(bootstrap).toContain("if ! git clone");
+    expect(bootstrap).not.toContain("/crabfleet/");
   });
 
   it("retries transient workspace admission failures without poisoning the workspace ID", async () => {

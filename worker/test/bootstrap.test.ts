@@ -63,6 +63,19 @@ async function gunzipBase64(value: string): Promise<string> {
 }
 
 describe("cloud-init bootstrap", () => {
+  it("installs a coordinator-generated SSH host identity", () => {
+    const got = cloudInit({
+      ...config,
+      sshHostPrivateKey: "private-host-key",
+      sshHostPublicKey: "ssh-ed25519 public-host-key",
+    });
+
+    expect(got).toContain("path: /etc/ssh/ssh_host_ed25519_key");
+    expect(got).toContain(`content: ${btoa("private-host-key")}`);
+    expect(got).toContain("path: /etc/ssh/ssh_host_ed25519_key.pub");
+    expect(got).toContain(`content: ${btoa("ssh-ed25519 public-host-key")}`);
+  });
+
   it("uses retrying package installation in runcmd", () => {
     const got = cloudInit(config);
     expect(got).toContain("package_update: false");

@@ -15,6 +15,13 @@ const requiredCostGuardrails = [
 ];
 
 describe("wrangler config", () => {
+  it("uses the portable ssh2 crypto implementation", () => {
+    expect(wranglerConfig).toContain(
+      '"./crypto/build/Release/sshcrypto.node": "./src/ssh2-native.cjs"',
+    );
+    expect(wranglerConfig).toContain('"./crypto/poly1305.js": "./src/ssh2-poly1305.cjs"');
+  });
+
   it("keeps deployed and preview coordinator cost guardrails enabled", () => {
     for (const name of requiredCostGuardrails) {
       const values = configValues(name);

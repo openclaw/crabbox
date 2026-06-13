@@ -86,6 +86,8 @@ export interface LeaseConfig {
   idleTimeoutSeconds: number;
   keep: boolean;
   sshPublicKey: string;
+  sshHostPrivateKey: string;
+  sshHostPublicKey: string;
   pond: string;
   exposedPorts: string[];
 }
@@ -301,6 +303,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     idleTimeoutSeconds,
     keep: input.keep ?? false,
     sshPublicKey,
+    sshHostPrivateKey: "",
+    sshHostPublicKey: "",
     pond: requestedPondName(input.pond ?? ""),
     exposedPorts: normalizeExposedPorts(input.exposedPorts ?? []),
   };
