@@ -205,6 +205,35 @@ func TestClientTimeoutPreservesErrorStatus(t *testing.T) {
 	}
 }
 
+func TestClientRejectsRedirectWithoutForwardingCredentialsOrPayload(t *testing.T) {
+	var redirectedRequests int
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectedRequests++
+		t.Errorf("redirect target received Authorization=%q", r.Header.Get("Authorization"))
+	}))
+	defer redirectTarget.Close()
+	loader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer loader.Close()
+
+	loaderClient, err := newLoaderAPI(testConfig(loader.URL), Runtime{HTTP: loader.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = loaderClient.Run(context.Background(), runRequest{
+		Module: moduleSource{Name: "index.js", Source: "export default {}"},
+		Env:    map[string]string{"SECRET": "forwarded-value"},
+	})
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("run error=%v, want typed HTTP 307", err)
+	}
+	if redirectedRequests != 0 {
+		t.Fatalf("redirect target requests=%d, want none", redirectedRequests)
+	}
+}
+
 func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

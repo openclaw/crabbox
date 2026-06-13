@@ -120,6 +120,7 @@ var newLoaderAPI = func(cfg Config, rt Runtime) (loaderAPI, error) {
 	if httpClient == nil {
 		httpClient = defaultHTTPClient(cfg)
 	}
+	httpClient = noRedirectHTTPClient(httpClient)
 	return &client{
 		baseURL:             baseURL,
 		token:               token,
@@ -176,6 +177,14 @@ func defaultHTTPClient(cfg Config) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseHeaderTimeout(cfg)
 	return &http.Client{Transport: transport}
+}
+
+func noRedirectHTTPClient(httpClient *http.Client) *http.Client {
+	cloned := *httpClient
+	cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &cloned
 }
 
 func responseHeaderTimeout(cfg Config) time.Duration {
