@@ -96,15 +96,21 @@ The Node runtime can accept an identity header from an ingress:
 CRABBOX_TRUSTED_USER_HEADER=X-Authenticated-User
 CRABBOX_TRUSTED_USER_ORG=example-org
 CRABBOX_TRUSTED_PROXY_CIDRS=10.42.7.19/32,fd00:1234::19/128
+CRABBOX_TRUSTED_PROXY_SECRET=replace-with-a-random-secret
 ```
 
 The socket peer must match the CIDR allowlist. The ingress must authenticate the
-caller and remove caller-supplied copies of the configured identity header.
-Allow only the ingress proxy's exact addresses or dedicated subnets, and block
-direct coordinator access with network policy. This path grants non-admin scope
-only; keep `CRABBOX_ADMIN_TOKEN` separate. The same proxy allowlist controls
+caller and remove caller-supplied copies of the configured identity and
+`X-Crabbox-Proxy-Secret` headers. When `CRABBOX_TRUSTED_PROXY_SECRET` is set, the
+ingress must send that value in `X-Crabbox-Proxy-Secret`; the coordinator strips
+it before routing the request. Allow only exact proxy addresses or dedicated
+subnets, or require the secret when direct access cannot be blocked. This path
+grants non-admin scope only; keep `CRABBOX_ADMIN_TOKEN` separate. The same proxy allowlist controls
 whether forwarded host, protocol, and client-IP headers affect URL construction
 and provider ingress rules.
+
+`X-Crabbox-Proxy-Secret` is reserved and cannot be used as
+`CRABBOX_TRUSTED_USER_HEADER`.
 
 ## Authorization
 
