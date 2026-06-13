@@ -270,7 +270,8 @@ copies an SSH private key and never grants access to the private provider API.
 | Bridge disconnects | daemon reconnects; direct SSH remains usable |
 | Coordinator release succeeds | record becomes inactive history; provider resource remains |
 | Provider cleanup fails | local routing remains for retry |
-| Routing is missing or ambiguous | destructive operation fails closed |
+| Persisted routing is ambiguous | destructive operation fails closed |
+| Routing is missing and current external config is selected | operation may proceed as an ownership override; verify provider scope and resource identity first |
 
 ## Security checklist
 
