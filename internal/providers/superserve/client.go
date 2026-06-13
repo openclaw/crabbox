@@ -470,8 +470,7 @@ func (c *httpSuperserveClient) execBuffered(ctx context.Context, sandboxID, toke
 		return execResult{}, err
 	}
 	var result execResult
-	timeout := c.execRequestTimeout(body.TimeoutSecs)
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	requestCtx, cancel := superserveExecRequestContext(ctx, body.TimeoutSecs)
 	defer cancel()
 	if err := c.doDataPlaneJSON(requestCtx, http.MethodPost, target, "/exec", token, body, &result, envSecretValues(body.Env)...); err != nil {
 		return execResult{}, err
@@ -484,8 +483,7 @@ func (c *httpSuperserveClient) execStream(ctx context.Context, sandboxID, token 
 	if err != nil {
 		return execResult{}, err
 	}
-	timeout := c.execRequestTimeout(body.TimeoutSecs)
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	requestCtx, cancel := superserveExecRequestContext(ctx, body.TimeoutSecs)
 	defer cancel()
 	var reader io.Reader
 	buf, err := json.Marshal(body)
@@ -555,11 +553,11 @@ func (c *httpSuperserveClient) doDataPlaneJSON(ctx context.Context, method strin
 	return nil
 }
 
-func (c *httpSuperserveClient) execRequestTimeout(timeoutSecs int) time.Duration {
+func superserveExecRequestContext(ctx context.Context, timeoutSecs int) (context.Context, context.CancelFunc) {
 	if timeoutSecs > 0 {
-		return time.Duration(timeoutSecs)*time.Second + 5*time.Second
+		return context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second+5*time.Second)
 	}
-	return defaultSuperserveRequestTimeout
+	return context.WithCancel(ctx)
 }
 
 type superserveStreamUnsupportedError struct {

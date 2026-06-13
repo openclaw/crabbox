@@ -411,6 +411,25 @@ func TestSuperserveUploadHonorsCallerDeadline(t *testing.T) {
 	}
 }
 
+func TestSuperserveExecRequestContextPreservesServiceDefault(t *testing.T) {
+	ctx, cancel := superserveExecRequestContext(context.Background(), 0)
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("service-default exec timeout added an absolute client deadline")
+	}
+
+	ctx, cancel = superserveExecRequestContext(context.Background(), 12)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("positive exec timeout did not add a client deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining < 16*time.Second || remaining > 18*time.Second {
+		t.Fatalf("positive exec timeout remaining=%s, want about 17s", remaining)
+	}
+}
+
 func TestSuperserveClientStreamDoesNotRetainUnboundedOutput(t *testing.T) {
 	chunk := strings.Repeat("x", maxExecStreamCaptureBytes+2048)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

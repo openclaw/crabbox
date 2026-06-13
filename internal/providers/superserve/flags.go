@@ -116,6 +116,8 @@ func superserveSandboxTimeoutSecs(cfg Config) (int, error) {
 	if timeout > maxSuperserveSandboxTimeoutSecs {
 		return 0, exit(2, "superserve sandbox lifetime must not exceed %d seconds (7 days)", maxSuperserveSandboxTimeoutSecs)
 	}
+	// Sandbox lifetime is an independent hard resource cap. It may intentionally
+	// be shorter than the command timeout to bound billing and remote lifetime.
 	return timeout, nil
 }
 
