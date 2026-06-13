@@ -184,6 +184,7 @@ func selectBrevSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		KnownHostsFile: entry.KnownHostsFile,
 		Port:           port,
 		TargetOS:       targetLinux,
+		ReadyCheck:     "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null",
 		NetworkKind:    networkPublic,
 	}
 	if proxy != "" {

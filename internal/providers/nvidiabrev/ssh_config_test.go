@@ -25,6 +25,11 @@ func TestNvidiaBrevSSHConfigParsesDirectTarget(t *testing.T) {
 	if target.KnownHostsFile != "/dev/null" || target.NetworkKind != networkPublic {
 		t.Fatalf("target metadata=%#v", target)
 	}
+	for _, command := range []string{"git", "rsync", "tar"} {
+		if !strings.Contains(target.ReadyCheck, "command -v "+command) {
+			t.Fatalf("ready check missing %q: %q", command, target.ReadyCheck)
+		}
+	}
 }
 
 func TestNvidiaBrevSSHConfigParsesProxyTarget(t *testing.T) {

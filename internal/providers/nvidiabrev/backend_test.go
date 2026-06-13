@@ -330,6 +330,9 @@ func TestNvidiaBrevAcquireCreatesRefreshesParsesSSHAndClaims(t *testing.T) {
 	if lease.SSH.Host != "203.0.113.10" || lease.SSH.Port != "2222" || lease.SSH.User != "ubuntu" || lease.SSH.Key == "" {
 		t.Fatalf("unexpected SSH target: %#v", lease.SSH)
 	}
+	if lease.SSH.ReadyCheck == "" || strings.Contains(lease.SSH.ReadyCheck, "crabbox-ready") {
+		t.Fatalf("unexpected SSH ready check: %q", lease.SSH.ReadyCheck)
+	}
 	claim, ok, err := resolveLeaseClaimForProvider(lease.LeaseID)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
@@ -338,6 +341,33 @@ func TestNvidiaBrevAcquireCreatesRefreshesParsesSSHAndClaims(t *testing.T) {
 		t.Fatalf("claim=%#v", claim)
 	}
 	assertNoNvidiaBrevSecretArgs(t, runner.calls)
+}
+
+func TestNvidiaBrevResolveSSHTargetRejectsOrganizationChangeDuringRefresh(t *testing.T) {
+	_, home := isolateNvidiaBrevState(t)
+	writeBrevSSHConfig(t, home, `Host crabbox-org-race
+  HostName 203.0.113.10
+  User ubuntu
+  IdentityFile "`+filepath.Join(home, ".brev", "brev.pem")+`"
+`)
+	runner := &fakeRunner{}
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		runner.calls = append(runner.calls, req)
+		if strings.Join(req.Args, " ") != "refresh" {
+			return LocalCommandResult{}, fmt.Errorf("unexpected command: %s", strings.Join(req.Args, " "))
+		}
+		writeBrevActiveOrg(t, "org-other")
+		return LocalCommandResult{}, nil
+	}
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	client, err := backend.client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = backend.resolveSSHTarget(context.Background(), client, backend.configForRun(), brevWorkspace{Name: "crabbox-org-race"}, "org-test")
+	if err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
+		t.Fatalf("err=%v, want organization change rejection", err)
+	}
 }
 
 func TestNvidiaBrevAcquireRevalidatesOrganizationAfterCreate(t *testing.T) {

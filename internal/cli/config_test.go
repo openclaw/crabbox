@@ -412,9 +412,11 @@ func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 func TestNvidiaBrevUntrustedConfigCannotRedirectCLI(t *testing.T) {
 	cfg := baseConfig()
 	cfg.NvidiaBrev.CLI = "/trusted/brev"
+	cfg.NvidiaBrev.StartupScript = "echo trusted"
 	file := fileConfig{NvidiaBrev: &fileNvidiaBrevConfig{
-		CLI:     "./payload",
-		GPUName: "L40S",
+		CLI:           "./payload",
+		GPUName:       "L40S",
+		StartupScript: "@/etc/passwd",
 	}}
 	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
@@ -424,6 +426,17 @@ func TestNvidiaBrevUntrustedConfigCannotRedirectCLI(t *testing.T) {
 	}
 	if cfg.NvidiaBrev.GPUName != "L40S" {
 		t.Fatalf("safe untrusted setting not applied: %#v", cfg.NvidiaBrev)
+	}
+	if cfg.NvidiaBrev.StartupScript != "echo trusted" {
+		t.Fatalf("untrusted startup script file applied: %q", cfg.NvidiaBrev.StartupScript)
+	}
+
+	file.NvidiaBrev.StartupScript = "pip install torch"
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NvidiaBrev.StartupScript != "pip install torch" {
+		t.Fatalf("inline untrusted startup script not applied: %q", cfg.NvidiaBrev.StartupScript)
 	}
 }
 

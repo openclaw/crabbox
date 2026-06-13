@@ -87,7 +87,9 @@ Defaults:
 
 `startupScript` follows Brev's native syntax: use an inline command such as
 `pip install torch`, or prefix a local file path with `@`, for example
-`@setup.sh` or `@/opt/setup.sh`.
+`@setup.sh` or `@/opt/setup.sh`. Local `@file` startup scripts are accepted only
+from trusted user config, environment overrides, or command-line flags; project
+config cannot select local files.
 
 Provider flags:
 

@@ -3933,7 +3933,8 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.NvidiaBrev.Launchable != "" {
 			cfg.NvidiaBrev.Launchable = file.NvidiaBrev.Launchable
 		}
-		if file.NvidiaBrev.StartupScript != "" {
+		if file.NvidiaBrev.StartupScript != "" &&
+			(trusted || !strings.HasPrefix(strings.TrimSpace(file.NvidiaBrev.StartupScript), "@")) {
 			cfg.NvidiaBrev.StartupScript = file.NvidiaBrev.StartupScript
 		}
 		if file.NvidiaBrev.ReleaseAction != "" {
