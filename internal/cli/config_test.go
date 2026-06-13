@@ -409,6 +409,24 @@ func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevUntrustedConfigCannotRedirectCLI(t *testing.T) {
+	cfg := baseConfig()
+	cfg.NvidiaBrev.CLI = "/trusted/brev"
+	file := fileConfig{NvidiaBrev: &fileNvidiaBrevConfig{
+		CLI:     "./payload",
+		GPUName: "L40S",
+	}}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NvidiaBrev.CLI != "/trusted/brev" {
+		t.Fatalf("untrusted CLI override applied: %q", cfg.NvidiaBrev.CLI)
+	}
+	if cfg.NvidiaBrev.GPUName != "L40S" {
+		t.Fatalf("safe untrusted setting not applied: %#v", cfg.NvidiaBrev)
+	}
+}
+
 func TestEffectiveNvidiaBrevWorkRootDoesNotInheritAnotherProviderDefault(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "xcp-ng"

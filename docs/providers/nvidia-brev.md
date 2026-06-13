@@ -28,6 +28,15 @@ CLI's own credential store.
   brev ls --json
   ```
 
+- For OAuth login, select the organization used for lifecycle operations:
+
+  ```sh
+  brev set
+  ```
+
+  API-key and workspace contexts may provide an explicit organization scope
+  without an active OAuth organization.
+
 - Keep OpenSSH and `rsync` available locally for Crabbox's SSH workflow.
 - Use an account with enough Brev quota and a GPU type that is available in the
   selected Brev cloud.

@@ -46,6 +46,28 @@ func TestNvidiaBrevProviderDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeBrevState(t *testing.T) {
+	tests := []struct {
+		status string
+		want   string
+	}{
+		{status: "starting", want: "booting"},
+		{status: "paused", want: "stopped"},
+		{status: "off", want: "stopped"},
+		{status: "deleted", want: "released"},
+		{status: "error", want: "failed"},
+		{status: "failed", want: "failed"},
+		{status: "", want: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.status, func(t *testing.T) {
+			if got := normalizeBrevState(brevWorkspace{Status: test.status}); got != test.want {
+				t.Fatalf("normalizeBrevState(%q)=%q, want %q", test.status, got, test.want)
+			}
+		})
+	}
+}
+
 func TestNvidiaBrevDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
 	cfg := Config{
 		WorkRoot: "/srv/crabbox",

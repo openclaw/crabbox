@@ -1352,7 +1352,13 @@ func normalizeBrevState(workspace brevWorkspace) string {
 	switch status {
 	case "running", "starting", "building", "queued", "pending":
 		return "booting"
-	case "stopped", "deleted", "failed", "error":
+	case "paused", "off":
+		return "stopped"
+	case "deleted":
+		return "released"
+	case "error":
+		return "failed"
+	case "stopped", "failed":
 		return status
 	case "":
 		return "unknown"

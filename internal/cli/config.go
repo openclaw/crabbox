@@ -3912,7 +3912,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.NvidiaBrev != nil {
-		if file.NvidiaBrev.CLI != "" {
+		if trusted && file.NvidiaBrev.CLI != "" {
 			cfg.NvidiaBrev.CLI = file.NvidiaBrev.CLI
 		}
 		if file.NvidiaBrev.Org != "" {

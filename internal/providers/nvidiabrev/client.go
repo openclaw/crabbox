@@ -97,13 +97,9 @@ func (c *brevClient) activeOrg(ctx context.Context) (brevOrg, error) {
 		return brevOrg{}, fmt.Errorf("parse brev organization JSON: %w", err)
 	}
 	var active brevOrg
-	var fallback brevOrg
-	for i, candidate := range orgs {
+	for _, candidate := range orgs {
 		candidate.ID = strings.TrimSpace(candidate.ID)
 		candidate.Name = strings.TrimSpace(candidate.Name)
-		if i == 0 {
-			fallback = candidate
-		}
 		if !candidate.IsActive {
 			continue
 		}
@@ -116,11 +112,10 @@ func (c *brevClient) activeOrg(ctx context.Context) (brevOrg, error) {
 		active = candidate
 	}
 	if active.ID == "" {
-		if fallback.ID == "" {
+		if len(orgs) == 0 {
 			return brevOrg{}, exit(2, "brev returned no accessible organization")
 		}
-		fallback.IsActive = true
-		return fallback, nil
+		return brevOrg{}, exit(2, "brev has no active organization; run `brev set` before nvidia-brev lifecycle operations")
 	}
 	return active, nil
 }

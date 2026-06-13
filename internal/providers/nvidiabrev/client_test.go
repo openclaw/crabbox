@@ -154,7 +154,7 @@ func TestNvidiaBrevClientFallsBackToActiveOrgJSON(t *testing.T) {
 	}
 }
 
-func TestNvidiaBrevClientUsesFirstOrganizationWhenNoneIsSelected(t *testing.T) {
+func TestNvidiaBrevClientRequiresActiveOrganization(t *testing.T) {
 	isolateBrevContextFiles(t)
 	t.Setenv("HOME", t.TempDir())
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
@@ -164,12 +164,9 @@ func TestNvidiaBrevClientUsesFirstOrganizationWhenNoneIsSelected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	org, err := client.activeOrg(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if org.ID != "org-default" || org.Name != "default" || !org.IsActive {
-		t.Fatalf("org=%#v", org)
+	_, err = client.activeOrg(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "run `brev set`") {
+		t.Fatalf("error=%v, want active organization guidance", err)
 	}
 }
 
