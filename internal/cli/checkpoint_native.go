@@ -632,6 +632,21 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	return nil
 }
 
+func applyNativeCheckpointForkConfigAndFlags(cfg *Config, fs *flag.FlagSet, record checkpointRecord, providerFlags providerFlagValues) error {
+	if err := applyNativeCheckpointForkConfig(cfg, fs, record); err != nil {
+		return err
+	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	flagProvider, ok := provider.(NativeCheckpointForkFlagProvider)
+	if !ok {
+		return nil
+	}
+	return flagProvider.ApplyNativeCheckpointForkFlags(cfg, fs, providerFlags[provider.Name()])
+}
+
 func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) error {
 	return applyNativeCheckpointForkConfig(cfg, fs, record)
 }

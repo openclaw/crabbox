@@ -18,7 +18,44 @@ func (a App) claimLeaseTargetForRepoAndRegister(
 	repoRoot string,
 	reclaim bool,
 ) error {
-	if err := claimLeaseTargetForRepoConfig(
+	_, err := a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, false)
+	return err
+}
+
+func (a App) claimResolvedLeaseTargetForRepoAndRegister(
+	ctx context.Context,
+	leaseID, slug string,
+	cfg Config,
+	server Server,
+	target SSHTarget,
+	repoRoot string,
+	reclaim bool,
+) error {
+	_, err := a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, true)
+	return err
+}
+
+func (a App) claimLeaseTargetForRepoAndRegisterMode(
+	ctx context.Context,
+	leaseID, slug string,
+	cfg Config,
+	server Server,
+	target SSHTarget,
+	repoRoot string,
+	reclaim, resolved bool,
+) (leaseClaim, error) {
+	var expected leaseClaim
+	var expectedExists bool
+	var err error
+	if resolved {
+		expected, expectedExists, err = resolvedLeaseClaimSnapshot(leaseID, server)
+	} else {
+		expected, expectedExists, err = readLeaseClaimWithPresence(leaseID)
+	}
+	if err != nil {
+		return leaseClaim{}, err
+	}
+	claimed, err := claimLeaseTargetForRepoConfigIfUnchanged(
 		leaseID,
 		slug,
 		cfg,
@@ -27,15 +64,18 @@ func (a App) claimLeaseTargetForRepoAndRegister(
 		repoRoot,
 		cfg.IdleTimeout,
 		reclaim,
-	); err != nil {
-		return err
+		expected,
+		expectedExists,
+	)
+	if err != nil {
+		return leaseClaim{}, err
 	}
 	a.registerCoordinatorLeaseBestEffort(ctx, cfg, LeaseTarget{
 		Server:  server,
 		SSH:     target,
 		LeaseID: leaseID,
 	})
-	return nil
+	return claimed, nil
 }
 
 func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, lease LeaseTarget) {

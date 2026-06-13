@@ -195,6 +195,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_MULTIPASS_MEMORY",
 		"CRABBOX_MULTIPASS_DISK",
 		"CRABBOX_MULTIPASS_LAUNCH_TIMEOUT",
+		"CRABBOX_WINDOWS_SANDBOX_WORKDIR",
+		"CRABBOX_WINDOWS_SANDBOX_TEMP_ROOT",
+		"CRABBOX_WINDOWS_SANDBOX_NETWORKING",
+		"CRABBOX_WINDOWS_SANDBOX_VGPU",
+		"CRABBOX_WINDOWS_SANDBOX_CLIPBOARD",
+		"CRABBOX_WINDOWS_SANDBOX_PROTECTED_CLIENT",
+		"CRABBOX_WINDOWS_SANDBOX_AUDIO_INPUT",
+		"CRABBOX_WINDOWS_SANDBOX_VIDEO_INPUT",
+		"CRABBOX_WINDOWS_SANDBOX_PRINTER_REDIRECTION",
+		"CRABBOX_WINDOWS_SANDBOX_MEMORY_MB",
 		"CRABBOX_WANDB_API_KEY",
 		"WANDB_API_KEY",
 		"CRABBOX_WANDB_DEFAULT_IMAGE",
@@ -265,8 +275,132 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_PROJECT_ID",
 		"CRABBOX_RAILWAY_ENVIRONMENT_ID",
 		"RAILWAY_ENVIRONMENT_ID",
+		"HOSTINGER_API_TOKEN",
+		"CRABBOX_HOSTINGER_API_TOKEN",
+		"HOSTINGER_API_URL",
+		"CRABBOX_HOSTINGER_API_URL",
+		"CRABBOX_HOSTINGER_ITEM_ID",
+		"CRABBOX_HOSTINGER_PAYMENT_METHOD_ID",
+		"CRABBOX_HOSTINGER_TEMPLATE_ID",
+		"CRABBOX_HOSTINGER_DATA_CENTER_ID",
+		"CRABBOX_HOSTINGER_HOSTNAME_PREFIX",
+		"CRABBOX_HOSTINGER_USER",
+		"CRABBOX_HOSTINGER_WORK_ROOT",
+		"CRABBOX_HOSTINGER_ALLOW_PURCHASE",
+		"CRABBOX_HOSTINGER_RELEASE_ACTION",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestHostingerConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Hostinger.APIURL != "https://developers.hostinger.com" ||
+		cfg.Hostinger.HostnamePrefix != "crabbox" ||
+		cfg.Hostinger.User != "root" ||
+		cfg.Hostinger.AllowPurchase {
+		t.Fatalf("hostinger defaults not applied: %#v", cfg.Hostinger)
+	}
+
+	allowPurchase := true
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "hostinger",
+		Hostinger: &fileHostingerConfig{
+			APIToken:        "file-token",
+			APIURL:          "https://hostinger-file.example",
+			ItemID:          "item-file",
+			PaymentMethodID: "42",
+			TemplateID:      "123",
+			DataCenterID:    "456",
+			HostnamePrefix:  "cbx-file",
+			User:            "ubuntu",
+			WorkRoot:        "/home/ubuntu/crabbox",
+			AllowPurchase:   &allowPurchase,
+			ReleaseAction:   "stop",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "hostinger" ||
+		cfg.Hostinger.APIToken != "file-token" ||
+		cfg.Hostinger.ItemID != "item-file" ||
+		cfg.Hostinger.PaymentMethodID != "42" ||
+		cfg.Hostinger.TemplateID != "123" ||
+		cfg.Hostinger.DataCenterID != "456" ||
+		!cfg.Hostinger.AllowPurchase {
+		t.Fatalf("file hostinger config not applied: %#v", cfg.Hostinger)
+	}
+	if !IsHostingerUserExplicit(&cfg) || !IsHostingerWorkRootExplicit(&cfg) {
+		t.Fatal("file hostinger SSH settings not marked explicit")
+	}
+
+	t.Setenv("HOSTINGER_API_TOKEN", "fallback-token")
+	t.Setenv("CRABBOX_HOSTINGER_API_TOKEN", "env-token")
+	t.Setenv("CRABBOX_HOSTINGER_API_URL", "https://hostinger-env.example")
+	t.Setenv("CRABBOX_HOSTINGER_ITEM_ID", "item-env")
+	t.Setenv("CRABBOX_HOSTINGER_PAYMENT_METHOD_ID", "84")
+	t.Setenv("CRABBOX_HOSTINGER_TEMPLATE_ID", "789")
+	t.Setenv("CRABBOX_HOSTINGER_DATA_CENTER_ID", "321")
+	t.Setenv("CRABBOX_HOSTINGER_USER", "admin")
+	t.Setenv("CRABBOX_HOSTINGER_WORK_ROOT", "/srv/hostinger")
+	t.Setenv("CRABBOX_HOSTINGER_ALLOW_PURCHASE", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Hostinger.APIToken != "env-token" ||
+		cfg.Hostinger.APIURL != "https://hostinger-env.example" ||
+		cfg.Hostinger.ItemID != "item-env" ||
+		cfg.Hostinger.PaymentMethodID != "84" ||
+		cfg.Hostinger.TemplateID != "789" ||
+		cfg.Hostinger.DataCenterID != "321" ||
+		cfg.Hostinger.User != "admin" ||
+		cfg.Hostinger.WorkRoot != "/srv/hostinger" ||
+		cfg.Hostinger.AllowPurchase {
+		t.Fatalf("env hostinger config not applied: %#v", cfg.Hostinger)
+	}
+	if !IsHostingerUserExplicit(&cfg) {
+		t.Fatal("env hostinger user not marked explicit")
+	}
+}
+
+func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
+	value := true
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Incus:     &fileIncusConfig{DeleteOnRelease: &value},
+		KubeVirt:  &fileKubeVirtConfig{DeleteOnRelease: &value},
+		Namespace: &fileNamespaceConfig{DeleteOnRelease: &value},
+		Morph:     &fileMorphConfig{DeleteOnRelease: &value},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+		if !DeleteOnReleaseExplicit(cfg, provider) {
+			t.Fatalf("file release policy not explicit for %s", provider)
+		}
+	}
+	if DeleteOnReleaseExplicit(cfg, "hostinger") {
+		t.Fatal("release policy leaked across providers")
+	}
+
+	clearConfigEnv(t)
+	envCfg := baseConfig()
+	for _, key := range []string{
+		"CRABBOX_INCUS_DELETE_ON_RELEASE",
+		"CRABBOX_KUBEVIRT_DELETE_ON_RELEASE",
+		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
+		"CRABBOX_MORPH_DELETE_ON_RELEASE",
+	} {
+		t.Setenv(key, "false")
+	}
+	if err := applyEnv(&envCfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+		if !DeleteOnReleaseExplicit(envCfg, provider) {
+			t.Fatalf("environment release policy not explicit for %s", provider)
+		}
 	}
 }
 
@@ -1438,6 +1572,191 @@ func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
+func TestSmolvmConfigYAMLOverrides(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	yamlText := strings.Join([]string{
+		"smolvm:",
+		"  baseUrl: https://smol.example",
+		"  image: ubuntu",
+		"  workdir: /srv/app",
+		"  cpus: 4",
+		"  memoryMB: 4096",
+		"  network: closed",
+		"  keep: true",
+	}, "\n")
+	if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	want := SmolvmConfig{
+		BaseURL:  "https://smol.example",
+		Image:    "ubuntu",
+		Workdir:  "/srv/app",
+		CPUs:     4,
+		MemoryMB: 4096,
+		Network:  "closed",
+		Keep:     true,
+	}
+	if cfg.Smolvm != want {
+		t.Fatalf("smolvm YAML config = %#v, want %#v", cfg.Smolvm, want)
+	}
+}
+
+func TestSmolvmConfigYAMLEmptyKeepsDefaults(t *testing.T) {
+	cfg := baseConfig()
+	defaults := cfg.Smolvm
+	file := fileConfig{Smolvm: &fileSmolvmConfig{}}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm != defaults {
+		t.Fatalf("empty smolvm YAML changed defaults: %#v, want %#v", cfg.Smolvm, defaults)
+	}
+}
+
+func TestSmolvmConfigYAMLCannotSetAPIKey(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("smolvm:\n  apiKey: smk-attacker\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm.APIKey != "" {
+		t.Fatalf("repository config set smolvm API key to %q", cfg.Smolvm.APIKey)
+	}
+}
+
+func TestSmolvmConfigEnvOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_SMOLVM_API_KEY", "smk-env")
+	t.Setenv("CRABBOX_SMOLVM_BASE_URL", "https://env.smol.example")
+	t.Setenv("CRABBOX_SMOLVM_IMAGE", "debian")
+	t.Setenv("CRABBOX_SMOLVM_WORKDIR", "/env/workdir")
+	t.Setenv("CRABBOX_SMOLVM_CPUS", "8")
+	t.Setenv("CRABBOX_SMOLVM_MEMORY_MB", "8192")
+	t.Setenv("CRABBOX_SMOLVM_NETWORK", "closed")
+	t.Setenv("CRABBOX_SMOLVM_KEEP", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := SmolvmConfig{
+		APIKey:   "smk-env",
+		BaseURL:  "https://env.smol.example",
+		Image:    "debian",
+		Workdir:  "/env/workdir",
+		CPUs:     8,
+		MemoryMB: 8192,
+		Network:  "closed",
+		Keep:     true,
+	}
+	if cfg.Smolvm != want {
+		t.Fatalf("smolvm env config = %#v, want %#v", cfg.Smolvm, want)
+	}
+}
+
+func TestSmolvmAPIKeyEnvFallbacks(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("SMOLMACHINES_API_KEY", "smk-vendor")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm.APIKey != "smk-vendor" {
+		t.Fatalf("SMOLMACHINES_API_KEY fallback = %q, want smk-vendor", cfg.Smolvm.APIKey)
+	}
+
+	cfg = baseConfig()
+	t.Setenv("SMOLMACHINES_API_KEY", "")
+	t.Setenv("SMK_API_KEY", "smk-short")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Smolvm.APIKey != "smk-short" {
+		t.Fatalf("SMK_API_KEY fallback = %q, want smk-short", cfg.Smolvm.APIKey)
+	}
+}
+
+func TestHostingerPurchaseOptInRequiresTrustedConfig(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+
+	if err := os.WriteFile(".crabbox.yaml", []byte("hostinger:\n  apiToken: attacker-token\n  apiUrl: https://attacker.example\n  itemId: attacker-item\n  paymentMethodId: attacker-payment\n  templateId: attacker-template\n  dataCenterId: attacker-dc\n  allowPurchase: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Hostinger.AllowPurchase {
+		t.Fatal("repo-local config authorized a Hostinger purchase")
+	}
+	if cfg.Hostinger.APIURL != "https://developers.hostinger.com" {
+		t.Fatalf("repo-local config redirected Hostinger API URL: %q", cfg.Hostinger.APIURL)
+	}
+	if cfg.Hostinger.APIToken != "" || cfg.Hostinger.ItemID != "" || cfg.Hostinger.PaymentMethodID != "" ||
+		cfg.Hostinger.TemplateID != "" || cfg.Hostinger.DataCenterID != "" {
+		t.Fatalf("repo-local config selected Hostinger account or purchase inputs: %#v", cfg.Hostinger)
+	}
+
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("hostinger:\n  apiToken: trusted-user-token\n  apiUrl: https://trusted-user.example\n  itemId: trusted-user-item\n  paymentMethodId: trusted-user-payment\n  templateId: trusted-user-template\n  dataCenterId: trusted-user-dc\n  allowPurchase: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Hostinger.AllowPurchase {
+		t.Fatal("private user config did not authorize a Hostinger purchase")
+	}
+	if cfg.Hostinger.APIURL != "https://trusted-user.example" {
+		t.Fatalf("private user config API URL=%q", cfg.Hostinger.APIURL)
+	}
+	if cfg.Hostinger.APIToken != "trusted-user-token" || cfg.Hostinger.ItemID != "trusted-user-item" ||
+		cfg.Hostinger.PaymentMethodID != "trusted-user-payment" || cfg.Hostinger.TemplateID != "trusted-user-template" ||
+		cfg.Hostinger.DataCenterID != "trusted-user-dc" {
+		t.Fatalf("private user config purchase inputs=%#v", cfg.Hostinger)
+	}
+
+	explicitPath := filepath.Join(t.TempDir(), "explicit.yaml")
+	if err := os.WriteFile(explicitPath, []byte("hostinger:\n  apiUrl: https://trusted-explicit.example\n  allowPurchase: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", explicitPath)
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Hostinger.AllowPurchase {
+		t.Fatal("explicit config did not authorize a Hostinger purchase")
+	}
+	if cfg.Hostinger.APIURL != "https://trusted-explicit.example" {
+		t.Fatalf("explicit config API URL=%q", cfg.Hostinger.APIURL)
+	}
+}
+
 func TestTartEnvExplicitFlags(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -1449,6 +1768,116 @@ func TestTartEnvExplicitFlags(t *testing.T) {
 	}
 	if !IsTartMemoryExplicit(&cfg) {
 		t.Fatal("tartMemoryExplicit must be true after env sets CRABBOX_TART_MEMORY")
+	}
+}
+
+func TestWindowsSandboxConfigDefaultsFileEnvAndProviderTarget(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.WindowsSandbox.Workdir != `C:\crabbox-work` || cfg.WindowsSandbox.Networking != "Enable" || cfg.WindowsSandbox.VGPU != "Disable" {
+		t.Fatalf("windows sandbox defaults not applied: %#v", cfg.WindowsSandbox)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "windows-sandbox",
+		WindowsSandbox: &fileWindowsSandboxConfig{
+			Workdir:            `C:\repo`,
+			TempRoot:           `C:\tmp\crabbox`,
+			Networking:         "disable",
+			VGPU:               "default",
+			Clipboard:          "disable",
+			ProtectedClient:    "enable",
+			AudioInput:         "disable",
+			VideoInput:         "disable",
+			PrinterRedirection: "disable",
+			MemoryMB:           8192,
+		},
+	})
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "windows-sandbox" || cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeNormal || cfg.WorkRoot != `C:\repo` {
+		t.Fatalf("provider target/workroot not applied: provider=%s target=%s mode=%s workroot=%s", cfg.Provider, cfg.TargetOS, cfg.WindowsMode, cfg.WorkRoot)
+	}
+	if cfg.WindowsSandbox.Workdir != `C:\repo` || cfg.WindowsSandbox.TempRoot != `C:\tmp\crabbox` || cfg.WindowsSandbox.MemoryMB != 8192 {
+		t.Fatalf("file windowsSandbox config not applied: %#v", cfg.WindowsSandbox)
+	}
+
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_WORKDIR", `C:\env\repo`)
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_TEMP_ROOT", `C:\env\tmp`)
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_NETWORKING", "enable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_VGPU", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_CLIPBOARD", "default")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_PROTECTED_CLIENT", "default")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_AUDIO_INPUT", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_VIDEO_INPUT", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_PRINTER_REDIRECTION", "disable")
+	t.Setenv("CRABBOX_WINDOWS_SANDBOX_MEMORY_MB", "4096")
+	applyEnv(&cfg)
+	if cfg.WindowsSandbox.Workdir != `C:\env\repo` || cfg.WindowsSandbox.TempRoot != `C:\env\tmp` || cfg.WindowsSandbox.Networking != "enable" || cfg.WindowsSandbox.Clipboard != "default" || cfg.WindowsSandbox.MemoryMB != 4096 {
+		t.Fatalf("env windowsSandbox config not applied: %#v", cfg.WindowsSandbox)
+	}
+
+	badTarget := baseConfig()
+	badTarget.Provider = "windows-sandbox"
+	badTarget.TargetOS = targetLinux
+	badTarget.targetExplicit = true
+	if err := applyProviderConfigDefaults(&badTarget); err == nil || !strings.Contains(err.Error(), "target=windows") {
+		t.Fatalf("target linux err=%v, want windows-sandbox target rejection", err)
+	}
+
+	badMode := baseConfig()
+	badMode.Provider = "windows-sandbox"
+	badMode.TargetOS = targetWindows
+	badMode.WindowsMode = windowsModeWSL2
+	badMode.explicitWindowsMode = windowsModeWSL2
+	if err := applyProviderConfigDefaults(&badMode); err == nil || !strings.Contains(err.Error(), "windows.mode=normal") {
+		t.Fatalf("wsl2 err=%v, want windows-sandbox windows mode rejection", err)
+	}
+}
+
+func TestRepositoryConfigCannotLoosenWindowsSandboxHostPolicy(t *testing.T) {
+	cfg := baseConfig()
+	cfg.WindowsSandbox.TempRoot = `C:\trusted-temp`
+	cfg.WindowsSandbox.Networking = "Disable"
+	cfg.WindowsSandbox.VGPU = "Disable"
+	cfg.WindowsSandbox.Clipboard = "Disable"
+	cfg.WindowsSandbox.ProtectedClient = "Enable"
+	cfg.WindowsSandbox.AudioInput = "Disable"
+	cfg.WindowsSandbox.VideoInput = "Disable"
+	cfg.WindowsSandbox.PrinterRedirection = "Disable"
+	cfg.WindowsSandbox.MemoryMB = 4096
+
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		WindowsSandbox: &fileWindowsSandboxConfig{
+			Workdir:            `C:\repo-work`,
+			TempRoot:           `\\server\share`,
+			Networking:         "enable",
+			VGPU:               "enable",
+			Clipboard:          "enable",
+			ProtectedClient:    "disable",
+			AudioInput:         "enable",
+			VideoInput:         "enable",
+			PrinterRedirection: "enable",
+			MemoryMB:           65536,
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.WindowsSandbox.Workdir != `C:\repo-work` {
+		t.Fatalf("repository workdir=%q, want sandbox-local override", cfg.WindowsSandbox.Workdir)
+	}
+	if cfg.WindowsSandbox.TempRoot != `C:\trusted-temp` || cfg.WindowsSandbox.MemoryMB != 4096 {
+		t.Fatalf("repository config changed host resources: %#v", cfg.WindowsSandbox)
+	}
+	if cfg.WindowsSandbox.Networking != "Disable" ||
+		cfg.WindowsSandbox.VGPU != "Disable" ||
+		cfg.WindowsSandbox.Clipboard != "Disable" ||
+		cfg.WindowsSandbox.ProtectedClient != "Enable" ||
+		cfg.WindowsSandbox.AudioInput != "Disable" ||
+		cfg.WindowsSandbox.VideoInput != "Disable" ||
+		cfg.WindowsSandbox.PrinterRedirection != "Disable" {
+		t.Fatalf("repository config loosened sandbox policy: %#v", cfg.WindowsSandbox)
 	}
 }
 
@@ -2811,6 +3240,30 @@ localContainer:
 	}
 	if cfg.Image != "ubuntu-26.04" || cfg.AzureImage != defaultAzureLinuxImage || cfg.Islo.Image != "docker.io/library/ubuntu:26.04" || cfg.LocalContainer.Image != "ubuntu:26.04" {
 		t.Fatalf("explicit images were overwritten: hetzner=%q azure=%q islo=%q local=%q", cfg.Image, cfg.AzureImage, cfg.Islo.Image, cfg.LocalContainer.Image)
+	}
+}
+
+func TestRepoConfigDoesNotApplyLocalContainerVolumes(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgPath := filepath.Join(home, "crabbox.yaml")
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	if err := os.WriteFile(cfgPath, []byte(`
+provider: local-container
+localContainer:
+  volumes:
+    - /host/secret:/container/secret:ro
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.LocalContainer.Volumes) != 0 {
+		t.Fatalf("repo config applied local-container volumes: %#v", cfg.LocalContainer.Volumes)
 	}
 }
 

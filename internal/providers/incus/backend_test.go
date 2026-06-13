@@ -1142,6 +1142,95 @@ func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
 	}
 }
 
+func TestResolveChecksRepoClaimBeforeStartingInstance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-retained": {
+				Name:       "crabbox-retained",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_claimed",
+					labelKey("slug"):    "claimed",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-retained": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+	}
+	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_claimed", "claimed", providerName, instanceScope("crabbox-retained"), cfg.Pond, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+
+	_, err := b.Resolve(context.Background(), ResolveRequest{
+		ID:   "crabbox-retained",
+		Repo: core.Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is claimed by repo") {
+		t.Fatalf("Resolve error=%v", err)
+	}
+	if len(fake.stateUpdates) != 0 {
+		t.Fatalf("claim conflict mutated instance state: %v", fake.stateUpdates)
+	}
+}
+
+func TestResolveRestoresRepoClaimWhenStartFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+
+	oldNewClient := newClient
+	fake := &fakeClient{
+		instances: map[string]*api.Instance{
+			"crabbox-failing": {
+				Name:       "crabbox-failing",
+				Status:     "Stopped",
+				StatusCode: api.Stopped,
+				InstancePut: api.InstancePut{Config: map[string]string{
+					labelKey("crabbox"): "true",
+					labelKey("lease"):   "cbx_failing",
+					labelKey("slug"):    "failing",
+				}},
+			},
+		},
+		states: map[string]*api.InstanceState{
+			"crabbox-failing": {Status: "Stopped", StatusCode: api.Stopped},
+		},
+		stateErr: io.ErrUnexpectedEOF,
+	}
+	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	t.Cleanup(func() { newClient = oldNewClient })
+
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	_, err := b.Resolve(context.Background(), ResolveRequest{
+		ID:   "crabbox-failing",
+		Repo: core.Repo{Root: t.TempDir()},
+	})
+	if err == nil {
+		t.Fatal("Resolve succeeded")
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence("cbx_failing"); err != nil || exists {
+		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
+	}
+}
+
 func TestResolveFallsBackToConfiguredKeyWhenStoredKeyIsMissing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1534,6 +1623,7 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 					labelKey("crabbox"): "true",
 					labelKey("lease"):   "cbx_retain123456",
 					labelKey("slug"):    "retained-slug",
+					labelKey("release"): "delete",
 				}},
 			},
 		},
@@ -1550,6 +1640,7 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Incus.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_retain123456"); err != nil {
 		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
 	}
@@ -1561,7 +1652,10 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
-	lease := core.LeaseTarget{LeaseID: "cbx_retain123456", Server: core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained", Labels: map[string]string{"lease": "cbx_retain123456", "slug": "retained-slug"}}}
+	lease := core.LeaseTarget{LeaseID: "cbx_retain123456", Server: core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained", Labels: map[string]string{"lease": "cbx_retain123456", "slug": "retained-slug", "release": "delete"}}}
+	if !b.RetainLeaseClaimAfterRelease(lease) {
+		t.Fatal("explicit retain policy did not override stored delete policy")
+	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -1574,6 +1668,9 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	if got := fake.instances["crabbox-retained"].Config[labelKey("state")]; got != "stopped" {
 		t.Fatalf("stored state=%q want stopped", got)
 	}
+	if got := fake.instances["crabbox-retained"].Config[labelKey("release")]; got != "stop" {
+		t.Fatalf("stored release=%q want stop", got)
+	}
 	if got := fake.instances["crabbox-retained"].Config[labelKey("host")]; got != "" {
 		t.Fatalf("stored host=%q want cleared", got)
 	}
@@ -1583,6 +1680,9 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	}
 	if claim.Labels["state"] != "stopped" {
 		t.Fatalf("claim state=%q want stopped", claim.Labels["state"])
+	}
+	if claim.Labels["release"] != "stop" {
+		t.Fatalf("claim release=%q want stop", claim.Labels["release"])
 	}
 	if claim.SSHHost != "" || claim.SSHPort != 0 {
 		t.Fatalf("claim endpoint=%s:%d want cleared", claim.SSHHost, claim.SSHPort)
@@ -1920,7 +2020,7 @@ func TestCleanupStopsRunningStaleInstancesBeforeDelete(t *testing.T) {
 func TestReleaseLeaseMessageReflectsDeleteAndRetainPaths(t *testing.T) {
 	lease := core.LeaseTarget{
 		LeaseID: "cbx_123456789abc",
-		Server:  core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained"},
+		Server:  core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained", Labels: map[string]string{"release": "delete"}},
 	}
 
 	cfg := core.BaseConfig()
@@ -1930,11 +2030,23 @@ func TestReleaseLeaseMessageReflectsDeleteAndRetainPaths(t *testing.T) {
 	if got := deleteBackend.ReleaseLeaseMessage(lease); got != "deleted lease=cbx_123456789abc instance=crabbox-retained" {
 		t.Fatalf("delete message=%q", got)
 	}
+	if deleteBackend.RetainLeaseClaimAfterRelease(lease) {
+		t.Fatal("delete-on-release backend retained claim")
+	}
 
-	cfg.Incus.DeleteOnRelease = false
+	lease.Server.Labels["release"] = "stop"
 	retainBackend := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	if got := retainBackend.ReleaseLeaseMessage(lease); got != "stopped lease=cbx_123456789abc instance=crabbox-retained retained=true" {
 		t.Fatalf("retain message=%q", got)
+	}
+	if !retainBackend.RetainLeaseClaimAfterRelease(lease) {
+		t.Fatal("stop-on-release backend removed claim")
+	}
+
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	explicitBackend := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	if got := explicitBackend.ReleaseLeaseMessage(lease); got != "deleted lease=cbx_123456789abc instance=crabbox-retained" {
+		t.Fatalf("explicit delete message=%q", got)
 	}
 }
 

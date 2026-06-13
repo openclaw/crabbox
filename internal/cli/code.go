@@ -69,18 +69,11 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if *id == "" {
 		return exit(2, "usage: crabbox code --id <lease-id-or-slug>")
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
 		return err
 	}
-	cfg.Provider = *provider
 	cfg.Code = true
-	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
-		return err
-	}
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
-		return err
-	}
 	if err := validateRequestedCapabilities(cfg); err != nil {
 		return err
 	}
@@ -94,7 +87,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if !useCoordinator || coord == nil || coord.Token == "" {
 		return exit(2, "code requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, *id, true)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -105,7 +98,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

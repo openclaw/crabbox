@@ -25,9 +25,9 @@ SSH-lease providers further differ by how they reach the cloud:
   (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same four providers without a configured broker, plus
   cloud providers that never broker (e.g. `digitalocean`, `linode`, `proxmox`,
-  `runpod`, `namespace-devbox`, `semaphore`, `sprites`, `exe-dev`, `daytona`,
-  `morph`). The CLI talks to the provider API itself and cleans up best-effort
-  via provider labels.
+  `hostinger`, `runpod`, `namespace-devbox`, `semaphore`, `sprites`, `exe-dev`,
+  `daytona`, `morph`). The CLI talks to the provider API itself and cleans up
+  best-effort via provider labels.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
   provisioning, no cleanup.
 - **Local runtime** — `local-container` starts a labeled Linux container through
@@ -39,9 +39,10 @@ SSH-lease providers further differ by how they reach the cloud:
   tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
-  `azure-dynamic-sessions`, `docker-sandbox`). `anthropic-sandbox-runtime` is
+  `azure-dynamic-sessions`, `docker-sandbox`, `smolvm`). `anthropic-sandbox-runtime` is
   the local macOS/Linux delegated-run exception: Anthropic's `srt` executes on
   the current machine while still owning sync/run policy end to end.
+  `windows-sandbox` is the local Windows delegated-run exception.
 
 Select a provider per command with `--provider <name>` (env `CRABBOX_PROVIDER`),
 or set `provider: <name>` in config. Provider flags are registered before
@@ -66,6 +67,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Hetzner](hetzner.md) — `hetzner` | Linux · brokered |
 | [DigitalOcean](digitalocean.md) — `digitalocean` | Linux · direct |
 | [Linode](linode.md) — `linode` | Linux · direct |
+| [Hostinger](hostinger.md) — `hostinger` | Linux · direct |
 | [Proxmox](proxmox.md) — `proxmox` | Linux · direct |
 | [XCP-ng](xcp-ng.md) — `xcp-ng` | Linux · direct |
 | [Incus](incus.md) — `incus` | Linux · direct |
@@ -107,9 +109,11 @@ the built-in adapter needs a separate local smoke contract.
 | [OpenSandbox](opensandbox.md) — `opensandbox` | Linux |
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
 | [Anthropic Sandbox Runtime](anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux |
+| [SmolVM](smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`) | Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
 | [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |
+| [Windows Sandbox](windows-sandbox.md) — `windows-sandbox` (`wsb`, `windows-sandbox-provider`) | Windows |
 
 Run `crabbox providers` (`--json`) to see the live capability set the binary
 reports.
@@ -153,6 +157,8 @@ reports.
   per-lease SSH keys, metadata user-data, optional attachment to an existing
   firewall, and Crabbox-owned tags; it does not run through the Worker broker in
   Phase 1.
+- Hostinger is a direct-only Linux VPS provider. Purchases require explicit
+  opt-in; release stops the VPS but does not cancel its subscription.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,
@@ -168,6 +174,7 @@ crabbox warmup --provider aws --class beast
 crabbox run --provider hetzner -- pnpm test
 crabbox run --provider digitalocean --type s-1vcpu-1gb -- pnpm test
 crabbox run --provider linode --type g6-standard-1 -- pnpm test
+crabbox doctor --provider hostinger
 crabbox run --provider docker -- pnpm test
 crabbox run --provider docker-sandbox -- go test ./...
 crabbox run --provider apple-vz -- go test ./...

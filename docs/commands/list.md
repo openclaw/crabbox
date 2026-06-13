@@ -8,6 +8,7 @@ crabbox list
 crabbox list --provider aws
 crabbox list --provider ssh --target macos --static-host mac-studio.local
 crabbox list --provider cloudflare --refresh
+crabbox list --provider hostinger --all
 crabbox list --pond alpha
 crabbox list --json
 ```
@@ -35,6 +36,14 @@ Providers that do not implement listing exit with an error.
 printing. Without it, those providers report only their local claims and stay
 credential-free. For example, `crabbox list --provider cloudflare` reports local
 claims by default; add `--refresh` to query live container state.
+
+## Including full provider inventory
+
+`--all` asks providers that support it to include inventory outside the
+Crabbox-owned lease view. This is useful for direct providers such as Hostinger,
+where an account can contain manually created VPSs alongside Crabbox-created
+leases. Providers that do not expose a broader inventory may return the same
+lease view they normally print.
 
 ## Filtering by pond
 
@@ -73,6 +82,7 @@ as Crabbox leases.
 --static-user <user>     provider=ssh: SSH user
 --static-port <port>     provider=ssh: SSH port
 --static-work-root <path> provider=ssh: remote work root
+--all                    include provider inventory outside Crabbox-owned leases where supported
 --refresh                query live provider state where supported
 --pond <name>            only list leases tagged with this pond
 --json                   print JSON

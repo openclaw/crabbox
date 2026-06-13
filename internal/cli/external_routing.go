@@ -94,14 +94,19 @@ func LoadExternalRouting(path string) (ExternalConfig, error) {
 		return ExternalConfig{}, fmt.Errorf("parse external routing file: %w", err)
 	}
 	return ExternalConfig{
-		Command:     state.Command,
-		Args:        append([]string(nil), state.Args...),
-		Config:      state.Config,
-		Lifecycle:   state.Lifecycle,
-		Connection:  state.Connection,
-		WorkRoot:    state.WorkRoot,
-		RoutingFile: path,
+		Command:       state.Command,
+		Args:          append([]string(nil), state.Args...),
+		Config:        state.Config,
+		Lifecycle:     state.Lifecycle,
+		Connection:    state.Connection,
+		WorkRoot:      state.WorkRoot,
+		RoutingFile:   path,
+		routingLoaded: true,
 	}, nil
+}
+
+func ExternalRoutingLoaded(cfg ExternalConfig) bool {
+	return cfg.routingLoaded
 }
 
 func RemoveExternalRouting(leaseID string) {

@@ -102,6 +102,10 @@ func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
+func ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+}
+
 func ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, cacheVolumes []string) error {
 	return claimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, cacheVolumes)
 }
@@ -112,6 +116,16 @@ func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 
 func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
+}
+
+// ClaimLeaseTargetForConfig records a provider resource that is not yet
+// attached to a repository.
+func ClaimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration) error {
+	return claimLeaseTargetForConfig(leaseID, slug, cfg, server, target, idleTimeout)
+}
+
+func ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
+	return claimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, server, target, idleTimeout, expected, expectedExists)
 }
 
 func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
@@ -138,12 +152,24 @@ func LeaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
 	return leaseClaimMatchesIdentifier(claim, identifier)
 }
 
+func ProviderClaimScope(provider string, cfg Config) string {
+	return providerClaimScope(canonicalClaimProvider(provider), cfg)
+}
+
 func RemoveLeaseClaim(leaseID string) {
 	removeLeaseClaim(leaseID)
 }
 
 func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return removeLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
+	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
+}
+
+func ReplaceLeaseClaimIfUnchanged(leaseID string, current, replacement LeaseClaim) error {
+	return replaceLeaseClaimIfUnchanged(leaseID, current, replacement)
 }
 
 func ValidateAzureSSHCIDRsForAcquire(ctx context.Context, cfg Config) error {
@@ -159,8 +185,22 @@ func UpdateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	return updateLeaseClaimEndpoint(leaseID, server, target)
 }
 
+func UpdateLeaseClaimEndpointIfUnchanged(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return updateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
+}
+
 func UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
 	return updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
+}
+
+func ReplaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
+	return replaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID, expected, server, target)
+}
+
+// UpdateLeaseClaimEndpointIfUnchangedAfter holds the claim lock while action
+// runs, then updates the endpoint only if the claim still matches expected.
+func UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {
+	return updateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
 }
 
 func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {

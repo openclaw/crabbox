@@ -59,8 +59,8 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
-	loadedRouting := false
-	if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" {
+	loadedRouting := core.ExternalRoutingLoaded(cfg.External)
+	if path := strings.TrimSpace(cfg.External.RoutingFile); path != "" && !loadedRouting {
 		routing, err := core.LoadExternalRouting(path)
 		if err != nil {
 			return nil, core.Exit(2, "%v", err)

@@ -68,29 +68,91 @@ func (b *namespaceLeaseBackend) Acquire(ctx context.Context, req AcquireRequest)
 		}
 		return LeaseTarget{}, err
 	}
+	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+		if !req.Keep {
+			removeLeaseClaim(leaseID)
+			_ = b.deleteDevbox(context.Background(), name)
+		}
+		return LeaseTarget{}, err
+	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s name=%s state=ready\n", leaseID, name)
 	return lease, nil
 }
 
-func (b *namespaceLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *namespaceLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseTarget, err error) {
 	name, leaseID, slug, err := resolveNamespaceDevboxName(req.ID, req.Reclaim)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if req.ReleaseOnly {
-		server := namespaceServer(name, leaseID, slug, b.namespaceConfigForRun(), true)
-		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
-	}
-	lease, err := b.prepareLease(ctx, name, leaseID, slug, true)
+	claim, claimOK, err := resolveLeaseClaim(leaseID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	if claimOK && claim.Provider != "" && claim.Provider != namespaceProvider {
+		return LeaseTarget{}, exit(4, "%q is claimed by provider %s", req.ID, claim.Provider)
+	}
+	if req.ReleaseOnly {
+		server := namespaceServer(name, leaseID, slug, b.namespaceConfigForRun(), true)
+		if claimOK {
+			for key, value := range claim.Labels {
+				server.Labels[key] = value
+			}
+		}
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
+	var previousClaim, preflightClaim LeaseClaim
+	var previousClaimExists, rollbackClaim bool
+	defer func() {
+		if err == nil || !rollbackClaim {
+			return
+		}
+		if restoreErr := restoreLeaseClaimIfUnchanged(leaseID, preflightClaim, previousClaim, previousClaimExists); restoreErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: restore Namespace lease claim %s after resolve failure: %v\n", leaseID, restoreErr)
+		}
+	}()
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		previousClaim, previousClaimExists, err = readLeaseClaimWithPresence(leaseID)
+		if err != nil {
 			return LeaseTarget{}, err
 		}
+		preflightClaim, err = claimLeaseForRepoProviderIfUnchanged(leaseID, slug, namespaceProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, previousClaim, previousClaimExists)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = true
+	}
+	lease, err = b.prepareLease(ctx, name, leaseID, slug, true)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	restoreNamespaceClaimLabels(&lease.Server, claim, claimOK, b.namespaceConfigForRun())
+	if req.Repo.Root != "" {
+		if _, err = updateLeaseClaimEndpointIfUnchanged(leaseID, preflightClaim, lease.Server, lease.SSH); err != nil {
+			return LeaseTarget{}, err
+		}
+		rollbackClaim = false
 	}
 	return lease, nil
+}
+
+func restoreNamespaceClaimLabels(server *Server, claim LeaseClaim, claimOK bool, cfg Config) {
+	if !claimOK || server == nil {
+		return
+	}
+	state := "ready"
+	if server.Labels != nil {
+		state = blank(strings.TrimSpace(server.Labels["state"]), state)
+	}
+	labels := touchDirectLeaseLabels(claim.Labels, cfg, state, time.Now().UTC())
+	for _, key := range []string{"lease", "name", "provider", "slug", "target"} {
+		if value := strings.TrimSpace(server.Labels[key]); value != "" {
+			labels[key] = value
+		}
+	}
+	if deleteOnReleaseExplicit(cfg) {
+		labels["release"] = namespaceReleaseAction(cfg)
+	}
+	server.Labels = labels
 }
 
 func (b *namespaceLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -99,11 +161,58 @@ func (b *namespaceLeaseBackend) List(ctx context.Context, req ListRequest) ([]Le
 	if err != nil {
 		return nil, err
 	}
+	claims, err := listLeaseClaims()
+	if err != nil {
+		return nil, err
+	}
 	servers := make([]Server, 0, len(items))
 	for _, item := range items {
-		servers = append(servers, namespaceItemToServer(item, b.namespaceConfigForRun()))
+		server := namespaceItemToServer(item, b.namespaceConfigForRun())
+		if claim, ok := namespaceClaimForServer(claims, server.Name); ok {
+			mergeNamespaceListClaim(&server, claim)
+		}
+		servers = append(servers, server)
 	}
 	return servers, nil
+}
+
+func namespaceClaimForServer(claims []LeaseClaim, name string) (LeaseClaim, bool) {
+	name = strings.TrimSpace(name)
+	for _, claim := range claims {
+		if claim.Provider != namespaceProvider {
+			continue
+		}
+		claimedName := strings.TrimSpace(claim.Labels["name"])
+		if claimedName == "" && strings.HasPrefix(claim.LeaseID, "nsd_") {
+			claimedName = strings.TrimSpace(claim.Slug)
+		}
+		if claimedName == "" {
+			claimedName = leaseProviderName(claim.LeaseID, claim.Slug)
+		}
+		if strings.TrimSpace(claim.CloudID) == name || claimedName == name {
+			return claim, true
+		}
+	}
+	return LeaseClaim{}, false
+}
+
+func mergeNamespaceListClaim(server *Server, claim LeaseClaim) {
+	if server == nil {
+		return
+	}
+	labels := make(map[string]string, len(claim.Labels)+5)
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	labels["lease"] = claim.LeaseID
+	labels["slug"] = claim.Slug
+	labels["provider"] = namespaceProvider
+	labels["name"] = server.Name
+	labels["state"] = server.Status
+	if labels["pond"] == "" && claim.Pond != "" {
+		labels["pond"] = claim.Pond
+	}
+	server.Labels = labels
 }
 
 func (b *namespaceLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -122,22 +231,52 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 	if name == "" {
 		return exit(2, "namespace devbox release requires a devbox name")
 	}
-	if b.cfg.Namespace.DeleteOnRelease {
+	claim, claimOK, err := resolveLeaseClaim(req.Lease.LeaseID)
+	if err != nil {
+		return err
+	}
+	if claimOK && claim.Provider != "" && claim.Provider != namespaceProvider {
+		return exit(4, "%q is claimed by provider %s", req.Lease.LeaseID, claim.Provider)
+	}
+	deleteDevbox := namespaceDeleteOnRelease(req.Lease, b.namespaceConfigForRun())
+	if deleteDevbox {
 		if err := b.deleteDevbox(ctx, name); err != nil {
 			return err
 		}
-	} else if err := b.shutdownDevbox(ctx, name); err != nil {
+		removeLeaseClaim(req.Lease.LeaseID)
+		if err := cleanupNamespaceSSHFiles(name, false, b.rt.Stdout); err != nil {
+			return err
+		}
+		return nil
+	}
+	server := req.Lease.Server
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
+	server.CloudID = name
+	server.Provider = namespaceProvider
+	server.Name = name
+	server.Status = "stopped"
+	server.Labels["state"] = "stopped"
+	server.Labels["release"] = "stop"
+	if claimOK {
+		_, err = updateLeaseClaimEndpointIfUnchangedAfter(req.Lease.LeaseID, claim, server, SSHTarget{}, func() error {
+			return b.shutdownDevbox(ctx, name)
+		})
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	if err := cleanupNamespaceSSHFiles(name, false, b.rt.Stdout); err != nil {
-		return err
-	}
-	return nil
+	return b.shutdownDevbox(ctx, name)
 }
 
 func (b *namespaceLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
-	return fmt.Sprintf("released namespace devbox lease=%s name=%s", lease.LeaseID, lease.Server.Name)
+	if namespaceDeleteOnRelease(lease, b.namespaceConfigForRun()) {
+		return fmt.Sprintf("deleted namespace devbox lease=%s name=%s", lease.LeaseID, lease.Server.Name)
+	}
+	return fmt.Sprintf("stopped namespace devbox lease=%s name=%s retained=true", lease.LeaseID, lease.Server.Name)
+}
+
+func (b *namespaceLeaseBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+	return !namespaceDeleteOnRelease(lease, b.namespaceConfigForRun())
 }
 
 func (b *namespaceLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
@@ -448,6 +587,7 @@ func namespaceServer(name, leaseID, slug string, cfg Config, keep bool) Server {
 	labels["name"] = name
 	labels["target"] = targetLinux
 	labels["state"] = "starting"
+	labels["release"] = namespaceReleaseAction(cfg)
 	server := Server{
 		CloudID:  name,
 		Provider: namespaceProvider,
@@ -466,6 +606,7 @@ func namespaceItemToServer(item namespaceListItem, cfg Config) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, namespaceProvider, "", true, time.Now().UTC())
 	labels["name"] = name
 	labels["state"] = blank(item.Status, "unknown")
+	labels["release"] = namespaceReleaseAction(cfg)
 	if item.Repository != "" {
 		labels["repo"] = item.Repository
 	}
@@ -481,6 +622,28 @@ func namespaceItemToServer(item namespaceListItem, cfg Config) Server {
 	}
 	server.ServerType.Name = blank(item.Size, namespaceSize(cfg))
 	return server
+}
+
+func namespaceReleaseAction(cfg Config) string {
+	if cfg.Namespace.DeleteOnRelease {
+		return "delete"
+	}
+	return "stop"
+}
+
+func namespaceDeleteOnRelease(lease LeaseTarget, cfg Config) bool {
+	if deleteOnReleaseExplicit(cfg) {
+		return cfg.Namespace.DeleteOnRelease
+	}
+	if lease.Server.Labels != nil {
+		switch strings.ToLower(strings.TrimSpace(lease.Server.Labels["release"])) {
+		case "delete":
+			return true
+		case "stop":
+			return false
+		}
+	}
+	return cfg.Namespace.DeleteOnRelease
 }
 
 var crabboxNamespaceNamePattern = regexp.MustCompile(`^crabbox-(.+)-[0-9a-f]{8}$`)

@@ -8,6 +8,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type spritesFlagValues struct {
@@ -88,6 +90,11 @@ type spritesBackend struct {
 }
 
 func (b *spritesBackend) Spec() ProviderSpec { return b.spec }
+
+func (b *spritesBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
 
 func (b *spritesBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	if err := b.ensureCLI(ctx); err != nil {

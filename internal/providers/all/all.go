@@ -20,6 +20,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/freestyle"
 	_ "github.com/openclaw/crabbox/internal/providers/gcp"
 	_ "github.com/openclaw/crabbox/internal/providers/hetzner"
+	_ "github.com/openclaw/crabbox/internal/providers/hostinger"
 	_ "github.com/openclaw/crabbox/internal/providers/hyperv"
 	_ "github.com/openclaw/crabbox/internal/providers/incus"
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
@@ -38,6 +39,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/railway"
 	_ "github.com/openclaw/crabbox/internal/providers/runpod"
 	_ "github.com/openclaw/crabbox/internal/providers/semaphore"
+	_ "github.com/openclaw/crabbox/internal/providers/smolvm"
 	_ "github.com/openclaw/crabbox/internal/providers/sprites"
 	_ "github.com/openclaw/crabbox/internal/providers/ssh"
 	_ "github.com/openclaw/crabbox/internal/providers/tart"
@@ -45,5 +47,6 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/tensorlake"
 	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
 	_ "github.com/openclaw/crabbox/internal/providers/wandb"
+	_ "github.com/openclaw/crabbox/internal/providers/windowssandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/xcpng"
 )

@@ -22,6 +22,7 @@ func init() {
 	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testXCPNgProvider{})
 	RegisterProvider(testStaticSSHProvider{})
+	RegisterProvider(testExternalProvider{})
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
@@ -43,6 +44,53 @@ func init() {
 	RegisterProvider(testParallelsProvider{})
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
+	RegisterProvider(testWindowsSandboxProvider{})
+}
+
+type testExternalProvider struct{}
+
+func (testExternalProvider) Name() string      { return "external" }
+func (testExternalProvider) Aliases() []string { return nil }
+func (testExternalProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "external",
+		Family:      "external",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testExternalProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return fs.String("external-routing-file", defaults.External.RoutingFile, "")
+}
+func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if flagWasSet(fs, "external-routing-file") {
+		path, _ := values.(*string)
+		if path != nil {
+			routing, err := LoadExternalRouting(*path)
+			if err != nil {
+				return err
+			}
+			cfg.External = routing
+		}
+	}
+	if strings.TrimSpace(cfg.External.Command) == "" {
+		return exit(2, "external command is required")
+	}
+	return nil
+}
+func (p testExternalProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
+	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}, cfg: cfg}, nil
+}
+
+type testExternalSSHBackend struct {
+	testSSHBackend
+	cfg Config
+}
+
+func (b testExternalSSHBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	return LeaseTarget{LeaseID: req.ID, Server: Server{Name: b.cfg.External.Command}}, nil
 }
 
 type testAzureProvider struct{}
@@ -187,6 +235,32 @@ func (testWandbProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testWandbProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
+}
+
+type testWindowsSandboxProvider struct{}
+
+func (testWindowsSandboxProvider) Name() string { return "windows-sandbox" }
+func (testWindowsSandboxProvider) Aliases() []string {
+	return []string{"wsb", "windows-sandbox-provider"}
+}
+func (testWindowsSandboxProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "windows-sandbox",
+		Family:      "local-sandbox",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Features:    FeatureSet{FeatureArchiveSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testWindowsSandboxProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (testWindowsSandboxProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testWindowsSandboxProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
@@ -1024,7 +1098,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:                "islo",
 		Kind:                ProviderKindDelegatedRun,
 		Targets:             []TargetSpec{{OS: targetLinux}},
-		Features:            FeatureSet{FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume},
+		Features:            FeatureSet{FeatureSSH, FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume},
 		Coordinator:         CoordinatorNever,
 		TailscaleEgressOnly: true,
 	}
@@ -1315,12 +1389,15 @@ func (testLocalContainerProvider) Name() string { return "local-container" }
 func (testLocalContainerProvider) Aliases() []string {
 	return []string{"docker", "container", "local-docker"}
 }
+func (testLocalContainerProvider) CreationOnlyFlagNames() []string {
+	return []string{"local-container-volume"}
+}
 func (testLocalContainerProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint, FeatureFork},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -1334,9 +1411,15 @@ type testLocalContainerFlagValues struct {
 	Memory       *string
 	Network      *string
 	DockerSocket *bool
+	Volumes      *[]string
 }
 
 func (testLocalContainerProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	volumes := append([]string(nil), defaults.LocalContainer.Volumes...)
+	fs.Func("local-container-volume", "container volume", func(value string) error {
+		volumes = append(volumes, value)
+		return nil
+	})
 	return testLocalContainerFlagValues{
 		Runtime:      fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI"),
 		Image:        fs.String("local-container-image", defaults.LocalContainer.Image, "container image"),
@@ -1346,6 +1429,7 @@ func (testLocalContainerProvider) RegisterFlags(fs *flag.FlagSet, defaults Confi
 		Memory:       fs.String("local-container-memory", defaults.LocalContainer.Memory, "container memory"),
 		Network:      fs.String("local-container-network", defaults.LocalContainer.Network, "container network"),
 		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket, "container Docker socket"),
+		Volumes:      &volumes,
 	}
 }
 func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -1380,6 +1464,9 @@ func (testLocalContainerProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, valu
 	if flagWasSet(fs, "local-container-docker-socket") {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 	}
+	if v.Volumes != nil && len(*v.Volumes) > 0 {
+		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)
+	}
 	if cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
 		cfg.Provider = "local-container"
 	}
@@ -1393,6 +1480,25 @@ func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpoin
 		return NativeCheckpointCapability{}, false
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindDockerCommit, Direct: true}, true
+}
+func (testLocalContainerProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
+	if req.Record.Kind != checkpointKindDockerCommit {
+		return exit(2, "provider=local-container does not support checkpoint kind=%s", req.Record.Kind)
+	}
+	req.Config.LocalContainer.Image = req.Record.ImageID
+	req.Config.LocalContainer.Runtime = req.Record.Metadata["runtime"]
+	req.Config.LocalContainer.User = req.Record.Metadata["container_user"]
+	req.Config.LocalContainer.WorkRoot = req.Record.Metadata["container_work_root"]
+	req.Config.SSHUser = req.Config.LocalContainer.User
+	req.Config.WorkRoot = req.Config.LocalContainer.WorkRoot
+	return nil
+}
+func (testLocalContainerProvider) ApplyNativeCheckpointForkFlags(cfg *Config, _ *flag.FlagSet, values any) error {
+	v, ok := values.(testLocalContainerFlagValues)
+	if ok && v.Volumes != nil {
+		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)
+	}
+	return nil
 }
 
 type testAppleVZProvider struct{}

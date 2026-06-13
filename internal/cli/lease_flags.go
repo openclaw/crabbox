@@ -103,6 +103,9 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := autoRouteStaticLease(cfg, fs, existingLeaseID); err != nil {
 		return err
 	}
+	if err := autoRouteExternalLease(cfg, fs, existingLeaseID); err != nil {
+		return err
+	}
 	if flagWasSet(fs, "os") {
 		osImage, err := normalizeOSImage(*values.OSImage)
 		if err != nil {
@@ -332,6 +335,9 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	if err := autoRouteStaticLease(&cfg, fs, opts.LeaseID); err != nil {
 		return Config{}, err
 	}
+	if err := autoRouteExternalLease(&cfg, fs, opts.LeaseID); err != nil {
+		return Config{}, err
+	}
 	if err := applyNetworkModeFlagOverride(&cfg, fs, networkFlags); err != nil {
 		return Config{}, err
 	}
@@ -370,14 +376,51 @@ func (a App) resolveNetworkLeaseTarget(ctx context.Context, cfg Config, id strin
 }
 
 func (a App) resolveNetworkLeaseTargetWithConfig(ctx context.Context, cfg *Config, id string, printFallback bool) (Server, SSHTarget, string, error) {
-	if cfg == nil {
-		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
-	}
-	server, target, leaseID, err := a.resolveLeaseTargetWithConfig(ctx, cfg, id)
+	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, cfg, id, printFallback, Repo{}, false)
+}
+
+func (a App) resolveNetworkLeaseTargetForRepo(ctx context.Context, cfg Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
+	return a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, id, printFallback, reclaim)
+}
+
+func (a App) resolveNetworkLoginTargetForRepo(ctx context.Context, cfg Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
+	repo, err := findRepo()
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
-	resolved, err := resolveNetworkTarget(ctx, *cfg, server, target)
+	return a.resolveNetworkSSHTargetWithRepoConfig(ctx, &cfg, id, printFallback, repo, reclaim, true)
+}
+
+func (a App) resolveNetworkLeaseTargetForRepoWithConfig(ctx context.Context, cfg *Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
+	repo, err := findRepo()
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, cfg, id, printFallback, repo, reclaim)
+}
+
+func (a App) resolveNetworkLeaseTargetWithRepoConfig(ctx context.Context, cfg *Config, id string, printFallback bool, repo Repo, reclaim bool) (Server, SSHTarget, string, error) {
+	return a.resolveNetworkSSHTargetWithRepoConfig(ctx, cfg, id, printFallback, repo, reclaim, false)
+}
+
+func (a App) resolveNetworkSSHTargetWithRepoConfig(ctx context.Context, cfg *Config, id string, printFallback bool, repo Repo, reclaim, allowLoginOnly bool) (Server, SSHTarget, string, error) {
+	if cfg == nil {
+		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
+	}
+	req := ResolveRequest{Repo: repo, ID: id, Reclaim: reclaim}
+	var server Server
+	var target SSHTarget
+	var leaseID string
+	var err error
+	if allowLoginOnly {
+		server, target, leaseID, err = a.resolveLoginTargetWithRequestConfig(ctx, cfg, req)
+	} else {
+		server, target, leaseID, err = a.resolveLeaseTargetWithRequestConfig(ctx, cfg, req)
+	}
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	resolved, err := resolveSSHTargetNetwork(ctx, *cfg, server, target, allowLoginOnly)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
@@ -385,11 +428,44 @@ func (a App) resolveNetworkLeaseTargetWithConfig(ctx context.Context, cfg *Confi
 	if target.Host != "" {
 		_ = probeSSHTransport(ctx, &target, 4*time.Second)
 	}
-	_ = updateLeaseClaimEndpoint(leaseID, server, target)
+	updatedClaim, claimExists, err := updateResolvedLeaseClaimEndpoint(leaseID, server, target)
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	if claimExists {
+		server.claimSnapshot = updatedClaim
+		server.claimSnapshotExists = true
+	}
 	if printFallback && resolved.FallbackReason != "" {
 		fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 	}
 	return server, target, leaseID, nil
+}
+
+func resolveSSHTargetNetwork(ctx context.Context, cfg Config, server Server, target SSHTarget, allowLoginOnly bool) (resolvedNetworkTarget, error) {
+	if allowLoginOnly && target.SSHConfigProxy && providerCapabilities(cfg.Provider).TailscaleEgress {
+		return resolvedNetworkTarget{Target: target, Network: NetworkPublic}, nil
+	}
+	return resolveNetworkTarget(ctx, cfg, server, target)
+}
+
+func resolvedLeaseClaimSnapshot(leaseID string, server Server) (leaseClaim, bool, error) {
+	if leaseID == "" {
+		return leaseClaim{}, false, nil
+	}
+	if !server.claimSnapshotSet {
+		return leaseClaim{}, false, exit(2, "lease %s resolve claim snapshot is missing", leaseID)
+	}
+	return cloneLeaseClaim(server.claimSnapshot), server.claimSnapshotExists, nil
+}
+
+func updateResolvedLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) (leaseClaim, bool, error) {
+	expected, exists, err := resolvedLeaseClaimSnapshot(leaseID, server)
+	if err != nil || !exists {
+		return leaseClaim{}, exists, err
+	}
+	updated, err := updateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
+	return updated, true, err
 }
 
 func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID string, reclaim bool) error {
@@ -397,7 +473,7 @@ func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Se
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

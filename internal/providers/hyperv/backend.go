@@ -83,6 +83,11 @@ func applyDefaults(cfg *Config) {
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
+func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
+
 func (b *backend) configForRun() Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)

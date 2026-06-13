@@ -28,9 +28,13 @@ Crabbox lease ID and local slug:
 
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug and forwards to
   `blacksmith testbox stop`.
-- `namespace-devbox` — shuts down the Namespace Devbox by default and removes
-  the local claim. Set `namespace.deleteOnRelease` (or pass
-  `--namespace-delete-on-release`) to delete the Devbox instead.
+- `namespace-devbox` — shuts down the Namespace Devbox by default and retains
+  its local claim and SSH files for reuse. Set `namespace.deleteOnRelease` (or
+  pass `--namespace-delete-on-release`) to delete the Devbox and local SSH
+  files instead.
+- `morph` — pauses the instance by default and retains its local claim and SSH
+  key for reuse. Set `morph.deleteOnRelease` (or pass
+  `--morph-delete-on-release`) to delete the instance and key instead.
 - `exe-dev` — accepts a Crabbox lease ID, local slug, or exe.dev VM name and
   deletes the VM through `ssh exe.dev rm`.
 - `semaphore` — stops the Semaphore CI job and removes the local claim.
@@ -45,6 +49,8 @@ Crabbox lease ID and local slug:
   `sbx rm --force`. This is destructive cleanup, not Docker Sandbox pause, and
   it remains the manual cleanup path for clone-mode Docker Sandbox runs that
   Crabbox keeps after a successful one-shot command.
+- `hostinger` — stops the VPS and retains its local claim and SSH key for later
+  reuse. Hostinger still owns the subscription and may continue billing it.
 - `ssh` (static hosts) — removes the local claim for the configured static
   target; it never deletes the host.
 - `xcp-ng` — accepts a Crabbox lease ID or local slug for a Crabbox-managed VM,
@@ -61,11 +67,13 @@ The action `stop` takes depends on how the lease was created:
   `stop` warns and still attempts the release by ID.
 - **Direct cloud and local providers** — usually delete the backing server and
   print `deleted lease=<id> server=<id> name=<name>`, but retain-capable
-  providers such as `namespace-devbox`, `kubevirt`, and `incus` stop instead
+  providers such as `namespace-devbox`, `morph`, `kubevirt`, and `incus` stop
+  or pause instead
   when their `*.deleteOnRelease` setting is `false` (some providers print a
   provider-specific release message instead, for example
   `stopped lease=<id> instance=<name> retained=true` for retained Incus
-  instances).
+  instances). Hostinger is stop-only and prints `billing=still-owned`; it does
+  not delete or cancel the subscription.
 - **Delegated runners** — call the provider's own teardown for the resolved
   sandbox.
 
@@ -102,6 +110,8 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --sprites-api-url <url>                  Sprites API URL
 --e2b-api-url <url>                      E2B API URL
 --e2b-domain <domain>                    E2B sandbox domain
+--hostinger-url <url>                    Hostinger API URL
+--hostinger-release-action stop          Hostinger release action; only stop is supported
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
 ```
 

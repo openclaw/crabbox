@@ -35,6 +35,13 @@ wandb
   features: -
   coordinator: never
   aliases: weights-and-biases
+
+hostinger
+  family: hostinger
+  kind: ssh-lease
+  targets: linux
+  features: ssh,crabbox-sync,cleanup
+  coordinator: never
 ```
 
 The `aliases` line appears only when the provider declares alternate names. A
@@ -49,6 +56,14 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
 
 ```json
 [
+  {
+    "provider": "hostinger",
+    "family": "hostinger",
+    "kind": "ssh-lease",
+    "targets": ["linux"],
+    "features": ["ssh", "crabbox-sync", "cleanup"],
+    "coordinator": "never"
+  },
   {
     "provider": "aws",
     "family": "aws",

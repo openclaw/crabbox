@@ -108,7 +108,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if !useCoordinator || coord == nil || coord.Token == "" {
 		return exit(2, "webvnc requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
 	if err != nil {
 		return err
 	}
@@ -369,7 +369,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 		if err := guardMacOSDirectWebVNC(cfg); err != nil {
 			return err
 		}
-		server, resolvedTarget, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+		server, resolvedTarget, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
 		if err != nil {
 			return err
 		}
@@ -393,7 +393,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 			return err
 		}
 		if useCoordinator && coord != nil && coord.Token != "" {
-			server, resolvedTarget, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+			server, resolvedTarget, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
 			if err != nil {
 				return err
 			}
@@ -1291,7 +1291,7 @@ func useDirectSSHWebVNC(cfg Config) bool {
 }
 
 func (a App) directSSHWebVNC(ctx context.Context, cfg Config, id, localPort string, openViewer, _ bool, reclaim bool) error {
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, id, false, reclaim)
 	if err != nil {
 		return err
 	}

@@ -85,6 +85,7 @@ sync/run/release path. None of them go through the Worker.
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 digitalocean     DigitalOcean Droplets                    Linux
 linode           Linode instances                         Linux
+hostinger        Hostinger VPSs over public SSH           Linux
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
 xcp-ng           Self-hosted XCP-ng pool over XAPI        Linux (normal leases)
@@ -113,7 +114,8 @@ provider on Apple hardware for macOS VM workflows.
 These run the command inside a sandbox/proof runner; Crabbox does not lease or
 SSH into a box. Local sync options (`--no-sync`, rsync flags) are rejected - the
 provider owns sync. Most are Linux-only. `anthropic-sandbox-runtime` is local
-to the current macOS or Linux host.
+to the current macOS or Linux host; `windows-sandbox` is local to a Windows
+host.
 
 ```text
 cloudflare              Cloudflare Containers (Worker runtime)
@@ -125,10 +127,12 @@ islo                    Islo sandboxes
 modal                   Modal Sandboxes
 opencomputer            OpenComputer Linux VMs
 anthropic-sandbox-runtime Anthropic Sandbox Runtime through the local srt CLI
+smolvm                  Smol Machines microVM sandboxes (delegated via smolfleet)
 tensorlake              Tensorlake Firecracker sandboxes
 upstash-box             Upstash sandboxes
 blacksmith-testbox      Blacksmith CI test runner (proof/session)
 wandb                   Weights & Biases run sandboxes
+windows-sandbox         Windows Sandbox on the local Windows host
 ```
 
 ## Service-control providers
@@ -150,6 +154,7 @@ railway                 Railway service status and stop controls
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
 - [DigitalOcean](../providers/digitalocean.md): direct Linux Droplet leases.
 - [Linode](../providers/linode.md): direct Linux instance leases.
+- [Hostinger](../providers/hostinger.md): direct Linux VPS leases with explicit purchase opt-in and stop-only release.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
 - [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
@@ -178,8 +183,10 @@ railway                 Railway service status and stop controls
 - [OpenComputer](../providers/opencomputer.md): delegated OpenComputer Linux VM execution through the OpenComputer REST API.
 - [Tensorlake](../providers/tensorlake.md): delegated Tensorlake Firecracker sandbox execution.
 - [Upstash Box](../providers/upstash-box.md): delegated Upstash sandbox execution.
+- [SmolVM](../providers/smolvm.md): delegated Smol Machines microVM execution via smolfleet.
 - [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Blacksmith CI runner.
 - [Weights & Biases](../providers/wandb.md): delegated W&B run sandbox execution.
+- [Windows Sandbox](../providers/windows-sandbox.md): delegated Windows Sandbox execution on a local Windows host.
 - [Provider backends](../provider-backends.md): guide for adding a new provider/backend/plugin.
 
 ## Machine classes
@@ -350,8 +357,10 @@ list, and cleanup.
 
 Delegated-run providers (`cloudflare`, `azure-dynamic-sessions`, `e2b`, `islo`,
 `modal`, `tensorlake`, `upstash-box`, `blacksmith-testbox`, `wandb`) do not use
-the broker or an SSH lease; each owns sandbox lifecycle and command execution and
-syncs through its own API (gzipped archive upload for most). See the linked
+the broker for run execution; each owns sandbox lifecycle and command execution
+and syncs through its own API (gzipped archive upload for most). Islo also
+exposes a direct `crabbox ssh` login helper for kept sandboxes at
+`<sandbox>.islo`, but Islo run/sync remains delegated. See the linked
 provider pages for per-provider auth and configuration.
 
 ## Static SSH targets

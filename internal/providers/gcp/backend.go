@@ -41,7 +41,7 @@ type gcpClient interface {
 
 func NewGCPLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "gcp"
-	return &gcpLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt}}
+	return &gcpLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
 func (b *gcpLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

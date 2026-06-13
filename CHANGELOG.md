@@ -4,10 +4,26 @@
 
 ### Added
 
+- Added `provider: windows-sandbox` for disposable native Windows runs through Microsoft Windows Sandbox, including mapped workspace sync, streamed output, timeout and cancellation cleanup, and keep-on-failure inspection. Thanks @zozo123.
+- Added `provider: smolvm` for delegated Linux microVM runs through the hosted smolfleet API, including archive sync, retained leases, status, cleanup, and repository-scoped ownership checks. Thanks @zozo123.
+- Added guarded SmolVM live E2E coverage for retained reuse, archive replacement, environment forwarding, command exit propagation, diagnostics, and targeted cleanup.
+- Added non-mutating Proxmox storage, bridge, pool, template, and cluster inventory readiness diagnostics plus guarded live lifecycle smoke coverage, with safer failed-create and cleanup claim handling. Thanks @coygeek.
+- Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
+
+### Fixed
+
+- Fixed Proxmox bridge readiness on PVE 8 by falling back to its compatible local-bridge and SDN-vnet inventory filter.
+
+## 0.29.0 - 2026-06-12
+
+### Added
+
+- Added repeatable `--local-container-volume host:container[:ro]` bind mounts for explicit local-container runs. Thanks @anagnorisis2peripeteia.
 - Added provider-neutral coordinator registration for direct SSH leases, with owner-scoped inventory and sharing, outbound WebVNC, automatic bridge daemons for kept desktops, and coordinator-safe metadata-only release and expiry.
 - Added provider-optional `crabbox pause` and `crabbox resume` lifecycle commands, with Islo sandbox pause/resume support that preserves local lease claims. Thanks @zozo123.
 - Added `provider: opensandbox` for delegated Linux sandbox runs through the OpenSandbox API, including archive sync, retained lease reuse, off-argv environment forwarding, status, and cleanup. Thanks @coygeek.
 - Added `provider: anthropic-sandbox-runtime` (`srt`) for local one-shot command execution through Anthropic Sandbox Runtime, including filesystem/network policy handoff, doctor checks, config overrides, and live enforcement coverage. Thanks @coygeek.
+- Added `provider: hostinger` for direct Linux VPS leases with read-only catalog and payment-method discovery, explicit purchase opt-in, setup-time SSH keys, ambiguous-purchase recovery, stopped-VPS reuse, and stop-only billing-aware release. Thanks @coygeek.
 - Added `provider: apple-vz` for full ARM64 Ubuntu VMs through Apple's `Virtualization.framework`, including verified cloud images, secret-safe signed URL handling, loopback VSOCK SSH, retained leases, native helper packaging, failure rollback, and live lifecycle coverage. Thanks @coygeek.
 - Added `provider: digitalocean` for direct Linux SSH leases backed by DigitalOcean Droplets, including flat-tag ownership, per-lease SSH keys, docs, and guarded live smoke coverage. Thanks @coygeek.
 - Added a delegated Freestyle provider that runs commands in Freestyle VMs through the Freestyle REST API, with env-only authentication, archive sync, and automatic VM cleanup. Thanks @zozo123.
@@ -17,6 +33,8 @@
 
 ### Fixed
 
+- Fixed `stop` and `pond release` to preserve claims, SSH credentials, lifecycle metadata, and restart routing when providers intentionally retain reusable stopped resources.
+- Fixed external lease commands to reuse each lease's persisted provider routing after the current external configuration changes.
 - Fixed `local-container` stop cleanup when a Docker container was removed externally, including stale claim and stored-key removal. Thanks @hxy91819.
 - Fixed Apple VZ release artifacts to target macOS 13, bounded guest serial logs without blocking noisy VMs, escaped terminal controls in diagnostics, and preserved retained lease state when helper inventory lookup fails.
 - Fixed DigitalOcean capability-tag persistence, provider config visibility and precedence, account-scoped ambiguous Droplet/SSH-key create recovery, retryable cleanup, and unnecessary monitoring-agent installation.

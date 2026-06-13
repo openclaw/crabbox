@@ -687,7 +687,7 @@ func TestRunStopCommandIncludesExeDevRoutingFlags(t *testing.T) {
 }
 
 func TestRunStopCommandIncludesMorphRoutingFlags(t *testing.T) {
-	got := runStopCommand(Config{
+	cfg := Config{
 		Provider: "morph",
 		TargetOS: targetLinux,
 		Morph: MorphConfig{
@@ -695,7 +695,9 @@ func TestRunStopCommandIncludesMorphRoutingFlags(t *testing.T) {
 			APIURL:          "https://morph.example.test",
 			DeleteOnRelease: true,
 		},
-	}, "cbx_123")
+	}
+	MarkDeleteOnReleaseExplicit(&cfg, "morph")
+	got := runStopCommand(cfg, "cbx_123")
 	for _, want := range []string{
 		"--provider morph",
 		"--morph-api-url https://morph.example.test",
@@ -711,8 +713,27 @@ func TestRunStopCommandIncludesMorphRoutingFlags(t *testing.T) {
 	}
 }
 
-func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
+func TestRunStopCommandIncludesHostingerRoutingFlags(t *testing.T) {
 	got := runStopCommand(Config{
+		Provider: "hostinger",
+		TargetOS: targetLinux,
+		Hostinger: HostingerConfig{
+			APIURL: "https://hostinger.example.test/api",
+		},
+	}, "1750645")
+	for _, want := range []string{
+		"--provider hostinger",
+		"--hostinger-url https://hostinger.example.test/api",
+		"--id 1750645",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
+	cfg := Config{
 		Provider: "kubevirt",
 		TargetOS: targetLinux,
 		KubeVirt: KubeVirtConfig{
@@ -724,7 +745,9 @@ func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
 			Template:        "/tmp/vm template.yaml",
 			DeleteOnRelease: false,
 		},
-	}, "cbx_123")
+	}
+	MarkDeleteOnReleaseExplicit(&cfg, "kubevirt")
+	got := runStopCommand(cfg, "cbx_123")
 	for _, want := range []string{
 		"--provider kubevirt",
 		"--kubevirt-kubectl /opt/bin/kubectl",
@@ -738,6 +761,19 @@ func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandOmitsAmbientReleasePolicy(t *testing.T) {
+	for _, cfg := range []Config{
+		{Provider: "incus", Incus: IncusConfig{DeleteOnRelease: true}},
+		{Provider: "kubevirt", KubeVirt: KubeVirtConfig{DeleteOnRelease: true}},
+		{Provider: "morph", Morph: MorphConfig{DeleteOnRelease: true}},
+		{Provider: "namespace-devbox", Namespace: NamespaceConfig{DeleteOnRelease: true}},
+	} {
+		if got := runStopCommand(cfg, "cbx_123"); strings.Contains(got, "delete-on-release") {
+			t.Fatalf("ambient release policy leaked into stop command:\n%s", got)
 		}
 	}
 }

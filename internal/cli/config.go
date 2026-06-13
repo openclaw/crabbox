@@ -17,8 +17,10 @@ import (
 type Config struct {
 	Profile                       string
 	Provider                      string
+	providerExplicit              bool
 	TargetOS                      string
 	targetExplicit                bool
+	targetFlagExplicit            bool
 	Architecture                  string
 	architectureExplicit          bool
 	OSImage                       string
@@ -26,6 +28,7 @@ type Config struct {
 	osImageProviderDefaults       string
 	WindowsMode                   string
 	explicitWindowsMode           string
+	windowsModeFlagExplicit       bool
 	Desktop                       bool
 	DesktopEnv                    string
 	Browser                       bool
@@ -104,6 +107,7 @@ type Config struct {
 	SSHUser                       string
 	explicitSSHUser               string
 	SSHKey                        string
+	explicitSSHKey                string
 	SSHPort                       string
 	explicitSSHPort               string
 	SSHFallbackPorts              []string
@@ -119,6 +123,7 @@ type Config struct {
 	Actions                       ActionsConfig
 	Blacksmith                    BlacksmithConfig
 	KubeVirt                      KubeVirtConfig
+	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
 	Morph                         MorphConfig
@@ -127,6 +132,9 @@ type Config struct {
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	Runpod                        RunpodConfig
+	Hostinger                     HostingerConfig
+	hostingerUserExplicit         bool
+	hostingerWorkRootExplicit     bool
 	Wandb                         WandbConfig
 	Islo                          IsloConfig
 	isloImageExplicit             bool
@@ -139,6 +147,7 @@ type Config struct {
 	AnthropicSRT                  AnthropicSRTConfig
 	Modal                         ModalConfig
 	UpstashBox                    UpstashBoxConfig
+	Smolvm                        SmolvmConfig
 	AsciiBox                      AsciiBoxConfig
 	Cloudflare                    CloudflareConfig
 	Semaphore                     SemaphoreConfig
@@ -163,6 +172,7 @@ type Config struct {
 	tartCPUsExplicit              bool
 	tartMemoryExplicit            bool
 	HyperV                        HyperVConfig
+	WindowsSandbox                WindowsSandboxConfig
 	Tailscale                     TailscaleConfig
 	Static                        StaticConfig
 	Results                       ResultsConfig
@@ -253,13 +263,14 @@ type KubeVirtConfig struct {
 }
 
 type ExternalConfig struct {
-	Command     string
-	Args        []string
-	Config      map[string]any
-	Lifecycle   ExternalLifecycleConfig
-	Connection  ExternalConnectionConfig
-	WorkRoot    string
-	RoutingFile string
+	Command       string
+	Args          []string
+	Config        map[string]any
+	Lifecycle     ExternalLifecycleConfig
+	Connection    ExternalConnectionConfig
+	WorkRoot      string
+	RoutingFile   string
+	routingLoaded bool
 }
 
 type ExternalLifecycleConfig struct {
@@ -402,6 +413,20 @@ type RunpodConfig struct {
 	WorkRoot   string
 }
 
+type HostingerConfig struct {
+	APIToken        string
+	APIURL          string
+	ItemID          string
+	PaymentMethodID string
+	TemplateID      string
+	DataCenterID    string
+	HostnamePrefix  string
+	User            string
+	WorkRoot        string
+	AllowPurchase   bool
+	ReleaseAction   string
+}
+
 // WandbConfig drives the W&B Sandboxes (CoreWeave Sandboxes) provider. The
 // API key is the same one `wandb login` writes to ~/.netrc — the value
 // proposition of this provider is that AI researchers already have it.
@@ -530,6 +555,17 @@ type UpstashBoxConfig struct {
 	Size      string
 	Workdir   string
 	KeepAlive bool
+}
+
+type SmolvmConfig struct {
+	APIKey   string
+	BaseURL  string
+	Image    string
+	Workdir  string
+	CPUs     int
+	MemoryMB int
+	Network  string
+	Keep     bool
 }
 
 type AsciiBoxConfig struct {
@@ -666,6 +702,7 @@ type LocalContainerConfig struct {
 	Memory             string
 	Network            string
 	DockerSocket       bool
+	Volumes            []string
 	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
 
@@ -734,6 +771,19 @@ type HyperVConfig struct {
 	Switch        string
 	GuestPassword string
 	InitPassword  bool
+}
+
+type WindowsSandboxConfig struct {
+	Workdir            string
+	TempRoot           string
+	Networking         string
+	VGPU               string
+	Clipboard          string
+	ProtectedClient    string
+	AudioInput         string
+	VideoInput         string
+	PrinterRedirection string
+	MemoryMB           int
 }
 
 type StaticConfig struct {
@@ -1171,6 +1221,23 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.SSHPort = "22"
 		return nil
 	}
+	if cfg.Provider == "windows-sandbox" || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider" {
+		if IsTargetExplicit(cfg) && normalizeTargetOS(cfg.TargetOS) != targetWindows {
+			return exit(2, "provider=windows-sandbox supports target=windows only")
+		}
+		if cfg.TargetOS == "" || (!IsTargetExplicit(cfg) && cfg.TargetOS == targetLinux) {
+			cfg.TargetOS = targetWindows
+		}
+		if cfg.explicitWindowsMode != "" && normalizeWindowsMode(cfg.explicitWindowsMode) != windowsModeNormal {
+			return exit(2, "provider=windows-sandbox supports windows.mode=normal only")
+		}
+		cfg.WindowsMode = windowsModeNormal
+		if cfg.WindowsSandbox.Workdir == "" {
+			cfg.WindowsSandbox.Workdir = `C:\crabbox-work`
+		}
+		cfg.WorkRoot = cfg.WindowsSandbox.Workdir
+		return nil
+	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		if cfg.ExeDev.User != "" {
 			cfg.SSHUser = cfg.ExeDev.User
@@ -1454,12 +1521,69 @@ func MarkSSHUserExplicit(cfg *Config) {
 	cfg.explicitSSHUser = cfg.SSHUser
 }
 
+func IsSSHKeyExplicit(cfg *Config) bool {
+	return cfg != nil && cfg.SSHKey != "" && (cfg.explicitSSHKey != "" || cfg.SSHKey != baseConfig().SSHKey)
+}
+
+func MarkSSHKeyExplicit(cfg *Config) {
+	cfg.explicitSSHKey = cfg.SSHKey
+}
+
 func IsSSHPortExplicit(cfg *Config) bool {
 	return cfg.explicitSSHPort != ""
 }
 
 func MarkSSHPortExplicit(cfg *Config) {
 	cfg.explicitSSHPort = cfg.SSHPort
+}
+
+func IsWorkRootExplicit(cfg *Config) bool {
+	return cfg.explicitWorkRoot != ""
+}
+
+func MarkWorkRootExplicit(cfg *Config) {
+	cfg.explicitWorkRoot = cfg.WorkRoot
+}
+
+func IsHostingerWorkRootExplicit(cfg *Config) bool {
+	return cfg.hostingerWorkRootExplicit
+}
+
+func IsHostingerUserExplicit(cfg *Config) bool {
+	return cfg.hostingerUserExplicit
+}
+
+func MarkHostingerUserExplicit(cfg *Config) {
+	cfg.hostingerUserExplicit = true
+}
+
+func MarkHostingerWorkRootExplicit(cfg *Config) {
+	cfg.hostingerWorkRootExplicit = true
+}
+
+func DeleteOnReleaseExplicit(cfg Config, provider string) bool {
+	return cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)]
+}
+
+func MarkDeleteOnReleaseExplicit(cfg *Config, provider string) {
+	if cfg.deleteOnReleaseExplicit == nil {
+		cfg.deleteOnReleaseExplicit = map[string]bool{}
+	}
+	cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)] = true
+}
+
+func EffectiveHostingerWorkRoot(cfg Config) string {
+	if cfg.Hostinger.WorkRoot != "" {
+		return cfg.Hostinger.WorkRoot
+	}
+	if cfg.explicitWorkRoot != "" {
+		return cfg.explicitWorkRoot
+	}
+	user := strings.TrimSpace(cfg.Hostinger.User)
+	if user == "" {
+		user = "root"
+	}
+	return "/home/" + user + "/crabbox"
 }
 
 func baseConfig() Config {
@@ -1610,6 +1734,12 @@ func baseConfig() Config {
 			Image:      "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04",
 			DiskGB:     20,
 		},
+		Hostinger: HostingerConfig{
+			APIURL:         "https://developers.hostinger.com",
+			HostnamePrefix: "crabbox",
+			User:           "root",
+			ReleaseAction:  "stop",
+		},
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
 			Image:    isloImage,
@@ -1672,6 +1802,14 @@ func baseConfig() Config {
 			Runtime: "node",
 			Size:    "small",
 			Workdir: "/workspace/home/crabbox",
+		},
+		Smolvm: SmolvmConfig{
+			BaseURL:  "https://api.smolmachines.com",
+			Image:    "alpine",
+			Workdir:  "/workspace",
+			CPUs:     2,
+			MemoryMB: 2048,
+			Network:  "open",
 		},
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
@@ -1750,6 +1888,16 @@ func baseConfig() Config {
 			Memory:   8192,
 			Switch:   "Default Switch",
 		},
+		WindowsSandbox: WindowsSandboxConfig{
+			Workdir:            `C:\crabbox-work`,
+			Networking:         "Enable",
+			VGPU:               "Disable",
+			Clipboard:          "Disable",
+			ProtectedClient:    "Default",
+			AudioInput:         "Disable",
+			VideoInput:         "Disable",
+			PrinterRedirection: "Disable",
+		},
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -1811,6 +1959,7 @@ type fileConfig struct {
 	ExeDev               *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
 	Railway              *fileRailwayConfig                 `yaml:"railway,omitempty"`
 	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
+	Hostinger            *fileHostingerConfig               `yaml:"hostinger,omitempty"`
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
 	Freestyle            *fileFreestyleConfig               `yaml:"freestyle,omitempty"`
@@ -1822,6 +1971,7 @@ type fileConfig struct {
 	AnthropicSRT         *fileAnthropicSRTConfig            `yaml:"anthropicSandboxRuntime,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
 	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
+	Smolvm               *fileSmolvmConfig                  `yaml:"smolvm,omitempty"`
 	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
 	Cloudflare           *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
 	Semaphore            *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
@@ -1833,6 +1983,7 @@ type fileConfig struct {
 	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
 	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
 	HyperV               *fileHyperVConfig                  `yaml:"hyperv,omitempty"`
+	WindowsSandbox       *fileWindowsSandboxConfig          `yaml:"windowsSandbox,omitempty"`
 	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
 	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
 	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
@@ -2194,6 +2345,20 @@ type fileRunpodConfig struct {
 	WorkRoot   string `yaml:"workRoot,omitempty"`
 }
 
+type fileHostingerConfig struct {
+	APIToken        string `yaml:"apiToken,omitempty"`
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	ItemID          string `yaml:"itemId,omitempty"`
+	PaymentMethodID string `yaml:"paymentMethodId,omitempty"`
+	TemplateID      string `yaml:"templateId,omitempty"`
+	DataCenterID    string `yaml:"dataCenterId,omitempty"`
+	HostnamePrefix  string `yaml:"hostnamePrefix,omitempty"`
+	User            string `yaml:"user,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	AllowPurchase   *bool  `yaml:"allowPurchase,omitempty"`
+	ReleaseAction   string `yaml:"releaseAction,omitempty"`
+}
+
 type fileWandbConfig struct {
 	APIKey             string `yaml:"apiKey,omitempty"`
 	DefaultImage       string `yaml:"defaultImage,omitempty"`
@@ -2295,6 +2460,16 @@ type fileUpstashBoxConfig struct {
 	Size      string `yaml:"size,omitempty"`
 	Workdir   string `yaml:"workdir,omitempty"`
 	KeepAlive *bool  `yaml:"keepAlive,omitempty"`
+}
+
+type fileSmolvmConfig struct {
+	BaseURL  string `yaml:"baseUrl,omitempty"`
+	Image    string `yaml:"image,omitempty"`
+	Workdir  string `yaml:"workdir,omitempty"`
+	CPUs     int    `yaml:"cpus,omitempty"`
+	MemoryMB int    `yaml:"memoryMB,omitempty"`
+	Network  string `yaml:"network,omitempty"`
+	Keep     *bool  `yaml:"keep,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -2414,6 +2589,19 @@ type fileHyperVConfig struct {
 	Switch        string `yaml:"switch,omitempty"`
 	GuestPassword string `yaml:"guestPassword,omitempty"`
 	InitPassword  *bool  `yaml:"initPassword,omitempty"`
+}
+
+type fileWindowsSandboxConfig struct {
+	Workdir            string `yaml:"workdir,omitempty"`
+	TempRoot           string `yaml:"tempRoot,omitempty"`
+	Networking         string `yaml:"networking,omitempty"`
+	VGPU               string `yaml:"vgpu,omitempty"`
+	Clipboard          string `yaml:"clipboard,omitempty"`
+	ProtectedClient    string `yaml:"protectedClient,omitempty"`
+	AudioInput         string `yaml:"audioInput,omitempty"`
+	VideoInput         string `yaml:"videoInput,omitempty"`
+	PrinterRedirection string `yaml:"printerRedirection,omitempty"`
+	MemoryMB           int    `yaml:"memoryMB,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -3022,6 +3210,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Incus.DeleteOnRelease != nil {
 			cfg.Incus.DeleteOnRelease = *file.Incus.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "incus")
 		}
 		if file.Incus.StartTimeout != "" {
 			applyLeaseDuration(&cfg.Incus.StartTimeout, file.Incus.StartTimeout)
@@ -3211,6 +3400,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.SSH.Key != "" {
 			cfg.SSHKey = expandUserPath(file.SSH.Key)
+			MarkSSHKeyExplicit(cfg)
 		}
 		if file.SSH.Port != "" {
 			cfg.SSHPort = file.SSH.Port
@@ -3377,6 +3567,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.KubeVirt.DeleteOnRelease != nil {
 			cfg.KubeVirt.DeleteOnRelease = *file.KubeVirt.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 		}
 	}
 	if file.External != nil {
@@ -3424,6 +3615,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Namespace.DeleteOnRelease != nil {
 			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 		}
 	}
 	if file.Morph != nil {
@@ -3444,6 +3636,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Morph.DeleteOnRelease != nil {
 			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "morph")
 		}
 		if file.Morph.WakeOnSSH != nil {
 			cfg.Morph.WakeOnSSH = *file.Morph.WakeOnSSH
@@ -3553,6 +3746,43 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Runpod.WorkRoot != "" {
 			cfg.Runpod.WorkRoot = file.Runpod.WorkRoot
+		}
+	}
+	if file.Hostinger != nil {
+		if trusted && file.Hostinger.APIToken != "" {
+			cfg.Hostinger.APIToken = file.Hostinger.APIToken
+		}
+		if trusted && file.Hostinger.APIURL != "" {
+			cfg.Hostinger.APIURL = file.Hostinger.APIURL
+		}
+		if trusted && file.Hostinger.ItemID != "" {
+			cfg.Hostinger.ItemID = file.Hostinger.ItemID
+		}
+		if trusted && file.Hostinger.PaymentMethodID != "" {
+			cfg.Hostinger.PaymentMethodID = file.Hostinger.PaymentMethodID
+		}
+		if trusted && file.Hostinger.TemplateID != "" {
+			cfg.Hostinger.TemplateID = file.Hostinger.TemplateID
+		}
+		if trusted && file.Hostinger.DataCenterID != "" {
+			cfg.Hostinger.DataCenterID = file.Hostinger.DataCenterID
+		}
+		if file.Hostinger.HostnamePrefix != "" {
+			cfg.Hostinger.HostnamePrefix = file.Hostinger.HostnamePrefix
+		}
+		if file.Hostinger.User != "" {
+			cfg.Hostinger.User = file.Hostinger.User
+			MarkHostingerUserExplicit(cfg)
+		}
+		if file.Hostinger.WorkRoot != "" {
+			cfg.Hostinger.WorkRoot = file.Hostinger.WorkRoot
+			MarkHostingerWorkRootExplicit(cfg)
+		}
+		if file.Hostinger.AllowPurchase != nil && (trusted || !*file.Hostinger.AllowPurchase) {
+			cfg.Hostinger.AllowPurchase = *file.Hostinger.AllowPurchase
+		}
+		if file.Hostinger.ReleaseAction != "" {
+			cfg.Hostinger.ReleaseAction = file.Hostinger.ReleaseAction
 		}
 	}
 	if file.Wandb != nil {
@@ -3818,6 +4048,29 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.UpstashBox.KeepAlive = *file.UpstashBox.KeepAlive
 		}
 	}
+	if file.Smolvm != nil {
+		if file.Smolvm.BaseURL != "" {
+			cfg.Smolvm.BaseURL = file.Smolvm.BaseURL
+		}
+		if file.Smolvm.Image != "" {
+			cfg.Smolvm.Image = file.Smolvm.Image
+		}
+		if file.Smolvm.Workdir != "" {
+			cfg.Smolvm.Workdir = file.Smolvm.Workdir
+		}
+		if file.Smolvm.CPUs > 0 {
+			cfg.Smolvm.CPUs = file.Smolvm.CPUs
+		}
+		if file.Smolvm.MemoryMB > 0 {
+			cfg.Smolvm.MemoryMB = file.Smolvm.MemoryMB
+		}
+		if file.Smolvm.Network != "" {
+			cfg.Smolvm.Network = file.Smolvm.Network
+		}
+		if file.Smolvm.Keep != nil {
+			cfg.Smolvm.Keep = *file.Smolvm.Keep
+		}
+	}
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
 			cfg.AsciiBox.BaseURL = file.AsciiBox.BaseURL
@@ -3885,6 +4138,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.LocalContainer.DockerSocket != nil {
 			cfg.LocalContainer.DockerSocket = *file.LocalContainer.DockerSocket
 		}
+		// NOTE: localContainer.volumes is intentionally NOT loaded from
+		// repo-local config files. Bind mounts expose host paths and must
+		// be an explicit CLI action (--local-container-volume), not
+		// something an untrusted checkout can request via .crabbox.yaml.
 	}
 	if file.AppleContainer != nil {
 		if file.AppleContainer.CLIPath != "" {
@@ -4056,6 +4313,40 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.HyperV.InitPassword != nil {
 			cfg.HyperV.InitPassword = *file.HyperV.InitPassword
+		}
+	}
+	if file.WindowsSandbox != nil {
+		if file.WindowsSandbox.Workdir != "" {
+			cfg.WindowsSandbox.Workdir = file.WindowsSandbox.Workdir
+		}
+		if trusted {
+			if file.WindowsSandbox.TempRoot != "" {
+				cfg.WindowsSandbox.TempRoot = expandUserPath(file.WindowsSandbox.TempRoot)
+			}
+			if file.WindowsSandbox.Networking != "" {
+				cfg.WindowsSandbox.Networking = file.WindowsSandbox.Networking
+			}
+			if file.WindowsSandbox.VGPU != "" {
+				cfg.WindowsSandbox.VGPU = file.WindowsSandbox.VGPU
+			}
+			if file.WindowsSandbox.Clipboard != "" {
+				cfg.WindowsSandbox.Clipboard = file.WindowsSandbox.Clipboard
+			}
+			if file.WindowsSandbox.ProtectedClient != "" {
+				cfg.WindowsSandbox.ProtectedClient = file.WindowsSandbox.ProtectedClient
+			}
+			if file.WindowsSandbox.AudioInput != "" {
+				cfg.WindowsSandbox.AudioInput = file.WindowsSandbox.AudioInput
+			}
+			if file.WindowsSandbox.VideoInput != "" {
+				cfg.WindowsSandbox.VideoInput = file.WindowsSandbox.VideoInput
+			}
+			if file.WindowsSandbox.PrinterRedirection != "" {
+				cfg.WindowsSandbox.PrinterRedirection = file.WindowsSandbox.PrinterRedirection
+			}
+			if file.WindowsSandbox.MemoryMB > 0 {
+				cfg.WindowsSandbox.MemoryMB = file.WindowsSandbox.MemoryMB
+			}
 		}
 	}
 	if file.Tailscale != nil {
@@ -4580,6 +4871,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Incus.WorkRoot = getenv("CRABBOX_INCUS_WORK_ROOT", cfg.Incus.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_INCUS_DELETE_ON_RELEASE"); ok {
 		cfg.Incus.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "incus")
 	}
 	if timeout := os.Getenv("CRABBOX_INCUS_START_TIMEOUT"); timeout != "" {
 		applyLeaseDuration(&cfg.Incus.StartTimeout, timeout)
@@ -4705,7 +4997,10 @@ func applyEnv(cfg *Config) error {
 		cfg.SSHUser = sshUser
 		MarkSSHUserExplicit(cfg)
 	}
-	cfg.SSHKey = getenv("CRABBOX_SSH_KEY", cfg.SSHKey)
+	if sshKey := os.Getenv("CRABBOX_SSH_KEY"); sshKey != "" {
+		cfg.SSHKey = sshKey
+		MarkSSHKeyExplicit(cfg)
+	}
 	if sshPort := os.Getenv("CRABBOX_SSH_PORT"); sshPort != "" {
 		cfg.SSHPort = sshPort
 		MarkSSHPortExplicit(cfg)
@@ -4752,6 +5047,7 @@ func applyEnv(cfg *Config) error {
 	cfg.KubeVirt.WorkRoot = getenv("CRABBOX_KUBEVIRT_WORK_ROOT", cfg.KubeVirt.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
 		cfg.KubeVirt.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 	}
 	cfg.External.Command = getenv("CRABBOX_EXTERNAL_COMMAND", cfg.External.Command)
 	if arg := os.Getenv("CRABBOX_EXTERNAL_ARG"); arg != "" {
@@ -4770,6 +5066,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Namespace.WorkRoot = getenv("CRABBOX_NAMESPACE_WORK_ROOT", cfg.Namespace.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
 		cfg.Namespace.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 	}
 	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
 	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
@@ -4778,6 +5075,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
 		cfg.Morph.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "morph")
 	}
 	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
 		cfg.Morph.WakeOnSSH = value
@@ -4822,6 +5120,25 @@ func applyEnv(cfg *Config) error {
 	cfg.Runpod.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.Runpod.DiskGB)
 	cfg.Runpod.User = getenv("CRABBOX_RUNPOD_USER", cfg.Runpod.User)
 	cfg.Runpod.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.Runpod.WorkRoot)
+	cfg.Hostinger.APIToken = getenv("CRABBOX_HOSTINGER_API_TOKEN", getenv("HOSTINGER_API_TOKEN", cfg.Hostinger.APIToken))
+	cfg.Hostinger.APIURL = getenv("CRABBOX_HOSTINGER_API_URL", getenv("HOSTINGER_API_URL", cfg.Hostinger.APIURL))
+	cfg.Hostinger.ItemID = getenv("CRABBOX_HOSTINGER_ITEM_ID", cfg.Hostinger.ItemID)
+	cfg.Hostinger.PaymentMethodID = getenv("CRABBOX_HOSTINGER_PAYMENT_METHOD_ID", cfg.Hostinger.PaymentMethodID)
+	cfg.Hostinger.TemplateID = getenv("CRABBOX_HOSTINGER_TEMPLATE_ID", cfg.Hostinger.TemplateID)
+	cfg.Hostinger.DataCenterID = getenv("CRABBOX_HOSTINGER_DATA_CENTER_ID", cfg.Hostinger.DataCenterID)
+	cfg.Hostinger.HostnamePrefix = getenv("CRABBOX_HOSTINGER_HOSTNAME_PREFIX", cfg.Hostinger.HostnamePrefix)
+	if user := os.Getenv("CRABBOX_HOSTINGER_USER"); user != "" {
+		cfg.Hostinger.User = user
+		MarkHostingerUserExplicit(cfg)
+	}
+	if workRoot := os.Getenv("CRABBOX_HOSTINGER_WORK_ROOT"); workRoot != "" {
+		cfg.Hostinger.WorkRoot = workRoot
+		MarkHostingerWorkRootExplicit(cfg)
+	}
+	if value, ok := getenvBool("CRABBOX_HOSTINGER_ALLOW_PURCHASE"); ok {
+		cfg.Hostinger.AllowPurchase = value
+	}
+	cfg.Hostinger.ReleaseAction = getenv("CRABBOX_HOSTINGER_RELEASE_ACTION", cfg.Hostinger.ReleaseAction)
 	// WANDB_API_KEY is resolved by the W&B client after file config so a
 	// generic shell login cannot override an explicit wandb.apiKey value.
 	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)
@@ -4942,6 +5259,16 @@ func applyEnv(cfg *Config) error {
 	cfg.UpstashBox.Workdir = getenv("CRABBOX_UPSTASH_BOX_WORKDIR", cfg.UpstashBox.Workdir)
 	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
 		cfg.UpstashBox.KeepAlive = value
+	}
+	cfg.Smolvm.APIKey = getenv("CRABBOX_SMOLVM_API_KEY", getenv("SMOLMACHINES_API_KEY", getenv("SMK_API_KEY", cfg.Smolvm.APIKey)))
+	cfg.Smolvm.BaseURL = getenv("CRABBOX_SMOLVM_BASE_URL", cfg.Smolvm.BaseURL)
+	cfg.Smolvm.Image = getenv("CRABBOX_SMOLVM_IMAGE", cfg.Smolvm.Image)
+	cfg.Smolvm.Workdir = getenv("CRABBOX_SMOLVM_WORKDIR", cfg.Smolvm.Workdir)
+	cfg.Smolvm.CPUs = getenvInt("CRABBOX_SMOLVM_CPUS", cfg.Smolvm.CPUs)
+	cfg.Smolvm.MemoryMB = getenvInt("CRABBOX_SMOLVM_MEMORY_MB", cfg.Smolvm.MemoryMB)
+	cfg.Smolvm.Network = getenv("CRABBOX_SMOLVM_NETWORK", cfg.Smolvm.Network)
+	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
+		cfg.Smolvm.Keep = value
 	}
 	cfg.AsciiBox.APIKey = getenv("CRABBOX_ASCII_BOX_API_KEY", getenv("ASCII_BOX_API_KEY", cfg.AsciiBox.APIKey))
 	cfg.AsciiBox.BaseURL = getenv("CRABBOX_ASCII_BOX_BASE_URL", getenv("ASCII_BOX_BASE_URL", cfg.AsciiBox.BaseURL))
@@ -5091,6 +5418,16 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_HYPERV_INIT_PASSWORD"); ok {
 		cfg.HyperV.InitPassword = value
 	}
+	cfg.WindowsSandbox.Workdir = getenv("CRABBOX_WINDOWS_SANDBOX_WORKDIR", cfg.WindowsSandbox.Workdir)
+	cfg.WindowsSandbox.TempRoot = expandUserPath(getenv("CRABBOX_WINDOWS_SANDBOX_TEMP_ROOT", cfg.WindowsSandbox.TempRoot))
+	cfg.WindowsSandbox.Networking = getenv("CRABBOX_WINDOWS_SANDBOX_NETWORKING", cfg.WindowsSandbox.Networking)
+	cfg.WindowsSandbox.VGPU = getenv("CRABBOX_WINDOWS_SANDBOX_VGPU", cfg.WindowsSandbox.VGPU)
+	cfg.WindowsSandbox.Clipboard = getenv("CRABBOX_WINDOWS_SANDBOX_CLIPBOARD", cfg.WindowsSandbox.Clipboard)
+	cfg.WindowsSandbox.ProtectedClient = getenv("CRABBOX_WINDOWS_SANDBOX_PROTECTED_CLIENT", cfg.WindowsSandbox.ProtectedClient)
+	cfg.WindowsSandbox.AudioInput = getenv("CRABBOX_WINDOWS_SANDBOX_AUDIO_INPUT", cfg.WindowsSandbox.AudioInput)
+	cfg.WindowsSandbox.VideoInput = getenv("CRABBOX_WINDOWS_SANDBOX_VIDEO_INPUT", cfg.WindowsSandbox.VideoInput)
+	cfg.WindowsSandbox.PrinterRedirection = getenv("CRABBOX_WINDOWS_SANDBOX_PRINTER_REDIRECTION", cfg.WindowsSandbox.PrinterRedirection)
+	cfg.WindowsSandbox.MemoryMB = getenvInt("CRABBOX_WINDOWS_SANDBOX_MEMORY_MB", cfg.WindowsSandbox.MemoryMB)
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 	}

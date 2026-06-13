@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -156,6 +158,39 @@ func (b *testExternalRunnerJSONBackend) Spec() ProviderSpec {
 func (b *testExternalRunnerJSONBackend) ListJSON(_ context.Context, req ListRequest) (any, error) {
 	b.requests = append(b.requests, req)
 	return b.view, nil
+}
+
+type testListRequestBackend struct {
+	testSSHBackend
+	requests []ListRequest
+}
+
+func (b *testListRequestBackend) List(_ context.Context, req ListRequest) ([]LeaseView, error) {
+	b.requests = append(b.requests, req)
+	return []LeaseView{{CloudID: "cbx_list_all", Name: "list-all", Status: "ready"}}, nil
+}
+
+func TestListForwardsAllAndRefreshToBackend(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &testListRequestBackend{testSSHBackend: testSSHBackend{spec: testAWSProvider{}.Spec()}}
+	testAWSBackendOverride = backend
+	defer func() { testAWSBackendOverride = nil }()
+
+	var stdout, stderr bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).list(context.Background(), []string{"--provider", "aws", "--all", "--refresh", "--json"}); err != nil {
+		t.Fatalf("list error=%v stderr=%q", err, stderr.String())
+	}
+	if len(backend.requests) != 1 {
+		t.Fatalf("list requests=%#v, want one request", backend.requests)
+	}
+	if got := backend.requests[0]; !got.All || !got.Refresh {
+		t.Fatalf("list request=%#v, want all and refresh", got)
+	}
+	if stdout.Len() == 0 {
+		t.Fatal("list JSON output is empty")
+	}
 }
 
 func TestSyncExternalRunnersBestEffortPostsBlacksmithJSONList(t *testing.T) {

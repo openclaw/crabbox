@@ -160,6 +160,19 @@ func TestIsloProviderDeclaresPauseResume(t *testing.T) {
 	if !(Provider{}).Spec().Features.Has(core.FeaturePauseResume) {
 		t.Fatal("islo provider must declare pause-resume")
 	}
+	if !(Provider{}).Spec().Features.Has(core.FeatureSSH) {
+		t.Fatal("islo provider must declare ssh")
+	}
+}
+
+func TestIsloProviderExposesLoginWithoutSSHLease(t *testing.T) {
+	backend := NewIsloBackend((Provider{}).Spec(), Config{}, Runtime{})
+	if _, ok := backend.(core.SSHLoginBackend); !ok {
+		t.Fatalf("backend=%T does not expose SSH login", backend)
+	}
+	if _, ok := backend.(core.SSHLeaseBackend); ok {
+		t.Fatalf("backend=%T must not expose a Crabbox-managed SSH lease", backend)
+	}
 }
 
 func TestResolveIsloLeaseIDRejectsUnclaimedRawSandbox(t *testing.T) {
@@ -254,6 +267,133 @@ func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 	_, err := backend.Run(context.Background(), RunRequest{NoSync: true})
 	if err == nil || !strings.Contains(err.Error(), "escapes /workspace") {
 		t.Fatalf("Run err=%v, want workdir containment error", err)
+	}
+}
+
+func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	leaseID := "isb_crabbox-repo-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, root, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", ID: "sandbox-id", Status: "running", Image: "ubuntu"},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "web", Repo: Repo{Root: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Name != "crabbox-repo-abcdef" {
+		t.Fatalf("lease=%q server=%q", lease.LeaseID, lease.Server.Name)
+	}
+	if lease.SSH.Host != "crabbox-repo-abcdef.islo" || lease.SSH.User != isloWorkloadUser || lease.SSH.Port != "22" {
+		t.Fatalf("ssh target=%#v", lease.SSH)
+	}
+	if lease.SSH.Key != "" || len(lease.SSH.FallbackPorts) != 0 || !lease.SSH.SSHConfigProxy || !lease.SSH.DisableHostKeyChecking {
+		t.Fatalf("islo ssh should not force Crabbox's default key or fallback ports: %#v", lease.SSH)
+	}
+	if lease.Server.PublicNet.IPv4.IP != "crabbox-repo-abcdef.islo" || lease.Server.Labels["ssh_host"] != "crabbox-repo-abcdef.islo" {
+		t.Fatalf("server ssh labels=%#v public=%q", lease.Server.Labels, lease.Server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
+	client := &fakeIsloSyncClient{
+		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "running"},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	cfg := Config{SSHUser: "alice", SSHPort: "2022", SSHKey: "/tmp/islo-key", Islo: IsloConfig{APIKey: "test"}}
+	core.MarkSSHUserExplicit(&cfg)
+	core.MarkSSHPortExplicit(&cfg)
+	core.MarkSSHKeyExplicit(&cfg)
+	backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-repo-abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.User != "alice" || lease.SSH.Port != "2022" || lease.SSH.Key != "/tmp/islo-key" {
+		t.Fatalf("ssh target=%#v", lease.SSH)
+	}
+}
+
+func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
+	client := &fakeIsloSyncClient{
+		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-repo-abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.resumeCalls != 1 || lease.Server.Status != "running" {
+		t.Fatalf("resumeCalls=%d status=%q", client.resumeCalls, lease.Server.Status)
+	}
+}
+
+func TestIsloResolveSSHRejectsForeignClaimBeforeResume(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "isb_crabbox-repo-abcdef"
+	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{
+		ID:   leaseID,
+		Repo: Repo{Root: t.TempDir()},
+	})
+	if err == nil || !strings.Contains(err.Error(), "--reclaim") {
+		t.Fatalf("expected ownership error, got %v", err)
+	}
+	if client.resumeCalls != 0 {
+		t.Fatalf("resumeCalls=%d, want 0", client.resumeCalls)
+	}
+}
+
+func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
+	client := &fakeIsloSyncClient{
+		getSandboxes: []*gosdk.SandboxResponse{
+			{Name: "crabbox-repo-abcdef", Status: "starting"},
+			{Name: "crabbox-repo-abcdef", Status: "running"},
+		},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stderr: io.Discard},
+	}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-repo-abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "running" || len(client.getSandboxes) != 0 {
+		t.Fatalf("status=%q remaining responses=%d", lease.Server.Status, len(client.getSandboxes))
 	}
 }
 
@@ -1268,6 +1408,7 @@ type fakeIsloSyncClient struct {
 	createRequest            *gosdk.SandboxCreate
 	createName               string
 	getSandbox               *gosdk.SandboxResponse
+	getSandboxes             []*gosdk.SandboxResponse
 	getSandboxErr            error
 	getSandboxGone           bool
 	resumeErr                error
@@ -1294,6 +1435,11 @@ func (f *fakeIsloSyncClient) GetSandbox(_ context.Context, name string) (*gosdk.
 	}
 	if f.getSandboxGone {
 		return nil, nil
+	}
+	if len(f.getSandboxes) > 0 {
+		sandbox := f.getSandboxes[0]
+		f.getSandboxes = f.getSandboxes[1:]
+		return sandbox, nil
 	}
 	if f.getSandbox != nil {
 		return f.getSandbox, nil

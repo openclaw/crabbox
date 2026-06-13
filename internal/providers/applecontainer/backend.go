@@ -74,6 +74,11 @@ func isDefaultWorkRoot(value string) bool {
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
+
 func (b *backend) configForRun() core.Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)

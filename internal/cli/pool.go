@@ -20,6 +20,7 @@ func (a App) list(ctx context.Context, args []string) error {
 	fs := newFlagSet("list", a.Stderr)
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
 	jsonOut := fs.Bool("json", false, "print JSON")
+	all := fs.Bool("all", false, "include provider inventory outside Crabbox-owned leases where supported")
 	refresh := fs.Bool("refresh", false, "refresh provider-backed state where supported")
 	pondFilter := fs.String("pond", "", "only list leases tagged with this pond")
 	providerFlags := registerProviderFlags(fs, defaults)
@@ -48,7 +49,7 @@ func (a App) list(ctx context.Context, args []string) error {
 	}
 	if *jsonOut {
 		if jsonBackend, ok := backend.(JSONListBackend); ok {
-			view, err := jsonBackend.ListJSON(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), Refresh: *refresh})
+			view, err := jsonBackend.ListJSON(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh})
 			if err != nil {
 				return err
 			}
@@ -62,9 +63,9 @@ func (a App) list(ctx context.Context, args []string) error {
 	var servers []Server
 	switch b := backend.(type) {
 	case SSHLeaseBackend:
-		servers, err = b.List(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), Refresh: *refresh})
+		servers, err = b.List(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh})
 	case DelegatedRunBackend:
-		servers, err = b.List(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), Refresh: *refresh})
+		servers, err = b.List(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh})
 	default:
 		return exit(2, "provider=%s does not support list", backend.Spec().Name)
 	}

@@ -98,7 +98,21 @@ Provider flags:
 --local-container-memory <size>
 --local-container-network <network>
 --local-container-docker-socket
+--local-container-volume host:container[:ro]   (repeatable)
 ```
+
+`--local-container-volume` bind-mounts a host directory into the container.
+Repeatable for multiple mounts. Passes through to Docker `-v`. Read-only
+mounts use the `:ro` suffix. Container targets must not overlap Crabbox-managed
+work, SSH, cache, or desktop configuration paths because bootstrap changes
+ownership under those paths. System paths such as `/etc`, `/usr`, `/var`,
+`/home`, and `/tmp` are also rejected; use an application mount point such as
+`/mnt/my-app` or `/cache`.
+
+**Security:** This flag is CLI-only. It is intentionally not loaded from
+repo-local `.crabbox.yaml` because bind mounts expose host paths and must
+be an explicit operator action, not something an untrusted checkout can
+request.
 
 Environment overrides:
 
@@ -112,6 +126,10 @@ CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 ```
+
+Host bind mounts must be passed explicitly with `--local-container-volume`.
+Crabbox intentionally ignores `localContainer.volumes` from config files because
+repo-local config can come from untrusted checkouts.
 
 For runtimes that use Docker contexts or Docker-compatible API sockets, the
 active socket is selected from `DOCKER_HOST` or the Docker context when socket
@@ -193,7 +211,9 @@ metadata updates.
   relocates the saved workspace into the new lease path, and persists the scope
   for later lease commands even when ambient Docker settings change. The source
   container user and work root are also replayed so relocation keeps ownership
-  and path semantics intact.
+  and path semantics intact. When host volumes are attached to a fork, Crabbox
+  resolves the restore workdir inside the container and rejects any overlap
+  before clearing or extracting checkpoint data.
 - `warmup --actions-runner` is not supported. Use plain `crabbox run` for local
   container smoke tests, or a remote SSH provider for GitHub runner registration.
 - Socket pass-through is opt-in and grants the lease access to the host

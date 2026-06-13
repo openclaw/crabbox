@@ -497,31 +497,70 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 	return members, ineligible, nil
 }
 
-// collectPondMembers narrows a backend's list output to the pond of interest
-// and resolves each member's SSHTarget. Servers without an exposed-ports
-// label are kept in the projection (Ports is empty) so the no-op case is
-// observable to callers and to doctor.
+// collectPondMembers narrows a backend's list output to the pond of interest.
+// It resolves SSH targets only for members with exposed ports, avoiding a
+// provider lifecycle change when pond connect has nothing to forward.
 func collectPondMembers(ctx context.Context, backend SSHLeaseBackend, cfg Config, servers []Server, pond string) ([]pondMember, error) {
 	servers = filterServersByPond(servers, pond)
 	out := make([]pondMember, 0, len(servers))
 	for _, server := range servers {
-		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: pondResolveIDForServer(server)})
+		resolveID := pondResolveIDForServer(server)
+		name := strings.TrimSpace(serverSlug(server))
+		if name == "" {
+			name = resolveID
+		}
+		ports := parseExposedPortsLabel(server.Labels[pondExposedPortsLabelKey])
+		if len(ports) == 0 {
+			out = append(out, pondMember{Name: name, Ports: ports, Lease: resolveID})
+			continue
+		}
+		expectedClaim, expectedClaimed, err := resolveLeaseClaim(resolveID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s claim: %w", server.Name, err)
+		}
+		lease, err := backend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: resolveID, Prepare: true})
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", server.Name, err)
 		}
-		name := strings.TrimSpace(serverSlug(server))
+		if expectedClaimed && expectedClaim.LeaseID == lease.LeaseID {
+			if _, err := updateLeaseClaimEndpointIfUnchanged(lease.LeaseID, expectedClaim, lease.Server, lease.SSH); err != nil {
+				current, claimed, resolveErr := resolveLeaseClaim(lease.LeaseID)
+				if resolveErr != nil {
+					return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, resolveErr)
+				}
+				if claimed && claimEndpointInactiveState(current.Labels["state"]) {
+					return nil, fmt.Errorf("refresh %s claim endpoint: lease %s became inactive during resolve", server.Name, lease.LeaseID)
+				}
+				if !claimed || !leaseClaimHasEndpoint(current, lease) {
+					return nil, fmt.Errorf("refresh %s claim endpoint: %w", server.Name, err)
+				}
+			}
+		}
 		if name == "" {
 			name = lease.LeaseID
 		}
 		out = append(out, pondMember{
 			Name:  name,
 			SSH:   lease.SSH,
-			Ports: parseExposedPortsLabel(server.Labels[pondExposedPortsLabelKey]),
+			Ports: ports,
 			Lease: lease.LeaseID,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+func leaseClaimHasEndpoint(claim leaseClaim, lease LeaseTarget) bool {
+	if lease.Server.CloudID != "" && claim.CloudID != lease.Server.CloudID {
+		return false
+	}
+	if lease.SSH.Host != "" && claim.SSHHost != lease.SSH.Host {
+		return false
+	}
+	if port, err := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); err == nil && port > 0 && claim.SSHPort != port {
+		return false
+	}
+	return true
 }
 
 func disambiguatePondMemberNames(members []pondMember) []pondMember {

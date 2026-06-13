@@ -33,6 +33,11 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (core.
 
 func (b *semaphoreBackend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *semaphoreBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
+}
+
 // Acquire creates a Semaphore job and returns SSH connection info.
 // Crabbox handles all sync and command execution from here.
 func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {

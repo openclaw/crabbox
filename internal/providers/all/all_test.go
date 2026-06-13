@@ -117,6 +117,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"freestyle",
 		"gcp",
 		"hetzner",
+		"hostinger",
 		"incus",
 		"islo",
 		"kubevirt",
@@ -133,6 +134,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"runpod",
 		"anthropic-sandbox-runtime",
 		"semaphore",
+		"smolvm",
 		"sprites",
 		"ssh",
 		"tart",
@@ -140,6 +142,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"tensorlake",
 		"upstash-box",
 		"wandb",
+		"windows-sandbox",
 		"xcp-ng",
 	}
 	for _, name := range providers {

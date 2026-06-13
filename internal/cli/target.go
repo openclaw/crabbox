@@ -2,6 +2,7 @@ package cli
 
 import (
 	"flag"
+	"os"
 	"path"
 	"strings"
 )
@@ -282,6 +283,171 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)
+}
+
+// autoRouteExternalLease restores the provider configuration captured when an
+// external lease was acquired. This keeps existing leases addressable after
+// the user's current external configuration changes.
+func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
+	providerExplicit := flagWasSet(fs, "provider")
+	if providerExplicit {
+		cfg.providerExplicit = true
+	}
+	if flagWasSet(fs, "target") {
+		cfg.targetFlagExplicit = true
+	}
+	if flagWasSet(fs, "windows-mode") {
+		cfg.windowsModeFlagExplicit = true
+	}
+	return autoRouteExternalLeaseWithHints(
+		cfg,
+		id,
+		flagWasSet(fs, "external-routing-file"),
+		cfg.targetFlagExplicit,
+		cfg.windowsModeFlagExplicit,
+	)
+}
+
+func autoRouteExternalLeaseForConfig(cfg *Config, id string) error {
+	return autoRouteExternalLeaseWithHints(cfg, id, false, cfg.targetFlagExplicit, cfg.windowsModeFlagExplicit)
+}
+
+func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
+	path, err := ExternalRoutingPath(leaseID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return exit(2, "external routing state is missing for lease %s; refusing unverified cleanup", leaseID)
+		}
+		return err
+	}
+	cfg.External.RoutingFile = ""
+	cfg.External.routingLoaded = false
+	return autoRouteExternalLeaseForConfig(cfg, leaseID)
+}
+
+func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, targetExplicit, windowsModeExplicit bool) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	provider, providerErr := ProviderFor(cfg.Provider)
+	providerSelected := providerErr == nil && provider.Name() == "external"
+	if cfg.providerExplicit {
+		if providerErr != nil || provider.Name() != "external" {
+			return nil
+		}
+	}
+	if routingExplicit {
+		if !cfg.providerExplicit {
+			cfg.Provider = "external"
+		}
+		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
+	}
+	if providerSelected && strings.TrimSpace(cfg.External.RoutingFile) != "" {
+		if !cfg.External.routingLoaded {
+			if err := loadExternalRoutingConfig(cfg, cfg.External.RoutingFile); err != nil {
+				return err
+			}
+		}
+		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
+	}
+	claim, ok, err := uniqueExternalLeaseClaim(id, providerSelected)
+	if err != nil || !ok {
+		return err
+	}
+	path, err := ExternalRoutingPath(claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			if providerSelected {
+				return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
+			}
+			return exit(2, "external routing state is missing for lease %s; select provider=external explicitly only if the current lifecycle still owns it", claim.LeaseID)
+		}
+		return err
+	}
+	if !cfg.providerExplicit {
+		cfg.Provider = "external"
+	}
+	if err := loadExternalRoutingConfig(cfg, path); err != nil {
+		return err
+	}
+	return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
+}
+
+func loadExternalRoutingConfig(cfg *Config, path string) error {
+	routing, err := LoadExternalRouting(path)
+	if err != nil {
+		return err
+	}
+	cfg.External = routing
+	if strings.TrimSpace(routing.WorkRoot) != "" {
+		cfg.WorkRoot = routing.WorkRoot
+	}
+	return nil
+}
+
+func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit bool) error {
+	if !targetExplicit {
+		cfg.TargetOS = targetLinux
+	}
+	if !windowsModeExplicit {
+		cfg.WindowsMode = windowsModeNormal
+	}
+	normalizeTargetConfig(cfg)
+	return validateTargetConfig(*cfg)
+}
+
+func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseClaim, bool, error) {
+	exact, exists, err := readLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return leaseClaim{}, false, err
+	}
+	if exists {
+		if exact.Provider != "external" {
+			return leaseClaim{}, false, nil
+		}
+		return exact, true, nil
+	}
+	claims, err := listLeaseClaims()
+	if err != nil {
+		return leaseClaim{}, false, err
+	}
+	matches := make([]leaseClaim, 0, 1)
+	externalMatches := make([]leaseClaim, 0, 1)
+	for _, claim := range claims {
+		if !leaseClaimMatchesIdentifier(claim, identifier) {
+			continue
+		}
+		matches = append(matches, claim)
+		if claim.Provider == "external" {
+			externalMatches = append(externalMatches, claim)
+		}
+	}
+	if len(externalMatches) == 0 {
+		return leaseClaim{}, false, nil
+	}
+	candidates := matches
+	if providerSelected {
+		candidates = externalMatches
+	}
+	if len(candidates) > 1 {
+		if providerSelected {
+			// The configured external lifecycle scope remains the tiebreaker.
+			return leaseClaim{}, false, nil
+		}
+		ids := make([]string, 0, len(candidates))
+		for _, claim := range candidates {
+			ids = append(ids, claim.LeaseID)
+		}
+		return leaseClaim{}, false, exit(2, "multiple lease claims match %q: %s; use a lease id or an explicit provider", identifier, strings.Join(ids, ", "))
+	}
+	return externalMatches[0], true, nil
 }
 
 func staticLeaseClaim(id string) (leaseClaim, bool, error) {

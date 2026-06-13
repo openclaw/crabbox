@@ -172,6 +172,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
+	if err := autoRouteExternalLease(&cfg, fs, resolvedDoctorID); err != nil {
+		return err
+	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
@@ -197,7 +200,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		record("ok", tool, path, map[string]string{"tool": tool, "path": path})
 	}
 	if resolvedDoctorID != "" {
-		_, target, leaseID, err := a.resolveLeaseTarget(ctx, cfg, resolvedDoctorID)
+		_, target, leaseID, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{ID: resolvedDoctorID})
 		if err != nil {
 			if strings.TrimSpace(*fromRun) != "" {
 				record("skip", "remote", fmt.Sprintf("%s unavailable: %v", resolvedDoctorID, err), map[string]string{"id": resolvedDoctorID, "reason": "lease_unavailable"})
