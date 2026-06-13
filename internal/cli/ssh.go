@@ -363,7 +363,6 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 		// typed remote-command builders. Callers must shell-quote user data
 		// before it reaches this boundary; see remoteCommand/shellQuote tests.
 		// codeql[go/command-injection]
-		// lgtm[go/command-injection]
 		cmd := exec.CommandContext(ctx, "ssh", sshArgsNoInput(probe, remote)...)
 		var out synchronizedBuffer
 		err := runSSHCommand(cmd, &out, &out)

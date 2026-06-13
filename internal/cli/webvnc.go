@@ -2949,13 +2949,13 @@ func directSSHWebVNCChallengeResponse(password string, challenge []byte) ([]byte
 	}
 	// RFB 3.8 mandates this legacy DES challenge response. The VNC service and
 	// noVNC proxy are loopback-only and the hop between hosts is protected by SSH.
-	// codeql[go/weak-cryptographic-algorithm]
 	cipher, err := des.NewCipher(key[:])
 	if err != nil {
 		return nil, fmt.Errorf("create RFB password cipher: %w", err)
 	}
 	response := make([]byte, len(challenge))
 	for offset := 0; offset < len(challenge); offset += des.BlockSize {
+		// codeql[go/weak-cryptographic-algorithm]
 		cipher.Encrypt(response[offset:offset+des.BlockSize], challenge[offset:offset+des.BlockSize])
 	}
 	return response, nil
