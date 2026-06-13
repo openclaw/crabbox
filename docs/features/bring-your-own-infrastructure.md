@@ -123,11 +123,17 @@ Crabbox needs only the protocol contract documented in
 
 ## Persisted routing
 
-External leases keep a private mode-`0600` routing file on the operator machine.
-It records the resolved provider command or lifecycle, non-secret config,
-connection templates, provider scope, and resource identity. Generated retry,
-SSH, WebVNC daemon, and stop commands refer to the opaque file instead of
-embedding private configuration on the command line.
+External leases keep two pieces of private local state on the operator machine:
+
+- the lease claim stores the canonical lease, resolved cloud/resource identity,
+  and resolved SSH target;
+- the mode-`0600` routing file stores the provider command or lifecycle,
+  non-secret config, connection templates, provider scope, and work root.
+
+Generated retry, SSH, WebVNC, and stop commands use the claim and its opaque
+routing reference instead of embedding private configuration on the command
+line. Preserve both. For a nondeterministic protocol adapter, the routing file
+alone may not contain enough resolved identity to release the resource.
 
 Routing is scoped by the selected lifecycle or protocol command and config.
 Two control planes may therefore use the same friendly slug without claiming
@@ -179,7 +185,8 @@ The normal sequence is:
 1. provision through the direct provider;
 2. wait for SSH and claim the lease locally;
 3. register or refresh coordinator metadata;
-4. start heartbeats and, for kept desktops, the optional WebVNC bridge daemon;
+4. heartbeat during active commands and, for kept desktops, through the optional
+   persistent WebVNC bridge daemon;
 5. use SSH and rsync directly for commands;
 6. stop the bridge and delete or retain the provider resource;
 7. release the coordinator registration.
@@ -187,6 +194,11 @@ The normal sequence is:
 Coordinator expiry or release removes only the registration. It cannot invoke
 the direct provider and never deletes the underlying resource. Provider cleanup
 remains the CLI adapter's responsibility.
+
+A retained headless lease has no persistent background heartbeat after the
+command exits. Its coordinator record may reach idle expiry while the direct
+provider resource remains live. A kept desktop bridge keeps heartbeating while
+its daemon is connected.
 
 Registered records are excluded from managed provider cost totals, ready
 pools, image operations, and access reconciliation. Registration does not
@@ -214,10 +226,14 @@ restarts, the client reconnects and refreshes the registration.
 Use:
 
 ```sh
-crabbox webvnc daemon status --id my-box
+crabbox webvnc daemon status --id cbx_0123456789ab
 crabbox webvnc status --id my-box
 crabbox webvnc reset --id my-box
 ```
+
+The daemon subcommand reads local PID/log state keyed by canonical `cbx_...`
+lease ID and does not resolve a friendly slug. Obtain that ID from `inspect` or
+`list`.
 
 ## Sharing
 
@@ -273,11 +289,19 @@ crabbox webvnc status --provider external --id integration-smoke
 crabbox stop --provider external integration-smoke
 ```
 
-Also verify a failed second acquire step rolls back, a changed local config can
-still stop an existing lease through persisted routing, a coordinator outage
-does not block direct cleanup, and inventory no longer contains the resource
-after stop. When the coordinator can enumerate the same provider account,
-prove that its orphan sweep cannot select a live registered direct resource.
+Also verify a changed local config can still stop an existing lease through
+persisted routing, a coordinator outage does not block direct cleanup, and
+inventory no longer contains the resource after stop. To prove acquisition
+rollback, use a disposable config whose second acquire step fails and run:
+
+```sh
+crabbox warmup --provider external --slug rollback-smoke --keep=false
+```
+
+Verify that the release operation ran and provider inventory contains no
+`rollback-smoke` resource. When the coordinator can enumerate the same provider
+account, also prove its orphan sweep cannot select a live registered direct
+resource.
 
 ## Related documentation
 

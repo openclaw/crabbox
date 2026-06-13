@@ -223,6 +223,7 @@ Before serving users:
 - create a dedicated PostgreSQL database and least-privilege role;
 - enable database backups and test a restore;
 - deploy exactly one service replica;
+- use a Recreate/no-surge rollout so old and new processes never overlap;
 - enable TLS and WebSocket upgrades at ingress;
 - keep request buffering disabled for upgrades;
 - inject credentials through the platform secret store, never image layers or argv;
@@ -238,16 +239,19 @@ Before serving users:
 
 ## Upgrade and rollback
 
-The Node and Cloudflare adapters share the same logical record keys, but there
-is no automatic cross-runtime state migration. Treat a move from an existing
-Cloudflare deployment as a controlled migration: pause mutations, export and
-validate records, import them into PostgreSQL, switch the coordinator URL, and
-keep provider cleanup enabled throughout rollback coverage.
+The Node and Cloudflare adapters share the same logical record keys, but the
+repository does not ship supported Durable Object export or PostgreSQL import
+tooling. Stateful cross-runtime migration is therefore unsupported. Do not move
+active leases, tickets, jobs, or pending cleanup between runtimes. A fresh
+cutover is safe only after draining and releasing all resources and verifying
+that the old coordinator has no remaining cleanup obligations.
 
 Ordinary Node image upgrades are simpler. Back up PostgreSQL, deploy the new
-image to the single replica, wait for `/v1/ready`, and verify the startup
-reconciliation job. Roll back the image without rolling back the database
-unless the release notes explicitly require it.
+image with Recreate/no-surge semantics, wait for the old process to finish its
+graceful shutdown before starting the replacement, then wait for `/v1/ready`
+and verify startup reconciliation. Roll back the image with the same
+non-overlapping sequence and without rolling back the database unless release
+notes explicitly require it.
 
 ## Verification from source
 
