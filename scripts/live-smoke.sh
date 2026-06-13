@@ -373,6 +373,77 @@ namespace_smoke() {
   run_in_repo "$cb" list --provider namespace-devbox --json | jq 'map({id:.id,slug:.slug,provider:.provider,state:.state})'
 }
 
+namespace_instance_smoke() {
+  need_tool jq
+  need_tool rg
+
+  if [[ -z "${CRABBOX_LIVE_REPO:-}" ]]; then
+    echo "namespace-instance smoke requires CRABBOX_LIVE_REPO to be set explicitly" >&2
+    return 2
+  fi
+  if ! command -v nsc >/dev/null 2>&1; then
+    echo "namespace-instance smoke requires the authenticated Namespace nsc CLI on PATH" >&2
+    return 2
+  fi
+  if ! nsc auth check-login >/dev/null 2>&1; then
+    echo "namespace-instance smoke requires an authenticated nsc CLI; run nsc login" >&2
+    return 2
+  fi
+
+  local lease=""
+  local slug=""
+  cleanup() {
+    trap - RETURN ERR
+    if [[ -n "$lease" ]]; then
+      stop_provider_lease namespace-instance "$lease" "$slug"
+      lease=""
+      slug=""
+    fi
+  }
+  trap cleanup RETURN ERR
+
+  run_in_repo "$cb" doctor --provider namespace-instance
+
+  local smoke_slug="${CRABBOX_LIVE_NAMESPACE_INSTANCE_SLUG:-namespace-instance-smoke-$$}"
+  local ttl="${CRABBOX_LIVE_NAMESPACE_INSTANCE_TTL:-15m}"
+  local idle="${CRABBOX_LIVE_NAMESPACE_INSTANCE_IDLE_TIMEOUT:-5m}"
+  local duration="${CRABBOX_LIVE_NAMESPACE_INSTANCE_DURATION:-$ttl}"
+  local machine_type="${CRABBOX_LIVE_NAMESPACE_INSTANCE_MACHINE_TYPE:-linux-small}"
+  local out
+  capture_run out run_in_repo "$cb" warmup \
+    --provider namespace-instance \
+    --slug "$smoke_slug" \
+    --ttl "$ttl" \
+    --idle-timeout "$idle" \
+    --namespace-instance-duration "$duration" \
+    --namespace-instance-machine-type "$machine_type" \
+    --timing-json
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  local step_status=0
+  run_in_repo "$cb" status --provider namespace-instance --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_NAMESPACE_INSTANCE_WAIT_TIMEOUT:-5m}" || step_status=$?
+  if [[ "$step_status" -ne 0 ]]; then
+    cleanup
+    return "$step_status"
+  fi
+  run_in_repo "$cb" run --provider namespace-instance --id "$slug" --no-sync -- echo crabbox-namespace-instance-ok || step_status=$?
+  if [[ "$step_status" -ne 0 ]]; then
+    cleanup
+    return "$step_status"
+  fi
+  run_in_repo "$cb" list --provider namespace-instance --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status)})' || step_status=$?
+  if [[ "$step_status" -ne 0 ]]; then
+    cleanup
+    return "$step_status"
+  fi
+  stop_provider_lease namespace-instance "$lease" "$slug"
+  lease=""
+}
+
 semaphore_smoke() {
   need_tool jq
   need_tool rg
@@ -912,6 +983,10 @@ fi
 
 if has_provider namespace-devbox || has_provider namespace; then
   namespace_smoke
+fi
+
+if has_provider namespace-instance || has_provider namespace-compute; then
+  namespace_instance_smoke
 fi
 
 if has_provider semaphore; then

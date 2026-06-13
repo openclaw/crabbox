@@ -60,7 +60,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 49 providers (29 SSH lease, 19 delegated run, 1 service control).
+Current built-in surface: 50 providers (30 SSH lease, 19 delegated run, 1 service control).
 
 Access terms:
 
@@ -101,6 +101,7 @@ Access terms:
 | [multipass](multipass.md) (`mp`, `canonical-multipass`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `cache-volume` | `linux`; Canonical Multipass VM | `local`; GPU: no | Crabbox; VM delete and purge | Portable local Ubuntu VM | Ubuntu-only first implementation |
 | [mxc](mxc.md) (`execution-container`) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: none | `windows/normal`; Microsoft Execution Container | `local`; GPU: no | Windows runtime; container termination | Local isolated Windows command execution | Windows host and execution-container support required |
 | [namespace-devbox](namespace-devbox.md) (`namespace`, `namespace-devboxes`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Namespace Devbox | `provider-managed`; GPU: unknown | Namespace devbox CLI; stop by default; optional delete | Fast managed development box over SSH | Uses the devbox product, not Namespace Compute instances |
+| [namespace-instance](namespace-instance.md) (`namespace-compute`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Namespace Compute Instance | `provider-managed`; GPU: unknown | Namespace nsc CLI; Crabbox labels and nsc destroy | Namespace Compute Instance over normal Crabbox SSH | Requires nsc JSON SSH metadata; namespace alias remains Devbox |
 | [opencomputer](opencomputer.md) (`oc`, `open-computer`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; OpenComputer Linux VM | `provider-managed`; GPU: unknown | OpenComputer; VM delete | Hosted delegated Linux VM execution | REST execution contract, not an SSH lease |
 | [opensandbox](opensandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; OpenSandbox sandbox | `provider-managed`; GPU: unknown | OpenSandbox; sandbox delete | Hosted delegated sandbox through an open SDK | Requires compatible OpenSandbox control and exec endpoints |
 | [parallels](parallels.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `workspace-checkpoint`, `workspace-fork`, `workspace-restore`, `provider-snapshot` | `linux`, `macos`, `windows/normal`, `windows/wsl2`; Parallels linked-clone VM | `local`; GPU: no | Crabbox; clone delete | Local macOS, Linux, or Windows VM with snapshots | Requires prepared Parallels source VMs and SSH |

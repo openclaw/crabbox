@@ -54,6 +54,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=e2b               CRABBOX_LIVE_REPO=/path/
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=modal             CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox  CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-instance CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore         CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=sprites           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tenki CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
@@ -70,7 +71,11 @@ Per-provider smoke prerequisites:
 - **Modal** — an authenticated Modal Python client (`python3 -m modal setup` or Modal token env vars).
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
 - **Daytona** — `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or `daytona.snapshot`.
-- **Namespace** — the authenticated `devbox` CLI on `PATH`.
+- **Namespace Devbox** — the authenticated `devbox` CLI on `PATH`; the
+  `namespace` alias still selects this provider.
+- **Namespace Instance** — the authenticated `nsc` CLI on `PATH`, plus an
+  explicit `CRABBOX_LIVE_REPO`; this smoke creates and destroys a Compute
+  Instance and runs only when `CRABBOX_LIVE_PROVIDERS=namespace-instance`.
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
 - **Tenki** — the authenticated `tenki` CLI on `PATH`; run `tenki login` and complete the browser flow.
 - **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.

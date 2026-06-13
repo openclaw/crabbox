@@ -161,6 +161,7 @@ from the CLI.
 | [KubeVirt](docs/providers/kubevirt.md) — `kubevirt` (`kubernetes-vm`) | Linux · direct | Generic KubeVirt VMs through `kubectl`, `virtctl`, and control-plane SSH forwarding. |
 | [External](docs/providers/external.md) — `external` (`exec-provider`) | Linux · direct | Configured executable implementing the Crabbox provider protocol. |
 | [Namespace Devbox](docs/providers/namespace-devbox.md) — `namespace-devbox` (`namespace`, `namespace-devboxes`) | Linux · direct | Namespace.so Devboxes over SSH. |
+| [Namespace Instance](docs/providers/namespace-instance.md) — `namespace-instance` (`namespace-compute`) | Linux · direct | Namespace Compute Instances over SSH through `nsc`. |
 | [Semaphore](docs/providers/semaphore.md) — `semaphore` (`sem`) | Linux · direct | A Semaphore CI job leased as a testbox. |
 | [Sprites](docs/providers/sprites.md) — `sprites` | Linux · direct | Sprites microVMs through `sprite proxy`. |
 | [Tenki](docs/providers/tenki.md) — `tenki` | Linux · direct | Tenki sandbox VMs through `tenki sandbox ssh-proxy`. |
@@ -469,6 +470,7 @@ scripts/check-docs.sh
 
 # Optional live smoke, when broker/provider credentials are available
 CRABBOX_LIVE=1 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-instance CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 ```
 
 CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
