@@ -133,7 +133,24 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
     throw new MarketplaceInputError("marketplace preview is disabled", "marketplace_disabled");
   }
 
-  const ttlSeconds = positiveInt(input.ttlSeconds, 3600, 30 * 24 * 60 * 60);
+  // basic shape validation for untyped JSON input (readJson only casts)
+  if (input && typeof input === "object") {
+    if (input.providers !== undefined && !Array.isArray(input.providers)) {
+      throw new MarketplaceInputError("providers must be an array of provider names", "invalid_providers");
+    }
+  } else if (input !== undefined) {
+    throw new MarketplaceInputError("quote request must be an object", "invalid_request");
+  }
+
+  let ttlSeconds: number;
+  if (input.ttlSeconds !== undefined) {
+    if (!Number.isFinite(input.ttlSeconds) || input.ttlSeconds <= 0) {
+      throw new MarketplaceInputError("ttlSeconds must be a positive number of seconds", "invalid_ttl");
+    }
+    ttlSeconds = positiveInt(input.ttlSeconds, 3600, 30 * 24 * 60 * 60);
+  } else {
+    ttlSeconds = 3600;
+  }
   const className = nonEmpty(input.class) || "standard";
   const serverType = nonEmpty(input.serverType) || className;
   const target = quoteTarget(input.target);
