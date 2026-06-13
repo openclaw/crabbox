@@ -1943,9 +1943,10 @@ export class FleetCoordinator {
             );
           }
           const now = new Date();
+          const hardDeadline = workspaceProvisionDeadline(current);
           current.provisionClaim = provisionClaim;
           current.provisionClaimExpiresAt = new Date(
-            now.getTime() + workspaceProvisionClaimMs,
+            Math.min(now.getTime() + workspaceProvisionClaimMs, hardDeadline),
           ).toISOString();
           current.updatedAt = now.toISOString();
           delete current.reconcileAfter;
@@ -8135,8 +8136,8 @@ async function workspaceLeaseRequest(
   sshPublicKey: string,
 ): Promise<Request> {
   const remainingMs = workspaceProvisionDeadline(workspace) - Date.now();
-  if (remainingMs <= 0) {
-    throw new Error("workspace provisioning deadline expired");
+  if (remainingMs < workspaceProvisionRecoveryGraceMs) {
+    throw new Error("workspace provisioning recovery window no longer fits before hard TTL");
   }
   const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
   const providerKey = `${workspaceProviderKeyPrefix}${(
@@ -8207,9 +8208,13 @@ function workspaceProvisionRecoveryDeadline(
   lease?: LeaseRecord,
 ): number {
   const requestStartedAt = Date.parse(lease?.provisioningRequestStartedAt ?? "");
-  return Number.isFinite(requestStartedAt)
-    ? requestStartedAt + workspaceProvisionRecoveryGraceMs
-    : workspaceProvisionDeadline(workspace) + workspaceProvisionRecoveryGraceMs;
+  const hardDeadline = workspaceProvisionDeadline(workspace);
+  return Math.min(
+    hardDeadline,
+    Number.isFinite(requestStartedAt)
+      ? requestStartedAt + workspaceProvisionRecoveryGraceMs
+      : hardDeadline,
+  );
 }
 
 function workspaceProvisioningNeedsRecovery(

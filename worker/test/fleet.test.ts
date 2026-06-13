@@ -1035,6 +1035,51 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(Date.parse(String(workspace["reconcileAfter"])));
   });
 
+  it("refuses late workspace provisioning that cannot recover before hard TTL", async () => {
+    const storage = new MemoryStorage();
+    let providerCreates = 0;
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(async () => {
+          providerCreates += 1;
+        }),
+      },
+      { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
+    );
+    const createdAt = new Date(Date.now() - 6 * 60_000).toISOString();
+    storage.seed("workspace:example-org:alice%40example.com:fleet-is-130", {
+      id: "fleet-is-130",
+      leaseID: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      provider: "hetzner",
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 1200,
+      idleTimeoutSeconds: 360,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    await fleet.alarm();
+
+    expect(providerCreates).toBe(0);
+    const failed = await fleet.fetch(
+      request("GET", "/v1/workspaces/fleet-is-130", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    await expect(failed.json()).resolves.toMatchObject({
+      status: "failed",
+      message: "workspace provisioning recovery window no longer fits before hard TTL",
+    });
+  });
+
   it("rejects a conflicting non-workspace lease using the reserved workspace lease ID", async () => {
     const storage = new MemoryStorage();
     let providerReleases = 0;
