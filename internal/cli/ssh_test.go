@@ -915,8 +915,18 @@ func TestWindowsWSLNativeToolPathsRejectsWindowsShims(t *testing.T) {
 			want:  false,
 		},
 		{
+			name:  "mnt other drive shim",
+			paths: "/mnt/d/tools/rsync\n/usr/bin/ssh\n",
+			want:  false,
+		},
+		{
 			name:  "mnt host c shim",
 			paths: "/mnt/host/c/msys64/usr/bin/rsync\n/usr/bin/ssh\n",
+			want:  false,
+		},
+		{
+			name:  "mnt host other drive shim",
+			paths: "/mnt/host/e/tools/rsync\n/usr/bin/ssh\n",
 			want:  false,
 		},
 	}

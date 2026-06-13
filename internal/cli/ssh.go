@@ -876,13 +876,19 @@ func windowsWSLNativeToolPath(path string) bool {
 	if strings.HasSuffix(path, ".exe") {
 		return false
 	}
-	if path == "/mnt/c" || strings.HasPrefix(path, "/mnt/c/") {
-		return false
-	}
-	if path == "/mnt/host/c" || strings.HasPrefix(path, "/mnt/host/c/") {
+	if windowsWSLMountedDrivePath(path) {
 		return false
 	}
 	return true
+}
+
+func windowsWSLMountedDrivePath(path string) bool {
+	rest, ok := strings.CutPrefix(path, "/mnt/")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimPrefix(rest, "host/")
+	return len(rest) >= 1 && rest[0] >= 'a' && rest[0] <= 'z' && (len(rest) == 1 || rest[1] == '/')
 }
 
 // windowsToWSLMountPath converts a single Windows path to WSL /mnt/ form.
