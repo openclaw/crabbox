@@ -31,13 +31,84 @@ Crabbox should be the customer-facing gateway:
 - Direct-provider mode remains outside Crabbox billing unless a user explicitly
   routes through a coordinator.
 
+The billing operator should be configurable. The same marketplace contract needs
+to work for an OpenClaw-hosted gateway, a neutral Crabbox-hosted gateway such as
+`crabbox.sh`, and self-hosted coordinators that only want BYOK routing and spend
+policy. Product names, checkout URLs, tax settings, support contact, and legal
+entity data should be deployment configuration, not provider-adapter behavior.
+
 The coordinator becomes the single source of truth for:
 
 - marketplace feature status;
 - customer-facing credit quotes;
 - route candidate ranking;
+- gateway API keys or scoped service tokens;
 - credit authorization and reservation, once the ledger exists;
 - lease-to-credit reconciliation.
+
+## Gateway Patterns To Copy
+
+AI gateways that already operate across multiple upstream providers point to
+several product requirements that should exist before Crabbox credits become
+mandatory:
+
+- One gateway credential should access many upstream providers, while upstream
+  provider credentials stay broker-owned or BYOK-managed.
+- Spend limits need multiple scopes: fleet, org or project, user, and API key.
+- BYOK and managed-provider modes should be explicit. BYOK customers bring
+  provider credentials and use Crabbox for routing, observability, and policy;
+  managed-provider customers pay Crabbox and consume credits.
+- Routing groups should be named policy objects with active members, priority
+  for failover, and weight for load balancing among equivalent providers.
+- Every credit-enforced request needs observability records: quote ID, route
+  group, selected provider, fallback attempts, estimated credits, captured
+  credits, and provider cost attribution.
+- Credit enforcement must require pricing data. If the broker cannot price a
+  route, it should reject credit-enforced requests before provisioning rather
+  than silently creating untracked spend.
+
+## Payment Operator Model
+
+Separate the technical gateway from the commercial operator:
+
+```text
+gateway tenant        example domain       payment mode
+openclaw-hosted       openclaw.ai          OpenClaw merchant of record or reseller
+crabbox-hosted        crabbox.sh           Crabbox merchant of record or reseller
+self-hosted           customer domain      BYOK, internal chargeback, or disabled payments
+```
+
+The coordinator should expose a deployment-level billing profile:
+
+```text
+CRABBOX_MARKETPLACE_BRAND_NAME
+CRABBOX_MARKETPLACE_PUBLIC_URL
+CRABBOX_MARKETPLACE_SUPPORT_EMAIL
+CRABBOX_MARKETPLACE_LEGAL_ENTITY
+CRABBOX_MARKETPLACE_TERMS_URL
+CRABBOX_MARKETPLACE_PRIVACY_URL
+CRABBOX_MARKETPLACE_PAYMENT_PROVIDER
+CRABBOX_MARKETPLACE_LEDGER_PROVIDER
+```
+
+That profile lets a hosted OpenClaw deployment and a hosted Crabbox deployment
+share the same APIs while keeping invoices, support, terms, and settlement under
+the right operator. Payment webhooks should include the tenant/operator ID in
+their idempotency keys so credits cannot cross domains accidentally.
+
+Payment modes:
+
+- `managed`: customer pays the gateway operator; Crabbox credits are consumed
+  across managed providers.
+- `byok`: customer supplies provider credentials; Crabbox still provides routing
+  policy, observability, and optional internal spend caps.
+- `hybrid`: managed providers consume credits, BYOK providers record usage
+  without charging credits unless the operator configures internal chargeback.
+- `disabled`: quotes and usage only.
+
+Do not make OpenClaw-specific names part of the protocol. Use neutral field
+names such as `billingProfile`, `tenant`, `owner`, `org`, `checkoutURL`, and
+`ledgerAccountID`.
 
 ## APIs
 
@@ -119,6 +190,7 @@ Initial strategies:
 Later routing inputs can include:
 
 - capacity hints and recent no-capacity failures;
+- routing-group member priority, weight, and active flags;
 - warm pool availability;
 - user/org policy and provider allowlists;
 - historical reliability;
@@ -207,25 +279,37 @@ Example:
   "aws:beast": {
     "costHourlyUSD": 2,
     "retailHourlyUSD": 3,
+    "priority": 20,
+    "weight": 1,
     "enabled": true
   },
   "hetzner:beast": {
     "costHourlyUSD": 1,
-    "markupBps": 1500
+    "markupBps": 1500,
+    "priority": 10,
+    "weight": 2
   }
 }
 ```
+
+Higher `priority` values are ranked first. `weight` is surfaced in quotes for a
+future load-balancer across providers with the same priority.
 
 ## Product Decisions Still Required
 
 Before real payment code lands, maintainers need explicit decisions for:
 
 - payment processor and customer account model;
+- OpenClaw-hosted versus Crabbox-hosted merchant/support/legal ownership;
 - whether credits are prepaid only, postpaid, or hybrid;
 - ledger storage, backup, audit, and admin access;
 - refund, failed-provisioning, expired-lease, and partial-use rules;
 - tax, invoice, receipt, and chargeback ownership;
 - provider cost variance and margin policy;
+- whether unknown pricing data rejects credit-enforced leases;
+- gateway API key scopes and spend caps per key;
+- BYOK versus managed-provider account boundaries;
+- routing group priority, weight, and active-member semantics;
 - whether marketplace routing may override explicit provider requests;
 - customer-facing SLA and capacity failure messaging;
 - privacy boundaries for provider account IDs and settlement records.
@@ -237,9 +321,11 @@ Before real payment code lands, maintainers need explicit decisions for:
    processor.
 3. Payment MVP: customer checkout and webhooks with idempotent credit purchases.
 4. Enforcement MVP: credit authorization before brokered lease provisioning.
-5. Smart routing MVP: route selection from quote into lease creation.
-6. Settlement reports: provider cost attribution and margin dashboards.
-7. Delegated providers: extend the marketplace contract beyond coordinator-owned
+5. Routing groups MVP: active members, priority failover, weighted same-priority
+   load balancing, and route audit events.
+6. Smart routing MVP: route selection from quote into lease creation.
+7. Settlement reports: provider cost attribution and margin dashboards.
+8. Delegated providers: extend the marketplace contract beyond coordinator-owned
    providers once external sandbox adapters expose comparable quote metadata.
 
 ## Related Docs

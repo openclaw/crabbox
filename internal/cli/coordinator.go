@@ -685,6 +685,8 @@ type CoordinatorMarketplaceQuoteCandidate struct {
 	Target            string  `json:"target"`
 	Class             string  `json:"class"`
 	ServerType        string  `json:"serverType"`
+	Priority          int     `json:"priority"`
+	Weight            float64 `json:"weight"`
 	TTLSeconds        int     `json:"ttlSeconds"`
 	CostHourlyUSD     float64 `json:"costHourlyUSD"`
 	RetailHourlyUSD   float64 `json:"retailHourlyUSD"`

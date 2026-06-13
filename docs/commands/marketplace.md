@@ -89,10 +89,17 @@ number, interpreted as retail hourly credits, or an object:
     "costHourlyUSD": 2,
     "retailHourlyUSD": 3,
     "markupBps": 1500,
+    "priority": 20,
+    "weight": 1,
     "enabled": true
   }
 }
 ```
+
+`priority` and `weight` are routing-policy skeleton fields. Higher-priority
+candidates are ranked first for failover-style routing. `weight` is returned in
+quotes so a later load-balancing implementation can split traffic among
+candidates with the same priority.
 
 ## Related Docs
 

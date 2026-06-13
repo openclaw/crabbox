@@ -120,9 +120,11 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 		quote.ID, quote.Mode, quote.Strategy, formatDurationSeconds(int64(quote.TTLSeconds)))
 	if quote.Selected != nil {
 		candidate := *quote.Selected
-		fmt.Fprintf(out, "selected provider=%s route=%s credits=$%.2f retail=$%.2f/h provider_cost=$%.2f/h margin=$%.2f\n",
+		fmt.Fprintf(out, "selected provider=%s route=%s priority=%d weight=%.2f credits=$%.2f retail=$%.2f/h provider_cost=$%.2f/h margin=$%.2f\n",
 			candidate.Provider,
 			candidate.RouteKey,
+			candidate.Priority,
+			candidate.Weight,
 			candidate.Credits,
 			candidate.RetailHourlyUSD,
 			candidate.CostHourlyUSD,
@@ -140,8 +142,10 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 					status += ":" + candidate.UnavailableReason
 				}
 			}
-			fmt.Fprintf(out, "  %-8s credits=$%-8.2f retail=$%-8.2f/h provider_cost=$%-8.2f/h route=%-28s %s\n",
+			fmt.Fprintf(out, "  %-8s priority=%-3d weight=%-6.2f credits=$%-8.2f retail=$%-8.2f/h provider_cost=$%-8.2f/h route=%-28s %s\n",
 				candidate.Provider,
+				candidate.Priority,
+				candidate.Weight,
 				candidate.Credits,
 				candidate.RetailHourlyUSD,
 				candidate.CostHourlyUSD,

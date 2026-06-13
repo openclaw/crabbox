@@ -64,6 +64,27 @@ describe("marketplace skeleton", () => {
     expect(quote.warnings).toContain("no candidate fits the requested credit ceiling");
   });
 
+  it("uses rate-card priority before price strategy", () => {
+    const quote = marketplaceQuote(
+      {
+        CRABBOX_MARKETPLACE_ENABLED: "1",
+        CRABBOX_MARKETPLACE_ALLOWED_PROVIDERS: "aws,hetzner",
+        CRABBOX_MARKETPLACE_RATE_CARD_JSON: JSON.stringify({
+          "aws:beast": { costHourlyUSD: 2, retailHourlyUSD: 4, priority: 20, weight: 3 },
+          "hetzner:beast": { costHourlyUSD: 1, retailHourlyUSD: 2, priority: 10, weight: 1 },
+        }),
+      } as Env,
+      { provider: "auto", class: "beast", ttlSeconds: 3600, strategy: "cheapest" },
+    );
+
+    expect(quote.selected).toMatchObject({
+      provider: "aws",
+      priority: 20,
+      weight: 3,
+      credits: 4,
+    });
+  });
+
   it("rejects quotes while preview mode is disabled", () => {
     expect(() => marketplaceQuote({} as Env, { provider: "aws" })).toThrow(MarketplaceInputError);
   });

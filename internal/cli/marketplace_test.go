@@ -61,7 +61,7 @@ func TestMarketplaceQuoteCommandSendsSmartRoutingIntent(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"quote":{"id":"mq_123","mode":"preview","currency":"USD","creditUnit":"usd","strategy":"cheapest","ttlSeconds":7200,"selected":{"provider":"hetzner","target":"linux","class":"beast","serverType":"beast","ttlSeconds":7200,"costHourlyUSD":1,"retailHourlyUSD":1.5,"estimatedCostUSD":2,"credits":3,"marginUSD":1,"routeKey":"hetzner:linux:beast","available":true},"candidates":[{"provider":"hetzner","target":"linux","class":"beast","serverType":"beast","ttlSeconds":7200,"costHourlyUSD":1,"retailHourlyUSD":1.5,"estimatedCostUSD":2,"credits":3,"marginUSD":1,"routeKey":"hetzner:linux:beast","available":true}],"warnings":["preview quote only"]},"marketplace":{"enabled":true,"mode":"preview","currency":"USD","creditUnit":"usd","requireCreditsForLeases":false,"supportedProviders":["aws","hetzner"],"features":{"quotes":true,"bidding":true,"payments":false,"creditLedger":false,"leaseEnforcement":false},"settlement":{"paymentProvider":"none","ledgerProvider":"none","providerSettlement":"external"},"decisionsRequired":["choose ledger"]}}`))
+		_, _ = w.Write([]byte(`{"quote":{"id":"mq_123","mode":"preview","currency":"USD","creditUnit":"usd","strategy":"cheapest","ttlSeconds":7200,"selected":{"provider":"hetzner","target":"linux","class":"beast","serverType":"beast","priority":10,"weight":1,"ttlSeconds":7200,"costHourlyUSD":1,"retailHourlyUSD":1.5,"estimatedCostUSD":2,"credits":3,"marginUSD":1,"routeKey":"hetzner:linux:beast","available":true},"candidates":[{"provider":"hetzner","target":"linux","class":"beast","serverType":"beast","priority":10,"weight":1,"ttlSeconds":7200,"costHourlyUSD":1,"retailHourlyUSD":1.5,"estimatedCostUSD":2,"credits":3,"marginUSD":1,"routeKey":"hetzner:linux:beast","available":true}],"warnings":["preview quote only"]},"marketplace":{"enabled":true,"mode":"preview","currency":"USD","creditUnit":"usd","requireCreditsForLeases":false,"supportedProviders":["aws","hetzner"],"features":{"quotes":true,"bidding":true,"payments":false,"creditLedger":false,"leaseEnforcement":false},"settlement":{"paymentProvider":"none","ledgerProvider":"none","providerSettlement":"external"},"decisionsRequired":["choose ledger"]}}`))
 	}))
 	defer server.Close()
 	t.Setenv("CRABBOX_COORDINATOR", server.URL)
@@ -95,7 +95,7 @@ func TestMarketplaceQuoteCommandSendsSmartRoutingIntent(t *testing.T) {
 	output := stdout.String()
 	for _, want := range []string{
 		"marketplace quote mq_123 mode=preview strategy=cheapest ttl=2h0m0s",
-		"selected provider=hetzner route=hetzner:linux:beast credits=$3.00",
+		"selected provider=hetzner route=hetzner:linux:beast priority=10 weight=1.00 credits=$3.00",
 		"preview quote only",
 		"choose ledger",
 	} {

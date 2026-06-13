@@ -47,6 +47,8 @@ export interface MarketplaceQuoteCandidate {
   target: TargetOS;
   class: string;
   serverType: string;
+  priority: number;
+  weight: number;
   ttlSeconds: number;
   costHourlyUSD: number;
   retailHourlyUSD: number;
@@ -75,6 +77,7 @@ interface MarketplaceRate {
   retailHourlyUSD?: number;
   markupBps?: number;
   priority?: number;
+  weight?: number;
   enabled?: boolean;
 }
 
@@ -85,7 +88,8 @@ const defaultMarketplaceDecisions = [
   "choose durable credit ledger and refund adjustment model",
   "define provider settlement, taxes, invoices, and chargeback ownership",
   "decide whether credit enforcement is advisory or mandatory for lease creation",
-  "define provider bid inputs, ranking policy, and compatibility guarantees",
+  "define routing groups with priority, weight, active flags, and compatibility guarantees",
+  "decide whether unknown pricing data blocks credit-enforced lease creation",
 ];
 
 export function marketplaceStatus(env: Env): MarketplaceStatus {
@@ -188,6 +192,8 @@ function quoteCandidate(
     target,
     class: className,
     serverType,
+    priority: rate?.priority ?? 0,
+    weight: rate?.weight ?? 1,
     ttlSeconds,
     costHourlyUSD,
     retailHourlyUSD,
@@ -348,6 +354,7 @@ function normalizeRate(value: Record<string, unknown>): MarketplaceRate {
   const markupBps =
     value["markupBps"] === undefined ? undefined : envInt(String(value["markupBps"]));
   const priority = value["priority"] === undefined ? undefined : envInt(String(value["priority"]));
+  const weight = positiveNumber(value["weight"]);
   if (costHourlyUSD !== undefined) {
     rate.costHourlyUSD = costHourlyUSD;
   }
@@ -359,6 +366,9 @@ function normalizeRate(value: Record<string, unknown>): MarketplaceRate {
   }
   if (priority !== undefined) {
     rate.priority = priority;
+  }
+  if (weight !== undefined) {
+    rate.weight = weight;
   }
   if (typeof value["enabled"] === "boolean") {
     rate.enabled = value["enabled"];
@@ -373,6 +383,9 @@ function candidateRank(
 ): number {
   if (left.available !== right.available) {
     return left.available ? -1 : 1;
+  }
+  if (left.priority !== right.priority) {
+    return right.priority - left.priority;
   }
   if (strategy === "provider-default") {
     return 0;
