@@ -138,6 +138,12 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
     if (input.providers !== undefined && !Array.isArray(input.providers)) {
       throw new MarketplaceInputError("providers must be an array of provider names", "invalid_providers");
     }
+    if (input.class !== undefined && typeof input.class !== "string") {
+      throw new MarketplaceInputError("class must be a string", "invalid_class");
+    }
+    if (input.serverType !== undefined && typeof input.serverType !== "string") {
+      throw new MarketplaceInputError("serverType must be a string", "invalid_server_type");
+    }
   } else if (input !== undefined) {
     throw new MarketplaceInputError("quote request must be an object", "invalid_request");
   }
