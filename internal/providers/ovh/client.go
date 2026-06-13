@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -55,6 +54,26 @@ type Project struct {
 	ProjectID   string `json:"projectId,omitempty"`
 	Description string `json:"description,omitempty"`
 	Status      string `json:"status,omitempty"`
+}
+
+type projectList []Project
+
+func (p *projectList) UnmarshalJSON(data []byte) error {
+	var ids []string
+	if err := json.Unmarshal(data, &ids); err == nil {
+		projects := make([]Project, 0, len(ids))
+		for _, id := range ids {
+			projects = append(projects, Project{ID: id})
+		}
+		*p = projects
+		return nil
+	}
+	var projects []Project
+	if err := json.Unmarshal(data, &projects); err != nil {
+		return err
+	}
+	*p = projects
+	return nil
 }
 
 func (p Project) Key() string {
@@ -153,13 +172,12 @@ type API interface {
 }
 
 type InstanceCreateRequest struct {
-	Name     string            `json:"name"`
-	Region   string            `json:"region"`
-	FlavorID string            `json:"flavorId"`
-	ImageID  string            `json:"imageId"`
-	SSHKeyID string            `json:"sshKeyId,omitempty"`
-	UserData string            `json:"userData,omitempty"`
-	Labels   map[string]string `json:"labels,omitempty"`
+	Name     string `json:"name"`
+	Region   string `json:"region"`
+	FlavorID string `json:"flavorId"`
+	ImageID  string `json:"imageId"`
+	SSHKeyID string `json:"sshKeyId,omitempty"`
+	UserData string `json:"userData,omitempty"`
 }
 
 func newClient(cfg core.Config, rt core.Runtime) (*Client, error) {
@@ -221,9 +239,9 @@ func (c *Client) AuthTime(ctx context.Context) (int64, error) {
 }
 
 func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
-	var out []Project
+	var out projectList
 	err := c.do(ctx, http.MethodGet, "/cloud/project", nil, &out)
-	return out, err
+	return []Project(out), err
 }
 
 func (c *Client) ListRegions(ctx context.Context, projectID string) ([]Region, error) {
@@ -332,11 +350,10 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body := strings.TrimSpace(string(data))
+		body := redactSecrets(strings.TrimSpace(string(data)), c.applicationKey, c.applicationSecret, c.consumerKey)
 		if len(body) > 400 {
 			body = body[:400]
 		}
-		body = redactSecrets(body, c.applicationKey, c.applicationSecret, c.consumerKey)
 		if readErr != nil {
 			if body != "" {
 				body += "; "
@@ -393,9 +410,20 @@ func cloudPath(projectID string, parts ...string) string {
 	all = append(all, parts...)
 	escaped := make([]string, 0, len(all))
 	for _, part := range all {
-		escaped = append(escaped, url.PathEscape(part))
+		escaped = append(escaped, escapePathSegment(part))
 	}
-	return "/" + path.Join(escaped...)
+	return "/" + strings.Join(escaped, "/")
+}
+
+func escapePathSegment(part string) string {
+	switch part {
+	case ".":
+		return "%2E"
+	case "..":
+		return "%2E%2E"
+	default:
+		return url.PathEscape(part)
+	}
 }
 
 func queryRegion(region string) string {

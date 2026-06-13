@@ -48,6 +48,41 @@ func TestClientSignsReadOnlyRequests(t *testing.T) {
 	}
 }
 
+func TestCloudPathPreservesEscapedDotSegments(t *testing.T) {
+	cases := []struct {
+		name      string
+		projectID string
+		parts     []string
+		want      string
+	}{
+		{
+			name:      "slash in project id",
+			projectID: "project/id",
+			parts:     []string{"region"},
+			want:      "/cloud/project/project%2Fid/region",
+		},
+		{
+			name:      "dot project id",
+			projectID: ".",
+			parts:     []string{"sshkey", ".."},
+			want:      "/cloud/project/%2E/sshkey/%2E%2E",
+		},
+		{
+			name:      "dot resource id",
+			projectID: "project-test",
+			parts:     []string{"instance", ".."},
+			want:      "/cloud/project/project-test/instance/%2E%2E",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cloudPath(tc.projectID, tc.parts...); got != tc.want {
+				t.Fatalf("cloudPath()=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClientAuthTimeIsUnsigned(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/auth/time" {
@@ -79,7 +114,7 @@ func TestClientReadOnlyDiscoveryMethods(t *testing.T) {
 		seen[r.URL.String()] = true
 		switch r.URL.Path {
 		case "/cloud/project":
-			_ = json.NewEncoder(w).Encode([]Project{{ID: "project-test"}})
+			_ = json.NewEncoder(w).Encode([]string{"project-test"})
 		case "/cloud/project/project-test/region":
 			_ = json.NewEncoder(w).Encode([]string{"BHS5", "GRA11"})
 		case "/cloud/project/project-test/flavor":
@@ -106,8 +141,12 @@ func TestClientReadOnlyDiscoveryMethods(t *testing.T) {
 
 	client := newTestClient(t, server.URL)
 	ctx := context.Background()
-	if _, err := client.ListProjects(ctx); err != nil {
+	projects, err := client.ListProjects(ctx)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].Key() != "project-test" {
+		t.Fatalf("projects=%#v", projects)
 	}
 	regions, err := client.ListRegions(ctx, "project-test")
 	if err != nil {
@@ -187,12 +226,11 @@ func TestClientMutatingLifecycleMethods(t *testing.T) {
 		ImageID:  "image-id",
 		SSHKeyID: key.ID,
 		UserData: "#cloud-config",
-		Labels:   map[string]string{"provider": providerName},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "instance-id" || instanceBody.FlavorID != "flavor-id" || instanceBody.ImageID != "image-id" || instanceBody.SSHKeyID != "key-id" || instanceBody.Labels["provider"] != providerName {
+	if created.ID != "instance-id" || instanceBody.FlavorID != "flavor-id" || instanceBody.ImageID != "image-id" || instanceBody.SSHKeyID != "key-id" || instanceBody.UserData != "#cloud-config" {
 		t.Fatalf("created=%#v body=%#v", created, instanceBody)
 	}
 	if err := client.DeleteInstance(context.Background(), "project-test", "instance-id"); err != nil {
@@ -225,6 +263,25 @@ func TestClientErrorRedactsSecrets(t *testing.T) {
 	}
 	msg := err.Error()
 	for _, leaked := range []string{"app-secret", "consumer-key", "$1$0123456789012345678901234567890123456789"} {
+		if strings.Contains(msg, leaked) {
+			t.Fatalf("error leaked %q: %s", leaked, msg)
+		}
+	}
+}
+
+func TestClientErrorRedactsSecretsBeforeTruncating(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, strings.Repeat("x", 395)+"app-secret consumer-key", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.ListProjects(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	for _, leaked := range []string{"app-", "app-secret", "consumer", "consumer-key"} {
 		if strings.Contains(msg, leaked) {
 			t.Fatalf("error leaked %q: %s", leaked, msg)
 		}

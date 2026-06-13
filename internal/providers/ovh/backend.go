@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -122,9 +123,20 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		return core.LeaseTarget{}, err
 	}
 	servers := make([]core.Server, 0, len(instances))
+	seenCloudIDs := map[string]bool{}
+	claimed, err := b.claimedLiveServers(instances)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	for _, item := range claimed {
+		servers = append(servers, item.server)
+		seenCloudIDs[item.server.CloudID] = true
+	}
 	for _, instance := range instances {
-		if isOwnedInstance(instance) {
-			servers = append(servers, serverFromInstance(instance, cfg))
+		if isOwnedInstance(instance) && !seenCloudIDs[instance.ID] {
+			server := serverFromInstance(instance, cfg)
+			servers = append(servers, server)
+			seenCloudIDs[server.CloudID] = true
 		}
 	}
 	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
@@ -193,13 +205,15 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		ImageID:  cfg.OVH.Image,
 		SSHKeyID: createdKey.ID,
 		UserData: core.CloudInitUserData(cfg, publicKey),
-		Labels:   labels,
 	})
 	if err != nil {
-		ambiguousCreate = true
+		if !isDeterminateCreateError(err) {
+			ambiguousCreate = true
+		}
 		if recovered, ok, findErr := findCreatedInstance(ctx, client, cfg.OVH.ProjectID, leaseID, slug, labels); findErr != nil {
 			return core.LeaseTarget{}, errors.Join(err, fmt.Errorf("reconcile ovh create recovery: %w", findErr))
 		} else if ok {
+			ambiguousCreate = true
 			created = mergeInstanceLabels(recovered, labels)
 			created.SSHKeyID = firstNonBlank(created.SSHKeyID, createdKey.ID)
 		}
@@ -237,12 +251,13 @@ func (b *Backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	servers := make([]core.Server, 0, len(instances))
 	byCloudID := map[string]Instance{}
-	for _, instance := range instances {
-		if !isOwnedInstance(instance) {
-			continue
-		}
-		server := serverFromInstance(instance, b.Cfg)
-		servers = append(servers, server)
+	liveClaims, err := b.claimedLiveServers(instances)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	for _, claimed := range liveClaims {
+		instance := mergeInstanceLabels(claimed.instance, claimed.server.Labels)
+		servers = append(servers, claimed.server)
 		byCloudID[instance.ID] = instance
 	}
 	if instance, ok := byCloudID[req.ID]; ok {
@@ -286,7 +301,7 @@ func (b *Backend) targetFromInstance(instance Instance, req core.ResolveRequest)
 	} else if req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "refusing to release OVH instance %s without a local Crabbox claim", server.DisplayID())
 	}
-	if req.ReleaseOnly || req.StatusOnly {
+	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
@@ -332,20 +347,23 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client API, id str
 			return core.LeaseTarget{}, err
 		}
 		if found {
-			server := serverFromInstance(instance, b.Cfg)
+			server := overlayClaimLabels(serverFromInstance(instance, b.Cfg), claim)
 			if err := validateOVHClaim(claim, server); err != nil {
 				return core.LeaseTarget{}, err
 			}
 			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
 		}
-		return core.LeaseTarget{
-			LeaseID: claim.LeaseID,
-			Server:  core.Server{Provider: providerName, Name: claim.Slug, Labels: claim.Labels},
-		}, nil
+		if claim.Labels[ovhSSHKeyOwnedLabel] == "true" && strings.TrimSpace(claim.Labels[ovhSSHKeyIDLabel]) != "" {
+			return core.LeaseTarget{
+				LeaseID: claim.LeaseID,
+				Server:  core.Server{Provider: providerName, Name: claim.Slug, Labels: claim.Labels},
+			}, nil
+		}
+		return core.LeaseTarget{}, core.Exit(4, "ovh ambiguous create recovery for lease=%s has no visible instance yet; retry stop after OVH inventory settles", claim.LeaseID)
 	}
 	instance, err := client.GetInstance(ctx, b.Cfg.OVH.ProjectID, claim.CloudID)
 	if err == nil {
-		server := serverFromInstance(instance, b.Cfg)
+		server := overlayClaimLabels(serverFromInstance(instance, b.Cfg), claim)
 		if err := validateOVHClaim(claim, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -370,20 +388,13 @@ func (b *Backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 	if err != nil {
 		return nil, err
 	}
-	out := make([]core.LeaseView, 0, len(instances))
-	for _, instance := range instances {
-		if isOwnedInstance(instance) {
-			server := serverFromInstance(instance, b.Cfg)
-			if claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil {
-				return nil, err
-			} else if exists {
-				if err := validateOVHClaim(claim, server); err != nil {
-					return nil, err
-				}
-				server = overlayClaimLabels(server, claim)
-			}
-			out = append(out, server)
-		}
+	claimed, err := b.claimedLiveServers(instances)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.LeaseView, 0, len(claimed))
+	for _, item := range claimed {
+		out = append(out, item.server)
 	}
 	return out, nil
 }
@@ -409,7 +420,7 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if err != nil {
 		return core.Server{}, err
 	}
-	live := serverFromInstance(instance, b.Cfg)
+	live := overlayExpectedOVHLabels(serverFromInstance(instance, b.Cfg), server)
 	if err := validateLiveOVHInstance(live, server); err != nil {
 		return core.Server{}, err
 	}
@@ -472,7 +483,7 @@ func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if server.CloudID != "" {
 		instance, err := client.GetInstance(ctx, b.Cfg.OVH.ProjectID, server.CloudID)
 		if err == nil {
-			live := serverFromInstance(instance, b.Cfg)
+			live := overlayExpectedOVHLabels(serverFromInstance(instance, b.Cfg), server)
 			if err := validateLiveOVHInstance(live, server); err != nil {
 				return err
 			}
@@ -693,15 +704,6 @@ func findCreatedInstance(ctx context.Context, client API, projectID, leaseID, sl
 		if instance.Name != expectedName {
 			continue
 		}
-		if !isOwnedInstance(instance) {
-			continue
-		}
-		if instance.Labels["lease"] != leaseID || instance.Labels["slug"] != slug {
-			continue
-		}
-		if expectedProject := strings.TrimSpace(labels[ovhProjectLabel]); expectedProject != "" && instance.Labels[ovhProjectLabel] != expectedProject {
-			continue
-		}
 		if expectedKey := strings.TrimSpace(labels[ovhSSHKeyIDLabel]); expectedKey != "" &&
 			instance.Labels[ovhSSHKeyIDLabel] != expectedKey &&
 			instance.SSHKeyID != expectedKey {
@@ -716,11 +718,98 @@ func findCreatedInstance(ctx context.Context, client API, projectID, leaseID, sl
 	return found, matches == 1, nil
 }
 
+type claimedLiveServer struct {
+	server   core.Server
+	instance Instance
+}
+
+func (b *Backend) claimedLiveServers(instances []Instance) ([]claimedLiveServer, error) {
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return nil, fmt.Errorf("list ovh lease claims: %w", err)
+	}
+	out := make([]claimedLiveServer, 0, len(claims))
+	usedInstances := map[string]string{}
+	for _, claim := range claims {
+		if claim.Provider != providerName || claim.Slug == "" || !claimMatchesOVHProject(claim, b.Cfg.OVH.ProjectID) {
+			continue
+		}
+		instance, found, err := findClaimedInstance(instances, claim)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		if otherLease := usedInstances[instance.ID]; otherLease != "" {
+			return nil, core.Exit(2, "refusing to use OVH instance %s for multiple local claims: %s and %s", instance.ID, otherLease, claim.LeaseID)
+		}
+		server := overlayClaimLabels(serverFromInstance(instance, b.Cfg), claim)
+		if err := validateOVHClaim(claim, server); err != nil {
+			return nil, err
+		}
+		usedInstances[instance.ID] = claim.LeaseID
+		out = append(out, claimedLiveServer{server: server, instance: instance})
+	}
+	return out, nil
+}
+
+func findClaimedInstance(instances []Instance, claim core.LeaseClaim) (Instance, bool, error) {
+	expectedName := core.LeaseProviderName(claim.LeaseID, claim.Slug)
+	var found Instance
+	matches := 0
+	for _, instance := range instances {
+		matchesClaim := false
+		if claim.CloudID != "" {
+			matchesClaim = instance.ID == claim.CloudID
+		} else if expectedName != "" {
+			matchesClaim = instance.Name == expectedName
+		}
+		if !matchesClaim {
+			continue
+		}
+		found = instance
+		matches++
+	}
+	if matches > 1 {
+		return Instance{}, false, core.Exit(2, "refusing to use OVH lease claim %s: matched %d live instances", claim.LeaseID, matches)
+	}
+	return found, matches == 1, nil
+}
+
+func claimMatchesOVHProject(claim core.LeaseClaim, projectID string) bool {
+	claimProject := strings.TrimSpace(claim.Labels[ovhProjectLabel])
+	return claimProject == "" || projectID == "" || claimProject == projectID
+}
+
 func overlayClaimLabels(server core.Server, claim core.LeaseClaim) core.Server {
 	merged := server
 	merged.Labels = copyLabels(server.Labels)
 	for key, value := range claim.Labels {
+		if isOVHLiveIdentityLabel(key) && strings.TrimSpace(merged.Labels[key]) != "" {
+			continue
+		}
 		merged.Labels[key] = value
+	}
+	return merged
+}
+
+func isOVHLiveIdentityLabel(key string) bool {
+	switch key {
+	case "crabbox", "created_by", "provider", "lease", "slug", ovhProjectLabel, ovhRegionLabel, ovhSSHKeyIDLabel:
+		return true
+	default:
+		return false
+	}
+}
+
+func overlayExpectedOVHLabels(live, expected core.Server) core.Server {
+	merged := live
+	merged.Labels = copyLabels(live.Labels)
+	for _, key := range []string{"crabbox", "created_by", "provider", "lease", "slug", ovhProjectLabel, ovhRegionLabel, ovhSSHKeyIDLabel, ovhSSHKeyOwnedLabel} {
+		if strings.TrimSpace(merged.Labels[key]) == "" && expected.Labels[key] != "" {
+			merged.Labels[key] = expected.Labels[key]
+		}
 	}
 	return merged
 }
@@ -875,6 +964,19 @@ func rollbackOVHAcquire(client API, projectID, instanceID, keyID string, keyCrea
 func isOVHNotFound(err error) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.Status == 404
+}
+
+func isDeterminateCreateError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Status {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	default:
+		return apiErr.Status >= 400 && apiErr.Status < 500
+	}
 }
 
 func regionExists(regions []Region, name string) bool {

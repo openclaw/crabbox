@@ -7,8 +7,8 @@ Read this when you are:
 - changing `internal/providers/ovh` or the guarded live smoke.
 
 OVHcloud is a Linux-only **SSH lease** provider. Crabbox creates a Public Cloud
-instance, creates a per-lease OVH SSH key, writes Crabbox ownership metadata as
-OVH instance labels, waits for a public IPv4 address and SSH bootstrap
+instance, creates a per-lease OVH SSH key, records Crabbox ownership metadata in
+a local lease claim, waits for a public IPv4 address and SSH bootstrap
 readiness, and then uses the normal Crabbox SSH sync/run/stop/cleanup path.
 
 OVHcloud is **direct-only** in this release. It does not run through the
@@ -124,8 +124,8 @@ permissions inside scripts.
 2. Resolve the configured flavor and image to OVH ids for the selected region.
 3. Generate a per-lease SSH key under the Crabbox testbox key directory.
 4. Create a matching OVH project SSH key.
-5. Create an instance with region, flavor, image, SSH key, cloud-init
-   `userData`, and Crabbox labels.
+5. Create an instance with region, flavor, image, SSH key, and cloud-init
+   `userData`.
 6. Wait for a public IPv4 address and Crabbox SSH bootstrap readiness.
 7. Record a local claim for the lease and run normal Crabbox sync/run/ssh
    workflows over SSH.
@@ -140,7 +140,7 @@ its SSH key.
 
 ## Ownership And Cleanup
 
-Crabbox-owned OVH instances carry labels such as:
+Crabbox-owned OVH leases use a local claim with ownership metadata such as:
 
 ```text
 crabbox=true
@@ -159,8 +159,8 @@ expires_at=<unix-seconds>
 
 Release and cleanup require a complete ownership predicate: Crabbox marker,
 provider marker, lease id, slug, project identity, and a matching local claim.
-Instances with partial, foreign, or malformed Crabbox-like labels are skipped or
-refused.
+Instances with partial, foreign, or malformed Crabbox-like metadata are skipped
+or refused.
 
 Direct mode has no coordinator alarm. Use:
 
@@ -203,8 +203,8 @@ classification=quota_blocked
 classification=validation_failed
 ```
 
-If cleanup fails, use the reported slug and labels to inspect the instance in
-`crabbox list --provider ovh --json` or the OVHcloud console.
+If cleanup fails, use the reported slug and local claim metadata to inspect the
+instance in `crabbox list --provider ovh --json` or the OVHcloud console.
 
 ## Capabilities
 
@@ -212,7 +212,7 @@ If cleanup fails, use the reported slug and labels to inspect the instance in
 - **Tailscale**: yes through the standard Linux cloud-init path when a direct
   Tailscale auth key is configured.
 - **Desktop / browser / code**: not advertised in Phase 1.
-- **Cleanup**: yes, label-owned and claim-backed only.
+- **Cleanup**: yes, claim-backed only.
 - **Coordinator**: never; direct CLI only.
 
 ## Gotchas

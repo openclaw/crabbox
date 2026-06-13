@@ -13,26 +13,28 @@ import (
 )
 
 type fakeAPI struct {
-	authCalls         int
-	regionCalls       int
-	flavorCalls       int
-	imageCalls        int
-	instanceCalls     int
-	mutatingCalls     int
-	deletedInstances  []string
-	deletedKeys       []string
-	createKeys        []SSHKey
-	createInstances   []InstanceCreateRequest
-	createInstanceErr error
-	createAcceptedErr bool
-	getInstanceErr    error
-	deleteInstanceErr error
-	deleteKeyErr      error
-	regions           []Region
-	flavors           []Flavor
-	images            []Image
-	instances         []Instance
-	sshKeys           []SSHKey
+	authCalls          int
+	regionCalls        int
+	flavorCalls        int
+	imageCalls         int
+	instanceCalls      int
+	mutatingCalls      int
+	deletedInstances   []string
+	deletedKeys        []string
+	createKeys         []SSHKey
+	createInstances    []InstanceCreateRequest
+	createInstanceErr  error
+	createAcceptedErr  bool
+	getInstanceErr     error
+	deleteInstanceErr  error
+	deleteKeyErr       error
+	listInstancesErr   error
+	listErrAfterCreate bool
+	regions            []Region
+	flavors            []Flavor
+	images             []Image
+	instances          []Instance
+	sshKeys            []SSHKey
 }
 
 func (f *fakeAPI) AuthTime(context.Context) (int64, error) {
@@ -95,6 +97,9 @@ func (f *fakeAPI) DeleteSSHKey(_ context.Context, _, keyID string) error {
 
 func (f *fakeAPI) ListInstances(context.Context, string) ([]Instance, error) {
 	f.instanceCalls++
+	if f.listInstancesErr != nil && (!f.listErrAfterCreate || len(f.createInstances) > 0) {
+		return nil, f.listInstancesErr
+	}
 	return f.instances, nil
 }
 
@@ -120,7 +125,6 @@ func (f *fakeAPI) CreateInstance(_ context.Context, _ string, req InstanceCreate
 		Status:   "ACTIVE",
 		Region:   req.Region,
 		SSHKeyID: req.SSHKeyID,
-		Labels:   req.Labels,
 		Flavor:   Flavor{ID: req.FlavorID, Name: req.FlavorID},
 		Image:    Image{ID: req.ImageID, Name: req.ImageID},
 		IPAddresses: []IPAddress{{
@@ -259,15 +263,39 @@ func TestAcquireCreatesInstanceSSHKeyTargetAndClaim(t *testing.T) {
 	if req.FlavorID != "flavor-id" || req.ImageID != "image-id" || req.SSHKeyID == "" || !strings.Contains(req.UserData, "ssh-ed25519") {
 		t.Fatalf("create request=%#v", req)
 	}
-	if req.Labels["crabbox"] != "true" || req.Labels["provider"] != providerName || req.Labels["lease"] != lease.LeaseID || req.Labels[ovhProjectLabel] != "project-test" {
-		t.Fatalf("labels=%#v", req.Labels)
-	}
 	claim, err := core.ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if claim.CloudID != "inst-1" || claim.Provider != providerName || claim.SSHHost != "203.0.113.10" {
 		t.Fatalf("claim=%#v", claim)
+	}
+	if claim.Labels["crabbox"] != "true" || claim.Labels["provider"] != providerName || claim.Labels["lease"] != lease.LeaseID || claim.Labels[ovhProjectLabel] != "project-test" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
+func TestAcquireRejectsDuplicateClaimedSlugWithoutLiveLabels(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:  []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+	}
+	backend := testBackend(fake)
+	repoRoot := t.TempDir()
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoRoot}, RequestedSlug: "blue-lobster"}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoRoot}, RequestedSlug: "blue-lobster"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Server.Labels["slug"] == "blue-lobster" || !strings.HasPrefix(second.Server.Labels["slug"], "blue-lobster-") {
+		t.Fatalf("duplicate slug was not repaired: %#v", second.Server.Labels)
+	}
+	if len(fake.createInstances) != 2 {
+		t.Fatalf("duplicate slug created %d instances", len(fake.createInstances))
 	}
 }
 
@@ -350,8 +378,8 @@ func TestListAndStatusOverlayReadyClaimLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fake.instances[0].Labels["state"] != "provisioning" {
-		t.Fatalf("fake live labels unexpectedly ready: %#v", fake.instances[0].Labels)
+	if fake.instances[0].Labels["state"] != "" {
+		t.Fatalf("fake live labels unexpectedly carried state: %#v", fake.instances[0].Labels)
 	}
 	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
@@ -366,6 +394,61 @@ func TestListAndStatusOverlayReadyClaimLabels(t *testing.T) {
 	}
 	if status.Server.Labels["state"] != "ready" {
 		t.Fatalf("status=%#v", status.Server.Labels)
+	}
+	waitStatus, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waitStatus.SSH.Host != "203.0.113.10" || waitStatus.SSH.Key == "" {
+		t.Fatalf("wait status ssh=%#v", waitStatus.SSH)
+	}
+}
+
+func TestResolveRejectsClaimWithMismatchedLiveLeaseIdentity(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.instances[0].Labels = map[string]string{
+		"crabbox":       "true",
+		"created_by":    "crabbox",
+		"provider":      providerName,
+		"lease":         "cbx_other",
+		"slug":          "other",
+		ovhProjectLabel: "project-test",
+	}
+
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "lease claim identity does not match") {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+}
+
+func TestResolveCloudIDClaimIgnoresDuplicateGeneratedNames(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "duplicate-name"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.instances = append(fake.instances, Instance{
+		ID:     "inst-other",
+		Name:   lease.Server.Name,
+		Region: "GRA11",
+	})
+
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Server.CloudID != lease.Server.CloudID {
+		t.Fatalf("resolved=%#v lease=%#v", resolved, lease)
 	}
 }
 
@@ -389,6 +472,34 @@ func TestReleaseDeletesOnlyOwnedClaimedInstanceAndKey(t *testing.T) {
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestReleaseRejectsClaimWithMismatchedLiveSSHKey(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "stale-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := copyLabels(claim.Labels)
+	labels[ovhSSHKeyIDLabel] = "different-key"
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "mismatched SSH key identity") {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("unexpected deletes instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
 	}
 }
 
@@ -423,8 +534,11 @@ func TestCleanupDryRunAndExpiredOwnedOnly(t *testing.T) {
 	if len(fake.instances) != 1 {
 		t.Fatalf("instances=%#v", fake.instances)
 	}
-	labels := fake.instances[0].Labels
-	labels["state"] = "released"
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := copyLabels(claim.Labels)
 	unclaimedLabels := copyLabels(labels)
 	unclaimedLabels["lease"] = "cbx_unclaimed"
 	unclaimedLabels["slug"] = "unclaimed"
@@ -456,7 +570,7 @@ func TestCleanupUsesTouchedLocalClaimBeforeLiveExpiryLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake.instances[0].Labels["state"] = "released"
+	fake.instances[0].Labels = map[string]string{"state": "released"}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -529,6 +643,99 @@ func TestAcquirePreservesRecoveryClaimOnCreateError(t *testing.T) {
 	}
 	if len(fake.deletedKeys) != 0 || len(fake.deletedInstances) != 0 {
 		t.Fatalf("ambiguous rollback should preserve recovery resources instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
+func TestReleaseOnlyCleansKeyOnlyRecoveryClaimWhenInstanceNotVisible(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		createInstanceErr: errors.New("indeterminate create"),
+	}
+	backend := testBackend(fake)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "recover-me"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate create") {
+		t.Fatalf("err=%v", err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].CloudID != "" {
+		t.Fatalf("claims=%#v", claims)
+	}
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "recover-me", ReleaseOnly: true})
+	if err != nil {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+	if resolved.Server.CloudID != "" || resolved.Server.Labels[ovhSSHKeyIDLabel] == "" {
+		t.Fatalf("resolved=%#v", resolved)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] == "" || len(fake.deletedInstances) != 0 {
+		t.Fatalf("ambiguous invisible release deletes instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
+func TestAcquirePreservesRecoveryClaimWhenIndeterminateReconcileFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:            []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:             []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		createInstanceErr:  errors.New("response lost after create"),
+		listInstancesErr:   errors.New("list unavailable"),
+		listErrAfterCreate: true,
+	}
+	backend := testBackend(fake)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "recover-list-fail"})
+	if err == nil || !strings.Contains(err.Error(), "reconcile ovh create recovery") {
+		t.Fatalf("err=%v", err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Labels["recovery"] != "ambiguous-create" || claims[0].Labels[ovhSSHKeyIDLabel] == "" {
+		t.Fatalf("claims=%#v", claims)
+	}
+	if len(fake.deletedKeys) != 0 || len(fake.deletedInstances) != 0 {
+		t.Fatalf("indeterminate reconcile failure should preserve recovery resources instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
+func TestAcquireRollsBackDeterministicCreateFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		createInstanceErr: &APIError{Operation: "create instance", Status: 400, Body: "bad request"},
+	}
+	backend := testBackend(fake)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "bad-request"})
+	if err == nil || !strings.Contains(err.Error(), "bad request") {
+		t.Fatalf("err=%v", err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("deterministic create failure left recovery claims=%#v", claims)
+	}
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] == "" {
+		t.Fatalf("deterministic create failure did not roll back key deletes=%v", fake.deletedKeys)
+	}
+	if len(fake.deletedInstances) != 0 {
+		t.Fatalf("deterministic create failure should not delete unknown instances=%v", fake.deletedInstances)
 	}
 }
 

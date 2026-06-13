@@ -166,6 +166,9 @@ Access terms:
   firewall, and Crabbox-owned tags; it does not run through the coordinator.
 - Hostinger is a direct-only Linux VPS provider. Purchases require explicit
   opt-in; release stops the VPS but does not cancel its subscription.
+- OVHcloud is a direct-only Linux Public Cloud provider. It uses environment-only
+  OVH application credentials, project-scoped SSH keys, and local Crabbox lease
+  claims; it does not run through the Worker broker in Phase 1.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,
