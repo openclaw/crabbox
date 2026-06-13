@@ -110,9 +110,12 @@ func (r *Region) UnmarshalJSON(data []byte) error {
 }
 
 type Flavor struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Region string `json:"region,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Region    string `json:"region,omitempty"`
+	OSType    string `json:"osType,omitempty"`
+	Available *bool  `json:"available,omitempty"`
+	Quota     *int64 `json:"quota,omitempty"`
 }
 
 func (f Flavor) Matches(value string) bool {
@@ -121,10 +124,12 @@ func (f Flavor) Matches(value string) bool {
 }
 
 type Image struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Region string `json:"region,omitempty"`
-	Type   string `json:"type,omitempty"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Region     string `json:"region,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
 }
 
 func (i Image) Matches(value string) bool {

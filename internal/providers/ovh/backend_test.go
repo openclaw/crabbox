@@ -245,6 +245,55 @@ func TestDoctorReportsUnavailableFlavor(t *testing.T) {
 	}
 }
 
+func TestResolveFlavorRejectsUnavailableOrExhaustedFlavor(t *testing.T) {
+	unavailable := false
+	quota := int64(0)
+	for _, flavor := range []Flavor{
+		{ID: "unavailable", Name: "b3-8", Available: &unavailable},
+		{ID: "exhausted", Name: "b3-16", Quota: &quota},
+		{ID: "windows", Name: "win-b3-8", OSType: "windows"},
+	} {
+		if _, err := selectFlavor([]Flavor{flavor}, flavor.ID); err == nil {
+			t.Fatalf("selectFlavor(%#v) succeeded", flavor)
+		}
+	}
+}
+
+func TestResolveFlavorPrefersExactIDAndRejectsAmbiguousName(t *testing.T) {
+	flavors := []Flavor{
+		{ID: "exact", Name: "shared-name"},
+		{ID: "other", Name: "shared-name"},
+	}
+	if got, err := selectFlavor(flavors, "exact"); err != nil || got.ID != "exact" {
+		t.Fatalf("select exact got=%#v err=%v", got, err)
+	}
+	if _, err := selectFlavor(flavors, "shared-name"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous err=%v", err)
+	}
+}
+
+func TestResolveImageRequiresUniquePublicActiveLinuxName(t *testing.T) {
+	images := []Image{
+		{ID: "public-id", Name: "Ubuntu 24.04", Status: "active", Type: "linux", Visibility: "public"},
+		{ID: "private-id", Name: "Ubuntu 24.04", Status: "active", Type: "linux", Visibility: "private"},
+	}
+	if got, err := selectImage(images, "private-id"); err != nil || got.ID != "private-id" {
+		t.Fatalf("select private id got=%#v err=%v", got, err)
+	}
+	if _, err := selectImage(images, "Ubuntu 24.04"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous err=%v", err)
+	}
+	for _, image := range []Image{
+		{ID: "inactive", Name: "Inactive", Status: "saving", Type: "linux", Visibility: "public"},
+		{ID: "windows", Name: "Windows", Status: "active", Type: "windows", Visibility: "public"},
+		{ID: "private", Name: "Private", Status: "active", Type: "linux", Visibility: "private"},
+	} {
+		if _, err := selectImage([]Image{image}, image.Name); err == nil {
+			t.Fatalf("selectImage(%#v) succeeded", image)
+		}
+	}
+}
+
 func TestBackendImplementsLeaseInterfacesWithNonMutatingStubs(t *testing.T) {
 	var backend any = NewBackend(Provider{}.Spec(), core.Config{}, core.Runtime{})
 	if _, ok := backend.(core.SSHLeaseBackend); !ok {

@@ -76,15 +76,19 @@ func (b *Backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	if cfg.OVH.Flavor != "" && !flavorExists(flavors, cfg.OVH.Flavor) {
-		return doctorCheckFailure("flavor", fmt.Sprintf("OVH flavor %q was not returned by the project", cfg.OVH.Flavor)), nil
+	if cfg.OVH.Flavor != "" {
+		if _, err := selectFlavor(flavors, cfg.OVH.Flavor); err != nil {
+			return doctorCheckFailure("flavor", err.Error()), nil
+		}
 	}
 	images, err := client.ListImages(ctx, cfg.OVH.ProjectID, cfg.OVH.Region)
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	if cfg.OVH.Image != "" && !imageExists(images, cfg.OVH.Image) {
-		return doctorCheckFailure("image", fmt.Sprintf("OVH image %q was not returned by the project", cfg.OVH.Image)), nil
+	if cfg.OVH.Image != "" {
+		if _, err := selectImage(images, cfg.OVH.Image); err != nil {
+			return doctorCheckFailure("image", err.Error()), nil
+		}
 	}
 	instances, err := client.ListInstances(ctx, cfg.OVH.ProjectID)
 	if err != nil {
@@ -734,12 +738,11 @@ func resolveFlavor(ctx context.Context, client API, projectID, region, value str
 	if err != nil {
 		return Flavor{}, err
 	}
-	for _, flavor := range flavors {
-		if flavor.Matches(value) {
-			return flavor, nil
-		}
+	flavor, err := selectFlavor(flavors, value)
+	if err != nil {
+		return Flavor{}, core.Exit(2, "%v for project=%s region=%s", err, projectID, region)
 	}
-	return Flavor{}, core.Exit(2, "ovh flavor %q was not returned by project=%s region=%s", value, projectID, region)
+	return flavor, nil
 }
 
 func resolveImage(ctx context.Context, client API, projectID, region, value string) (Image, error) {
@@ -747,12 +750,86 @@ func resolveImage(ctx context.Context, client API, projectID, region, value stri
 	if err != nil {
 		return Image{}, err
 	}
-	for _, image := range images {
-		if image.Matches(value) {
-			return image, nil
+	image, err := selectImage(images, value)
+	if err != nil {
+		return Image{}, core.Exit(2, "%v for project=%s region=%s", err, projectID, region)
+	}
+	return image, nil
+}
+
+func selectFlavor(flavors []Flavor, value string) (Flavor, error) {
+	value = strings.TrimSpace(value)
+	for _, flavor := range flavors {
+		if flavor.ID == value {
+			return validateFlavor(flavor)
 		}
 	}
-	return Image{}, core.Exit(2, "ovh image %q was not returned by project=%s region=%s", value, projectID, region)
+	matches := make([]Flavor, 0, 1)
+	for _, flavor := range flavors {
+		if flavor.Name == value {
+			matches = append(matches, flavor)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Flavor{}, core.Exit(2, "ovh flavor %q was not returned", value)
+	case 1:
+		return validateFlavor(matches[0])
+	default:
+		return Flavor{}, core.Exit(2, "ovh flavor name %q is ambiguous across %d records; configure an exact flavor id", value, len(matches))
+	}
+}
+
+func validateFlavor(flavor Flavor) (Flavor, error) {
+	if flavor.Available != nil && !*flavor.Available {
+		return Flavor{}, core.Exit(2, "ovh flavor %q is unavailable", firstNonBlank(flavor.ID, flavor.Name))
+	}
+	if flavor.Quota != nil && *flavor.Quota <= 0 {
+		return Flavor{}, core.Exit(2, "ovh flavor %q has no remaining project quota", firstNonBlank(flavor.ID, flavor.Name))
+	}
+	if osType := strings.ToLower(strings.TrimSpace(flavor.OSType)); osType != "" && osType != "linux" {
+		return Flavor{}, core.Exit(2, "ovh flavor %q is for osType=%s, not linux", firstNonBlank(flavor.ID, flavor.Name), flavor.OSType)
+	}
+	return flavor, nil
+}
+
+func selectImage(images []Image, value string) (Image, error) {
+	value = strings.TrimSpace(value)
+	for _, image := range images {
+		if image.ID == value {
+			return validateImage(image, true)
+		}
+	}
+	matches := make([]Image, 0, 1)
+	for _, image := range images {
+		if image.Name == value {
+			matches = append(matches, image)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Image{}, core.Exit(2, "ovh image %q was not returned", value)
+	case 1:
+		return validateImage(matches[0], false)
+	default:
+		return Image{}, core.Exit(2, "ovh image name %q is ambiguous across %d records; configure an exact image id", value, len(matches))
+	}
+}
+
+func validateImage(image Image, selectedByID bool) (Image, error) {
+	if status := strings.ToLower(strings.TrimSpace(image.Status)); status != "" && status != "active" {
+		return Image{}, core.Exit(2, "ovh image %q has status=%s", firstNonBlank(image.ID, image.Name), image.Status)
+	}
+	if imageType := strings.ToLower(strings.TrimSpace(image.Type)); imageType != "" && imageType != "linux" {
+		return Image{}, core.Exit(2, "ovh image %q has type=%s, not linux", firstNonBlank(image.ID, image.Name), image.Type)
+	}
+	if !selectedByID {
+		visibility := strings.ToLower(strings.TrimSpace(image.Visibility))
+		if visibility != "" && visibility != "public" {
+			return Image{}, core.Exit(2, "ovh image name %q resolves to visibility=%s; configure its exact image id to use a non-public image", image.Name, image.Visibility)
+		}
+	}
+	return image, nil
 }
 
 func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, labels map[string]string, recovery string, instance Instance, key SSHKey, keyCreated bool, reclaim bool) error {
@@ -1325,24 +1402,6 @@ func isDeterminateCreateError(err error) bool {
 func regionExists(regions []Region, name string) bool {
 	for _, region := range regions {
 		if region.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func flavorExists(flavors []Flavor, value string) bool {
-	for _, flavor := range flavors {
-		if flavor.Matches(value) {
-			return true
-		}
-	}
-	return false
-}
-
-func imageExists(images []Image, value string) bool {
-	for _, image := range images {
-		if image.Matches(value) {
 			return true
 		}
 	}
