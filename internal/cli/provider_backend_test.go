@@ -280,6 +280,29 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 }
 
+func TestLoadBackendResetsInferredTargetAfterProviderSwitch(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cloudflare-dynamic-workers"
+	applySingleProviderTargetDefault(&cfg)
+	if cfg.TargetOS != "worker-runtime" {
+		t.Fatalf("initial target=%q, want worker-runtime", cfg.TargetOS)
+	}
+
+	cfg.Provider = "hetzner"
+	cfg.Coordinator = "https://coordinator.example"
+	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load backend after provider switch: %v", err)
+	}
+	coordinator, ok := backend.(*coordinatorLeaseBackend)
+	if !ok {
+		t.Fatalf("backend=%T, want coordinatorLeaseBackend", backend)
+	}
+	if coordinator.cfg.TargetOS != targetLinux {
+		t.Fatalf("coordinator target=%q, want %q", coordinator.cfg.TargetOS, targetLinux)
+	}
+}
+
 func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"

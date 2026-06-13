@@ -455,6 +455,13 @@ describe("Cloudflare Dynamic Workers runner", () => {
     expect(loader.getCalls).toHaveLength(0);
   });
 
+  it("rejects malformed percent-encoded run IDs", async () => {
+    const response = await worker.fetch(authedRequest("/v1/runs/%"), env(), ctx());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "run id is invalid" });
+  });
+
   it("reports a missing loader binding from readiness", async () => {
     const testEnv = env();
     delete testEnv.LOADER;

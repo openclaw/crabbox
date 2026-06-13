@@ -375,6 +375,43 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	}
 }
 
+func TestRunRejectsSuccessfulLoaderResponseWithoutStatus(t *testing.T) {
+	var runID string
+	var deleted bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			runID = request.ID
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case http.MethodDelete:
+			if r.URL.Path != "/v1/runs/"+runID || r.URL.Query().Get("acknowledgedComplete") != "true" {
+				t.Fatalf("unexpected cleanup request %s?%s", r.URL.Path, r.URL.RawQuery)
+			}
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	result, err := backend.Run(context.Background(), RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err == nil || result.ExitCode != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if !deleted {
+		t.Fatal("malformed successful response did not clean up run metadata")
+	}
+}
+
 func TestRunStableCacheUsesUniqueRunIDsAndStableWorkerID(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	req := RunRequest{

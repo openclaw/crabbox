@@ -1024,7 +1024,12 @@ export default {
     const match = url.pathname.match(/^\/v1\/runs\/([^/]+)(?:\/([^/]+))?$/);
     if (!match) return json({ error: "not found" }, 404);
 
-    const runId = decodeURIComponent(match[1] ?? "");
+    let runId = "";
+    try {
+      runId = decodeURIComponent(match[1] ?? "");
+    } catch {
+      return json({ error: "run id is invalid" }, 400);
+    }
     const action = match[2] ?? "";
     if (!cleanRunId(runId)) return json({ error: "run id is invalid" }, 400);
 

@@ -914,8 +914,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Provider = provider.Name()
-	backend, err := provider.Configure(cfg, rt)
+	backend, err := configureProviderBackend(provider, &cfg, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -927,6 +926,12 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 		return &coordinatorLeaseBackend{spec: provider.Spec(), cfg: cfg, direct: ssh, coord: coord, rt: rt}, nil
 	}
 	return backend, nil
+}
+
+func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backend, error) {
+	cfg.Provider = provider.Name()
+	applySingleProviderTargetDefault(cfg)
+	return provider.Configure(*cfg, rt)
 }
 
 func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {

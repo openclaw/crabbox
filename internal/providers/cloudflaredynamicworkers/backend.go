@@ -722,7 +722,7 @@ func readyState(status string) bool {
 
 func runSucceeded(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "completed", "succeeded", "success", "ok":
+	case "completed", "succeeded", "success", "ok":
 		return true
 	default:
 		return false
