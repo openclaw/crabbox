@@ -1043,6 +1043,9 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if moduleRun && len(req.Command) > 0 {
 		return exit(2, "%s executes module source; trailing shell commands are not supported", provider)
 	}
+	if moduleRun && req.ShellMode {
+		return exit(2, "%s executes module source; --shell is not supported", provider)
+	}
 	if !req.FreshPR.Empty() {
 		return exit(2, "%s delegates sync; --fresh-pr is not supported", provider)
 	}

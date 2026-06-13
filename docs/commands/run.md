@@ -232,7 +232,9 @@ gets a `.ps1` extension added before upload. Trailing arguments after `--` are
 passed to the script. This is an SSH-run feature for OS-backed providers.
 Delegated module-runtime providers that advertise `module-run` accept the same
 script flags as source module input, but they reject trailing command argv and
-do not imply shell, SSH, rsync, or POSIX filesystem behavior.
+`--shell`; they do not imply shell, SSH, rsync, or POSIX filesystem behavior.
+Use `--script <file>` when the runtime needs a filename extension to identify
+the module language. `--script-stdin` is JavaScript module source.
 
 For Cloudflare Dynamic Workers, the script body must be Worker module source,
 for example:

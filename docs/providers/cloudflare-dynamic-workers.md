@@ -15,12 +15,13 @@ Containers and Linux command execution.
 - **Target:** `worker-runtime`.
 - **Supported commands:** `run`, `status`, `stop`, `list`, `doctor`, and
   local-claim `cleanup`.
-- **Run input:** `--script <file>` or `--script-stdin` module source.
+- **Run input:** `--script <file>` for JavaScript, CommonJS, or Python modules;
+  `--script-stdin` for JavaScript module source.
 - **Coordinator:** never brokered. The CLI talks directly to the loader Worker.
 - **Cache modes:** `one-shot`, `stable`, and `explicit`.
 - **Egress modes:** `blocked` by default, or `intercept` when the loader exports
   the gateway bindings required by the Worker runner.
-- **Not supported:** trailing `-- <command>` argv, POSIX shell, SSH, rsync,
+- **Not supported:** trailing `-- <command>` argv, `--shell`, POSIX shell, SSH, rsync,
   archive sync, VNC, browser desktop, code-server, port forwarding, Actions
   hydration, artifact download, `--fresh-pr`, `--checksum`, `--class`, and
   `--type`.

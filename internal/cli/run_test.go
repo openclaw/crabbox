@@ -628,6 +628,34 @@ func TestRunCommandRejectsModuleDelegatedScriptStdinTrailingCommandBeforeReading
 	}
 }
 
+func TestRunCommandRejectsModuleDelegatedShellBeforeReadingScriptStdin(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	stdin := &countingReader{data: "export default {}"}
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  stdin,
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--shell",
+		"--script-stdin",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; --shell is not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if stdin.reads != 0 {
+		t.Fatalf("stdin was read %d times before delegated option validation", stdin.reads)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
+	}
+}
+
 func TestRunCommandRejectsDelegatedEnvHelper(t *testing.T) {
 	profile := filepath.Join(t.TempDir(), "env.profile")
 	if err := os.WriteFile(profile, []byte("API_TOKEN=secret\n"), 0600); err != nil {

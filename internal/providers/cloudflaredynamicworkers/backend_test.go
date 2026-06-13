@@ -765,6 +765,16 @@ func TestWorkerModuleNameBoundsLongGeneratedPaths(t *testing.T) {
 	}
 }
 
+func TestWorkerModuleNameUsesJavaScriptForStdin(t *testing.T) {
+	name := workerModuleName(&RunScriptSpec{
+		Source:     "stdin",
+		RemotePath: ".crabbox/scripts/abc123-script.sh",
+	})
+	if name != "index.js" {
+		t.Fatalf("module name=%q, want JavaScript stdin module", name)
+	}
+}
+
 func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1").CloudflareDynamicWorkers
 	source := []byte("export default { fetch() { return new Response('ok') } }\n")

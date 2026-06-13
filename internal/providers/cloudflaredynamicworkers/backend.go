@@ -546,6 +546,9 @@ func workerModuleName(script *RunScriptSpec) string {
 	if script == nil {
 		return "index.js"
 	}
+	if strings.TrimSpace(script.Source) == "stdin" {
+		return "index.js"
+	}
 	candidate := strings.ReplaceAll(strings.TrimSpace(script.RemotePath), "\\", "/")
 	if candidate == "" {
 		candidate = strings.ReplaceAll(strings.TrimSpace(script.Source), "\\", "/")

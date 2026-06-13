@@ -1022,6 +1022,12 @@ func TestRejectDelegatedSyncOptionsAllowsModuleRunScriptOnly(t *testing.T) {
 	}); err == nil {
 		t.Fatal("module-run provider should reject trailing command argv")
 	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ScriptRequested: true,
+		ShellMode:       true,
+	}); err == nil {
+		t.Fatal("module-run provider should reject --shell")
+	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "e2b", Kind: ProviderKindDelegatedRun}, RunRequest{
 		ScriptRequested: true,
 		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
