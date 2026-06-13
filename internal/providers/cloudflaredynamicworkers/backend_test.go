@@ -1450,6 +1450,90 @@ func TestStopMissingRemoteRemovesStaleLocalClaim(t *testing.T) {
 	}
 }
 
+func TestStopMissingRemotePreservesUnrelatedExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/runs/shared-id" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	if err := core.ClaimLeaseForRepoProviderScope("shared-id", "other", "hetzner", "", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Stop(context.Background(), StopRequest{ID: "shared-id"}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim("shared-id")
+	if err != nil || !ok || claim.Provider != "hetzner" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+func TestCleanupDeletesTerminalMetadataBeforeClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(runStatus{ID: "cfdw_terminal", Status: "succeeded"})
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	if err := claimLease("cfdw_terminal", "terminal-claim", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_terminal", "terminal-claim", runStatus{ID: "cfdw_terminal", Status: "succeeded"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(requests, ","); got != "GET /v1/runs/cfdw_terminal,DELETE /v1/runs/cfdw_terminal" {
+		t.Fatalf("requests=%q", got)
+	}
+	if _, ok, err := resolveLeaseClaim("terminal-claim", backend.cfg); err != nil || ok {
+		t.Fatalf("claim after cleanup ok=%t err=%v", ok, err)
+	}
+}
+
+func TestCleanupRetainsClaimWhenTerminalMetadataDeleteFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stderr bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(runStatus{ID: "cfdw_terminal", Status: "failed"})
+		case http.MethodDelete:
+			http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	if err := claimLease("cfdw_terminal", "terminal-claim", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_terminal", "terminal-claim", runStatus{ID: "cfdw_terminal", Status: "failed"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := resolveLeaseClaim("terminal-claim", backend.cfg); err != nil || !ok {
+		t.Fatalf("claim after cleanup ok=%t err=%v", ok, err)
+	}
+	if !strings.Contains(stderr.String(), "metadata delete failed for cfdw_terminal") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
 func TestClaimsAreScopedToLoaderEndpoint(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfgA := testConfig("https://Loader-A.example.test/api/")

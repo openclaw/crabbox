@@ -328,7 +328,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, slug, err := b.resolveRunID(req.ID, "", false)
+	leaseID, slug, _, err := b.resolveRunID(req.ID, "", false)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -364,19 +364,23 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, _, err := b.resolveRunID(req.ID, "", false)
+	leaseID, _, claimed, err := b.resolveRunID(req.ID, "", false)
 	if err != nil {
 		return err
 	}
 	if err := client.Delete(ctx, leaseID); err != nil {
 		if notFoundError(err) {
-			removeLeaseClaim(leaseID)
-			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
+			if claimed {
+				removeLeaseClaim(leaseID)
+				fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
+			}
 			return nil
 		}
 		return providerError("delete metadata", err)
 	}
-	removeLeaseClaim(leaseID)
+	if claimed {
+		removeLeaseClaim(leaseID)
+	}
 	fmt.Fprintf(b.rt.Stdout, "stopped %s provider=%s loader_metadata=%s\n", leaseID, providerName, leaseID)
 	return nil
 }
@@ -411,12 +415,16 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), status.Status)
+			fmt.Fprintf(b.rt.Stdout, "would delete terminal %s metadata and remove claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), status.Status)
+			continue
+		}
+		if err := client.Delete(ctx, claim.LeaseID); err != nil && !notFoundError(err) {
+			fmt.Fprintf(b.rt.Stderr, "warning: %s metadata delete failed for %s: %v\n", providerName, claim.LeaseID, err)
 			continue
 		}
 		removeLeaseClaim(claim.LeaseID)
 		removed++
-		fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), status.Status)
+		fmt.Fprintf(b.rt.Stdout, "deleted terminal %s metadata and removed claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), status.Status)
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d checked=%d\n", providerName, removed, len(claims))
@@ -465,25 +473,25 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 	return leaseID, "", slug, false, nil
 }
 
-func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, error) {
+func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, bool, error) {
 	claim, ok, err := resolveLeaseClaim(identifier, b.cfg)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if ok {
 		if repoRoot != "" {
 			server := claimServer(claim, blank(claim.Labels["state"], "unknown"))
 			if err := claimLease(claim.LeaseID, claim.Slug, b.cfg, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, server); err != nil {
-				return "", "", err
+				return "", "", false, err
 			}
 		}
-		return claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), nil
+		return claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), true, nil
 	}
 	value := strings.TrimSpace(identifier)
 	if value == "" {
-		return "", "", exit(2, "%s id is required", providerName)
+		return "", "", false, exit(2, "%s id is required", providerName)
 	}
-	return value, newLeaseSlug(value), nil
+	return value, newLeaseSlug(value), false, nil
 }
 
 func (b *backend) buildRunRequest(req RunRequest, leaseID, workerID, cacheMode string) runRequest {
