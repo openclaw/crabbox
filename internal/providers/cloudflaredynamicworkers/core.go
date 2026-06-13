@@ -34,8 +34,9 @@ type ExitError = core.ExitError
 type timingReport = core.TimingReport
 
 const (
-	providerName = "cloudflare-dynamic-workers"
-	targetWorker = core.TargetWorkerRuntime
+	providerName             = "cloudflare-dynamic-workers"
+	targetWorker             = core.TargetWorkerRuntime
+	defaultCompatibilityDate = core.DefaultCloudflareDynamicWorkersCompatibilityDate
 )
 
 func exit(code int, format string, args ...any) core.ExitError {

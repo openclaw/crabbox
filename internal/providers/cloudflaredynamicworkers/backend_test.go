@@ -193,6 +193,19 @@ func TestDefaultHTTPClientHonorsConfiguredRunTimeout(t *testing.T) {
 	}
 }
 
+func TestDefaultHTTPClientDisablesTimeoutWhenRunTimeoutIsDisabled(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.CloudflareDynamicWorkers.TimeoutSecs = 0
+	client := defaultHTTPClient(cfg)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport=%T", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 0 {
+		t.Fatalf("response header timeout=%s, want disabled", transport.ResponseHeaderTimeout)
+	}
+}
+
 func TestClientTimeoutCoversResponseBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -351,6 +364,67 @@ func TestClientRejectsInvalidStatusIdentityAndState(t *testing.T) {
 				t.Fatalf("status error=%v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestClientRetriesTransientStatusReads(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			http.Error(w, "error code: 1104", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(runStatus{ID: "run_expected", Status: "succeeded"})
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+		readRetryDelays:     []time.Duration{0, 0},
+	}
+
+	status, err := client.Status(context.Background(), "run_expected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 || status.Status != "succeeded" {
+		t.Fatalf("calls=%d status=%#v", calls, status)
+	}
+}
+
+func TestClientRetryDoesNotDrainStalledErrorBody(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("error code: "))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		_ = json.NewEncoder(w).Encode(runStatus{ID: "run_expected", Status: "succeeded"})
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+		readRetryDelays:     []time.Duration{0},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	status, err := client.Status(ctx, "run_expected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || status.Status != "succeeded" {
+		t.Fatalf("calls=%d status=%#v", calls, status)
 	}
 }
 
@@ -1322,15 +1396,28 @@ func TestWorkerModuleNameUsesJavaScriptForStdin(t *testing.T) {
 
 func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1").CloudflareDynamicWorkers
+	cfg.CompatibilityDate = ""
 	source := []byte("export default { fetch() { return new Response('ok') } }\n")
 	first := stableRunID("worker.mjs", source, cfg, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
 	reordered := stableRunID("worker.mjs", source, cfg, map[string]string{"FEATURE": "on", "TOKEN": "alpha"})
 	second := stableRunID("worker.mjs", source, cfg, map[string]string{"TOKEN": "beta", "FEATURE": "on"})
 	empty := stableRunID("worker.mjs", source, cfg, nil)
 	renamed := stableRunID("index.js", source, cfg, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
+	explicitDefault := cfg
+	explicitDefault.CompatibilityDate = defaultCompatibilityDate
+	defaultDate := stableRunID("worker.mjs", source, explicitDefault, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
+	changedDate := cfg
+	changedDate.CompatibilityDate = "2026-06-13"
+	differentDate := stableRunID("worker.mjs", source, changedDate, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
 
 	if first != reordered {
 		t.Fatalf("stable id should be independent of env map iteration order: %q != %q", first, reordered)
+	}
+	if first != defaultDate {
+		t.Fatalf("empty and explicit default compatibility dates should match: %q != %q", first, defaultDate)
+	}
+	if first == differentDate {
+		t.Fatal("stable id should change when the compatibility date changes")
 	}
 	if first == second {
 		t.Fatal("stable id should change when forwarded env values change")
@@ -1340,6 +1427,20 @@ func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 	}
 	if first == renamed {
 		t.Fatal("stable id should change when the main module name changes")
+	}
+}
+
+func TestBuildRunRequestSendsEffectiveCompatibilityDate(t *testing.T) {
+	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
+	backend.cfg.CloudflareDynamicWorkers.CompatibilityDate = ""
+	req := backend.buildRunRequest(
+		RunRequest{Script: &RunScriptSpec{Source: "stdin", Data: []byte("export default {}")}},
+		"run_1",
+		"worker_1",
+		"stable",
+	)
+	if req.CompatibilityDate != defaultCompatibilityDate {
+		t.Fatalf("compatibility date=%q, want %q", req.CompatibilityDate, defaultCompatibilityDate)
 	}
 }
 
