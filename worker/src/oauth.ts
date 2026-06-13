@@ -1,5 +1,5 @@
 import { issueUserToken, sha256Hex, userTokenExpiresAt } from "./auth";
-import type { CoordinatorStorage } from "./coordinator-runtime";
+import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
 import { errorMessage, json, readJson } from "./http";
 import type { Env, Provider } from "./types";
 import { requestOrg } from "./usage";
@@ -28,6 +28,7 @@ interface OAuthPending {
   org?: string;
   login?: string;
   error?: string;
+  callbackClaim?: string;
 }
 
 interface GitHubUser {
@@ -57,18 +58,18 @@ interface AllowedGitHubTeam {
 export async function githubAuthRoute(
   request: Request,
   action: string | undefined,
-  storage: CoordinatorStorage,
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
   env: Env,
 ): Promise<Response> {
   const method = request.method.toUpperCase();
   if (method === "POST" && action === "start") {
-    return await githubAuthStart(request, storage, env);
+    return await githubAuthStart(request, runtime.storage, env);
   }
   if (method === "GET" && action === "callback") {
-    return await githubAuthCallback(request, storage, env);
+    return await githubAuthCallback(request, runtime, env);
   }
   if (method === "POST" && action === "poll") {
-    return await githubAuthPoll(request, storage);
+    return await githubAuthPoll(request, runtime.storage);
   }
   return json({ error: "not_found" }, { status: 404 });
 }
@@ -190,25 +191,22 @@ function githubAuthorizeURLFor(
 
 async function githubAuthCallback(
   request: Request,
-  storage: CoordinatorStorage,
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code") ?? "";
   const state = url.searchParams.get("state") ?? "";
   const error = url.searchParams.get("error") ?? "";
-  const id = state ? await storage.get<string>(oauthStateKey(state)) : undefined;
-  const pending = id ? await storage.get<OAuthPending>(oauthKey(id)) : undefined;
-  if (!pending || pending.state !== state || Date.parse(pending.expiresAt) <= Date.now()) {
-    return html(
-      "Crabbox login expired",
-      "The login request expired. Run crabbox login --url <broker-url> again.",
-      400,
-    );
+  const claimed = await claimPendingOAuth(runtime, state);
+  if ("response" in claimed) {
+    return claimed.response;
   }
+  const { pending, claim } = claimed;
   if (error || !code) {
-    pending.error = error || "missing_code";
-    await storage.put(oauthKey(pending.id), pending);
+    await finishPendingOAuth(runtime, pending.id, claim, {
+      error: error || "missing_code",
+    });
     return html("Crabbox login failed", "GitHub did not authorize the login.", 400);
   }
   try {
@@ -232,19 +230,27 @@ async function githubAuthCallback(
     if (identity.name) {
       tokenInput.name = identity.name;
     }
-    pending.token = await issueUserToken(env, tokenInput);
-    const tokenExpiry = userTokenExpiresAt(pending.token);
-    if (tokenExpiry) {
-      pending.tokenExpiresAt = tokenExpiry;
+    const token = await issueUserToken(env, tokenInput);
+    const completion: Pick<OAuthPending, "token" | "owner" | "org" | "login"> & {
+      tokenExpiresAt?: string;
+    } = {
+      token,
+      owner: identity.owner,
+      org,
+      login: identity.login,
+    };
+    const tokenExpiresAt = userTokenExpiresAt(token);
+    if (tokenExpiresAt) {
+      completion.tokenExpiresAt = tokenExpiresAt;
     }
-    pending.owner = identity.owner;
-    pending.org = org;
-    pending.login = identity.login;
-    await storage.put(oauthKey(pending.id), pending);
-    if (pending.mode === "portal") {
-      await deletePendingOAuth(storage, pending);
-      return redirect(pending.returnTo || "/portal", 302, {
-        "set-cookie": portalSessionCookie(pending.token, ttlSeconds),
+    const completed = await finishPendingOAuth(runtime, pending.id, claim, completion);
+    if (!completed) {
+      return expiredOAuthResponse();
+    }
+    if (completed.mode === "portal") {
+      await runtime.runExclusive(() => deletePendingOAuth(runtime.storage, completed));
+      return redirect(completed.returnTo || "/portal", 302, {
+        "set-cookie": portalSessionCookie(token, ttlSeconds),
       });
     }
     return html(
@@ -252,13 +258,75 @@ async function githubAuthCallback(
       "GitHub authorized Crabbox. You can close this tab and return to the terminal.",
     );
   } catch (err) {
-    pending.error = errorMessage(err);
-    await storage.put(oauthKey(pending.id), pending);
+    await finishPendingOAuth(runtime, pending.id, claim, { error: errorMessage(err) });
     if (err instanceof GitHubAuthorizationError) {
       return html("Crabbox login denied", err.message, 403);
     }
     return html("Crabbox login failed", "The coordinator could not finish GitHub login.", 500);
   }
+}
+
+async function claimPendingOAuth(
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
+  state: string,
+): Promise<
+  | { pending: OAuthPending; claim: string }
+  | {
+      response: Response;
+    }
+> {
+  return runtime.runExclusive(async () => {
+    const id = state ? await runtime.storage.get<string>(oauthStateKey(state)) : undefined;
+    const pending = id ? await runtime.storage.get<OAuthPending>(oauthKey(id)) : undefined;
+    if (!pending || pending.state !== state || Date.parse(pending.expiresAt) <= Date.now()) {
+      return { response: expiredOAuthResponse() };
+    }
+    if (pending.callbackClaim || pending.error || pending.token) {
+      return {
+        response: html(
+          "Crabbox login already used",
+          "This GitHub login callback is already being processed or completed.",
+          409,
+        ),
+      };
+    }
+    const claim = randomID("callback");
+    pending.callbackClaim = claim;
+    await runtime.storage.put(oauthKey(pending.id), pending);
+    return { pending: structuredClone(pending), claim };
+  });
+}
+
+async function finishPendingOAuth(
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
+  id: string,
+  claim: string,
+  result: Partial<
+    Pick<OAuthPending, "token" | "tokenExpiresAt" | "owner" | "org" | "login" | "error">
+  >,
+): Promise<OAuthPending | undefined> {
+  return runtime.runExclusive(async () => {
+    const pending = await runtime.storage.get<OAuthPending>(oauthKey(id));
+    if (
+      !pending ||
+      pending.callbackClaim !== claim ||
+      Date.parse(pending.expiresAt) <= Date.now()
+    ) {
+      return undefined;
+    }
+    Object.assign(pending, result);
+    delete pending.callbackClaim;
+    await runtime.storage.put(oauthKey(pending.id), pending);
+    return structuredClone(pending);
+  });
+}
+
+function expiredOAuthResponse(): Response {
+  return html(
+    "Crabbox login expired",
+    "The login request expired. Run crabbox login --url <broker-url> again.",
+    400,
+  );
 }
 
 async function githubAuthPoll(request: Request, storage: CoordinatorStorage): Promise<Response> {

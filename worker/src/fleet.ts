@@ -467,7 +467,7 @@ export class FleetCoordinator {
         return await this.scheduledMaintenance(request);
       }
       if (parts[0] === "v1" && parts[1] === "auth" && parts[2] === "github") {
-        return await githubAuthRoute(request, parts[3], this.state.storage, this.env);
+        return await githubAuthRoute(request, parts[3], this.state, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/login") {
         return await githubPortalLogin(request, this.state.storage, this.env);
