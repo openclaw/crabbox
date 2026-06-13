@@ -60,6 +60,28 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestAgentSandboxRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("agent-sandbox")
+	if err != nil {
+		t.Fatalf("ProviderFor(agent-sandbox): %v", err)
+	}
+	if provider.Name() != "agent-sandbox" {
+		t.Fatalf("ProviderFor(agent-sandbox).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("agent-sandbox spec=%#v", spec)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("agent-sandbox features=%v", spec.Features)
+	}
+	for _, alias := range []string{"agentsandbox", "asb", "sandbox"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "agent-sandbox" {
+			t.Fatalf("%q alias unexpectedly resolves to agent-sandbox", alias)
+		}
+	}
+}
+
 func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("superserve")
 	if err != nil {
@@ -141,6 +163,7 @@ func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
 
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	providers := []string{
+		"agent-sandbox",
 		"apple-container",
 		"apple-machine",
 		"apple-vz",
