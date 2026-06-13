@@ -21,6 +21,7 @@
   "vars": {
     "CRABBOX_DEFAULT_ORG": "openclaw",
     "CRABBOX_GITHUB_ALLOWED_ORG": "openclaw",
+    "CRABBOX_PUBLIC_URL": "https://crabbox-coordinator.services-91b.workers.dev",
     "CRABBOX_WORKSPACE_PROVIDER": "aws",
     "CRABBOX_WORKSPACE_CLASS": "standard",
     "CRABBOX_USER_TOKEN_TTL_SECONDS": "15552000",
