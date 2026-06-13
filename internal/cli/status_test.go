@@ -12,7 +12,7 @@ import (
 )
 
 func TestStatusWaitDoneTreatsTerminalStatesAsDone(t *testing.T) {
-	for _, state := range []string{"deleting", "expired", "failed", "released", "stopped", "stopped_with_code", "terminated"} {
+	for _, state := range []string{"deleting", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated"} {
 		if !statusWaitDone(statusView{State: state}) {
 			t.Fatalf("statusWaitDone(%q) = false, want true", state)
 		}

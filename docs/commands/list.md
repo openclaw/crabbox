@@ -36,6 +36,9 @@ Providers that do not implement listing exit with an error.
 printing. Without it, those providers report only their local claims and stay
 credential-free. For example, `crabbox list --provider cloudflare` reports local
 claims by default; add `--refresh` to query live container state.
+`crabbox list --provider cloudflare-dynamic-workers` follows the same local-claim
+model for Dynamic Workers run metadata; `--refresh` asks the loader about each
+claimed run ID and reports missing metadata as a stale local claim.
 
 ## Including full provider inventory
 

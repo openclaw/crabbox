@@ -2,6 +2,7 @@ bin/
 dist/
 dist-cloudflare/
 /worker/dist-node/
+/worker/dist-cloudflare-dynamic-workers/
 artifacts/
 .crabbox/
 .clawpatch/

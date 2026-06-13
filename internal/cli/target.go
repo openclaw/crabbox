@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	targetLinux   = "linux"
-	targetMacOS   = "macos"
-	targetWindows = "windows"
+	targetLinux         = "linux"
+	targetMacOS         = "macos"
+	targetWindows       = "windows"
+	targetWorkerRuntime = "worker-runtime"
 
 	windowsModeNormal = "normal"
 	windowsModeWSL2   = "wsl2"
@@ -21,11 +22,12 @@ const (
 )
 
 const (
-	TargetLinux       = targetLinux
-	TargetMacOS       = targetMacOS
-	TargetWindows     = targetWindows
-	WindowsModeNormal = windowsModeNormal
-	WindowsModeWSL2   = windowsModeWSL2
+	TargetLinux         = targetLinux
+	TargetMacOS         = targetMacOS
+	TargetWindows       = targetWindows
+	TargetWorkerRuntime = targetWorkerRuntime
+	WindowsModeNormal   = windowsModeNormal
+	WindowsModeWSL2     = windowsModeWSL2
 )
 
 func normalizeTargetConfig(cfg *Config) {
@@ -107,9 +109,9 @@ func normalizeWindowsMode(value string) string {
 
 func validateTargetConfig(cfg Config) error {
 	switch cfg.TargetOS {
-	case targetLinux, targetMacOS, targetWindows:
+	case targetLinux, targetMacOS, targetWindows, targetWorkerRuntime:
 	default:
-		return exit(2, "target must be linux, macos, or windows")
+		return exit(2, "target must be linux, macos, windows, or worker-runtime")
 	}
 	if cfg.TargetOS != targetWindows && cfg.WindowsMode != windowsModeNormal {
 		return exit(2, "windows.mode is only valid with target=windows")
@@ -132,10 +134,11 @@ func validateProviderTarget(cfg Config) error {
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
-	if (provider.Name() == "tart" || provider.Name() == "apple-vz") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+	machineTarget := cfg.TargetOS != targetWorkerRuntime
+	if machineTarget && (provider.Name() == "tart" || provider.Name() == "apple-vz") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
-	if effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
+	if machineTarget && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
 		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vz" {
 			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, or provider=apple-vz")
 		}
@@ -277,6 +280,7 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if !isStaticProvider(cfg.Provider) {
 		return nil
 	}
+	prepareProviderDefaults(cfg)
 	if hasClaim {
 		restoreStaticClaimIdentity(cfg, claim)
 		restoreStaticClaimTarget(cfg, fs, claim)
@@ -393,8 +397,13 @@ func loadExternalRoutingConfig(cfg *Config, path string) error {
 }
 
 func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit bool) error {
+	prepareProviderDefaults(cfg)
+	if strings.TrimSpace(cfg.External.WorkRoot) != "" {
+		cfg.WorkRoot = cfg.External.WorkRoot
+	}
 	if !targetExplicit {
 		cfg.TargetOS = targetLinux
+		cfg.inferredTargetProvider = ""
 	}
 	if !windowsModeExplicit {
 		cfg.WindowsMode = windowsModeNormal
@@ -482,6 +491,7 @@ func restoreStaticClaimTarget(cfg *Config, fs *flag.FlagSet, claim leaseClaim) {
 	}
 	if !flagWasSet(fs, "target") && strings.TrimSpace(claim.TargetOS) != "" {
 		cfg.TargetOS = strings.TrimSpace(claim.TargetOS)
+		cfg.inferredTargetProvider = ""
 	}
 	if !flagWasSet(fs, "windows-mode") && strings.TrimSpace(claim.WindowsMode) != "" {
 		cfg.WindowsMode = strings.TrimSpace(claim.WindowsMode)

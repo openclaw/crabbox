@@ -72,6 +72,7 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 
 func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string, mutateExternal bool) error {
 	cfg.Provider = *values.Provider
+	prepareProviderDefaults(cfg)
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
 	if flagWasSet(fs, "arch") {
@@ -121,13 +122,15 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := applyProviderRoutingFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
 	}
+	prepareProviderDefaults(cfg)
+	applySingleProviderTargetDefault(cfg)
+	applyOSImageProviderDefaults(cfg, false)
 	if existingLeaseID != "" && cfg.Provider == "aws" && cfg.TargetOS == targetMacOS && !flagWasSet(fs, "market") {
 		cfg.Capacity.Market = "on-demand"
 	}
 	if err := applyCapacityMarketFlag(cfg, fs, *values.Market); err != nil {
 		return err
 	}
-	applyServerTypeFlagOverrides(cfg, fs, *values.ServerType)
 	if flagWasSet(fs, "ttl") {
 		cfg.TTL = *values.TTL
 	}
@@ -137,6 +140,10 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := applyProviderFlags(cfg, fs, values.ProviderFlags); err != nil {
 		return err
 	}
+	prepareProviderDefaults(cfg)
+	applySingleProviderTargetDefault(cfg)
+	applyOSImageProviderDefaults(cfg, false)
+	applyServerTypeFlagOverrides(cfg, fs, *values.ServerType)
 	if flagWasSet(fs, "cache-volume") {
 		volumes, err := ParseCacheVolumeSpecs(*values.CacheVolumes)
 		if err != nil {
@@ -326,6 +333,7 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 		return Config{}, err
 	}
 	cfg.Provider = provider
+	prepareProviderDefaults(&cfg)
 	if opts.Desktop {
 		cfg.Desktop = true
 	}
