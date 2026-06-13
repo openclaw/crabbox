@@ -243,6 +243,62 @@ exit 99
   assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /^cleanup /m);
 });
 
+test("live linode smoke retries cleanup through ambiguous-create recovery", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-linode-recovery-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const stopAttempts = path.join(dir, "stop-attempts.log");
+  fs.mkdirSync(binDir, { recursive: true });
+  writeRawInventoryPythonStub(binDir, 0);
+  writeExecutable(path.join(binDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor)
+    printf 'auth=ready\\n'
+    ;;
+  list)
+    printf '[]\\n'
+    ;;
+  warmup)
+    printf 'indeterminate create\\n' >&2
+    exit 37
+    ;;
+  stop)
+    printf 'attempt\\n' >>"${stopAttempts}"
+    attempts="$(wc -l <"${stopAttempts}" | tr -d ' ')"
+    if [[ "$attempts" -lt 4 ]]; then
+      printf 'lease/linode not found: %s\\n' "$4" >&2
+      exit 4
+    fi
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "linode",
+      LINODE_TOKEN: "test-secret-token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(stopAttempts, "utf8"), "attempt\nattempt\nattempt\nattempt\n");
+  assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
+});
+
 test("live linode smoke refuses a non-empty inventory before mutation", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-linode-nonempty-"));
   const binDir = path.join(dir, "bin");

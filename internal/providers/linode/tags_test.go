@@ -86,3 +86,49 @@ func TestLinodeStateAndExpirationPreferSaferNewestValues(t *testing.T) {
 		t.Fatalf("labels=%v", labels)
 	}
 }
+
+func TestLinodeTagsRespectLengthLimitAndRoundTripLongSlug(t *testing.T) {
+	slug := strings.Repeat("long-slug-", 6)
+	tags := tagsFromLabels(map[string]string{
+		"lease": "cbx_test",
+		"slug":  slug,
+	})
+	for _, tag := range tags {
+		if len(tag) > maxLinodeTagLength {
+			t.Fatalf("tag length=%d tag=%q", len(tag), tag)
+		}
+	}
+	if got := labelsFromTags(tags)["slug"]; got != slug {
+		t.Fatalf("slug=%q, want %q; tags=%v", got, slug, tags)
+	}
+}
+
+func TestLinodeMissingOwnershipTagChunkFailsClosed(t *testing.T) {
+	tags := tagsFromLabels(map[string]string{
+		"lease": "cbx_test",
+		"slug":  strings.Repeat("long-slug-", 6),
+	})
+	for i, tag := range tags {
+		if strings.HasPrefix(tag, "crabbox:slug_v2:") {
+			tags = append(tags[:i], tags[i+1:]...)
+			break
+		}
+	}
+	labels := labelsFromTags(tags)
+	if labels[ownershipTagConflictLabel] != "slug" {
+		t.Fatalf("labels=%v tags=%v", labels, tags)
+	}
+	if err := validateLinodeLabels(labels); err == nil {
+		t.Fatal("missing ownership chunk should fail closed")
+	}
+}
+
+func TestReplaceCrabboxTagsPreservesExternalTags(t *testing.T) {
+	got := replaceCrabboxTags(
+		[]string{"customer:production", "crabbox", "crabbox:state:ready"},
+		[]string{"crabbox", "crabbox:state:running"},
+	)
+	if !containsString(got, "customer:production") || containsString(got, "crabbox:state:ready") || !containsString(got, "crabbox:state:running") {
+		t.Fatalf("tags=%v", got)
+	}
+}

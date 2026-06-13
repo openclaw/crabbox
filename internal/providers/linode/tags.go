@@ -1,6 +1,7 @@
 package linode
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -14,6 +15,10 @@ const (
 	tagCrabbox                = "crabbox"
 	tagPrefix                 = "crabbox:"
 	ownershipTagConflictLabel = "_linode_ownership_tag_conflict"
+	maxLinodeTagLength        = 50
+	maxEncodedTagValueLength  = 255
+	tagChunkSuffix            = "_v2"
+	tagChunkHeaderLength      = 5
 )
 
 var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
@@ -35,7 +40,7 @@ func tagsFromLabels(labels map[string]string) []string {
 	}
 	for _, key := range tagLabelKeys() {
 		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
+			tags = append(tags, encodeTagKV(key, value)...)
 		}
 	}
 	return normalizeTags(tags)
@@ -51,13 +56,13 @@ func tagLabelKeys() []string {
 	}
 }
 
-func encodeTagKV(key, value string) string {
+func encodeTagKV(key, value string) []string {
 	key = sanitizeTagPart(key)
-	if exactTagValueKey(key) {
-		key += "_v1"
-		return tagPrefix + key + ":" + encodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
+	plain := tagPrefix + key + ":" + sanitizeTagPart(value)
+	if !exactTagValueKey(key) && len(plain) <= maxLinodeTagLength {
+		return []string{plain}
 	}
-	return tagPrefix + key + ":" + sanitizeTagPart(value)
+	return encodeChunkedTagKV(key, value)
 }
 
 func sanitizeTagPart(value string) string {
@@ -67,10 +72,31 @@ func sanitizeTagPart(value string) string {
 	if value == "" {
 		return "unknown"
 	}
-	if len(value) > 64 {
-		return value[:64]
-	}
 	return value
+}
+
+func encodeChunkedTagKV(key, value string) []string {
+	base := tagPrefix + key + tagChunkSuffix + ":"
+	chunkSize := maxLinodeTagLength - len(base) - tagChunkHeaderLength
+	if chunkSize <= 0 {
+		return nil
+	}
+	encoded := encodeExactTagValue(value, maxEncodedTagValueLength)
+	chunkCount := (len(encoded) + chunkSize - 1) / chunkSize
+	if chunkCount == 0 {
+		chunkCount = 1
+	}
+	if chunkCount > 99 {
+		chunkCount = 99
+		encoded = encoded[:chunkSize*chunkCount]
+	}
+	tags := make([]string, 0, chunkCount)
+	for index := 0; index < chunkCount; index++ {
+		start := index * chunkSize
+		end := min(start+chunkSize, len(encoded))
+		tags = append(tags, base+fmt.Sprintf("%02d%02d:", index, chunkCount)+encoded[start:end])
+	}
+	return tags
 }
 
 func exactTagValueKey(key string) bool {
@@ -85,6 +111,19 @@ func exactTagValueKey(key string) bool {
 func versionedExactTagValueKey(key string) (string, bool) {
 	logical := strings.TrimSuffix(key, "_v1")
 	return logical, logical != key && exactTagValueKey(logical)
+}
+
+func chunkedTagValueKey(key string) (string, bool) {
+	logical := strings.TrimSuffix(key, tagChunkSuffix)
+	if logical == key {
+		return "", false
+	}
+	for _, candidate := range tagLabelKeys() {
+		if logical == candidate {
+			return logical, true
+		}
+	}
+	return "", false
 }
 
 func legacyEncodedExactTagValueKey(key string) bool {
@@ -155,9 +194,16 @@ func normalizeTags(tags []string) []string {
 	return out
 }
 
+type tagChunkSet struct {
+	total    int
+	parts    map[int]string
+	conflict bool
+}
+
 func labelsFromTags(tags []string) map[string]string {
 	labels := map[string]string{}
 	ownershipConflicts := map[string]bool{}
+	chunkedExact := map[string]*tagChunkSet{}
 	versionedExact := map[string]string{}
 	versionedExactConflict := map[string]bool{}
 	legacyExact := map[string]string{}
@@ -174,6 +220,10 @@ func labelsFromTags(tags []string) map[string]string {
 				continue
 			}
 			key := strings.ToLower(parts[0])
+			if logical, ok := chunkedTagValueKey(key); ok {
+				recordTagChunk(chunkedExact, logical, parts[1])
+				continue
+			}
 			if logical, ok := versionedExactTagValueKey(key); ok {
 				recordExactTagValue(versionedExact, versionedExactConflict, logical, decodeExactTagValue(parts[1]))
 				continue
@@ -186,29 +236,43 @@ func labelsFromTags(tags []string) map[string]string {
 				recordExactTagValue(legacyExact, legacyExactConflict, key, value)
 				continue
 			}
-			switch key {
-			case "provider", "lease", "slug", "target":
-				value := parts[1]
-				if key == "provider" || key == "target" {
-					value = strings.ToLower(value)
-				}
-				recordOwnershipTagValue(labels, ownershipConflicts, key, value)
-			case "keep", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
-				value := parts[1]
-				switch key {
-				case "keep", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
-					value = strings.ToLower(value)
-				}
-				labels[key] = value
-			case "state":
-				value := strings.ToLower(parts[1])
-				if statePriority(value) >= statePriority(labels["state"]) {
-					labels["state"] = value
-				}
-			case "expires_at", "last_touched_at":
-				if numericTagValue(parts[1]) >= numericTagValue(labels[key]) {
-					labels[key] = parts[1]
-				}
+			applyDecodedTagLabel(labels, ownershipConflicts, key, parts[1])
+		}
+	}
+	for key, chunks := range chunkedExact {
+		if chunks.conflict || chunks.total == 0 || len(chunks.parts) != chunks.total {
+			versionedExactConflict[key] = true
+			continue
+		}
+		var encoded strings.Builder
+		for index := 0; index < chunks.total; index++ {
+			part, ok := chunks.parts[index]
+			if !ok {
+				versionedExactConflict[key] = true
+				break
+			}
+			encoded.WriteString(part)
+		}
+		if !versionedExactConflict[key] {
+			recordExactTagValue(versionedExact, versionedExactConflict, key, decodeExactTagValue(encoded.String()))
+		}
+	}
+	for _, key := range tagLabelKeys() {
+		if value, ok := versionedExact[key]; ok || versionedExactConflict[key] {
+			delete(labels, key)
+			if ok && !versionedExactConflict[key] {
+				applyDecodedTagLabel(labels, ownershipConflicts, key, value)
+			} else if isOwnershipTagKey(key) {
+				ownershipConflicts[key] = true
+			}
+			continue
+		}
+		if value, ok := legacyExact[key]; ok || legacyExactConflict[key] {
+			delete(labels, key)
+			if ok && !legacyExactConflict[key] {
+				applyDecodedTagLabel(labels, ownershipConflicts, key, value)
+			} else if isOwnershipTagKey(key) {
+				ownershipConflicts[key] = true
 			}
 		}
 	}
@@ -220,21 +284,70 @@ func labelsFromTags(tags []string) map[string]string {
 		sort.Strings(keys)
 		labels[ownershipTagConflictLabel] = strings.Join(keys, ",")
 	}
-	for _, key := range tagLabelKeys() {
-		if !exactTagValueKey(key) {
-			continue
+	return labels
+}
+
+func recordTagChunk(chunks map[string]*tagChunkSet, key, value string) {
+	set := chunks[key]
+	if set == nil {
+		set = &tagChunkSet{parts: map[int]string{}}
+		chunks[key] = set
+	}
+	if len(value) < tagChunkHeaderLength || value[4] != ':' {
+		set.conflict = true
+		return
+	}
+	index, indexErr := strconv.Atoi(value[:2])
+	total, totalErr := strconv.Atoi(value[2:4])
+	if indexErr != nil || totalErr != nil || total < 1 || index >= total {
+		set.conflict = true
+		return
+	}
+	if set.total != 0 && set.total != total {
+		set.conflict = true
+		return
+	}
+	set.total = total
+	part := value[tagChunkHeaderLength:]
+	if existing, ok := set.parts[index]; ok && existing != part {
+		set.conflict = true
+		return
+	}
+	set.parts[index] = part
+}
+
+func applyDecodedTagLabel(labels map[string]string, ownershipConflicts map[string]bool, key, value string) {
+	switch key {
+	case "provider", "lease", "slug", "target":
+		if key == "provider" || key == "target" {
+			value = strings.ToLower(value)
 		}
-		if value, ok := versionedExact[key]; ok || versionedExactConflict[key] {
-			if ok && !versionedExactConflict[key] {
-				labels[key] = value
-			}
-			continue
+		recordOwnershipTagValue(labels, ownershipConflicts, key, value)
+	case "keep", "class", "server_type", "provider_key", "ttl_secs", "idle_timeout", "idle_timeout_secs", "created_at", "updated_at", "profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports", "tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error", "tailscale_exit_node", "tailscale_exit_node_allow_lan_access":
+		switch key {
+		case "keep", "tailscale", "tailscale_state", "tailscale_exit_node_allow_lan_access":
+			value = strings.ToLower(value)
 		}
-		if value, ok := legacyExact[key]; ok && !legacyExactConflict[key] {
+		labels[key] = value
+	case "state":
+		value = strings.ToLower(value)
+		if statePriority(value) >= statePriority(labels["state"]) {
+			labels["state"] = value
+		}
+	case "expires_at", "last_touched_at":
+		if numericTagValue(value) >= numericTagValue(labels[key]) {
 			labels[key] = value
 		}
 	}
-	return labels
+}
+
+func isOwnershipTagKey(key string) bool {
+	switch key {
+	case "provider", "lease", "slug", "target":
+		return true
+	default:
+		return false
+	}
 }
 
 func recordOwnershipTagValue(labels map[string]string, conflicts map[string]bool, key, value string) {
@@ -259,6 +372,18 @@ func recordExactTagValue(values map[string]string, conflicts map[string]bool, ke
 		return
 	}
 	values[key] = value
+}
+
+func replaceCrabboxTags(existing, desired []string) []string {
+	tags := append([]string(nil), desired...)
+	for _, tag := range existing {
+		lower := strings.ToLower(strings.TrimSpace(tag))
+		if lower == tagCrabbox || strings.HasPrefix(lower, tagPrefix) {
+			continue
+		}
+		tags = append(tags, tag)
+	}
+	return normalizeTags(tags)
 }
 
 func statePriority(state string) int64 {

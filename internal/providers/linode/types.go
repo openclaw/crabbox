@@ -1,7 +1,11 @@
 package linode
 
 type account struct {
-	Email string `json:"email"`
+	EUUID string `json:"euuid"`
+}
+
+type accountSettings struct {
+	InterfacesForNewLinodes string `json:"interfaces_for_new_linodes"`
 }
 
 type linodeInstance struct {
@@ -20,19 +24,20 @@ type linodeInstance struct {
 }
 
 type createLinodeRequest struct {
-	Region          string            `json:"region"`
-	Type            string            `json:"type"`
-	Image           string            `json:"image"`
-	Label           string            `json:"label,omitempty"`
-	Tags            []string          `json:"tags,omitempty"`
-	AuthorizedKeys  []string          `json:"authorized_keys,omitempty"`
-	RootPass        string            `json:"root_pass,omitempty"`
-	Metadata        *linodeMetadata   `json:"metadata,omitempty"`
-	FirewallID      int64             `json:"firewall_id,omitempty"`
-	Interfaces      []linodeInterface `json:"interfaces,omitempty"`
-	PrivateIP       bool              `json:"private_ip,omitempty"`
-	StackScriptID   int64             `json:"stackscript_id,omitempty"`
-	StackScriptData map[string]string `json:"stackscript_data,omitempty"`
+	Region              string            `json:"region"`
+	Type                string            `json:"type"`
+	Image               string            `json:"image"`
+	Label               string            `json:"label,omitempty"`
+	Tags                []string          `json:"tags,omitempty"`
+	AuthorizedKeys      []string          `json:"authorized_keys,omitempty"`
+	RootPass            string            `json:"root_pass,omitempty"`
+	Metadata            *linodeMetadata   `json:"metadata,omitempty"`
+	FirewallID          int64             `json:"firewall_id,omitempty"`
+	InterfaceGeneration string            `json:"interface_generation,omitempty"`
+	Interfaces          []linodeInterface `json:"interfaces,omitempty"`
+	PrivateIP           bool              `json:"private_ip,omitempty"`
+	StackScriptID       int64             `json:"stackscript_id,omitempty"`
+	StackScriptData     map[string]string `json:"stackscript_data,omitempty"`
 }
 
 type linodeMetadata struct {
@@ -40,8 +45,10 @@ type linodeMetadata struct {
 }
 
 type linodeInterface struct {
-	Purpose string `json:"purpose"`
-	Label   string `json:"label,omitempty"`
+	Purpose    string    `json:"purpose,omitempty"`
+	Label      string    `json:"label,omitempty"`
+	FirewallID *int64    `json:"firewall_id,omitempty"`
+	Public     *struct{} `json:"public,omitempty"`
 }
 
 type linodeType struct {

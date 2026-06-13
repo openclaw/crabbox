@@ -100,8 +100,8 @@ linodes:read_write
 
 Add firewall access when using `linode.firewall` /
 `CRABBOX_LINODE_FIREWALL`. Crabbox uses account identity to bind local cleanup
-claims to the creating Linode account and refuses claim-only deletion after an
-account switch.
+claims to the creating Linode account's stable EUUID and refuses claim-only
+deletion after an account switch.
 
 If a live smoke fails with a permission error, keep the error output secret-safe
 and adjust token scopes before retrying. Do not broaden scopes inside scripts.
@@ -142,8 +142,9 @@ Release and cleanup require a complete ownership predicate: Crabbox marker,
 provider marker, lease id, slug, and Linux target. Linodes with partial,
 foreign, or malformed Crabbox-like tags are skipped/refused.
 
-Tag updates apply only Crabbox's normalized tag set for the instance being
-touched. Direct mode has no coordinator alarm. Use:
+Tag updates replace only Crabbox's namespaced tags and preserve unrelated
+operator tags already attached to the instance. Direct mode has no coordinator
+alarm. Use:
 
 ```sh
 crabbox list --provider linode --json
@@ -155,7 +156,9 @@ crabbox cleanup --provider linode
 
 Phase 1 does not create or manage Linode firewall rules. If `linode.firewall`
 or `CRABBOX_LINODE_FIREWALL` is set to a numeric firewall id, Crabbox attaches
-that existing firewall when creating the instance. Operators own the firewall
+that existing firewall when creating the instance. Crabbox reads the account's
+new-Linode interface setting and attaches the firewall either to the legacy
+Linode or its public Linode interface as required. Operators own the firewall
 policy, including SSH source restrictions.
 
 Use account-default firewall policy, an existing firewall, short TTLs, and

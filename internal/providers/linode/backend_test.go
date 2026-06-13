@@ -20,18 +20,20 @@ type fakeClock struct {
 func (c fakeClock) Now() time.Time { return c.t }
 
 type fakeLinodeAPI struct {
-	linodes        []linodeInstance
-	accountID      string
-	accountErr     error
-	nextID         int64
-	createErr      error
-	getErr         error
-	deleteErr      error
-	created        []linodeInstance
-	deleted        []int64
-	updated        []int64
-	updatedTags    [][]string
-	createRequests []createLinodeRequest
+	linodes            []linodeInstance
+	accountID          string
+	accountErr         error
+	accountSettings    accountSettings
+	accountSettingsErr error
+	nextID             int64
+	createErr          error
+	getErr             error
+	deleteErr          error
+	created            []linodeInstance
+	deleted            []int64
+	updated            []int64
+	updatedTags        [][]string
+	createRequests     []createLinodeRequest
 }
 
 func (f *fakeLinodeAPI) AccountID(context.Context) (string, error) {
@@ -41,7 +43,17 @@ func (f *fakeLinodeAPI) AccountID(context.Context) (string, error) {
 	if f.accountID != "" {
 		return f.accountID, nil
 	}
-	return "email:alice@example.com", nil
+	return "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56", nil
+}
+
+func (f *fakeLinodeAPI) AccountSettings(context.Context) (accountSettings, error) {
+	if f.accountSettingsErr != nil {
+		return accountSettings{}, f.accountSettingsErr
+	}
+	if f.accountSettings.InterfacesForNewLinodes == "" {
+		return accountSettings{InterfacesForNewLinodes: "legacy_config_default_but_linode_allowed"}, nil
+	}
+	return f.accountSettings, nil
 }
 
 func (f *fakeLinodeAPI) ListLinodes(context.Context) ([]linodeInstance, error) {
@@ -169,7 +181,7 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 	if labels := labelsFromTags(req.Tags); labels["lease"] != lease.LeaseID || labels["slug"] != "my-app" || labels["state"] != "provisioning" {
 		t.Fatalf("create labels=%v", labels)
 	}
-	if lease.Server.Labels["state"] != "ready" || lease.Server.Labels[linodeAccountLabel] != "email:alice@example.com" {
+	if lease.Server.Labels["state"] != "ready" || lease.Server.Labels[linodeAccountLabel] != "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56" {
 		t.Fatalf("lease labels=%v", lease.Server.Labels)
 	}
 	if len(api.updated) != 1 || api.updated[0] != 100 {
@@ -179,7 +191,7 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 		t.Fatalf("ready tags labels=%v", labels)
 	}
 	claim, ok, err := core.ResolveLeaseClaimForProvider("my-app", providerName)
-	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[linodeAccountLabel] != "email:alice@example.com" {
+	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[linodeAccountLabel] != "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56" {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }
@@ -219,6 +231,39 @@ func TestAcquireRejectsInvalidFirewallBeforeCreate(t *testing.T) {
 	}
 	if len(api.createRequests) != 0 {
 		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+}
+
+func TestAcquireConfiguresFirewallForLegacyInterfaces(t *testing.T) {
+	api := &fakeLinodeAPI{
+		accountSettings: accountSettings{InterfacesForNewLinodes: "legacy_config_default_but_linode_allowed"},
+	}
+	backend := newTestBackend(t, api)
+	backend.Cfg.Linode.FirewallID = "123"
+
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "legacy-firewall"}); err != nil {
+		t.Fatal(err)
+	}
+	req := api.createRequests[0]
+	if req.InterfaceGeneration != "legacy_config" || req.FirewallID != 123 || len(req.Interfaces) != 0 {
+		t.Fatalf("request=%#v", req)
+	}
+}
+
+func TestAcquireConfiguresFirewallForLinodeInterfaces(t *testing.T) {
+	api := &fakeLinodeAPI{
+		accountSettings: accountSettings{InterfacesForNewLinodes: "linode_only"},
+	}
+	backend := newTestBackend(t, api)
+	backend.Cfg.Linode.FirewallID = "456"
+
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "linode-firewall"}); err != nil {
+		t.Fatal(err)
+	}
+	req := api.createRequests[0]
+	if req.InterfaceGeneration != "linode" || req.FirewallID != 0 || len(req.Interfaces) != 1 ||
+		req.Interfaces[0].FirewallID == nil || *req.Interfaces[0].FirewallID != 456 || req.Interfaces[0].Public == nil {
+		t.Fatalf("request=%#v", req)
 	}
 }
 
@@ -327,7 +372,7 @@ func TestResolveReleaseOnlyNumericSlugClaimBeforeRawLinodeID(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
-	labels[linodeAccountLabel] = "email:alice@example.com"
+	labels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	server := core.Server{
 		Provider: providerName,
 		CloudID:  "456",
@@ -351,14 +396,14 @@ func TestResolveReleaseOnlyNumericSlugClaimBeforeRawLinodeID(t *testing.T) {
 }
 
 func TestReleaseRefusesAccountMismatch(t *testing.T) {
-	api := &fakeLinodeAPI{accountID: "email:first@example.com"}
+	api := &fakeLinodeAPI{accountID: "euuid:first"}
 	backend := newTestBackend(t, api)
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "mismatch"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	api.accountID = "email:second@example.com"
+	api.accountID = "euuid:second"
 	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
 	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("ReleaseLease err=%v", err)
@@ -374,7 +419,7 @@ func TestReleaseMissingLiveLinodeFinalizesLocalClaim(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	labels := core.DirectLeaseLabels(cfg, leaseID, "gone", providerName, "", false, time.Now())
-	labels[linodeAccountLabel] = "email:alice@example.com"
+	labels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	server := core.Server{
 		Provider: providerName,
 		CloudID:  "123",
@@ -413,11 +458,11 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	cfg.TargetOS = core.TargetLinux
 	expiredLabels := core.DirectLeaseLabels(cfg, "cbx_expired", "expired", providerName, "", false, now.Add(-2*time.Hour))
 	expiredLabels["state"] = "ready"
-	expiredLabels[linodeAccountLabel] = "email:alice@example.com"
+	expiredLabels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	expiredLabels["expires_at"] = "1"
 	keepLabels := core.DirectLeaseLabels(cfg, "cbx_keep", "keep", providerName, "", true, now.Add(-2*time.Hour))
 	keepLabels["state"] = "ready"
-	keepLabels[linodeAccountLabel] = "email:alice@example.com"
+	keepLabels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
 	api := &fakeLinodeAPI{linodes: []linodeInstance{
 		{ID: 10, Label: core.LeaseProviderName("cbx_expired", "expired"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.10"}, Tags: tagsFromLabels(expiredLabels)},
 		{ID: 11, Label: core.LeaseProviderName("cbx_keep", "keep"), Status: "running", Type: "g6-standard-1", IPv4: []string{"203.0.113.11"}, Tags: tagsFromLabels(keepLabels)},
@@ -446,7 +491,7 @@ func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
 	cfg.ServerType = defaultType
 	cfg.TTL = time.Hour
 	cfg.IdleTimeout = time.Minute
-	item := linodeInstance{ID: 99, Label: core.LeaseProviderName("cbx_abcdef123456", "touch-me"), Status: "running", Type: defaultType, IPv4: []string{"203.0.113.10"}, Tags: leaseTags(cfg, "cbx_abcdef123456", "touch-me", "ready", false, time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC))}
+	item := linodeInstance{ID: 99, Label: core.LeaseProviderName("cbx_abcdef123456", "touch-me"), Status: "running", Type: defaultType, IPv4: []string{"203.0.113.10"}, Tags: append(leaseTags(cfg, "cbx_abcdef123456", "touch-me", "ready", false, time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)), "customer:production")}
 	server := serverFromLinode(item, cfg)
 	server.Labels["tailscale_ipv4"] = "100.64.1.1"
 	server.Labels["tailscale_fqdn"] = "stale.example.ts.net"
@@ -461,7 +506,7 @@ func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
 	liveLabels["tailscale_error"] = "last probe failed: retrying"
 	liveLabels["tailscale_tags"] = "tag:ci,tag:crabbox"
 	liveLabels["tailscale_exit_node"] = "exit.example.ts.net"
-	item.Tags = tagsFromLabels(liveLabels)
+	item.Tags = append(tagsFromLabels(liveLabels), "customer:production")
 	api := &fakeLinodeAPI{linodes: []linodeInstance{item}}
 	backend := newTestBackend(t, api)
 	backend.RT.Clock = fakeClock{t: time.Date(2026, 6, 10, 12, 10, 0, 0, time.UTC)}
@@ -483,6 +528,9 @@ func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
 	if len(api.updated) != 1 || api.updated[0] != 99 {
 		t.Fatalf("updated=%v", api.updated)
 	}
+	if !containsString(api.updatedTags[0], "customer:production") {
+		t.Fatalf("external tags not preserved: %v", api.updatedTags[0])
+	}
 	decoded := labelsFromTags(api.updatedTags[0])
 	if decoded["state"] != "running" ||
 		decoded["idle_timeout_secs"] != "1200" ||
@@ -494,6 +542,15 @@ func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
 		decoded["tailscale_exit_node"] != "exit.example.ts.net" {
 		t.Fatalf("persisted labels=%v tags=%v", decoded, api.updatedTags[0])
 	}
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAmbiguousCreatePersistsRecoveryClaimAndRetainsKey(t *testing.T) {
@@ -509,7 +566,7 @@ func TestAmbiguousCreatePersistsRecoveryClaimAndRetainsKey(t *testing.T) {
 		t.Fatalf("createRequests=%d deleted=%v", len(api.createRequests), api.deleted)
 	}
 	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("ambiguous", providerName)
-	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" || claim.Labels[linodeAccountLabel] != "email:alice@example.com" {
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels["recovery"] != "ambiguous-create" || claim.Labels[linodeAccountLabel] != "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56" {
 		t.Fatalf("recovery claim=%#v ok=%v err=%v", claim, ok, claimErr)
 	}
 	keyPath, pathErr := core.TestboxKeyPath(claim.LeaseID)

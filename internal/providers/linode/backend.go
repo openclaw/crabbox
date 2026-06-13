@@ -17,6 +17,7 @@ import (
 
 type linodeAPI interface {
 	AccountID(context.Context) (string, error)
+	AccountSettings(context.Context) (accountSettings, error)
 	ListLinodes(context.Context) ([]linodeInstance, error)
 	GetLinode(context.Context, int64) (linodeInstance, error)
 	CreateLinode(context.Context, createLinodeRequest) (linodeInstance, error)
@@ -159,8 +160,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
-	fmt.Fprintf(b.RT.Stderr, "provisioning provider=linode lease=%s slug=%s type=%s region=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, linodeRegionForConfig(cfg), linodeImageForConfig(cfg), req.Keep)
-	created, err = client.CreateLinode(ctx, createLinodeRequest{
+	createReq := createLinodeRequest{
 		Region:         linodeRegionForConfig(cfg),
 		Type:           linodeServerTypeForConfig(cfg),
 		Image:          linodeImageForConfig(cfg),
@@ -169,8 +169,18 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 		AuthorizedKeys: []string{publicKey},
 		RootPass:       rootPass,
 		Metadata:       &linodeMetadata{UserData: linodeUserData(cfg, publicKey)},
-		FirewallID:     firewallID,
-	})
+	}
+	if firewallID > 0 {
+		settings, settingsErr := client.AccountSettings(ctx)
+		if settingsErr != nil {
+			return core.LeaseTarget{}, settingsErr
+		}
+		if configureErr := configureLinodeFirewall(&createReq, firewallID, settings.InterfacesForNewLinodes); configureErr != nil {
+			return core.LeaseTarget{}, configureErr
+		}
+	}
+	fmt.Fprintf(b.RT.Stderr, "provisioning provider=linode lease=%s slug=%s type=%s region=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, linodeRegionForConfig(cfg), linodeImageForConfig(cfg), req.Keep)
+	created, err = client.CreateLinode(ctx, createReq)
 	if err != nil {
 		if isLinodeCreateAmbiguous(err) {
 			if claimErr := b.persistAcquireRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, accountID, req.Keep, now); claimErr != nil {
@@ -192,7 +202,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	}
 	readyLabels := labelsFromTags(leaseTags(cfg, leaseID, slug, "ready", req.Keep, now))
 	readyLabels[linodeAccountLabel] = accountID
-	if err := client.UpdateLinodeTags(ctx, created.ID, tagsFromLabels(readyLabels)); err != nil {
+	if err := client.UpdateLinodeTags(ctx, created.ID, replaceCrabboxTags(created.Tags, tagsFromLabels(readyLabels))); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels = readyLabels
@@ -566,7 +576,7 @@ func (b *linodeLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (
 	if accountID := strings.TrimSpace(server.Labels[linodeAccountLabel]); accountID != "" {
 		labels[linodeAccountLabel] = accountID
 	}
-	if err := client.UpdateLinodeTags(ctx, server.ID, tagsFromLabels(labels)); err != nil {
+	if err := client.UpdateLinodeTags(ctx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
 		return core.Server{}, err
 	}
 	server.Labels = labels
@@ -594,7 +604,7 @@ func (b *linodeLeaseBackend) UpdateTailscaleMetadata(ctx context.Context, lease 
 		labels[linodeAccountLabel] = accountID
 	}
 	applyTailscaleMetadata(labels, meta)
-	if err := client.UpdateLinodeTags(ctx, server.ID, tagsFromLabels(labels)); err != nil {
+	if err := client.UpdateLinodeTags(ctx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
 		return core.Server{}, err
 	}
 	server.Labels = labels
@@ -963,6 +973,20 @@ func parseLinodeFirewallID(value string) (int64, error) {
 		return 0, core.Exit(2, "linode firewall must be a positive numeric firewall ID")
 	}
 	return id, nil
+}
+
+func configureLinodeFirewall(req *createLinodeRequest, firewallID int64, interfaceSetting string) error {
+	switch strings.TrimSpace(interfaceSetting) {
+	case "legacy_config_only", "legacy_config_default_but_linode_allowed":
+		req.InterfaceGeneration = "legacy_config"
+		req.FirewallID = firewallID
+	case "linode_default_but_legacy_config_allowed", "linode_only":
+		req.InterfaceGeneration = "linode"
+		req.Interfaces = []linodeInterface{{FirewallID: &firewallID, Public: &struct{}{}}}
+	default:
+		return core.Exit(3, "linode account returned unsupported interfaces_for_new_linodes value %q", interfaceSetting)
+	}
+	return nil
 }
 
 func generateLinodeRootPass() (string, error) {

@@ -121,10 +121,18 @@ func (c *linodeClient) AccountID(ctx context.Context) (string, error) {
 	if err := c.do(ctx, http.MethodGet, "/account", nil, &res); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(res.Email) == "" {
-		return "", core.Exit(3, "linode account response did not include email identity")
+	if strings.TrimSpace(res.EUUID) == "" {
+		return "", core.Exit(3, "linode account response did not include euuid identity")
 	}
-	return "email:" + strings.TrimSpace(res.Email), nil
+	return "euuid:" + strings.TrimSpace(res.EUUID), nil
+}
+
+func (c *linodeClient) AccountSettings(ctx context.Context) (accountSettings, error) {
+	var out accountSettings
+	if err := c.do(ctx, http.MethodGet, "/account/settings", nil, &out); err != nil {
+		return accountSettings{}, err
+	}
+	return out, nil
 }
 
 func (c *linodeClient) ListLinodes(ctx context.Context) ([]linodeInstance, error) {

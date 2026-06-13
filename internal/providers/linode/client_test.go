@@ -82,7 +82,7 @@ func TestLinodeClientAccountID(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/account" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
-		_, _ = w.Write([]byte(`{"email":"alice@example.com"}`))
+		_, _ = w.Write([]byte(`{"euuid":"A1BC2DEF-34GH-567I-J890KLMN12O34P56"}`))
 	}))
 	defer server.Close()
 
@@ -96,8 +96,32 @@ func TestLinodeClientAccountID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accountID != "email:alice@example.com" {
+	if accountID != "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56" {
 		t.Fatalf("accountID=%q", accountID)
+	}
+}
+
+func TestLinodeClientAccountSettings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/account/settings" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		_, _ = w.Write([]byte(`{"interfaces_for_new_linodes":"linode_only"}`))
+	}))
+	defer server.Close()
+
+	t.Setenv(tokenEnv, "token")
+	client, err := newLinodeClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	settings, err := client.AccountSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.InterfacesForNewLinodes != "linode_only" {
+		t.Fatalf("settings=%#v", settings)
 	}
 }
 

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `provider: linode` for direct Linux SSH leases with per-lease keys, account-bound cleanup, preserved operator tags, interface-aware existing firewalls, and guarded live smoke coverage. Thanks @coygeek.
 - Added `provider: windows-sandbox` for disposable native Windows runs through Microsoft Windows Sandbox, including mapped workspace sync, streamed output, timeout and cancellation cleanup, and keep-on-failure inspection. Thanks @zozo123.
 - Added `provider: smolvm` for delegated Linux microVM runs through the hosted smolfleet API, including archive sync, retained leases, status, cleanup, and repository-scoped ownership checks. Thanks @zozo123.
 - Added guarded SmolVM live E2E coverage for retained reuse, archive replacement, environment forwarding, command exit propagation, diagnostics, and targeted cleanup.

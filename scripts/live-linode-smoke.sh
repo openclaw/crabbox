@@ -184,7 +184,9 @@ cleanup() {
     local cleanup_output=""
     local cleanup_status=1
     local attempt
-    for attempt in 1 2 3; do
+    local cleanup_attempts=65
+    local cleanup_poll_seconds=2
+    for ((attempt = 1; attempt <= cleanup_attempts; attempt++)); do
       set +e
       cleanup_output="$(bin/crabbox stop --provider linode "$slug" 2>&1)"
       cleanup_status=$?
@@ -196,7 +198,9 @@ cleanup() {
       local lower_cleanup_output
       lower_cleanup_output="$(printf '%s' "$cleanup_output" | tr '[:upper:]' '[:lower:]')"
       if [ "$cleanup_status" -ne 4 ] || [[ "$lower_cleanup_output" != *"lease/linode not found:"* ]]; then
-        sleep 2
+        if [ "$attempt" -lt "$cleanup_attempts" ]; then
+          sleep "$cleanup_poll_seconds"
+        fi
         continue
       fi
       local slug_status=2
@@ -213,7 +217,9 @@ cleanup() {
           break
         fi
       fi
-      sleep 2
+      if [ "$attempt" -lt "$cleanup_attempts" ]; then
+        sleep "$cleanup_poll_seconds"
+      fi
     done
     if [ "$cleanup_status" -ne 0 ]; then
       printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "bin/crabbox stop --provider linode $slug" "$cleanup_status" "$slug" >&2
