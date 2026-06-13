@@ -218,8 +218,8 @@ provider-specific exclusion before production use.
 
 ## Outbound WebVNC
 
-Direct desktop leases normally use a loopback-only local noVNC page. With
-registered mode, a kept desktop may start an outbound bridge daemon:
+Managed and external desktop integrations should keep VNC on target loopback.
+With registered mode, a kept desktop may start an outbound bridge daemon:
 
 ```text
 guest VNC on loopback
@@ -228,9 +228,14 @@ guest VNC on loopback
     <- authenticated viewer WebSocket -> browser
 ```
 
-The guest does not expose VNC publicly. The coordinator uses short-lived
-one-use tickets to pair an agent and viewer. If the daemon or coordinator
-restarts, the client reconnects and refreshes the registration.
+In this path the guest does not expose VNC publicly. The coordinator uses
+short-lived one-use tickets to pair an agent and viewer.
+
+Static `ssh` hosts have an explicit direct-endpoint fallback: if loopback VNC
+is unavailable but `<host>:5900` is reachable, the local daemon may connect to
+that endpoint without an SSH tunnel. Use that mode only on a trusted private
+network with firewall isolation and host-managed VNC authentication; it does
+not provide SSH transport protection. Prefer loopback VNC when possible.
 
 Use:
 
@@ -280,7 +285,8 @@ copies an SSH private key and never grants access to the private provider API.
 - Use argv arrays and leave shell evaluation disabled.
 - Keep routing and user config files mode `0600`.
 - Never put secret environment placeholders in lifecycle argv.
-- Keep VNC loopback-only and use SSH plus the outbound bridge.
+- Keep managed/external VNC loopback-only and use SSH plus the outbound bridge;
+  separately secure any explicit static-host direct endpoint.
 - Configure coordinator authentication independently from provider auth.
 - Share portal capabilities only with authenticated identities.
 - Verify stop removes the provider resource before deregistration is treated as
