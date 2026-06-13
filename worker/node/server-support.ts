@@ -118,6 +118,26 @@ export function isTrustedProxySource(
   return blockList.check(normalizedAddress, family === 4 ? "ipv4" : "ipv6");
 }
 
+export function requestSourceIP(
+  peerAddress: string | undefined,
+  forwardedFor: string | undefined,
+  configuredCIDRs: string | undefined,
+): string | undefined {
+  const peer = normalizeIPAddress(peerAddress);
+  if (isIP(peer) === 0) return undefined;
+  if (!isTrustedProxySource(peer, configuredCIDRs)) return peer;
+
+  const chain = (forwardedFor ?? "")
+    .split(",")
+    .map((entry) => normalizeIPAddress(entry))
+    .filter((entry) => isIP(entry) !== 0);
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const candidate = chain[index];
+    if (candidate && !isTrustedProxySource(candidate, configuredCIDRs)) return candidate;
+  }
+  return peer;
+}
+
 function normalizeIPAddress(address: string | undefined): string {
   const value = address?.trim() ?? "";
   const mappedIPv4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(value);

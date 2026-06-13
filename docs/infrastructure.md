@@ -124,6 +124,11 @@ receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate. The Cloudflare
 Worker runtime does not expose a trusted socket peer, so use its verified Access
 JWT support instead.
 
+The same peer allowlist controls whether the Node runtime honors forwarded host,
+protocol, and client-IP headers. It walks the forwarded-for chain from the socket
+inward and uses the nearest address outside the trusted proxy ranges for dynamic
+provider ingress rules; direct callers always use the socket peer address.
+
 ### GitHub browser login
 
 Browser login uses a GitHub OAuth app owned by your deployment org. Configure the

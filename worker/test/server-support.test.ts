@@ -14,6 +14,7 @@ import {
   isTrustedProxySource,
   readNodeRequestBody,
   requestBodyLimit,
+  requestSourceIP,
   runFinishRequestBodyBytes,
   settlesWithin,
   shouldReadUnauthenticatedRequestBody,
@@ -145,6 +146,15 @@ describe("Node server support", () => {
     expect(isTrustedProxySource("192.0.2.10", ranges)).toBe(false);
     expect(isTrustedProxySource("10.4.5.6", undefined)).toBe(false);
     expect(isTrustedProxySource("10.4.5.6", "invalid,10.0.0.0/8")).toBe(false);
+  });
+
+  it("derives caller IPs from sockets and trusted proxy chains", () => {
+    const ranges = "10.0.0.0/8,fd00::/8";
+    expect(requestSourceIP("198.51.100.8", "203.0.113.9", ranges)).toBe("198.51.100.8");
+    expect(requestSourceIP("10.0.0.2", "192.0.2.9, 198.51.100.8", ranges)).toBe("198.51.100.8");
+    expect(requestSourceIP("10.0.0.2", "198.51.100.8, 10.0.0.3", ranges)).toBe("198.51.100.8");
+    expect(requestSourceIP("::ffff:198.51.100.8", undefined, ranges)).toBe("198.51.100.8");
+    expect(requestSourceIP(undefined, "198.51.100.8", ranges)).toBeUndefined();
   });
 
   it("rejects declared oversized bodies without reading their stream", async () => {

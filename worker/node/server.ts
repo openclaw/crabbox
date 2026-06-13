@@ -18,6 +18,7 @@ import {
   isReadinessRequestMethod,
   isTrustedProxySource,
   readNodeRequestBody,
+  requestSourceIP,
   requestBodyLimit,
   settlesWithin,
   shouldReadUnauthenticatedRequestBody,
@@ -50,13 +51,9 @@ const server = createServer((request, response) => {
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   try {
-    const requestMetadata = webRequestFromNode(request);
-    const authContext = {
-      trustedProxy: isTrustedProxySource(
-        request.socket.remoteAddress,
-        env.CRABBOX_TRUSTED_PROXY_CIDRS,
-      ),
-    };
+    const requestContext = nodeRequestContext(request);
+    const requestMetadata = webRequestFromNode(request, requestContext);
+    const authContext = { trustedProxy: requestContext.trustedProxy };
     if (new URL(requestMetadata.url).pathname === "/v1/ready") {
       let result: Response;
       if (isReadinessRequestMethod(requestMetadata.method)) {
@@ -127,13 +124,9 @@ async function handleUpgrade(
 ): Promise<void> {
   const context: NodeUpgradeContext = { request, socket, head, upgraded: false };
   try {
-    const webRequest = webRequestFromNode(request);
-    const authContext = {
-      trustedProxy: isTrustedProxySource(
-        request.socket.remoteAddress,
-        env.CRABBOX_TRUSTED_PROXY_CIDRS,
-      ),
-    };
+    const requestContext = nodeRequestContext(request);
+    const webRequest = webRequestFromNode(request, requestContext);
+    const authContext = { trustedProxy: requestContext.trustedProxy };
     const response = await runtime.runWithUpgrade(context, () =>
       routeCoordinatorRequest(webRequest, env, runFleetRequest, authContext),
     );
@@ -199,10 +192,32 @@ function shutdownFailed(error: unknown): void {
   process.exit(1);
 }
 
-function webRequestFromNode(request: IncomingMessage): Request {
-  const protocol = firstHeader(request.headers["x-forwarded-proto"]) || "http";
-  const host =
-    firstHeader(request.headers["x-forwarded-host"]) || request.headers.host || "localhost";
+interface NodeRequestContext {
+  sourceIP: string | undefined;
+  trustedProxy: boolean;
+}
+
+function nodeRequestContext(request: IncomingMessage): NodeRequestContext {
+  const configuredCIDRs = env.CRABBOX_TRUSTED_PROXY_CIDRS;
+  const peerAddress = request.socket.remoteAddress;
+  return {
+    sourceIP: requestSourceIP(
+      peerAddress,
+      joinedHeader(request.headers["x-forwarded-for"]),
+      configuredCIDRs,
+    ),
+    trustedProxy: isTrustedProxySource(peerAddress, configuredCIDRs),
+  };
+}
+
+function webRequestFromNode(request: IncomingMessage, context: NodeRequestContext): Request {
+  const protocol = context.trustedProxy
+    ? firstHeader(request.headers["x-forwarded-proto"]) || "http"
+    : "http";
+  const forwardedHost = context.trustedProxy
+    ? firstHeader(request.headers["x-forwarded-host"])
+    : "";
+  const host = forwardedHost || request.headers.host || "localhost";
   const url = `${protocol}://${host}${request.url || "/"}`;
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
@@ -212,6 +227,8 @@ function webRequestFromNode(request: IncomingMessage): Request {
       headers.set(name, value);
     }
   }
+  headers.delete("cf-connecting-ip");
+  if (context.sourceIP) headers.set("cf-connecting-ip", context.sourceIP);
   const method = request.method || "GET";
   return new Request(url, { method, headers });
 }
@@ -299,6 +316,10 @@ function contentType(path: string): string {
 
 function firstHeader(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? "") : ((value ?? "").split(",")[0]?.trim() ?? "");
+}
+
+function joinedHeader(value: string | string[] | undefined): string {
+  return Array.isArray(value) ? value.join(",") : (value ?? "");
 }
 
 function requiredEnv(name: string): string {
