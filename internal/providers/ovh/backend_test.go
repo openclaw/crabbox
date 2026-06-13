@@ -669,11 +669,14 @@ func TestFailedRollbackRecoveryIsImmediatelyCleanupEligible(t *testing.T) {
 	}
 	backend := testBackend(fake)
 	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
-		return errors.New("ssh never became ready")
+		return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during ovh bootstrap")
 	}
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-cleanup", Keep: true})
 	if err == nil || !strings.Contains(err.Error(), "temporary delete failure") {
 		t.Fatalf("err=%v", err)
+	}
+	if len(fake.createInstances) != 1 {
+		t.Fatalf("create instances=%d; cleanup failure must suppress acquire retry", len(fake.createInstances))
 	}
 	claims, err := core.ListLeaseClaims()
 	if err != nil {

@@ -189,7 +189,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			err = errors.Join(err, fmt.Errorf("persist ovh recovery claim: %w", claimErr))
 		}
 		if cleanupErr := rollbackOVHAcquire(client, cfg.OVH.ProjectID, created.ID, createdKey.ID, keyCreated); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("ovh cleanup failed: %w", cleanupErr))
+			err = core.Exit(7, "%v; ovh cleanup failed: %v", err, cleanupErr)
 			return
 		}
 		if recoveryPersisted {
