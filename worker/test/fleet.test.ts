@@ -223,6 +223,30 @@ describe("fleet lease identity and idle", () => {
     expect((error as HetznerProvisioningError).retryable).toBe(false);
   });
 
+  it("recovers Hetzner SSH key uniqueness races by key identity", async () => {
+    const existing = {
+      id: 42,
+      name: "legacy-workspace-key",
+      fingerprint: "fingerprint",
+      public_key: "ssh-ed25519 workspace-test old-comment",
+    };
+    const responses = [
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ error: { code: "uniqueness_error" } }, 409),
+      jsonResponse({ ssh_keys: [existing] }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift() ?? jsonResponse({}, 500)),
+    );
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      client.ensureSSHKey("crabbox-workspace-new", "ssh-ed25519 workspace-test new-comment"),
+    ).resolves.toEqual(existing);
+  });
+
   it("treats an already-absent Hetzner server as successful cleanup", async () => {
     vi.stubGlobal(
       "fetch",
@@ -1867,6 +1891,79 @@ describe("fleet lease identity and idle", () => {
       status: "expired",
     });
     expect(providerReleases).toBe(1);
+  });
+
+  it("does not report a recovered initializing server as ready when it already has an IP", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {
+        servers: [
+          {
+            provider: "hetzner",
+            id: 655,
+            cloudID: "655",
+            name: "crabbox-fleet-is-129",
+            status: "initializing",
+            serverType: "cpx62",
+            host: "192.0.2.129",
+            labels: { lease: leaseID },
+          },
+        ],
+      }),
+    });
+    const old = new Date(Date.now() - 20 * 60_000).toISOString();
+    storage.seed("workspace:example-org:alice%40example.com:fleet-is-129", {
+      id: "fleet-is-129",
+      leaseID,
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      provider: "hetzner",
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 3600,
+      idleTimeoutSeconds: 360,
+      createdAt: old,
+      updatedAt: old,
+    });
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "fleet-is-129",
+        workspaceID: "fleet-is-129",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        keep: false,
+        state: "provisioning",
+        provisioningRequestStartedAt: old,
+        createdAt: old,
+        updatedAt: old,
+        lastTouchedAt: old,
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    const pending = await fleet.fetch(
+      request("GET", "/v1/workspaces/fleet-is-129", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    await expect(pending.json()).resolves.toMatchObject({ status: "provisioning" });
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      cloudID: "655",
+      state: "provisioning",
+    });
   });
 
   it("expires interrupted workspace recovery through normal lease cleanup", async () => {

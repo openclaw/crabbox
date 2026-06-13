@@ -30,6 +30,7 @@ import {
   HetznerClient,
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
+  sshPublicKeyIdentity,
 } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
@@ -2038,7 +2039,7 @@ export class FleetCoordinator {
         current.serverID = server.id;
         current.serverName = server.name;
         current.serverType = server.serverType;
-        if (server.host.trim()) {
+        if (server.status === "running" && server.host.trim()) {
           current.state = "active";
           current.host = server.host;
         } else {
@@ -8100,7 +8101,9 @@ async function workspaceLeaseRequest(
     throw new Error("workspace provisioning deadline expired");
   }
   const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
-  const providerKey = `${workspaceProviderKeyPrefix}${(await sha256Hex(sshPublicKey.trim())).slice(0, 12)}`;
+  const providerKey = `${workspaceProviderKeyPrefix}${(
+    await sha256Hex(sshPublicKeyIdentity(sshPublicKey))
+  ).slice(0, 12)}`;
   return new Request("https://crabbox.invalid/v1/leases", {
     method: "POST",
     headers: workspaceRecordHeaders(workspace),

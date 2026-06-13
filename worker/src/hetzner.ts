@@ -91,25 +91,22 @@ export class HetznerClient {
   }
 
   async ensureSSHKey(name: string, publicKey: string): Promise<HetznerSSHKey> {
+    const identity = sshPublicKeyIdentity(publicKey);
     const byName = await this.request<HetznerListSSHKeysResponse>(
       "GET",
       `/ssh_keys?${new URLSearchParams({ name })}`,
     );
     for (const key of byName.ssh_keys) {
       if (key.name === name) {
-        if (key.public_key.trim() !== publicKey.trim()) {
+        if (sshPublicKeyIdentity(key.public_key) !== identity) {
           throw new Error(`hetzner ssh key ${name} exists with different public key`);
         }
         return key;
       }
     }
 
-    const all = await this.request<HetznerListSSHKeysResponse>(
-      "GET",
-      `/ssh_keys?${new URLSearchParams({ per_page: "100" })}`,
-    );
-    for (const key of all.ssh_keys) {
-      if (key.public_key.trim() === publicKey.trim()) {
+    for (const key of await this.listSSHKeys()) {
+      if (sshPublicKeyIdentity(key.public_key) === identity) {
         return key;
       }
     }
@@ -128,12 +125,10 @@ export class HetznerClient {
       if (!String(error).includes("uniqueness_error")) {
         throw error;
       }
-      const raced = await this.request<HetznerListSSHKeysResponse>(
-        "GET",
-        `/ssh_keys?${new URLSearchParams({ name })}`,
+      const key = (await this.listSSHKeys()).find(
+        (entry) => sshPublicKeyIdentity(entry.public_key) === identity,
       );
-      const key = raced.ssh_keys.find((entry) => entry.name === name);
-      if (key?.public_key.trim() === publicKey.trim()) {
+      if (key) {
         return key;
       }
       throw error;
@@ -220,7 +215,7 @@ export class HetznerClient {
     while (Date.now() < deadline) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- polling must wait between Hetzner API reads.
       const server = await this.getServer(id);
-      if (server.public_net.ipv4.ip) {
+      if (server.status === "running" && server.public_net.ipv4.ip) {
         return server;
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- this delay is the polling interval.
@@ -280,7 +275,7 @@ export class HetznerClient {
         transientHetznerError(message) || isRetryableProvisioningError(message),
       );
     }
-    if (response.server.public_net.ipv4.ip) {
+    if (response.server.status === "running" && response.server.public_net.ipv4.ip) {
       return response.server;
     }
     try {
@@ -288,6 +283,23 @@ export class HetznerClient {
     } catch (error) {
       throw new HetznerProvisioningError(errorText(error), true, true);
     }
+  }
+
+  private async listSSHKeys(): Promise<HetznerSSHKey[]> {
+    const keys: HetznerSSHKey[] = [];
+    const perPage = 100;
+    for (let page = 1; page <= 100; page += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- Hetzner SSH key pagination is sequential.
+      const response = await this.request<HetznerListSSHKeysResponse>(
+        "GET",
+        `/ssh_keys?${new URLSearchParams({ page: String(page), per_page: String(perPage) })}`,
+      );
+      keys.push(...response.ssh_keys);
+      if (response.ssh_keys.length < perPage) {
+        break;
+      }
+    }
+    return keys;
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -312,6 +324,11 @@ export class HetznerClient {
     }
     return (await response.json()) as T;
   }
+}
+
+export function sshPublicKeyIdentity(publicKey: string): string {
+  const [type, encoded] = publicKey.trim().split(/\s+/, 3);
+  return type && encoded ? `${type} ${encoded}` : publicKey.trim();
 }
 
 export function isRetryableProvisioningError(message: string): boolean {
