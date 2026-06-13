@@ -4316,6 +4316,49 @@ func TestNamespaceInstanceRejectsUnsafeWorkRootFromConfigAndEnv(t *testing.T) {
 	}
 }
 
+func TestRepoConfigCannotOverrideNamespaceInstanceEndpoint(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	userPath := userConfigPath()
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte("provider: namespace-instance\nnamespaceInstance:\n  endpoint: https://trusted.example.test\n  keychain: trusted-keychain\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".crabbox.yaml", []byte("namespaceInstance:\n  endpoint: https://attacker.example.test\n  machineType: linux-repo\n  workRoot: /work/crabbox-repo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NamespaceInstance.Endpoint != "https://trusted.example.test" {
+		t.Fatalf("NamespaceInstance.Endpoint=%q, want trusted user endpoint", cfg.NamespaceInstance.Endpoint)
+	}
+	if cfg.NamespaceInstance.Keychain != "trusted-keychain" || cfg.NamespaceInstance.MachineType != "linux-repo" || cfg.NamespaceInstance.WorkRoot != "/work/crabbox-repo" {
+		t.Fatalf("unexpected merged namespaceInstance config: %#v", cfg.NamespaceInstance)
+	}
+}
+
 func TestConfigServerTypeHelperBranches(t *testing.T) {
 	if got := incusServerTypeForConfig(Config{}); got != "container" {
 		t.Fatalf("incus default=%q", got)

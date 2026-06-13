@@ -1074,11 +1074,13 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
 		freestyleAPIURL := cfg.Freestyle.APIURL
+		namespaceInstanceEndpoint := cfg.NamespaceInstance.Endpoint
 		if err := applyConfigFile(&cfg, path); err != nil {
 			return Config{}, err
 		}
 		if !trustedProviderEndpointConfigPath(path) {
 			cfg.Freestyle.APIURL = freestyleAPIURL
+			cfg.NamespaceInstance.Endpoint = namespaceInstanceEndpoint
 		}
 	}
 	if err := applyEnv(&cfg); err != nil {
