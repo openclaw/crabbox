@@ -1,0 +1,38 @@
+// Shared tailnet policy: keep operator context.
+{
+  "tagOwners": {
+    "tag:existing": ["autogroup:admin"],
+    "tag:cbx-pond-alice-pr-42": ["autogroup:admin"],
+    // Keep this tag-owner closing note.
+  },
+
+  // Modern policy rows.
+  "grants": [
+    {
+      "src": ["group:developers"],
+      "dst": ["tag:existing"],
+      "ip": ["tcp:22"],
+    },
+    {"src":["tag:cbx-pond-alice-pr-42"],"dst":["tag:cbx-pond-alice-pr-42"],"ip":["*"]},
+    // Keep this grants closing note.
+  ],
+
+  "tests": [
+    {
+      "src": "alice@example.com",
+      "accept": ["tag:existing:22"],
+    },
+  ],
+  "ssh": [
+    {
+      "action": "check",
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self"],
+      "users": ["autogroup:nonroot"],
+    },
+  ],
+  "futureSection": {
+    "keep": "exactly where it is",
+  },
+  // Keep this root closing note.
+}
