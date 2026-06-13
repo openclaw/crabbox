@@ -270,6 +270,18 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_PROJECT_ID",
 		"CRABBOX_RAILWAY_ENVIRONMENT_ID",
 		"RAILWAY_ENVIRONMENT_ID",
+		"CRABBOX_NVIDIA_BREV_CLI",
+		"CRABBOX_NVIDIA_BREV_ORG",
+		"CRABBOX_NVIDIA_BREV_TYPE",
+		"CRABBOX_NVIDIA_BREV_GPU_NAME",
+		"CRABBOX_NVIDIA_BREV_PROVIDER",
+		"CRABBOX_NVIDIA_BREV_MODE",
+		"CRABBOX_NVIDIA_BREV_LAUNCHABLE",
+		"CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT",
+		"CRABBOX_NVIDIA_BREV_RELEASE_ACTION",
+		"CRABBOX_NVIDIA_BREV_TARGET",
+		"CRABBOX_NVIDIA_BREV_USER",
+		"CRABBOX_NVIDIA_BREV_WORK_ROOT",
 		"HOSTINGER_API_TOKEN",
 		"CRABBOX_HOSTINGER_API_TOKEN",
 		"HOSTINGER_API_URL",
@@ -285,6 +297,84 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_HOSTINGER_RELEASE_ACTION",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.NvidiaBrev.CLI != "brev" ||
+		cfg.NvidiaBrev.GPUName != "A100" ||
+		cfg.NvidiaBrev.Mode != "vm" ||
+		cfg.NvidiaBrev.ReleaseAction != "delete" ||
+		cfg.NvidiaBrev.Target != "container" ||
+		cfg.NvidiaBrev.WorkRoot != "/tmp/crabbox" {
+		t.Fatalf("nvidiaBrev defaults not applied: %#v", cfg.NvidiaBrev)
+	}
+
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "nvidia-brev",
+		NvidiaBrev: &fileNvidiaBrevConfig{
+			CLI:           "/opt/brev",
+			Org:           "example-org",
+			Type:          "gpu",
+			GPUName:       "L40S",
+			Provider:      "aws",
+			Mode:          "vm",
+			Launchable:    "pytorch",
+			StartupScript: "setup.sh",
+			ReleaseAction: "stop",
+			Target:        "host",
+			User:          "ubuntu",
+			WorkRoot:      "/work/brev",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "nvidia-brev" ||
+		cfg.NvidiaBrev.CLI != "/opt/brev" ||
+		cfg.NvidiaBrev.Org != "example-org" ||
+		cfg.NvidiaBrev.Type != "gpu" ||
+		cfg.NvidiaBrev.GPUName != "L40S" ||
+		cfg.NvidiaBrev.Provider != "aws" ||
+		cfg.NvidiaBrev.Mode != "vm" ||
+		cfg.NvidiaBrev.Launchable != "pytorch" ||
+		cfg.NvidiaBrev.StartupScript != "setup.sh" ||
+		cfg.NvidiaBrev.ReleaseAction != "stop" ||
+		cfg.NvidiaBrev.Target != "host" ||
+		cfg.NvidiaBrev.User != "ubuntu" ||
+		cfg.NvidiaBrev.WorkRoot != "/work/brev" {
+		t.Fatalf("file nvidiaBrev config not applied: %#v", cfg.NvidiaBrev)
+	}
+
+	t.Setenv("CRABBOX_NVIDIA_BREV_CLI", "/usr/local/bin/brev")
+	t.Setenv("CRABBOX_NVIDIA_BREV_ORG", "env-example-org")
+	t.Setenv("CRABBOX_NVIDIA_BREV_TYPE", "cpu")
+	t.Setenv("CRABBOX_NVIDIA_BREV_GPU_NAME", "A100")
+	t.Setenv("CRABBOX_NVIDIA_BREV_PROVIDER", "gcp")
+	t.Setenv("CRABBOX_NVIDIA_BREV_MODE", "vm")
+	t.Setenv("CRABBOX_NVIDIA_BREV_LAUNCHABLE", "base")
+	t.Setenv("CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT", "env-setup.sh")
+	t.Setenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION", "delete")
+	t.Setenv("CRABBOX_NVIDIA_BREV_TARGET", "container")
+	t.Setenv("CRABBOX_NVIDIA_BREV_USER", "runner")
+	t.Setenv("CRABBOX_NVIDIA_BREV_WORK_ROOT", "/workspace/brev")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NvidiaBrev.CLI != "/usr/local/bin/brev" ||
+		cfg.NvidiaBrev.Org != "env-example-org" ||
+		cfg.NvidiaBrev.Type != "cpu" ||
+		cfg.NvidiaBrev.GPUName != "A100" ||
+		cfg.NvidiaBrev.Provider != "gcp" ||
+		cfg.NvidiaBrev.Mode != "vm" ||
+		cfg.NvidiaBrev.Launchable != "base" ||
+		cfg.NvidiaBrev.StartupScript != "env-setup.sh" ||
+		cfg.NvidiaBrev.ReleaseAction != "delete" ||
+		cfg.NvidiaBrev.Target != "container" ||
+		cfg.NvidiaBrev.User != "runner" ||
+		cfg.NvidiaBrev.WorkRoot != "/workspace/brev" {
+		t.Fatalf("env nvidiaBrev config not applied: %#v", cfg.NvidiaBrev)
 	}
 }
 
