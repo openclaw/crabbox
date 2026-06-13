@@ -174,16 +174,22 @@ second Crabbox login by forwarding the verified user in a header:
 CRABBOX_TRUSTED_USER_HEADER=X-Authenticated-User
 CRABBOX_TRUSTED_USER_ORG=example-org
 CRABBOX_TRUSTED_PROXY_CIDRS=10.42.7.19/32,fd00:1234::19/128
+CRABBOX_TRUSTED_PROXY_SECRET=replace-with-a-random-secret
 ```
 
 The Node runtime accepts the identity only when the connection peer is within
-`CRABBOX_TRUSTED_PROXY_CIDRS`. Enable this only when the ingress removes
-caller-supplied copies of the configured identity header. Use only the ingress
-proxy's exact addresses or dedicated subnets, and enforce network policy that
-prevents callers from reaching the coordinator directly. The forwarded
+`CRABBOX_TRUSTED_PROXY_CIDRS`. When `CRABBOX_TRUSTED_PROXY_SECRET` is set, the
+ingress must also send the same value in `X-Crabbox-Proxy-Secret`; the coordinator
+strips that header before routing the request. Enable this only when the ingress
+removes caller-supplied identity and secret headers. Use exact proxy addresses or
+dedicated subnets, or require the secret when direct coordinator access cannot be
+blocked. The forwarded
 identity receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate. The
 Cloudflare Worker runtime does not expose a trusted socket peer, so use its
 verified Access JWT support instead.
+
+`X-Crabbox-Proxy-Secret` is reserved and cannot be used as
+`CRABBOX_TRUSTED_USER_HEADER`.
 
 The same peer allowlist controls whether the Node runtime honors forwarded host,
 protocol, and client-IP headers. It walks the forwarded-for chain from the socket
@@ -233,7 +239,8 @@ minted Access JWT in `CRABBOX_ACCESS_TOKEN`.
 
 For brokered Tailscale reachability, the coordinator mints one ephemeral, pre-approved
 auth key per lease and injects it only into cloud-init. Lease records store only
-non-secret Tailscale metadata (hostname, FQDN, 100.x address, state, tags).
+non-secret Tailscale metadata (hostname, FQDN, 100.x address, client version,
+device id, state, tags, and cleanup result).
 
 Create a Tailscale OAuth client with the `auth_keys` scope, limited to the tags
 Crabbox may assign (typically `tag:crabbox`), and inject the credentials as
@@ -244,10 +251,21 @@ CRABBOX_TAILSCALE_ENABLED=1
 CRABBOX_TAILSCALE_CLIENT_ID
 CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
-CRABBOX_TAILSCALE_TAGS=tag:crabbox      # must match the OAuth client's allowed tags
+CRABBOX_TAILSCALE_TAGS=tag:crabbox      # requested-tag allowlist/default
+CRABBOX_TAILSCALE_INSTALL_MODE=package  # or pinned
+CRABBOX_TAILSCALE_VERSION=1.98.4        # pinned mode
+CRABBOX_TAILSCALE_SHA256_AMD64=...      # pinned mode
+CRABBOX_TAILSCALE_SHA256_ARM64=...      # pinned mode
 ```
 
-Verify end to end with `crabbox warmup --tailscale --network tailscale`. See
+For one tag, assign the same tag to the OAuth client. For multiple tags, either
+request the OAuth client's complete tag set or configure `tagOwners` so an OAuth
+client tag owns every subset tag Crabbox may request. Prefer one dedicated
+deployment-owner tag over broad OAuth permissions. Tailscale rejects unowned subset
+requests even when every tag is present in `CRABBOX_TAILSCALE_TAGS`.
+
+Preflight the coordinator with `scripts/live-tailscale-smoke.sh --json`, then verify
+end to end with `crabbox warmup --tailscale --network tailscale`. See
 [Tailscale](features/tailscale.md).
 
 ### Deploy token scope
@@ -496,6 +514,12 @@ Shared prerequisites:
 - budget limits sized before inviting users;
 - outbound network access to provider, GitHub, Tailscale, and artifact APIs that
   the enabled features use.
+
+Choose Cloudflare Workers/Durable Objects or the single-replica Node/PostgreSQL
+runtime. For the container runbook, see
+[Portable Coordinator](features/portable-coordinator.md). Design history,
+production proof, and remaining scale work are tracked in
+[Portable Coordinator Runtime](plan/portable-coordinator.md).
 
 Cloudflare prerequisites:
 

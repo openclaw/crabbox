@@ -127,7 +127,8 @@ tailscale_exit_node_allow_lan_access=true|false
 
 Brokered leases receive a one-shot auth key minted by the Worker via Tailscale
 OAuth. Direct-provider leases use a key read from the environment variable named
-by `--tailscale-auth-key-env`. The auth key is never stored on the runner.
+by `--tailscale-auth-key-env`. Bootstrap pipes the key to `tailscale up` through
+stdin, so it is neither placed in process arguments nor stored on the runner.
 
 When the metadata says the lease is on the tailnet but the client cannot reach
 it, the usual causes are:

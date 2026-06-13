@@ -256,11 +256,14 @@ is **opt-in**. To let lease creation auto-install the rows, set both:
 - `CRABBOX_POND_ACL_BOOTSTRAP=1` — explicit consent to edit the tailnet policy.
   `TS_API_KEY` alone is never treated as consent.
 
-When enabled, Crabbox reads the policy with an ETag, merges in the missing
-`tagOwners` entry and a self-peering rule (grants-shape if the policy already
-uses grants, otherwise a legacy `acls` row), and writes it back with `If-Match`
-so concurrent edits fail fast. If the control plane does not expose a
-Tailscale-compatible policy API (e.g. Headscale), lease creation is not blocked.
+When enabled, Crabbox reads the HuJSON policy with an ETag, applies only the
+missing `tagOwners` entry and self-peering rule (grants-shape if the policy
+already uses grants, otherwise a legacy `acls` row), and writes it back with
+`If-Match` so concurrent edits fail fast. Existing comments, ordering, trailing
+commas, and unrelated policy sections are preserved. Ambiguous or unsupported
+policy shapes fail closed with the manual snippet below. If the control plane
+does not expose a Tailscale-compatible policy API (e.g. Headscale), lease
+creation is not blocked.
 
 Without the opt-in, `crabbox doctor --pond <name>` verifies the required policy
 row (using `TS_API_KEY` read-only) and points you at this document if it is

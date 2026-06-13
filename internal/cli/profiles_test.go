@@ -600,6 +600,34 @@ func TestRunStopCommandIncludesProviderRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesNamespaceInstanceRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "namespace-instance",
+		TargetOS: targetLinux,
+		NamespaceInstance: NamespaceInstanceConfig{
+			CLIPath:  "/opt/Namespace CLI/nsc",
+			Endpoint: "https://user:secret@api.example.test/path",
+			Region:   "eu west",
+			Keychain: "ci",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider namespace-instance",
+		"--namespace-instance-cli '/opt/Namespace CLI/nsc'",
+		"--namespace-instance-endpoint https://api.example.test/path",
+		"--namespace-instance-region 'eu west'",
+		"--namespace-instance-keychain ci",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "secret") || strings.Contains(got, "user") {
+		t.Fatalf("stop command leaked endpoint credentials:\n%s", got)
+	}
+}
+
 func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
 	got := runStopCommand(Config{
 		Provider: "xcp-ng",
@@ -732,6 +760,45 @@ func TestRunStopCommandIncludesHostingerRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesExplicitNvidiaBrevReleaseAction(t *testing.T) {
+	cfg := Config{
+		Provider: "nvidia-brev",
+		TargetOS: targetLinux,
+		NvidiaBrev: NvidiaBrevConfig{
+			CLI:           "/opt/bin/brev",
+			ReleaseAction: "stop",
+			Target:        "host",
+			User:          "ubuntu",
+		},
+	}
+	MarkDeleteOnReleaseExplicit(&cfg, "nvidia-brev")
+	got := runStopCommand(cfg, "cbx_123")
+	for _, want := range []string{
+		"--provider nvidia-brev",
+		"--nvidia-brev-cli /opt/bin/brev",
+		"--nvidia-brev-release-action stop",
+		"--nvidia-brev-target host",
+		"--nvidia-brev-user ubuntu",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunStopCommandPreservesExplicitDefaultNvidiaBrevCLI(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "nvidia-brev",
+		NvidiaBrev: NvidiaBrevConfig{
+			CLI: "brev",
+		},
+	}, "cbx_123")
+	if !strings.Contains(got, "--nvidia-brev-cli brev") {
+		t.Fatalf("stop command omitted effective Brev CLI:\n%s", got)
+	}
+}
+
 func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
 	cfg := Config{
 		Provider: "kubevirt",
@@ -771,8 +838,9 @@ func TestRunStopCommandOmitsAmbientReleasePolicy(t *testing.T) {
 		{Provider: "kubevirt", KubeVirt: KubeVirtConfig{DeleteOnRelease: true}},
 		{Provider: "morph", Morph: MorphConfig{DeleteOnRelease: true}},
 		{Provider: "namespace-devbox", Namespace: NamespaceConfig{DeleteOnRelease: true}},
+		{Provider: "nvidia-brev", NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}},
 	} {
-		if got := runStopCommand(cfg, "cbx_123"); strings.Contains(got, "delete-on-release") {
+		if got := runStopCommand(cfg, "cbx_123"); strings.Contains(got, "delete-on-release") || strings.Contains(got, "release-action") {
 			t.Fatalf("ambient release policy leaked into stop command:\n%s", got)
 		}
 	}

@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/crabbox-worker",
-  "version": "0.28.0",
+  "version": "0.30.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -27,6 +27,7 @@
     "fast-xml-parser": "^5.8.0",
     "pg": "^8.21.0",
     "pg-boss": "^12.18.2",
+    "ssh2": "^1.17.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

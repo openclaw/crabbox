@@ -1663,6 +1663,19 @@ func runStopCommand(cfg Config, id string) string {
 
 func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []string {
 	switch normalizeProviderName(cfg.Provider) {
+	case "namespace-instance":
+		if strings.TrimSpace(cfg.NamespaceInstance.CLIPath) != "" && cfg.NamespaceInstance.CLIPath != "nsc" {
+			args = append(args, "--namespace-instance-cli", cfg.NamespaceInstance.CLIPath)
+		}
+		if strings.TrimSpace(cfg.NamespaceInstance.Endpoint) != "" {
+			args = append(args, "--namespace-instance-endpoint", routingSafeURL(cfg.NamespaceInstance.Endpoint))
+		}
+		if strings.TrimSpace(cfg.NamespaceInstance.Region) != "" {
+			args = append(args, "--namespace-instance-region", cfg.NamespaceInstance.Region)
+		}
+		if strings.TrimSpace(cfg.NamespaceInstance.Keychain) != "" {
+			args = append(args, "--namespace-instance-keychain", cfg.NamespaceInstance.Keychain)
+		}
 	case "proxmox":
 		if strings.TrimSpace(cfg.Proxmox.APIURL) != "" {
 			args = append(args, "--proxmox-api-url", cfg.Proxmox.APIURL)
@@ -1752,6 +1765,19 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 	case "hostinger":
 		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
 			args = append(args, "--hostinger-url", cfg.Hostinger.APIURL)
+		}
+	case "nvidia-brev":
+		if cli := strings.TrimSpace(cfg.NvidiaBrev.CLI); cli != "" {
+			args = append(args, "--nvidia-brev-cli", cli)
+		}
+		if target := strings.TrimSpace(cfg.NvidiaBrev.Target); target != "" && target != "container" {
+			args = append(args, "--nvidia-brev-target", target)
+		}
+		if user := strings.TrimSpace(cfg.NvidiaBrev.User); user != "" {
+			args = append(args, "--nvidia-brev-user", user)
+		}
+		if DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
+			args = append(args, "--nvidia-brev-release-action", cfg.NvidiaBrev.ReleaseAction)
 		}
 	case "kubevirt":
 		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
@@ -2517,6 +2543,7 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
@@ -2767,6 +2794,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if lease.SSH.Host != "" {
 		a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
 	}
+	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		return err
 	}

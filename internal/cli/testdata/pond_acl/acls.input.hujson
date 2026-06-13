@@ -1,0 +1,21 @@
+{
+  /* Existing owner and legacy rules stay untouched. */
+  "tagOwners": {
+    "tag:cbx-pond-alice-pr-42": ["autogroup:admin"],
+    "tag:existing": ["group:ops"],
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["group:ops"],
+      "dst": ["tag:existing:*"],
+    },
+    // Keep this ACL closing note.
+  ],
+  "nodeAttrs": [
+    {
+      "target": ["autogroup:member"],
+      "attr": ["funnel"],
+    },
+  ],
+}

@@ -45,6 +45,7 @@ export async function authenticateRequest(
     | "CRABBOX_GITHUB_ADMIN_LOGINS"
     | "CRABBOX_TRUSTED_USER_HEADER"
     | "CRABBOX_TRUSTED_USER_ORG"
+    | "CRABBOX_TRUSTED_PROXY_SECRET"
   >,
   context: AuthRequestContext = {},
 ): Promise<AuthContext | undefined> {
@@ -117,6 +118,7 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   const headers = new Headers(request.headers);
   headers.delete("cf-access-authenticated-user-email");
   headers.delete("cf-access-jwt-assertion");
+  headers.delete("x-crabbox-proxy-secret");
   headers.set("x-crabbox-auth", auth.auth);
   headers.set("x-crabbox-admin", auth.admin ? "true" : "false");
   headers.set("x-crabbox-owner", auth.owner);
@@ -131,6 +133,15 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   } else {
     headers.delete("x-crabbox-token-expires-at");
   }
+  return new Request(request, { headers });
+}
+
+export function requestWithoutProxySecret(request: Request): Request {
+  if (!request.headers.has("x-crabbox-proxy-secret")) {
+    return request;
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("x-crabbox-proxy-secret");
   return new Request(request, { headers });
 }
 
@@ -235,10 +246,25 @@ interface AccessIdentity {
 
 function trustedProxyIdentity(
   request: Request,
-  env: Pick<Env, "CRABBOX_TRUSTED_USER_HEADER" | "CRABBOX_TRUSTED_USER_ORG">,
+  env: Pick<
+    Env,
+    "CRABBOX_TRUSTED_USER_HEADER" | "CRABBOX_TRUSTED_USER_ORG" | "CRABBOX_TRUSTED_PROXY_SECRET"
+  >,
 ): AuthContext | undefined {
+  const requiredSecret = env.CRABBOX_TRUSTED_PROXY_SECRET;
+  if (
+    requiredSecret !== undefined &&
+    (!requiredSecret ||
+      !constantTimeEqual(request.headers.get("x-crabbox-proxy-secret") ?? "", requiredSecret))
+  ) {
+    return undefined;
+  }
   const header = env.CRABBOX_TRUSTED_USER_HEADER?.trim();
-  if (!header || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(header)) {
+  if (
+    !header ||
+    header.toLowerCase() === "x-crabbox-proxy-secret" ||
+    !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(header)
+  ) {
     return undefined;
   }
   const owner = request.headers.get(header)?.trim();

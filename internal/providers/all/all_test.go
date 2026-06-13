@@ -60,6 +60,21 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"nvidia-brev", "brev", "nvidia"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "nvidia-brev" {
+			t.Fatalf("ProviderFor(%q).Name=%q want nvidia-brev", name, provider.Name())
+		}
+		if _, ok := provider.(core.DoctorProvider); !ok {
+			t.Fatalf("ProviderFor(%q) does not expose doctor", name)
+		}
+	}
+}
+
 func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("superserve")
 	if err != nil {
@@ -79,6 +94,25 @@ func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "superserve" {
 			t.Fatalf("%q alias unexpectedly resolves to superserve", alias)
 		}
+	}
+}
+
+func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
+	for _, name := range []string{"namespace-instance", "namespace-compute"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "namespace-instance" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		}
+	}
+	provider, err := core.ProviderFor("namespace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.Name() != "namespace-devbox" {
+		t.Fatalf("namespace alias resolves to %q; want namespace-devbox", provider.Name())
 	}
 }
 
@@ -148,6 +182,8 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"multipass",
 		"mxc",
 		"namespace-devbox",
+		"namespace-instance",
+		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",
 		"ovh",

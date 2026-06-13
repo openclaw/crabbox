@@ -34,6 +34,7 @@ func (a App) configShow(args []string) error {
 
 func effectiveConfigForShow(cfg Config) Config {
 	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
+	cfg.NvidiaBrev.WorkRoot = EffectiveNvidiaBrevWorkRoot(cfg)
 	if cfg.Provider == "digitalocean" || cfg.Provider == "linode" {
 		base := baseConfig()
 		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
@@ -49,6 +50,10 @@ func effectiveConfigForShow(cfg Config) Config {
 		cfg.SSHUser = cfg.Hostinger.User
 		cfg.SSHPort = "22"
 		cfg.SSHFallbackPorts = nil
+	}
+	switch normalizeProviderName(cfg.Provider) {
+	case "nvidia-brev", "brev", "nvidia":
+		cfg.WorkRoot = cfg.NvidiaBrev.WorkRoot
 	}
 	return cfg
 }
@@ -134,6 +139,21 @@ func configShowView(cfg Config) map[string]any {
 			"firewall": cfg.Linode.FirewallID,
 			"sshCIDRs": cfg.Linode.SSHCIDRs,
 		},
+		"nvidiaBrev": map[string]any{
+			"cli":           cfg.NvidiaBrev.CLI,
+			"auth":          "cli",
+			"org":           cfg.NvidiaBrev.Org,
+			"type":          cfg.NvidiaBrev.Type,
+			"gpuName":       cfg.NvidiaBrev.GPUName,
+			"provider":      cfg.NvidiaBrev.Provider,
+			"mode":          cfg.NvidiaBrev.Mode,
+			"launchable":    cfg.NvidiaBrev.Launchable,
+			"startupScript": cfg.NvidiaBrev.StartupScript,
+			"releaseAction": cfg.NvidiaBrev.ReleaseAction,
+			"target":        cfg.NvidiaBrev.Target,
+			"user":          cfg.NvidiaBrev.User,
+			"workRoot":      cfg.NvidiaBrev.WorkRoot,
+		},
 		"hostinger": map[string]any{
 			"apiUrl":          cfg.Hostinger.APIURL,
 			"auth":            tokenState(cfg.Hostinger.APIToken),
@@ -179,6 +199,17 @@ func configShowView(cfg Config) map[string]any {
 			"autoStopIdleTimeout": cfg.Namespace.AutoStopIdleTimeout.String(),
 			"workRoot":            cfg.Namespace.WorkRoot,
 			"deleteOnRelease":     cfg.Namespace.DeleteOnRelease,
+		},
+		"namespaceInstance": map[string]any{
+			"cli":         cfg.NamespaceInstance.CLIPath,
+			"machineType": cfg.NamespaceInstance.MachineType,
+			"duration":    cfg.NamespaceInstance.Duration.String(),
+			"region":      cfg.NamespaceInstance.Region,
+			"endpoint":    redactedConfigURL(cfg.NamespaceInstance.Endpoint),
+			"keychain":    cfg.NamespaceInstance.Keychain,
+			"volumes":     cfg.NamespaceInstance.Volumes,
+			"workRoot":    cfg.NamespaceInstance.WorkRoot,
+			"bare":        cfg.NamespaceInstance.Bare,
 		},
 		"morph": map[string]any{
 			"apiUrl":          cfg.Morph.APIURL,
@@ -397,6 +428,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	fmt.Fprintf(w, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
+	fmt.Fprintf(w, "namespace_instance cli=%s machine_type=%s duration=%s region=%s endpoint=%s keychain=%s volumes=%d work_root=%s bare=%t\n", cfg.NamespaceInstance.CLIPath, blank(cfg.NamespaceInstance.MachineType, "-"), cfg.NamespaceInstance.Duration, blank(cfg.NamespaceInstance.Region, "-"), blank(redactedConfigURL(cfg.NamespaceInstance.Endpoint), "-"), blank(cfg.NamespaceInstance.Keychain, "-"), len(cfg.NamespaceInstance.Volumes), cfg.NamespaceInstance.WorkRoot, cfg.NamespaceInstance.Bare)
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(cfg.Morph.APIURL, "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", cfg.E2B.APIURL, cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
@@ -424,6 +456,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
+	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth=cli\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
 	fmt.Fprintf(w, "hostinger api_url=%s item_id=%s payment_method_id=%s template_id=%s data_center_id=%s hostname_prefix=%s user=%s work_root=%s allow_purchase=%t release_action=%s auth=%s\n", blank(cfg.Hostinger.APIURL, "-"), blank(cfg.Hostinger.ItemID, "-"), blank(cfg.Hostinger.PaymentMethodID, "-"), blank(cfg.Hostinger.TemplateID, "-"), blank(cfg.Hostinger.DataCenterID, "-"), blank(cfg.Hostinger.HostnamePrefix, "-"), blank(cfg.Hostinger.User, "-"), blank(cfg.Hostinger.WorkRoot, "-"), cfg.Hostinger.AllowPurchase, blank(cfg.Hostinger.ReleaseAction, "-"), tokenState(cfg.Hostinger.APIToken))
 	fmt.Fprintf(w, "ovh endpoint=%s project_id=%s region=%s image=%s flavor=%s auth=%s\n", blank(redactedConfigURL(cfg.OVH.Endpoint), "-"), blank(cfg.OVH.ProjectID, "-"), blank(cfg.OVH.Region, "-"), blank(cfg.OVH.Image, "-"), blank(cfg.OVH.Flavor, "-"), ovhAuthState())
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(cfg.AzureDynamicSessions.Endpoint, "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)

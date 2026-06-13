@@ -15,6 +15,7 @@ default_providers=(
   islo
   modal
   namespace-devbox
+  namespace-instance
   proxmox
   semaphore
   sprites

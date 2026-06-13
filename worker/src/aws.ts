@@ -7,6 +7,7 @@ import {
   awsInstanceTypeCandidatesForTargetClass,
   sshPorts,
   validatedCIDRs,
+  workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
 import { osImageSpec } from "./os-image";
@@ -54,6 +55,24 @@ const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: strin
 };
 const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
+
+export function awsManagedSecurityGroupName(config: Pick<LeaseConfig, "providerKey">): string {
+  return config.providerKey.startsWith(workspaceProviderKeyPrefix)
+    ? "crabbox-workspaces"
+    : "crabbox-runners";
+}
+
+export function awsConfiguredSecurityGroupID(
+  config: Pick<LeaseConfig, "awsSGID" | "providerKey">,
+  env: Pick<Env, "CRABBOX_AWS_SECURITY_GROUP_ID">,
+): string {
+  return (
+    config.awsSGID ||
+    (config.providerKey.startsWith(workspaceProviderKeyPrefix)
+      ? ""
+      : env.CRABBOX_AWS_SECURITY_GROUP_ID || "")
+  );
+}
 
 export interface AWSMacHost {
   id: string;
@@ -1126,7 +1145,7 @@ export class EC2SpotClient {
   }
 
   private async resolveAMI(config: LeaseConfig): Promise<string> {
-    if (config.awsAMI || this.env.CRABBOX_AWS_AMI) {
+    if (!config.awsUseStockImage && (config.awsAMI || this.env.CRABBOX_AWS_AMI)) {
       return config.awsAMI || this.env.CRABBOX_AWS_AMI || "";
     }
     if (config.target === "windows") {
@@ -1187,7 +1206,7 @@ export class EC2SpotClient {
     config: LeaseConfig,
     options: AWSIngressOptions = {},
   ): Promise<string> {
-    const configuredGroupID = config.awsSGID || this.env.CRABBOX_AWS_SECURITY_GROUP_ID || "";
+    const configuredGroupID = awsConfiguredSecurityGroupID(config, this.env);
     let group: unknown;
     let groupID = configuredGroupID;
     if (groupID) {
@@ -1197,7 +1216,7 @@ export class EC2SpotClient {
       group = items(record(existing["securityGroupInfo"])["item"])[0];
     } else {
       const vpcID = await this.securityGroupVPC(config);
-      const name = "crabbox-runners";
+      const name = awsManagedSecurityGroupName(config);
       const existing = await this.ec2("DescribeSecurityGroups", {
         "Filter.1.Name": "group-name",
         "Filter.1.Value.1": name,
@@ -1236,13 +1255,15 @@ export class EC2SpotClient {
         }
         let compactedAfterRuleLimit = false;
         for (const port of ports) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
-          await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
-            if (!message.includes("InvalidPermission.NotFound")) {
-              throw error;
-            }
-          });
+          if (!cidrs.includes("0.0.0.0/0")) {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
+            await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              if (!message.includes("InvalidPermission.NotFound")) {
+                throw error;
+              }
+            });
+          }
           for (const cidr of cidrs) {
             // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
             await this.allowTCP(groupID, port, cidr).catch((error: unknown) => {

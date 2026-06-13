@@ -54,8 +54,10 @@ Node deployments commonly put TLS and identity-aware routing in front of the
 service. The ingress must support WebSocket upgrades. If it injects a trusted
 user header, configure `CRABBOX_TRUSTED_USER_HEADER`,
 `CRABBOX_TRUSTED_USER_ORG`, and `CRABBOX_TRUSTED_PROXY_CIDRS`; the service
-accepts that identity only from an allowlisted socket peer. The ingress must
-remove caller-supplied copies of the identity header.
+accepts that identity only from an allowlisted socket peer. If direct access
+cannot be blocked, also configure `CRABBOX_TRUSTED_PROXY_SECRET` and send it in
+`X-Crabbox-Proxy-Secret`. The ingress must remove caller-supplied copies of both
+headers; the coordinator strips the secret before routing the request.
 
 ## How The Coordinator Authenticates A Request
 

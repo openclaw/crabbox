@@ -67,12 +67,17 @@ export interface Env {
   CRABBOX_GITHUB_ADMIN_OWNERS?: string;
   CRABBOX_GITHUB_ADMIN_LOGINS?: string;
   CRABBOX_PUBLIC_URL?: string;
+  CRABBOX_WORKSPACE_PROVIDER?: string;
+  CRABBOX_WORKSPACE_CLASS?: string;
+  CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?: string;
+  CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?: string;
   CRABBOX_DEFAULT_ORG?: string;
   CRABBOX_ACCESS_TEAM_DOMAIN?: string;
   CRABBOX_ACCESS_AUD?: string;
   CRABBOX_TRUSTED_USER_HEADER?: string;
   CRABBOX_TRUSTED_USER_ORG?: string;
   CRABBOX_TRUSTED_PROXY_CIDRS?: string;
+  CRABBOX_TRUSTED_PROXY_SECRET?: string;
   CRABBOX_COST_RATES_JSON?: string;
   CRABBOX_EUR_TO_USD?: string;
   CRABBOX_MAX_ACTIVE_LEASES?: string;
@@ -88,6 +93,10 @@ export interface Env {
   CRABBOX_TAILSCALE_CLIENT_SECRET?: string;
   CRABBOX_TAILSCALE_TAILNET?: string;
   CRABBOX_TAILSCALE_TAGS?: string;
+  CRABBOX_TAILSCALE_INSTALL_MODE?: string;
+  CRABBOX_TAILSCALE_VERSION?: string;
+  CRABBOX_TAILSCALE_SHA256_AMD64?: string;
+  CRABBOX_TAILSCALE_SHA256_ARM64?: string;
   CRABBOX_ARTIFACTS_BACKEND?: string;
   CRABBOX_ARTIFACTS_BUCKET?: string;
   CRABBOX_ARTIFACTS_PREFIX?: string;
@@ -279,6 +288,7 @@ export interface RunTelemetrySummary {
 export interface LeaseRecord {
   id: string;
   slug?: string;
+  workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;
   target: TargetOS;
@@ -333,6 +343,10 @@ export interface LeaseRecord {
   cleanupRetryAt?: string;
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
+  failureError?: string;
+  provisioningResourceMayExist?: boolean;
+  provisioningFailureRetryable?: boolean;
+  provisioningRequestStartedAt?: string;
   releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;
@@ -407,6 +421,7 @@ export interface LeaseNetworkState {
   sshSourceCIDRs?: string[];
   sshSourceCIDRsComplete?: boolean;
   awsSecurityGroupID?: string;
+  awsSecurityGroupName?: string;
   awsSubnetID?: string;
 }
 
@@ -427,6 +442,10 @@ export interface TailscaleMetadata {
   tags?: string[];
   state?: "requested" | "ready" | "failed";
   error?: string;
+  version?: string;
+  deviceID?: string;
+  cleanupState?: "missing_device_id" | "api_delete_succeeded" | "api_delete_failed";
+  cleanupError?: string;
   exitNode?: string;
   exitNodeAllowLanAccess?: boolean;
 }

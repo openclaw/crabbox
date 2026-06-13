@@ -13,6 +13,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var aws *providerMatrixEntry
 	var incus *providerMatrixEntry
 	var digitalOcean *providerMatrixEntry
+	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
@@ -23,6 +24,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "digitalocean" {
 			digitalOcean = &entries[i]
+		}
+		if entries[i].Provider == "nvidia-brev" {
+			nvidiaBrev = &entries[i]
 		}
 		if entries[i].Provider == "linode" {
 			linode = &entries[i]
@@ -36,6 +40,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if digitalOcean == nil {
 		t.Fatal("digitalocean provider not found")
+	}
+	if nvidiaBrev == nil {
+		t.Fatal("nvidia-brev provider not found")
 	}
 	if linode == nil {
 		t.Fatal("linode provider not found")
@@ -74,6 +81,18 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsString(linode.Targets, targetLinux) {
 		t.Fatalf("linode targets=%v", linode.Targets)
+	}
+	if nvidiaBrev.Kind != ProviderKindSSHLease || nvidiaBrev.Family != "nvidia-brev" || nvidiaBrev.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("nvidia-brev kind/family/coordinator=%q/%q/%q", nvidiaBrev.Kind, nvidiaBrev.Family, nvidiaBrev.Coordinator)
+	}
+	if !containsString(nvidiaBrev.Targets, targetLinux) {
+		t.Fatalf("nvidia-brev targets=%v", nvidiaBrev.Targets)
+	}
+	if !containsFeature(nvidiaBrev.Features, FeatureSSH) || !containsFeature(nvidiaBrev.Features, FeatureCrabboxSync) || !containsFeature(nvidiaBrev.Features, FeatureCleanup) {
+		t.Fatalf("nvidia-brev features=%v", nvidiaBrev.Features)
+	}
+	if !containsString(nvidiaBrev.Aliases, "brev") || !containsString(nvidiaBrev.Aliases, "nvidia") {
+		t.Fatalf("nvidia-brev aliases=%v", nvidiaBrev.Aliases)
 	}
 }
 

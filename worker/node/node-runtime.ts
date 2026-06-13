@@ -9,6 +9,7 @@ import type {
   CoordinatorRuntime,
   CoordinatorSocketHandlers,
   CoordinatorWebSocketUpgrade,
+  CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { PostgresCoordinatorStorage } from "./postgres-storage";
 
@@ -21,6 +22,7 @@ const bridgeDataAttachmentKinds = new Set([
   "code-viewer",
   "egress-host",
   "egress-client",
+  "workspace-terminal",
 ]);
 
 export interface NodeUpgradeContext {
@@ -32,12 +34,9 @@ export interface NodeUpgradeContext {
 
 export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   readonly storage: PostgresCoordinatorStorage;
+  readonly ephemeralWebSocketMaxPayloadBytes = 1024 * 1024;
   private readonly boss: PgBoss;
-  private readonly webSocketServer = new WebSocketServer({
-    noServer: true,
-    perMessageDeflate: false,
-    maxPayload: 12 * 1024 * 1024,
-  });
+  private readonly webSocketServers = new Map<number, WebSocketServer>();
   private readonly upgradeContext = new AsyncLocalStorage<NodeUpgradeContext>();
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private readonly sockets = new Set<NodeWebSocket>();
@@ -130,7 +129,9 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     return this.upgradeContext.run(context, callback);
   }
 
-  createWebSocketUpgrade(): CoordinatorWebSocketUpgrade {
+  createWebSocketUpgrade(
+    options?: CoordinatorWebSocketUpgradeOptions,
+  ): CoordinatorWebSocketUpgrade {
     if (this.shuttingDown) {
       throw new Error("coordinator is shutting down");
     }
@@ -138,8 +139,18 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     if (!context || context.upgraded) {
       throw new Error("websocket upgrade context is unavailable");
     }
+    const maxPayload = options?.maxPayload ?? 12 * 1024 * 1024;
+    let webSocketServer = this.webSocketServers.get(maxPayload);
+    if (!webSocketServer) {
+      webSocketServer = new WebSocketServer({
+        noServer: true,
+        perMessageDeflate: false,
+        maxPayload,
+      });
+      this.webSocketServers.set(maxPayload, webSocketServer);
+    }
     let accepted: NodeWebSocket | undefined;
-    this.webSocketServer.handleUpgrade(context.request, context.socket, context.head, (socket) => {
+    webSocketServer.handleUpgrade(context.request, context.socket, context.head, (socket) => {
       accepted = socket;
     });
     if (!accepted) {
@@ -202,6 +213,10 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
         console.error("coordinator websocket error handler failed", error);
       });
     });
+  }
+
+  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void {
+    this.acceptWebSocket(socket, { kind: "workspace-terminal" }, [], handlers);
   }
 
   async scheduleAlarm(time: number): Promise<void> {

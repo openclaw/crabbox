@@ -130,12 +130,15 @@ type Config struct {
 	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
+	NamespaceInstance             NamespaceInstanceConfig
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	Runpod                        RunpodConfig
+	NvidiaBrev                    NvidiaBrevConfig
+	nvidiaBrevWorkRootExplicit    bool
 	Hostinger                     HostingerConfig
 	hostingerUserExplicit         bool
 	hostingerWorkRootExplicit     bool
@@ -342,6 +345,19 @@ type NamespaceConfig struct {
 	DeleteOnRelease     bool
 }
 
+type NamespaceInstanceConfig struct {
+	CLIPath     string
+	MachineType string
+	Duration    time.Duration
+	Region      string
+	Endpoint    string
+	Keychain    string
+	TenantID    string
+	Volumes     []string
+	WorkRoot    string
+	Bare        bool
+}
+
 type MorphConfig struct {
 	APIKey          string
 	APIURL          string
@@ -427,6 +443,24 @@ type RunpodConfig struct {
 	DiskGB     int
 	User       string
 	WorkRoot   string
+}
+
+// NvidiaBrevConfig is intentionally non-secret. Authentication stays in the
+// NVIDIA Brev CLI's own credential store and is never accepted as Crabbox
+// config or argv.
+type NvidiaBrevConfig struct {
+	CLI           string
+	Org           string
+	Type          string
+	GPUName       string
+	Provider      string
+	Mode          string
+	Launchable    string
+	StartupScript string
+	ReleaseAction string
+	Target        string
+	User          string
+	WorkRoot      string
 }
 
 type HostingerConfig struct {
@@ -1629,6 +1663,26 @@ func MarkHostingerWorkRootExplicit(cfg *Config) {
 	cfg.hostingerWorkRootExplicit = true
 }
 
+func IsNvidiaBrevWorkRootExplicit(cfg *Config) bool {
+	return cfg.nvidiaBrevWorkRootExplicit
+}
+
+func MarkNvidiaBrevWorkRootExplicit(cfg *Config) {
+	cfg.nvidiaBrevWorkRootExplicit = true
+}
+
+func EffectiveNvidiaBrevWorkRoot(cfg Config) string {
+	workRoot := cfg.NvidiaBrev.WorkRoot
+	providerDefault := workRoot == "" || workRoot == "/tmp/crabbox"
+	if !IsNvidiaBrevWorkRootExplicit(&cfg) && providerDefault && cfg.explicitWorkRoot != "" {
+		return cfg.explicitWorkRoot
+	}
+	if workRoot == "" {
+		return "/tmp/crabbox"
+	}
+	return workRoot
+}
+
 func DeleteOnReleaseExplicit(cfg Config, provider string) bool {
 	return cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)]
 }
@@ -1771,6 +1825,11 @@ func baseConfig() Config {
 			WorkRoot:            "/workspaces/crabbox",
 			AutoStopIdleTimeout: 30 * time.Minute,
 		},
+		NamespaceInstance: NamespaceInstanceConfig{
+			CLIPath:  "nsc",
+			WorkRoot: "/work/crabbox",
+			Bare:     true,
+		},
 		Morph: MorphConfig{
 			APIURL:         "https://cloud.morph.so",
 			SSHGatewayHost: "ssh.cloud.morph.so",
@@ -1806,6 +1865,14 @@ func baseConfig() Config {
 			InstanceID: "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500",
 			Image:      "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04",
 			DiskGB:     20,
+		},
+		NvidiaBrev: NvidiaBrevConfig{
+			CLI:           "brev",
+			GPUName:       "A100",
+			Mode:          "vm",
+			ReleaseAction: "delete",
+			Target:        "container",
+			WorkRoot:      "/tmp/crabbox",
 		},
 		Hostinger: HostingerConfig{
 			APIURL:         "https://developers.hostinger.com",
@@ -2033,12 +2100,14 @@ type fileConfig struct {
 	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
 	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
+	NamespaceInstance    *fileNamespaceInstanceConfig       `yaml:"namespaceInstance,omitempty"`
 	Morph                *fileMorphConfig                   `yaml:"morph,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
 	ExeDev               *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
 	Railway              *fileRailwayConfig                 `yaml:"railway,omitempty"`
 	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
+	NvidiaBrev           *fileNvidiaBrevConfig              `yaml:"nvidiaBrev,omitempty"`
 	Hostinger            *fileHostingerConfig               `yaml:"hostinger,omitempty"`
 	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
 	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
@@ -2362,6 +2431,18 @@ type fileNamespaceConfig struct {
 	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
+type fileNamespaceInstanceConfig struct {
+	CLIPath     string   `yaml:"cli,omitempty"`
+	MachineType string   `yaml:"machineType,omitempty"`
+	Duration    string   `yaml:"duration,omitempty"`
+	Region      string   `yaml:"region,omitempty"`
+	Endpoint    string   `yaml:"endpoint,omitempty"`
+	Keychain    string   `yaml:"keychain,omitempty"`
+	Volumes     []string `yaml:"volumes,omitempty"`
+	WorkRoot    string   `yaml:"workRoot,omitempty"`
+	Bare        *bool    `yaml:"bare,omitempty"`
+}
+
 type fileMorphConfig struct {
 	APIKey          string `yaml:"apiKey,omitempty"`
 	APIURL          string `yaml:"apiUrl,omitempty"`
@@ -2432,6 +2513,21 @@ type fileRunpodConfig struct {
 	DiskGB     int    `yaml:"diskGB,omitempty"`
 	User       string `yaml:"user,omitempty"`
 	WorkRoot   string `yaml:"workRoot,omitempty"`
+}
+
+type fileNvidiaBrevConfig struct {
+	CLI           string `yaml:"cli,omitempty"`
+	Org           string `yaml:"org,omitempty"`
+	Type          string `yaml:"type,omitempty"`
+	GPUName       string `yaml:"gpuName,omitempty"`
+	Provider      string `yaml:"provider,omitempty"`
+	Mode          string `yaml:"mode,omitempty"`
+	Launchable    string `yaml:"launchable,omitempty"`
+	StartupScript string `yaml:"startupScript,omitempty"`
+	ReleaseAction string `yaml:"releaseAction,omitempty"`
+	Target        string `yaml:"target,omitempty"`
+	User          string `yaml:"user,omitempty"`
+	WorkRoot      string `yaml:"workRoot,omitempty"`
 }
 
 type fileHostingerConfig struct {
@@ -3737,6 +3833,35 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 		}
 	}
+	if file.NamespaceInstance != nil {
+		if trusted {
+			if file.NamespaceInstance.CLIPath != "" {
+				cfg.NamespaceInstance.CLIPath = expandUserPath(file.NamespaceInstance.CLIPath)
+			}
+			if file.NamespaceInstance.Region != "" {
+				cfg.NamespaceInstance.Region = file.NamespaceInstance.Region
+			}
+			if file.NamespaceInstance.Endpoint != "" {
+				cfg.NamespaceInstance.Endpoint = file.NamespaceInstance.Endpoint
+			}
+			if file.NamespaceInstance.Keychain != "" {
+				cfg.NamespaceInstance.Keychain = file.NamespaceInstance.Keychain
+			}
+			if file.NamespaceInstance.Volumes != nil {
+				cfg.NamespaceInstance.Volumes = append([]string(nil), file.NamespaceInstance.Volumes...)
+			}
+		}
+		if file.NamespaceInstance.MachineType != "" {
+			cfg.NamespaceInstance.MachineType = file.NamespaceInstance.MachineType
+		}
+		applyLeaseDuration(&cfg.NamespaceInstance.Duration, file.NamespaceInstance.Duration)
+		if file.NamespaceInstance.WorkRoot != "" {
+			cfg.NamespaceInstance.WorkRoot = file.NamespaceInstance.WorkRoot
+		}
+		if file.NamespaceInstance.Bare != nil {
+			cfg.NamespaceInstance.Bare = *file.NamespaceInstance.Bare
+		}
+	}
 	if file.Morph != nil {
 		if file.Morph.APIKey != "" {
 			cfg.Morph.APIKey = file.Morph.APIKey
@@ -3865,6 +3990,47 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Runpod.WorkRoot != "" {
 			cfg.Runpod.WorkRoot = file.Runpod.WorkRoot
+		}
+	}
+	if file.NvidiaBrev != nil {
+		if trusted && file.NvidiaBrev.CLI != "" {
+			cfg.NvidiaBrev.CLI = file.NvidiaBrev.CLI
+		}
+		if file.NvidiaBrev.Org != "" {
+			cfg.NvidiaBrev.Org = file.NvidiaBrev.Org
+		}
+		if file.NvidiaBrev.Type != "" {
+			cfg.NvidiaBrev.Type = file.NvidiaBrev.Type
+		}
+		if file.NvidiaBrev.GPUName != "" {
+			cfg.NvidiaBrev.GPUName = file.NvidiaBrev.GPUName
+		}
+		if file.NvidiaBrev.Provider != "" {
+			cfg.NvidiaBrev.Provider = file.NvidiaBrev.Provider
+		}
+		if file.NvidiaBrev.Mode != "" {
+			cfg.NvidiaBrev.Mode = file.NvidiaBrev.Mode
+		}
+		if file.NvidiaBrev.Launchable != "" {
+			cfg.NvidiaBrev.Launchable = file.NvidiaBrev.Launchable
+		}
+		if file.NvidiaBrev.StartupScript != "" &&
+			(trusted || !strings.HasPrefix(strings.TrimSpace(file.NvidiaBrev.StartupScript), "@")) {
+			cfg.NvidiaBrev.StartupScript = file.NvidiaBrev.StartupScript
+		}
+		if file.NvidiaBrev.ReleaseAction != "" {
+			cfg.NvidiaBrev.ReleaseAction = file.NvidiaBrev.ReleaseAction
+			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+		}
+		if file.NvidiaBrev.Target != "" {
+			cfg.NvidiaBrev.Target = file.NvidiaBrev.Target
+		}
+		if file.NvidiaBrev.User != "" {
+			cfg.NvidiaBrev.User = file.NvidiaBrev.User
+		}
+		if file.NvidiaBrev.WorkRoot != "" {
+			cfg.NvidiaBrev.WorkRoot = file.NvidiaBrev.WorkRoot
+			MarkNvidiaBrevWorkRootExplicit(cfg)
 		}
 	}
 	if file.Hostinger != nil {
@@ -5245,6 +5411,21 @@ func applyEnv(cfg *Config) error {
 		cfg.Namespace.DeleteOnRelease = value
 		MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 	}
+	cfg.NamespaceInstance.CLIPath = expandUserPath(getenv("CRABBOX_NAMESPACE_INSTANCE_CLI", cfg.NamespaceInstance.CLIPath))
+	cfg.NamespaceInstance.MachineType = getenv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE", cfg.NamespaceInstance.MachineType)
+	if duration := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_DURATION"); duration != "" {
+		applyLeaseDuration(&cfg.NamespaceInstance.Duration, duration)
+	}
+	cfg.NamespaceInstance.Region = getenv("CRABBOX_NAMESPACE_INSTANCE_REGION", cfg.NamespaceInstance.Region)
+	cfg.NamespaceInstance.Endpoint = getenv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT", cfg.NamespaceInstance.Endpoint)
+	cfg.NamespaceInstance.Keychain = getenv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN", cfg.NamespaceInstance.Keychain)
+	if volumes, ok := getenvList("CRABBOX_NAMESPACE_INSTANCE_VOLUMES"); ok {
+		cfg.NamespaceInstance.Volumes = volumes
+	}
+	cfg.NamespaceInstance.WorkRoot = getenv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT", cfg.NamespaceInstance.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_BARE"); ok {
+		cfg.NamespaceInstance.Bare = value
+	}
 	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
 	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
 	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
@@ -5297,6 +5478,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Runpod.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.Runpod.DiskGB)
 	cfg.Runpod.User = getenv("CRABBOX_RUNPOD_USER", cfg.Runpod.User)
 	cfg.Runpod.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.Runpod.WorkRoot)
+	cfg.NvidiaBrev.CLI = getenv("CRABBOX_NVIDIA_BREV_CLI", cfg.NvidiaBrev.CLI)
+	cfg.NvidiaBrev.Org = getenv("CRABBOX_NVIDIA_BREV_ORG", cfg.NvidiaBrev.Org)
+	cfg.NvidiaBrev.Type = getenv("CRABBOX_NVIDIA_BREV_TYPE", cfg.NvidiaBrev.Type)
+	cfg.NvidiaBrev.GPUName = getenv("CRABBOX_NVIDIA_BREV_GPU_NAME", cfg.NvidiaBrev.GPUName)
+	cfg.NvidiaBrev.Provider = getenv("CRABBOX_NVIDIA_BREV_PROVIDER", cfg.NvidiaBrev.Provider)
+	cfg.NvidiaBrev.Mode = getenv("CRABBOX_NVIDIA_BREV_MODE", cfg.NvidiaBrev.Mode)
+	cfg.NvidiaBrev.Launchable = getenv("CRABBOX_NVIDIA_BREV_LAUNCHABLE", cfg.NvidiaBrev.Launchable)
+	cfg.NvidiaBrev.StartupScript = getenv("CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT", cfg.NvidiaBrev.StartupScript)
+	if value := os.Getenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION"); value != "" {
+		cfg.NvidiaBrev.ReleaseAction = value
+		MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+	}
+	cfg.NvidiaBrev.Target = getenv("CRABBOX_NVIDIA_BREV_TARGET", cfg.NvidiaBrev.Target)
+	cfg.NvidiaBrev.User = getenv("CRABBOX_NVIDIA_BREV_USER", cfg.NvidiaBrev.User)
+	if value := os.Getenv("CRABBOX_NVIDIA_BREV_WORK_ROOT"); value != "" {
+		cfg.NvidiaBrev.WorkRoot = value
+		MarkNvidiaBrevWorkRootExplicit(cfg)
+	}
 	cfg.Hostinger.APIToken = getenv("CRABBOX_HOSTINGER_API_TOKEN", getenv("HOSTINGER_API_TOKEN", cfg.Hostinger.APIToken))
 	cfg.Hostinger.APIURL = getenv("CRABBOX_HOSTINGER_API_URL", getenv("HOSTINGER_API_URL", cfg.Hostinger.APIURL))
 	cfg.Hostinger.ItemID = getenv("CRABBOX_HOSTINGER_ITEM_ID", cfg.Hostinger.ItemID)

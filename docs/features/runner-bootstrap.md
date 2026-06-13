@@ -103,8 +103,9 @@ metadata under `/var/lib/crabbox` (such as `tailscale-ipv4`, `tailscale-hostname
 and exit-node details), and extends `crabbox-ready` with a bounded check that a
 `100.x` address has appeared.
 
-The auth key is not persisted after `tailscale up`. Brokered leases receive a
-one-off key minted by the coordinator; direct-provider leases read it from
+The auth key is piped to `tailscale up` through stdin and is not persisted or
+placed in process arguments. Brokered leases receive a one-off key minted by
+the coordinator; direct-provider leases read it from
 `CRABBOX_TAILSCALE_AUTH_KEY`. Set `TS_CONTROL_URL` on the operator shell to
 register the box against a self-hosted control plane (Headscale and similar)
 instead of the default Tailscale control plane.

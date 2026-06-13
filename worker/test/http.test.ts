@@ -7,8 +7,18 @@ import {
   issueUserToken,
   requestWithAuthContext,
 } from "../src/auth";
+import { prepareCoordinatorRequest } from "../src/coordinator-entry";
 import { errorMessage, json, requestOwner } from "../src/http";
 import type { Env } from "../src/types";
+
+function proxyIdentityRequest(secret?: string): Request {
+  return new Request("https://example.test/v1/whoami", {
+    headers: {
+      "x-authenticated-user": "alice@example.com",
+      ...(secret ? { "x-crabbox-proxy-secret": secret } : {}),
+    },
+  });
+}
 
 describe("coordinator auth", () => {
   it("denies requests when no shared token is configured", async () => {
@@ -53,6 +63,87 @@ describe("coordinator auth", () => {
       }),
     ).resolves.toBeUndefined();
     await expect(authenticateRequest(request, {})).resolves.toBeUndefined();
+  });
+
+  it("requires the configured reverse-proxy secret before trusting identity", async () => {
+    const env = {
+      CRABBOX_TRUSTED_USER_HEADER: "X-Authenticated-User",
+      CRABBOX_TRUSTED_USER_ORG: "example-org",
+      CRABBOX_TRUSTED_PROXY_SECRET: "proxy-secret",
+    };
+
+    await expect(
+      authenticateRequest(proxyIdentityRequest("proxy-secret"), env, { trustedProxy: true }),
+    ).resolves.toMatchObject({ auth: "proxy", owner: "alice@example.com" });
+    await expect(
+      authenticateRequest(proxyIdentityRequest("wrong-secret"), env, { trustedProxy: true }),
+    ).resolves.toBeUndefined();
+    await expect(
+      authenticateRequest(proxyIdentityRequest(), env, { trustedProxy: true }),
+    ).resolves.toBeUndefined();
+    await expect(
+      authenticateRequest(proxyIdentityRequest("proxy-secret"), env),
+    ).resolves.toBeUndefined();
+    await expect(
+      authenticateRequest(
+        proxyIdentityRequest(),
+        { ...env, CRABBOX_TRUSTED_PROXY_SECRET: "" },
+        { trustedProxy: true },
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      authenticateRequest(
+        new Request("https://example.test/v1/whoami", {
+          headers: { "x-crabbox-proxy-secret": "proxy-secret" },
+        }),
+        { ...env, CRABBOX_TRUSTED_USER_HEADER: "X-Crabbox-Proxy-Secret" },
+        { trustedProxy: true },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("strips the reverse-proxy secret from unauthenticated pass-through routes", async () => {
+    const requests = [
+      new Request("https://example.test/v1/auth/github/callback", {
+        headers: { "x-crabbox-proxy-secret": "proxy-secret" },
+      }),
+      new Request("https://example.test/portal/login", {
+        headers: { "x-crabbox-proxy-secret": "proxy-secret" },
+      }),
+      new Request("https://example.test/v1/leases/lease-1/webvnc/agent", {
+        headers: { upgrade: "websocket", "x-crabbox-proxy-secret": "proxy-secret" },
+      }),
+    ];
+
+    const routedRequests = await Promise.all(
+      requests.map(async (request) => {
+        const prepared = await prepareCoordinatorRequest(request, {} as Env);
+        if ("response" in prepared) {
+          throw new Error("expected pass-through request");
+        }
+        return prepared.request;
+      }),
+    );
+
+    expect(routedRequests.map((request) => request.headers.get("x-crabbox-proxy-secret"))).toEqual([
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it("requires normal coordinator authentication for workspace terminals", async () => {
+    const prepared = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
+        headers: { upgrade: "websocket" },
+      }),
+      {},
+    );
+
+    expect(prepared).toMatchObject({
+      authenticated: false,
+      response: { status: 401 },
+    });
   });
 
   it("keeps shared bearer token non-admin and ignores caller-supplied identity headers", async () => {
@@ -318,10 +409,13 @@ describe("coordinator auth", () => {
     expect(response.status).toBe(404);
   });
 
-  it("does not let caller-supplied Access identity override signed user token identity", () => {
+  it("does not let caller-supplied Access identity override signed user token identity", async () => {
     const request = new Request("https://example.test/v1/whoami", {
+      method: "POST",
+      body: "request-body",
       headers: {
         "cf-access-authenticated-user-email": "spoof@example.com",
+        "x-crabbox-proxy-secret": "proxy-secret",
         "x-crabbox-owner": "spoof@example.com",
       },
     });
@@ -336,7 +430,9 @@ describe("coordinator auth", () => {
 
     expect(next.headers.get("cf-access-authenticated-user-email")).toBeNull();
     expect(next.headers.get("cf-access-jwt-assertion")).toBeNull();
+    expect(next.headers.get("x-crabbox-proxy-secret")).toBeNull();
     expect(requestOwner(next)).toBe("friend@example.com");
+    await expect(next.text()).resolves.toBe("request-body");
   });
 
   it("redirects browser portal auth routes to the configured public origin", async () => {

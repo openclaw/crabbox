@@ -590,6 +590,28 @@ namespace:
   deleteOnRelease: false
 ```
 
+### Namespace Compute Instance
+
+```yaml
+provider: namespace-instance
+namespaceInstance:
+  cli: nsc
+  machineType: 4x8
+  duration: 30m
+  region: ""
+  endpoint: ""
+  keychain: ""
+  volumes: []
+  workRoot: /work/crabbox
+  bare: true
+```
+
+The `namespace` section remains specific to `namespace-devbox`.
+`namespaceInstance` configures the separate `nsc`-backed Compute provider.
+For repository-local config, Crabbox ignores `cli`, `endpoint`, `region`,
+`keychain`, and `volumes`; set those through trusted user config, environment
+variables, or explicit flags.
+
 ### KubeVirt
 
 ```yaml

@@ -8,10 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/tailscale/hujson"
 )
 
 // stubPondTailnetACLClient lets unit tests exercise pondACLEnsure without
@@ -75,10 +79,14 @@ func TestPondACLEnsureUpsertsMissingRowAndPropagatesETag(t *testing.T) {
 	if !strings.Contains(stub.lastBody, wantTag) {
 		t.Fatalf("expected new policy body to mention %q, got:\n%s", wantTag, stub.lastBody)
 	}
-	// The merged body must still parse as JSON and carry the expected entries.
+	// The merged body must remain valid HuJSON and carry the expected entries.
 	var policy map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(stub.lastBody), &policy); err != nil {
-		t.Fatalf("merged policy is not valid JSON: %v\n%s", err, stub.lastBody)
+	standardized, err := hujson.Standardize([]byte(stub.lastBody))
+	if err != nil {
+		t.Fatalf("merged policy is not valid HuJSON: %v\n%s", err, stub.lastBody)
+	}
+	if err := json.Unmarshal(standardized, &policy); err != nil {
+		t.Fatalf("standardized policy is not valid JSON: %v\n%s", err, standardized)
 	}
 	if !pondACLRowPresent(stub.lastBody, wantTag) {
 		t.Fatalf("merged policy should pass pondACLRowPresent, got:\n%s", stub.lastBody)
@@ -134,6 +142,9 @@ func TestPondACLEnsureAcceptsHuJSONPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected HuJSON to be accepted, got %v", err)
 	}
+	if !strings.Contains(stub.lastBody, "// my tailnet policy") {
+		t.Fatalf("expected HuJSON comment to survive, got:\n%s", stub.lastBody)
+	}
 }
 
 func TestPondACLEnsureRefusesTrulyMalformedPolicy(t *testing.T) {
@@ -147,12 +158,142 @@ func TestPondACLEnsureRefusesTrulyMalformedPolicy(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on truly malformed policy")
 	}
-	if !strings.Contains(err.Error(), "non-JSON") {
-		t.Fatalf("expected non-JSON error, got %v", err)
+	if !strings.Contains(err.Error(), "parse HuJSON") {
+		t.Fatalf("expected HuJSON parse error, got %v", err)
 	}
 	if atomic.LoadInt32(&stub.puts) != 0 {
 		t.Fatalf("must not PUT when merge fails, got %d puts", stub.puts)
 	}
+}
+
+func TestPondACLMergePolicyPreservesHuJSONGolden(t *testing.T) {
+	tag := "tag:cbx-pond-alice-pr-42"
+	for _, name := range []string{"grants", "acls"} {
+		t.Run(name, func(t *testing.T) {
+			input := readPondACLGolden(t, name+".input.hujson")
+			want := readPondACLGolden(t, name+".golden.hujson")
+			got, err := pondACLMergePolicy(input, tag)
+			if err != nil {
+				t.Fatalf("pondACLMergePolicy: %v", err)
+			}
+			if got != want {
+				t.Fatalf("merged policy mismatch (-want +got):\nwant:\n%s\n\ngot:\n%s", want, got)
+			}
+			again, err := pondACLMergePolicy(got, tag)
+			if err != nil {
+				t.Fatalf("second pondACLMergePolicy: %v", err)
+			}
+			if again != got {
+				t.Fatalf("merge is not byte-idempotent:\nfirst:\n%s\n\nsecond:\n%s", got, again)
+			}
+		})
+	}
+}
+
+func TestPondACLMergePolicyFailsClosedOnAmbiguousShapes(t *testing.T) {
+	tag := "tag:cbx-pond-alice-pr-42"
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "duplicate top-level field",
+			body: `{"tagOwners": {}, "tagOwners": {}}`,
+			want: `duplicate top-level policy field "tagOwners"`,
+		},
+		{
+			name: "duplicate tag owner",
+			body: `{"tagOwners": {"tag:existing": [], "tag:existing": []}}`,
+			want: `duplicate tagOwners entry "tag:existing"`,
+		},
+		{
+			name: "wrong grants type",
+			body: `{"tagOwners": {}, "grants": {}}`,
+			want: "grants must be an array",
+		},
+		{
+			name: "wrong acls type",
+			body: `{"tagOwners": {}, "acls": null}`,
+			want: "acls must be an array",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := pondACLMergePolicy(tc.body, tag)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("pondACLMergePolicy error=%v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPondACLMergePolicyPreservesRootTrailingCommaWhenAddingSections(t *testing.T) {
+	tag := "tag:cbx-pond-alice-pr-42"
+	input := `// keep this
+{
+  "groups": {
+    "group:ops": ["alice@example.com"],
+  },
+  // Keep this root-closing note.
+}`
+	got, err := pondACLMergePolicy(input, tag)
+	if err != nil {
+		t.Fatalf("pondACLMergePolicy: %v", err)
+	}
+	value, err := hujson.Parse([]byte(got))
+	if err != nil {
+		t.Fatalf("parse merged policy: %v", err)
+	}
+	if !hujsonTrailingComma(&value) {
+		t.Fatalf("root trailing comma was not preserved:\n%s", got)
+	}
+	if !strings.HasPrefix(got, "// keep this\n") {
+		t.Fatalf("leading comment was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "// Keep this root-closing note.") {
+		t.Fatalf("root-closing comment was not preserved:\n%s", got)
+	}
+	if !pondACLRowPresent(got, tag) {
+		t.Fatalf("merged policy is missing pond rows:\n%s", got)
+	}
+}
+
+func TestPondACLMergePolicyDoesNotDuplicateExistingAccessRow(t *testing.T) {
+	tag := "tag:cbx-pond-alice-pr-42"
+	input := `{
+  "acls": [
+    {"action":"accept","src":["tag:cbx-pond-alice-pr-42"],"dst":["tag:cbx-pond-alice-pr-42:*"]},
+  ],
+}`
+	got, err := pondACLMergePolicy(input, tag)
+	if err != nil {
+		t.Fatalf("pondACLMergePolicy: %v", err)
+	}
+	standardized, err := hujson.Standardize([]byte(got))
+	if err != nil {
+		t.Fatalf("standardize merged policy: %v", err)
+	}
+	var policy struct {
+		ACLs []pondACLRule `json:"acls"`
+	}
+	if err := json.Unmarshal(standardized, &policy); err != nil {
+		t.Fatalf("decode merged policy: %v", err)
+	}
+	if len(policy.ACLs) != 1 {
+		t.Fatalf("existing access row was duplicated: %#v", policy.ACLs)
+	}
+	if !pondACLRowPresent(got, tag) {
+		t.Fatalf("merged policy is missing pond rows:\n%s", got)
+	}
+}
+
+func readPondACLGolden(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "pond_acl", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
 }
 
 func TestPondACLEnsurePropagatesGetError(t *testing.T) {
@@ -173,25 +314,36 @@ func TestPondACLEnsurePropagatesGetError(t *testing.T) {
 func TestPondACLEnsureLiveClientETagFlow(t *testing.T) {
 	t.Run("happy path threads ETag", func(t *testing.T) {
 		var lastIfMatch string
+		var getAccept string
+		var putContentType string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
+				getAccept = r.Header.Get("Accept")
 				w.Header().Set("ETag", `"v42"`)
 				_, _ = io.WriteString(w, `{"tagOwners":{"tag:crabbox":["autogroup:admin"]}}`)
 			case http.MethodPost:
 				lastIfMatch = r.Header.Get("If-Match")
+				putContentType = r.Header.Get("Content-Type")
 				w.WriteHeader(http.StatusOK)
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)
 			}
 		}))
 		defer srv.Close()
-		client := newPondTailnetTestClient(t, srv.URL, "stub-key")
+		t.Setenv(crabboxTailnetAPIURLEnvVar, srv.URL)
+		client := newPondTailnetACLClient("stub-key")
 		if err := pondACLEnsure(context.Background(), client, "-", "user", "alpha"); err != nil {
 			t.Fatalf("pondACLEnsure: %v", err)
 		}
 		if lastIfMatch != `"v42"` {
 			t.Fatalf("expected If-Match propagated, got %q", lastIfMatch)
+		}
+		if getAccept != "application/hujson" {
+			t.Fatalf("expected HuJSON GET, got Accept %q", getAccept)
+		}
+		if putContentType != "application/hujson" {
+			t.Fatalf("expected HuJSON PUT, got Content-Type %q", putContentType)
 		}
 	})
 
@@ -206,7 +358,8 @@ func TestPondACLEnsureLiveClientETagFlow(t *testing.T) {
 			}
 		}))
 		defer srv.Close()
-		client := newPondTailnetTestClient(t, srv.URL, "stub-key")
+		t.Setenv(crabboxTailnetAPIURLEnvVar, srv.URL)
+		client := newPondTailnetACLClient("stub-key")
 		err := pondACLEnsure(context.Background(), client, "-", "user", "alpha")
 		if err == nil {
 			t.Fatal("expected error on 412")

@@ -433,6 +433,20 @@
     "caveat": "Windows host and execution-container support required",
     "docs": "mxc.md"
   },
+  "nvidia-brev": {
+    "status": "built-in",
+    "category": "gpu-cloud",
+    "substrate": "NVIDIA Brev GPU workspace",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "yes",
+    "lifecycle": "NVIDIA Brev CLI",
+    "cleanup": "delete by default; optional stop",
+    "bestFit": "Managed NVIDIA GPU workspace over SSH",
+    "caveat": "Requires Brev CLI auth, quota, and available GPU capacity",
+    "docs": "nvidia-brev.md"
+  },
   "namespace-devbox": {
     "status": "built-in",
     "category": "direct-cloud",
@@ -446,6 +460,20 @@
     "bestFit": "Fast managed development box over SSH",
     "caveat": "Uses the devbox product, not Namespace Compute instances",
     "docs": "namespace-devbox.md"
+  },
+  "namespace-instance": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Namespace Compute instance",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "unknown",
+    "lifecycle": "Namespace nsc CLI",
+    "cleanup": "instance delete",
+    "bestFit": "Short-lived managed Linux compute over SSH",
+    "caveat": "Requires the nsc CLI and direct provider credentials",
+    "docs": "namespace-instance.md"
   },
   "opencomputer": {
     "status": "built-in",
