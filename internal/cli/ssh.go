@@ -790,10 +790,11 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 	// Prepare WSL key: copy with correct permissions.
 	wslKey := ""
 	knownHostsPath := ""
+	wslKnownHosts := ""
 	if target.Key != "" {
 		wslKey = "/tmp/crabbox-wsl-" + filepath.Base(filepath.Dir(target.Key))
-		knownHostsPath = filepath.Join(filepath.Dir(target.Key), "known_hosts")
-		if keyData, err := os.ReadFile(target.Key); err == nil {
+		knownHostsPath = knownHostsFile(target)
+		if keyData, err := os.ReadFile(windowsHostPath(target.Key)); err == nil {
 			cpCmd := exec.Command(wslExe, "sh", "-lc",
 				fmt.Sprintf("umask 077; cat > %s && chmod 600 %s",
 					shellQuote(wslKey),
@@ -801,19 +802,22 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 			cpCmd.Stdin = bytes.NewReader(keyData)
 			if err := cpCmd.Run(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: copy SSH key into WSL for rsync failed: %v\n", err)
+				return windowsNativeRsyncCommand(ctx, args)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "warning: read SSH key for WSL rsync failed: %s: %v\n", target.Key, err)
+			return windowsNativeRsyncCommand(ctx, args)
 		}
-		if knownHostsData, err := os.ReadFile(knownHostsPath); err == nil {
-			wslKH := wslKey + "-known_hosts"
+		if knownHostsData, err := os.ReadFile(windowsHostPath(knownHostsPath)); err == nil {
+			wslKnownHosts = wslKey + "-known_hosts"
 			cpKnownHostsCmd := exec.Command(wslExe, "sh", "-lc",
 				fmt.Sprintf("cat > %s && chmod 600 %s",
-					shellQuote(wslKH),
-					shellQuote(wslKH)))
+					shellQuote(wslKnownHosts),
+					shellQuote(wslKnownHosts)))
 			cpKnownHostsCmd.Stdin = bytes.NewReader(knownHostsData)
 			if err := cpKnownHostsCmd.Run(); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: copy known_hosts into WSL for rsync failed: %v\n", err)
+				wslKnownHosts = ""
 			}
 		}
 	}
@@ -829,10 +833,9 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 			converted = strings.ReplaceAll(converted, keyWSL, wslKey)
 		}
 		// Replace known_hosts path
-		if knownHostsPath != "" {
+		if knownHostsPath != "" && wslKnownHosts != "" {
 			khWSL := windowsToWSLMountPath(knownHostsPath)
-			wslKH := wslKey + "-known_hosts"
-			converted = strings.ReplaceAll(converted, khWSL, wslKH)
+			converted = strings.ReplaceAll(converted, khWSL, wslKnownHosts)
 		}
 		wslArgs[i] = converted
 	}
@@ -843,6 +846,15 @@ func windowsNativeRsyncCommand(ctx context.Context, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "rsync", args...)
 	cmd.Env = append(os.Environ(), "MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning")
 	return cmd
+}
+
+func windowsHostPath(path string) string {
+	path = strings.ReplaceAll(path, `\`, "/")
+	if len(path) >= 3 && path[0] == '/' && path[2] == '/' &&
+		(path[1] >= 'a' && path[1] <= 'z' || path[1] >= 'A' && path[1] <= 'Z') {
+		return string(path[1]) + ":" + path[2:]
+	}
+	return path
 }
 
 func windowsWSLHasNativeRsyncSSH(wslExe string) bool {

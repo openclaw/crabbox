@@ -887,6 +887,20 @@ func TestWindowsToWSLMountPathSupportsHostMountRoot(t *testing.T) {
 	}
 }
 
+func TestWindowsHostPathConvertsMSYSDrivePath(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		`C:\Users\marti\.ssh\id_ed25519`: "C:/Users/marti/.ssh/id_ed25519",
+		"/c/Users/marti/.ssh/id_ed25519": "c:/Users/marti/.ssh/id_ed25519",
+		"/work/repo":                     "/work/repo",
+	}
+	for in, want := range tests {
+		if got := windowsHostPath(in); got != want {
+			t.Fatalf("windowsHostPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestWindowsWSLNativeToolPathsRejectsWindowsShims(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
