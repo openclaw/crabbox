@@ -115,7 +115,12 @@ func (g *controllerAcquireIdentityGate) serve(onIdentity func(controllerAcquireI
 	for {
 		conn, err := g.listener.Accept()
 		if err != nil {
-			g.publish(controllerAcquireIdentityResult{Err: fmt.Errorf("controller warmup did not acknowledge a raw acquire identity: %w", err)})
+			// An authenticated handler owns the terminal result. The client can
+			// receive its durable ACK and close the gate just before that handler
+			// publishes, so the listener-close path must not win the result race.
+			if !g.authenticationClaimed() {
+				g.publish(controllerAcquireIdentityResult{Err: fmt.Errorf("controller warmup did not acknowledge a raw acquire identity: %w", err)})
+			}
 			return
 		}
 		select {
@@ -181,6 +186,12 @@ func (g *controllerAcquireIdentityGate) claimAuthentication() bool {
 	}
 	g.authed = true
 	return true
+}
+
+func (g *controllerAcquireIdentityGate) authenticationClaimed() bool {
+	g.authMu.Lock()
+	defer g.authMu.Unlock()
+	return g.authed
 }
 
 func (g *controllerAcquireIdentityGate) publish(result controllerAcquireIdentityResult) {
