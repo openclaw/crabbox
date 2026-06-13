@@ -103,6 +103,22 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_OPENSANDBOX_PLATFORM_ARCH",
 		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
 		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
+		"CRABBOX_VERCEL_SANDBOX_RUNTIME",
+		"CRABBOX_VERCEL_SANDBOX_WORKDIR",
+		"CRABBOX_VERCEL_SANDBOX_PROJECT_ID",
+		"CRABBOX_VERCEL_SANDBOX_TEAM_ID",
+		"CRABBOX_VERCEL_SANDBOX_SCOPE",
+		"CRABBOX_VERCEL_SANDBOX_VCPUS",
+		"CRABBOX_VERCEL_SANDBOX_TIMEOUT_SECS",
+		"CRABBOX_VERCEL_SANDBOX_EXEC_TIMEOUT_SECS",
+		"CRABBOX_VERCEL_SANDBOX_PERSISTENT",
+		"CRABBOX_VERCEL_SANDBOX_SNAPSHOT",
+		"CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE",
+		"CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY",
+		"CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW",
+		"CRABBOX_VERCEL_SANDBOX_NETWORK_DENY",
+		"CRABBOX_VERCEL_SANDBOX_PORTS",
+		"CRABBOX_VERCEL_SANDBOX_FORGET_MISSING",
 		"CRABBOX_SUPERSERVE_API_KEY",
 		"SUPERSERVE_API_KEY",
 		"CRABBOX_SUPERSERVE_BASE_URL",
@@ -1634,6 +1650,90 @@ func TestSuperserveTrustedConfigCanSetBaseURL(t *testing.T) {
 	}
 	if cfg.Superserve.BaseURL != "https://trusted.example" {
 		t.Fatalf("trusted config base URL=%q", cfg.Superserve.BaseURL)
+	}
+}
+
+func TestVercelSandboxConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
+	cfg := baseConfig()
+	if cfg.VercelSandbox.Runtime != "node24" || cfg.VercelSandbox.Workdir != "/vercel/sandbox/crabbox" || cfg.VercelSandbox.ExecTimeoutSecs != 600 || cfg.VercelSandbox.NetworkPolicy != "default" {
+		t.Fatalf("unexpected vercel-sandbox defaults: %#v", cfg.VercelSandbox)
+	}
+	for _, fieldName := range []string{"Token", "AuthToken", "APIToken", "APIKey", "Secret"} {
+		if _, ok := reflect.TypeOf(VercelSandboxConfig{}).FieldByName(fieldName); ok {
+			t.Fatalf("provider config must not persist %s", fieldName)
+		}
+		if _, ok := reflect.TypeOf(fileVercelSandboxConfig{}).FieldByName(fieldName); ok {
+			t.Fatalf("file config must not accept %s", fieldName)
+		}
+	}
+}
+
+func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	yamlText := strings.Join([]string{
+		"vercelSandbox:",
+		"  runtime: node22",
+		"  workdir: /work/app",
+		"  projectId: prj_123",
+		"  teamId: team_123",
+		"  scope: example-org",
+		"  vcpus: 2",
+		"  timeoutSecs: 120",
+		"  execTimeoutSecs: 60",
+		"  persistent: true",
+		"  snapshot: snap_123",
+		"  snapshotMode: restore",
+		"  networkPolicy: restricted",
+		"  networkAllow: [api.example.com, 10.0.0.0/8]",
+		"  networkDeny: [metadata.google.internal]",
+		"  ports: [3000, 8080-8090]",
+		"  forgetMissing: true",
+	}, "\n")
+	if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VercelSandbox.Runtime != "node22" || cfg.VercelSandbox.Workdir != "/work/app" || cfg.VercelSandbox.ProjectID != "prj_123" || cfg.VercelSandbox.TeamID != "team_123" || cfg.VercelSandbox.Scope != "example-org" {
+		t.Fatalf("vercel-sandbox YAML scalar config not applied: %#v", cfg.VercelSandbox)
+	}
+	if cfg.VercelSandbox.VCPUs != 2 || cfg.VercelSandbox.TimeoutSecs != 120 || cfg.VercelSandbox.ExecTimeoutSecs != 60 || !cfg.VercelSandbox.Persistent || cfg.VercelSandbox.Snapshot != "snap_123" || cfg.VercelSandbox.SnapshotMode != "restore" || cfg.VercelSandbox.NetworkPolicy != "restricted" || !cfg.VercelSandbox.ForgetMissing {
+		t.Fatalf("vercel-sandbox YAML config not applied: %#v", cfg.VercelSandbox)
+	}
+	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"api.example.com", "10.0.0.0/8"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"metadata.google.internal"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"3000", "8080-8090"}) {
+		t.Fatalf("vercel-sandbox YAML lists not applied: %#v", cfg.VercelSandbox)
+	}
+
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_RUNTIME", "node24")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_WORKDIR", "/work/env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_PROJECT_ID", "prj_env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_TEAM_ID", "team_env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_SCOPE", "env-org")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_VCPUS", "4")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_TIMEOUT_SECS", "240")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_EXEC_TIMEOUT_SECS", "90")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_PERSISTENT", "false")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT", "snap_env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE", "checkpoint")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY", "public")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW", "example.com,192.168.0.0/16")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_DENY", "bad.example")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_PORTS", "443,9000-9001")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_FORGET_MISSING", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VercelSandbox.Runtime != "node24" || cfg.VercelSandbox.Workdir != "/work/env" || cfg.VercelSandbox.ProjectID != "prj_env" || cfg.VercelSandbox.TeamID != "team_env" || cfg.VercelSandbox.Scope != "env-org" {
+		t.Fatalf("vercel-sandbox env scalar config not applied: %#v", cfg.VercelSandbox)
+	}
+	if cfg.VercelSandbox.VCPUs != 4 || cfg.VercelSandbox.TimeoutSecs != 240 || cfg.VercelSandbox.ExecTimeoutSecs != 90 || cfg.VercelSandbox.Persistent || cfg.VercelSandbox.Snapshot != "snap_env" || cfg.VercelSandbox.SnapshotMode != "checkpoint" || cfg.VercelSandbox.NetworkPolicy != "public" || cfg.VercelSandbox.ForgetMissing {
+		t.Fatalf("vercel-sandbox env config not applied: %#v", cfg.VercelSandbox)
+	}
+	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"example.com", "192.168.0.0/16"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"bad.example"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"443", "9000-9001"}) {
+		t.Fatalf("vercel-sandbox env lists not applied: %#v", cfg.VercelSandbox)
 	}
 }
 
