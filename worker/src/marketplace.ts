@@ -196,10 +196,14 @@ function quoteCandidate(
   maxCredits?: number,
 ): MarketplaceQuoteCandidate {
   const rate = marketplaceRate(env, provider, className, serverType);
+  // For leaseCost base fallback (no rate cost entry), never pass a class name as serverType
+  // (classes are not concrete machine types in the lease cost table). Class-only quotes rely on
+  // rate-card entries (e.g. "aws:beast") for accurate pricing; without them we fall back to generic.
+  const leaseServerType = serverType === className ? "standard" : serverType;
   const baseHourlyUSD = leaseCost(
     env,
     provider,
-    serverType,
+    leaseServerType,
     ttlSeconds,
     rate?.costHourlyUSD,
   ).hourlyUSD;
