@@ -252,6 +252,16 @@ func TestClientReadOnlyDiscoveryMethods(t *testing.T) {
 	}
 }
 
+func TestInstanceDecodesTopLevelFlavorID(t *testing.T) {
+	var instance Instance
+	if err := json.Unmarshal([]byte(`{"id":"instance-id","flavorId":"b3-16"}`), &instance); err != nil {
+		t.Fatal(err)
+	}
+	if instance.FlavorID != "b3-16" {
+		t.Fatalf("instance=%#v", instance)
+	}
+}
+
 func TestClientMutatingLifecycleMethods(t *testing.T) {
 	var seen []string
 	var instanceBody InstanceCreateRequest

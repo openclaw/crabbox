@@ -574,7 +574,11 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if err := validateOVHClaim(claim, server); err != nil {
 			return err
 		}
-		shouldDelete, reason := core.ShouldCleanupServer(server, now)
+		shouldDelete := server.Labels["state"] == "cleanup"
+		reason := "state=cleanup"
+		if !shouldDelete {
+			shouldDelete, reason = core.ShouldCleanupServer(server, now)
+		}
 		if !shouldDelete {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
@@ -1186,7 +1190,7 @@ func serverFromInstance(instance Instance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = publicIPv4(instance)
-	server.ServerType.Name = firstNonBlank(instance.Flavor.ID, instance.Flavor.Name, cfg.ServerType)
+	server.ServerType.Name = firstNonBlank(instance.FlavorID, instance.Flavor.ID, instance.Flavor.Name, cfg.ServerType)
 	return server
 }
 

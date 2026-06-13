@@ -693,6 +693,39 @@ func TestFailedRollbackRecoveryIsImmediatelyCleanupEligible(t *testing.T) {
 	}
 }
 
+func TestCleanupRetriesPersistedCleanupStateAfterTransientDeleteFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		deleteInstanceErr: errors.New("temporary delete failure"),
+	}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cleanup-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := markClaimReleased(lease.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "temporary delete failure") {
+		t.Fatalf("first cleanup err=%v", err)
+	}
+	if got := mustReadClaimLabels(t, lease.LeaseID)["state"]; got != "cleanup" {
+		t.Fatalf("claim state=%q", got)
+	}
+	fake.deleteInstanceErr = nil
+	fake.deletedInstances = nil
+	fake.deletedKeys = nil
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
+		t.Fatalf("deleted instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
 func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -851,6 +884,13 @@ func TestPublicIPv4PrefersPublicNonPrivateAddress(t *testing.T) {
 	}}
 	if got := publicIPv4(instance); got != "198.51.100.42" {
 		t.Fatalf("publicIPv4=%q", got)
+	}
+}
+
+func TestServerFromInstancePrefersTopLevelFlavorID(t *testing.T) {
+	server := serverFromInstance(Instance{FlavorID: "b3-16", Flavor: Flavor{ID: "legacy-nested"}}, core.Config{ServerType: "b3-8"})
+	if server.ServerType.Name != "b3-16" {
+		t.Fatalf("server type=%q", server.ServerType.Name)
 	}
 }
 

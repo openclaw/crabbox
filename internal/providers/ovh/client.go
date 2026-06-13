@@ -150,6 +150,7 @@ type Instance struct {
 	Name        string            `json:"name"`
 	Status      string            `json:"status,omitempty"`
 	Region      string            `json:"region,omitempty"`
+	FlavorID    string            `json:"flavorId,omitempty"`
 	Flavor      Flavor            `json:"flavor,omitempty"`
 	Image       Image             `json:"image,omitempty"`
 	SSHKeyID    string            `json:"sshKeyId,omitempty"`
