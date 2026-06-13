@@ -50,6 +50,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/tenki"
 	_ "github.com/openclaw/crabbox/internal/providers/tensorlake"
 	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
+	_ "github.com/openclaw/crabbox/internal/providers/vercelsandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/wandb"
 	_ "github.com/openclaw/crabbox/internal/providers/windowssandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/xcpng"

@@ -231,12 +231,13 @@ list, and cleanup.
   SSH through `sprite proxy` for a fast Linux microVM on the standard SSH path.
 
 Delegated-run providers (`cloudflare`, `azure-dynamic-sessions`, `e2b`, `islo`,
-`modal`, `tensorlake`, `upstash-box`, `blacksmith-testbox`, `wandb`) do not use
-the broker for run execution; each owns sandbox lifecycle and command execution
-and syncs through its own API (gzipped archive upload for most). Islo also
-exposes a direct `crabbox ssh` login helper for kept sandboxes at
-`<sandbox>.islo`, but Islo run/sync remains delegated. See the linked
-provider pages for per-provider auth and configuration.
+`modal`, `tensorlake`, `upstash-box`, `blacksmith-testbox`, `wandb`,
+`opensandbox`, `superserve`, and `vercel-sandbox`) do not use the broker for run
+execution; each owns sandbox lifecycle and command execution and syncs through
+its own API (gzipped archive upload for most). Islo also exposes a direct
+`crabbox ssh` login helper for kept sandboxes at `<sandbox>.islo`, but Islo
+run/sync remains delegated. See the linked provider pages for per-provider auth
+and configuration.
 
 Module-runtime delegated providers are a narrower category for Worker-isolate
 style runtimes. They should advertise `target=worker-runtime` and

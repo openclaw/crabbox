@@ -152,6 +152,7 @@ type Config struct {
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
 	OpenSandbox                   OpenSandboxConfig
+	VercelSandbox                 VercelSandboxConfig
 	Superserve                    SuperserveConfig
 	DockerSandbox                 DockerSandboxConfig
 	AnthropicSRT                  AnthropicSRTConfig
@@ -566,6 +567,29 @@ type OpenSandboxConfig struct {
 	PlatformArch    string
 	SecureAccess    bool
 	UseServerProxy  bool
+	ForgetMissing   bool
+}
+
+// VercelSandboxConfig configures the delegated Vercel Sandbox provider. Token
+// fields are intentionally absent: SDK and CLI credentials are resolved from
+// environment/auth stores at runtime and are never persisted in Crabbox config
+// or passed on argv.
+type VercelSandboxConfig struct {
+	Runtime         string
+	Workdir         string
+	ProjectID       string
+	TeamID          string
+	Scope           string
+	VCPUs           float64
+	TimeoutSecs     int
+	ExecTimeoutSecs int
+	Persistent      bool
+	Snapshot        string
+	SnapshotMode    string
+	NetworkPolicy   string
+	NetworkAllow    []string
+	NetworkDeny     []string
+	Ports           []string
 	ForgetMissing   bool
 }
 
@@ -2018,6 +2042,12 @@ func baseConfig() Config {
 			PlatformOS:      "linux",
 			PlatformArch:    "amd64",
 		},
+		VercelSandbox: VercelSandboxConfig{
+			Runtime:         "node24",
+			Workdir:         "/vercel/sandbox/crabbox",
+			ExecTimeoutSecs: 600,
+			NetworkPolicy:   "default",
+		},
 		Superserve: SuperserveConfig{
 			BaseURL:         "https://api.superserve.ai",
 			Template:        "superserve/base",
@@ -2216,6 +2246,7 @@ type fileConfig struct {
 	Tensorlake               *fileTensorlakeConfig               `yaml:"tensorlake,omitempty"`
 	OpenComputer             *fileOpenComputerConfig             `yaml:"openComputer,omitempty"`
 	OpenSandbox              *fileOpenSandboxConfig              `yaml:"openSandbox,omitempty"`
+	VercelSandbox            *fileVercelSandboxConfig            `yaml:"vercelSandbox,omitempty"`
 	Superserve               *fileSuperserveConfig               `yaml:"superserve,omitempty"`
 	DockerSandbox            *fileDockerSandboxConfig            `yaml:"dockerSandbox,omitempty"`
 	AnthropicSRT             *fileAnthropicSRTConfig             `yaml:"anthropicSandboxRuntime,omitempty"`
@@ -2705,6 +2736,25 @@ type fileOpenSandboxConfig struct {
 	PlatformArch    *string `yaml:"platformArch,omitempty"`
 	SecureAccess    *bool   `yaml:"secureAccess,omitempty"`
 	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
+}
+
+type fileVercelSandboxConfig struct {
+	Runtime         *string   `yaml:"runtime,omitempty"`
+	Workdir         *string   `yaml:"workdir,omitempty"`
+	ProjectID       *string   `yaml:"projectId,omitempty"`
+	TeamID          *string   `yaml:"teamId,omitempty"`
+	Scope           *string   `yaml:"scope,omitempty"`
+	VCPUs           *float64  `yaml:"vcpus,omitempty"`
+	TimeoutSecs     *int      `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int      `yaml:"execTimeoutSecs,omitempty"`
+	Persistent      *bool     `yaml:"persistent,omitempty"`
+	Snapshot        *string   `yaml:"snapshot,omitempty"`
+	SnapshotMode    *string   `yaml:"snapshotMode,omitempty"`
+	NetworkPolicy   *string   `yaml:"networkPolicy,omitempty"`
+	NetworkAllow    *[]string `yaml:"networkAllow,omitempty"`
+	NetworkDeny     *[]string `yaml:"networkDeny,omitempty"`
+	Ports           *[]string `yaml:"ports,omitempty"`
+	ForgetMissing   *bool     `yaml:"forgetMissing,omitempty"`
 }
 
 type fileSuperserveConfig struct {
@@ -4461,6 +4511,62 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.OpenSandbox.UseServerProxy = *file.OpenSandbox.UseServerProxy
 		}
 	}
+	if file.VercelSandbox != nil {
+		if file.VercelSandbox.Runtime != nil {
+			cfg.VercelSandbox.Runtime = *file.VercelSandbox.Runtime
+		}
+		if file.VercelSandbox.Workdir != nil {
+			cfg.VercelSandbox.Workdir = *file.VercelSandbox.Workdir
+		}
+		if file.VercelSandbox.ProjectID != nil {
+			cfg.VercelSandbox.ProjectID = *file.VercelSandbox.ProjectID
+		}
+		if file.VercelSandbox.TeamID != nil {
+			cfg.VercelSandbox.TeamID = *file.VercelSandbox.TeamID
+		}
+		if file.VercelSandbox.Scope != nil {
+			cfg.VercelSandbox.Scope = *file.VercelSandbox.Scope
+		}
+		if file.VercelSandbox.VCPUs != nil {
+			cfg.VercelSandbox.VCPUs = *file.VercelSandbox.VCPUs
+		}
+		if file.VercelSandbox.TimeoutSecs != nil {
+			if *file.VercelSandbox.TimeoutSecs < 0 {
+				return exit(2, "vercel-sandbox timeoutSecs must be non-negative")
+			}
+			cfg.VercelSandbox.TimeoutSecs = *file.VercelSandbox.TimeoutSecs
+		}
+		if file.VercelSandbox.ExecTimeoutSecs != nil {
+			if *file.VercelSandbox.ExecTimeoutSecs < 0 {
+				return exit(2, "vercel-sandbox execTimeoutSecs must be non-negative")
+			}
+			cfg.VercelSandbox.ExecTimeoutSecs = *file.VercelSandbox.ExecTimeoutSecs
+		}
+		if file.VercelSandbox.Persistent != nil {
+			cfg.VercelSandbox.Persistent = *file.VercelSandbox.Persistent
+		}
+		if file.VercelSandbox.Snapshot != nil {
+			cfg.VercelSandbox.Snapshot = *file.VercelSandbox.Snapshot
+		}
+		if file.VercelSandbox.SnapshotMode != nil {
+			cfg.VercelSandbox.SnapshotMode = *file.VercelSandbox.SnapshotMode
+		}
+		if file.VercelSandbox.NetworkPolicy != nil {
+			cfg.VercelSandbox.NetworkPolicy = *file.VercelSandbox.NetworkPolicy
+		}
+		if file.VercelSandbox.NetworkAllow != nil {
+			cfg.VercelSandbox.NetworkAllow = normalizeList(*file.VercelSandbox.NetworkAllow)
+		}
+		if file.VercelSandbox.NetworkDeny != nil {
+			cfg.VercelSandbox.NetworkDeny = normalizeList(*file.VercelSandbox.NetworkDeny)
+		}
+		if file.VercelSandbox.Ports != nil {
+			cfg.VercelSandbox.Ports = normalizeList(*file.VercelSandbox.Ports)
+		}
+		if file.VercelSandbox.ForgetMissing != nil {
+			cfg.VercelSandbox.ForgetMissing = *file.VercelSandbox.ForgetMissing
+		}
+	}
 	if file.Superserve != nil {
 		if trusted && strings.TrimSpace(file.Superserve.BaseURL) != "" {
 			cfg.Superserve.BaseURL = file.Superserve.BaseURL
@@ -5797,6 +5903,38 @@ func applyEnv(cfg *Config) error {
 	}
 	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
 		cfg.OpenSandbox.UseServerProxy = v
+	}
+	cfg.VercelSandbox.Runtime = getenv("CRABBOX_VERCEL_SANDBOX_RUNTIME", cfg.VercelSandbox.Runtime)
+	cfg.VercelSandbox.Workdir = getenv("CRABBOX_VERCEL_SANDBOX_WORKDIR", cfg.VercelSandbox.Workdir)
+	cfg.VercelSandbox.ProjectID = getenv("CRABBOX_VERCEL_SANDBOX_PROJECT_ID", cfg.VercelSandbox.ProjectID)
+	cfg.VercelSandbox.TeamID = getenv("CRABBOX_VERCEL_SANDBOX_TEAM_ID", cfg.VercelSandbox.TeamID)
+	cfg.VercelSandbox.Scope = getenv("CRABBOX_VERCEL_SANDBOX_SCOPE", cfg.VercelSandbox.Scope)
+	cfg.VercelSandbox.VCPUs = getenvFloat("CRABBOX_VERCEL_SANDBOX_VCPUS", cfg.VercelSandbox.VCPUs)
+	cfg.VercelSandbox.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_VERCEL_SANDBOX_TIMEOUT_SECS", cfg.VercelSandbox.TimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.VercelSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_VERCEL_SANDBOX_EXEC_TIMEOUT_SECS", cfg.VercelSandbox.ExecTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	if v, ok := getenvBool("CRABBOX_VERCEL_SANDBOX_PERSISTENT"); ok {
+		cfg.VercelSandbox.Persistent = v
+	}
+	cfg.VercelSandbox.Snapshot = getenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT", cfg.VercelSandbox.Snapshot)
+	cfg.VercelSandbox.SnapshotMode = getenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE", cfg.VercelSandbox.SnapshotMode)
+	cfg.VercelSandbox.NetworkPolicy = getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY", cfg.VercelSandbox.NetworkPolicy)
+	if allow := os.Getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW"); allow != "" {
+		cfg.VercelSandbox.NetworkAllow = splitCommaList(allow)
+	}
+	if deny := os.Getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_DENY"); deny != "" {
+		cfg.VercelSandbox.NetworkDeny = splitCommaList(deny)
+	}
+	if ports := os.Getenv("CRABBOX_VERCEL_SANDBOX_PORTS"); ports != "" {
+		cfg.VercelSandbox.Ports = splitCommaList(ports)
+	}
+	if v, ok := getenvBool("CRABBOX_VERCEL_SANDBOX_FORGET_MISSING"); ok {
+		cfg.VercelSandbox.ForgetMissing = v
 	}
 	cfg.Superserve.BaseURL = getenv("CRABBOX_SUPERSERVE_BASE_URL", getenv("SUPERSERVE_BASE_URL", cfg.Superserve.BaseURL))
 	cfg.Superserve.Template = getenv("CRABBOX_SUPERSERVE_TEMPLATE", cfg.Superserve.Template)
