@@ -85,6 +85,7 @@ func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	}
 	if flagWasSet(fs, "nvidia-brev-work-root") {
 		cfg.NvidiaBrev.WorkRoot = *v.WorkRoot
+		markNvidiaBrevWorkRootExplicit(cfg)
 	}
 	if isNvidiaBrevProviderName(cfg.Provider) {
 		applyNvidiaBrevDefaults(cfg)

@@ -34,6 +34,7 @@ func (a App) configShow(args []string) error {
 
 func effectiveConfigForShow(cfg Config) Config {
 	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
+	cfg.NvidiaBrev.WorkRoot = EffectiveNvidiaBrevWorkRoot(cfg)
 	if cfg.Provider == "digitalocean" || cfg.Provider == "linode" {
 		base := baseConfig()
 		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
@@ -49,6 +50,10 @@ func effectiveConfigForShow(cfg Config) Config {
 		cfg.SSHUser = cfg.Hostinger.User
 		cfg.SSHPort = "22"
 		cfg.SSHFallbackPorts = nil
+	}
+	switch normalizeProviderName(cfg.Provider) {
+	case "nvidia-brev", "brev", "nvidia":
+		cfg.WorkRoot = cfg.NvidiaBrev.WorkRoot
 	}
 	return cfg
 }

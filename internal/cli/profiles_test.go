@@ -737,19 +737,37 @@ func TestRunStopCommandIncludesExplicitNvidiaBrevReleaseAction(t *testing.T) {
 		Provider: "nvidia-brev",
 		TargetOS: targetLinux,
 		NvidiaBrev: NvidiaBrevConfig{
+			CLI:           "/opt/bin/brev",
 			ReleaseAction: "stop",
+			Target:        "host",
+			User:          "ubuntu",
 		},
 	}
 	MarkDeleteOnReleaseExplicit(&cfg, "nvidia-brev")
 	got := runStopCommand(cfg, "cbx_123")
 	for _, want := range []string{
 		"--provider nvidia-brev",
+		"--nvidia-brev-cli /opt/bin/brev",
 		"--nvidia-brev-release-action stop",
+		"--nvidia-brev-target host",
+		"--nvidia-brev-user ubuntu",
 		"--id cbx_123",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stop command missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRunStopCommandPreservesExplicitDefaultNvidiaBrevCLI(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "nvidia-brev",
+		NvidiaBrev: NvidiaBrevConfig{
+			CLI: "brev",
+		},
+	}, "cbx_123")
+	if !strings.Contains(got, "--nvidia-brev-cli brev") {
+		t.Fatalf("stop command omitted effective Brev CLI:\n%s", got)
 	}
 }
 

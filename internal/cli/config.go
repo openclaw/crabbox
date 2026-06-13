@@ -135,6 +135,7 @@ type Config struct {
 	Railway                       RailwayConfig
 	Runpod                        RunpodConfig
 	NvidiaBrev                    NvidiaBrevConfig
+	nvidiaBrevWorkRootExplicit    bool
 	Hostinger                     HostingerConfig
 	hostingerUserExplicit         bool
 	hostingerWorkRootExplicit     bool
@@ -1597,6 +1598,26 @@ func MarkHostingerUserExplicit(cfg *Config) {
 
 func MarkHostingerWorkRootExplicit(cfg *Config) {
 	cfg.hostingerWorkRootExplicit = true
+}
+
+func IsNvidiaBrevWorkRootExplicit(cfg *Config) bool {
+	return cfg.nvidiaBrevWorkRootExplicit
+}
+
+func MarkNvidiaBrevWorkRootExplicit(cfg *Config) {
+	cfg.nvidiaBrevWorkRootExplicit = true
+}
+
+func EffectiveNvidiaBrevWorkRoot(cfg Config) string {
+	workRoot := cfg.NvidiaBrev.WorkRoot
+	providerDefault := workRoot == "" || workRoot == "/tmp/crabbox"
+	if !IsNvidiaBrevWorkRootExplicit(&cfg) && providerDefault && cfg.explicitWorkRoot != "" {
+		return cfg.explicitWorkRoot
+	}
+	if workRoot == "" {
+		return "/tmp/crabbox"
+	}
+	return workRoot
 }
 
 func DeleteOnReleaseExplicit(cfg Config, provider string) bool {
@@ -3866,6 +3887,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.NvidiaBrev.WorkRoot != "" {
 			cfg.NvidiaBrev.WorkRoot = file.NvidiaBrev.WorkRoot
+			MarkNvidiaBrevWorkRootExplicit(cfg)
 		}
 	}
 	if file.Hostinger != nil {
@@ -5304,7 +5326,10 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.NvidiaBrev.Target = getenv("CRABBOX_NVIDIA_BREV_TARGET", cfg.NvidiaBrev.Target)
 	cfg.NvidiaBrev.User = getenv("CRABBOX_NVIDIA_BREV_USER", cfg.NvidiaBrev.User)
-	cfg.NvidiaBrev.WorkRoot = getenv("CRABBOX_NVIDIA_BREV_WORK_ROOT", cfg.NvidiaBrev.WorkRoot)
+	if value := os.Getenv("CRABBOX_NVIDIA_BREV_WORK_ROOT"); value != "" {
+		cfg.NvidiaBrev.WorkRoot = value
+		MarkNvidiaBrevWorkRootExplicit(cfg)
+	}
 	cfg.Hostinger.APIToken = getenv("CRABBOX_HOSTINGER_API_TOKEN", getenv("HOSTINGER_API_TOKEN", cfg.Hostinger.APIToken))
 	cfg.Hostinger.APIURL = getenv("CRABBOX_HOSTINGER_API_URL", getenv("HOSTINGER_API_URL", cfg.Hostinger.APIURL))
 	cfg.Hostinger.ItemID = getenv("CRABBOX_HOSTINGER_ITEM_ID", cfg.Hostinger.ItemID)

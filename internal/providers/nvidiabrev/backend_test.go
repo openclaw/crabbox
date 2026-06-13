@@ -47,9 +47,29 @@ func TestNvidiaBrevProviderDefaults(t *testing.T) {
 }
 
 func TestNvidiaBrevDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
-	cfg := Config{WorkRoot: "/srv/crabbox"}
+	cfg := Config{
+		WorkRoot: "/srv/crabbox",
+		NvidiaBrev: NvidiaBrevConfig{
+			WorkRoot: "/tmp/crabbox",
+		},
+	}
+	markWorkRootExplicit(&cfg)
 	applyNvidiaBrevDefaults(&cfg)
 	if cfg.WorkRoot != "/srv/crabbox" || cfg.NvidiaBrev.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("workRoot=%q nvidiaBrev.workRoot=%q", cfg.WorkRoot, cfg.NvidiaBrev.WorkRoot)
+	}
+}
+
+func TestNvidiaBrevDefaultsPreserveExplicitProviderWorkRoot(t *testing.T) {
+	cfg := Config{
+		WorkRoot: "/srv/crabbox",
+		NvidiaBrev: NvidiaBrevConfig{
+			WorkRoot: "/tmp/crabbox",
+		},
+	}
+	markNvidiaBrevWorkRootExplicit(&cfg)
+	applyNvidiaBrevDefaults(&cfg)
+	if cfg.WorkRoot != "/tmp/crabbox" || cfg.NvidiaBrev.WorkRoot != "/tmp/crabbox" {
 		t.Fatalf("workRoot=%q nvidiaBrev.workRoot=%q", cfg.WorkRoot, cfg.NvidiaBrev.WorkRoot)
 	}
 }
@@ -109,17 +129,17 @@ func TestNvidiaBrevApplyFlagsRejectsGenericClassAndType(t *testing.T) {
 	}
 }
 
-func TestNvidiaBrevApplyFlagsMarksReleaseActionExplicit(t *testing.T) {
+func TestNvidiaBrevApplyFlagsMarksExplicitSettings(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := RegisterNvidiaBrevProviderFlags(fs, Config{})
-	if err := fs.Parse([]string{"--nvidia-brev-release-action", "stop"}); err != nil {
+	if err := fs.Parse([]string{"--nvidia-brev-release-action", "stop", "--nvidia-brev-work-root", "/work/brev"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := Config{Provider: providerName}
 	if err := ApplyNvidiaBrevProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.NvidiaBrev.ReleaseAction != "stop" || !releaseActionExplicit(cfg) {
+	if cfg.NvidiaBrev.ReleaseAction != "stop" || !releaseActionExplicit(cfg) || cfg.NvidiaBrev.WorkRoot != "/work/brev" || !nvidiaBrevWorkRootExplicit(&cfg) {
 		t.Fatalf("release action not marked explicit: %#v", cfg.NvidiaBrev)
 	}
 }

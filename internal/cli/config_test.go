@@ -368,6 +368,9 @@ func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 	if !DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
 		t.Fatal("file nvidiaBrev release action not marked explicit")
 	}
+	if !IsNvidiaBrevWorkRootExplicit(&cfg) {
+		t.Fatal("file nvidiaBrev work root not marked explicit")
+	}
 
 	t.Setenv("CRABBOX_NVIDIA_BREV_CLI", "/usr/local/bin/brev")
 	t.Setenv("CRABBOX_NVIDIA_BREV_ORG", "env-example-org")
@@ -400,6 +403,18 @@ func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if !DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
 		t.Fatal("env nvidiaBrev release action not marked explicit")
+	}
+	if !IsNvidiaBrevWorkRootExplicit(&cfg) {
+		t.Fatal("env nvidiaBrev work root not marked explicit")
+	}
+}
+
+func TestEffectiveNvidiaBrevWorkRootDoesNotInheritAnotherProviderDefault(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "xcp-ng"
+	cfg.WorkRoot = "/home/vm/crabbox"
+	if got := EffectiveNvidiaBrevWorkRoot(cfg); got != "/tmp/crabbox" {
+		t.Fatalf("effective nvidia-brev work root=%q", got)
 	}
 }
 

@@ -55,6 +55,22 @@ func markReleaseActionExplicit(cfg *Config) {
 	core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 }
 
+func nvidiaBrevWorkRootExplicit(cfg *Config) bool {
+	return core.IsNvidiaBrevWorkRootExplicit(cfg)
+}
+
+func markNvidiaBrevWorkRootExplicit(cfg *Config) {
+	core.MarkNvidiaBrevWorkRootExplicit(cfg)
+}
+
+func markWorkRootExplicit(cfg *Config) {
+	core.MarkWorkRootExplicit(cfg)
+}
+
+func effectiveNvidiaBrevWorkRoot(cfg Config) string {
+	return core.EffectiveNvidiaBrevWorkRoot(cfg)
+}
+
 func cliDoctorResult(provider string, leases int, runtime string) DoctorResult {
 	return core.CLIDoctorResult(provider, leases, runtime)
 }

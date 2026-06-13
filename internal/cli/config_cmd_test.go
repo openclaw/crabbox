@@ -581,6 +581,17 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 	}
 }
 
+func TestConfigShowAppliesNvidiaBrevGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "nvidia-brev"
+	cfg.WorkRoot = "/srv/crabbox"
+	MarkWorkRootExplicit(&cfg)
+	got := effectiveConfigForShow(cfg)
+	if got.WorkRoot != "/srv/crabbox" || got.NvidiaBrev.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("workRoot=%q nvidiaBrev.workRoot=%q", got.WorkRoot, got.NvidiaBrev.WorkRoot)
+	}
+}
+
 func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
 	other := effectiveConfigForShow(baseConfig())
 	if other.Hostinger.WorkRoot != "/home/root/crabbox" ||
