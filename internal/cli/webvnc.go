@@ -1374,7 +1374,7 @@ func inheritedWebVNCDaemonListener(port string) (net.Listener, error) {
 	if !inheritedWebVNCDaemonPortReservation(port) {
 		return nil, fmt.Errorf("inherited WebVNC daemon TCP listener is unavailable")
 	}
-	descriptor, err := strconv.ParseUint(strings.TrimSpace(os.Getenv(webVNCDaemonPortReservationFDEnv)), 10, 64)
+	descriptor, err := strconv.ParseUint(strings.TrimSpace(os.Getenv(webVNCDaemonPortReservationFDEnv)), 10, strconv.IntSize)
 	if err != nil || descriptor <= 2 {
 		return nil, fmt.Errorf("inherited WebVNC daemon TCP listener descriptor is invalid")
 	}
@@ -2947,6 +2947,9 @@ func directSSHWebVNCChallengeResponse(password string, challenge []byte) ([]byte
 	for i := range key {
 		key[i] = reverseVNCKeyByte(key[i])
 	}
+	// RFB 3.8 mandates this legacy DES challenge response. The VNC service and
+	// noVNC proxy are loopback-only and the hop between hosts is protected by SSH.
+	// codeql[go/weak-cryptographic-algorithm]
 	cipher, err := des.NewCipher(key[:])
 	if err != nil {
 		return nil, fmt.Errorf("create RFB password cipher: %w", err)

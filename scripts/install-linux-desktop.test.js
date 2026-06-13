@@ -4,8 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-const repoRoot = path.resolve(import.meta.dirname, "..");
-const scriptPath = path.join(repoRoot, "scripts", "install-linux-desktop.sh");
+const scriptPath = "scripts/install-linux-desktop.sh";
 
 test("public Linux desktop bootstrap is valid and keeps VNC on loopback", () => {
 	const syntax = spawnSync("bash", ["-n", scriptPath], { encoding: "utf8" });

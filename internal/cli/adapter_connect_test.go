@@ -90,6 +90,9 @@ func TestAdapterRelayRouteAllowlist(t *testing.T) {
 		if got := adapterRelayRouteAllowed(test.method, test.path); got != test.want {
 			t.Errorf("route %s %s allowed=%v want=%v", test.method, test.path, got, test.want)
 		}
+		if canonical, ok := adapterRelayCanonicalPath(test.method, test.path); ok && canonical != test.path {
+			t.Errorf("route %s %s canonical=%q", test.method, test.path, canonical)
+		}
 	}
 }
 

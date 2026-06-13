@@ -345,7 +345,11 @@ func (r *adapterRelay) handle(ctx context.Context, request adapterRelayRequest) 
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, adapterRelayTimeoutForRequest(request, r.desktopTimeout))
 	defer cancel()
-	localRequest, err := http.NewRequestWithContext(requestCtx, request.Method, r.localBaseURL+request.Path, bytes.NewReader(body))
+	localPath, ok := adapterRelayCanonicalPath(request.Method, request.Path)
+	if !ok {
+		return adapterRelayErrorResponse(request.ID, http.StatusBadRequest, "invalid_request", "method and path are outside the crabfleet/v1 adapter surface")
+	}
+	localRequest, err := http.NewRequestWithContext(requestCtx, request.Method, r.localBaseURL+localPath, bytes.NewReader(body))
 	if err != nil {
 		return adapterRelayErrorResponse(request.ID, http.StatusBadRequest, "invalid_request", "could not construct local adapter request")
 	}
@@ -441,19 +445,30 @@ func validAdapterRelayRequestID(value string) bool {
 }
 
 func adapterRelayRouteAllowed(method, requestPath string) bool {
+	_, ok := adapterRelayCanonicalPath(method, requestPath)
+	return ok
+}
+
+func adapterRelayCanonicalPath(method, requestPath string) (string, bool) {
 	if requestPath == "/v1/workspaces" {
-		return method == http.MethodPost
+		return requestPath, method == http.MethodPost
 	}
 	const prefix = "/v1/workspaces/"
 	if !strings.HasPrefix(requestPath, prefix) || strings.ContainsAny(requestPath, "?#%") {
-		return false
+		return "", false
 	}
 	rest := strings.TrimPrefix(requestPath, prefix)
 	if method == http.MethodPost && strings.HasSuffix(rest, "/connections/desktop") {
 		workspaceID := strings.TrimSuffix(rest, "/connections/desktop")
-		return validControllerWorkspaceID(workspaceID)
+		if !validControllerWorkspaceID(workspaceID) {
+			return "", false
+		}
+		return prefix + url.PathEscape(workspaceID) + "/connections/desktop", true
 	}
-	return (method == http.MethodGet || method == http.MethodDelete) && validControllerWorkspaceID(rest)
+	if (method != http.MethodGet && method != http.MethodDelete) || !validControllerWorkspaceID(rest) {
+		return "", false
+	}
+	return prefix + url.PathEscape(rest), true
 }
 
 func validateAdapterRelayHeaders(headers map[string]string) error {
