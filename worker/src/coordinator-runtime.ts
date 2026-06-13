@@ -17,6 +17,9 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (method === "POST" && path.join("/") === "v1/leases") {
     return "direct";
   }
+  if (path[0] === "v1" && path[1] === "workspaces") {
+    return "direct";
+  }
   if (method === "POST" && path.join("/") === "v1/internal/scheduled") {
     return "direct";
   }

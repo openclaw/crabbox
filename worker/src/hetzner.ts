@@ -37,6 +37,31 @@ interface HetznerServerTypePrice {
   };
 }
 
+export class HetznerProvisioningError extends Error {
+  constructor(
+    message: string,
+    readonly resourceMayExist: boolean,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = "HetznerProvisioningError";
+  }
+}
+
+export function hetznerProvisioningFailureMayHaveResource(error: unknown): boolean {
+  return (
+    (error instanceof HetznerProvisioningError && error.resourceMayExist) ||
+    errorText(error).includes("timed out waiting for server IP")
+  );
+}
+
+export function hetznerProvisioningFailureRetryable(error: unknown): boolean {
+  return (
+    (error instanceof HetznerProvisioningError && error.retryable) ||
+    errorText(error).includes("timed out waiting for server IP")
+  );
+}
+
 export class HetznerClient {
   private readonly token: string;
 
@@ -54,6 +79,15 @@ export class HetznerClient {
     });
     const response = await this.request<HetznerListServersResponse>("GET", `/servers?${query}`);
     return response.servers;
+  }
+
+  async findServerByLease(leaseID: string): Promise<HetznerServer | undefined> {
+    const query = new URLSearchParams({
+      label_selector: `crabbox=true,lease=${leaseID}`,
+      per_page: "1",
+    });
+    const response = await this.request<HetznerListServersResponse>("GET", `/servers?${query}`);
+    return response.servers[0];
   }
 
   async ensureSSHKey(name: string, publicKey: string): Promise<HetznerSSHKey> {
@@ -80,15 +114,30 @@ export class HetznerClient {
       }
     }
 
-    const created = await this.request<HetznerSSHKeyResponse>("POST", "/ssh_keys", {
-      name,
-      public_key: publicKey,
-      labels: {
-        crabbox: "true",
-        created_by: "crabbox",
-      },
-    });
-    return created.ssh_key;
+    try {
+      const created = await this.request<HetznerSSHKeyResponse>("POST", "/ssh_keys", {
+        name,
+        public_key: publicKey,
+        labels: {
+          crabbox: "true",
+          created_by: "crabbox",
+        },
+      });
+      return created.ssh_key;
+    } catch (error) {
+      if (!String(error).includes("uniqueness_error")) {
+        throw error;
+      }
+      const raced = await this.request<HetznerListSSHKeysResponse>(
+        "GET",
+        `/ssh_keys?${new URLSearchParams({ name })}`,
+      );
+      const key = raced.ssh_keys.find((entry) => entry.name === name);
+      if (key?.public_key.trim() === publicKey.trim()) {
+        return key;
+      }
+      throw error;
+    }
   }
 
   async deleteSSHKey(name: string): Promise<void> {
@@ -124,13 +173,21 @@ export class HetznerClient {
     slug: string,
     owner: string,
   ): Promise<{ server: HetznerServer; serverType: string }> {
-    const key = await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
+    let key: HetznerSSHKey;
+    try {
+      key = await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
+    } catch (error) {
+      const message = errorText(error);
+      throw new HetznerProvisioningError(message, false, transientHetznerError(message));
+    }
     const resolvedConfig = { ...config, providerKey: key.name };
     const candidates = prependUnique(
       resolvedConfig.serverType,
       serverTypeCandidatesForClass(resolvedConfig.class),
     );
     const failures: string[] = [];
+    let resourceMayExist = false;
+    let retryable = false;
     for (const serverType of candidates) {
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- server-type fallback must stay sequential.
@@ -142,14 +199,16 @@ export class HetznerClient {
         );
         return { server, serverType };
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorText(error);
         failures.push(`${serverType}: ${message}`);
-        if (!isRetryableProvisioningError(message)) {
+        resourceMayExist = hetznerProvisioningFailureMayHaveResource(error);
+        retryable = hetznerProvisioningFailureRetryable(error);
+        if (resourceMayExist || !isRetryableProvisioningError(message)) {
           break;
         }
       }
     }
-    throw new Error(failures.join("; "));
+    throw new HetznerProvisioningError(failures.join("; "), resourceMayExist, retryable);
   }
 
   async getServer(id: number): Promise<HetznerServer> {
@@ -196,23 +255,39 @@ export class HetznerClient {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
     const labels = leaseProviderLabels(config, leaseID, slug, owner, "hetzner", now);
-    const response = await this.request<HetznerServerResponse>("POST", "/servers", {
-      name,
-      server_type: config.serverType,
-      image: config.image,
-      location: config.location,
-      labels,
-      ssh_keys: [config.providerKey],
-      user_data: cloudInit(config),
-      start_after_create: true,
-      public_net: {
-        enable_ipv4: true,
-        enable_ipv6: false,
-      },
-    });
-    return response.server.public_net.ipv4.ip
-      ? response.server
-      : await this.waitForServerIP(response.server.id);
+    let response: HetznerServerResponse;
+    try {
+      response = await this.request<HetznerServerResponse>("POST", "/servers", {
+        name,
+        server_type: config.serverType,
+        image: config.image,
+        location: config.location,
+        labels,
+        ssh_keys: [config.providerKey],
+        user_data: cloudInit(config),
+        start_after_create: true,
+        public_net: {
+          enable_ipv4: true,
+          enable_ipv6: false,
+        },
+      });
+    } catch (error) {
+      const message = errorText(error);
+      const status = /hetzner POST \/servers: http (\d{3})/.exec(message)?.[1];
+      throw new HetznerProvisioningError(
+        message,
+        status === undefined || Number.parseInt(status, 10) >= 500,
+        transientHetznerError(message) || isRetryableProvisioningError(message),
+      );
+    }
+    if (response.server.public_net.ipv4.ip) {
+      return response.server;
+    }
+    try {
+      return await this.waitForServerIP(response.server.id);
+    } catch (error) {
+      throw new HetznerProvisioningError(errorText(error), true, true);
+    }
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -273,4 +348,20 @@ async function safeBody(response: Response): Promise<string> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function transientHetznerError(message: string): boolean {
+  if (message.includes("exists with different public key")) {
+    return false;
+  }
+  const status = /hetzner \w+ [^:]+: http (\d{3})/.exec(message)?.[1];
+  return (
+    status === undefined ||
+    Number.parseInt(status, 10) === 429 ||
+    Number.parseInt(status, 10) >= 500
+  );
 }

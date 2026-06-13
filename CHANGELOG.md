@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an idempotent workspace adapter over coordinator leases, with durable owner-scoped lifecycle mapping and truthful capability negotiation for external control planes.
 - Added a generated provider decision matrix with checked metadata for execution model, access, substrate, GPU fit, lifecycle, cleanup, and provider caveats; docs validation now fails on provider drift. Thanks @coygeek.
 - Added confirmed lifecycle actions to portal lease rows, with provider shutdown for coordinator-managed boxes and explicitly metadata-only deregistration for client-managed boxes.
 - Added `provider: superserve` for delegated Linux sandbox runs through the Superserve control and data planes, including archive sync, retained leases, ownership-guarded lifecycle operations, and credentialed live smoke coverage. Thanks @coygeek.

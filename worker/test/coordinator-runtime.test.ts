@@ -101,6 +101,9 @@ describe("coordinator runtimes", () => {
       ["GET", "/portal/hosts/aws/h-123"],
       ["POST", "/portal/hosts/aws/h-123/vnc"],
       ["POST", "/portal/leases/example/release"],
+      ["POST", "/v1/workspaces"],
+      ["GET", "/v1/workspaces/fleet-is-101"],
+      ["DELETE", "/v1/workspaces/fleet-is-101"],
     ]) {
       expect(
         coordinatorRequestQueue(new Request(`https://coordinator.test${path}`, { method })),

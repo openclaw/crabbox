@@ -14,6 +14,8 @@
   "vars": {
     "CRABBOX_DEFAULT_ORG": "openclaw",
     "CRABBOX_GITHUB_ALLOWED_ORG": "openclaw",
+    "CRABBOX_WORKSPACE_PROVIDER": "hetzner",
+    "CRABBOX_WORKSPACE_CLASS": "standard",
     "CRABBOX_USER_TOKEN_TTL_SECONDS": "15552000",
     "CRABBOX_AWS_REGION": "eu-west-1",
     "CRABBOX_CAPACITY_REGIONS": "eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2",
@@ -50,6 +52,8 @@
     "vars": {
       "CRABBOX_DEFAULT_ORG": "openclaw",
       "CRABBOX_GITHUB_ALLOWED_ORG": "openclaw",
+      "CRABBOX_WORKSPACE_PROVIDER": "hetzner",
+      "CRABBOX_WORKSPACE_CLASS": "standard",
       "CRABBOX_USER_TOKEN_TTL_SECONDS": "15552000",
       "CRABBOX_AWS_REGION": "eu-west-1",
       "CRABBOX_CAPACITY_REGIONS": "eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2",
