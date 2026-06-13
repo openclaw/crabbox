@@ -70,7 +70,10 @@ Provider readiness validates the selected provider without creating a lease.
   purchase, start, stop, delete, or cancel a VPS.
 - Delegated providers run their own direct readiness check where available; for
   example Cloudflare validates the configured runner URL and bearer token
-  against the runner readiness API. Blacksmith Testbox reports runtime as
+  against the runner readiness API. Vercel Sandbox checks the SDK bridge
+  contract, local `sandbox` CLI, read-only `sandbox list --all --limit 1`
+  auth/inventory access, project scoping readiness, and local `vsbx_...`
+  inventory without creating resources. Blacksmith Testbox reports runtime as
   provider-hydrated because GitHub Actions hydration is owned by Testbox.
 - Providers with no direct doctor print `skip provider ... direct_doctor=unsupported`.
 

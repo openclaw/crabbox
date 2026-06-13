@@ -77,9 +77,10 @@ direct backend.
 Use `DelegatedRunBackend` when the provider owns execution itself instead of
 exposing a Crabbox-managed SSH target.
 
-Examples: Blacksmith Testbox, E2B, Islo, Modal, Tensorlake, [Upstash Box](https://upstash.com/docs/box/overall/quickstart), and
-Azure Container Apps dynamic sessions, where the provider owns workspace setup
-and command streaming.
+Examples: Blacksmith Testbox, E2B, Islo, Modal, Tensorlake,
+[Upstash Box](https://upstash.com/docs/box/overall/quickstart), Superserve,
+Vercel Sandbox, and Azure Container Apps dynamic sessions, where the provider
+owns workspace setup and command streaming.
 
 The delegated backend owns warmup, command execution, output streaming, and
 stop. Core still owns provider selection, config loading, local claims, friendly
