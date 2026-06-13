@@ -76,6 +76,10 @@ Defaults:
 - `target`: `container`
 - `workRoot`: `/tmp/crabbox`
 
+`startupScript` follows Brev's native syntax: use an inline command such as
+`pip install torch`, or prefix a local file path with `@`, for example
+`@setup.sh` or `@/opt/setup.sh`.
+
 Provider flags:
 
 ```text
@@ -223,9 +227,10 @@ can create a billable GPU workspace:
 CRABBOX_NVIDIA_BREV_LIVE=1 scripts/live-nvidia-brev-smoke.sh
 ```
 
-The script builds or reuses `bin/crabbox`, runs `doctor`, creates one kept
-workspace, proves `nvidia-smi` through `crabbox run`, lists the lease, and then
-deletes the lease with `crabbox stop`. It prints a stable classification:
+The script builds or reuses `bin/crabbox`, runs `doctor`, creates one workspace
+with `--keep=false` so partial acquisition failures roll back, proves
+`nvidia-smi` through `crabbox run`, lists the lease, and then deletes the lease
+with `crabbox stop`. It prints a stable classification:
 
 - `live_nvidia_brev_smoke_passed` when the full GPU path passes;
 - `environment_blocked` for missing CLI/auth/configuration;

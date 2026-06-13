@@ -150,7 +150,7 @@ func selectBrevSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry for host %q is ambiguous", alias)
 	}
 	entry := matches[0]
-	user := firstNonEmpty(entry.User, cfg.NvidiaBrev.User, cfg.SSHUser)
+	user := firstNonEmpty(cfg.NvidiaBrev.User, entry.User, cfg.SSHUser)
 	if strings.TrimSpace(user) == "" {
 		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q is missing User", alias)
 	}

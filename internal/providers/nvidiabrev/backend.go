@@ -80,11 +80,11 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		return LeaseTarget{}, err
 	}
 	cfg := b.configForRun()
-	workspace, leaseID, slug, _, err := b.resolveWorkspace(ctx, client, req.ID)
+	workspace, leaseID, slug, claim, err := b.resolveWorkspace(ctx, client, req.ID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	lease := LeaseTarget{Server: workspaceToServer(cfg, workspace, leaseID, slug, false), LeaseID: leaseID}
+	lease := LeaseTarget{Server: workspaceToClaimedServer(cfg, workspace, leaseID, slug, claim), LeaseID: leaseID}
 	if req.ReleaseOnly || req.StatusOnly {
 		if req.ReadyProbe && brevWorkspaceReady(workspace) {
 			target, targetErr := b.resolveSSHTarget(ctx, client, cfg, workspace)
@@ -96,11 +96,29 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		return lease, nil
 	}
 	if brevWorkspaceStopped(workspace) {
-		workspace, err = b.startStoppedWorkspace(ctx, client, workspace)
-		if err != nil {
-			return LeaseTarget{}, err
+		if claim.LeaseID != "" {
+			starting := workspace
+			starting.Status = "STARTING"
+			startingServer := workspaceToClaimedServer(cfg, starting, leaseID, slug, claim)
+			updatedClaim, updateErr := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, startingServer, SSHTarget{}, func() error {
+				fmt.Fprintf(b.rt.Stderr, "starting provider=%s workspace=%s\n", providerName, safeWorkspaceRef(workspace))
+				return client.start(ctx, workspaceIdentifier(workspace))
+			})
+			if updateErr != nil {
+				return LeaseTarget{}, updateErr
+			}
+			claim = updatedClaim
+			workspace, err = b.waitForWorkspaceReady(ctx, client, workspaceIdentifier(workspace))
+			if err != nil {
+				return LeaseTarget{}, err
+			}
+		} else {
+			workspace, err = b.startStoppedWorkspace(ctx, client, workspace)
+			if err != nil {
+				return LeaseTarget{}, err
+			}
 		}
-		lease.Server = workspaceToServer(cfg, workspace, leaseID, slug, false)
+		lease.Server = workspaceToClaimedServer(cfg, workspace, leaseID, slug, claim)
 	}
 	target, err := b.resolveSSHTarget(ctx, client, cfg, workspace)
 	if err != nil {
@@ -108,9 +126,17 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	}
 	lease.SSH = target
 	if req.Repo.Root != "" && isCrabboxBrevWorkspace(workspace) {
-		if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, req.Reclaim); err != nil {
-			return LeaseTarget{}, err
+		updatedClaim, claimErr := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, req.Reclaim, claim, claim.LeaseID != "")
+		if claimErr != nil {
+			return LeaseTarget{}, claimErr
 		}
+		claim = updatedClaim
+	} else if claim.LeaseID != "" {
+		updatedClaim, claimErr := updateLeaseClaimEndpointIfUnchanged(leaseID, claim, lease.Server, lease.SSH)
+		if claimErr != nil {
+			return LeaseTarget{}, claimErr
+		}
+		claim = updatedClaim
 	}
 	return lease, nil
 }
@@ -142,14 +168,11 @@ func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		return exit(2, "lease=%s claim does not match nvidia-brev workspace %s", claim.LeaseID, safeWorkspaceRef(workspace))
 	}
 	action := b.releaseAction()
+	if action == "stop" {
+		return b.stopWorkspaceAndPersistClaim(ctx, client, workspace, claim)
+	}
 	if err := b.releaseWorkspace(ctx, client, workspace); err != nil {
 		return err
-	}
-	if action == "stop" {
-		if err := b.persistStoppedClaim(workspace, claim); err != nil {
-			return err
-		}
-		return nil
 	}
 	removeLeaseClaim(leaseID)
 	return nil
@@ -157,12 +180,27 @@ func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 
 func (b *nvidiaBrevBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
 	cfg := b.configForRun()
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
+	}
+	var claim LeaseClaim
+	var claimed bool
+	var err error
+	if req.Lease.LeaseID != "" {
+		claim, claimed, err = resolveLeaseClaimForProvider(req.Lease.LeaseID)
+		if err != nil {
+			return server, err
+		}
+		if claimed {
+			if strings.EqualFold(strings.TrimSpace(claim.Labels["state"]), "stopped") {
+				return server, exit(4, "nvidia-brev lease=%s is stopped", claim.LeaseID)
+			}
+			server = serverWithClaimLabels(server, claim)
+		}
+	}
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
 	}
 	server.Labels = touchDirectLeaseLabels(server.Labels, cfg, req.State)
 	if strings.TrimSpace(req.State) != "" {
@@ -170,15 +208,9 @@ func (b *nvidiaBrevBackend) Touch(_ context.Context, req TouchRequest) (Server, 
 	} else if state := strings.TrimSpace(server.Labels["state"]); state != "" {
 		server.Status = state
 	}
-	if req.Lease.LeaseID != "" {
-		claim, ok, err := resolveLeaseClaimForProvider(req.Lease.LeaseID)
-		if err != nil {
+	if claimed && claim.RepoRoot != "" {
+		if _, err := claimLeaseTargetForRepoConfigIfUnchanged(claim.LeaseID, claim.Slug, cfg, server, req.Lease.SSH, claim.RepoRoot, false, claim, true); err != nil {
 			return server, err
-		}
-		if ok && claim.RepoRoot != "" {
-			if err := claimLeaseTargetForRepoConfig(claim.LeaseID, claim.Slug, cfg, server, req.Lease.SSH, claim.RepoRoot, false); err != nil {
-				return server, err
-			}
 		}
 	}
 	return server, nil
@@ -205,6 +237,20 @@ func (b *nvidiaBrevBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			continue
 		}
 		leaseID, slug := brevLeaseIdentity(workspace, claim)
+		if claimed && claim.Provider == providerName && claimMatchesWorkspace(claim, workspace) && b.releaseAction() == "stop" && brevWorkspaceStopped(workspace) {
+			if strings.EqualFold(strings.TrimSpace(claim.Labels["state"]), "stopped") && claim.SSHHost == "" && claim.SSHPort == 0 {
+				fmt.Fprintf(b.rt.Stderr, "skip provider=%s lease=%s workspace=%s reason=stopped\n", providerName, leaseID, safeWorkspaceRef(workspace))
+				continue
+			}
+			if req.DryRun {
+				fmt.Fprintf(b.rt.Stderr, "would reconcile provider=%s lease=%s slug=%s workspace=%s state=stopped\n", providerName, leaseID, slug, safeWorkspaceRef(workspace))
+				continue
+			}
+			if err := b.persistStoppedClaim(workspace, claim, nil); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		eligible, reason := b.cleanupEligible(workspace, claim, claimed)
 		if !eligible {
 			fmt.Fprintf(b.rt.Stderr, "skip provider=%s lease=%s workspace=%s reason=%s\n", providerName, leaseID, safeWorkspaceRef(workspace), reason)
@@ -214,18 +260,18 @@ func (b *nvidiaBrevBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			fmt.Fprintf(b.rt.Stderr, "would release provider=%s lease=%s slug=%s workspace=%s action=%s\n", providerName, leaseID, slug, safeWorkspaceRef(workspace), b.releaseAction())
 			continue
 		}
+		if b.releaseAction() == "stop" {
+			if err := b.stopWorkspaceAndPersistClaim(ctx, client, workspace, claim); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		if err := b.releaseWorkspace(ctx, client, workspace); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		if claimed {
-			if b.releaseAction() == "stop" {
-				if err := b.persistStoppedClaim(workspace, claim); err != nil {
-					errs = append(errs, err)
-				}
-			} else {
-				removeLeaseClaim(claim.LeaseID)
-			}
+			removeLeaseClaim(claim.LeaseID)
 		}
 	}
 	return errors.Join(errs...)
@@ -276,11 +322,17 @@ func parseBrevClaimTime(value string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (b *nvidiaBrevBackend) persistStoppedClaim(workspace brevWorkspace, claim LeaseClaim) error {
-	stopped := workspaceToServer(b.configForRun(), workspace, claim.LeaseID, claim.Slug, false)
+func (b *nvidiaBrevBackend) stopWorkspaceAndPersistClaim(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim) error {
+	return b.persistStoppedClaim(workspace, claim, func() error {
+		return b.releaseWorkspace(ctx, client, workspace)
+	})
+}
+
+func (b *nvidiaBrevBackend) persistStoppedClaim(workspace brevWorkspace, claim LeaseClaim, action func() error) error {
+	stopped := workspaceToClaimedServer(b.configForRun(), workspace, claim.LeaseID, claim.Slug, claim)
 	stopped.Status = "stopped"
 	stopped.Labels["state"] = "stopped"
-	if err := claimLeaseTargetForRepoConfig(claim.LeaseID, claim.Slug, b.configForRun(), stopped, SSHTarget{}, claim.RepoRoot, false); err != nil {
+	if _, err := updateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, stopped, SSHTarget{}, action); err != nil {
 		return fmt.Errorf("persist stopped nvidia-brev lease claim: %w", err)
 	}
 	return nil
@@ -505,7 +557,7 @@ func (b *nvidiaBrevBackend) listServers(ctx context.Context, client *brevClient,
 			continue
 		}
 		leaseID, slug := brevLeaseIdentity(workspace, claim)
-		servers = append(servers, workspaceToServer(b.configForRun(), workspace, leaseID, slug, false))
+		servers = append(servers, workspaceToClaimedServer(b.configForRun(), workspace, leaseID, slug, claim))
 	}
 	return servers, nil
 }
@@ -578,6 +630,60 @@ func workspaceToServer(cfg Config, workspace brevWorkspace, leaseID, slug string
 		Labels:   labels,
 	}
 	server.ServerType.Name = firstNonEmpty(workspace.InstanceType, workspace.WorkspaceClass, cfg.NvidiaBrev.Type, cfg.NvidiaBrev.GPUName)
+	server.Labels["server_type"] = server.ServerType.Name
+	return server
+}
+
+func workspaceToClaimedServer(cfg Config, workspace brevWorkspace, leaseID, slug string, claim LeaseClaim) Server {
+	server := workspaceToServer(cfg, workspace, leaseID, slug, false)
+	if workspace.InstanceType == "" && workspace.WorkspaceClass == "" {
+		if storedType := strings.TrimSpace(claim.Labels["server_type"]); storedType != "" {
+			server.ServerType.Name = storedType
+			server.Labels["server_type"] = storedType
+		}
+	}
+	return serverWithClaimLabels(server, claim)
+}
+
+func serverWithClaimLabels(server Server, claim LeaseClaim) Server {
+	if len(claim.Labels) == 0 {
+		return server
+	}
+	labels := make(map[string]string, len(claim.Labels)+len(server.Labels))
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	for key, value := range server.Labels {
+		if _, exists := labels[key]; !exists {
+			labels[key] = value
+		}
+	}
+	for _, key := range []string{
+		"state",
+		"brev_workspace_id",
+		"brev_workspace_name",
+		"brev_status",
+		"brev_target",
+	} {
+		delete(labels, key)
+		if value := server.Labels[key]; value != "" {
+			labels[key] = value
+		}
+	}
+	for _, key := range []string{
+		"server_type",
+		"brev_build_status",
+		"brev_shell_status",
+		"brev_health_status",
+		"gpu",
+		"instance_kind",
+	} {
+		if value := server.Labels[key]; value != "" {
+			labels[key] = value
+		}
+	}
+	server.Labels = labels
+	server.Status = labels["state"]
 	return server
 }
 

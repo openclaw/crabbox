@@ -137,6 +137,8 @@ esac
       ...process.env,
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       CRABBOX_NVIDIA_BREV_LIVE: "1",
+      CRABBOX_NVIDIA_BREV_CLEANUP_ATTEMPTS: "2",
+      CRABBOX_NVIDIA_BREV_CLEANUP_POLL_SECONDS: "0",
     },
     encoding: "utf8",
   });
@@ -145,13 +147,14 @@ esac
   assert.match(result.stdout, /classification=live_nvidia_brev_smoke_passed/);
 
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
-  assert.equal(seen[0], "doctor --provider nvidia-brev");
-  assert.equal(seen[1], "list --provider nvidia-brev --json");
-  assert.match(seen[2], /^warmup --provider nvidia-brev --nvidia-brev-release-action delete --slug nvidia-brev-smoke-\d{14}-\d+ --keep --ttl 20m --idle-timeout 5m$/);
-  assert.match(seen[3], /^status --provider nvidia-brev --nvidia-brev-release-action delete --id nvidia-brev-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
-  assert.match(seen[4], /^run --provider nvidia-brev --nvidia-brev-release-action delete --id nvidia-brev-smoke-\d{14}-\d+ --no-sync -- nvidia-smi$/);
-  assert.equal(seen[5], "list --provider nvidia-brev --json");
-  assert.match(seen[6], /^stop --provider nvidia-brev --nvidia-brev-release-action delete nvidia-brev-smoke-\d{14}-\d+$/);
+  assert.equal(seen[0], "doctor --provider nvidia-brev --nvidia-brev-cli brev");
+  assert.equal(seen[1], "list --provider nvidia-brev --nvidia-brev-cli brev --json");
+  assert.match(seen[2], /^warmup --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --slug nbrev-smoke-\d+-\d+-[0-9a-f]{8} --keep=false --ttl 20m --idle-timeout 5m$/);
+  assert.ok(seen[2].match(/--slug (\S+)/)[1].length <= 48);
+  assert.match(seen[3], /^status --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --no-sync -- nvidia-smi$/);
+  assert.equal(seen[5], "list --provider nvidia-brev --nvidia-brev-cli brev --json");
+  assert.match(seen[6], /^stop --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete nbrev-smoke-\d+-\d+-[0-9a-f]{8}$/);
 });
 
 test("live nvidia brev smoke attempts targeted cleanup after partial failure", () => {
@@ -159,7 +162,6 @@ test("live nvidia brev smoke attempts targeted cleanup after partial failure", (
   const binDir = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const calls = path.join(dir, "calls.log");
-  const stopped = path.join(dir, "stopped.log");
   fs.mkdirSync(binDir, { recursive: true });
 
   writeGoStub(
@@ -177,7 +179,161 @@ if [[ "$1" == "warmup" ]]; then
   exit 37
 fi
 if [[ "$1" == "stop" ]]; then
-  printf '%s\\n' "\${@: -1}" >>"${stopped}"
+  printf 'nvidia-brev workspace not found: %s\\n' "\${@: -1}" >&2
+  exit 4
+fi
+exit 99
+`,
+  );
+  writeExecutable(
+    path.join(binDir, "brev"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "ls" ]]; then
+  printf '{"workspaces":[]}\\n'
+  exit 0
+fi
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_NVIDIA_BREV_LIVE: "1",
+      CRABBOX_NVIDIA_BREV_CLEANUP_ATTEMPTS: "2",
+      CRABBOX_NVIDIA_BREV_CLEANUP_POLL_SECONDS: "0",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=environment_blocked/);
+  assert.match(result.stderr, /created workspace before failing/);
+  assert.match(fs.readFileSync(calls, "utf8"), /warmup .* --keep=false /);
+  assert.match(fs.readFileSync(calls, "utf8"), /stop --provider nvidia-brev .* nbrev-smoke-\d+-\d+-[0-9a-f]{8}/);
+  assert.doesNotMatch(result.stderr, /reason=cleanup_failed/);
+});
+
+test("live nvidia brev smoke deletes an unclaimed workspace by unique prefix", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nbrev-unclaimed-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const slugFile = path.join(dir, "slug.txt");
+  const brevCalls = path.join(dir, "brev-calls.log");
+  const brevListCount = path.join(dir, "brev-list-count.txt");
+  const crabboxCalls = path.join(dir, "crabbox-calls.log");
+  const customBrev = path.join(binDir, "custom-brev");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+${shellArgHelper}
+printf '%s\\n' "$*" >>"${crabboxCalls}"
+if [[ "$1" == "doctor" || "$1" == "list" ]]; then
+  [[ "$1" == "list" ]] && printf '[]\\n' || printf 'auth=ready\\n'
+  exit 0
+fi
+if [[ "$1" == "warmup" ]]; then
+  arg_after --slug "$@" >"${slugFile}"
+  printf 'rollback cleanup failed\\n' >&2
+  exit 37
+fi
+if [[ "$1" == "stop" ]]; then
+  printf 'refusing to release nvidia-brev workspace ws-orphan without a local Crabbox claim\\n' >&2
+  exit 2
+fi
+exit 99
+`,
+  );
+  writeExecutable(
+    customBrev,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${brevCalls}"
+if [[ "$1" == "ls" ]]; then
+  count="$(cat "${brevListCount}" 2>/dev/null || printf '0')"
+  count=$((count + 1))
+  printf '%s' "$count" >"${brevListCount}"
+  if [[ "$count" -eq 1 ]]; then
+    printf '{"workspaces":[]}\\n'
+    exit 0
+  fi
+  slug="$(cat "${slugFile}")"
+  printf '{"workspaces":[{"name":"crabbox-%s-abcdef123456"}]}\\n' "$slug"
+  exit 0
+fi
+if [[ "$1" == "delete" ]]; then
+  exit 0
+fi
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_NVIDIA_BREV_LIVE: "1",
+      CRABBOX_NVIDIA_BREV_CLI: customBrev,
+      CRABBOX_NVIDIA_BREV_CLEANUP_ATTEMPTS: "2",
+      CRABBOX_NVIDIA_BREV_CLEANUP_POLL_SECONDS: "0",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stderr, /reason=cleanup_failed/);
+  const calls = fs.readFileSync(brevCalls, "utf8");
+  assert.equal(calls.match(/^ls --json --all$/gm)?.length, 2);
+  assert.match(calls, /^delete crabbox-nbrev-smoke-\d+-\d+-[0-9a-f]{8}-abcdef123456$/m);
+  assert.ok(fs.readFileSync(crabboxCalls, "utf8").includes(`--nvidia-brev-cli ${customBrev}`));
+});
+
+test("live nvidia brev smoke refuses ambiguous fallback cleanup", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nbrev-ambiguous-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const slugFile = path.join(dir, "slug.txt");
+  const brevCalls = path.join(dir, "brev-calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+${shellArgHelper}
+if [[ "$1" == "doctor" || "$1" == "list" ]]; then
+  [[ "$1" == "list" ]] && printf '[]\\n' || printf 'auth=ready\\n'
+  exit 0
+fi
+if [[ "$1" == "warmup" ]]; then
+  arg_after --slug "$@" >"${slugFile}"
+  exit 37
+fi
+if [[ "$1" == "stop" ]]; then
+  printf 'refusing to release nvidia-brev workspace ws-orphan without a local Crabbox claim\\n' >&2
+  exit 2
+fi
+exit 99
+`,
+  );
+  writeExecutable(
+    path.join(binDir, "brev"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${brevCalls}"
+if [[ "$1" == "ls" ]]; then
+  slug="$(cat "${slugFile}")"
+  printf '{"workspaces":[{"name":"crabbox-%s-first"},{"name":"crabbox-%s-second"}]}\\n' "$slug" "$slug"
+  exit 0
+fi
+if [[ "$1" == "delete" ]]; then
   exit 0
 fi
 exit 99
@@ -195,9 +351,50 @@ exit 99
   });
 
   assert.equal(result.status, 37, result.stdout + result.stderr);
-  assert.match(result.stderr, /classification=environment_blocked/);
-  assert.match(result.stderr, /created workspace before failing/);
-  assert.match(fs.readFileSync(stopped, "utf8"), /^nvidia-brev-smoke-\d{14}-\d+\n$/);
+  assert.match(result.stderr, /reason=cleanup_inventory_invalid/);
+  assert.match(result.stderr, /multiple workspaces match cleanup prefix/);
+  assert.doesNotMatch(fs.readFileSync(brevCalls, "utf8"), /^delete /m);
+});
+
+test("live nvidia brev smoke reports unrelated cleanup failures", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nbrev-cleanup-fail-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "doctor" || "$1" == "list" ]]; then
+  [[ "$1" == "list" ]] && printf '[]\\n' || printf 'auth=ready\\n'
+  exit 0
+fi
+if [[ "$1" == "warmup" ]]; then
+  printf 'created workspace before failing\\n' >&2
+  exit 37
+fi
+if [[ "$1" == "stop" ]]; then
+  printf 'exec: brev: executable file not found\\n' >&2
+  exit 4
+fi
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_NVIDIA_BREV_LIVE: "1",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.match(result.stderr, /reason=cleanup_failed/);
+  assert.match(result.stderr, /executable file not found/);
 });
 
 test("live nvidia brev smoke classifies capacity failures", () => {

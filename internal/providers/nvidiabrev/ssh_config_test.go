@@ -68,6 +68,34 @@ Host gpu-box-host
 	}
 }
 
+func TestNvidiaBrevSSHConfigPrefersConfiguredUser(t *testing.T) {
+	target, err := selectBrevSSHTarget(Config{NvidiaBrev: NvidiaBrevConfig{User: "alice"}}, `Host gpu-box
+  HostName 10.0.0.5
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+`, "gpu-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.User != "alice" {
+		t.Fatalf("user=%q want alice", target.User)
+	}
+}
+
+func TestNvidiaBrevSSHConfigPrefersGeneratedUserOverGenericDefault(t *testing.T) {
+	target, err := selectBrevSSHTarget(Config{SSHUser: "crabbox"}, `Host gpu-box
+  HostName 10.0.0.5
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+`, "gpu-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.User != "brev" {
+		t.Fatalf("user=%q want brev", target.User)
+	}
+}
+
 func TestNvidiaBrevSSHConfigReportsMissingFields(t *testing.T) {
 	tests := []struct {
 		name string

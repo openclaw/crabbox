@@ -28,7 +28,7 @@ func RegisterNvidiaBrevProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		Provider:      fs.String("nvidia-brev-provider", defaults.NvidiaBrev.Provider, "NVIDIA Brev cloud provider selector"),
 		Mode:          fs.String("nvidia-brev-mode", defaults.NvidiaBrev.Mode, "NVIDIA Brev mode: vm"),
 		Launchable:    fs.String("nvidia-brev-launchable", defaults.NvidiaBrev.Launchable, "NVIDIA Brev launchable selector"),
-		StartupScript: fs.String("nvidia-brev-startup-script", defaults.NvidiaBrev.StartupScript, "NVIDIA Brev startup script path or name"),
+		StartupScript: fs.String("nvidia-brev-startup-script", defaults.NvidiaBrev.StartupScript, "NVIDIA Brev startup script inline command or @file path"),
 		ReleaseAction: fs.String("nvidia-brev-release-action", defaults.NvidiaBrev.ReleaseAction, "NVIDIA Brev release action: delete or stop"),
 		Target:        fs.String("nvidia-brev-target", defaults.NvidiaBrev.Target, "NVIDIA Brev SSH target: container or host"),
 		User:          fs.String("nvidia-brev-user", defaults.NvidiaBrev.User, "SSH user for NVIDIA Brev workspaces"),

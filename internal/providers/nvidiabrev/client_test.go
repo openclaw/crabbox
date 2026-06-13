@@ -44,7 +44,7 @@ func TestNvidiaBrevParseWorkspaceJSONShapes(t *testing.T) {
 func TestNvidiaBrevClientConstructsNonSecretCommands(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
-		{args: "create crabbox-demo-123456789abc --detached --type gpu-l40s --gpu-name L40S --provider aws --mode vm --launchable env-example --startup-script setup.sh"},
+		{args: "create crabbox-demo-123456789abc --detached --type gpu-l40s --gpu-name L40S --provider aws --mode vm --launchable env-example --startup-script @setup.sh"},
 		{args: "refresh"},
 		{args: "stop ws-123"},
 		{args: "delete ws-123"},
@@ -56,7 +56,7 @@ func TestNvidiaBrevClientConstructsNonSecretCommands(t *testing.T) {
 		Provider:      "aws",
 		Mode:          "vm",
 		Launchable:    "env-example",
-		StartupScript: "setup.sh",
+		StartupScript: "@setup.sh",
 	}}
 	client, err := newBrevClient(cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
@@ -78,6 +78,19 @@ func TestNvidiaBrevClientConstructsNonSecretCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoNvidiaBrevSecretArgs(t, runner.calls)
+}
+
+func TestNvidiaBrevClientPreservesInlineStartupScript(t *testing.T) {
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "create crabbox-inline-123456789abc --detached --gpu-name A100 --mode vm --startup-script pip install torch"},
+	}}
+	client, err := newBrevClient(Config{NvidiaBrev: NvidiaBrevConfig{StartupScript: "pip install torch"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.create(context.Background(), "crabbox-inline-123456789abc"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestNvidiaBrevClientScopesReadOnlyListByOrg(t *testing.T) {
