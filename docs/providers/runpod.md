@@ -10,7 +10,7 @@ Read when:
 CPU flavors, templates, and machines. Crabbox treats a pod as a standard
 SSH-lease box: it provisions one through the RunPod REST API, waits for public
 SSH, and from then on uses the usual sync/run/ssh/status/stop paths. RunPod is
-**direct-only** — it never goes through the Worker broker.
+**direct-only** — it never goes through the coordinator.
 
 ## How leasing works
 

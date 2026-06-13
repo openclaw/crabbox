@@ -927,7 +927,7 @@ the connectivity contract.
 ### Mediated egress
 
 Mediated egress is a browser/app QA feature where a lease exits to the internet
-through an operator machine over the Cloudflare Worker mediator. It is opt-in
+through an operator machine over the coordinator mediator. It is opt-in
 and profile-based.
 
 ```yaml

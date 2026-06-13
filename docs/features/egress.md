@@ -29,10 +29,9 @@ proxy setting. It keeps browser QA reproducible without re-routing every process
 on the box. Whole-machine routing is a separate concern; use a Tailscale exit
 node for that.
 
-The egress is mediated by the broker (the Cloudflare Worker / Fleet Durable
-Object), but the Worker is **not** the egress point. It only pairs two
-WebSocket bridges by lease and session; the operator machine opens the actual
-internet connections.
+The egress is mediated by the coordinator, but the coordinator is **not** the
+egress point. It only pairs two WebSocket bridges by lease and session; the
+operator machine opens the actual internet connections.
 
 ## Non-goals
 
@@ -41,19 +40,19 @@ Mediated egress is not:
 - a public open proxy (it refuses to start without an allowlist);
 - a replacement for provider firewalls or SSH access controls;
 - a transparent VM-wide VPN;
-- a way for the Worker to become the internet egress point;
+- a way for the coordinator to become the internet egress point;
 - a place to store browser login state, app credentials, or provider secrets.
 
 ## Architecture
 
-Mediated egress has two long-running agents joined by one Worker session:
+Mediated egress has two long-running agents joined by one coordinator session:
 
 ```text
-                    Cloudflare Worker / Fleet Durable Object
-                   +----------------------------------------+
-                   | ticket auth, socket pairing, status,   |
-                   | allowlist metadata, cleanup            |
-                   +-------------------+--------------------+
+                    coordinator WebSocket bridge
+                   +--------------------------------------+
+                   | ticket auth, socket pairing, status, |
+                   | allowlist metadata, cleanup          |
+                   +------------------+-------------------+
                                        |
                     paired WebSocket streams over HTTPS
                                        |
@@ -81,9 +80,11 @@ Mediated egress has two long-running agents joined by one Worker session:
 - **Host egress agent** runs on the operator machine. It enforces the allowlist
   and opens the real outbound TCP connections, so remote services see the
   operator's public IP.
-- **Worker session** consumes one-use tickets, pairs the host and client
-  sockets by `leaseID`/`sessionID`, and reports status. Bridge sockets survive
-  Durable Object hibernation; a newer session of the same role replaces an
+- **Coordinator session** consumes one-use tickets, pairs the host and client
+  sockets by `leaseID`/`sessionID`, and reports status. Cloudflare bridge
+  sockets survive Durable Object hibernation. Node sockets are process-local;
+  after a coordinator restart, rerun `crabbox egress start` to mint tickets and
+  restart the lease-side client. A newer session of the same role replaces an
   older one.
 
 The bridge multiplexes many TCP connections over a single WebSocket per side
@@ -157,7 +158,7 @@ Common flags (most accept the lease `--id` or slug, or a positional id):
 proxy.
 
 `egress stop` stops the local host daemon (if any) and kills the remote client
-over SSH. Releasing or expiring the lease also tears down the Worker-side egress
+over SSH. Releasing or expiring the lease also tears down the coordinator-side egress
 session.
 
 ### Access-protected coordinators
@@ -189,7 +190,7 @@ domain and any subdomain (`*.discord.com` matches `discord.com` and
 agent dials only destinations that match; everything else is rejected with an
 `error` frame.
 
-## Worker API
+## Coordinator API
 
 The coordinator exposes ticketed egress routes alongside the WebVNC and code
 bridges:
@@ -212,7 +213,7 @@ Ticket creation requires manage access on an active lease. The request body:
 }
 ```
 
-The Worker returns a one-use ticket (`{ ticket, leaseID, role, sessionID,
+The coordinator returns a one-use ticket (`{ ticket, leaseID, role, sessionID,
 expiresAt }`, TTL 120s) and activates the egress session. Agent WebSocket
 upgrades on `/egress/host` and `/egress/client` are accepted only after a valid
 ticket of the matching role is consumed; a Cloudflare Access service token may
@@ -283,10 +284,11 @@ the local agents run.
   browser/app QA. See [Tailscale](tailscale.md).
 - **Cloudflare Tunnel TCP** can expose private TCP without a public listener,
   but still needs host and lease processes plus lifecycle management. Keeping
-  egress inside the existing Worker/Durable Object bridge reuses one auth,
+  egress inside the existing coordinator bridge reuses one auth,
   status, and cleanup model.
-- **Worker as egress** is explicitly not the goal: the point is to use the
-  operator machine's internet path, not Cloudflare's. The Worker only mediates.
+- **Coordinator as egress** is explicitly not the goal: the point is to use the
+  operator machine's internet path, not the coordinator host. The coordinator
+  only mediates.
 
 ## Verification
 
@@ -316,8 +318,8 @@ Expected evidence:
 - coordinator ticket/status client: `internal/cli/coordinator.go`
 - desktop/browser launch integration: `internal/cli/desktop.go`
 - command tree: `internal/cli/cli_kong.go`
-- Worker WebSocket routing: `worker/src/index.ts`
-- Fleet Durable Object bridge state and routes: `worker/src/fleet.ts`
+- shared WebSocket routing: `worker/src/coordinator-entry.ts`
+- coordinator bridge state and routes: `worker/src/fleet.ts`
 - portal lease detail status: `worker/src/portal.ts`
 
 Related docs:

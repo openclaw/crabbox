@@ -14,32 +14,33 @@ up.
 A `crabbox run` leases a brokered cloud machine, reuses a static SSH host, or
 delegates to a sandbox provider; syncs your tracked, non-ignored local files;
 executes the command remotely; streams stdout and stderr back; and then
-releases or unclaims the target. A small Cloudflare-hosted broker owns cloud
-provider credentials, lease state, cleanup, usage accounting, and cost
-guardrails so individual machines and CLIs never hold those.
+releases or unclaims the target. An optional coordinator owns cloud provider
+credentials, lease state, cleanup, usage accounting, and cost guardrails so
+individual machines and CLIs never hold those. The coordinator runs either on
+Cloudflare Workers with a Durable Object or on Node.js with PostgreSQL.
 
 ## How it fits together
 
 ```text
-your laptop                Cloudflare Worker            cloud provider
--------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS / Azure / GCP
-   |                         lease + cost state              |
-   |                                                         |
-   +------------ SSH + rsync to leased runner <--------------+
+your laptop                 coordinator runtime              cloud provider
+-------------               -------------------              --------------
+crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP
+   |                      or Node.js + PostgreSQL              |
+   |                                                           |
+   +------------- SSH + rsync to leased runner <---------------+
 ```
 
-The CLI is a Go binary (`cmd/crabbox`, `internal/cli`). The broker is a
-Cloudflare Worker plus a single Durable Object (`worker/src`). Lease lifecycle
-calls go through the broker over HTTPS, but the data plane — SSH, rsync, and
-command execution — goes **directly from the CLI to the runner host**. Runners
-hold no broker credentials; they are leaf nodes.
+The CLI is a Go binary (`cmd/crabbox`, `internal/cli`). Shared coordinator
+behavior lives in `worker/src`; Cloudflare and Node/PostgreSQL provide runtime
+adapters. Lease lifecycle calls go through the coordinator over HTTPS, but the
+data plane — SSH, rsync, and command execution — goes **directly from the CLI to
+the runner host**. Runners hold no coordinator credentials; they are leaf nodes.
 
 Crabbox selects one of three execution modes per provider:
 
 - **Brokered** — for `aws`, `azure`, `gcp`, and `hetzner` when a broker URL is
-  configured (`CRABBOX_COORDINATOR`). The Worker provisions and tracks leases;
-  the CLI still drives sync and command execution over SSH.
+  configured (`CRABBOX_COORDINATOR`). The coordinator provisions and tracks
+  leases; the CLI still drives sync and command execution over SSH.
 - **Direct SSH** — the same SSH-lease providers without a broker, plus static
   hosts (`provider: ssh`) and self-hosted/local providers. The CLI talks to the
   cloud or host API itself.
@@ -56,9 +57,9 @@ from Actions hydration or repo-owned setup.
 1. The CLI loads config from flags, env, repo, user, and defaults.
 2. The CLI mints a per-lease SSH key and slug, then `POST /v1/leases` on the
    broker (brokered mode) or provisions directly (direct mode).
-3. The Worker checks active-lease and monthly spend caps, reserves worst-case
-   TTL cost, provisions a server with region/market fallback, and returns host /
-   port / user / workdir / expiry / slug.
+3. The coordinator checks active-lease and monthly spend caps, reserves
+   worst-case TTL cost, provisions a server with region/market fallback, and
+   returns host / port / user / workdir / expiry / slug.
 4. The CLI waits for the `crabbox-ready` marker, seeds remote Git when possible,
    rsyncs the Git file-list manifest, runs sync guardrails, and hydrates the
    configured base ref.
@@ -113,6 +114,8 @@ Pick whichever matches your intent:
   [Architecture](architecture.md), [Orchestrator](orchestrator.md),
   [Broker auth and routing](features/broker-auth-routing.md),
   [Coordinator](features/coordinator.md).
+- **Deploy the coordinator:** [Infrastructure](infrastructure.md),
+  [Operations](operations.md), [Security](security.md).
 - **Use the CLI:** [CLI overview](cli.md),
   [Command reference](commands/README.md),
   [Feature reference](features/README.md),

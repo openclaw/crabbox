@@ -18,29 +18,31 @@ loop, cloud-grade compute, agent-ready observability.
 crabbox run -- pnpm test
 ```
 
-Behind that one command: a Go CLI on your laptop, a Cloudflare Worker broker
-that owns provider credentials and lease state, and a managed or delegated
-runner.
+Behind that one command: a Go CLI on your laptop, an optional coordinator that
+owns provider credentials and lease state, and a managed or delegated runner.
+Run the coordinator on Cloudflare Workers with a Durable Object, or as a
+Node.js service backed by PostgreSQL.
 
 ## How it works
 
 ```text
-your laptop                Cloudflare Worker            cloud provider
--------------              ------------------           --------------
-crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS / Azure / GCP
-   |                         lease + cost state              |
-   |                                                         |
-   +------------ SSH + rsync to leased runner <--------------+
+your laptop                 coordinator runtime              cloud provider
+-------------               -------------------              --------------
+crabbox CLI    -- HTTPS --> Cloudflare + Durable Object  --> Hetzner / AWS / Azure / GCP
+   |                      or Node.js + PostgreSQL              |
+   |                                                           |
+   +------------- SSH + rsync to leased runner <---------------+
 ```
 
 - **CLI** — Go binary. Loads config, mints a per-lease SSH key, asks the broker
   for a lease, waits for SSH, seeds remote Git, rsyncs the dirty checkout (with
   a fingerprint skip when nothing changed), runs the command, streams output,
   releases.
-- **Broker** — Cloudflare Worker plus a single Fleet Durable Object. Owns
+- **Coordinator** — the same fleet control plane on either Cloudflare Workers
+  plus a Fleet Durable Object, or Node.js plus PostgreSQL and pg-boss. Owns
   provider credentials, serializes lease state, enforces active-lease and
-  monthly spend caps, and expires stale leases by alarm. Auth is GitHub browser
-  login or a shared bearer token.
+  monthly spend caps, and expires stale leases. Auth is GitHub browser login, a
+  shared bearer token, or an explicitly trusted identity proxy.
 - **Runner** — a throwaway machine reachable over SSH on the primary port
   (default `2222`) plus configured fallback ports, prepared with Crabbox's
   sync/run prerequisites. Linux uses Ubuntu with cloud-init and `/work/crabbox`;
@@ -50,14 +52,29 @@ crabbox CLI    -- HTTPS --> Fleet Durable Object  -->   Hetzner / AWS / Azure / 
   mise/asdf, or setup scripts — not from Crabbox.
 
 The data plane — SSH, rsync, command execution — always runs directly from the
-CLI to the runner. The broker only manages leases, cost, and observability.
+CLI to the runner. The coordinator only manages leases, cost, and observability.
 
-Only `aws`, `azure`, `gcp`, and `hetzner` can be brokered through the Worker,
-and even those run direct from the CLI when no broker URL is configured. Every
-other provider always runs direct. A direct-provider mode
+Only `aws`, `azure`, `gcp`, and `hetzner` can transfer provider lifecycle to the
+coordinator, and even those run direct from the CLI when no coordinator URL is
+configured. Every other provider runs direct or delegated. A direct-provider mode
 (`--provider hetzner|aws|azure|gcp|digitalocean|linode|proxmox` with local
-credentials) exists for debugging the broker itself or using private
+credentials) exists for debugging the coordinator itself or using private
 infrastructure.
+
+### Coordinator deployment choices
+
+| Path | State and scheduling | Best fit |
+| --- | --- | --- |
+| **Cloudflare Workers** | Fleet Durable Object, alarms, scheduled Worker trigger | Managed edge deployment with minimal server operations and optional Cloudflare Access. |
+| **Node.js + PostgreSQL** | PostgreSQL key/value state, pg-boss alarms and reconciliation | Initial runtime for containers, a VM, or Kubernetes with one replica; requires Node.js, PostgreSQL 13+, TLS, and WebSockets. |
+| **No coordinator** | Local claims and provider-owned state | Personal/direct providers where shared credentials, history, budgets, and central cleanup are unnecessary. |
+
+Both coordinator runtimes expose the same API, GitHub login, portal, provider
+adapters, cost controls, cleanup behavior, and live bridges. State is not
+automatically migrated between Durable Object storage and PostgreSQL.
+Cloudflare is the established deployment; validate the newly shipped Node
+runtime against the production proof checklist before cutover. See
+[Infrastructure](docs/infrastructure.md) for deployment and ingress details.
 
 For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For
 the doc-to-code map, see [Source Map](docs/source-map.md).
@@ -116,8 +133,9 @@ human-readable name.
 
 ## Providers
 
-`Brokered` providers can run through the Worker (or direct when no broker is
-configured); every other provider always runs direct from the CLI.
+`Brokered` providers can run through either coordinator runtime (or direct when
+no coordinator is configured); every other provider runs direct or delegated
+from the CLI.
 
 ### SSH-lease providers (provision or connect a box, full lifecycle)
 
@@ -436,10 +454,12 @@ go build -trimpath -o bin/crabbox ./cmd/crabbox
 go vet ./...
 go test -race ./...
 
-# Cloudflare Worker (Node 22+ locally; CI runs Node 24)
+# Coordinator runtimes (Node 22+ locally; CI runs Node 24)
 npm ci --prefix worker
 npm test --prefix worker
 npm run build --prefix worker
+npm run check:node --prefix worker
+npm run build:node --prefix worker
 
 # Repository scripts
 node --test scripts/*.test.js
@@ -457,7 +477,7 @@ lint/typecheck/tests/build) on every push and PR. Tagged pushes matching `v*`
 publish Go archives via GoReleaser and bump the Homebrew formula at
 [openclaw/homebrew-tap](https://github.com/openclaw/homebrew-tap).
 
-Worker deployment, required secrets, and DNS routing live in
+Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live in
 [docs/infrastructure.md](docs/infrastructure.md).
 
 ## Docs

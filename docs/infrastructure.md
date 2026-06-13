@@ -6,7 +6,7 @@ Cloudflare or Node.js/PostgreSQL coordinator, its secrets, the brokered provider
 
 Crabbox runs in three modes (see [How It Works](how-it-works.md)). A *broker* is
 only required for **brokered mode**, where lease lifecycle, cost limits, cleanup,
-sharing, and `crabbox usage` are owned by the Worker. Direct and delegated
+sharing, and `crabbox usage` are owned by the coordinator. Direct and delegated
 providers run straight from the CLI and need none of this. The four brokerable
 providers are `hetzner`, `aws`, `azure`, and `gcp`; even those run direct unless a
 coordinator URL is configured.
@@ -15,23 +15,55 @@ Use neutral placeholders below — `broker.example.com`, `example-org`,
 `alice@example.com`. Replace them with your own values. Keep every secret out of
 the repository.
 
+## Choose A Coordinator Runtime
+
+Both runtimes execute the same `FleetCoordinator`, provider adapters, API,
+GitHub login, portal, cost controls, cleanup rules, and WebSocket protocols.
+
+| Runtime | Durable state | Scheduling | Typical deployment |
+| --- | --- | --- | --- |
+| **Cloudflare Workers** | One Fleet Durable Object | DO alarms plus a scheduled Worker trigger | Wrangler, workers.dev or a custom route, optional Cloudflare Access |
+| **Node.js/PostgreSQL** | PostgreSQL `crabbox` schema | pg-boss `crabbox_jobs` jobs plus reconciliation | Initial single-replica runtime for a container, VM service, or Kubernetes pod behind TLS/WebSocket ingress |
+
+Choose Cloudflare for the smallest operational footprint and native edge
+routing. Choose Node/PostgreSQL when the coordinator must run on conventional
+infrastructure, use a managed PostgreSQL service, or fit an existing container
+platform. Cloudflare is the established deployment; Node/PostgreSQL is newly
+shipped and should complete the environment-specific proof checklist in
+[Portable Coordinator Runtime](plan/portable-coordinator.md) before production
+cutover.
+
+Run one Node replica initially. Lifecycle serialization and live bridge sockets
+are process-local even though state and jobs are durable. Also treat a runtime
+change as a new deployment: Crabbox does not currently export, import, or
+automatically migrate state between Durable Object storage and PostgreSQL.
+
 ## Coordinator Endpoints
 
-A typical deployment exposes the same Worker on a few routes:
+A deployment needs one canonical public origin:
 
 ```text
 https://broker.example.com                          # canonical login + automation route
+```
+
+A Cloudflare deployment can expose the same Worker on additional routes:
+
+```text
 https://broker-access.example.com                   # same Worker behind Cloudflare Access
 https://crabbox-coordinator.example.workers.dev     # workers.dev fallback for health checks
 ```
 
 - `broker.example.com/*` is the stable route for browser login and automation.
-  It is public at the edge; the Worker still enforces Crabbox auth on every
+  The coordinator still enforces Crabbox auth on every
   non-health route.
 - `broker-access.example.com/*` is the same Worker behind a Cloudflare Access
   application, for service-token automation behind an outer Cloudflare gate.
-- The workers.dev URL is useful for `/v1/health` checks if custom DNS is
+- The workers.dev URL is useful for Cloudflare `/v1/health` checks if custom DNS is
   disrupted.
+
+Node deployments should put TLS termination and WebSocket-capable ingress in
+front of port `8080` (or `PORT`). Health checks use `/v1/health`; readiness
+checks use `/v1/ready`.
 
 See [Broker Auth And Routing](features/broker-auth-routing.md) for the full route
 and auth model.
@@ -51,7 +83,7 @@ The Worker entry, routing, and Durable Object responsibilities are documented in
 (`*/15 * * * *`) wakes the Durable Object every 15 minutes so scheduled cleanup
 runs even when no leases are active.
 
-## Node.js And PostgreSQL
+## Node JS And PostgreSQL
 
 The portable runtime runs the same `FleetCoordinator` behavior as an ordinary
 Node.js service. PostgreSQL stores the existing coordinator key/value records;
@@ -61,7 +93,7 @@ WebSocket bridges use the same tickets and protocol as Cloudflare.
 Requirements:
 
 - Node.js 22.12 or newer;
-- PostgreSQL;
+- PostgreSQL 13 or newer;
 - one always-on service replica initially;
 - an ingress that supports WebSocket upgrades;
 - the same auth, provider, budget, and optional artifact environment variables
@@ -74,7 +106,7 @@ npm ci --prefix worker
 npm run check:node --prefix worker
 npm run build:node --prefix worker
 
-DATABASE_URL=postgresql://crabbox:password@db.example.com/crabbox \
+DATABASE_URL='postgresql://crabbox:password@db.example.com/crabbox?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.pem' \
 CRABBOX_SHARED_TOKEN=replace-me \
 CRABBOX_SHARED_OWNER=alice@example.com \
 CRABBOX_DEFAULT_ORG=example-org \
@@ -99,12 +131,39 @@ Build the container with `worker/` as the build context:
 
 ```sh
 docker build -f worker/Dockerfile.node -t crabbox-coordinator:local worker
+docker run --rm -p 8080:8080 \
+  --env-file /secure/path/crabbox.env \
+  --mount type=bind,src=/secure/path/postgres-ca.pem,dst=/run/secrets/postgres-ca.pem,readonly \
+  crabbox-coordinator:local
 ```
 
 Long-lived WebSocket clients send periodic pings and must reconnect after
 service restarts or ingress drains. Run one replica until bridge ownership is
 externalized; PostgreSQL and pg-boss are ready for multiple service processes,
 but live bridge sockets remain process-local.
+
+Deployment shapes:
+
+- **Container platform** - run the OCI image as one always-on service and attach
+  managed PostgreSQL.
+- **VM or bare process** - run `npm run start:node --prefix worker` under a
+  service manager after `npm run build:node --prefix worker`.
+- **Kubernetes** - use one replica, `Recreate` deployment strategy, readiness on
+  `/v1/ready`, liveness on `/v1/health`, WebSocket-capable ingress, and a
+  termination grace period longer than `CRABBOX_SHUTDOWN_TIMEOUT_MS`.
+
+Required service settings:
+
+```text
+DATABASE_URL                         # PostgreSQL connection string
+PORT                                 # optional; default 8080
+CRABBOX_PUBLIC_URL                   # canonical external origin
+CRABBOX_SHUTDOWN_TIMEOUT_MS          # optional; default 120000
+```
+
+Put all auth, provider, budget, Tailscale, and artifact settings from this page
+in the same service secret/config injection used by the platform. Do not bake
+them into the image.
 
 ### Trusted reverse-proxy identity
 
@@ -114,15 +173,17 @@ second Crabbox login by forwarding the verified user in a header:
 ```text
 CRABBOX_TRUSTED_USER_HEADER=X-Authenticated-User
 CRABBOX_TRUSTED_USER_ORG=example-org
-CRABBOX_TRUSTED_PROXY_CIDRS=10.0.0.0/8,fd00::/8
+CRABBOX_TRUSTED_PROXY_CIDRS=10.42.7.19/32,fd00:1234::19/128
 ```
 
 The Node runtime accepts the identity only when the connection peer is within
 `CRABBOX_TRUSTED_PROXY_CIDRS`. Enable this only when the ingress removes
-caller-supplied copies of the configured identity header. The forwarded identity
-receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate. The Cloudflare
-Worker runtime does not expose a trusted socket peer, so use its verified Access
-JWT support instead.
+caller-supplied copies of the configured identity header. Use only the ingress
+proxy's exact addresses or dedicated subnets, and enforce network policy that
+prevents callers from reaching the coordinator directly. The forwarded
+identity receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate. The
+Cloudflare Worker runtime does not expose a trusted socket peer, so use its
+verified Access JWT support instead.
 
 The same peer allowlist controls whether the Node runtime honors forwarded host,
 protocol, and client-IP headers. It walks the forwarded-for chain from the socket
@@ -141,8 +202,9 @@ Homepage URL: https://broker.example.com
 Callback URL: https://broker.example.com/v1/auth/github/callback
 ```
 
-The Worker derives the callback from `CRABBOX_PUBLIC_URL` (falling back to the
-request origin). Store the OAuth app values as Worker secrets:
+The coordinator derives the callback from `CRABBOX_PUBLIC_URL` (falling back to
+the request origin). Inject the OAuth app values through the runtime's secret
+mechanism:
 
 ```text
 CRABBOX_GITHUB_CLIENT_ID
@@ -169,13 +231,13 @@ minted Access JWT in `CRABBOX_ACCESS_TOKEN`.
 
 ### Tailscale (optional)
 
-For brokered Tailscale reachability, the Worker mints one ephemeral, pre-approved
+For brokered Tailscale reachability, the coordinator mints one ephemeral, pre-approved
 auth key per lease and injects it only into cloud-init. Lease records store only
 non-secret Tailscale metadata (hostname, FQDN, 100.x address, state, tags).
 
 Create a Tailscale OAuth client with the `auth_keys` scope, limited to the tags
-Crabbox may assign (typically `tag:crabbox`), and store the credentials as Worker
-secrets:
+Crabbox may assign (typically `tag:crabbox`), and inject the credentials as
+coordinator secrets:
 
 ```text
 CRABBOX_TAILSCALE_ENABLED=1
@@ -213,8 +275,9 @@ independent of the canonical host.
 
 ## Brokered Providers
 
-Provider credentials live as Worker secrets, never in repo config. Configure at
-least one brokered provider before inviting users. Per-provider details are in
+Provider credentials live in coordinator secret injection, never in repo
+config. Configure at least one brokered provider before inviting users.
+Per-provider details are in
 [Hetzner](features/hetzner.md), [AWS](features/aws.md),
 [Azure](features/azure.md), and the [provider docs](providers/README.md).
 
@@ -224,7 +287,7 @@ least one brokered provider before inviting users. Per-provider details are in
 HETZNER_TOKEN                    # project that owns the disposable runners
 ```
 
-Linux-only. The Worker provisions through the Hetzner Cloud API directly; `hcloud`
+Linux-only. The coordinator provisions through the Hetzner Cloud API directly; `hcloud`
 is not required. Default Linux image `ubuntu-24.04`, SSH user `crabbox`, primary
 SSH port `2222` with `22` as the ordered fallback. Cloud-init installs only
 Crabbox plumbing (OpenSSH, curl/CA certificates, Git, rsync, jq, and a retrying
@@ -238,7 +301,7 @@ default, can launch managed Windows and WSL2 targets, and can launch EC2 Mac
 instances on an operator-provided Dedicated Host. The direct CLI provider remains
 available with `--provider aws` when no broker is configured.
 
-Brokered credentials and host pinning (Worker secrets):
+Brokered credentials and host pinning (coordinator secrets):
 
 ```text
 AWS_ACCESS_KEY_ID
@@ -248,7 +311,7 @@ CRABBOX_HOST_ID                  # optional; pins a brokered host such as an EC2
 CRABBOX_AWS_MAC_HOST_ID          # optional legacy AWS alias for CRABBOX_HOST_ID
 ```
 
-AWS-specific Worker settings (all optional unless noted):
+AWS-specific coordinator settings (all optional unless noted):
 
 ```text
 CRABBOX_AWS_REGION                       # default eu-west-1
@@ -337,7 +400,7 @@ when the captured quota already meets the requested value.
 
 ### Azure and GCP
 
-Azure and GCP are also brokerable. Their Worker secrets follow the same pattern —
+Azure and GCP are also brokerable. Their coordinator secrets follow the same pattern —
 SDK credentials plus `CRABBOX_AZURE_*` / `CRABBOX_GCP_*` placement settings
 (location/region, resource group or project, image, network). See
 [Azure](features/azure.md) and the per-provider docs for the full set.
@@ -390,7 +453,7 @@ Azure resolves classes to `Standard_*` VM sizes per target; GCP resolves to
 
 ## Lease Defaults
 
-The Worker `LeaseConfig` applies these defaults (`worker/src/config.ts`):
+The coordinator `LeaseConfig` applies these defaults (`worker/src/config.ts`):
 
 ```text
 provider       hetzner
@@ -426,9 +489,13 @@ expires_at=<unix-seconds>
 Use this when you want broker-owned provider credentials, coordinator cleanup,
 active-lease limits, monthly spend caps, and `crabbox usage`.
 
-The default deployment uses Cloudflare Workers and Durable Objects. For the
-container and PostgreSQL runtime, see
-[Portable Coordinator Runtime](plan/portable-coordinator.md).
+Shared prerequisites:
+
+- a canonical HTTPS origin for the API, portal, OAuth callback, and WebSockets;
+- runtime secret injection for auth and at least one brokered provider;
+- budget limits sized before inviting users;
+- outbound network access to provider, GitHub, Tailscale, and artifact APIs that
+  the enabled features use.
 
 Cloudflare prerequisites:
 
@@ -436,8 +503,15 @@ Cloudflare prerequisites:
 - a Worker route or workers.dev URL for the coordinator;
 - the Durable Object binding from `worker/wrangler.jsonc` (`FLEET` ->
   `FleetDurableObject`);
-- Worker secrets for at least one brokered provider;
-- budget limits sized before inviting users.
+- the scheduled trigger from `worker/wrangler.jsonc`.
+
+Node/PostgreSQL prerequisites:
+
+- Node.js 22.12+ or the image from `worker/Dockerfile.node`;
+- PostgreSQL 13+ reachable through a TLS-verified `DATABASE_URL` for remote
+  databases;
+- one always-on service replica;
+- TLS ingress with WebSocket upgrades and health/readiness probes.
 
 Pick an auth model:
 
@@ -476,7 +550,7 @@ crabbox doctor
 crabbox usage
 ```
 
-## Deployment
+## Cloudflare Deployment
 
 Worker source lives in `worker/`. Run the CI-equivalent gate, then deploy with
 Wrangler (use `npx wrangler` unless `wrangler` is installed globally):
@@ -504,7 +578,10 @@ A full deploy should:
 The `scripts/deploy-worker-smoke.sh` and `scripts/deploy-cloudflare-smoke.sh`
 helpers cover post-deploy verification.
 
-### Worker secrets and settings reference
+The equivalent Node build, container, readiness, shutdown, and ingress contract
+is in [Node.js And PostgreSQL](#node-js-and-postgresql).
+
+### Coordinator secrets and settings reference
 
 ```text
 # Providers (at least one set)
@@ -546,7 +623,7 @@ CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS, CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS
 ```
 
 Artifact credentials on the coordinator are storage-only S3/R2-compatible keys.
-They let the Worker sign one upload URL per artifact and return the final asset
+They let the coordinator sign one upload URL per artifact and return the final asset
 URL; they are not Cloudflare deploy tokens, Crabbox bearer/admin tokens, or VM
 provider credentials. Normal artifact publishing should go through the
 coordinator; keep direct local S3/R2 credentials as an operator fallback only.

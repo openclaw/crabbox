@@ -19,10 +19,11 @@ Crabbox has three implementation surfaces:
   delegated-run backend. `internal/providers/all/all.go` imports every adapter
   for its registration side effects; `internal/providers/shared` holds common
   helpers.
-- **Worker broker** — TypeScript, under `worker/src`. A Cloudflare Worker plus a
-  single Fleet Durable Object that brokers leases, runs, usage, and live
-  bridges. Only `aws`, `azure`, `gcp`, and `hetzner` can be brokered; everything
-  else runs direct from the CLI.
+- **Coordinator** — TypeScript, under `worker/src` and `worker/node`. Shared
+  `FleetCoordinator` behavior runs either in a Cloudflare Worker plus one
+  Durable Object or in Node.js backed by PostgreSQL and pg-boss. Only `aws`,
+  `azure`, `gcp`, and `hetzner` can transfer provider lifecycle to it;
+  everything else runs direct or delegated from the CLI.
 
 ## CLI Surface
 
@@ -109,7 +110,7 @@ Shared and registration:
 - Shared backend helpers: `internal/providers/shared`
 - Built-in provider registration (imports every adapter): `internal/providers/all/all.go`
 
-Worker-side provider operations (brokered providers only):
+Coordinator-side provider operations (brokered providers only):
 
 - Hetzner: `worker/src/hetzner.ts`
 - AWS EC2 (provision, capacity fallback, Mac hosts, orphan sweep): `worker/src/aws.ts`

@@ -172,7 +172,7 @@ multi-region setups list every region the broker may launch into. Regions are
 tried in order: when every candidate type in a region is rejected for a
 retryable reason, Crabbox advances to the next region.
 
-Brokered Azure uses `CRABBOX_AZURE_REGIONS` on the Worker for its Azure-specific
+Brokered Azure uses `CRABBOX_AZURE_REGIONS` on the coordinator for its Azure-specific
 region list, so AWS and Azure do not accidentally share incompatible region
 names. The CLI-level `capacity.regions` list is still included in Azure lease
 requests for direct or explicitly shared setups.

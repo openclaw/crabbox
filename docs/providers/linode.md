@@ -12,7 +12,7 @@ Crabbox ownership metadata as namespaced Linode tags, waits for SSH/bootstrap
 readiness, and then uses the normal Crabbox SSH sync/run/stop/cleanup path.
 
 Linode is **direct-only** in this release. It does not run through the
-Cloudflare Worker broker, so the local CLI must have a Linode API token and
+coordinator, so the local CLI must have a Linode API token and
 direct cleanup remains the operator's responsibility.
 
 ## When To Use It
@@ -203,7 +203,7 @@ in `crabbox list --provider linode --json` or the Linode console.
 
 ## Gotchas
 
-- `linode` is direct-only. Worker broker secrets and cost accounting do not
+- `linode` is direct-only. Coordinator secrets and cost accounting do not
   cover these instances.
 - `--type` must be a valid Linode type slug such as `g6-standard-1`.
 - Crabbox decodes the highest-priority state when stale tags coexist, but

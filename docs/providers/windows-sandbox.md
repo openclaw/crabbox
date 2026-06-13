@@ -14,7 +14,7 @@ Aliases: `wsb`, `windows-sandbox-provider`
 Targets: native Windows only (`--target windows --windows-mode normal`)
 
 Brokered: no. This provider runs entirely from the local CLI and does not use
-the Cloudflare Worker coordinator.
+the coordinator.
 
 ## Requirements
 

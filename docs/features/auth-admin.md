@@ -28,7 +28,7 @@ allowed GitHub org** (`CRABBOX_GITHUB_ALLOWED_ORGS`, or the singular
 `CRABBOX_GITHUB_ALLOWED_ORG`) and, if any **allowed teams** are configured
 (`CRABBOX_GITHUB_ALLOWED_TEAMS` / `CRABBOX_GITHUB_ALLOWED_TEAM`), a member of one
 of them. On success the broker issues a signed user token (prefix `cbxu_`,
-HMAC-SHA256, default 30-day expiry) and the CLI stores it in the user config.
+HMAC-SHA256, default 180-day expiry) and the CLI stores it in the user config.
 
 ```sh
 crabbox login --url https://broker.example.com

@@ -21,9 +21,11 @@ Read when:
 
 ## Brokered fleet
 
-- [Coordinator](coordinator.md): brokered leases through the Cloudflare Worker and its Durable Object.
+- [Coordinator](coordinator.md): shared broker behavior across Cloudflare
+  Durable Object and Node.js/PostgreSQL runtimes.
 - [Browser portal](portal.md): authenticated lease/run UI, detail pages, bridge routes, and runner visibility.
-- [Broker auth and routing](broker-auth-routing.md): GitHub login, shared bearer tokens, optional Cloudflare Access, and Worker routes.
+- [Broker auth and routing](broker-auth-routing.md): GitHub login, shared bearer
+  tokens, trusted proxy identity, optional Cloudflare Access, and public routes.
 - [Auth and admin](auth-admin.md): login/logout/whoami and trusted operator controls.
 - [Telemetry](telemetry.md): lightweight Linux load, memory, disk, uptime, and per-run resource samples.
 - [History and logs](history-logs.md): coordinator run records, events, and retained remote output.
@@ -58,7 +60,8 @@ Provider deep-dives that live here in `features/`:
 
 - [Tailscale](tailscale.md): optional tailnet reachability for managed Linux leases and static hosts.
 - [Pond](pond.md): group related leases and discover their Tailscale, URL bridge, or SSH-mesh reachability.
-- [Mediated egress](egress.md): browser/app egress through an operator machine using the Cloudflare Worker mediator.
+- [Mediated egress](egress.md): browser/app egress through an operator machine
+  using the coordinator mediator.
 - [Runner bootstrap](runner-bootstrap.md): cloud-init, installed tools, SSH port, and readiness.
 - [Prebaked runner images](prebaked-images.md): provider-owned image storage and the image/cache/state boundary.
 - [Image bake runbook](image-bake-runbook.md): exact AWS bake, candidate smoke, promotion, rollback, and cleanup flow.

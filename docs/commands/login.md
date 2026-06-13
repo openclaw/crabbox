@@ -1,8 +1,8 @@
 # login
 
-`crabbox login` authenticates the CLI against a broker (the Cloudflare Worker
-coordinator), stores the resulting credentials in your user config, and verifies
-them with `GET /v1/whoami`.
+`crabbox login` authenticates the CLI against a coordinator, stores the
+resulting credentials in your user config, and verifies them with
+`GET /v1/whoami`. The coordinator may run on Cloudflare or Node/PostgreSQL.
 
 There is no built-in hosted broker. You must supply a broker URL with `--url`, or
 have one already configured (`crabbox config set-broker`). Without a broker, the
@@ -74,9 +74,9 @@ crabbox config path
 
 ## Self-hosted brokers
 
-Each broker owns its own GitHub OAuth credentials and admission policy. A separate
-organization or private deployment needs its own Cloudflare Worker, Worker secrets,
-and GitHub OAuth app.
+Each broker owns its own GitHub OAuth credentials and admission policy. A
+separate organization or private deployment needs its own coordinator runtime,
+secret injection, and GitHub OAuth app.
 
 Configure that GitHub OAuth app with a callback URL that exactly matches the
 broker's public origin:
@@ -85,7 +85,7 @@ broker's public origin:
 https://<your-broker-host>/v1/auth/github/callback
 ```
 
-Set the same public origin in `CRABBOX_PUBLIC_URL` on the Worker, then deploy
+Set the same public origin in `CRABBOX_PUBLIC_URL` on the coordinator, then deploy
 `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
 `CRABBOX_SESSION_SECRET`, and the relevant `CRABBOX_GITHUB_ALLOWED_ORG(S)` or
 `CRABBOX_GITHUB_ALLOWED_TEAMS` values. A GitHub `Invalid redirect_uri` error means

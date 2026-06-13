@@ -170,7 +170,7 @@ Do not put secrets in the allowlist even when forwarding seems convenient.
 Crabbox forwards whatever it finds locally, so a secret in the allowlist leaks
 on every run of every contributor who has it set. Secrets belong in:
 
-- the broker environment (Cloudflare Worker secrets) for provider credentials;
+- coordinator secret injection for brokered provider credentials;
 - the operator's credential store for short-lived tokens;
 - a per-runner image bake when the secret should be on every lease;
 - post-bootstrap secret injection in repo-owned setup (devcontainer, `bin/setup`).

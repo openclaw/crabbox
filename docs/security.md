@@ -7,11 +7,11 @@ Crabbox spans three trust layers, and each owns a different part of the security
 posture:
 
 ```text
-local CLI -> Cloudflare Worker / Fleet Durable Object -> provider VM
+local CLI -> coordinator (Cloudflare or Node/PostgreSQL) -> provider VM
 ```
 
 The CLI owns local config, per-lease SSH keys, sync, and remote command
-execution. The Worker (the broker) owns authentication, authorization, lease
+execution. The coordinator owns authentication, authorization, lease
 state, provider credentials, cost guardrails, and cleanup. Providers own VM
 creation, network reachability, and deletion. Delegated-run providers such as
 Docker Sandbox also own the command transport and runtime that receive commands
@@ -33,12 +33,15 @@ per-tenant isolation is not the current security boundary.
 
 ## Authentication
 
-Every non-health route on the Worker requires a Bearer token; requests without
-one are rejected `401 unauthorized`. The only unauthenticated routes are
-`GET /v1/health` and the portal login/logout endpoints. Authentication is
-resolved in `worker/src/auth.ts` in this precedence:
+Every non-health route normally requires a Bearer token; requests without one
+are rejected `401 unauthorized`. The Node runtime can instead accept an
+explicitly configured trusted reverse-proxy identity from allowlisted peer
+CIDRs. The generally unauthenticated routes are `GET /v1/health`, the GitHub
+login/OAuth and portal login/logout routes, and bridge agent upgrades that use
+short-lived tickets. Authentication is resolved in `worker/src/auth.ts` in this
+precedence:
 
-1. **Admin token** — the request token equals the Worker secret
+1. **Admin token** — the request token equals the coordinator secret
    `CRABBOX_ADMIN_TOKEN`. Grants admin scope.
 2. **Shared operator token** — the token equals `CRABBOX_SHARED_TOKEN`. Grants a
    non-admin shared identity for automation.
@@ -53,7 +56,7 @@ resolved in `worker/src/auth.ts` in this precedence:
 
 `crabbox login --url <broker-url>` opens a GitHub OAuth flow and stores the
 returned signed user token in local config. Authorization during login is gated
-by Worker config:
+by coordinator config:
 
 - `CRABBOX_GITHUB_ALLOWED_ORG` / `CRABBOX_GITHUB_ALLOWED_ORGS` restrict login to
   members of the listed GitHub org(s).
@@ -84,6 +87,24 @@ The local service-token credentials `CRABBOX_ACCESS_CLIENT_ID` and
 `CRABBOX_ACCESS_CLIENT_SECRET` only satisfy the Access edge; they authorize no
 Crabbox action by themselves. Store them in user config or env, never in repo
 config.
+
+### Trusted reverse proxy identity
+
+The Node runtime can accept an identity header from an ingress:
+
+```text
+CRABBOX_TRUSTED_USER_HEADER=X-Authenticated-User
+CRABBOX_TRUSTED_USER_ORG=example-org
+CRABBOX_TRUSTED_PROXY_CIDRS=10.42.7.19/32,fd00:1234::19/128
+```
+
+The socket peer must match the CIDR allowlist. The ingress must authenticate the
+caller and remove caller-supplied copies of the configured identity header.
+Allow only the ingress proxy's exact addresses or dedicated subnets, and block
+direct coordinator access with network policy. This path grants non-admin scope
+only; keep `CRABBOX_ADMIN_TOKEN` separate. The same proxy allowlist controls
+whether forwarded host, protocol, and client-IP headers affect URL construction
+and provider ingress rules.
 
 ## Authorization
 
@@ -137,9 +158,10 @@ env:
 See [environment forwarding](features/env-forwarding.md) for matching and
 profile behavior.
 
-### Worker secrets and config
+### Coordinator secrets and config
 
-Stored as Worker **secrets** (never in the repo):
+Inject these as Cloudflare Worker secrets or Node service secrets, never in the
+repo:
 
 - `CRABBOX_ADMIN_TOKEN` — admin and image-lifecycle routes.
 - `CRABBOX_SHARED_TOKEN` — trusted operator automation; also the fallback
@@ -157,7 +179,7 @@ Stored as Worker **secrets** (never in the repo):
   Scope these to the artifact bucket/prefix and use them only to sign
   short-lived upload/read URLs.
 
-Worker **config** values (not secret material):
+Coordinator config values (not secret material):
 
 - `CRABBOX_GITHUB_ALLOWED_ORG(S)`, `CRABBOX_GITHUB_ALLOWED_TEAMS` —
   browser-login authorization.
@@ -216,7 +238,7 @@ grouping plus transport metadata, not an isolation boundary.
   operator's tailnet policy — but only when both `TS_API_KEY` and
   `CRABBOX_POND_ACL_BOOTSTRAP=1` are set. `TS_API_KEY` alone enables read-only
   `doctor --pond` verification. The broker never receives the Tailscale API key.
-- Brokered leases keep using the Worker's `CRABBOX_TAILSCALE_TAGS` allowlist and
+- Brokered leases keep using the coordinator's `CRABBOX_TAILSCALE_TAGS` allowlist and
   do not receive generated `tag:cbx-pond-*` tags. Admins who want brokered
   tailnet reachability must configure and review that policy explicitly.
 
@@ -244,8 +266,8 @@ Layered protections:
 - A lease TTL cap and an idle timeout enforced against a heartbeat/touch
   deadline.
 - Explicit release (`crabbox stop` / `release`).
-- A Durable Object alarm that expires leases and reschedules itself for the
-  soonest pending deadline.
+- A Durable Object alarm or pg-boss job that expires leases and reschedules the
+  next pending deadline, plus periodic reconciliation.
 - A coordinator-side AWS orphan sweep over current broker credentials and
   capacity regions.
 - A provider-label sweep for clearly expired, inactive orphan machines.
@@ -253,10 +275,10 @@ Layered protections:
 In direct-CLI mode, cleanup runs from the CLI using provider labels: it skips
 `keep` machines, deletes expired ready/leased/active machines, and only removes
 running/provisioning machines after an extra stale-safety window. When a
-coordinator is configured, provider-side cleanup is disabled — the Durable
-Object alarm owns brokered cleanup.
+coordinator is configured, provider-side cleanup is disabled — the coordinator
+scheduler owns brokered cleanup.
 
-The brokered AWS orphan sweep treats live Durable Object lease state as the
+The brokered AWS orphan sweep treats live coordinator lease state as the
 authority and only acts on provider tags after a matching active lease is absent
 or points at a different cloud instance. It skips `keep=true` resources and
 applies a grace window before acting on missing labels or stale lease mappings.

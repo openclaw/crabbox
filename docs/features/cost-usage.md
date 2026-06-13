@@ -6,7 +6,7 @@ Read this when you are:
 - adjusting how provider prices are looked up;
 - interpreting `crabbox usage` output.
 
-The coordinator (the Cloudflare Worker broker) tracks lease counts, active leases,
+The coordinator tracks lease counts, active leases,
 elapsed runtime, estimated elapsed cost, and reserved worst-case cost. This is an
 operational guardrail, not invoice reconciliation. Provider extras such as static IP
 charges, egress, snapshots, taxes, credits, and discounts are not modeled.

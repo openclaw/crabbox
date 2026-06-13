@@ -22,15 +22,17 @@ Crabbox has three parts:
 
 - **CLI** — a local Go binary (`cmd/crabbox`, `internal/cli`) used by
   developers, CI operators, and agents.
-- **Broker** — a Cloudflare Worker plus a single Durable Object that holds all
-  lease, run, and usage state (`worker/src`).
+- **Coordinator** — shared `FleetCoordinator` behavior with either a Cloudflare
+  Worker/Durable Object runtime or a Node.js/PostgreSQL runtime (`worker/src`,
+  `worker/node`).
 - **Runners** — managed cloud machines, self-hosted VMs, BYO SSH hosts, or
   delegated sandboxes that actually run commands. See the
   [provider reference](features/providers.md).
 
-The broker manages leases. The CLI executes work. Runners do not call back to
-the broker; lease bridges (WebVNC, code-server, egress) are the only paths that
-route runner traffic through the Worker, and only on demand.
+The coordinator manages leases. The CLI executes work. Runners do not call back
+to the coordinator for ordinary command execution; lease bridges (WebVNC,
+code-server, egress) are the only on-demand paths that route runner traffic
+through it.
 
 ```text
 developer machine
@@ -38,9 +40,10 @@ developer machine
     |                                                              ^
     | HTTPS JSON, Bearer auth (control plane)                      |
     v                                                  provider cloud API
-Cloudflare Worker  ------------------------------------------>  (provision)
-  Fleet Durable Object
-  (lease / run / usage state, cleanup alarms, live bridges)
+coordinator ----------------------------------------------->  (provision)
+  Cloudflare Worker + Durable Object
+  or Node.js + PostgreSQL/pg-boss
+  (lease / run / usage state, cleanup scheduling, live bridges)
 ```
 
 ## Execution Modes
@@ -52,17 +55,17 @@ The CLI picks one of four modes per provider in `loadBackend`
   `Coordinator: supported` *and* a broker URL is configured
   (`CRABBOX_COORDINATOR` or `config set-broker`). The provider's SSH backend is
   wrapped in a `coordinatorLeaseBackend`: lease lifecycle goes through the
-  Worker over HTTPS, but the CLI still drives SSH, rsync, and command execution
+  coordinator over HTTPS, but the CLI still drives SSH, rsync, and command execution
   **directly** to the runner. The brokered set is exactly the four managed cloud
   providers: `aws`, `azure`, `gcp`, `hetzner`.
 - **Direct SSH mode** — the provider returns an SSH lease backend but no broker
   is configured. The CLI provisions and connects against the cloud or host API
-  itself; no Worker is involved. The four brokerable providers fall back to this
+  itself; no coordinator is involved. The four brokerable providers fall back to this
   when no broker URL is set, and every other SSH-lease provider (`ssh`,
   `parallels`, `proxmox`, `daytona`, `runpod`, and so on) always runs here.
 - **Registered direct mode** — `broker.mode: registered` keeps the same direct
   SSH provider lifecycle but registers lease metadata and heartbeats with the
-  Worker. The coordinator can list and share portal bridges, but cannot call the
+  coordinator. It can list and share portal bridges, but cannot call the
   provider, delete the resource, charge it to managed usage, or place it in a
   ready pool.
 - **Delegated mode** — the provider implements a delegated-run backend (e.g.
@@ -84,10 +87,10 @@ adapter's `Spec()`; the type definitions live in
 3. The CLI sends `POST /v1/leases` with the lease ID (`cbx_<12 hex>`), slug,
    provider, target, machine class, TTL, idle timeout, the SSH public key, and
    provider-specific fields.
-4. The Worker validates identity and policy, checks provider readiness, and
-   enforces cost/spend caps.
-5. The Fleet Durable Object provisions the machine through the provider adapter
-   (with region/market fallback) and persists the lease record.
+4. The coordinator validates identity and policy, checks provider readiness,
+   and enforces cost/spend caps.
+5. `FleetCoordinator` provisions the machine through the provider adapter (with
+   region/market fallback) and persists the lease record through its runtime.
 6. The broker returns the lease ID, slug, host, SSH user/port, work root, and
    expiry.
 7. The CLI waits for the `crabbox-ready` bootstrap marker.
@@ -101,32 +104,35 @@ adapter's `Spec()`; the type definitions live in
     `lastTouchedAt`, recomputes idle expiry up to the TTL cap, and attaches a
     best-effort Linux telemetry snapshot when SSH is reachable.
 12. The CLI releases the lease unless `--keep` is set.
-13. A Durable Object alarm reaps expired leases and orphaned cloud resources.
+13. A Durable Object alarm or pg-boss maintenance job reaps expired leases and
+    orphaned cloud resources.
 
-## Broker: Worker Entry and Auth
+## Coordinator Entry And Auth
 
-`worker/src/index.ts` handles every request and forwards to a single Durable
-Object instance (`FLEET.idFromName("default")`):
+`worker/src/coordinator-entry.ts` contains shared routing and auth. Cloudflare's
+`worker/src/index.ts` forwards fleet requests to one Durable Object instance
+(`FLEET.idFromName("default")`); `worker/node/server.ts` forwards them to the
+Node runtime:
 
 - `GET /v1/health` returns liveness; `GET /` redirects to `/portal`.
 - `/v1/auth/*`, `/portal/login`, `/portal/logout`, and WebSocket upgrades for
-  the live bridges go straight to the DO.
-- `/v1/internal/*` is 404 externally; the cron handler reaches it internally
-  with the `x-crabbox-internal: scheduled` header.
+  the live bridges go to `FleetCoordinator`.
+- `/v1/internal/*` is 404 externally; runtime schedulers invoke maintenance
+  internally.
 - Everything else passes through `authenticateRequest` and is forwarded with
   auth context injected via `requestWithAuthContext`.
 
 Auth (`worker/src/auth.ts`) requires a Bearer token, matched in order:
 `CRABBOX_ADMIN_TOKEN` (admin), `CRABBOX_SHARED_TOKEN` (non-admin shared), then a
-signed user token (prefix `cbxu_`, HMAC-SHA256, 30-day default expiry) minted
+signed user token (prefix `cbxu_`, HMAC-SHA256, 180-day default expiry) minted
 after GitHub OAuth login verifies allowed org membership. An optional Cloudflare
 Access JWT (`cf-access-jwt-assertion`) can supply the owner identity. The
-broker injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-login`
+coordinator injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-login`
 headers. The portal converts a `crabbox_session` cookie into a Bearer token.
 
-## Fleet Durable Object
+## Fleet Coordinator And Runtime Adapters
 
-One global DO (`worker/src/fleet.ts`) holds all state in DO storage and owns:
+One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
 
 - **Lease state** — `lease:*` records (`LeaseRecord` in `worker/src/types.ts`):
   provider, target, class/server type, cloud ID, host, SSH user/port, owner/org,
@@ -141,7 +147,7 @@ One global DO (`worker/src/fleet.ts`) holds all state in DO storage and owns:
   defaults.
 - **Usage accounting** — `usageSummary` aggregates leases per
   owner/org/provider/server type for the month; served at `GET /v1/usage`.
-- **Cleanup and expiry** — `alarm()` and the cron both run maintenance:
+- **Cleanup and expiry** — runtime alarms/jobs and reconciliation run maintenance:
   `expireLeases` deletes the cloud server for active leases past `expiresAt`
   (retrying after a 5-minute backoff on failure), then an optional AWS orphan
   sweep, then `scheduleAlarm` arms the next alarm at the soonest pending expiry.
@@ -149,12 +155,24 @@ One global DO (`worker/src/fleet.ts`) holds all state in DO storage and owns:
   [What Flows on a Run](#what-flows-on-a-run).
 - **Live bridges** — WebSocket relays for WebVNC (agent ↔ viewer), the
   code-server proxy, and egress (host ↔ client), plus a `/v1/control` socket for
-  run-event subscriptions and lease heartbeats. Bridge sockets survive
-  hibernation.
+  run-event subscriptions and lease heartbeats. Cloudflare can hibernate
+  sockets; Node keeps them in process and clients reconnect after restarts.
 - **Provider operations** — per-provider adapters (`aws.ts`, `azure.ts`,
   `gcp.ts`, `hetzner.ts`) handle provision/release/images/identity/capacity. The
   core stays provider-neutral through hooks such as `prepareLeaseCreate`,
   `createServerWithFallback`, `finalizeLeaseCreate`, and `hourlyPriceUSD`.
+
+Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:
+
+| Runtime | Durable state | Scheduling | WebSockets |
+| --- | --- | --- | --- |
+| Cloudflare | Durable Object storage | DO alarms plus scheduled Worker reconciliation | Hibernating WebSockets |
+| Node.js | PostgreSQL `crabbox` schema | pg-boss `crabbox_jobs` schema | In-process `ws`; reconnect after restart |
+
+The Node runtime currently requires one service replica because lifecycle
+serialization and live bridge ownership are process-local. PostgreSQL and
+pg-boss are durable, but horizontal replicas need distributed locking and
+bridge routing first.
 
 ## Coordinator HTTP API
 
@@ -230,7 +248,7 @@ commands can read it back:
 - `POST /v1/runs/{id}/telemetry` posts periodic host samples.
 - `POST /v1/runs/{id}/finish` reports exit code, sync/command durations, the log
   (chunked at 64 KiB, capped at 8 MiB), and parsed [results](features/test-results.md).
-  The Worker computes `durationMs`, sets state `succeeded`/`failed`, and records
+  The coordinator computes `durationMs`, sets state `succeeded`/`failed`, and records
   classification (`blockedStage`, `retryLikely`).
 
 The command itself, file sync, and I/O streaming all happen **directly
@@ -288,9 +306,9 @@ Actions hints, and trusted projects. See the [configuration reference](features/
 
 Config must **not** store live leases, SSH private keys, or provider secrets.
 Per-lease SSH private keys live under the user-config directory, outside repo
-config. Provider secrets live in the broker environment (Cloudflare Worker
-secrets) for brokered providers; for direct providers they come from the local
-SDK credential chain.
+config. Provider secrets live in the coordinator runtime's secret environment
+for brokered providers; for direct providers they come from the local SDK
+credential chain.
 
 ## Defaults
 
@@ -310,11 +328,11 @@ SDK credential chain.
 ## Failure Model
 
 Assume the CLI can crash, SSH can disconnect, machines can fail to boot,
-provider API calls can race or partially complete, and the Worker can retry
-requests. Therefore:
+provider API calls can race or partially complete, and coordinator requests can
+retry. Therefore:
 
 - Lease creation is idempotent where practical.
-- TTL/idle cleanup in the Durable Object is authoritative.
+- TTL/idle cleanup in coordinator state is authoritative.
 - Provider resources carry labels so orphan sweeps can find them.
 - Release is safe to call repeatedly.
 - Machine delete tolerates already-deleted resources.
@@ -327,5 +345,6 @@ requests. Therefore:
 | Backend selection / modes | `internal/cli/provider_backend.go` |
 | Broker client | `internal/cli/coordinator.go`, `provider_coordinator.go` |
 | Run / sync / lease | `internal/cli/run.go`, `lease.go` |
-| Worker entry / auth | `worker/src/index.ts`, `auth.ts` |
+| Coordinator entry / auth | `worker/src/coordinator-entry.ts`, `worker/src/index.ts`, `worker/node/server.ts`, `worker/src/auth.ts` |
 | Fleet state / endpoints | `worker/src/fleet.ts`, `types.ts`, `config.ts`, `usage.ts` |
+| Runtime adapters | `worker/src/coordinator-runtime.ts`, `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts` |

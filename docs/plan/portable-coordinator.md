@@ -10,14 +10,15 @@ Read when:
 
 Current behavior remains authoritative in
 [Coordinator](../features/coordinator.md), [Architecture](../architecture.md),
-and `worker/src/`. This document proposes a second runtime; it does not describe
-shipped behavior.
+and `worker/src/`. This document records the implemented runtime design and the
+remaining deployment proof required before production cutover, horizontal
+scaling, or cross-runtime migration.
 
 ## Decision
 
-Add a Node.js coordinator runtime backed by PostgreSQL. Keep the existing
-Cloudflare Worker and Durable Object deployment as an adapter over the same
-coordinator behavior.
+Crabbox includes a Node.js coordinator runtime backed by PostgreSQL and keeps
+the existing Cloudflare Worker and Durable Object deployment as an adapter over
+the same coordinator behavior.
 
 Use:
 
@@ -161,7 +162,7 @@ Produce one OCI image containing:
 
 Required deployment resources:
 
-- managed PostgreSQL;
+- managed PostgreSQL 13 or newer;
 - secret injection for coordinator, OAuth, and provider credentials;
 - outbound access to provider APIs;
 - an ingress that supports WebSocket upgrades;
@@ -203,7 +204,7 @@ it is not by itself a production replacement for distributed Durable Object
 storage, alarms, and hibernating sockets. It helps API compatibility, not the
 coordinator's durable control-plane problem.
 
-## Implementation Phases
+## Implementation Status
 
 ### Phase 1: contracts
 
@@ -216,17 +217,18 @@ coordinator's durable control-plane problem.
 - [x] Add PostgreSQL storage and migrations.
 - [x] Add Node HTTP and WebSocket entrypoints.
 - [x] Add pg-boss maintenance and reconciliation jobs.
-- [ ] Run the complete coordinator API suite against both runtimes.
+- [ ] Run every Miniflare-specific coordinator contract against PostgreSQL in
+  the same test matrix.
 
-### Phase 3: deployment proof
+### Remaining deployment proof
 
-- Build the OCI image.
+- [x] Build the OCI image locally and in CI.
 - Deploy one replica with managed PostgreSQL.
 - Exercise auth, lease create/heartbeat/release, restart recovery, cleanup,
   usage, portal, run recording, WebVNC, code, and egress.
 - Verify WebSocket reconnect during a rolling restart.
 
-### Phase 4: cutover
+### Optional cutover
 
 - Add a Durable Object state export and PostgreSQL import tool.
 - Pause mutations during migration, import, validate counts and active leases,

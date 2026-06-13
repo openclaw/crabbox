@@ -5,7 +5,7 @@ Read this when you are:
 - choosing `provider: hetzner`;
 - debugging Hetzner capacity, quotas, images, locations, or SSH readiness;
 - changing `internal/providers/hetzner` or brokered Hetzner provisioning in the
-  Worker (`worker/src/hetzner.ts`).
+  coordinator (`worker/src/hetzner.ts`).
 
 Hetzner is the Linux-only managed provider and the simplest managed path for
 Crabbox. It is an **SSH lease** backend: Hetzner Cloud provisions the server,
@@ -21,7 +21,7 @@ provider-native snapshots, use [AWS](aws.md), [GCP](gcp.md), [Azure](azure.md),
 or a container/sandbox provider instead.
 
 Hetzner is one of the four brokerable providers: it runs **direct from the CLI**
-by default and goes **through the Worker broker** only when a coordinator URL and
+by default and goes **through the coordinator** only when a coordinator URL and
 token are configured. See [Provider backends](../provider-backends.md) for the
 brokered-vs-direct model.
 
@@ -118,7 +118,7 @@ when Hetzner reports a capacity or quota error.
   coordinator-side OAuth secrets.
 - **Actions hydration**: yes (Linux SSH leases).
 - **Cleanup**: yes.
-- **Coordinator**: supported (brokerable through the Worker).
+- **Coordinator**: supported.
 
 ## Gotchas
 

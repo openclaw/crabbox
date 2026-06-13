@@ -60,10 +60,11 @@ directory, command output, and optional desktop/browser state. Prefer
 **CLI** - the local Go binary `crabbox`. Owns config, sync, command execution,
 output streaming, and per-lease SSH keys. See [Architecture](architecture.md).
 
-**Broker** / **coordinator** - the Cloudflare Worker plus its single Fleet
-Durable Object. Owns provider credentials, lease state, expiry, cleanup alarms,
-run history, usage, and cost caps. The two terms are interchangeable;
-"coordinator" is preferred in docs that emphasize state, "broker" when
+**Broker** / **coordinator** - the authenticated shared control plane. It owns
+provider credentials, lease state, expiry, cleanup scheduling, run history,
+usage, and cost caps. It runs on Cloudflare Workers with a Fleet Durable Object
+or on Node.js with PostgreSQL and pg-boss. The two terms are interchangeable;
+"coordinator" is preferred in docs that emphasize the service, "broker" when
 emphasizing the trust boundary between the CLI and the provider.
 
 **Provider** - a Crabbox adapter that knows how to acquire, resolve, list, and
@@ -91,8 +92,9 @@ cleanup, and review evidence.
 ## Modes
 
 **Brokered mode** / **coordinator mode** - the path where the CLI talks to the
-Worker for lease creation, state, and cleanup, while still doing SSH, rsync, and
-command execution directly to the runner. Provider secrets stay broker-side.
+coordinator for lease creation, state, and cleanup, while still doing SSH,
+rsync, and command execution directly to the runner. Provider secrets stay
+coordinator-side.
 Chosen when the provider supports the coordinator (AWS, Azure, Google Cloud,
 Hetzner) and a broker URL is configured via `CRABBOX_COORDINATOR` or
 `config set-broker`.
@@ -201,21 +203,30 @@ lease to the configured tailnet so clients can reach the runner without its
 public IP. Distinct from the network mode (`--network tailscale`) that selects
 which plane the CLI uses. See [Capabilities](features/capabilities.md).
 
-## Backplane
+## Coordinator Runtime
 
-**Durable Object** - the Cloudflare Worker primitive that holds Crabbox fleet
-state. Crabbox uses one Fleet Durable Object (`idFromName("default")`) so all
-scheduling decisions are serialized.
+**FleetCoordinator** - the runtime-neutral TypeScript control-plane behavior.
+Both deployment runtimes use the same routes, auth, provider adapters, records,
+cost controls, cleanup rules, portal, and bridge protocols.
 
-**Alarm** - the Durable Object scheduling primitive that fires at a future
-timestamp. Crabbox uses alarms for idle-timeout sweeps and TTL cleanup.
+**Durable Object** - the Cloudflare primitive that stores coordinator state and
+serializes fleet decisions. Crabbox uses one Fleet Durable Object
+(`idFromName("default")`) in the Cloudflare runtime.
 
-**Portal** - the server-rendered, authenticated web UI hosted by the same
-Worker, under `/portal/...`. Surfaces lease detail, run logs and events, and the
-live VNC/Code panes. See [Browser portal](features/portal.md).
+**PostgreSQL runtime** - the portable Node.js deployment. The `crabbox` schema
+stores coordinator key/value records; pg-boss uses `crabbox_jobs` for exact
+maintenance jobs and periodic reconciliation.
 
-**Bridge** - a Worker endpoint that proxies traffic to a loopback service on the
-lease over a WebSocket: WebVNC (VNC on 5900), code-server (8080), and egress.
+**Alarm** - a future cleanup deadline. Cloudflare uses Durable Object alarms;
+Node/PostgreSQL uses pg-boss jobs. Both schedule idle-timeout, TTL, cleanup
+retry, and provider maintenance work.
+
+**Portal** - the server-rendered, authenticated web UI hosted by the
+coordinator under `/portal/...`. Surfaces lease detail, run logs and events,
+and the live VNC/Code panes. See [Browser portal](features/portal.md).
+
+**Bridge** - a coordinator endpoint that proxies traffic to a loopback service
+on the lease over a WebSocket: WebVNC (VNC on 5900), code-server (8080), and egress.
 Bridges authenticate against the portal session, then talk to the lease over the
 SSH plane.
 

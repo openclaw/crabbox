@@ -52,10 +52,9 @@ rather than stored as an empty record.
 
 ## Where it lives
 
-Telemetry is stored in two places on the coordinator (the Cloudflare Worker
-broker):
+Telemetry is stored in two places on the coordinator:
 
-- **Lease record.** The Fleet Durable Object keeps the most recent sanitized
+- **Lease record.** `FleetCoordinator` keeps the most recent sanitized
   snapshot on the lease (`telemetry`) plus a bounded ring of the latest
   samples (`telemetryHistory`, capped at 60). Older samples drop off as new
   ones arrive.
@@ -65,7 +64,7 @@ broker):
   capped at 60) so longer commands show a load/memory/disk trend rather than
   just two endpoints.
 
-The sanitizer on the Worker only accepts the numeric fields above plus
+The coordinator sanitizer only accepts the numeric fields above plus
 `source` (truncated to 32 characters). Raw `/proc` content, hostnames, kernel
 versions, mount points, and process tables never reach storage.
 

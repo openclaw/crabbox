@@ -64,7 +64,7 @@ ARM64 classes use Azure Cobalt Dpsv6/Dpdsv6 candidates. Linux ARM64 also uses
 ARM64 Ubuntu Marketplace images. Windows ARM64 is native Windows only because
 Azure Cobalt ARM64 sizes do not support the nested virtualization WSL2 needs;
 it requires `azure.image` / `CRABBOX_AZURE_IMAGE` on the request, or
-`CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the Worker, to name an ARM64 Windows
+`CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the coordinator, to name an ARM64 Windows
 Marketplace or custom image because the built-in Windows default is x64:
 
 ```text
@@ -96,7 +96,7 @@ Single-region leases keep the shared network names unchanged; for multi-region
 fallback Crabbox appends the region to the managed vnet and NSG names so one
 resource group can hold independent regional networks.
 
-Azure pricing is not hardcoded. Use `CRABBOX_COST_RATES_JSON` on the Worker for
+Azure pricing is not hardcoded. Use `CRABBOX_COST_RATES_JSON` on the coordinator for
 exact Azure cost guardrails.
 
 ## OS Disk Mode
@@ -172,7 +172,7 @@ role on the target resource group (or on the subscription, if you want Crabbox
 to create the resource group on first use).
 
 Brokered Azure uses `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
-and `AZURE_SUBSCRIPTION_ID` on the Worker. Operators own the shared infra
+and `AZURE_SUBSCRIPTION_ID` on the coordinator. Operators own the shared infra
 through `CRABBOX_AZURE_*`. Lease requests may override only `azureLocation`,
 `azureImage`, and `azureOSDisk`. Use `CRABBOX_AZURE_REGIONS` for brokered Azure
 region fallback (`CRABBOX_CAPACITY_REGIONS` stays AWS-specific).
@@ -203,7 +203,7 @@ With `architecture: arm64` or `--arch arm64`, Linux defaults switch to
 ARM64 uses ARM64 VM sizes with the selected Windows Marketplace or custom image.
 Set `azure.image` / `CRABBOX_AZURE_IMAGE` as a `Publisher:Offer:SKU:Version`
 reference to override. In brokered mode, use
-`CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the Worker to provide the default ARM64
+`CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the coordinator to provide the default ARM64
 Windows image without changing the global Azure image fallback for Linux or
 AMD64 Windows leases.
 
