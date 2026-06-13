@@ -222,6 +222,7 @@ internal/providers/semaphore            # Semaphore SSH lease backend
 internal/providers/sprites              # Sprites SSH backend
 internal/providers/exedev               # exe.dev SSH backend
 internal/providers/runpod               # RunPod GPU pod SSH backend
+internal/providers/nvidiabrev           # NVIDIA Brev GPU workspace SSH backend
 internal/providers/railway              # Railway.app delegated backend
 internal/providers/blacksmith           # Blacksmith Testbox delegated backend
 internal/providers/e2b                  # E2B delegated backend
