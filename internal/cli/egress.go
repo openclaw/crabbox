@@ -109,7 +109,7 @@ func (a App) egressHost(ctx context.Context, args []string) error {
 	if len(allow) == 0 {
 		return exit(2, "egress host requires --profile or --allow; refusing to start an open proxy")
 	}
-	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id)
+	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket)
 	if err != nil {
 		return err
 	}
@@ -143,7 +143,7 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	if err := validateEgressListen(*listen); err != nil {
 		return err
 	}
-	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id)
+	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket)
 	if err != nil {
 		return err
 	}
@@ -196,7 +196,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !useCoordinator || coord == nil || coord.Token == "" {
+	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return exit(2, "egress start requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
@@ -259,7 +259,7 @@ func (a App) egressStatus(ctx context.Context, args []string) error {
 	if *id == "" {
 		return exit(2, "usage: crabbox egress status --id <lease-id-or-slug>")
 	}
-	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id)
+	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, "")
 	if err != nil {
 		return err
 	}
@@ -305,7 +305,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinatorURL, id string) (*CoordinatorClient, string, error) {
+func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinatorURL, id, ticket string) (*CoordinatorClient, string, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, "", err
@@ -313,7 +313,6 @@ func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinato
 	cfg.Provider = provider
 	if strings.TrimSpace(coordinatorURL) != "" {
 		cfg.Coordinator = strings.TrimRight(strings.TrimSpace(coordinatorURL), "/")
-		cfg.CoordToken = firstNonBlank(cfg.CoordToken, "ticket-only")
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -322,10 +321,10 @@ func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinato
 	if !useCoordinator || coord == nil || coord.BaseURL == "" {
 		return nil, "", exit(2, "egress requires a configured coordinator")
 	}
-	if strings.TrimSpace(coordinatorURL) != "" && coord.Token == "ticket-only" {
+	if strings.TrimSpace(ticket) != "" {
 		return coord, id, nil
 	}
-	if coord.Token == "" {
+	if !coord.hasConfiguredAuth() {
 		return nil, "", exit(2, "egress requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	lease, err := coord.GetLease(ctx, id)
@@ -360,8 +359,12 @@ func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 	} else if strings.TrimSpace(sessionID) == "" {
 		sessionID = "egress_manual"
 	}
+	headers, err := coord.webVNCAccessHeaders(ctx)
+	if err != nil {
+		return nil, err
+	}
 	ws, _, err := websocket.Dial(ctx, egressAgentURL(coord.BaseURL, leaseID, role, ticket), &websocket.DialOptions{
-		HTTPHeader: coord.webVNCAccessHeaders(),
+		HTTPHeader: headers,
 	})
 	if err != nil {
 		return nil, err

@@ -589,8 +589,10 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	if record.Native.Direct {
 		cfg.Coordinator = ""
 		cfg.CoordToken = ""
+		cfg.CoordTokenCommand = nil
 	} else if cfg.CoordAdminToken != "" {
 		cfg.CoordToken = cfg.CoordAdminToken
+		cfg.CoordTokenCommand = nil
 	}
 	if record.TargetOS != "" {
 		cfg.TargetOS = record.TargetOS

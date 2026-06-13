@@ -312,8 +312,9 @@ func TestCoordinatorClientForLoginAppliesURLBeforeRegisteredModeValidation(t *te
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", `["token-helper","--scope","example"]`)
 	t.Setenv("CRABBOX_PROVIDER", "")
-	if err := os.WriteFile(configPath, []byte("broker:\n  mode: registered\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("broker:\n  mode: registered\n  token: persisted\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.NotFoundHandler())
@@ -325,6 +326,12 @@ func TestCoordinatorClientForLoginAppliesURLBeforeRegisteredModeValidation(t *te
 	}
 	if client == nil || client.BaseURL != server.URL {
 		t.Fatalf("client=%#v", client)
+	}
+	if client.Token != "" {
+		t.Fatalf("login client retained stored token")
+	}
+	if got := strings.Join(client.TokenCommand, "\x00"); got != "token-helper\x00--scope\x00example" {
+		t.Fatalf("login token command=%q", client.TokenCommand)
 	}
 }
 

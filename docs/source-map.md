@@ -174,14 +174,16 @@ Provider docs:
 
 ## Worker API, Cost, And Operations
 
-- Worker auth and top-level routing: `worker/src/index.ts`, `worker/src/auth.ts`
+- Shared coordinator auth and top-level routing: `worker/src/coordinator-entry.ts`, `worker/src/index.ts`, `worker/src/auth.ts`
 - HTTP response/request helpers: `worker/src/http.ts`
 - GitHub OAuth login flow and user-token issuance: `worker/src/oauth.ts`
-- Fleet Durable Object routes and lease/run storage: `worker/src/fleet.ts`
+- Shared fleet routes and behavior: `worker/src/fleet.ts`
+- Cloudflare runtime adapter: `worker/src/coordinator-runtime.ts`
+- Node.js/PostgreSQL runtime, HTTP/WebSocket server, and durable jobs: `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`, `worker/node/server.ts`
 - Browser portal lease detail, bridge status, and run log/event pages: `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Usage aggregation, pricing fallback, owner/org limits, and cost guardrails: `worker/src/usage.ts`
 - Worker package scripts and dependencies: `worker/package.json`
-- Worker deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`
+- Coordinator deployment config: `worker/wrangler.jsonc`, `worker/wrangler.cloudflare.jsonc`, `worker/Dockerfile.node`
 
 ## Cross-cutting Feature Docs
 

@@ -18,13 +18,20 @@ import (
 )
 
 type CoordinatorClient struct {
-	BaseURL string
-	Token   string
-	Access  AccessConfig
-	Client  *http.Client
+	BaseURL      string
+	Token        string
+	TokenCommand []string
+	Access       AccessConfig
+	Client       *http.Client
+}
+
+func (c *CoordinatorClient) hasConfiguredAuth() bool {
+	return c != nil && (strings.TrimSpace(c.Token) != "" || len(c.TokenCommand) > 0)
 }
 
 const coordinatorHTTPTimeout = 30 * time.Minute
+const coordinatorTokenCommandTimeout = 15 * time.Second
+const maxCoordinatorTokenBytes = 16 * 1024
 
 type CoordinatorHTTPError struct {
 	Method     string
@@ -627,9 +634,10 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 	}
 	base.Path = strings.TrimRight(base.Path, "/")
 	return &CoordinatorClient{
-		BaseURL: strings.TrimRight(base.String(), "/"),
-		Token:   cfg.CoordToken,
-		Access:  cfg.Access,
+		BaseURL:      strings.TrimRight(base.String(), "/"),
+		Token:        cfg.CoordToken,
+		TokenCommand: append([]string(nil), cfg.CoordTokenCommand...),
+		Access:       cfg.Access,
 		Client: &http.Client{
 			Timeout: coordinatorHTTPTimeout,
 			Transport: &http.Transport{
@@ -1584,7 +1592,9 @@ func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, dat
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	c.addRequestHeaders(req.Header)
+	if err := c.addRequestHeaders(ctx, req.Header); err != nil {
+		return err
+	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
 		return err
@@ -1593,9 +1603,13 @@ func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, dat
 	return decodeCoordinatorResponse(method, path, resp.StatusCode, resp.Body, out)
 }
 
-func (c *CoordinatorClient) addRequestHeaders(headers http.Header) {
-	if c.Token != "" {
-		headers.Set("Authorization", "Bearer "+c.Token)
+func (c *CoordinatorClient) addRequestHeaders(ctx context.Context, headers http.Header) error {
+	token, err := c.authorizationToken(ctx)
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		headers.Set("Authorization", "Bearer "+token)
 	}
 	c.addAccessHeaders(headers)
 	if owner := localCoordinatorOwner(); owner != "" {
@@ -1604,10 +1618,61 @@ func (c *CoordinatorClient) addRequestHeaders(headers http.Header) {
 	if org := os.Getenv("CRABBOX_ORG"); org != "" {
 		headers.Set("X-Crabbox-Org", org)
 	}
+	return nil
+}
+
+func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, error) {
+	if len(c.TokenCommand) == 0 {
+		return c.Token, nil
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, coordinatorTokenCommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(commandCtx, c.TokenCommand[0], c.TokenCommand[1:]...)
+	var output limitedCoordinatorTokenOutput
+	cmd.Stdout = &output
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+			return "", errors.New("coordinator token command timed out")
+		}
+		return "", fmt.Errorf("coordinator token command failed: %w", err)
+	}
+	if output.overflow {
+		return "", fmt.Errorf("coordinator token command output exceeds %d bytes", maxCoordinatorTokenBytes)
+	}
+	token := strings.TrimSuffix(output.String(), "\n")
+	token = strings.TrimSuffix(token, "\r")
+	if token == "" {
+		return "", errors.New("coordinator token command returned an empty token")
+	}
+	if strings.TrimSpace(token) != token || strings.ContainsAny(token, "\r\n\x00") {
+		return "", errors.New("coordinator token command must return exactly one token line")
+	}
+	return token, nil
+}
+
+type limitedCoordinatorTokenOutput struct {
+	bytes.Buffer
+	overflow bool
+}
+
+func (w *limitedCoordinatorTokenOutput) Write(p []byte) (int, error) {
+	originalLength := len(p)
+	remaining := maxCoordinatorTokenBytes - w.Len()
+	if remaining <= 0 {
+		w.overflow = w.overflow || originalLength > 0
+		return originalLength, nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		w.overflow = true
+	}
+	_, _ = w.Buffer.Write(p)
+	return originalLength, nil
 }
 
 func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
-	config, cleanup, err := c.curlConfig(method, path, data, hasBody)
+	config, cleanup, err := c.curlConfig(ctx, method, path, data, hasBody)
 	if err != nil {
 		return err
 	}
@@ -1632,7 +1697,7 @@ func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, dat
 	return decodeCoordinatorResponse(method, path, status, bytes.NewReader(body), out)
 }
 
-func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody bool) (string, func(), error) {
+func (c *CoordinatorClient) curlConfig(ctx context.Context, method, path string, data []byte, hasBody bool) (string, func(), error) {
 	var bodyPath string
 	cleanup := func() {}
 	if hasBody {
@@ -1667,8 +1732,13 @@ func (c *CoordinatorClient) curlConfig(method, path string, data []byte, hasBody
 		curlConfigValue(&cfg, "header", "Content-Type: application/json")
 		curlConfigValue(&cfg, "data-binary", "@"+bodyPath)
 	}
-	if c.Token != "" {
-		curlConfigValue(&cfg, "header", "Authorization: Bearer "+c.Token)
+	token, err := c.authorizationToken(ctx)
+	if err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	if token != "" {
+		curlConfigValue(&cfg, "header", "Authorization: Bearer "+token)
 	}
 	c.addCurlAccessHeaders(&cfg)
 	if owner := localCoordinatorOwner(); owner != "" {

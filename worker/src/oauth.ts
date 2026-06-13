@@ -1,4 +1,5 @@
 import { issueUserToken, sha256Hex, userTokenExpiresAt } from "./auth";
+import type { CoordinatorStorage } from "./coordinator-runtime";
 import { errorMessage, json, readJson } from "./http";
 import type { Env, Provider } from "./types";
 import { requestOrg } from "./usage";
@@ -56,7 +57,7 @@ interface AllowedGitHubTeam {
 export async function githubAuthRoute(
   request: Request,
   action: string | undefined,
-  storage: DurableObjectStorage,
+  storage: CoordinatorStorage,
   env: Env,
 ): Promise<Response> {
   const method = request.method.toUpperCase();
@@ -74,7 +75,7 @@ export async function githubAuthRoute(
 
 export async function githubPortalLogin(
   request: Request,
-  storage: DurableObjectStorage,
+  storage: CoordinatorStorage,
   env: Env,
 ): Promise<Response> {
   const clientID = env.CRABBOX_GITHUB_CLIENT_ID;
@@ -109,7 +110,7 @@ export function githubPortalLogout(): Response {
 
 async function githubAuthStart(
   request: Request,
-  storage: DurableObjectStorage,
+  storage: CoordinatorStorage,
   env: Env,
 ): Promise<Response> {
   const clientID = env.CRABBOX_GITHUB_CLIENT_ID;
@@ -166,7 +167,7 @@ function newPendingOAuth(
 }
 
 async function storePendingOAuth(
-  storage: DurableObjectStorage,
+  storage: CoordinatorStorage,
   pending: OAuthPending,
 ): Promise<void> {
   await storage.put(oauthKey(pending.id), pending);
@@ -189,7 +190,7 @@ function githubAuthorizeURLFor(
 
 async function githubAuthCallback(
   request: Request,
-  storage: DurableObjectStorage,
+  storage: CoordinatorStorage,
   env: Env,
 ): Promise<Response> {
   const url = new URL(request.url);
@@ -260,7 +261,7 @@ async function githubAuthCallback(
   }
 }
 
-async function githubAuthPoll(request: Request, storage: DurableObjectStorage): Promise<Response> {
+async function githubAuthPoll(request: Request, storage: CoordinatorStorage): Promise<Response> {
   const input = await readJson<{ loginID?: string; pollSecret?: string }>(request);
   if (!input.loginID || !input.pollSecret) {
     return json({ error: "invalid_poll" }, { status: 400 });
@@ -508,14 +509,14 @@ function githubHeaders(accessToken: string): Record<string, string> {
 class GitHubAuthorizationError extends Error {}
 
 async function deletePendingOAuth(
-  storage: DurableObjectStorage,
+  storage: CoordinatorStorage,
   pending: OAuthPending,
 ): Promise<void> {
   await storage.delete(oauthKey(pending.id));
   await storage.delete(oauthStateKey(pending.state));
 }
 
-async function cleanupExpiredPendingOAuth(storage: DurableObjectStorage): Promise<number> {
+async function cleanupExpiredPendingOAuth(storage: CoordinatorStorage): Promise<number> {
   const entries = await storage.list<OAuthPending>({ prefix: "oauth:" });
   let active = 0;
   const now = Date.now();

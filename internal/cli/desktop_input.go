@@ -26,7 +26,7 @@ func (a App) desktopDoctor(ctx context.Context, args []string) error {
 		return nil
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
-	if err == nil && useCoordinator && coord != nil && coord.Token != "" {
+	if err == nil && useCoordinator && coord.hasConfiguredAuth() {
 		rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
 		status, err := coord.WebVNCStatus(ctx, leaseID)
 		if err != nil {

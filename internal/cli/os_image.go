@@ -18,6 +18,7 @@ type osImageSpec struct {
 	AzureArm64Image string
 	GCPImage        string
 	HetznerImage    string
+	LinodeImage     string
 	DockerImage     string
 	ContainerName   string
 	AppleVZImage    string
@@ -34,6 +35,7 @@ var osImageSpecs = map[string]osImageSpec{
 		AzureArm64Image: "Canonical:ubuntu-24_04-lts:server-arm64:latest",
 		GCPImage:        "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64",
 		HetznerImage:    "ubuntu-24.04",
+		LinodeImage:     "linode/ubuntu24.04",
 		DockerImage:     "docker.io/library/ubuntu:24.04",
 		ContainerName:   "ubuntu:24.04",
 		AppleVZImage:    "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
@@ -128,19 +130,19 @@ func awsLinuxAMIQueryForOS(value string, architecture string) (name string, labe
 	return spec.AWSName, spec.AWSLabel, nil
 }
 
-func osImageDefaultProviderImages(value string) (hetzner, azure, gcp, docker, container string, err error) {
+func osImageDefaultProviderImages(value string) (hetzner, azure, gcp, linode, docker, container string, err error) {
 	return osImageDefaultProviderImagesForArchitecture(value, ArchitectureAMD64)
 }
 
-func osImageDefaultProviderImagesForArchitecture(value string, architecture string) (hetzner, azure, gcp, docker, container string, err error) {
+func osImageDefaultProviderImagesForArchitecture(value string, architecture string) (hetzner, azure, gcp, linode, docker, container string, err error) {
 	spec, err := osImageSpecFor(value)
 	if err != nil {
-		return "", "", "", "", "", err
+		return "", "", "", "", "", "", err
 	}
 	if architecture == ArchitectureARM64 {
-		return spec.HetznerImage, spec.AzureArm64Image, spec.GCPImage, spec.DockerImage, spec.ContainerName, nil
+		return spec.HetznerImage, spec.AzureArm64Image, spec.GCPImage, spec.LinodeImage, spec.DockerImage, spec.ContainerName, nil
 	}
-	return spec.HetznerImage, spec.AzureImage, spec.GCPImage, spec.DockerImage, spec.ContainerName, nil
+	return spec.HetznerImage, spec.AzureImage, spec.GCPImage, spec.LinodeImage, spec.DockerImage, spec.ContainerName, nil
 }
 
 func osImageDefaultMultipassImage(value string) (string, error) {

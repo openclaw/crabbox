@@ -717,6 +717,7 @@ func configuredAdminCoordinator() (*CoordinatorClient, error) {
 		return nil, exit(2, "admin command requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN")
 	}
 	cfg.CoordToken = cfg.CoordAdminToken
+	cfg.CoordTokenCommand = nil
 	coord, ok, err := newCoordinatorClient(cfg)
 	if err != nil {
 		return nil, err

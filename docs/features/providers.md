@@ -71,9 +71,9 @@ Sessions backend with `azure.backend: dynamic-sessions` or
 When no coordinator is configured, these providers still work in **direct mode**:
 the CLI talks to the cloud API itself using local credentials (AWS SDK chain,
 Azure credentials, Google Application Default Credentials,
-`HCLOUD_TOKEN`/`HETZNER_TOKEN`, or `DIGITALOCEAN_TOKEN` for DigitalOcean).
-Direct mode has no Durable Object alarm; cleanup
-is best-effort through provider labels and manual `crabbox cleanup`. Prefer the
+`HCLOUD_TOKEN`/`HETZNER_TOKEN`, `DIGITALOCEAN_TOKEN` for DigitalOcean, or
+`LINODE_TOKEN` for Linode). Direct mode has no Durable Object alarm; cleanup is
+best-effort through provider labels and manual `crabbox cleanup`. Prefer the
 brokered path when a broker is available.
 
 ## Direct SSH-lease providers
@@ -84,6 +84,7 @@ sync/run/release path. None of them go through the Worker.
 ```text
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
 digitalocean     DigitalOcean Droplets                    Linux
+linode           Linode instances                         Linux
 hostinger        Hostinger VPSs over public SSH           Linux
 parallels        Parallels Desktop linked clones          Linux, macOS, Windows
 proxmox          Proxmox VE QEMU VM clones                Linux
@@ -152,6 +153,7 @@ railway                 Railway service status and stop controls
 - [Google Cloud](../providers/gcp.md): GCP Compute Engine SSH leases.
 - [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
 - [DigitalOcean](../providers/digitalocean.md): direct Linux Droplet leases.
+- [Linode](../providers/linode.md): direct Linux instance leases.
 - [Hostinger](../providers/hostinger.md): direct Linux VPS leases with explicit purchase opt-in and stop-only release.
 - [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
 - [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
@@ -248,6 +250,9 @@ instance type. Drop `--type` and use a class when you want fallback. See
 DigitalOcean maps every class to the smallest Phase 1 default size
 `s-1vcpu-1gb`. Use `--type <droplet-size-slug>` when you need a larger exact
 Droplet size.
+
+Linode maps every class to the smallest Phase 1 default size `g6-standard-1`.
+Use `--type <linode-type-slug>` when you need a different exact instance type.
 
 ## Brokered provider behavior
 

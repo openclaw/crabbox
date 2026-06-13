@@ -25,6 +25,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/incus"
 	_ "github.com/openclaw/crabbox/internal/providers/islo"
 	_ "github.com/openclaw/crabbox/internal/providers/kubevirt"
+	_ "github.com/openclaw/crabbox/internal/providers/linode"
 	_ "github.com/openclaw/crabbox/internal/providers/localcontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/modal"
 	_ "github.com/openclaw/crabbox/internal/providers/morph"

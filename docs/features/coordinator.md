@@ -8,10 +8,13 @@ Read this when you are:
 
 ## What the coordinator is
 
-The coordinator is the Cloudflare Worker (`worker/src/index.ts`) plus a single
-Fleet Durable Object (`worker/src/fleet.ts`). Together they are the broker: an
-authenticated control plane that owns provider credentials, lease state, run
-records, usage accounting, and the live access bridges.
+The coordinator is an authenticated control plane that owns provider
+credentials, lease state, run records, usage accounting, and live access
+bridges. `FleetCoordinator` (`worker/src/fleet.ts`) contains the shared behavior
+and runs through either:
+
+- the Cloudflare Worker and one Fleet Durable Object (`worker/src/index.ts`);
+- the Node.js service with PostgreSQL and pg-boss (`worker/node`).
 
 The default `broker.mode: managed` lets brokerable providers (`aws`, `azure`,
 `gcp`, and `hetzner`) transfer lifecycle operations to the coordinator. Every
@@ -29,14 +32,15 @@ the provider resource. Registered records are excluded from provider access
 reconciliation, ready pools, image operations, orphan sweeps, and cost totals.
 
 The coordinator brokers the **control plane**, not the data plane. Lease
-lifecycle, run recording, usage, and bridges flow through the Worker over HTTP.
-SSH readiness, rsync, command execution, and output streaming always happen
-directly from the CLI to the runner host and never traverse the Worker. See
+lifecycle, run recording, usage, and bridges flow through the coordinator over
+HTTP. SSH readiness, rsync, command execution, and output streaming always
+happen directly from the CLI to the runner host and never traverse the
+coordinator. See
 [Architecture](../architecture.md) for the full topology.
 
 ## Responsibilities
 
-The Fleet Durable Object holds all state in DO storage and owns:
+The fleet coordinator owns:
 
 - authentication of every broker request;
 - lease lifecycle: create, look up, heartbeat, release, expire, share;
@@ -48,12 +52,13 @@ The Fleet Durable Object holds all state in DO storage and owns:
 - live bridges (WebVNC, code-server, mediated egress) and the run-event control
   socket;
 - artifact-upload credentials and scoped upload URLs;
-- expiry and cleanup, driven by a DO alarm and a scheduled cron.
+- expiry and cleanup, driven by Durable Object alarms or durable pg-boss jobs
+  plus periodic reconciliation.
 
 ## Authentication
 
-Every request below the public health route requires a Bearer token, resolved in
-this order (`worker/src/auth.ts`):
+Every request below the public health route requires an authenticated identity,
+resolved in this order (`worker/src/auth.ts`):
 
 1. **Admin token** — matches `CRABBOX_ADMIN_TOKEN`. Grants admin scope.
 2. **Shared operator token** — matches `CRABBOX_SHARED_TOKEN`. Non-admin scope,
@@ -62,13 +67,17 @@ this order (`worker/src/auth.ts`):
    base64url payload, keyed by `CRABBOX_SESSION_SECRET` (falling back to
    `CRABBOX_SHARED_TOKEN`). Issued by GitHub OAuth login; default 30-day expiry.
    Carries `owner`, `org`, and GitHub `login`.
+4. **Trusted reverse-proxy identity** — opt-in through
+   `CRABBOX_TRUSTED_USER_HEADER` on the Node runtime, accepted only from peers in
+   `CRABBOX_TRUSTED_PROXY_CIDRS`; the authenticated ingress must also strip
+   caller-supplied copies of that header.
 
 An optional Cloudflare Access JWT (`cf-access-jwt-assertion`, verified against
 `CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD`) supplies the verified
 owner email for admin and shared-token requests.
 
-After auth, the Worker strips inbound Access headers and injects a trusted
-context for the Durable Object: `x-crabbox-auth`, `x-crabbox-admin`,
+After auth, the coordinator strips inbound Access headers and injects a trusted
+context for the fleet implementation: `x-crabbox-auth`, `x-crabbox-admin`,
 `x-crabbox-owner`, `x-crabbox-org`, and `x-crabbox-github-login`. The portal
 converts a `crabbox_session` cookie into a Bearer token so browser sessions reuse
 the same auth path.
@@ -80,11 +89,11 @@ sub-routes.
 
 ## API surface
 
-The Worker (`worker/src/index.ts`) answers `GET /v1/health` and redirects `/` to
-`/portal` directly, routes auth, portal-login, and bridge websocket upgrades to
-the Durable Object unauthenticated, rejects `/v1/internal/*` externally, and
-otherwise authenticates and forwards to the Durable Object. The cron handler
-posts `/v1/internal/scheduled` to the DO to run maintenance.
+The shared entry router answers `GET /v1/health` and redirects `/` to `/portal`
+directly, routes auth, portal-login, and bridge websocket upgrades to the fleet
+unauthenticated, rejects `/v1/internal/*` externally, and otherwise
+authenticates and forwards to the fleet. Cloudflare cron or pg-boss
+reconciliation runs maintenance.
 
 Public and user-scoped routes:
 
@@ -244,6 +253,7 @@ bake/promote, Mac-host management, identity) are invoked through admin routes.
 
 - [Architecture](../architecture.md)
 - [Orchestrator](../orchestrator.md)
+- [Portable coordinator runtime proposal](../plan/portable-coordinator.md)
 - [CLI](../cli.md)
 - [Browser portal](portal.md)
 - [usage command](../commands/usage.md)

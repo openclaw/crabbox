@@ -2,8 +2,10 @@ import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { awsPromotedAMIConfigKey, type LeaseConfig } from "../src/config";
+import { EC2SpotClient } from "../src/aws";
+import { awsPromotedAMIConfigKey, leaseConfig, type LeaseConfig } from "../src/config";
 import {
+  AWSProvider,
   FleetDurableObject,
   bridgeTicketFromRequest,
   codeForwardHeaders,
@@ -11,6 +13,7 @@ import {
   flushPendingWebVNC,
   forwardOrBufferWebVNC,
   resetWebVNCBridge,
+  recordAzureDeferredCleanup,
   shouldActivateEgressSession,
   type WebVNCBuffer,
 } from "../src/fleet";
@@ -23,6 +26,7 @@ import type {
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
+  ReadyPoolEntry,
   RunRecord,
 } from "../src/types";
 
@@ -74,6 +78,15 @@ class MemoryStorage {
 
   alarm(): number | undefined {
     return this.alarmTime;
+  }
+}
+
+class HookedMemoryStorage extends MemoryStorage {
+  beforePut?: (key: string, value: unknown) => Promise<void>;
+
+  override async put<T>(key: string, value: T): Promise<void> {
+    await this.beforePut?.(key, value);
+    await super.put(key, value);
   }
 }
 
@@ -316,6 +329,89 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBeUndefined();
   });
 
+  it("keeps heartbeats flowing while expiry cleanup runs and reconciles AWS ingress", async () => {
+    const storage = new MemoryStorage();
+    const deleteStarted = deferred<void>();
+    const finishDelete = deferred<void>();
+    const reconciliations: string[][] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        undefined,
+        {
+          provider: "aws",
+          onReconcileLeaseAccess(_lease, context) {
+            reconciliations.push(
+              context.activeLeases
+                .filter((candidate) => candidate.provider === "aws" && candidate.state === "active")
+                .map((candidate) => candidate.id)
+                .toSorted(),
+            );
+          },
+        },
+        async () => {
+          deleteStarted.resolve();
+          await finishDelete.promise;
+        },
+      ),
+    });
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        provider: "aws",
+        cloudID: "i-expired",
+        region: "eu-west-1",
+        network: {
+          awsSecurityGroupID: "sg-shared",
+          sshSourceCIDRs: ["198.51.100.10/32"],
+          sshSourceCIDRsComplete: true,
+        },
+        expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        provider: "aws",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "i-active",
+        region: "eu-west-1",
+        network: {
+          awsSecurityGroupID: "sg-shared",
+          sshSourceCIDRs: ["198.51.100.20/32"],
+          sshSourceCIDRsComplete: true,
+        },
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+
+    const alarm = fleet.alarm();
+    await deleteStarted.promise;
+    const heartbeatCompleted = await Promise.race([
+      fleet
+        .fetch(
+          request("POST", "/v1/leases/cbx_000000000002/heartbeat", {
+            headers: {
+              "x-crabbox-owner": "alice@example.com",
+              "x-crabbox-org": "example-org",
+            },
+            body: { idleTimeoutSeconds: 300 },
+          }),
+        )
+        .then((response) => response.status === 200),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(heartbeatCompleted).toBe(true);
+
+    finishDelete.resolve();
+    await alarm;
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000001")?.state).toBe("expired");
+    expect(reconciliations).toEqual([["cbx_000000000002"]]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+  });
+
   it("keeps provider cleanup failures active even when the cloud instance is already gone", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {
@@ -515,6 +611,58 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(firstAlarm);
   });
 
+  it("serializes Azure deferred cleanup persistence with alarm reconciliation", async () => {
+    const storage = new MemoryStorage();
+    let tail = Promise.resolve();
+    const state = {
+      storage,
+      async runExclusive<T>(callback: () => Promise<T>): Promise<T> {
+        const predecessor = tail;
+        const successor = deferred<void>();
+        tail = successor.promise;
+        await predecessor;
+        try {
+          return await callback();
+        } finally {
+          successor.resolve();
+        }
+      },
+    };
+    const staleRead = deferred<void>();
+    const staleBlocked = deferred<void>();
+    const staleSchedule = state.runExclusive(async () => {
+      expect((await storage.list({ prefix: "azure-cleanup:" })).size).toBe(0);
+      staleRead.resolve();
+      await staleBlocked.promise;
+      await storage.setAlarm(Date.now() + 60_000);
+    });
+    await staleRead.promise;
+
+    const deferredCleanup = recordAzureDeferredCleanup(
+      state,
+      async () => {
+        const records = await storage.list<{ retryAt: string }>({ prefix: "azure-cleanup:" });
+        const retryAt = Date.parse([...records.values()][0]?.retryAt ?? "");
+        await storage.setAlarm(Math.max(Date.now() + 1000, retryAt));
+      },
+      {
+        name: "crabbox-deferred",
+        location: "eastus",
+        resourceGroup: "crabbox-leases",
+        createdAt: new Date().toISOString(),
+      },
+    );
+    staleBlocked.resolve();
+    await Promise.all([staleSchedule, deferredCleanup]);
+
+    expect(storage.value("azure-cleanup:eastus:crabbox-deferred")).toMatchObject({
+      attempts: 0,
+      location: "eastus",
+      name: "crabbox-deferred",
+    });
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1500);
+  });
+
   it("bootstraps AWS orphan sweep maintenance from the Worker cron route", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(
@@ -660,10 +808,46 @@ describe("fleet lease identity and idle", () => {
       testLease({
         id: "cbx_000000000777",
         provider: "azure",
-        cloudID: "vm-provisioning",
+        cloudID: "",
         region: "eastus",
         state: "provisioning",
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000778",
+      testLease({
+        id: "cbx_000000000778",
+        provider: "azure",
+        cloudID: "vm-cleaning",
+        region: "eastus",
+        state: "released",
+        cleanupStartedAt: new Date().toISOString(),
+        cleanupClaimExpiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000779",
+      testLease({
+        id: "cbx_000000000779",
+        provider: "azure",
+        cloudID: "",
+        region: "eastus",
+        state: "released",
+        keep: true,
+        releaseDeletesServer: false,
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000780",
+      testLease({
+        id: "cbx_000000000780",
+        provider: "azure",
+        cloudID: "vm-retained",
+        region: "eastus",
+        state: "released",
+        keep: true,
+        releaseDeletesServer: false,
       }),
     );
     const fleet = testFleet(
@@ -705,6 +889,39 @@ describe("fleet lease identity and idle", () => {
                 labels: {
                   crabbox: "true",
                   lease: "cbx_000000000777",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-cleaning",
+                name: "vm-cleaning",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_000000000778",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-retaining",
+                name: "vm-retaining",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_000000000779",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-retained",
+                name: "vm-retained",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_000000000780",
                   created_at: oldSeconds,
                   expires_at: oldSeconds,
                 },
@@ -1184,6 +1401,79 @@ describe("fleet lease identity and idle", () => {
     expect(cleanReturn.status).toBe(200);
   });
 
+  it("does not let a stale ready-pool status write overwrite a newer registration", async () => {
+    const storage = new HookedMemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    const key = "example";
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: "2026-05-01T00:00:00.000Z",
+      }),
+    );
+    storage.seed<ReadyPoolEntry>(`ready-pool:${key}:${leaseID}`, {
+      key,
+      leaseID,
+      state: "ready",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: "2026-05-01T00:00:00.000Z",
+      updatedAt: "2026-05-01T00:00:00.000Z",
+      expiresAt: "2026-05-01T00:00:00.000Z",
+    });
+    const stalePutStarted = deferred<void>();
+    const finishStalePut = deferred<void>();
+    let blocked = false;
+    storage.beforePut = async (storageKey, value) => {
+      if (
+        !blocked &&
+        storageKey === `ready-pool:${key}:${leaseID}` &&
+        (value as ReadyPoolEntry).state === "stale"
+      ) {
+        blocked = true;
+        stalePutStarted.resolve();
+        await finishStalePut.promise;
+      }
+    };
+
+    const status = fleet.fetch(request("GET", `/v1/ready-pools/${key}`, { headers }));
+    await stalePutStarted.promise;
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    const register = fleet.fetch(
+      request("POST", `/v1/ready-pools/${key}/register`, {
+        headers,
+        body: { leaseID },
+      }),
+    );
+    expect(
+      await Promise.race([
+        register.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
+      ]),
+    ).toBe(false);
+
+    finishStalePut.resolve();
+    expect((await status).status).toBe(200);
+    expect((await register).status).toBe(200);
+    expect(storage.value<ReadyPoolEntry>(`ready-pool:${key}:${leaseID}`)?.state).toBe("ready");
+  });
+
   it("requires manage access to borrow and drain ready-pool leases", async () => {
     const storage = new MemoryStorage();
     let deleted = "";
@@ -1578,8 +1868,8 @@ describe("fleet lease identity and idle", () => {
     const create = await fleet.fetch(
       request("POST", "/v1/leases", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
         body: {
           leaseID: "cbx_abcdef123456",
@@ -1617,8 +1907,8 @@ describe("fleet lease identity and idle", () => {
     const update = await fleet.fetch(
       request("POST", "/v1/leases/blue-lobster/tailscale", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
         body: {
           enabled: true,
@@ -1636,6 +1926,283 @@ describe("fleet lease identity and idle", () => {
     expect(updated.lease.tailscale?.ipv4).toBe("100.64.0.10");
     expect(updated.lease.tailscale?.exitNode).toBe("mac-studio.tailnet.ts.net");
     expect(updated.lease.tailscale?.state).toBe("ready");
+  });
+
+  it("does not hold the state transition lock while minting a Tailscale key", async () => {
+    const storage = new MemoryStorage();
+    const accessSnapshots = new Map<string, LeaseRecord[]>();
+    let oauthStarted!: () => void;
+    let finishOAuth!: () => void;
+    let providerCreateStarted!: () => void;
+    let finishProviderCreate!: () => void;
+    const oauthStartedPromise = new Promise<void>((resolve) => {
+      oauthStarted = resolve;
+    });
+    const finishOAuthPromise = new Promise<void>((resolve) => {
+      finishOAuth = resolve;
+    });
+    const providerCreateStartedPromise = new Promise<void>((resolve) => {
+      providerCreateStarted = resolve;
+    });
+    const finishProviderCreatePromise = new Promise<void>((resolve) => {
+      finishProviderCreate = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+          oauthStarted();
+          await finishOAuthPromise;
+          return jsonResponse({ access_token: "oauth-token" });
+        }
+        if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+          return jsonResponse({ key: "tskey-oneoff" });
+        }
+        return jsonResponse({ message: `unexpected ${url}` }, 500);
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(
+          async () => {
+            providerCreateStarted();
+            await finishProviderCreatePromise;
+          },
+          {
+            provider: "aws",
+            onPrepareLeaseCreate(config, lease, context) {
+              accessSnapshots.set(lease.id, structuredClone(context.activeLeases));
+              return {
+                config,
+                lease: {
+                  ...lease,
+                  network: { sshSourceCIDRs: context.requestSourceCIDRs },
+                },
+                provisioning: {
+                  sshIngressReconcile: "authoritative",
+                  publishAccessBeforeProvisioning: true,
+                },
+              };
+            },
+          },
+        ),
+      },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:ci",
+      },
+    );
+    const firstCreate = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "cf-connecting-ip": "198.51.100.10" },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          tailscale: true,
+          tailscaleTags: ["tag:ci"],
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await oauthStartedPromise;
+    const secondCreate = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "cf-connecting-ip": "198.51.100.11" },
+        body: {
+          leaseID: "cbx_abcdef123457",
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    const secondReachedProvider = await Promise.race([
+      providerCreateStartedPromise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(secondReachedProvider).toBe(true);
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", "/v1/leases/cbx_abcdef123457/release", {
+            body: { delete: false },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+
+    finishOAuth();
+    await vi.waitFor(() => expect(accessSnapshots.has("cbx_abcdef123456")).toBe(true));
+    expect(
+      accessSnapshots.get("cbx_abcdef123456")?.find((lease) => lease.id === "cbx_abcdef123457"),
+    ).toMatchObject({
+      state: "provisioning",
+      network: { sshSourceCIDRs: ["198.51.100.11/32"] },
+    });
+    finishProviderCreate();
+    expect((await firstCreate).status).toBe(201);
+    expect((await secondCreate).status).toBe(409);
+  });
+
+  it("removes a retained release canceled before provider preparation", async () => {
+    const storage = new MemoryStorage();
+    let oauthStarted!: () => void;
+    let finishOAuth!: () => void;
+    let providerCalled = false;
+    const oauthStartedPromise = new Promise<void>((resolve) => {
+      oauthStarted = resolve;
+    });
+    const finishOAuthPromise = new Promise<void>((resolve) => {
+      finishOAuth = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+          oauthStarted();
+          await finishOAuthPromise;
+          return jsonResponse({ access_token: "oauth-token" });
+        }
+        if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+          return jsonResponse({ key: "tskey-oneoff" });
+        }
+        return jsonResponse({ message: `unexpected ${url}` }, 500);
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(
+          () => {
+            providerCalled = true;
+          },
+          {
+            provider: "aws",
+            onPrepareLeaseCreate(config, lease) {
+              providerCalled = true;
+              return { config, lease };
+            },
+          },
+        ),
+      },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:ci",
+      },
+    );
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          tailscale: true,
+          tailscaleTags: ["tag:ci"],
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await oauthStartedPromise;
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers,
+        body: { delete: false },
+      }),
+    );
+    expect(release.status).toBe(200);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      state: "released",
+      releaseDeletesServer: false,
+    });
+
+    finishOAuth();
+    expect((await createPromise).status).toBe(409);
+    expect(providerCalled).toBe(false);
+    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
+    expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
+  });
+
+  it("removes a retained release when Tailscale preparation fails", async () => {
+    const storage = new MemoryStorage();
+    let oauthStarted!: () => void;
+    let finishOAuth!: () => void;
+    let providerCalled = false;
+    const oauthStartedPromise = new Promise<void>((resolve) => {
+      oauthStarted = resolve;
+    });
+    const finishOAuthPromise = new Promise<void>((resolve) => {
+      finishOAuth = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+          oauthStarted();
+          await finishOAuthPromise;
+          return jsonResponse({ message: "oauth unavailable" }, 503);
+        }
+        return jsonResponse({ message: `unexpected ${url}` }, 500);
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(() => {
+          providerCalled = true;
+        }),
+      },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:ci",
+      },
+    );
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          tailscale: true,
+          tailscaleTags: ["tag:ci"],
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await oauthStartedPromise;
+    const release = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers,
+        body: { delete: false },
+      }),
+    );
+    expect(release.status).toBe(200);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      state: "released",
+      releaseDeletesServer: false,
+    });
+
+    finishOAuth();
+    expect((await createPromise).status).toBe(502);
+    expect(providerCalled).toBe(false);
+    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
+    expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
   });
 
   it("persists brokered leases as provisioning before provider create returns", async () => {
@@ -1681,6 +2248,73 @@ describe("fleet lease identity and idle", () => {
       cloudID: "vm-cbx-abcdef123456",
     });
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.state).toBe("active");
+  });
+
+  it("rejects a concurrent create with the same lease ID", async () => {
+    const storage = new MemoryStorage();
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    const createStartedPromise = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finishCreatePromise = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        async () => {
+          createStarted();
+          await finishCreatePromise;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+      ),
+    });
+    const firstCreate = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await createStartedPromise;
+    const conflictingCreate = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "bob@example.com",
+          "x-crabbox-org": "other-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "westus3",
+          sshPublicKey: "ssh-ed25519 other",
+        },
+      }),
+    );
+    expect(conflictingCreate.status).toBe(409);
+    await expect(conflictingCreate.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "provisioning",
+    });
+
+    finishCreate();
+    const firstResult = await firstCreate;
+    expect(firstResult.status).toBe(201);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "active",
+    });
   });
 
   it("marks provisioning leases failed when provider create fails", async () => {
@@ -1825,6 +2459,114 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("rejects a no-delete release after provisioning cleanup has started", async () => {
+    const storage = new MemoryStorage();
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    let deleteStarted!: () => void;
+    let finishDelete!: () => void;
+    const createStartedPromise = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finishCreatePromise = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const deleteStartedPromise = new Promise<void>((resolve) => {
+      deleteStarted = resolve;
+    });
+    const finishDeletePromise = new Promise<void>((resolve) => {
+      finishDelete = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        async () => {
+          createStarted();
+          await finishCreatePromise;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+        async () => {
+          deleteStarted();
+          await finishDeletePromise;
+          throw new Error("azure delete throttled");
+        },
+      ),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await createStartedPromise;
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", "/v1/leases/cbx_abcdef123456/release", {
+            headers,
+            body: { delete: true },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    finishCreate();
+    await deleteStartedPromise;
+
+    const noDelete = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers,
+        body: { delete: false },
+      }),
+    );
+    expect(noDelete.status).toBe(409);
+    await expect(noDelete.json()).resolves.toMatchObject({ error: "cleanup_in_progress" });
+    const claimed = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(claimed).toMatchObject({
+      state: "released",
+      cloudID: "vm-cbx-abcdef123456",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+      cleanupClaimExpiresAt: expect.any(String),
+    });
+    expect(
+      Date.parse(claimed?.cleanupClaimExpiresAt ?? "") -
+        Date.parse(claimed?.cleanupStartedAt ?? ""),
+    ).toBe(30 * 60 * 1000);
+    expect(storage.alarm()).toBe(Date.parse(claimed?.cleanupClaimExpiresAt ?? ""));
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/heartbeat", {
+        headers,
+        body: { idleTimeoutSeconds: 300 },
+      }),
+    );
+    expect(heartbeat.status).toBe(409);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.cleanupStartedAt).toBe(
+      claimed?.cleanupStartedAt,
+    );
+
+    finishDelete();
+    expect((await createPromise).status).toBe(500);
+    const released = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    expect(released?.state).toBe("released");
+    expect(released?.cleanupStartedAt).toBeUndefined();
+    expect(released?.cleanupClaimExpiresAt).toBeUndefined();
+    expect(released).toMatchObject({
+      releaseDeletesServer: true,
+      cleanupError: "azure delete throttled",
+      cleanupRetryAt: expect.any(String),
+    });
+  });
+
   it("does not reactivate a provisioning lease released while create finalization is pending", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
@@ -1892,6 +2634,152 @@ describe("fleet lease identity and idle", () => {
       provider: "azure",
       state: "released",
       cloudID: "",
+    });
+  });
+
+  it("preserves heartbeat updates while create finalization is pending", async () => {
+    const storage = new MemoryStorage();
+    let finalizationStarted!: () => void;
+    let finishFinalization!: () => void;
+    const finalizationStartedPromise = new Promise<void>((resolve) => {
+      finalizationStarted = resolve;
+    });
+    const finishFinalizationPromise = new Promise<void>((resolve) => {
+      finishFinalization = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        cloudID: "vm-cbx-abcdef123456",
+        region: "eastus",
+        onFinalizeLeaseCreate: async (config, lease) => {
+          finalizationStarted();
+          await finishFinalizationPromise;
+          return { config, lease };
+        },
+      }),
+    });
+
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await finalizationStartedPromise;
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/heartbeat", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { idleTimeoutSeconds: 300 },
+      }),
+    );
+    expect(heartbeat.status).toBe(200);
+    const heartbeatLease = ((await heartbeat.json()) as { lease: LeaseRecord }).lease;
+
+    finishFinalization();
+    const create = await createPromise;
+    expect(create.status).toBe(201);
+    const createdLease = ((await create.json()) as { lease: LeaseRecord }).lease;
+    expect(createdLease).toMatchObject({
+      id: "cbx_abcdef123456",
+      state: "active",
+      cloudID: "vm-cbx-abcdef123456",
+      idleTimeoutSeconds: 300,
+      lastTouchedAt: heartbeatLease.lastTouchedAt,
+      expiresAt: heartbeatLease.expiresAt,
+    });
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toEqual(createdLease);
+  });
+
+  it("buffers Cloudflare heartbeat bodies before serializing state transitions", async () => {
+    const storage = new MemoryStorage();
+    let finalizationStarted!: () => void;
+    let finishFinalization!: () => void;
+    let bodyReadStarted!: () => void;
+    let finishBody!: () => void;
+    const finalizationStartedPromise = new Promise<void>((resolve) => {
+      finalizationStarted = resolve;
+    });
+    const finishFinalizationPromise = new Promise<void>((resolve) => {
+      finishFinalization = resolve;
+    });
+    const bodyReadStartedPromise = new Promise<void>((resolve) => {
+      bodyReadStarted = resolve;
+    });
+    const finishBodyPromise = new Promise<void>((resolve) => {
+      finishBody = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        cloudID: "vm-cbx-abcdef123456",
+        region: "eastus",
+        onFinalizeLeaseCreate: async (config, lease) => {
+          finalizationStarted();
+          await finishFinalizationPromise;
+          return { config, lease };
+        },
+      }),
+    });
+    const headers = {
+      "content-type": "application/json",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "azure",
+          azureLocation: "eastus",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await finalizationStartedPromise;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        bodyReadStarted();
+        await finishBodyPromise;
+        controller.enqueue(new TextEncoder().encode('{"idleTimeoutSeconds":300}'));
+        controller.close();
+      },
+    });
+    const heartbeatPromise = fleet.fetch(
+      new Request("https://coordinator.test/v1/leases/cbx_abcdef123456/heartbeat", {
+        method: "POST",
+        headers,
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+    );
+    await bodyReadStartedPromise;
+    finishFinalization();
+    expect((await createPromise).status).toBe(201);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.state).toBe("active");
+
+    finishBody();
+    expect((await heartbeatPromise).status).toBe(200);
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      state: "active",
+      cloudID: "vm-cbx-abcdef123456",
+      idleTimeoutSeconds: 300,
     });
   });
 
@@ -2213,8 +3101,9 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("rejects brokered Tailscale tags outside the coordinator allowlist", async () => {
+    const storage = new MemoryStorage();
     const fleet = testFleet(
-      new MemoryStorage(),
+      storage,
       { hetzner: fakeProvider() },
       {
         CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
@@ -2238,15 +3127,17 @@ describe("fleet lease identity and idle", () => {
       error: "invalid_tailscale_tags",
       message: "tailscale tags not allowed: tag:prod",
     });
+    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
   it("reports brokered Tailscale disabled when OAuth secrets are absent", async () => {
-    const fleet = testFleet(new MemoryStorage(), { hetzner: fakeProvider() });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, { hetzner: fakeProvider() });
     const create = await fleet.fetch(
       request("POST", "/v1/leases", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
         body: {
           leaseID: "cbx_abcdef123456",
@@ -2261,6 +3152,7 @@ describe("fleet lease identity and idle", () => {
       error: "tailscale_disabled",
       message: "Tailscale is disabled for this coordinator",
     });
+    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
   it("passes the Cloudflare request source IP as AWS SSH ingress CIDR", async () => {
@@ -2297,6 +3189,813 @@ describe("fleet lease identity and idle", () => {
     );
     expect(create.status).toBe(201);
     expect(awsCIDRs).toEqual(["203.0.113.7/32"]);
+  });
+
+  it("uses additive AWS ingress reconciliation while creates can overlap", async () => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      state: "provisioning",
+      network: { sshSourceCIDRs: ["203.0.113.7/32"] },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const active = testLease({
+      id: "cbx_000000000001",
+      provider: "aws",
+      network: { sshSourceCIDRs: ["198.51.100.44/32"] },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const prepared = await provider.prepareLeaseCreate(config, lease, {
+      requestSourceCIDRs: ["203.0.113.7/32"],
+      activeLeases: [active],
+    });
+
+    expect(prepared.config.awsSSHCIDRs).toEqual(["198.51.100.44/32", "203.0.113.7/32"]);
+    expect(prepared.provisioning).toMatchObject({
+      sshIngressReconcile: "additive",
+      publishAccessBeforeProvisioning: true,
+    });
+  });
+
+  it("reports each AWS fallback region before provisioning mutates it", async () => {
+    const attempts: string[] = [];
+    const targets: string[] = [];
+    const machine: ProviderMachine = {
+      provider: "aws",
+      id: 123,
+      cloudID: "i-123",
+      name: "crabbox-test",
+      status: "running",
+      serverType: "c7a.8xlarge",
+      host: "192.0.2.10",
+      labels: {},
+    };
+    const create = vi
+      .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+      .mockImplementation(async (candidateConfig) => {
+        attempts.push(candidateConfig.awsRegion);
+        if (candidateConfig.awsRegion === "eu-west-1") {
+          throw new Error("capacity unavailable");
+        }
+        return { server: machine, serverType: machine.serverType };
+      });
+    const wait = vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockResolvedValue(machine);
+    try {
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const config = {
+        ...leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" }),
+        capacityRegions: ["us-east-1"],
+      };
+
+      const result = await provider.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "test",
+        "alice@example.com",
+        {
+          onTargetAttempt: async (target) => {
+            targets.push(target.region ?? "");
+          },
+        },
+      );
+
+      expect(attempts).toEqual(["eu-west-1", "us-east-1"]);
+      expect(targets).toEqual(attempts);
+      expect(result.server.region).toBe("us-east-1");
+    } finally {
+      create.mockRestore();
+      wait.mockRestore();
+    }
+  });
+
+  it("keeps retained unknown AWS access additive and ignores unrelated regions", async () => {
+    const requests: Array<{ action: string; cidr: string; groupID: string; hostname: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const fetchRequest = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await fetchRequest.clone().text());
+        const action = params.get("Action") ?? "";
+        const groupID = params.get("GroupId") ?? params.get("GroupId.1") ?? "";
+        requests.push({
+          action,
+          cidr:
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+            params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6") ??
+            "",
+          groupID,
+          hostname: new URL(fetchRequest.url).hostname,
+        });
+        if (action === "DescribeSecurityGroups") {
+          return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse>
+  <securityGroupInfo>
+    <item>
+      <groupId>${groupID}</groupId>
+      <ipPermissions>
+        <item>
+          <ipProtocol>tcp</ipProtocol>
+          <fromPort>22</fromPort>
+          <toPort>22</toPort>
+          <ipRanges>
+            <item>
+              <cidrIp>203.0.113.10/32</cidrIp>
+              <description>Crabbox SSH</description>
+            </item>
+          </ipRanges>
+        </item>
+      </ipPermissions>
+    </item>
+  </securityGroupInfo>
+</DescribeSecurityGroupsResponse>`);
+        }
+        return new Response(`<Response />`);
+      }),
+    );
+    const provider = new AWSProvider(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+      } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const anchor = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      state: "released",
+      region: "eu-west-1",
+      network: { awsSecurityGroupID: "sg-west" },
+    });
+    const retained = testLease({
+      id: "cbx_abcdef123457",
+      provider: "aws",
+      state: "released",
+      region: "eu-west-1",
+      releaseDeletesServer: false,
+      network: { awsSecurityGroupID: "sg-west" },
+    });
+    const activeEast = testLease({
+      id: "cbx_abcdef123460",
+      provider: "aws",
+      state: "active",
+      region: "us-east-1",
+      network: {
+        awsSecurityGroupID: "sg-east",
+        sshSourceCIDRs: ["198.51.100.20/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+    const unrelated = testLease({
+      id: "cbx_abcdef123458",
+      provider: "azure",
+      state: "active",
+      region: "eastus",
+    });
+    const historical = testLease({
+      id: "cbx_abcdef123459",
+      provider: "aws",
+      state: "released",
+      region: "us-invalid-1",
+    });
+
+    await provider.reconcileLeaseAccess(anchor, {
+      requestSourceCIDRs: [],
+      activeLeases: [retained, activeEast, unrelated, historical],
+    });
+
+    expect(new Set(requests.map((entry) => `${entry.hostname}:${entry.groupID}`))).toEqual(
+      new Set(["ec2.eu-west-1.amazonaws.com:sg-west", "ec2.us-east-1.amazonaws.com:sg-east"]),
+    );
+    expect(
+      requests.filter(
+        (entry) =>
+          entry.action === "RevokeSecurityGroupIngress" &&
+          entry.groupID === "sg-west" &&
+          entry.cidr === "203.0.113.10/32",
+      ),
+    ).toEqual([]);
+    expect(
+      requests.some(
+        (entry) =>
+          entry.action === "AuthorizeSecurityGroupIngress" &&
+          entry.groupID === "sg-west" &&
+          entry.cidr === "198.51.100.20/32",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps reconciliation additive when legacy metadata may resolve to an explicit AWS group", async () => {
+    const revokedCIDRs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const fetchRequest = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await fetchRequest.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeVpcs") {
+          return new Response(
+            "<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-default</vpcId></item></vpcSet></DescribeVpcsResponse>",
+          );
+        }
+        if (action === "DescribeSecurityGroups") {
+          return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          revokedCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
+        }
+        return new Response("<Response />");
+      }),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const anchor = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      state: "released",
+      region: "eu-west-1",
+      sshPort: "22",
+      network: { awsSecurityGroupID: "sg-shared" },
+    });
+    const legacy = testLease({
+      id: "cbx_abcdef123457",
+      provider: "aws",
+      region: "eu-west-1",
+      sshPort: "22",
+      network: {
+        sshSourceCIDRs: ["198.51.100.10/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+    const explicit = testLease({
+      id: "cbx_abcdef123458",
+      provider: "aws",
+      region: "eu-west-1",
+      sshPort: "22",
+      network: {
+        awsSecurityGroupID: "sg-shared",
+        sshSourceCIDRs: ["198.51.100.20/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+
+    await provider.reconcileLeaseAccess(anchor, {
+      requestSourceCIDRs: [],
+      activeLeases: [legacy, explicit],
+    });
+
+    expect(revokedCIDRs.filter((cidr) => cidr !== "0.0.0.0/0")).toEqual([]);
+  });
+
+  it("prunes stale CIDRs from a single auto-managed AWS group", async () => {
+    const revokedCIDRs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const fetchRequest = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await fetchRequest.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeVpcs") {
+          return new Response(
+            "<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-default</vpcId></item></vpcSet></DescribeVpcsResponse>",
+          );
+        }
+        if (action === "DescribeSecurityGroups") {
+          return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-auto</groupId><groupName>crabbox-runners</groupName><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          revokedCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
+        }
+        return new Response("<Response />");
+      }),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const anchor = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      state: "released",
+      region: "eu-west-1",
+      sshPort: "22",
+    });
+    const active = testLease({
+      id: "cbx_abcdef123457",
+      provider: "aws",
+      region: "eu-west-1",
+      sshPort: "22",
+      network: {
+        sshSourceCIDRs: ["198.51.100.20/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+
+    await provider.reconcileLeaseAccess(anchor, {
+      requestSourceCIDRs: [],
+      activeLeases: [active],
+    });
+
+    expect(revokedCIDRs).toContain("198.51.100.10/32");
+    expect(revokedCIDRs).not.toContain("198.51.100.20/32");
+  });
+
+  it("reconciles distinct SSH port sets that share an AWS security group", async () => {
+    const authorizedRules: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const fetchRequest = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await fetchRequest.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeSecurityGroups") {
+          return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          authorizedRules.push(
+            `${params.get("IpPermissions.1.FromPort")}:${
+              params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+              params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6")
+            }`,
+          );
+        }
+        return new Response("<Response />");
+      }),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const anchor = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      state: "released",
+      region: "eu-west-1",
+      sshPort: "22",
+      network: { awsSecurityGroupID: "sg-shared" },
+    });
+    const active22 = testLease({
+      id: "cbx_abcdef123457",
+      provider: "aws",
+      region: "eu-west-1",
+      sshPort: "22",
+      network: {
+        awsSecurityGroupID: "sg-shared",
+        sshSourceCIDRs: ["198.51.100.20/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+    const active2222 = testLease({
+      id: "cbx_abcdef123458",
+      provider: "aws",
+      region: "eu-west-1",
+      sshPort: "2222",
+      network: {
+        awsSecurityGroupID: "sg-shared",
+        sshSourceCIDRs: ["198.51.100.21/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+
+    await provider.reconcileLeaseAccess(anchor, {
+      requestSourceCIDRs: [],
+      activeLeases: [active22, active2222],
+    });
+
+    expect(new Set(authorizedRules)).toEqual(
+      new Set(["22:198.51.100.20/32", "22:198.51.100.21/32", "2222:198.51.100.21/32"]),
+    );
+  });
+
+  it("reconciles AWS ingress after the final overlapping create drains", async () => {
+    const storage = new MemoryStorage();
+    const started = [deferred<void>(), deferred<void>()];
+    const finish = [deferred<void>(), deferred<void>()];
+    let createIndex = 0;
+    const reconciliations: string[][] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        async () => {
+          const index = createIndex++;
+          started[index]?.resolve();
+          await finish[index]?.promise;
+        },
+        {
+          provider: "aws",
+          region: "eu-west-1",
+          onPrepareLeaseCreate(config, lease, context) {
+            return {
+              config,
+              lease: {
+                ...lease,
+                network: { ...lease.network, sshSourceCIDRs: context.requestSourceCIDRs },
+              },
+              provisioning: {
+                sshIngressReconcile: "additive",
+                publishAccessBeforeProvisioning: true,
+              },
+            };
+          },
+          onReconcileLeaseAccess(_lease, context) {
+            reconciliations.push(
+              context.activeLeases
+                .filter((active) => active.provider === "aws" && active.state === "active")
+                .map((active) => active.id)
+                .toSorted(),
+            );
+          },
+        },
+      ),
+    });
+    const create = (leaseID: string, sourceIP: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: { "cf-connecting-ip": sourceIP },
+          body: { leaseID, provider: "aws", sshPublicKey: "ssh-ed25519 test" },
+        }),
+      );
+
+    const first = create("cbx_abcdef123456", "198.51.100.10");
+    await started[0]?.promise;
+    const second = create("cbx_abcdef123457", "198.51.100.11");
+    await started[1]?.promise;
+    finish[0]?.resolve();
+    expect((await first).status).toBe(201);
+    expect(reconciliations).toEqual([]);
+
+    finish[1]?.resolve();
+    expect((await second).status).toBe(201);
+    expect(reconciliations).toEqual([]);
+
+    await fleet.alarm();
+    expect(reconciliations).toEqual([["cbx_abcdef123456", "cbx_abcdef123457"]]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+  });
+
+  it("recovers additive AWS creates from security-group rule limits", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const reconciliations: Array<{ cidrs: string[]; region: string; stateRegions: string[] }> = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        () => {
+          creates += 1;
+          if (creates === 1) {
+            throw new Error("RulesPerSecurityGroupLimitExceeded: security group rule quota");
+          }
+        },
+        {
+          provider: "aws",
+          region: "us-east-1",
+          onPrepareLeaseCreate(config, lease, context) {
+            return {
+              config,
+              lease: {
+                ...lease,
+                network: {
+                  ...lease.network,
+                  sshSourceCIDRs: context.requestSourceCIDRs,
+                  sshSourceCIDRsComplete: true,
+                },
+              },
+              provisioning: {
+                sshIngressReconcile: "additive",
+                publishAccessBeforeProvisioning: true,
+              },
+            };
+          },
+          async onCreateProvisioning(provisioning) {
+            await provisioning?.onTargetAttempt?.({ region: "us-east-1" });
+          },
+          onReconcileLeaseAccess(lease, context) {
+            reconciliations.push({
+              cidrs: context.activeLeases.flatMap(
+                (candidate) => candidate.network?.sshSourceCIDRs ?? [],
+              ),
+              region: lease.region ?? "",
+              stateRegions: context.activeLeases.map((candidate) => candidate.region ?? ""),
+            });
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "cf-connecting-ip": "198.51.100.10" },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          awsRegion: "eu-west-1",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(creates).toBe(2);
+    expect(reconciliations).toEqual([
+      {
+        cidrs: ["198.51.100.10/32"],
+        region: "us-east-1",
+        stateRegions: ["us-east-1"],
+      },
+    ]);
+  });
+
+  it("preserves distinct pending AWS ingress targets until each reconciles", async () => {
+    const storage = new MemoryStorage();
+    const reconciled: string[] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        (config) => {
+          if (config.awsRegion === "eu-west-1") {
+            throw new Error("first region failed");
+          }
+        },
+        {
+          provider: "aws",
+          region: "us-east-1",
+          onPrepareLeaseCreate(config, lease, context) {
+            return {
+              config,
+              lease: {
+                ...lease,
+                network: {
+                  ...lease.network,
+                  awsSecurityGroupID: config.awsSGID,
+                  sshSourceCIDRs: context.requestSourceCIDRs,
+                },
+              },
+              provisioning: {
+                sshIngressReconcile: "additive",
+                publishAccessBeforeProvisioning: true,
+              },
+            };
+          },
+          onReconcileLeaseAccess(lease) {
+            reconciled.push(`${lease.region}:${lease.network?.awsSecurityGroupID}`);
+          },
+        },
+      ),
+    });
+    const create = (leaseID: string, awsRegion: string, awsSGID: string) =>
+      fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: { "cf-connecting-ip": "198.51.100.10" },
+          body: {
+            leaseID,
+            provider: "aws",
+            awsRegion,
+            awsSGID,
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+
+    expect((await create("cbx_abcdef123456", "eu-west-1", "sg-west")).status).toBe(500);
+    expect((await create("cbx_abcdef123457", "us-east-1", "sg-east")).status).toBe(201);
+    expect(
+      storage.value<{ targets: Array<{ anchor: LeaseRecord }> }>("aws-ingress-reconcile:pending")
+        ?.targets,
+    ).toHaveLength(2);
+
+    await fleet.alarm();
+
+    expect(reconciled.toSorted()).toEqual(["eu-west-1:sg-west", "us-east-1:sg-east"]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+  });
+
+  it("retains every attempted AWS region for cleanup when provisioning fails", async () => {
+    const storage = new MemoryStorage();
+    const reconciled: string[] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease, context) {
+          return {
+            config,
+            lease: {
+              ...lease,
+              network: {
+                ...lease.network,
+                awsSecurityGroupID: config.awsSGID,
+                sshSourceCIDRs: context.requestSourceCIDRs,
+                sshSourceCIDRsComplete: true,
+              },
+            },
+            provisioning: {
+              sshIngressReconcile: "additive",
+              publishAccessBeforeProvisioning: true,
+            },
+          };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "eu-west-1" });
+          await provisioning?.onTargetAttempt?.({ region: "us-east-1" });
+          throw new Error("capacity unavailable");
+        },
+        onReconcileLeaseAccess(lease) {
+          reconciled.push(lease.region ?? "");
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "cf-connecting-ip": "198.51.100.10" },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          awsRegion: "eu-west-1",
+          awsSGID: "sg-shared",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(
+      storage
+        .value<{ targets: Array<{ anchor: LeaseRecord }> }>("aws-ingress-reconcile:pending")
+        ?.targets.map((target) => target.anchor.region)
+        .toSorted(),
+    ).toEqual(["eu-west-1", "us-east-1"]);
+
+    await fleet.alarm();
+    expect(reconciled.toSorted()).toEqual(["eu-west-1", "us-east-1"]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+  });
+
+  it("fences a release behind AWS ingress reconciliation and preserves the newer work", async () => {
+    const storage = new MemoryStorage();
+    const reconcileStarted = deferred<void>();
+    const finishReconcile = deferred<void>();
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease, context) {
+          return {
+            config,
+            lease: {
+              ...lease,
+              network: { ...lease.network, sshSourceCIDRs: context.requestSourceCIDRs },
+            },
+            provisioning: {
+              sshIngressReconcile: "additive",
+              publishAccessBeforeProvisioning: true,
+            },
+          };
+        },
+        async onReconcileLeaseAccess() {
+          reconcileStarted.resolve();
+          await finishReconcile.promise;
+        },
+      }),
+    });
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", "/v1/leases", {
+            headers: { "cf-connecting-ip": "198.51.100.10" },
+            body: {
+              leaseID: "cbx_abcdef123456",
+              provider: "aws",
+              sshPublicKey: "ssh-ed25519 test",
+            },
+          }),
+        )
+      ).status,
+    ).toBe(201);
+
+    const alarm = fleet.alarm();
+    await reconcileStarted.promise;
+    const release = fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        body: { delete: false },
+      }),
+    );
+    const releaseCompleted = await Promise.race([
+      release.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(releaseCompleted).toBe(false);
+    finishReconcile.resolve();
+    expect((await release).status).toBe(200);
+    await alarm;
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeDefined();
+
+    await fleet.alarm();
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+  });
+
+  it("applies a heartbeat after an older AWS ingress reconciliation snapshot", async () => {
+    const storage = new MemoryStorage();
+    const reconcileStarted = deferred<void>();
+    const finishReconcile = deferred<void>();
+    const operations: string[] = [];
+    let reconciliationCount = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease, context) {
+          return {
+            config,
+            lease: {
+              ...lease,
+              network: { ...lease.network, sshSourceCIDRs: context.requestSourceCIDRs },
+            },
+            provisioning: {
+              sshIngressReconcile: "additive",
+              publishAccessBeforeProvisioning: true,
+            },
+          };
+        },
+        onRefreshLeaseAccess(lease, context) {
+          operations.push(`refresh:${context.requestSourceCIDRs.join(",")}`);
+          return {
+            ...lease,
+            network: { ...lease.network, sshSourceCIDRs: context.requestSourceCIDRs },
+          };
+        },
+        async onReconcileLeaseAccess(_lease, context) {
+          reconciliationCount += 1;
+          operations.push(
+            `reconcile:${context.activeLeases
+              .flatMap((candidate) => candidate.network?.sshSourceCIDRs ?? [])
+              .join(",")}`,
+          );
+          if (reconciliationCount === 1) {
+            reconcileStarted.resolve();
+            await finishReconcile.promise;
+          }
+        },
+      }),
+    });
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", "/v1/leases", {
+            headers: {
+              "cf-connecting-ip": "198.51.100.10",
+              "x-crabbox-owner": "alice@example.com",
+              "x-crabbox-org": "example-org",
+            },
+            body: {
+              leaseID: "cbx_abcdef123456",
+              provider: "aws",
+              sshPublicKey: "ssh-ed25519 test",
+            },
+          }),
+        )
+      ).status,
+    ).toBe(201);
+
+    const alarm = fleet.alarm();
+    await reconcileStarted.promise;
+    const heartbeat = fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/heartbeat", {
+        headers: {
+          "cf-connecting-ip": "198.51.100.20",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { idleTimeoutSeconds: 300 },
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(operations).toEqual(["reconcile:198.51.100.10/32"]);
+
+    finishReconcile.resolve();
+    expect((await heartbeat).status).toBe(200);
+    await alarm;
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeDefined();
+
+    await fleet.alarm();
+    expect(operations).toEqual([
+      "reconcile:198.51.100.10/32",
+      "refresh:198.51.100.20/32",
+      "reconcile:198.51.100.20/32",
+    ]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
   });
 
   it("preserves active AWS lease SSH ingress CIDRs while creating another lease", async () => {
@@ -2370,6 +4069,51 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.network?.sshSourceCIDRs).toEqual([
       "203.0.113.7/32",
     ]);
+  });
+
+  it("starts provider access TTL when the snapshot is published", async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new MemoryStorage();
+      const reservedAt = new Date("2026-06-01T12:00:00.000Z");
+      const publishedAt = new Date("2026-06-01T12:10:00.000Z");
+      let publishedExpiry = "";
+      vi.setSystemTime(reservedAt);
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(
+          () => {
+            publishedExpiry =
+              storage.value<LeaseRecord>("provider-access:cbx_abcdef123456")?.expiresAt ?? "";
+          },
+          {
+            provider: "aws",
+            onPrepareLeaseCreate(config, lease) {
+              vi.setSystemTime(publishedAt);
+              return {
+                config,
+                lease,
+                provisioning: { publishAccessBeforeProvisioning: true },
+              };
+            },
+          },
+        ),
+      });
+
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+
+      expect(create.status).toBe(201);
+      expect(Date.parse(publishedExpiry)).toBe(publishedAt.getTime() + 15 * 60 * 1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lets providers choose additive access reconciliation for unknown active lease state", async () => {
@@ -4036,19 +5780,26 @@ describe("fleet lease identity and idle", () => {
     expect(runtime.timers).toEqual([]);
   });
 
-  it("accepts bridge tickets in authorization before falling back to query strings", () => {
+  it("prefers valid query bridge tickets over unrelated bearer authorization", () => {
+    const queryTicket = `code_${"a".repeat(32)}`;
     expect(
       bridgeTicketFromRequest(
-        request("GET", "/v1/leases/blue-lobster/code/agent?ticket=code_query", {
-          headers: { authorization: "Bearer code_header" },
+        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${queryTicket}`, {
+          headers: { authorization: "Bearer edge-identity-token" },
         }),
       ),
-    ).toBe("code_header");
+    ).toBe(queryTicket);
+  });
+
+  it("uses bearer bridge tickets when the query value is absent or invalid", () => {
+    const headerTicket = `code_${"b".repeat(32)}`;
     expect(
       bridgeTicketFromRequest(
-        request("GET", "/v1/leases/blue-lobster/code/agent?ticket=code_query"),
+        request("GET", "/v1/leases/blue-lobster/code/agent?ticket=invalid", {
+          headers: { authorization: `Bearer ${headerTicket}` },
+        }),
       ),
-    ).toBe("code_query");
+    ).toBe(headerTicket);
   });
 
   it("uses a VS Code-compatible CSP for code proxy responses", () => {
@@ -8071,6 +9822,14 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });
 }
@@ -8147,10 +9906,15 @@ function fakeProvider(
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
     ) => LeaseRecord | undefined;
+    onReconcileLeaseAccess?: (
+      lease: LeaseRecord,
+      context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
+    ) => Promise<void> | void;
     onCreateProvisioning?: (provisioning?: {
       sshIngressReconcile?: "authoritative" | "additive";
       publishAccessBeforeProvisioning?: boolean;
-    }) => void;
+      onTargetAttempt?: (target: { region?: string }) => Promise<void>;
+    }) => Promise<void> | void;
     onPrepareLeaseConfig?: (
       config: LeaseConfig,
       storage: MemoryStorage | undefined,
@@ -8259,6 +10023,12 @@ function fakeProvider(
     ) {
       return result.onRefreshLeaseAccess?.(lease, context);
     },
+    async reconcileLeaseAccess(
+      lease: LeaseRecord,
+      context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
+    ) {
+      await result.onReconcileLeaseAccess?.(lease, context);
+    },
     async createServerWithFallback(
       config: LeaseConfig,
       _leaseID: string,
@@ -8267,9 +10037,10 @@ function fakeProvider(
       provisioning?: {
         sshIngressReconcile?: "authoritative" | "additive";
         publishAccessBeforeProvisioning?: boolean;
+        onTargetAttempt?: (target: { region?: string }) => Promise<void>;
       },
     ) {
-      result.onCreateProvisioning?.(provisioning);
+      await result.onCreateProvisioning?.(provisioning);
       await onCreate?.(config);
       return {
         server: {

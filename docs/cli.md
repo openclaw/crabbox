@@ -425,6 +425,7 @@ This is the canonical environment-variable reference. The most common ones:
 ```text
 CRABBOX_COORDINATOR                broker URL (enables brokered mode for supported providers)
 CRABBOX_COORDINATOR_TOKEN          broker user/shared token
+CRABBOX_COORDINATOR_TOKEN_COMMAND  JSON argv array that prints a fresh bearer token
 CRABBOX_COORDINATOR_ADMIN_TOKEN    broker admin token
 CRABBOX_COORDINATOR_MODE           managed|registered
 CRABBOX_COORDINATOR_AUTO_WEBVNC    auto-start portal bridge for kept registered desktops

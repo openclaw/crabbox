@@ -25,6 +25,36 @@ describe("coordinator auth", () => {
     await expect(isAuthorized(allowed, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(true);
   });
 
+  it("accepts a reverse-proxy identity only from a trusted proxy source", async () => {
+    const request = new Request("https://example.test/v1/whoami", {
+      headers: { "x-authenticated-user": "alice@example.com" },
+    });
+
+    await expect(
+      authenticateRequest(
+        request,
+        {
+          CRABBOX_TRUSTED_USER_HEADER: "X-Authenticated-User",
+          CRABBOX_TRUSTED_USER_ORG: "example-org",
+        },
+        { trustedProxy: true },
+      ),
+    ).resolves.toEqual({
+      authorized: true,
+      admin: false,
+      auth: "proxy",
+      owner: "alice@example.com",
+      org: "example-org",
+    });
+    await expect(
+      authenticateRequest(request, {
+        CRABBOX_TRUSTED_USER_HEADER: "X-Authenticated-User",
+        CRABBOX_TRUSTED_USER_ORG: "example-org",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(authenticateRequest(request, {})).resolves.toBeUndefined();
+  });
+
   it("keeps shared bearer token non-admin and ignores caller-supplied identity headers", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",

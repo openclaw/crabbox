@@ -4,14 +4,18 @@
 
 ### Added
 
+- Added `provider: linode` for direct Linux SSH leases with per-lease keys, account-bound cleanup, preserved operator tags, interface-aware existing firewalls, and guarded live smoke coverage. Thanks @coygeek.
 - Added `provider: windows-sandbox` for disposable native Windows runs through Microsoft Windows Sandbox, including mapped workspace sync, streamed output, timeout and cancellation cleanup, and keep-on-failure inspection. Thanks @zozo123.
 - Added `provider: smolvm` for delegated Linux microVM runs through the hosted smolfleet API, including archive sync, retained leases, status, cleanup, and repository-scoped ownership checks. Thanks @zozo123.
 - Added guarded SmolVM live E2E coverage for retained reuse, archive replacement, environment forwarding, command exit propagation, diagnostics, and targeted cleanup.
 - Added non-mutating Proxmox storage, bridge, pool, template, and cluster inventory readiness diagnostics plus guarded live lifecycle smoke coverage, with safer failed-create and cleanup claim handling. Thanks @coygeek.
 - Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
+- Added a portable Node.js and PostgreSQL coordinator runtime with durable pg-boss maintenance jobs, WebSocket bridges, trusted reverse-proxy identity support, container packaging, and the existing Cloudflare Worker/Durable Object runtime preserved as an adapter over the same fleet implementation.
+- Added refreshable coordinator bearer authentication through a shell-free JSON argv token command, including HTTP and reconnecting WebSocket bridges behind expiring upstream identity proxies.
 
 ### Fixed
 
+- Fixed Cloudflare container runs to fail when streamed stdout or stderr cannot be written instead of silently reporting success after output loss.
 - Fixed Proxmox bridge readiness on PVE 8 by falling back to its compatible local-bridge and SDN-vnet inventory filter.
 
 ## 0.29.0 - 2026-06-12

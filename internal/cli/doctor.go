@@ -294,6 +294,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 				if cfg.CoordAdminToken != "" {
 					adminCfg := cfg
 					adminCfg.CoordToken = cfg.CoordAdminToken
+					adminCfg.CoordTokenCommand = nil
 					adminCoord, _, err := newCoordinatorClient(adminCfg)
 					if err != nil {
 						return err

@@ -2549,9 +2549,7 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 				idleTimeoutOverride = updateIdleTimeout
 			}
 			if control == nil {
-				dialCtx, dialCancel := context.WithTimeout(callCtx, coordinatorControlDialTimeout)
-				control, _ = dialCoordinatorControl(dialCtx, coord)
-				dialCancel()
+				control, _ = dialCoordinatorControl(callCtx, coord)
 			}
 			if control != nil {
 				err = control.heartbeat(callCtx, leaseID, idleTimeoutOverride, telemetry)

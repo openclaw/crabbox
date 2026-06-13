@@ -70,6 +70,9 @@ export interface Env {
   CRABBOX_DEFAULT_ORG?: string;
   CRABBOX_ACCESS_TEAM_DOMAIN?: string;
   CRABBOX_ACCESS_AUD?: string;
+  CRABBOX_TRUSTED_USER_HEADER?: string;
+  CRABBOX_TRUSTED_USER_ORG?: string;
+  CRABBOX_TRUSTED_PROXY_CIDRS?: string;
   CRABBOX_COST_RATES_JSON?: string;
   CRABBOX_EUR_TO_USD?: string;
   CRABBOX_MAX_ACTIVE_LEASES?: string;
@@ -328,6 +331,8 @@ export interface LeaseRecord {
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;
+  cleanupStartedAt?: string;
+  cleanupClaimExpiresAt?: string;
   releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;
@@ -401,6 +406,8 @@ export interface ReadyPoolReturnRequest {
 export interface LeaseNetworkState {
   sshSourceCIDRs?: string[];
   sshSourceCIDRsComplete?: boolean;
+  awsSecurityGroupID?: string;
+  awsSubnetID?: string;
 }
 
 export type LeaseShareRole = "use" | "manage";
