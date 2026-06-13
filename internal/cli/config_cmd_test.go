@@ -956,6 +956,78 @@ func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesLambdaWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("LAMBDA_API_KEY", "lambda-secret-token")
+	if err := os.WriteFile(configPath, []byte(`provider: lambda
+lambda:
+  region: us-east-1
+  type: gpu_1x_h100_sxm5
+  imageFamily: lambda-stack-24-04
+  firewallRuleset: crabbox
+  sshCIDRs: [203.0.113.0/24]
+  filesystemNames: [cache]
+  filesystemMounts:
+    - name: cache
+      mountPath: /mnt/cache
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "lambda region=us-east-1 type=gpu_1x_h100_sxm5 image=- image_family=lambda-stack-24-04 firewall_ruleset=crabbox ssh_cidrs=203.0.113.0/24 filesystems=cache mounts=1 auth=env") {
+		t.Fatalf("config show missing lambda summary: %q", text)
+	}
+	if !strings.Contains(text, "ssh=ubuntu@<host>:22 fallback_ports=-") {
+		t.Fatalf("config show missing effective lambda ssh defaults: %q", text)
+	}
+	if strings.Contains(text, "lambda-secret-token") || strings.Contains(text, "LAMBDA_API_KEY") {
+		t.Fatalf("config show text leaked lambda credential: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stdout.String(), "lambda-secret-token") || strings.Contains(stdout.String(), "LAMBDA_API_KEY") {
+		t.Fatalf("config show json leaked lambda credential: %q", stdout.String())
+	}
+	var got struct {
+		SSHUser          string   `json:"sshUser"`
+		SSHPort          string   `json:"sshPort"`
+		SSHFallbackPorts []string `json:"sshFallbackPorts"`
+		Lambda           struct {
+			Region           string                  `json:"region"`
+			Type             string                  `json:"type"`
+			ImageFamily      string                  `json:"imageFamily"`
+			FirewallRuleset  string                  `json:"firewallRuleset"`
+			SSHCIDRs         []string                `json:"sshCIDRs"`
+			FilesystemNames  []string                `json:"filesystemNames"`
+			FilesystemMounts []LambdaFilesystemMount `json:"filesystemMounts"`
+			Auth             string                  `json:"auth"`
+		} `json:"lambda"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Lambda.Region != "us-east-1" || got.Lambda.Type != "gpu_1x_h100_sxm5" || got.Lambda.ImageFamily != "lambda-stack-24-04" || got.Lambda.FirewallRuleset != "crabbox" || got.Lambda.Auth != "env" {
+		t.Fatalf("unexpected lambda json: %#v", got.Lambda)
+	}
+	if got.SSHUser != "ubuntu" || got.SSHPort != "22" || len(got.SSHFallbackPorts) != 0 {
+		t.Fatalf("unexpected lambda ssh json: %#v", got)
+	}
+}
+
 func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

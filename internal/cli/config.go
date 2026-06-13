@@ -107,6 +107,10 @@ type Config struct {
 	Linode                        LinodeConfig
 	linodeImageExplicit           bool
 	linodeTypeExplicit            bool
+	Lambda                        LambdaConfig
+	lambdaImageExplicit           bool
+	lambdaImageFamilyExplicit     bool
+	lambdaTypeExplicit            bool
 	Nebius                        NebiusConfig
 	OVH                           OVHConfig
 	ovhImageExplicit              bool
@@ -271,6 +275,22 @@ type LinodeConfig struct {
 	Type       string
 	FirewallID string
 	SSHCIDRs   []string
+}
+
+type LambdaConfig struct {
+	Region           string
+	Type             string
+	Image            string
+	ImageFamily      string
+	FirewallRuleset  string
+	SSHCIDRs         []string
+	FilesystemNames  []string
+	FilesystemMounts []LambdaFilesystemMount
+}
+
+type LambdaFilesystemMount struct {
+	Name      string `yaml:"name,omitempty" json:"name,omitempty"`
+	MountPath string `yaml:"mountPath,omitempty" json:"mountPath,omitempty"`
 }
 
 // NebiusConfig is intentionally non-secret. Authentication stays in the
@@ -1532,6 +1552,49 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "lambda" {
+		if cfg.Lambda.Region == "" {
+			cfg.Lambda.Region = "us-west-1"
+		}
+		if cfg.Lambda.Type == "" {
+			cfg.Lambda.Type = "gpu_1x_a10"
+		}
+		if cfg.osImageExplicit && !cfg.lambdaImageExplicit && !cfg.lambdaImageFamilyExplicit {
+			if cfg.OSImage == "ubuntu:24.04" {
+				cfg.Lambda.ImageFamily = "lambda-stack-24-04"
+			} else {
+				cfg.Lambda.ImageFamily = ""
+			}
+		} else if cfg.Lambda.Image == "" && cfg.Lambda.ImageFamily == "" {
+			cfg.Lambda.ImageFamily = "lambda-stack-24-04"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = "ubuntu"
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "nebius" {
 		if cfg.Nebius.CLI == "" {
 			cfg.Nebius.CLI = "nebius"
@@ -2247,6 +2310,11 @@ func baseConfig() Config {
 			Image:  linodeImage,
 			Type:   "g6-standard-1",
 		},
+		Lambda: LambdaConfig{
+			Region:      "us-west-1",
+			Type:        "gpu_1x_a10",
+			ImageFamily: "lambda-stack-24-04",
+		},
 		OVH: OVHConfig{
 			Endpoint: "https://api.us.ovhcloud.com/1.0",
 			Image:    "Ubuntu 24.04",
@@ -2638,6 +2706,7 @@ type fileConfig struct {
 	DigitalOcean             *fileDigitalOceanConfig             `yaml:"digitalocean,omitempty"`
 	Vultr                    *fileVultrConfig                    `yaml:"vultr,omitempty"`
 	Linode                   *fileLinodeConfig                   `yaml:"linode,omitempty"`
+	Lambda                   *fileLambdaConfig                   `yaml:"lambda,omitempty"`
 	Nebius                   *fileNebiusConfig                   `yaml:"nebius,omitempty"`
 	OVH                      *fileOVHConfig                      `yaml:"ovh,omitempty"`
 	Scaleway                 *fileScalewayConfig                 `yaml:"scaleway,omitempty"`
@@ -2765,6 +2834,17 @@ type fileLinodeConfig struct {
 	Type       string   `yaml:"type,omitempty"`
 	FirewallID string   `yaml:"firewall,omitempty"`
 	SSHCIDRs   []string `yaml:"sshCIDRs,omitempty"`
+}
+
+type fileLambdaConfig struct {
+	Region           string                  `yaml:"region,omitempty"`
+	Type             string                  `yaml:"type,omitempty"`
+	Image            string                  `yaml:"image,omitempty"`
+	ImageFamily      string                  `yaml:"imageFamily,omitempty"`
+	FirewallRuleset  string                  `yaml:"firewallRuleset,omitempty"`
+	SSHCIDRs         []string                `yaml:"sshCIDRs,omitempty"`
+	FilesystemNames  []string                `yaml:"filesystemNames,omitempty"`
+	FilesystemMounts []LambdaFilesystemMount `yaml:"filesystemMounts,omitempty"`
 }
 
 type fileNebiusConfig struct {
@@ -4152,6 +4232,42 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if len(file.Linode.SSHCIDRs) > 0 {
 			cfg.Linode.SSHCIDRs = file.Linode.SSHCIDRs
+		}
+	}
+	if file.Lambda != nil {
+		lambdaImageSet := false
+		lambdaImageFamilySet := false
+		if file.Lambda.Region != "" {
+			cfg.Lambda.Region = file.Lambda.Region
+		}
+		if file.Lambda.Type != "" {
+			cfg.Lambda.Type = file.Lambda.Type
+			cfg.lambdaTypeExplicit = true
+		}
+		if file.Lambda.Image != "" {
+			cfg.Lambda.Image = file.Lambda.Image
+			cfg.lambdaImageExplicit = true
+			lambdaImageSet = true
+		}
+		if file.Lambda.ImageFamily != "" {
+			cfg.Lambda.ImageFamily = file.Lambda.ImageFamily
+			cfg.lambdaImageFamilyExplicit = true
+			lambdaImageFamilySet = true
+		}
+		if lambdaImageSet && !lambdaImageFamilySet {
+			cfg.Lambda.ImageFamily = ""
+		}
+		if file.Lambda.FirewallRuleset != "" {
+			cfg.Lambda.FirewallRuleset = file.Lambda.FirewallRuleset
+		}
+		if len(file.Lambda.SSHCIDRs) > 0 {
+			cfg.Lambda.SSHCIDRs = file.Lambda.SSHCIDRs
+		}
+		if len(file.Lambda.FilesystemNames) > 0 {
+			cfg.Lambda.FilesystemNames = file.Lambda.FilesystemNames
+		}
+		if len(file.Lambda.FilesystemMounts) > 0 {
+			cfg.Lambda.FilesystemMounts = file.Lambda.FilesystemMounts
 		}
 	}
 	if file.Nebius != nil {
@@ -6529,6 +6645,30 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); cidrs != "" {
 		cfg.Linode.SSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.Lambda.Region = getenv("CRABBOX_LAMBDA_REGION", cfg.Lambda.Region)
+	if lambdaType := os.Getenv("CRABBOX_LAMBDA_TYPE"); lambdaType != "" {
+		cfg.Lambda.Type = lambdaType
+		cfg.lambdaTypeExplicit = true
+	}
+	if image := os.Getenv("CRABBOX_LAMBDA_IMAGE"); image != "" {
+		cfg.Lambda.Image = image
+		cfg.lambdaImageExplicit = true
+		cfg.Lambda.ImageFamily = ""
+	}
+	if imageFamily := os.Getenv("CRABBOX_LAMBDA_IMAGE_FAMILY"); imageFamily != "" {
+		cfg.Lambda.ImageFamily = imageFamily
+		cfg.lambdaImageFamilyExplicit = true
+	}
+	cfg.Lambda.FirewallRuleset = getenv("CRABBOX_LAMBDA_FIREWALL_RULESET", cfg.Lambda.FirewallRuleset)
+	if cidrs := os.Getenv("CRABBOX_LAMBDA_SSH_CIDRS"); cidrs != "" {
+		cfg.Lambda.SSHCIDRs = splitCommaList(cidrs)
+	}
+	if names := os.Getenv("CRABBOX_LAMBDA_FILESYSTEM_NAMES"); names != "" {
+		cfg.Lambda.FilesystemNames = splitCommaList(names)
+	}
+	if mounts := os.Getenv("CRABBOX_LAMBDA_FILESYSTEM_MOUNTS"); mounts != "" {
+		cfg.Lambda.FilesystemMounts = parseLambdaFilesystemMounts(mounts)
+	}
 	cfg.Nebius.CLI = getenv("CRABBOX_NEBIUS_CLI", cfg.Nebius.CLI)
 	cfg.Nebius.Profile = getenv("CRABBOX_NEBIUS_PROFILE", cfg.Nebius.Profile)
 	cfg.Nebius.ParentID = getenv("CRABBOX_NEBIUS_PARENT_ID", cfg.Nebius.ParentID)
@@ -8095,6 +8235,20 @@ func getenvList(name string) ([]string, bool) {
 func splitCommaList(value string) []string {
 	parts := strings.Split(value, ",")
 	return normalizeList(parts)
+}
+
+func parseLambdaFilesystemMounts(value string) []LambdaFilesystemMount {
+	parts := splitCommaList(value)
+	out := make([]LambdaFilesystemMount, 0, len(parts))
+	for _, part := range parts {
+		name, mountPath, ok := strings.Cut(part, ":")
+		if !ok {
+			out = append(out, LambdaFilesystemMount{Name: strings.TrimSpace(part)})
+			continue
+		}
+		out = append(out, LambdaFilesystemMount{Name: strings.TrimSpace(name), MountPath: strings.TrimSpace(mountPath)})
+	}
+	return out
 }
 
 func normalizeList(values []string) []string {

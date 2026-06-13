@@ -74,6 +74,15 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_LINODE_TYPE",
 		"CRABBOX_LINODE_FIREWALL",
 		"CRABBOX_LINODE_SSH_CIDRS",
+		"CRABBOX_LAMBDA_REGION",
+		"CRABBOX_LAMBDA_TYPE",
+		"CRABBOX_LAMBDA_IMAGE",
+		"CRABBOX_LAMBDA_IMAGE_FAMILY",
+		"CRABBOX_LAMBDA_FIREWALL_RULESET",
+		"CRABBOX_LAMBDA_SSH_CIDRS",
+		"CRABBOX_LAMBDA_FILESYSTEM_NAMES",
+		"CRABBOX_LAMBDA_FILESYSTEM_MOUNTS",
+		"LAMBDA_API_KEY",
 		"CRABBOX_NEBIUS_CLI",
 		"CRABBOX_NEBIUS_PROFILE",
 		"CRABBOX_NEBIUS_PARENT_ID",
@@ -1837,6 +1846,63 @@ func TestLinodeConfigFileAndEnv(t *testing.T) {
 		t.Fatalf("linode defaults leaked into generic fields: cfg=%#v", cfg)
 	}
 	if got := serverTypeForConfig(cfg); got != "g6-nanode-1" {
+		t.Fatalf("serverTypeForConfig=%q", got)
+	}
+}
+
+func TestLambdaProviderConfigDefaultsAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "lambda"
+	if err := applyFileConfig(&cfg, fileConfig{Lambda: &fileLambdaConfig{
+		Region:          "us-east-1",
+		Type:            "gpu_1x_h100_sxm5",
+		ImageFamily:     "lambda-stack-24-04",
+		FirewallRuleset: "crabbox",
+		SSHCIDRs:        []string{"203.0.113.0/24"},
+		FilesystemNames: []string{"cache"},
+		FilesystemMounts: []LambdaFilesystemMount{{
+			Name:      "dataset",
+			MountPath: "/mnt/dataset",
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lambda.Region != "us-east-1" || cfg.Location == "us-east-1" || cfg.Lambda.Type != "gpu_1x_h100_sxm5" || cfg.Lambda.ImageFamily != "lambda-stack-24-04" || cfg.Lambda.FirewallRuleset != "crabbox" {
+		t.Fatalf("file lambda config not applied: cfg=%#v lambda=%#v", cfg, cfg.Lambda)
+	}
+	if strings.Join(cfg.Lambda.SSHCIDRs, ",") != "203.0.113.0/24" || strings.Join(cfg.Lambda.FilesystemNames, ",") != "cache" || len(cfg.Lambda.FilesystemMounts) != 1 {
+		t.Fatalf("file lambda lists not applied: %#v", cfg.Lambda)
+	}
+
+	t.Setenv("CRABBOX_LAMBDA_REGION", "us-south-1")
+	t.Setenv("CRABBOX_LAMBDA_TYPE", "gpu_1x_a10")
+	t.Setenv("CRABBOX_LAMBDA_IMAGE", "img-123")
+	t.Setenv("CRABBOX_LAMBDA_IMAGE_FAMILY", "")
+	t.Setenv("CRABBOX_LAMBDA_FIREWALL_RULESET", "agents")
+	t.Setenv("CRABBOX_LAMBDA_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	t.Setenv("CRABBOX_LAMBDA_FILESYSTEM_NAMES", "cache,models")
+	t.Setenv("CRABBOX_LAMBDA_FILESYSTEM_MOUNTS", "cache:/mnt/cache,models:/mnt/models")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Lambda.Region != "us-south-1" || cfg.Location == "us-south-1" || cfg.Lambda.Type != "gpu_1x_a10" || cfg.Lambda.Image != "img-123" || cfg.Lambda.ImageFamily != "" || cfg.Image == "img-123" || cfg.Lambda.FirewallRuleset != "agents" {
+		t.Fatalf("env lambda config not applied: cfg=%#v lambda=%#v", cfg, cfg.Lambda)
+	}
+	if strings.Join(cfg.Lambda.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" || strings.Join(cfg.Lambda.FilesystemNames, ",") != "cache,models" || len(cfg.Lambda.FilesystemMounts) != 2 {
+		t.Fatalf("env lambda lists not applied: %#v", cfg.Lambda)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	base := baseConfig()
+	if cfg.Location != base.Location || cfg.Image != base.Image {
+		t.Fatalf("lambda defaults leaked into generic fields: cfg=%#v", cfg)
+	}
+	if cfg.SSHUser != "ubuntu" || cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("lambda ssh defaults not applied: user=%q port=%q fallback=%v", cfg.SSHUser, cfg.SSHPort, cfg.SSHFallbackPorts)
+	}
+	if got := serverTypeForConfig(cfg); got != "gpu_1x_a10" {
 		t.Fatalf("serverTypeForConfig=%q", got)
 	}
 }

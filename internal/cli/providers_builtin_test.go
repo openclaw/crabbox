@@ -15,6 +15,7 @@ func init() {
 	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testVultrProvider{})
 	RegisterProvider(testLinodeProvider{})
+	RegisterProvider(testLambdaProvider{})
 	RegisterProvider(testNebiusProvider{})
 	RegisterProvider(testScalewayProvider{})
 	RegisterProvider(testAWSProvider{})
@@ -407,6 +408,38 @@ func (testLinodeProvider) ServerTypeForConfig(cfg Config) string {
 }
 func (testLinodeProvider) ServerTypeForClass(string) string { return "g6-standard-1" }
 func (p testLinodeProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testLambdaProvider struct{}
+
+func (testLambdaProvider) Name() string      { return "lambda" }
+func (testLambdaProvider) Aliases() []string { return nil }
+func (testLambdaProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "lambda",
+		Family:      "lambda",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testLambdaProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testLambdaProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testLambdaProvider) ServerTypeForConfig(cfg Config) string {
+	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
+		return cfg.ServerType
+	}
+	if cfg.Lambda.Type != "" {
+		return cfg.Lambda.Type
+	}
+	return "gpu_1x_a10"
+}
+func (testLambdaProvider) ServerTypeForClass(string) string { return "gpu_1x_a10" }
+func (p testLambdaProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

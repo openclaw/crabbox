@@ -77,6 +77,28 @@ func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestLambdaRegistersAsBuiltInProvider(t *testing.T) {
+	provider, err := core.ProviderFor("lambda")
+	if err != nil {
+		t.Fatalf("ProviderFor(lambda): %v", err)
+	}
+	if provider.Name() != "lambda" {
+		t.Fatalf("ProviderFor(lambda).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever || len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("lambda spec=%#v", spec)
+	}
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("lambda features=%v missing %s", spec.Features, feature)
+		}
+	}
+	if _, ok := provider.(core.DoctorProvider); !ok {
+		t.Fatal("lambda does not expose doctor")
+	}
+}
+
 func TestNebiusRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("nebius")
 	if err != nil {
