@@ -192,7 +192,7 @@ func TestWarmupCreatesClaimAndOwnershipMetadataWithoutToken(t *testing.T) {
 	if len(fake.created) != 1 || fake.created[0].Metadata[metadataProviderKey] != providerName || fake.created[0].Metadata[metadataScopeKey] == "" {
 		t.Fatalf("create metadata=%#v", fake.created)
 	}
-	if !strings.HasPrefix(fake.created[0].Name, "crabbox-my-app-") || fake.created[0].FromTemplate != backend.cfg.Superserve.Template || fake.created[0].TimeoutSeconds != backend.cfg.Superserve.TimeoutSecs {
+	if !strings.HasPrefix(fake.created[0].Name, "crabbox-my-app-") || fake.created[0].FromTemplate != backend.cfg.Superserve.Template || fake.created[0].TimeoutSeconds != backend.sandboxTimeoutSecs() {
 		t.Fatalf("create request did not use Superserve API fields: %#v", fake.created[0])
 	}
 	if len(fake.updates) != 1 || fake.updates[0][metadataClaimKey] != leaseID || fake.updates[0][metadataSlugKey] == "" {
@@ -375,10 +375,15 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 	backend.rt.Stderr = &stderr
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Name: "my-app", Root: t.TempDir()},
-		NoSync:     true,
-		Command:    []string{"go", "test", "./..."},
-		Env:        map[string]string{"SUPERSERVE_API_KEY": "ss_test_not_real", "CI": "1"},
+		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:  true,
+		Command: []string{"go", "test", "./..."},
+		Env: map[string]string{
+			"CRABBOX_SUPERSERVE_API_KEY": "crabbox_ss_test_not_real",
+			"SUPERSERVE_API_KEY":         "ss_test_not_real",
+			"PROJECT_TOKEN":              "project_test_not_real",
+			"CI":                         "1",
+		},
 		EnvSummary: true,
 	})
 	if err != nil {
@@ -390,8 +395,11 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 	if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "warn\n") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
-	if strings.Contains(stderr.String(), "ss_test_not_real") {
+	if strings.Contains(stderr.String(), "ss_test_not_real") || strings.Contains(stderr.String(), "project_test_not_real") {
 		t.Fatalf("env summary leaked value: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "CRABBOX_SUPERSERVE_API_KEY,SUPERSERVE_API_KEY") {
+		t.Fatalf("stderr=%q, want stripped provider auth warning", stderr.String())
 	}
 	if len(fake.execs) != 2 {
 		t.Fatalf("execs=%#v", fake.execs)
@@ -400,8 +408,14 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 	if commandReq.Command != "'go' 'test' './...'" || commandReq.WorkingDir != defaultWorkdir || commandReq.TimeoutSecs != backend.cfg.Superserve.ExecTimeoutSecs {
 		t.Fatalf("command req=%#v", commandReq)
 	}
-	if commandReq.Env["SUPERSERVE_API_KEY"] != "ss_test_not_real" {
-		t.Fatalf("env not forwarded in body: %#v", commandReq.Env)
+	if commandReq.Env["PROJECT_TOKEN"] != "project_test_not_real" || commandReq.Env["CI"] != "1" {
+		t.Fatalf("safe env not forwarded in body: %#v", commandReq.Env)
+	}
+	if _, ok := commandReq.Env["SUPERSERVE_API_KEY"]; ok {
+		t.Fatalf("provider auth forwarded in body: %#v", commandReq.Env)
+	}
+	if _, ok := commandReq.Env["CRABBOX_SUPERSERVE_API_KEY"]; ok {
+		t.Fatalf("provider auth forwarded in body: %#v", commandReq.Env)
 	}
 	if strings.Contains(commandReq.Command, "ss_test_not_real") {
 		t.Fatalf("secret env value appeared in command argv: %q", commandReq.Command)
@@ -465,6 +479,26 @@ func TestRunPropagatesOneShotDeleteFailureAndPreservesClaim(t *testing.T) {
 	leaseID := leasePrefix + fake.sandbox.ID
 	if claim, claimErr := readLeaseClaim(leaseID); claimErr != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim should remain for cleanup retry: %#v err=%v", claim, claimErr)
+	}
+}
+
+func TestRunPreservesCommandExitCodeWhenDeleteFails(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	fake.execResults = []execResult{{}, {ExitCode: 23}}
+	fake.deleteErr = errors.New("delete denied")
+	backend := newSuperserveTestBackend(t, fake)
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:  true,
+		Command: []string{"false"},
+	})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 23 {
+		t.Fatalf("Run err=%T %[1]v, want wrapped ExitError 23", err)
+	}
+	if !strings.Contains(err.Error(), "delete denied") || result.ExitCode != 23 {
+		t.Fatalf("Run result=%#v err=%v, want exit 23 and cleanup failure", result, err)
 	}
 }
 

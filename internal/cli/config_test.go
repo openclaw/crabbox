@@ -2363,7 +2363,7 @@ superserve:
     - ""
     - pkg.example.test
   networkDenyOut:
-    - metadata.google.internal
+    - 169.254.169.254/32
   forgetMissing: true
 cloudflare:
   apiUrl: https://cloudflare.example.test
@@ -2555,7 +2555,7 @@ ssh:
 	if cfg.Superserve.BaseURL != "https://superserve-file-ignored.example.test" || cfg.Superserve.Template != "superserve/custom" || cfg.Superserve.Snapshot != "snap-file" || cfg.Superserve.Workdir != "/workspace/ss-test" || cfg.Superserve.TimeoutSecs != 777 || cfg.Superserve.ExecTimeoutSecs != 888 || !cfg.Superserve.ForgetMissing {
 		t.Fatalf("superserve config not loaded safely: %#v", cfg.Superserve)
 	}
-	if len(cfg.Superserve.NetworkAllowOut) != 2 || cfg.Superserve.NetworkAllowOut[0] != "api.example.test" || cfg.Superserve.NetworkAllowOut[1] != "pkg.example.test" || len(cfg.Superserve.NetworkDenyOut) != 1 || cfg.Superserve.NetworkDenyOut[0] != "metadata.google.internal" {
+	if len(cfg.Superserve.NetworkAllowOut) != 2 || cfg.Superserve.NetworkAllowOut[0] != "api.example.test" || cfg.Superserve.NetworkAllowOut[1] != "pkg.example.test" || len(cfg.Superserve.NetworkDenyOut) != 1 || cfg.Superserve.NetworkDenyOut[0] != "169.254.169.254/32" {
 		t.Fatalf("superserve network config not normalized: %#v", cfg.Superserve)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
@@ -2937,7 +2937,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_SUPERSERVE_TIMEOUT_SECS", "321")
 	t.Setenv("CRABBOX_SUPERSERVE_EXEC_TIMEOUT_SECS", "654")
 	t.Setenv("CRABBOX_SUPERSERVE_NETWORK_ALLOW_OUT", "api.env.example, ,pkg.env.example")
-	t.Setenv("CRABBOX_SUPERSERVE_NETWORK_DENY_OUT", "metadata.env.example")
+	t.Setenv("CRABBOX_SUPERSERVE_NETWORK_DENY_OUT", "169.254.169.254/32")
 	t.Setenv("CRABBOX_SUPERSERVE_FORGET_MISSING", "true")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
@@ -3118,7 +3118,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Superserve.BaseURL != "https://superserve-env.example" || cfg.Superserve.Template != "superserve/env-template" || cfg.Superserve.Snapshot != "snap-env" || cfg.Superserve.Workdir != "/workspace/ss-env" || cfg.Superserve.TimeoutSecs != 321 || cfg.Superserve.ExecTimeoutSecs != 654 || !cfg.Superserve.ForgetMissing {
 		t.Fatalf("unexpected superserve env: %#v", cfg.Superserve)
 	}
-	if len(cfg.Superserve.NetworkAllowOut) != 2 || cfg.Superserve.NetworkAllowOut[0] != "api.env.example" || cfg.Superserve.NetworkAllowOut[1] != "pkg.env.example" || len(cfg.Superserve.NetworkDenyOut) != 1 || cfg.Superserve.NetworkDenyOut[0] != "metadata.env.example" {
+	if len(cfg.Superserve.NetworkAllowOut) != 2 || cfg.Superserve.NetworkAllowOut[0] != "api.env.example" || cfg.Superserve.NetworkAllowOut[1] != "pkg.env.example" || len(cfg.Superserve.NetworkDenyOut) != 1 || cfg.Superserve.NetworkDenyOut[0] != "169.254.169.254/32" {
 		t.Fatalf("unexpected superserve env network lists: %#v", cfg.Superserve)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {

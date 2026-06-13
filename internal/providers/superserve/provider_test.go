@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -65,7 +66,7 @@ func TestApplyFlagsUpdatesSuperserveConfig(t *testing.T) {
 		"--superserve-timeout-secs", "300",
 		"--superserve-exec-timeout-secs", "120",
 		"--superserve-network-allow-out", "api.example.test, pkg.example.test",
-		"--superserve-network-deny-out", "metadata.example.test",
+		"--superserve-network-deny-out", "169.254.169.254/32",
 		"--superserve-forget-missing",
 	}); err != nil {
 		t.Fatal(err)
@@ -145,6 +146,7 @@ func TestValidateSuperserveConfigRejectsBadValues(t *testing.T) {
 		{name: "system workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "/etc" }, wantErr: "too broad"},
 		{name: "negative timeout", mutate: func(cfg *Config) { cfg.Superserve.TimeoutSecs = -1 }, wantErr: "timeoutSecs must be non-negative"},
 		{name: "negative exec timeout", mutate: func(cfg *Config) { cfg.Superserve.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
+		{name: "deny hostname", mutate: func(cfg *Config) { cfg.Superserve.NetworkDenyOut = []string{"metadata.example.test"} }, wantErr: "must be a CIDR"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -164,6 +166,24 @@ func TestSuperserveExecTimeoutPreservesExplicitZero(t *testing.T) {
 	backend := NewSuperserveBackend((Provider{}).Spec(), cfg, Runtime{}).(*backend)
 	if got := backend.execTimeoutSecs(); got != 0 {
 		t.Fatalf("exec timeout=%d, want service default marker 0", got)
+	}
+}
+
+func TestSuperserveSandboxTimeoutUsesConfiguredValueOrTTL(t *testing.T) {
+	cfg := testConfig()
+	cfg.TTL = 2*time.Minute + time.Millisecond
+	backend := NewSuperserveBackend((Provider{}).Spec(), cfg, Runtime{}).(*backend)
+	if got := backend.sandboxTimeoutSecs(); got != 121 {
+		t.Fatalf("sandbox timeout=%d, want rounded TTL 121", got)
+	}
+	backend.cfg.Superserve.TimeoutSecs = 300
+	if got := backend.sandboxTimeoutSecs(); got != 300 {
+		t.Fatalf("sandbox timeout=%d, want explicit 300", got)
+	}
+	backend.cfg.Superserve.TimeoutSecs = 0
+	backend.cfg.TTL = 0
+	if got := backend.sandboxTimeoutSecs(); got != 5400 {
+		t.Fatalf("sandbox timeout=%d, want safe fallback 5400", got)
 	}
 }
 

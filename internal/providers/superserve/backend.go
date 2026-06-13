@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -242,14 +243,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return RunResult{}, err
 	}
 	commandText := commandScript(command)
+	commandEnv, strippedAuthEnv := superserveCommandEnv(req.Env)
+	if len(strippedAuthEnv) > 0 {
+		fmt.Fprintf(b.rt.Stderr, "warning: provider=superserve did not forward provider authentication variables: %s\n", strings.Join(strippedAuthEnv, ","))
+	}
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, commandEnv)
 	}
 	commandStart := b.now()
 	execRes, runErr := api.Exec(ctx, &access, execRequest{
 		Command:     commandText,
 		WorkingDir:  workdir,
-		Env:         req.Env,
+		Env:         commandEnv,
 		TimeoutSecs: b.execTimeoutSecs(),
 	}, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
@@ -292,7 +297,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if result.ExitCode == 0 {
 			result.ExitCode = 1
 		}
-		commandErr = errorsJoin(commandErr, cleanupErr)
+		commandErr = errors.Join(commandErr, cleanupErr)
 	}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
@@ -578,7 +583,7 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 		Name:           newSandboxName(repo),
 		FromTemplate:   fromTemplate,
 		FromSnapshot:   fromSnapshot,
-		TimeoutSeconds: b.cfg.Superserve.TimeoutSecs,
+		TimeoutSeconds: b.sandboxTimeoutSecs(),
 		Metadata:       initialMetadata,
 		Network:        superserveNetworkConfig(b.cfg),
 	})
@@ -884,6 +889,35 @@ func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.
 
 func (b *backend) execTimeoutSecs() int {
 	return b.cfg.Superserve.ExecTimeoutSecs
+}
+
+func (b *backend) sandboxTimeoutSecs() int {
+	if b.cfg.Superserve.TimeoutSecs > 0 {
+		return b.cfg.Superserve.TimeoutSecs
+	}
+	lifetime := b.cfg.TTL
+	if lifetime <= 0 {
+		lifetime = 90 * time.Minute
+	}
+	return int((lifetime + time.Second - 1) / time.Second)
+}
+
+func superserveCommandEnv(env map[string]string) (map[string]string, []string) {
+	if len(env) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(env))
+	var stripped []string
+	for name, value := range env {
+		switch name {
+		case "CRABBOX_SUPERSERVE_API_KEY", "SUPERSERVE_API_KEY":
+			stripped = append(stripped, name)
+		default:
+			out[name] = value
+		}
+	}
+	slices.Sort(stripped)
+	return out, stripped
 }
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {

@@ -26,7 +26,7 @@ func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		Template:        fs.String("superserve-template", defaults.Superserve.Template, "Superserve sandbox template"),
 		Snapshot:        fs.String("superserve-snapshot", defaults.Superserve.Snapshot, "Superserve snapshot ID or name"),
 		Workdir:         fs.String("superserve-workdir", defaults.Superserve.Workdir, "Absolute working directory inside the sandbox"),
-		TimeoutSecs:     fs.Int("superserve-timeout-secs", defaults.Superserve.TimeoutSecs, "Superserve sandbox lifetime cap in seconds (0 = service default)"),
+		TimeoutSecs:     fs.Int("superserve-timeout-secs", defaults.Superserve.TimeoutSecs, "Superserve sandbox lifetime cap in seconds (0 = Crabbox TTL)"),
 		ExecTimeoutSecs: fs.Int("superserve-exec-timeout-secs", defaults.Superserve.ExecTimeoutSecs, "Superserve command timeout in seconds (0 = service default)"),
 		NetworkAllowOut: fs.String("superserve-network-allow-out", strings.Join(defaults.Superserve.NetworkAllowOut, ","), "comma-separated outbound network allow list"),
 		NetworkDenyOut:  fs.String("superserve-network-deny-out", strings.Join(defaults.Superserve.NetworkDenyOut, ","), "comma-separated outbound network deny list"),
@@ -89,6 +89,11 @@ func validateSuperserveConfig(cfg Config) error {
 	}
 	if cfg.Superserve.ExecTimeoutSecs < 0 {
 		return exit(2, "superserve execTimeoutSecs must be non-negative")
+	}
+	for _, deny := range cfg.Superserve.NetworkDenyOut {
+		if _, _, err := net.ParseCIDR(deny); err != nil {
+			return exit(2, "superserve networkDenyOut entry %q must be a CIDR", deny)
+		}
 	}
 	return nil
 }

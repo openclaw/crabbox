@@ -79,11 +79,12 @@ target: linux
 superserve:
   template: superserve/base
   workdir: /workspace/crabbox
+  timeoutSecs: 5400              # 0 derives the sandbox lifetime from Crabbox TTL
   execTimeoutSecs: 600
   networkAllowOut:
     - api.example.com
   networkDenyOut:
-    - metadata.google.internal
+    - 169.254.169.254/32
 ```
 
 Trusted user config may also set `superserve.baseUrl`. Repository config cannot
