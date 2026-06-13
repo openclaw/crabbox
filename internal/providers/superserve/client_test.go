@@ -55,8 +55,29 @@ func TestSuperserveClientCreateListActivateAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.CreateSandbox(context.Background(), createSandboxRequest{Template: "superserve/base"}); err != nil {
+	if _, err := client.CreateSandbox(context.Background(), createSandboxRequest{
+		Name:           "crabbox-my-app",
+		FromTemplate:   "superserve/base",
+		FromSnapshot:   "snap_123",
+		TimeoutSeconds: 300,
+		Metadata:       map[string]string{metadataProviderKey: providerName},
+		Network:        &createSandboxNetworkCfg{AllowOut: []string{"api.example.test"}, DenyOut: []string{"metadata.example.test"}},
+	}); err != nil {
 		t.Fatalf("CreateSandbox err=%v", err)
+	}
+	var createBody map[string]any
+	if err := json.Unmarshal([]byte(requests[0].body), &createBody); err != nil {
+		t.Fatalf("create body json=%q err=%v", requests[0].body, err)
+	}
+	if createBody["name"] != "crabbox-my-app" || createBody["from_template"] != "superserve/base" || createBody["from_snapshot"] != "snap_123" || createBody["timeout_seconds"].(float64) != 300 {
+		t.Fatalf("create body used wrong API fields: %#v", createBody)
+	}
+	network, ok := createBody["network"].(map[string]any)
+	if !ok || len(network["allow_out"].([]any)) != 1 || len(network["deny_out"].([]any)) != 1 {
+		t.Fatalf("create network body=%#v", createBody["network"])
+	}
+	if _, ok := createBody["template"]; ok {
+		t.Fatalf("create body sent legacy template field: %#v", createBody)
 	}
 	if _, err := client.ListSandboxes(context.Background(), map[string]string{metadataProviderKey: providerName, metadataEndpointKey: "endpoint"}); err != nil {
 		t.Fatalf("ListSandboxes err=%v", err)
@@ -144,6 +165,32 @@ func TestSuperserveClientUpdateDoesNotFabricateMissingMetadata(t *testing.T) {
 	}
 	if sb.Metadata != nil {
 		t.Fatalf("metadata was fabricated from request: %#v", sb.Metadata)
+	}
+}
+
+func TestSuperserveClientUpdateFetchesSandboxAfterEmptyPatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/sandboxes/sb_123":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/sb_123":
+			writeTestJSON(w, map[string]any{"id": "sb_123", "metadata": map[string]string{metadataClaimKey: leasePrefix + "sb_123"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := client.UpdateSandboxMetadata(context.Background(), "sb_123", map[string]string{metadataClaimKey: leasePrefix + "sb_123"})
+	if err != nil {
+		t.Fatalf("UpdateSandboxMetadata err=%v", err)
+	}
+	if sb.Metadata[metadataClaimKey] != leasePrefix+"sb_123" {
+		t.Fatalf("metadata was not fetched after empty patch: %#v", sb.Metadata)
 	}
 }
 
