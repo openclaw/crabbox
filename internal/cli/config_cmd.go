@@ -232,6 +232,18 @@ func configShowView(cfg Config) map[string]any {
 			"cliPath": cfg.AsciiBox.CLIPath,
 			"workdir": cfg.AsciiBox.Workdir,
 		},
+		"superserve": map[string]any{
+			"baseUrl":         redactedConfigURL(cfg.Superserve.BaseURL),
+			"auth":            superserveAuthState(),
+			"template":        cfg.Superserve.Template,
+			"snapshot":        cfg.Superserve.Snapshot,
+			"workdir":         cfg.Superserve.Workdir,
+			"timeoutSecs":     cfg.Superserve.TimeoutSecs,
+			"execTimeoutSecs": cfg.Superserve.ExecTimeoutSecs,
+			"networkAllowOut": cfg.Superserve.NetworkAllowOut,
+			"networkDenyOut":  cfg.Superserve.NetworkDenyOut,
+			"forgetMissing":   cfg.Superserve.ForgetMissing,
+		},
 		"appleContainer": map[string]any{
 			"cliPath":  cfg.AppleContainer.CLIPath,
 			"image":    cfg.AppleContainer.Image,
@@ -397,6 +409,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "smolvm base_url=%s image=%s workdir=%s cpus=%d memory_mb=%d network=%s keep=%t auth=%s\n", cfg.Smolvm.BaseURL, cfg.Smolvm.Image, cfg.Smolvm.Workdir, cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB, cfg.Smolvm.Network, cfg.Smolvm.Keep, tokenState(cfg.Smolvm.APIKey))
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
+	fmt.Fprintf(w, "superserve base_url=%s template=%s snapshot=%s workdir=%s timeout_secs=%d exec_timeout_secs=%d network_allow_out=%s network_deny_out=%s forget_missing=%t auth=%s\n", redactedConfigURL(cfg.Superserve.BaseURL), blank(cfg.Superserve.Template, "-"), blank(cfg.Superserve.Snapshot, "-"), cfg.Superserve.Workdir, cfg.Superserve.TimeoutSecs, cfg.Superserve.ExecTimeoutSecs, blank(strings.Join(cfg.Superserve.NetworkAllowOut, ","), "-"), blank(strings.Join(cfg.Superserve.NetworkDenyOut, ","), "-"), cfg.Superserve.ForgetMissing, superserveAuthState())
 	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
 	fmt.Fprintf(w, "mxc cli=%s version=%s containment=%s network=%s readonly_paths=%d readwrite_paths=%d allowed_hosts=%d blocked_hosts=%d allow_dacl_mutation=%t allow_windows_ui=%t experimental=%t\n", cfg.MXC.CLIPath, cfg.MXC.Version, cfg.MXC.Containment, cfg.MXC.Network, len(cfg.MXC.ReadOnlyPaths), len(cfg.MXC.ReadWritePaths), len(cfg.MXC.AllowedHosts), len(cfg.MXC.BlockedHosts), cfg.MXC.AllowDACLMutation, cfg.MXC.AllowWindowsUI, cfg.MXC.Experimental)
 	fmt.Fprintf(w, "docker_sandbox cli=%s agent=%s template=%s cpus=%g memory=%s clone=%t workdir=%s extra_workspaces=%s mcp=%s kit=%s\n", cfg.DockerSandbox.CLIPath, cfg.DockerSandbox.Agent, blank(cfg.DockerSandbox.Template, "-"), cfg.DockerSandbox.CPUs, blank(cfg.DockerSandbox.Memory, "-"), cfg.DockerSandbox.Clone, blank(cfg.DockerSandbox.Workdir, "-"), blank(strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ","), "-"), blank(strings.Join(cfg.DockerSandbox.MCP, ","), "-"), blank(strings.Join(cfg.DockerSandbox.Kit, ","), "-"))
@@ -663,6 +676,10 @@ func tokenState(token string) string {
 		return "missing"
 	}
 	return "configured"
+}
+
+func superserveAuthState() string {
+	return tokenState(firstNonBlank(os.Getenv("CRABBOX_SUPERSERVE_API_KEY"), os.Getenv("SUPERSERVE_API_KEY")))
 }
 
 func coordinatorTokenState(cfg Config) string {

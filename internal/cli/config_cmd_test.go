@@ -310,6 +310,54 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "superserve-secret-token")
+	if err := os.WriteFile(configPath, []byte("superserve:\n  baseUrl: https://user:base-url-secret@superserve.example.test\n  template: superserve/custom\n  workdir: /workspace/test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "superserve base_url=https://<redacted>@superserve.example.test template=superserve/custom snapshot=- workdir=/workspace/test") || !strings.Contains(text, "auth=configured") {
+		t.Fatalf("config show missing superserve summary: %q", text)
+	}
+	if strings.Contains(text, "superserve-secret-token") || strings.Contains(text, "base-url-secret") {
+		t.Fatalf("config show leaked Superserve credential: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Superserve struct {
+			BaseURL  string `json:"baseUrl"`
+			Auth     string `json:"auth"`
+			Template string `json:"template"`
+			Workdir  string `json:"workdir"`
+		} `json:"superserve"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Superserve.BaseURL != "https://<redacted>@superserve.example.test" || got.Superserve.Template != "superserve/custom" || got.Superserve.Workdir != "/workspace/test" || got.Superserve.Auth != "configured" {
+		t.Fatalf("unexpected superserve json: %#v", got.Superserve)
+	}
+	if strings.Contains(stdout.String(), "superserve-secret-token") || strings.Contains(stdout.String(), "base-url-secret") {
+		t.Fatalf("config show json leaked Superserve credential: %q", stdout.String())
+	}
+}
+
 func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

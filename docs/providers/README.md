@@ -111,6 +111,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
 | [Anthropic Sandbox Runtime](anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux |
 | [SmolVM](smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`) | Linux |
+| [Superserve](superserve.md) — `superserve` | Linux |
 | [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
 | [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
 | [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |
@@ -133,6 +134,9 @@ reports.
 - OpenSandbox is a delegated-run provider using the OpenSandbox Go SDK for
   lifecycle, file upload, and execd command execution. It has no aliases in v1,
   so `osb` remains reserved.
+- Superserve is a delegated-run provider using Superserve's control plane for
+  sandbox lifecycle and a sandbox data plane for file upload and command
+  execution. It has no aliases in v1.
 - Anthropic Sandbox Runtime is a local one-shot delegated-run provider driven
   by the standalone `srt` CLI. It has no SSH lease, no persistent lifecycle,
   and no remote sync surface.
