@@ -55,8 +55,9 @@ CLI to the runner. The broker only manages leases, cost, and observability.
 Only `aws`, `azure`, `gcp`, and `hetzner` can be brokered through the Worker,
 and even those run direct from the CLI when no broker URL is configured. Every
 other provider always runs direct. A direct-provider mode
-(`--provider hetzner|aws|azure|gcp|proxmox` with local credentials) exists for
-debugging the broker itself or using private infrastructure.
+(`--provider hetzner|aws|azure|gcp|digitalocean|linode|proxmox` with local
+credentials) exists for debugging the broker itself or using private
+infrastructure.
 
 For the full mental model, see [How Crabbox Works](docs/how-it-works.md). For
 the doc-to-code map, see [Source Map](docs/source-map.md).
@@ -79,8 +80,9 @@ Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 ## Quick start
 
 Broker access is deployment-specific. Use a coordinator URL from your team, use
-direct-provider mode for a personal cloud account, or self-host the Worker
-broker with your own provider credentials and spend caps. See
+direct-provider mode for a personal cloud account, or self-host the broker on
+Cloudflare or Node.js/PostgreSQL with your own provider credentials and spend
+caps. See
 [Getting started](docs/getting-started.md#choosing-an-access-path) and
 [Infrastructure](docs/infrastructure.md#self-hosted-broker-minimum-setup) for the
 setup paths.
@@ -125,6 +127,8 @@ configured); every other provider always runs direct from the CLI.
 | [Azure](docs/providers/azure.md) — `azure` | Linux, Windows · brokered | VMs with Tailscale support; native Windows and WSL2. |
 | [Google Cloud](docs/providers/gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered | Compute Engine VMs with Tailscale support. |
 | [Hetzner Cloud](docs/providers/hetzner.md) — `hetzner` | Linux · brokered | VMs with desktop/browser/code and Tailscale. |
+| [DigitalOcean](docs/providers/digitalocean.md) — `digitalocean` | Linux · direct | Droplets with per-lease SSH keys and Crabbox tags. |
+| [Linode](docs/providers/linode.md) — `linode` | Linux · direct | Linode instances with metadata user-data, optional existing firewall attachment, and Crabbox tags. |
 | [Hostinger](docs/providers/hostinger.md) — `hostinger` | Linux · direct | VPS leases over public SSH; explicit purchase opt-in, stop-only release. |
 | [Parallels](docs/providers/parallels.md) — `parallels` | Linux, macOS, Windows · direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
 | [Proxmox](docs/providers/proxmox.md) — `proxmox` | Linux · direct | Clone QEMU templates on a private Proxmox VE cluster. |
@@ -460,7 +464,7 @@ Worker deployment, required secrets, and DNS routing live in
 
 - **Get the model:** [How Crabbox Works](docs/how-it-works.md), [Architecture](docs/architecture.md), [Concepts](docs/concepts.md), [Orchestrator](docs/orchestrator.md)
 - **Use the CLI:** [CLI](docs/cli.md), [Commands](docs/commands/README.md), [Features](docs/features/README.md), [Configuration](docs/features/configuration.md)
-- **Choose a provider:** [Providers](docs/providers/README.md), [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [GCP](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md), [Hostinger](docs/providers/hostinger.md)
+- **Choose a provider:** [Providers](docs/providers/README.md), [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [GCP](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md), [DigitalOcean](docs/providers/digitalocean.md), [Linode](docs/providers/linode.md), [Hostinger](docs/providers/hostinger.md)
 - **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md), [Pond](docs/features/pond.md)
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)
 - **Operate it:** [Operations](docs/operations.md), [Observability](docs/observability.md), [Troubleshooting](docs/troubleshooting.md), [Performance](docs/performance.md)

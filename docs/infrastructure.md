@@ -1,8 +1,8 @@
 # Infrastructure
 
 Read this when you stand up, audit, or operate a self-hosted Crabbox broker: the
-Cloudflare Worker coordinator, its secrets, the brokered providers (Hetzner, AWS,
-Azure, GCP), and the DNS/Access front door.
+Cloudflare or Node.js/PostgreSQL coordinator, its secrets, the brokered providers
+(Hetzner, AWS, Azure, GCP), and the network front door.
 
 Crabbox runs in three modes (see [How It Works](how-it-works.md)). A *broker* is
 only required for **brokered mode**, where lease lifecycle, cost limits, cleanup,
@@ -50,6 +50,84 @@ The Worker entry, routing, and Durable Object responsibilities are documented in
 [Architecture](architecture.md). The cron trigger in `worker/wrangler.jsonc`
 (`*/15 * * * *`) wakes the Durable Object every 15 minutes so scheduled cleanup
 runs even when no leases are active.
+
+## Node.js And PostgreSQL
+
+The portable runtime runs the same `FleetCoordinator` behavior as an ordinary
+Node.js service. PostgreSQL stores the existing coordinator key/value records;
+pg-boss stores exact alarms, retries, and the 15-minute reconciliation job.
+WebSocket bridges use the same tickets and protocol as Cloudflare.
+
+Requirements:
+
+- Node.js 22.12 or newer;
+- PostgreSQL;
+- one always-on service replica initially;
+- an ingress that supports WebSocket upgrades;
+- the same auth, provider, budget, and optional artifact environment variables
+  documented below.
+
+Build and run:
+
+```sh
+npm ci --prefix worker
+npm run check:node --prefix worker
+npm run build:node --prefix worker
+
+DATABASE_URL=postgresql://crabbox:password@db.example.com/crabbox \
+CRABBOX_SHARED_TOKEN=replace-me \
+CRABBOX_SHARED_OWNER=alice@example.com \
+CRABBOX_DEFAULT_ORG=example-org \
+CRABBOX_PUBLIC_URL=https://broker.example.com \
+npm run start:node --prefix worker
+```
+
+The service creates the `crabbox` and `crabbox_jobs` schemas on startup. Health
+and readiness routes:
+
+```text
+GET /v1/health
+GET /v1/ready
+```
+
+On `SIGTERM` or `SIGINT`, the service stops accepting requests and drains active
+HTTP, WebSocket, lifecycle, and provisioning operations before closing
+PostgreSQL. `CRABBOX_SHUTDOWN_TIMEOUT_MS` bounds that wait and defaults to two
+minutes.
+
+Build the container with `worker/` as the build context:
+
+```sh
+docker build -f worker/Dockerfile.node -t crabbox-coordinator:local worker
+```
+
+Long-lived WebSocket clients send periodic pings and must reconnect after
+service restarts or ingress drains. Run one replica until bridge ownership is
+externalized; PostgreSQL and pg-boss are ready for multiple service processes,
+but live bridge sockets remain process-local.
+
+### Trusted reverse-proxy identity
+
+An identity-aware ingress can authenticate browser and API requests without a
+second Crabbox login by forwarding the verified user in a header:
+
+```text
+CRABBOX_TRUSTED_USER_HEADER=X-Authenticated-User
+CRABBOX_TRUSTED_USER_ORG=example-org
+CRABBOX_TRUSTED_PROXY_CIDRS=10.0.0.0/8,fd00::/8
+```
+
+The Node runtime accepts the identity only when the connection peer is within
+`CRABBOX_TRUSTED_PROXY_CIDRS`. Enable this only when the ingress removes
+caller-supplied copies of the configured identity header. The forwarded identity
+receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate. The Cloudflare
+Worker runtime does not expose a trusted socket peer, so use its verified Access
+JWT support instead.
+
+The same peer allowlist controls whether the Node runtime honors forwarded host,
+protocol, and client-IP headers. It walks the forwarded-for chain from the socket
+inward and uses the nearest address outside the trusted proxy ranges for dynamic
+provider ingress rules; direct callers always use the socket peer address.
 
 ### GitHub browser login
 
@@ -348,6 +426,10 @@ expires_at=<unix-seconds>
 Use this when you want broker-owned provider credentials, coordinator cleanup,
 active-lease limits, monthly spend caps, and `crabbox usage`.
 
+The default deployment uses Cloudflare Workers and Durable Objects. For the
+container and PostgreSQL runtime, see
+[Portable Coordinator Runtime](plan/portable-coordinator.md).
+
 Cloudflare prerequisites:
 
 - a Cloudflare account with Workers and Durable Objects enabled;
@@ -441,6 +523,8 @@ CRABBOX_GITHUB_ADMIN_OWNERS, CRABBOX_GITHUB_ADMIN_LOGINS (optional)
 CRABBOX_SESSION_SECRET
 CRABBOX_DEFAULT_ORG
 CRABBOX_ACCESS_TEAM_DOMAIN, CRABBOX_ACCESS_AUD   # Cloudflare Access route
+CRABBOX_TRUSTED_USER_HEADER, CRABBOX_TRUSTED_USER_ORG
+CRABBOX_TRUSTED_PROXY_CIDRS              # Node runtime peer allowlist
 CRABBOX_PUBLIC_URL                       # canonical coordinator URL for OAuth callback
 
 # Cost / limits

@@ -283,6 +283,7 @@ func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]Coordinat
 	}
 	cfg := b.cfg
 	cfg.CoordToken = cfg.CoordAdminToken
+	cfg.CoordTokenCommand = nil
 	coord, _, err := newCoordinatorClient(cfg)
 	if err != nil {
 		return nil, nil, err
@@ -300,7 +301,7 @@ func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]Coordinat
 }
 
 func (b *coordinatorLeaseBackend) listLeasesFallback(ctx context.Context, adminErr error) ([]CoordinatorLease, error) {
-	if b.cfg.CoordToken == "" {
+	if b.cfg.CoordToken == "" && len(b.cfg.CoordTokenCommand) == 0 {
 		return nil, adminErr
 	}
 	if adminErr != nil && isCoordinatorUnauthorized(adminErr) {
@@ -368,6 +369,7 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 func (b *coordinatorLeaseBackend) adminCoordinatorClient() (*CoordinatorClient, error) {
 	cfg := b.cfg
 	cfg.CoordToken = cfg.CoordAdminToken
+	cfg.CoordTokenCommand = nil
 	coord, _, err := newCoordinatorClient(cfg)
 	return coord, err
 }

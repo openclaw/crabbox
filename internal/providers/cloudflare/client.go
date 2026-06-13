@@ -217,7 +217,6 @@ func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	exitCode := 0
-	completed := false
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -230,14 +229,17 @@ func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req
 		switch event.Type {
 		case "stdout":
 			if stdout != nil {
-				_, _ = io.WriteString(stdout, event.Data)
+				if _, err := io.WriteString(stdout, event.Data); err != nil {
+					return exitCode, fmt.Errorf("write %s stdout: %w", providerName, err)
+				}
 			}
 		case "stderr":
 			if stderr != nil {
-				_, _ = io.WriteString(stderr, event.Data)
+				if _, err := io.WriteString(stderr, event.Data); err != nil {
+					return exitCode, fmt.Errorf("write %s stderr: %w", providerName, err)
+				}
 			}
 		case "complete":
-			completed = true
 			if event.ExitCode != nil {
 				exitCode = *event.ExitCode
 			}
@@ -255,10 +257,7 @@ func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req
 	if err := scanner.Err(); err != nil {
 		return exitCode, err
 	}
-	if !completed {
-		return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
-	}
-	return exitCode, nil
+	return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
 }
 
 func (c *cloudflareClient) sandboxEndpoint(sandboxID, suffix string) string {

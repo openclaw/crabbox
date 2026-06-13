@@ -105,7 +105,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !useCoordinator || coord == nil || coord.Token == "" {
+	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return exit(2, "webvnc requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
@@ -392,7 +392,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if useCoordinator && coord != nil && coord.Token != "" {
+		if useCoordinator && coord.hasConfiguredAuth() {
 			server, resolvedTarget, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, *id, false, *reclaim)
 			if err != nil {
 				return err
@@ -526,7 +526,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !useCoordinator || coord == nil || coord.Token == "" {
+	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return exit(2, "webvnc status requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
@@ -648,7 +648,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !useCoordinator || coord == nil || coord.Token == "" {
+	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return exit(2, "webvnc reset requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
@@ -1175,9 +1175,14 @@ func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 		HTTPHeader: bridgeTicketHeaders(coord, ticket.Ticket),
 	})
 	if retryBridgeTicketInQuery(resp, err) {
-		ws, _, err = websocket.Dial(ctx, webVNCAgentURLWithTicketAndCapabilities(coord.BaseURL, leaseID, ticket.Ticket, capabilities), &websocket.DialOptions{
-			HTTPHeader: coord.webVNCAccessHeaders(),
-		})
+		headers, headerErr := coord.webVNCAccessHeaders(ctx)
+		if headerErr != nil {
+			err = headerErr
+		} else {
+			ws, _, err = websocket.Dial(ctx, webVNCAgentURLWithTicketAndCapabilities(coord.BaseURL, leaseID, ticket.Ticket, capabilities), &websocket.DialOptions{
+				HTTPHeader: headers,
+			})
+		}
 	}
 	if err != nil {
 		_ = tcp.Close()
@@ -1762,14 +1767,26 @@ func copyTCPToWebSocket(ctx context.Context, ws *websocket.Conn, tcp net.Conn) e
 	}
 }
 
-func (c *CoordinatorClient) webVNCAccessHeaders() http.Header {
+func (c *CoordinatorClient) webVNCEdgeHeaders() http.Header {
 	header := http.Header{}
 	c.addAccessHeaders(header)
 	return header
 }
 
+func (c *CoordinatorClient) webVNCAccessHeaders(ctx context.Context) (http.Header, error) {
+	header := c.webVNCEdgeHeaders()
+	token, err := c.authorizationToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		header.Set("Authorization", "Bearer "+token)
+	}
+	return header, nil
+}
+
 func bridgeTicketHeaders(coord *CoordinatorClient, ticket string) http.Header {
-	headers := coord.webVNCAccessHeaders()
+	headers := coord.webVNCEdgeHeaders()
 	headers.Set("Authorization", "Bearer "+ticket)
 	return headers
 }
@@ -1782,7 +1799,7 @@ func retryBridgeTicketInQuery(resp *http.Response, err error) bool {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
-	return resp.StatusCode == http.StatusUnauthorized
+	return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
 }
 
 func webVNCAgentURL(base, leaseID string) string {

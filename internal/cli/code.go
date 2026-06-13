@@ -84,7 +84,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !useCoordinator || coord == nil || coord.Token == "" {
+	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return exit(2, "code requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
@@ -242,9 +242,14 @@ func connectCodeBridge(ctx context.Context, coord *CoordinatorClient, leaseID, h
 		HTTPHeader: bridgeTicketHeaders(coord, ticket.Ticket),
 	})
 	if retryBridgeTicketInQuery(resp, err) {
-		ws, _, err = websocket.Dial(ctx, webCodeAgentURLWithTicket(coord.BaseURL, leaseID, ticket.Ticket), &websocket.DialOptions{
-			HTTPHeader: coord.webVNCAccessHeaders(),
-		})
+		headers, headerErr := coord.webVNCAccessHeaders(ctx)
+		if headerErr != nil {
+			err = headerErr
+		} else {
+			ws, _, err = websocket.Dial(ctx, webCodeAgentURLWithTicket(coord.BaseURL, leaseID, ticket.Ticket), &websocket.DialOptions{
+				HTTPHeader: headers,
+			})
+		}
 	}
 	if err != nil {
 		return nil, err

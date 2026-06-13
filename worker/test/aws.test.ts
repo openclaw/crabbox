@@ -54,6 +54,126 @@ describe("aws provider", () => {
     expect(params).not.toHaveProperty("Description");
   });
 
+  it("recovers when another create wins the shared security group race", async () => {
+    let describeSecurityGroups = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeVpcs") {
+          return ec2XMLResponse(
+            "<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-default</vpcId></item></vpcSet></DescribeVpcsResponse>",
+          );
+        }
+        if (action === "DescribeSecurityGroups") {
+          describeSecurityGroups += 1;
+          return ec2XMLResponse(
+            describeSecurityGroups === 1
+              ? "<DescribeSecurityGroupsResponse><securityGroupInfo /></DescribeSecurityGroupsResponse>"
+              : "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-raced</groupId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+          );
+        }
+        if (action === "CreateSecurityGroup") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidGroup.Duplicate</Code><Message>already exists</Message></Error></Errors></Response>",
+            400,
+          );
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          return ec2XMLResponse("<AuthorizeSecurityGroupIngressResponse />");
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+
+    await client.refreshSSHIngress(
+      leaseConfig({
+        provider: "aws",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      { reconcile: "additive" },
+    );
+
+    expect(describeSecurityGroups).toBe(2);
+  });
+
+  it("retries raced security group discovery and initial ingress propagation", async () => {
+    let describeSecurityGroups = 0;
+    let authorizeIngress = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "DescribeVpcs") {
+          return ec2XMLResponse(
+            "<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-default</vpcId></item></vpcSet></DescribeVpcsResponse>",
+          );
+        }
+        if (action === "DescribeSecurityGroups") {
+          describeSecurityGroups += 1;
+          return ec2XMLResponse(
+            describeSecurityGroups < 3
+              ? "<DescribeSecurityGroupsResponse><securityGroupInfo /></DescribeSecurityGroupsResponse>"
+              : "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-raced</groupId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+          );
+        }
+        if (action === "CreateSecurityGroup") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidGroup.Duplicate</Code><Message>already exists</Message></Error></Errors></Response>",
+            400,
+          );
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          return ec2XMLResponse("<RevokeSecurityGroupIngressResponse />");
+        }
+        if (action === "AuthorizeSecurityGroupIngress") {
+          authorizeIngress += 1;
+          return authorizeIngress === 1
+            ? ec2XMLResponse(
+                "<Response><Errors><Error><Code>InvalidGroup.NotFound</Code><Message>not visible</Message></Error></Errors></Response>",
+                400,
+              )
+            : ec2XMLResponse("<AuthorizeSecurityGroupIngressResponse />");
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+
+    await client.refreshSSHIngress(
+      leaseConfig({
+        provider: "aws",
+        awsSSHCIDRs: ["198.51.100.77/32"],
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      { reconcile: "additive" },
+    );
+
+    expect(describeSecurityGroups).toBe(3);
+    expect(authorizeIngress).toBe(3);
+  });
+
   it("extracts only Crabbox-owned SSH ingress rules from AWS security groups", () => {
     expect(
       crabboxSSHIngressRules(

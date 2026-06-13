@@ -83,6 +83,37 @@ func TestEgressStartCoordinatorOverrideUsesPublicRoute(t *testing.T) {
 	}
 }
 
+func TestExplicitEgressTicketDoesNotCreateFakeBearer(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CRABBOX_CONFIG", home+"/missing.yaml")
+
+	coord, leaseID, err := (App{}).egressCoordinatorAndLease(
+		context.Background(),
+		"aws",
+		"https://broker.example.com",
+		"cbx_abcdef123456",
+		"egress_ticket",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID != "cbx_abcdef123456" {
+		t.Fatalf("leaseID=%q", leaseID)
+	}
+	if coord.hasConfiguredAuth() {
+		t.Fatal("explicit-ticket mode should not synthesize coordinator credentials")
+	}
+	headers, err := coord.webVNCAccessHeaders(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := headers.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization=%q, want empty", got)
+	}
+}
+
 func TestEgressClientBinaryRejectsNonLinuxTargets(t *testing.T) {
 	_, cleanup, err := egressClientBinaryForTarget(context.Background(), SSHTarget{TargetOS: targetWindows})
 	defer cleanup()

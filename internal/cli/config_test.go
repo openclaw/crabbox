@@ -19,6 +19,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_COORDINATOR_MODE",
 		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
 		"CRABBOX_COORDINATOR_TOKEN",
+		"CRABBOX_COORDINATOR_TOKEN_COMMAND",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
 		"CRABBOX_HOST_ID",
@@ -58,6 +59,11 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_DIGITALOCEAN_IMAGE",
 		"CRABBOX_DIGITALOCEAN_VPC",
 		"CRABBOX_DIGITALOCEAN_SSH_CIDRS",
+		"CRABBOX_LINODE_REGION",
+		"CRABBOX_LINODE_IMAGE",
+		"CRABBOX_LINODE_TYPE",
+		"CRABBOX_LINODE_FIREWALL",
+		"CRABBOX_LINODE_SSH_CIDRS",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -298,6 +304,36 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_HOSTINGER_RELEASE_ACTION",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestCoordinatorTokenCommandEnv(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", `["token-helper","--scope","example"]`)
+	cfg := baseConfig()
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.CoordTokenCommand, "\x00"); got != "token-helper\x00--scope\x00example" {
+		t.Fatalf("token command=%q", cfg.CoordTokenCommand)
+	}
+}
+
+func TestCoordinatorTokenCommandEnvRejectsInvalidArgv(t *testing.T) {
+	for name, value := range map[string]string{
+		"not-json":  "token-helper",
+		"empty":     `[]`,
+		"empty-arg": `["token-helper",""]`,
+		"newline":   `["token-helper","bad\narg"]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", value)
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err == nil {
+				t.Fatal("invalid token command was accepted")
+			}
+		})
 	}
 }
 
@@ -746,6 +782,130 @@ func TestDigitalOceanDefaultsDoNotLeakAcrossProviderOverride(t *testing.T) {
 		cfg.SSHUser != wantSSHUser || cfg.SSHPort != wantSSHPort ||
 		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(wantFallbackPorts, ",") {
 		t.Fatalf("digitalocean defaults leaked after provider override: %#v", cfg)
+	}
+}
+
+func TestLinodeConfigFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "linode",
+		Linode: &fileLinodeConfig{
+			Region:     "us-sea",
+			Image:      "linode/ubuntu24.04",
+			Type:       "g6-standard-2",
+			FirewallID: "12345",
+			SSHCIDRs:   []string{"203.0.113.0/24"},
+		},
+	})
+	if cfg.Provider != "linode" || cfg.Linode.Region != "us-sea" || cfg.Location == "us-sea" || cfg.Linode.Image != "linode/ubuntu24.04" || cfg.Image == "linode/ubuntu24.04" || cfg.Linode.Type != "g6-standard-2" || cfg.Linode.FirewallID != "12345" {
+		t.Fatalf("file linode config not applied: cfg=%#v linode=%#v", cfg, cfg.Linode)
+	}
+	if strings.Join(cfg.Linode.SSHCIDRs, ",") != "203.0.113.0/24" {
+		t.Fatalf("file linode ssh cidrs=%v", cfg.Linode.SSHCIDRs)
+	}
+
+	t.Setenv("CRABBOX_LINODE_REGION", "us-ord")
+	t.Setenv("CRABBOX_LINODE_IMAGE", "private/999")
+	t.Setenv("CRABBOX_LINODE_TYPE", "g6-nanode-1")
+	t.Setenv("CRABBOX_LINODE_FIREWALL", "67890")
+	t.Setenv("CRABBOX_LINODE_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Linode.Region != "us-ord" || cfg.Location == "us-ord" || cfg.Linode.Image != "private/999" || cfg.Image == "private/999" || cfg.Linode.Type != "g6-nanode-1" || cfg.Linode.FirewallID != "67890" {
+		t.Fatalf("env linode config not applied: cfg=%#v linode=%#v", cfg, cfg.Linode)
+	}
+	if strings.Join(cfg.Linode.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
+		t.Fatalf("env linode ssh cidrs=%v", cfg.Linode.SSHCIDRs)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	base := baseConfig()
+	if cfg.Location != base.Location || cfg.Image != base.Image {
+		t.Fatalf("linode defaults leaked into generic fields: cfg=%#v", cfg)
+	}
+	if got := serverTypeForConfig(cfg); got != "g6-nanode-1" {
+		t.Fatalf("serverTypeForConfig=%q", got)
+	}
+}
+
+func TestLinodePortableOSSelection(t *testing.T) {
+	t.Run("supported selector maps to provider image", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "linode"
+		cfg.OSImage = "ubuntu:24.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Linode.Image != "linode/ubuntu24.04" {
+			t.Fatalf("Linode.Image=%q", cfg.Linode.Image)
+		}
+	})
+
+	t.Run("unsupported selector is deferred to acquisition", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "linode"
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Linode.Image != "linode/ubuntu24.04" {
+			t.Fatalf("default Linode.Image=%q", cfg.Linode.Image)
+		}
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Linode.Image != "" {
+			t.Fatalf("Linode.Image=%q, want unresolved provider image", cfg.Linode.Image)
+		}
+	})
+
+	t.Run("provider image overrides portable selector", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "linode"
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		cfg.Linode.Image = "private/123"
+		cfg.linodeImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Linode.Image != "private/123" {
+			t.Fatalf("Linode.Image=%q", cfg.Linode.Image)
+		}
+	})
+}
+
+func TestLinodeDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "ssh",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Static: &fileStaticConfig{
+			User:     "builder",
+			Port:     "2202",
+			WorkRoot: "/srv/static",
+		},
+	})
+	normalizeTargetConfig(&cfg)
+
+	cfg.Provider = "linode"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("Linode WorkRoot=%q want explicit generic root", cfg.WorkRoot)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("Linode SSHUser=%q want explicit generic user", cfg.SSHUser)
+	}
+	if cfg.SSHPort != "2200" {
+		t.Fatalf("Linode SSHPort=%q want explicit generic port", cfg.SSHPort)
 	}
 }
 

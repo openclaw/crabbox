@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -175,7 +176,7 @@ func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
 			Token:        "access-jwt",
 		},
 	}
-	config, cleanup, err := client.curlConfig("POST", "/v1/leases", []byte(`{"leaseID":"cbx"}`), true)
+	config, cleanup, err := client.curlConfig(context.Background(), "POST", "/v1/leases", []byte(`{"leaseID":"cbx"}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,6 +234,75 @@ func TestCoordinatorHTTPAddsAccessHeaders(t *testing.T) {
 	if err := client.Health(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestCoordinatorTokenCommandRefreshesBearer(t *testing.T) {
+	t.Setenv("CRABBOX_TOKEN_HELPER", "1")
+	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "first-token")
+	var authorizations []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorizations = append(authorizations, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+	client := CoordinatorClient{
+		BaseURL: server.URL,
+		TokenCommand: []string{
+			os.Args[0],
+			"-test.run=^TestCoordinatorTokenCommandHelper$",
+		},
+		Client: server.Client(),
+	}
+
+	if err := client.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "second-token")
+	if err := client.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(authorizations, []string{"Bearer first-token", "Bearer second-token"}) {
+		t.Fatalf("Authorization headers=%q", authorizations)
+	}
+}
+
+func TestCoordinatorConfiguredAuthRecognizesTokenCommand(t *testing.T) {
+	for name, client := range map[string]*CoordinatorClient{
+		"nil":           nil,
+		"empty":         {},
+		"static token":  {Token: "token"},
+		"token command": {TokenCommand: []string{"token-helper"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := name == "static token" || name == "token command"
+			if got := client.hasConfiguredAuth(); got != want {
+				t.Fatalf("hasConfiguredAuth()=%t want %t", got, want)
+			}
+		})
+	}
+}
+
+func TestCoordinatorTokenCommandRejectsMultipleLines(t *testing.T) {
+	t.Setenv("CRABBOX_TOKEN_HELPER", "1")
+	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "first\nsecond")
+	client := CoordinatorClient{
+		TokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+	}
+	if _, err := client.authorizationToken(context.Background()); err == nil || !strings.Contains(err.Error(), "exactly one token line") {
+		t.Fatalf("error=%v, want one-line validation", err)
+	}
+}
+
+func TestCoordinatorTokenCommandHelper(t *testing.T) {
+	if os.Getenv("CRABBOX_TOKEN_HELPER") != "1" {
+		return
+	}
+	if delay, err := time.ParseDuration(os.Getenv("CRABBOX_TOKEN_HELPER_DELAY")); err == nil {
+		time.Sleep(delay)
+	}
+	_, _ = fmt.Fprintln(os.Stdout, os.Getenv("CRABBOX_TOKEN_HELPER_VALUE"))
+	os.Exit(0)
 }
 
 func TestCoordinatorAdminLeaseAudit(t *testing.T) {
@@ -695,6 +765,65 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 	select {
 	case <-httpHeartbeats:
 		t.Fatal("heartbeat fell back to HTTP despite websocket success")
+	default:
+	}
+}
+
+func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
+	t.Setenv("CRABBOX_TOKEN_HELPER", "1")
+	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "slow-token")
+	t.Setenv("CRABBOX_TOKEN_HELPER_DELAY", "1600ms")
+	controlHeartbeats := make(chan struct{}, 1)
+	httpHeartbeats := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+			if got := r.Header.Get("Authorization"); got != "Bearer slow-token" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Errorf("accept control websocket: %v", err)
+				return
+			}
+			defer conn.Close(websocket.StatusNormalClosure, "")
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Errorf("read control heartbeat: %v", err)
+				return
+			}
+			controlHeartbeats <- struct{}{}
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"heartbeat","leaseID":"cbx_123","ok":true}`))
+			<-r.Context().Done()
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_123/heartbeat":
+			httpHeartbeats <- struct{}{}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"aws","state":"active","expiresAt":"2026-05-01T00:30:00Z"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{
+		BaseURL: server.URL,
+		TokenCommand: []string{
+			os.Args[0],
+			"-test.run=^TestCoordinatorTokenCommandHelper$",
+		},
+		Client: server.Client(),
+	}
+	stop := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", 30*time.Minute, nil, nil, io.Discard)
+	defer stop()
+
+	select {
+	case <-controlHeartbeats:
+	case <-time.After(4 * time.Second):
+		t.Fatal("slow token mint prevented control websocket heartbeat")
+	}
+	select {
+	case <-httpHeartbeats:
+		t.Fatal("heartbeat fell back to HTTP after successful control websocket dial")
 	default:
 	}
 }

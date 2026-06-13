@@ -419,8 +419,8 @@ func TestRetryBridgeTicketInQuery(t *testing.T) {
 	if !retryBridgeTicketInQuery(resp, errors.New("websocket rejected")) {
 		t.Fatal("expected unauthorized websocket response to retry with query ticket")
 	}
-	if retryBridgeTicketInQuery(&http.Response{StatusCode: http.StatusForbidden}, errors.New("forbidden")) {
-		t.Fatal("forbidden response should not retry with query ticket")
+	if !retryBridgeTicketInQuery(&http.Response{StatusCode: http.StatusForbidden}, errors.New("forbidden")) {
+		t.Fatal("expected upstream auth rejection to retry with query ticket")
 	}
 	if retryBridgeTicketInQuery(resp, nil) {
 		t.Fatal("successful dial should not retry with query ticket")

@@ -44,14 +44,18 @@ func dialCoordinatorControl(ctx context.Context, coord *CoordinatorClient) (*coo
 		return nil, err
 	}
 	headers := http.Header{}
-	coord.addRequestHeaders(headers)
+	if err := coord.addRequestHeaders(ctx, headers); err != nil {
+		return nil, err
+	}
 	opts := &websocket.DialOptions{
 		HTTPHeader: headers,
 	}
 	if coord.Client != nil {
 		opts.HTTPClient = coord.Client
 	}
-	conn, resp, err := websocket.Dial(ctx, endpoint, opts)
+	dialCtx, cancel := context.WithTimeout(ctx, coordinatorControlDialTimeout)
+	defer cancel()
+	conn, resp, err := websocket.Dial(dialCtx, endpoint, opts)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -112,9 +116,7 @@ func (c *coordinatorControlConn) read(ctx context.Context) (coordinatorControlMe
 }
 
 func followRunControlWebSocket(ctx context.Context, coord *CoordinatorClient, runID string, after int, poll time.Duration, stdout, stderr io.Writer) (int, bool, bool, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, coordinatorControlDialTimeout)
-	control, err := dialCoordinatorControl(dialCtx, coord)
-	cancel()
+	control, err := dialCoordinatorControl(ctx, coord)
 	if err != nil {
 		if ctx.Err() != nil {
 			return after, false, false, ctx.Err()

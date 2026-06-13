@@ -541,7 +541,7 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 			return nil, "", "", err
 		}
 		if opts.Storage == "auto" {
-			if useCoordinator && coord != nil && coord.Token != "" {
+			if useCoordinator && coord.hasConfiguredAuth() {
 				opts.Storage = "broker"
 			} else {
 				opts.Storage = "local"
@@ -633,7 +633,7 @@ func (a App) writeArtifactWebVNCStatus(ctx context.Context, cfg Config, target S
 		return "", false, nil
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
-	if err != nil || !useCoordinator || coord == nil || coord.Token == "" {
+	if err != nil || !useCoordinator || !coord.hasConfiguredAuth() {
 		return "", false, nil
 	}
 	status, err := coord.WebVNCStatus(ctx, leaseID)
