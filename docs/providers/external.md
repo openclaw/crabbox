@@ -22,6 +22,8 @@ external:
   command: node
   args:
     - /absolute/path/provider.mjs
+  capabilities:
+    idempotentLeaseId: true
   config:
     backend: vm
     namespace: team-devboxes
@@ -37,7 +39,20 @@ command, arguments, and config in a private per-lease routing file and print
 only that file's opaque path. Kept acquisition failures persist this routing
 before the SSH readiness wait, so the printed recovery commands can still
 resolve or release the lease. Routing files use mode `0600` and are removed
-after successful release.
+after successful release. Persistence flushes the private temporary file before
+rename, then flushes the installed directory and its complete ancestor chain;
+a sync failure is reported and a retry repeats the entire durability chain.
+Confirmed-absence cleanup likewise flushes the containing directories after
+removing matching routing, claim, and slug-reservation sidecars. A failed
+directory flush keeps controller cleanup pending, and the next attempt repeats
+the flush even when the sidecar was already removed.
+
+`external.capabilities.idempotentLeaseId` is an explicit adapter contract, not
+a protocol-v1 default. Enable it only when repeated `acquire` requests for one
+fixed `desired.leaseId`, `desired.slug`, and `desired.name` always return that
+same resource. `adapter serve` rejects external adapters without this
+opt-in before any lifecycle side effect. Declarative adapters must also use
+the command-attested identity contract described below.
 
 Local claims are scoped to a fingerprint of the selected protocol command or
 declarative lifecycle, connection templates, and `external.config`. This lets
@@ -45,6 +60,22 @@ multiple external backends or namespaces reuse the same slug without cleanup
 for one configuration removing claims or routing files owned by another.
 Legacy unscoped claims are not reconciled by cleanup; stop them directly by
 lease ID or with the generated routing file.
+
+An explicit requested slug is a fixed provider identity: Crabbox either reserves
+that exact normalized slug or fails the acquisition. It never silently appends
+a collision suffix. Generated slugs may still receive a suffix. Reservations
+are published by fsyncing a private temporary file, atomically renaming it, and
+syncing the reservation directory. Creation persists every newly created
+ancestor entry and directory in order, so a crash cannot strand only part of
+the reservation path. Retries repeat the complete chain even when an earlier
+attempt left newly created directories visible after a failed sync; stale and
+same-attempt recovery also syncs directory removals before reuse. Reservations
+record the owner PID plus process
+start identity and, on Linux, the kernel boot ID. A retry reclaims a fresh same-attempt reservation immediately
+when that exact owner has exited or the PID was recycled; it never waits the
+generic six-hour collision TTL. A PID/start-tick pair from an earlier Linux
+boot is never treated as a live owner. A still-running exact owner and any mismatched
+lease/slug/token identity remain protected.
 
 ## Declarative lifecycle
 
@@ -97,7 +128,7 @@ external:
 
 `acquire`, `list`, `release`, and `connection.ssh.user` are required.
 Lifecycle operations configure exactly one of `argv` or `steps`. Steps run in
-order and stop at the first failure. For structured list output, only the final
+order and stop at the first failure. For structured output, only the final
 step's stdout is parsed; earlier stdout is forwarded as diagnostic output.
 `acquire.rollbackOnFailure: true` runs the configured release operation when a
 later acquire step fails after at least one successful step, unless the caller
@@ -149,11 +180,63 @@ other credential contents.
 providers that require DNS-style names. `resourceName` is the expanded
 `connection.resourceName`.
 
+`acquire.output` and `resolve.output` accept `json-lease`. The final command
+must print one plain JSON lease object (not the protocol response wrapper) with
+nonempty `leaseId`, `slug`, `name`, and provider-immutable `cloudId` fields.
+Acquire and normal resolve output must also include the SSH fields needed to
+connect. For example:
+
+```json
+{"leaseId":"cbx_0123456789ab","slug":"fast-coral","name":"crabbox-fast-coral-deadbeef","cloudId":"provider/resource-123","ssh":{"user":"dev","host":"devbox-fast-coral","port":"22"}}
+```
+
+The three Crabbox identity fields must exactly echo the requested
+`leaseId`, `slug`, and `name`; the provider-native identity belongs only in
+`cloudId`. Identity values must be trimmed, printable, and at most 4096 bytes;
+`leaseId` must be the requested canonical `cbx_...` ID and `slug` must already
+be normalized. A compact controller-ready configuration looks like:
+
+```yaml
+external:
+  capabilities:
+    idempotentLeaseId: true
+  lifecycle:
+    acquire:
+      argv: [provider-adapter, acquire, "{{leaseId}}", "{{slug}}", "{{name}}", "{{resourceName}}"]
+      output: json-lease
+    resolve:
+      argv: [provider-adapter, resolve, "{{leaseId}}", "{{slug}}", "{{name}}", "{{resourceName}}"]
+      output: json-lease
+    list:
+      argv: [provider-adapter, list]
+      output: json-lease-array
+    release:
+      argv: [provider-adapter, release, "{{leaseId}}", "{{slug}}", "{{name}}", "{{cloudId}}"]
+  connection:
+    resourceName: "{{leaseIdSlug}}"
+    ssh:
+      user: developer
+```
+
+A declarative adapter qualifies for controller fixed-ID provisioning only when
+`idempotentLeaseId` is true, both acquire and resolve use `json-lease`, list
+uses `json-lease-array`, and every configured release command has a standalone
+argument exactly equal to `{{cloudId}}`. Every inventory item must contain the
+same four identity fields. Each release helper must use the raw `cloudId`
+argument as its resource
+constraint. This binds release to the raw
+identity returned by the provider command; default connection expansion and
+`json-name-array` synthesis do not qualify. Raw lease output may not set the
+reserved `lease`, `slug`, `name`, `externalResourceName`, or
+`externalResourceNameFromEnv` labels.
+
 `list.output` accepts:
 
 - `json-name-array`: stdout is a JSON array of resource names;
 - `json-lease-array`: stdout is a JSON array using the protocol lease shape
-  documented below.
+  documented below. Controller-capable declarative adapters require nonempty
+  `leaseId`, `slug`, `name`, and `cloudId` fields in every item; ordinary
+  legacy declarative adapters retain the existing partial lease-array format.
 
 For `json-name-array`, optional `list.namePrefix` discards inventory names
 outside the expanded prefix before Crabbox constructs leases. Use it when a
@@ -163,12 +246,19 @@ Declarative configuration and resolved connection templates are included in
 the private per-lease routing file. This lets generated retry, daemon, SSH, and
 stop commands work without the original config file.
 
+Routing files use the OS user-config directory by default. A non-empty
+`XDG_CONFIG_HOME` takes precedence on every supported platform, including
+macOS, and places them below `$XDG_CONFIG_HOME/crabbox/external/`. The override
+must be an absolute path without surrounding whitespace; Crabbox rejects an
+invalid value instead of silently falling back to another directory.
+
 Flags:
 
 ```text
 --external-command
 --external-arg
 --external-config-json
+--external-idempotent-lease-id
 --external-work-root
 --external-routing-file
 ```
@@ -178,6 +268,7 @@ Environment:
 ```text
 CRABBOX_EXTERNAL_COMMAND
 CRABBOX_EXTERNAL_ARG
+CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID
 CRABBOX_EXTERNAL_WORK_ROOT
 CRABBOX_EXTERNAL_ROUTING_FILE
 ```
@@ -234,6 +325,28 @@ Request shape:
 }
 ```
 
+Controller-driven release-only `resolve` and `release` requests also include an
+optional immutable expectation:
+
+```json
+{
+  "expected": {
+    "leaseId": "cbx_0123456789ab",
+    "attemptLeaseId": "cbx_0123456789ab",
+    "slug": "fast-coral",
+    "cloudId": "private-control-plane/devbox-fast-coral"
+  }
+}
+```
+
+Adapters must use this as a match constraint, not as permission to retarget a
+different resource. For a controller release-only resolve, the resolver's raw
+response must explicitly repeat every nonempty expected lease ID, attempt ID,
+slug, and `cloudId`. Omitted fields are rejected before desired-value or
+protocol-compatibility filling; a declarative default assembled from the
+request cannot authorize release. Crabbox independently validates the complete
+resolved target again before release.
+
 Operations:
 
 ```text
@@ -281,12 +394,27 @@ When `readyCheck` is omitted, Crabbox uses a generic Linux tool check for
 `bash`, `python3`, `git`, `rsync`, and `tar`. Return an explicit `readyCheck`
 when the external provider needs a stronger guest bootstrap signal.
 
-`list` returns `{"protocolVersion":1,"leases":[...]}`. `doctor` may return a
-human-readable `message`. Any operation may return `{"error":"..."}`; error-only
-responses do not need `protocolVersion`.
+`list` returns `{"protocolVersion":1,"leases":[...]}`. Protocol-command adapters
+that enable `idempotentLeaseId` must return a real array, including `[]` for an
+empty inventory, and every row must contain canonical `leaseId`, normalized
+`slug`, exact `name`, and immutable `cloudId`; omitted, partial, or `null`
+inventory cannot prove controller absence. `doctor` may return a human-readable
+`message`. Any operation may return `{"error":"..."}`; error-only responses do
+not need `protocolVersion`.
 
-For `acquire`, omitted `leaseId`, `slug`, or `name` fields inherit the
-corresponding values from `desired`.
+For ordinary protocol-command `acquire`, omitted `leaseId`, `slug`, or `name`
+fields inherit the corresponding values from `desired`. A fixed-ID protocol
+adapter that enables `idempotentLeaseId` must instead return the complete raw
+`leaseId`, `slug`, `name`, and `cloudId` tuple. Declarative `json-lease` output
+never receives compatibility filling.
+
+Adapters that enable `idempotentLeaseId` must treat repeated `acquire` requests
+with the same `desired.leaseId`, `desired.slug`, and `desired.name` as
+idempotent. Controllers preserve that attempt identity across crash recovery
+and may retry it after a full absence-reconciliation window; the retry must
+return the same external resource rather than create another. Controller-capable
+fixed-attempt responses must return the complete raw identity tuple and every
+value must match `desired` exactly.
 
 `leaseId` is Crabbox's local lease identity. For new `acquire` responses and
 non-release `resolve` responses, it must be the generated `cbx_...` value from
@@ -294,3 +422,7 @@ non-release `resolve` responses, it must be the generated `cbx_...` value from
 `cloudId`; Crabbox persists claims and stop routing by `leaseId`. Release-only
 paths still accept older protocol-v1 provider IDs so existing leases can be
 stopped, but path-shaped legacy IDs are not used for local claim deletion.
+Controller stop additionally supplies its full persisted lease ID, attempt ID,
+slug, and `cloudId` expectation. Release-only resolution and release both
+validate every nonempty expected field before the adapter's destructive
+operation runs, including attempts canceled before a local claim was written.

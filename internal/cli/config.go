@@ -278,11 +278,16 @@ type ExternalConfig struct {
 	Command       string
 	Args          []string
 	Config        map[string]any
+	Capabilities  ExternalCapabilitiesConfig
 	Lifecycle     ExternalLifecycleConfig
 	Connection    ExternalConnectionConfig
 	WorkRoot      string
 	RoutingFile   string
 	routingLoaded bool
+}
+
+type ExternalCapabilitiesConfig struct {
+	IdempotentLeaseID bool `yaml:"idempotentLeaseId,omitempty" json:"idempotentLeaseId,omitempty"`
 }
 
 type ExternalLifecycleConfig struct {
@@ -662,6 +667,8 @@ type CloudflareConfig struct {
 	Token   string
 	Workdir string
 }
+
+const DefaultCloudflareDynamicWorkersCompatibilityDate = "2026-06-12"
 
 type CloudflareDynamicWorkersConfig struct {
 	LoaderURL                      string
@@ -2083,10 +2090,11 @@ func baseConfig() Config {
 			Workdir: "/workspace/crabbox",
 		},
 		CloudflareDynamicWorkers: CloudflareDynamicWorkersConfig{
-			CacheMode:   "stable",
-			Egress:      "blocked",
-			TimeoutSecs: 60,
-			Metadata:    map[string]string{},
+			CompatibilityDate: DefaultCloudflareDynamicWorkersCompatibilityDate,
+			CacheMode:         "stable",
+			Egress:            "blocked",
+			TimeoutSecs:       60,
+			Metadata:          map[string]string{},
 		},
 		Proxmox: ProxmoxConfig{
 			User:      "crabbox",
@@ -2527,13 +2535,14 @@ type fileKubeVirtConfig struct {
 }
 
 type fileExternalConfig struct {
-	Command     string                    `yaml:"command,omitempty"`
-	Args        []string                  `yaml:"args,omitempty"`
-	Config      map[string]any            `yaml:"config,omitempty"`
-	Lifecycle   *ExternalLifecycleConfig  `yaml:"lifecycle,omitempty"`
-	Connection  *ExternalConnectionConfig `yaml:"connection,omitempty"`
-	WorkRoot    string                    `yaml:"workRoot,omitempty"`
-	RoutingFile string                    `yaml:"routingFile,omitempty"`
+	Command      string                      `yaml:"command,omitempty"`
+	Args         []string                    `yaml:"args,omitempty"`
+	Config       map[string]any              `yaml:"config,omitempty"`
+	Capabilities *ExternalCapabilitiesConfig `yaml:"capabilities,omitempty"`
+	Lifecycle    *ExternalLifecycleConfig    `yaml:"lifecycle,omitempty"`
+	Connection   *ExternalConnectionConfig   `yaml:"connection,omitempty"`
+	WorkRoot     string                      `yaml:"workRoot,omitempty"`
+	RoutingFile  string                      `yaml:"routingFile,omitempty"`
 }
 
 type fileNamespaceConfig struct {
@@ -4037,6 +4046,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.External.Config != nil {
 			cfg.External.Config = file.External.Config
+		}
+		if file.External.Capabilities != nil {
+			cfg.External.Capabilities = *file.External.Capabilities
 		}
 		if file.External.Lifecycle != nil {
 			cfg.External.Lifecycle = *file.External.Lifecycle
@@ -5692,6 +5704,9 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.External.WorkRoot = getenv("CRABBOX_EXTERNAL_WORK_ROOT", cfg.External.WorkRoot)
 	cfg.External.RoutingFile = getenv("CRABBOX_EXTERNAL_ROUTING_FILE", cfg.External.RoutingFile)
+	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
+		cfg.External.Capabilities.IdempotentLeaseID = value
+	}
 	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)
 	cfg.Namespace.Size = getenv("CRABBOX_NAMESPACE_SIZE", cfg.Namespace.Size)
 	cfg.Namespace.Repository = getenv("CRABBOX_NAMESPACE_REPOSITORY", cfg.Namespace.Repository)

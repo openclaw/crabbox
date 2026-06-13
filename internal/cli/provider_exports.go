@@ -286,6 +286,18 @@ func LeaseProviderName(leaseID, slug string) string {
 	return leaseProviderName(leaseID, slug)
 }
 
+func LocalProcessStartIdentity(pid int) (string, error) {
+	return webVNCDaemonProcessStartIdentity(pid)
+}
+
+func LocalProcessBootIdentity() (string, error) {
+	return processBootIdentity()
+}
+
+func LocalProcessBootIdentityRequired() bool {
+	return processBootIdentityRequired()
+}
+
 func AllocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {
 	return allocateDirectLeaseSlug(leaseID, requested, servers)
 }

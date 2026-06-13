@@ -125,6 +125,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal");
     expect(got).toContain("xfconf xfce4-settings x11vnc xauth dbus-x11");
     expect(got).toContain("arc-theme");
+    expect(got).toContain("util-linux");
+    expect(got).toContain("novnc websockify");
     expect(got).toContain("/etc/systemd/system/crabbox-xvfb.service");
     expect(got).toContain("/usr/local/bin/crabbox-configure-desktop-theme");
     expect(got).toContain("/etc/systemd/system/crabbox-desktop.service");
@@ -216,6 +218,8 @@ describe("cloud-init bootstrap", () => {
     const got = cloudInit({ ...config, desktop: true, desktopEnv: "wayland", browser: true });
     expect(got).toContain("labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr");
     expect(got).toContain("xdg-desktop-portal-wlr");
+    expect(got).toContain("util-linux");
+    expect(got).toContain("novnc websockify");
     expect(got).toContain("/usr/local/bin/crabbox-start-wayland-desktop");
     expect(got).toContain("/etc/systemd/system/crabbox-wayvnc.service");
     expect(got).toContain("CRABBOX_DESKTOP_ENV=wayland");
@@ -257,6 +261,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("swaybg librsvg2-common");
     expect(got).toContain("dbus-user-session xwayland");
     expect(got).toContain("gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme");
+    expect(got).toContain("util-linux");
+    expect(got).toContain("novnc websockify");
     expect(got).toContain("/usr/local/bin/crabbox-start-wayland-desktop");
     expect(got).toContain("CRABBOX_DESKTOP_ENV=gnome");
     expect(got).toContain("DISPLAY=:0");

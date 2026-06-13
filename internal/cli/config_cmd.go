@@ -14,19 +14,35 @@ import (
 func (a App) configShow(args []string) error {
 	fs := newFlagSet("config show", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
+	providerOverride := fs.String("provider", "", "resolve config for this provider")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadConfigWithOverrides("", strings.TrimSpace(*providerOverride))
 	if err != nil {
 		return err
 	}
 	if err := validateProviderConfig(cfg); err != nil {
 		return err
 	}
+	provider, providerScope, fixedLeaseID, scopeErr := controllerProviderIdentityForConfig(cfg)
+	if scopeErr != nil {
+		provider = cfg.Provider
+		providerScope = ""
+		fixedLeaseID = false
+	}
+	coordinatorRegistrationURL, err := coordinatorRegistrationURLForConfig(cfg)
+	if err != nil {
+		return err
+	}
 	cfg = effectiveConfigForShow(cfg)
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(configShowView(cfg))
+		view := configShowView(cfg)
+		view["provider"] = provider
+		view["providerScope"] = providerScope
+		view["idempotentLeaseId"] = fixedLeaseID
+		view["coordinatorRegistrationUrl"] = coordinatorRegistrationURL
+		return json.NewEncoder(a.Stdout).Encode(view)
 	}
 	writeConfigShowText(a.Stdout, cfg)
 	return nil

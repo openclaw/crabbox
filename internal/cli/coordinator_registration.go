@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -70,22 +71,40 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	if err != nil {
 		return leaseClaim{}, err
 	}
-	a.registerCoordinatorLeaseBestEffort(ctx, cfg, LeaseTarget{
+	if err := a.registerCoordinatorLeaseBestEffort(ctx, cfg, LeaseTarget{
 		Server:  server,
 		SSH:     target,
 		LeaseID: leaseID,
-	})
+	}); err != nil {
+		return claimed, err
+	}
 	return claimed, nil
 }
 
-func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, lease LeaseTarget) {
+func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, lease LeaseTarget) error {
+	adapterID, workspaceID, adapterMode, bindingErr := adapterRuntimeRegistrationBinding()
+	if bindingErr != nil {
+		a.coordinatorRegistrationWarning(lease.LeaseID, bindingErr)
+		return bindingErr
+	}
 	if !shouldRegisterCoordinatorLease(cfg) || strings.TrimSpace(lease.LeaseID) == "" {
-		return
+		if adapterMode {
+			err := fmt.Errorf("adapter workspace requires registered coordinator mode and a stable lease ID")
+			a.coordinatorRegistrationWarning(lease.LeaseID, err)
+			return err
+		}
+		return nil
 	}
 	coord, configured, err := newCoordinatorClient(cfg)
 	if err != nil || !configured || coord == nil {
-		fmt.Fprintf(a.Stderr, "warning: coordinator registration skipped for %s: %v\n", lease.LeaseID, err)
-		return
+		if err == nil {
+			err = fmt.Errorf("coordinator is not configured")
+		}
+		a.coordinatorRegistrationWarning(lease.LeaseID, err)
+		if adapterMode {
+			return err
+		}
+		return nil
 	}
 	server := lease.Server
 	target := lease.SSH
@@ -116,37 +135,146 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 		TTLSeconds:         int(cfg.TTL.Seconds()),
 		IdleTimeoutSeconds: int(cfg.IdleTimeout.Seconds()),
 	}
+	if adapterMode {
+		registration.RuntimeAdapterID = adapterID
+		registration.RuntimeWorkspaceID = workspaceID
+	}
 	callCtx, cancel := context.WithTimeout(ctx, coordinatorRegistrationTimeout)
 	defer cancel()
-	if _, err := coord.RegisterLease(callCtx, lease.LeaseID, registration); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: coordinator registration failed for %s: %v\n", lease.LeaseID, err)
+	registered, err := coord.RegisterLease(callCtx, lease.LeaseID, registration)
+	if err != nil {
+		a.coordinatorRegistrationWarning(lease.LeaseID, err)
+		if adapterMode {
+			return fmt.Errorf("register adapter workspace with coordinator: %w", err)
+		}
+		return nil
 	}
+	if adapterMode && (registered.RuntimeAdapterID != adapterID || registered.RuntimeWorkspaceID != workspaceID) {
+		err := fmt.Errorf(
+			"coordinator returned adapter binding %q/%q, expected %q/%q",
+			registered.RuntimeAdapterID,
+			registered.RuntimeWorkspaceID,
+			adapterID,
+			workspaceID,
+		)
+		a.coordinatorRegistrationWarning(lease.LeaseID, err)
+		return err
+	}
+	return nil
+}
+
+func coordinatorRegistrationURLForConfig(cfg Config) (string, error) {
+	if !shouldRegisterCoordinatorLease(cfg) {
+		return "", nil
+	}
+	coord, configured, err := newCoordinatorClient(cfg)
+	if err != nil {
+		return "", err
+	}
+	if !configured || coord == nil || strings.TrimSpace(coord.BaseURL) == "" {
+		return "", fmt.Errorf("registered coordinator mode has no configured coordinator")
+	}
+	return coord.BaseURL, nil
+}
+
+func validateControllerCoordinatorRegistrationURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("coordinator registration URL must not contain surrounding whitespace")
+	}
+	normalized, err := coordinatorRegistrationURLForConfig(Config{
+		BrokerMode:  BrokerModeRegistered,
+		Coordinator: value,
+	})
+	if err != nil {
+		return err
+	}
+	if normalized != value {
+		return fmt.Errorf("coordinator registration URL must be canonical (%s)", normalized)
+	}
+	return nil
+}
+
+func adapterRuntimeRegistrationBinding() (adapterID, workspaceID string, required bool, err error) {
+	adapterID = strings.TrimSpace(os.Getenv("CRABBOX_ADAPTER_ID"))
+	workspaceID = strings.TrimSpace(os.Getenv(controllerWorkspaceIDEnv))
+	required = adapterID != "" && workspaceID != ""
+	if !required {
+		return adapterID, workspaceID, false, nil
+	}
+	if !validControllerWorkspaceID(adapterID) || !validControllerWorkspaceID(workspaceID) {
+		return adapterID, workspaceID, true, fmt.Errorf("adapter coordinator registration requires valid adapter and workspace IDs")
+	}
+	return adapterID, workspaceID, true, nil
+}
+
+func (a App) coordinatorRegistrationWarning(leaseID string, err error) {
+	if a.Stderr == nil {
+		return
+	}
+	fmt.Fprintf(a.Stderr, "warning: coordinator registration failed for %s: %v\n", firstNonBlank(leaseID, "unknown"), err)
 }
 
 func (a App) startRegisteredWebVNCDaemonBestEffort(cfg Config, target SSHTarget, leaseID string, keep bool) {
-	if !keep || !cfg.Desktop || !cfg.BrokerAutoWebVNC || !shouldRegisterCoordinatorLease(cfg) {
+	if !shouldStartRegisteredWebVNCDaemon(cfg, keep) {
 		return
 	}
-	if err := a.startWebVNCDaemon(webVNCBridgeArgs(cfg, target, leaseID, false, false), leaseID); err != nil {
+	if err := a.startWebVNCDaemon(webVNCBridgeArgs(cfg, target, leaseID, false, false), leaseID, false, ""); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: could not start registered WebVNC bridge for %s: %v\n", leaseID, err)
 	}
 }
 
+func shouldStartRegisteredWebVNCDaemon(cfg Config, keep bool) bool {
+	// Controller warmup is a gated child lifecycle. Its desktop bridge is
+	// created later with persisted ownership and no-provider-side-effects.
+	// Never leave an ordinary registered-broker daemon outside that gate.
+	return keep && cfg.Desktop && cfg.BrokerAutoWebVNC && shouldRegisterCoordinatorLease(cfg) &&
+		strings.TrimSpace(os.Getenv(controllerWorkspaceIDEnv)) == ""
+}
+
 func (a App) releaseRegisteredCoordinatorLeaseBestEffort(ctx context.Context, cfg Config, leaseID string) {
-	if !shouldRegisterCoordinatorLease(cfg) || strings.TrimSpace(leaseID) == "" {
+	if strings.TrimSpace(os.Getenv(controllerWorkspaceIDEnv)) != "" {
+		// The controller's stable-absence cleanup owns deregistration. Releasing
+		// here would make a transient or eventually-consistent absence look final.
 		return
 	}
-	if _, err := a.stopWebVNCDaemonIfRunning(leaseID); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: could not stop registered WebVNC bridge for %s: %v\n", leaseID, err)
+	if err := a.releaseRegisteredCoordinatorLease(ctx, cfg, leaseID, true); err != nil && a.Stderr != nil {
+		fmt.Fprintf(a.Stderr, "warning: coordinator deregistration failed for %s: %v\n", leaseID, err)
+	}
+}
+
+func (a App) releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(ctx context.Context, cfg Config, leaseID string) error {
+	err := a.releaseRegisteredCoordinatorLease(ctx, cfg, leaseID, false)
+	if isCoordinatorNotFound(err) {
+		// Stable provider absence is already proven. A missing coordinator row is
+		// the desired terminal state and makes this cleanup retry idempotent.
+		return nil
+	}
+	return err
+}
+
+func (a App) releaseRegisteredCoordinatorLease(ctx context.Context, cfg Config, leaseID string, stopBridge bool) error {
+	if !shouldRegisterCoordinatorLease(cfg) || strings.TrimSpace(leaseID) == "" {
+		return nil
+	}
+	if stopBridge {
+		if _, err := a.stopWebVNCDaemonIfRunning(leaseID); err != nil && a.Stderr != nil {
+			fmt.Fprintf(a.Stderr, "warning: could not stop registered WebVNC bridge for %s: %v\n", leaseID, err)
+		}
 	}
 	coord, configured, err := newCoordinatorClient(cfg)
 	if err != nil || !configured || coord == nil {
-		fmt.Fprintf(a.Stderr, "warning: coordinator deregistration skipped for %s: %v\n", leaseID, err)
-		return
+		if err == nil {
+			err = fmt.Errorf("coordinator is not configured")
+		}
+		return err
 	}
 	callCtx, cancel := context.WithTimeout(ctx, coordinatorRegistrationTimeout)
 	defer cancel()
 	if _, err := coord.ReleaseLease(callCtx, leaseID, false); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: coordinator deregistration failed for %s: %v\n", leaseID, err)
+		return err
 	}
+	return nil
 }

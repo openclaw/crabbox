@@ -1101,8 +1101,8 @@ function optionalBootstrap(config: LeaseConfig): string {
   if (config.desktop && config.desktopEnv !== "xfce") {
     const gnome = config.desktopEnv === "gnome";
     const packages = gnome
-      ? "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps"
-      : "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps";
+      ? "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps util-linux novnc websockify"
+      : "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps util-linux novnc websockify";
     const desktopEnvExtra = gnome
       ? "    DISPLAY=:0\n    GDK_BACKEND=x11\n    MOZ_ENABLE_WAYLAND=0\n"
       : "";
@@ -1374,12 +1374,12 @@ ${themeConfigure}    systemctl daemon-reload
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`);
   } else if (config.desktop) {
-    parts.push(`    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme
+    parts.push(`    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
     fi
-    x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
+    { head -c 8 /var/lib/crabbox/vnc.password; printf '\\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\\n\\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
     chown crabbox:crabbox /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     printf 'CRABBOX_DESKTOP_ENV=xfce\\nDISPLAY=:99\\n' >/var/lib/crabbox/desktop.env

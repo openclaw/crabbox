@@ -60,7 +60,21 @@ test("dynamic workers smoke classifies deploy quota failures", () => {
   const npxCalls = path.join(dir, "npx-calls.jsonl");
 
   writeExecutable(fakeCrabbox, "#!/usr/bin/env bash\nexit 0\n");
-  writeExecutable(path.join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    path.join(bin, "npm"),
+    `#!/usr/bin/env node
+const credentialNames = [
+  "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN",
+  "CLOUDFLARE_API_TOKEN",
+  "CLOUDFLARE_API_KEY",
+  "CLOUDFLARE_EMAIL",
+  "CF_API_TOKEN",
+  "CF_API_KEY",
+  "CF_API_EMAIL",
+];
+if (credentialNames.some((name) => process.env[name])) process.exit(42);
+`,
+  );
   writeExecutable(
     path.join(bin, "npx"),
     `#!/usr/bin/env node
@@ -267,6 +281,7 @@ test("dynamic workers smoke deletes its Worker before the KV namespace", () => {
     path.join(bin, "npx"),
     `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.CRABBOX_FAKE_NPX_CALLS, JSON.stringify(args) + "\\n");
 if (args[0] === "wrangler" && args[1] === "kv" && args[2] === "namespace" && args[3] === "create") {
@@ -290,6 +305,8 @@ if (args[0] === "wrangler" && args[1] === "deploy") {
     (binding) => binding.name === "RUN_COORDINATOR",
   );
   if (coordinator?.class_name !== "DynamicWorkerRunCoordinator") process.exit(4);
+  if (!config.compatibility_flags?.includes("global_fetch_strictly_public")) process.exit(7);
+  if (!path.isAbsolute(config.main)) process.exit(8);
   if (
     !config.migrations?.some((migration) =>
       migration.new_sqlite_classes?.includes("DynamicWorkerRunCoordinator"),
@@ -328,8 +345,9 @@ process.exit(0);
     CRABBOX_FAKE_NPX_CALLS: npxCalls,
     CRABBOX_LIVE: "1",
     CRABBOX_LIVE_PROVIDERS: "cloudflare-dynamic-workers",
-    CRABBOX_CFDW_SKIP_LOCAL_CHECKS: "1",
     CLOUDFLARE_ACCOUNT_ID: "account",
+    CLOUDFLARE_API_TOKEN: "deploy-secret",
+    CF_API_KEY: "legacy-secret",
     CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN: runnerToken,
   });
 

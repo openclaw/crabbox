@@ -144,7 +144,9 @@ Provider docs:
 - Desktop app launch, terminal, record, proof, input (`click`/`type`/`paste`/`key`): `internal/cli/desktop.go`, `internal/cli/desktop_input.go`, `internal/cli/desktop_proof.go`
 - VNC tunnel command: `internal/cli/vnc.go`
 - Screenshot capture (incl. direct RFB grab): `internal/cli/screenshot.go`, `internal/cli/rfb_screenshot.go`
-- WebVNC portal bridge: `internal/cli/webvnc.go`, `worker/src/portal.ts`, `worker/src/fleet.ts`
+- WebVNC portal bridge and daemon process identity: `internal/cli/webvnc.go`, `internal/cli/webvnc_process_*.go`, `worker/src/portal.ts`, `worker/src/fleet.ts`
+- Workspace controller HTTP service, descriptor-verified durable state lock, crash-owned lifecycle subprocess adapter, and platform process controls: `internal/cli/controller.go`, `internal/cli/controller_service.go`, `internal/cli/controller_state_lock_*.go`, `internal/cli/controller_subprocess.go`, `internal/cli/controller_command_*.go`
+- Public Linux desktop bootstrap: `scripts/install-linux-desktop.sh`
 - Web code-server portal bridge: `internal/cli/code.go`, `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Mediated egress bridge: `internal/cli/egress.go`, `internal/cli/coordinator.go`, `worker/src/index.ts`, `worker/src/fleet.ts`
 - Interactive desktop/VNC contract: `docs/features/interactive-desktop-vnc.md`, `docs/features/vnc-linux.md`, `docs/features/vnc-windows.md`, `docs/features/vnc-macos.md`

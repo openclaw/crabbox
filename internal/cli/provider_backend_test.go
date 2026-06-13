@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,69 @@ func (r *recordingCommandRunner) Run(_ context.Context, req LocalCommandRequest)
 
 func testRuntimeWithRunner(r CommandRunner) Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: realClock{}, Exec: r}
+}
+
+func TestExecCommandRunnerBoundsCapturedOutputAndStopsChild(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := (execCommandRunner{}).Run(ctx, LocalCommandRequest{
+		Name:                   executable,
+		Args:                   []string{"-test.run=TestExecCommandRunnerOutputLimitHelperProcess", "--"},
+		Env:                    append(os.Environ(), "CRABBOX_TEST_OUTPUT_LIMIT_HELPER=1"),
+		MaxCapturedOutputBytes: 1024,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeded 1024-byte limit") {
+		t.Fatalf("output limit error=%v stdout_bytes=%d stdout=%q stderr=%q", err, len(result.Stdout), result.Stdout, result.Stderr)
+	}
+	if len(result.Stdout) != 1024 {
+		t.Fatalf("captured stdout bytes=%d", len(result.Stdout))
+	}
+	if result.ExitCode != 5 {
+		t.Fatalf("output limit exit code=%d want=5", result.ExitCode)
+	}
+}
+
+func TestExecCommandRunnerOutputLimitHelperProcess(t *testing.T) {
+	mode := os.Getenv("CRABBOX_TEST_OUTPUT_LIMIT_HELPER")
+	if mode == "" {
+		return
+	}
+	if mode == "child" {
+		time.Sleep(time.Hour)
+		return
+	}
+	child := exec.Command(os.Args[0], "-test.run=TestExecCommandRunnerOutputLimitHelperProcess", "--")
+	child.Env = make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "CRABBOX_TEST_OUTPUT_LIMIT_HELPER=") {
+			child.Env = append(child.Env, entry)
+		}
+	}
+	child.Env = append(child.Env, "CRABBOX_TEST_OUTPUT_LIMIT_HELPER=child")
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	if err := child.Start(); err != nil {
+		os.Exit(97)
+	}
+	_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 1<<20))
+	time.Sleep(time.Hour)
+}
+
+func TestControllerCoordinatorRegistrationBindingRejectsAcquisitionDrift(t *testing.T) {
+	t.Setenv(controllerCoordinatorRegistrationExpectedEnv, "1")
+	t.Setenv(controllerCoordinatorRegistrationURLEnv, "https://old-coordinator.example.test/root")
+	matching := Config{BrokerMode: BrokerModeRegistered, Coordinator: "https://old-coordinator.example.test/root/"}
+	if err := validateControllerCoordinatorRegistrationBinding(matching); err != nil {
+		t.Fatalf("canonical matching binding: %v", err)
+	}
+	drifted := Config{BrokerMode: BrokerModeRegistered, Coordinator: "https://new-coordinator.example.test/root"}
+	if err := validateControllerCoordinatorRegistrationBinding(drifted); err == nil || !strings.Contains(err.Error(), "binding changed") {
+		t.Fatalf("binding drift error=%v", err)
+	}
 }
 
 func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
@@ -178,6 +242,7 @@ func TestProviderFlagsOverrideDynamicSessionsConfigWithoutLeaseCreate(t *testing
 }
 
 func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
+	t.Setenv(controllerProviderScopeEnv, "")
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	cfg.Coordinator = "https://coordinator.example"
@@ -280,6 +345,24 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 }
 
+func TestLoadBackendRejectsChangedControllerProviderScope(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.External.Command = "provider-a"
+	_, scope, _, err := controllerProviderIdentityForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(controllerProviderScopeEnv, scope)
+	if _, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{})); err != nil {
+		t.Fatalf("matching scope rejected: %v", err)
+	}
+	cfg.External.Command = "provider-b"
+	if _, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{})); err == nil || !strings.Contains(err.Error(), "controller routing scope changed") {
+		t.Fatalf("changed scope error=%v", err)
+	}
+}
+
 func TestLoadBackendResetsInferredTargetAfterProviderSwitch(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "cloudflare-dynamic-workers"
@@ -304,6 +387,7 @@ func TestLoadBackendResetsInferredTargetAfterProviderSwitch(t *testing.T) {
 }
 
 func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
+	t.Setenv(controllerProviderScopeEnv, "")
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	cfg.Coordinator = "https://coordinator.example"

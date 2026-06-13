@@ -195,6 +195,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI",
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS",
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG",
+		"CRABBOX_SMOLVM_API_KEY",
+		"SMOLMACHINES_API_KEY",
+		"SMK_API_KEY",
+		"CRABBOX_SMOLVM_BASE_URL",
+		"CRABBOX_SMOLVM_IMAGE",
+		"CRABBOX_SMOLVM_WORKDIR",
+		"CRABBOX_SMOLVM_CPUS",
+		"CRABBOX_SMOLVM_MEMORY_MB",
+		"CRABBOX_SMOLVM_NETWORK",
+		"CRABBOX_SMOLVM_KEEP",
 		"CRABBOX_ASCII_BOX_API_KEY",
 		"ASCII_BOX_API_KEY",
 		"CRABBOX_ASCII_BOX_BASE_URL",
@@ -340,6 +350,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_HOSTINGER_WORK_ROOT",
 		"CRABBOX_HOSTINGER_ALLOW_PURCHASE",
 		"CRABBOX_HOSTINGER_RELEASE_ACTION",
+		"CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID",
 	} {
 		t.Setenv(key, "")
 	}
@@ -2110,6 +2121,28 @@ func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 	}
 	if !IsTartMemoryExplicit(&cfg) {
 		t.Fatal("tartMemoryExplicit must be true after YAML sets memory")
+	}
+}
+
+func TestExternalFixedLeaseIDCapabilityConfigAndEnv(t *testing.T) {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("external:\n  capabilities:\n    idempotentLeaseId: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.External.Capabilities.IdempotentLeaseID {
+		t.Fatal("external fixed lease ID capability was not loaded from YAML")
+	}
+	cfg.External.Capabilities.IdempotentLeaseID = false
+	t.Setenv("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.External.Capabilities.IdempotentLeaseID {
+		t.Fatal("external fixed lease ID capability was not loaded from the environment")
 	}
 }
 

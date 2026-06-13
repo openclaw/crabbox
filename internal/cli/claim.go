@@ -983,7 +983,7 @@ func removeLeaseClaim(leaseID string) {
 	path, err := leaseClaimPath(leaseID)
 	if err == nil {
 		_ = withLeaseClaimLock(path, func() error {
-			err := os.Remove(path)
+			err := removeControllerFile(path)
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
@@ -993,6 +993,22 @@ func removeLeaseClaim(leaseID string) {
 }
 
 func removeLeaseClaimIfUnchanged(leaseID string, expected leaseClaim) error {
+	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, nil)
+}
+
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, action func() error) error {
+	return removeLeaseClaimIfUnchangedAfterWithSync(leaseID, expected, action, syncControllerDirectory)
+}
+
+func removeLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseClaim, action func() error, syncDirectory func(string) error) error {
+	return cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID, expected, true, action, syncDirectory)
+}
+
+func cleanupLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expectedExists bool, action func() error) error {
+	return cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID, expected, expectedExists, action, syncControllerDirectory)
+}
+
+func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseClaim, expectedExists bool, action func() error, syncDirectory func(string) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -1002,11 +1018,24 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected leaseClaim) error {
 		if err != nil {
 			return err
 		}
-		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
+		if err := unchangedLeaseClaimGuard(leaseID, expected, expectedExists)(claim, exists); err != nil {
 			return err
 		}
-		if err := os.Remove(path); err != nil {
+		if action != nil {
+			if err := action(); err != nil {
+				return err
+			}
+		}
+		// Even when the source is absent, Windows may still have the
+		// deterministic tombstone left by an interrupted write-through remove.
+		if err := removeControllerFile(path); err != nil && (exists || !errors.Is(err, os.ErrNotExist)) {
 			return exit(2, "remove claim %s: %v", path, err)
+		}
+		if err := syncDirectory(filepath.Dir(path)); err != nil {
+			if !exists && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return exit(2, "sync removed claim directory %s: %v", filepath.Dir(path), err)
 		}
 		return nil
 	})

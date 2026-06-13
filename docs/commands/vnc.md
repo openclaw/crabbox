@@ -89,7 +89,13 @@ Keep the tunnel process running while connected.
 Run the printed `ssh -N -L ...` tunnel in another terminal, then connect your
 VNC client to the printed `127.0.0.1:<port>` endpoint. The tunnel forwards your
 chosen local port (`--local-port`, or an auto-picked port in `5901-5999`) to
-`127.0.0.1:5900` on the remote box.
+`127.0.0.1:5900` on the remote box. Crabbox binds the local forward explicitly
+to IPv4 `127.0.0.1`. Linux and macOS hosts verify that the launched SSH process
+owns that exact listener before returning or opening a VNC client. Windows uses
+the system TCP owner table to require the exact tracked, non-forking `ssh.exe`
+PID; a reachable listener owned by another process is rejected. Platforms
+without an exact ownership implementation fail closed. `adapter serve`
+remains Linux/macOS-only.
 
 Use `--open` to let Crabbox start the tunnel and open the local VNC URL for you:
 
@@ -99,7 +105,11 @@ crabbox vnc --id blue-lobster --open
 
 `--open` starts the SSH tunnel in the background, waits until the local port is
 reachable, prints the tunnel pid, then opens `vnc://127.0.0.1:<port>` with your
-OS's URL handler. Opening URLs is supported on macOS, Linux, and Windows.
+OS's URL handler. Dedicated VNC and WebVNC tunnels explicitly set
+`ControlMaster=no`, `ControlPath=none`, `ControlPersist=no`, and
+`ForkAfterAuthentication=no`, so they cannot silently reuse, background, or
+leave behind an SSH connection whose listener is no longer owned by the
+tracked process. Opening URLs is supported on macOS, Linux, and Windows.
 
 For the same desktop inside the authenticated broker portal instead of a native
 VNC client, use [`crabbox webvnc --id <lease> --open`](webvnc.md). WebVNC still

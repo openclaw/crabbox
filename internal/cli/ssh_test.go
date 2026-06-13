@@ -872,6 +872,89 @@ func TestRsyncLocalPathPassesThroughNonWindowsPath(t *testing.T) {
 	}
 }
 
+func TestWindowsToWSLMountPathSupportsHostMountRoot(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		`C:\Users\alice\.ssh\id_ed25519`: "/mnt/host/c/Users/alice/.ssh/id_ed25519",
+		"C:/oc-work/my-app":              "/mnt/host/c/oc-work/my-app",
+		"/c/msys64/usr/bin/rsync.exe":    "/mnt/host/c/msys64/usr/bin/rsync.exe",
+	}
+	for in, want := range tests {
+		got := windowsToWSLMountPathWithRoot(in, "/mnt/host")
+		if got != want {
+			t.Fatalf("windowsToWSLMountPathWithRoot(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestWindowsHostPathConvertsMSYSDrivePath(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		`C:\Users\alice\.ssh\id_ed25519`: "C:/Users/alice/.ssh/id_ed25519",
+		"/c/Users/alice/.ssh/id_ed25519": "c:/Users/alice/.ssh/id_ed25519",
+		"/work/repo":                     "/work/repo",
+	}
+	for in, want := range tests {
+		if got := windowsHostPath(in); got != want {
+			t.Fatalf("windowsHostPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestWindowsWSLNativeToolPathsRejectsWindowsShims(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		paths string
+		want  bool
+	}{
+		{
+			name:  "native paths",
+			paths: "/usr/bin/rsync\n/usr/bin/ssh\n",
+			want:  true,
+		},
+		{
+			name:  "missing ssh",
+			paths: "/usr/bin/rsync\n",
+			want:  false,
+		},
+		{
+			name:  "exe shim",
+			paths: "/usr/bin/rsync.exe\n/usr/bin/ssh\n",
+			want:  false,
+		},
+		{
+			name:  "mnt c shim",
+			paths: "/mnt/c/msys64/usr/bin/rsync\n/usr/bin/ssh\n",
+			want:  false,
+		},
+		{
+			name:  "mnt other drive shim",
+			paths: "/mnt/d/tools/rsync\n/usr/bin/ssh\n",
+			want:  false,
+		},
+		{
+			name:  "mnt host c shim",
+			paths: "/mnt/host/c/msys64/usr/bin/rsync\n/usr/bin/ssh\n",
+			want:  false,
+		},
+		{
+			name:  "mnt host other drive shim",
+			paths: "/mnt/host/e/tools/rsync\n/usr/bin/ssh\n",
+			want:  false,
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := windowsWSLNativeToolPaths(tc.paths); got != tc.want {
+				t.Fatalf("windowsWSLNativeToolPaths(%q) = %v, want %v", tc.paths, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeRsyncOptionsNoTimesForcesChecksum(t *testing.T) {
 	t.Parallel()
 	got := normalizeRsyncOptions(rsyncOptions{NoTimes: true})
@@ -902,6 +985,18 @@ func TestWindowsToWSLPath(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("windowsToWSLPath(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestWindowsToWSLPathSupportsHostMountRoot(t *testing.T) {
+	t.Parallel()
+	in := `ssh -i C:\Users\alice\AppData\Local\Temp\cbx\id_ed25519 -o UserKnownHostsFile=/c/tmp/known_hosts`
+	got := windowsToWSLPathWithRoot(in, "/mnt/host")
+	if !strings.Contains(got, "/mnt/host/c/Users/alice/AppData/Local/Temp/cbx/id_ed25519") {
+		t.Fatalf("converted path missing host-root key path: %q", got)
+	}
+	if !strings.Contains(got, "UserKnownHostsFile=/mnt/host/c/tmp/known_hosts") {
+		t.Fatalf("converted path missing host-root known_hosts path: %q", got)
 	}
 }
 
