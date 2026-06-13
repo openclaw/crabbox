@@ -162,6 +162,9 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
   const target = quoteTarget(input.target);
   const strategy = quoteStrategy(input.strategy);
   const maxCredits = positiveNumber(input.maxCredits);
+  if (input.maxCredits !== undefined && maxCredits === undefined) {
+    throw new MarketplaceInputError("maxCredits must be a positive number", "invalid_max_credits");
+  }
   const providers = quoteProviders(status.supportedProviders, input);
   const candidates = providers
     .map((provider) =>
@@ -272,6 +275,7 @@ function quoteProviders(supported: Provider[], input: MarketplaceQuoteRequest): 
     : input.provider && input.provider !== "auto"
       ? [input.provider]
       : supported;
+  const isExplicit = !!(input.providers?.length || (input.provider && input.provider !== "auto"));
   // intersect with the deployment allowlist (CRABBOX_MARKETPLACE_ALLOWED_PROVIDERS or default coordinator)
   // so that explicitly requested providers outside the list are rejected (prevents bypass of routing/billing policy)
   const supportedSet = new Set(supported);
@@ -280,6 +284,13 @@ function quoteProviders(supported: Provider[], input: MarketplaceQuoteRequest): 
   if (providers.length === 0) {
     throw new MarketplaceInputError(
       "no supported marketplace providers requested",
+      "invalid_provider",
+    );
+  }
+  if (isExplicit && providers.length < uniqueProviders(raw).length) {
+    // any explicitly requested provider was dropped -> policy violation for the requestor
+    throw new MarketplaceInputError(
+      "one or more requested providers are not allowed by CRABBOX_MARKETPLACE_ALLOWED_PROVIDERS",
       "invalid_provider",
     );
   }
