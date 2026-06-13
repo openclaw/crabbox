@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "alias": {
     "cpu-features": "./src/cpu-features.cjs",
+    "./crypto/build/Release/sshcrypto.node": "./src/ssh2-native.cjs",
     "./crypto/poly1305.js": "./src/ssh2-poly1305.cjs",
   },
   "workers_dev": true,
