@@ -10,9 +10,10 @@ short-lived testboxes and sandboxes. Two sides cooperate:
 
 - The **CLI** (`cmd/crabbox`, `internal/cli`) keeps the developer story simple:
   lease a box, sync your dirty checkout, run a command, stream output, clean up.
-- The **broker** — a Cloudflare Worker plus a single Fleet Durable Object
-  (`worker/src`) — keeps shared capacity safe: it holds provider credentials and
-  owns lease state, expiry, cleanup, usage accounting, and cost guardrails.
+- The **coordinator** (`worker/src`) keeps shared capacity safe: it holds
+  provider credentials and owns lease state, expiry, cleanup, usage accounting,
+  and cost guardrails. It runs on Cloudflare Workers with a Durable Object or
+  as a Node.js service with PostgreSQL and pg-boss.
 
 The leased machines are vanilla runners that hold no broker secrets. They are
 leaves: provisioned, used, deleted. Durable evidence — run records, logs,
@@ -21,12 +22,12 @@ telemetry, screenshots, artifacts — stays with Crabbox, not on the box.
 ## The pieces
 
 ```text
-┌──────────────────────┐   HTTPS / JSON   ┌──────────────────────┐
-│ your machine         │ ───────────────► │ Cloudflare Worker    │
-│ crabbox CLI          │  bearer + owner  │ Fleet Durable Object │
-│ repo checkout        │                  │ provider creds       │
-│ per-lease SSH key    │                  │ lease + usage state  │
-└──────────┬───────────┘                  └──────────┬───────────┘
+┌──────────────────────┐   HTTPS / JSON   ┌───────────────────────────┐
+│ your machine         │ ───────────────► │ coordinator runtime       │
+│ crabbox CLI          │  bearer + owner  │ Cloudflare + Durable Obj. │
+│ repo checkout        │                  │ or Node.js + PostgreSQL   │
+│ per-lease SSH key    │                  │ provider creds + state    │
+└──────────┬───────────┘                  └────────────┬──────────────┘
            │                                         │ provider API
            │                                         ▼
            │                          ┌──────────────────────────────┐
@@ -36,16 +37,16 @@ telemetry, screenshots, artifacts — stays with Crabbox, not on the box.
                                       └──────────────────────────────┘
 ```
 
-The CLI talks to the broker over HTTPS, then talks **directly** to the leased
-runner over SSH and rsync. The runner never calls the broker; that path stays
-one-way. The broker manages leases, not the data plane — your files, commands,
-and output never traverse the Worker.
+The CLI talks to the coordinator over HTTPS, then talks **directly** to the
+leased runner over SSH and rsync. The runner never calls the coordinator for
+ordinary command execution; that path stays one-way. The coordinator manages
+leases, not the data plane — your files, commands, and output never traverse it.
 
 For long-lived interactions the CLI may also open one authenticated WebSocket to
-the Fleet Durable Object at `/v1/control`. That socket carries run-event attach
+the coordinator at `/v1/control`. That socket carries run-event attach
 streams and lease heartbeats, so high-latency links do less request polling. The
 HTTPS endpoints remain canonical storage and a compatibility fallback, so older
-CLIs and brokers still interoperate.
+CLIs and coordinators still interoperate.
 
 ## Ownership
 
@@ -66,12 +67,12 @@ per-lease SSH key under `<user-config>/crabbox/testboxes/<lease>/id_ed25519`
 (RSA for AWS/Azure Windows targets).
 
 **2. Lease.** `POST /v1/leases` to the broker with class, provider, target, TTL,
-idle timeout, slug, requested capabilities, and the SSH public key. The Worker
-authenticates and forwards to the Fleet Durable Object. The Durable Object
-enforces active-lease and monthly spend caps, asks the provider for live
-pricing, reserves the worst-case TTL cost, provisions the machine (with region
-and market fallback), and returns the host, SSH user/port, work root, expiry,
-final lease ID, and slug. If the broker assigned a different final lease ID, the
+idle timeout, slug, requested capabilities, and the SSH public key. The
+coordinator authenticates the request, serializes fleet mutations, enforces
+active-lease and monthly spend caps, asks the provider for live pricing,
+reserves the worst-case TTL cost, provisions the machine (with region and
+market fallback), and returns the host, SSH user/port, work root, expiry, final
+lease ID, and slug. If the coordinator assigned a different final lease ID, the
 CLI re-keys its local key directory to match.
 
 **3. Sync.** Wait for SSH and the readiness probe. Seed remote Git from the
@@ -105,16 +106,16 @@ crabbox stop blue-lobster
 Every lease gets a friendly slug (an `<adjective>-<noun>` pair derived from the
 lease ID, e.g. `blue-lobster` or `swift-crab`) alongside its canonical `cbx_…`
 ID; most commands accept either via `--id`. While the CLI is using a lease it
-sends heartbeats, and the Durable Object updates `lastTouchedAt` and recomputes
-idle expiry. If a warm lease goes untouched past its idle timeout, the alarm
-releases it.
+sends heartbeats, and the coordinator updates `lastTouchedAt` and recomputes
+idle expiry. If a warm lease goes untouched past its idle timeout, the runtime's
+durable scheduler releases it.
 
 ## Brokered vs. direct provider
 
 The **brokered path** is normal operation:
 
 ```text
-CLI -> Cloudflare Worker -> Durable Object -> provider API
+CLI -> coordinator (Cloudflare or Node/PostgreSQL) -> provider API
 CLI -> runner over SSH/rsync
 ```
 
@@ -150,9 +151,10 @@ archive sync.
 
 ## Auth and identity
 
-The broker accepts signed GitHub login tokens for normal users and shared bearer
-tokens for trusted automation; routes may additionally sit behind Cloudflare
-Access. Bearer-token CLI requests send:
+The coordinator accepts signed GitHub login tokens for normal users and shared
+bearer tokens for trusted automation. Cloudflare routes may additionally sit
+behind Cloudflare Access; Node deployments may trust an identity header only
+from configured reverse-proxy CIDRs. Bearer-token CLI requests send:
 
 ```text
 Authorization: Bearer <token>
@@ -207,19 +209,20 @@ type.
 ## Failure and cleanup
 
 Crabbox assumes failure is normal: CLIs crash, SSH disconnects, cloud-init
-fails, provider calls partially succeed, Cloudflare retries, and machines
-outlive local processes. The design response:
+fails, provider calls partially succeed, coordinator requests retry, and
+machines outlive local processes. The design response:
 
-- one Durable Object serializes fleet decisions;
+- each supported runtime serializes fleet decisions;
 - lease creation is idempotent where practical;
 - provider resources carry Crabbox tags or labels;
 - release is safe to call repeatedly;
-- stale leases expire via a Durable Object alarm (and a cron sweep);
+- stale leases expire through Durable Object alarms or pg-boss jobs, with
+  periodic reconciliation;
 - direct cleanup is conservative;
 - brokered cleanup is broker-owned.
 
 `crabbox cleanup` refuses to sweep provider resources when a coordinator is
-configured, because brokered cleanup belongs to the Durable Object.
+configured, because brokered cleanup belongs to the coordinator.
 
 ## Where to go next
 
@@ -228,5 +231,6 @@ configured, because brokered cleanup belongs to the Durable Object.
 - [CLI](cli.md): command surface, config, output, and exit codes.
 - [Features](features/README.md): one page per feature area.
 - [Commands](commands/README.md): one page per command.
-- [Infrastructure](infrastructure.md): Cloudflare, DNS, and provider setup.
+- [Infrastructure](infrastructure.md): coordinator runtimes, ingress, secrets,
+  DNS, and provider setup.
 - [Security](security.md): auth, secrets, SSH, cleanup, and trust boundaries.

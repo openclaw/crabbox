@@ -52,7 +52,7 @@ Provider readiness validates the selected provider without creating a lease.
 
 - When a coordinator is configured for a brokered provider (`aws`, `azure`,
   `gcp`, `hetzner`), doctor asks the broker for secret readiness. It reports
-  missing Worker secret names such as `AZURE_TENANT_ID` without exposing secret
+  missing coordinator secret names such as `AZURE_TENANT_ID` without exposing secret
   values. For AWS, broker readiness can also include non-mutating EC2 vCPU quota
   checks; low quotas print advisory `warning` lines and do not fail the run.
 - Without a coordinator, providers that implement a direct doctor run their own

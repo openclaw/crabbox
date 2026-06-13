@@ -10,8 +10,8 @@ Read when:
 a snapshot. It is registered as an SSH-lease provider, but the data plane is
 hybrid: `warmup`, `run`, `list`, `status`, and `stop` drive Daytona's SDK and
 toolbox APIs, while `ssh` mints a short-lived Daytona SSH token only when
-interactive shell access is requested. Daytona is direct-from-CLI only — it never
-runs through the Worker broker — and supports Linux targets exclusively.
+interactive shell access is requested. Daytona is direct-from-CLI only — it
+never runs through the coordinator — and supports Linux targets exclusively.
 
 ## Authentication
 

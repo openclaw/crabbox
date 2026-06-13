@@ -167,13 +167,13 @@ execution, and release/delete without syncing a repository.
 
 ## Brokered auth
 
-Brokered mode uses Worker-side service-account credentials, so developer
+Brokered mode uses coordinator-side service-account credentials, so developer
 machines do not need Google credentials when the coordinator owns provisioning.
-The Worker uses Compute REST calls with the configured service account and lists
+The coordinator uses Compute REST calls with the configured service account and lists
 pool state through aggregated instance listing with partial success enabled, so
 one unhealthy zone does not hide healthy Crabbox VMs elsewhere.
 
-Required Worker secrets:
+Required coordinator secrets:
 
 ```text
 GCP_PROJECT_ID   (or CRABBOX_GCP_PROJECT)
@@ -181,7 +181,7 @@ GCP_CLIENT_EMAIL
 GCP_PRIVATE_KEY
 ```
 
-Optional Worker defaults (same names as the direct-mode environment):
+Optional coordinator defaults (same names as the direct-mode environment):
 
 ```text
 CRABBOX_GCP_ZONE

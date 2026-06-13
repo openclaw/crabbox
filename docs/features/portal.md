@@ -6,12 +6,12 @@ Read this when:
 - changing portal pages, page-level routes, or bridge proxies;
 - deciding whether a feature belongs in the CLI, the `/v1` API, or the portal.
 
-The browser portal is a server-rendered web UI hosted by the same Cloudflare
-Worker that backs the Crabbox API. It is not a separate frontend or
-single-page app: every page is HTML rendered by the Worker, with light
+The browser portal is a server-rendered web UI hosted by the same coordinator
+that backs the Crabbox API. It is not a separate frontend or single-page app:
+every page is HTML rendered by the coordinator, with light
 client-side JavaScript only for filtering, sorting, clipboard copy, theme
-switching, and the live VNC viewer. Because the portal and the API serve the
-same Fleet Durable Object state, the two surfaces cannot drift apart.
+switching, and the live VNC viewer. Because the portal and the API use the same
+`FleetCoordinator` state, the two surfaces cannot drift apart.
 
 ## URL map
 
@@ -40,7 +40,7 @@ The WebVNC viewer page also drives a small set of bridge sub-routes that the
 browser calls directly: `/vnc/viewer` (the noVNC WebSocket), `/vnc/status`,
 `/vnc/control` (take control), and `/vnc/theme` (sync the desktop theme).
 Static assets, including the noVNC client at `/portal/assets/novnc/rfb.js`,
-are served from the Worker's asset binding.
+are served from the coordinator's bundled assets.
 
 A `GET /` redirects to `/portal` (while `GET /v1/health` returns a JSON
 health payload). When

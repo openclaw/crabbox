@@ -29,7 +29,7 @@ to scope its checks to one provider. See [doctor](features/doctor.md) and
 
 ## Broker auth fails
 
-The CLI talks to the broker (the Cloudflare Worker) over HTTP for every lease
+The CLI talks to the coordinator over HTTP for every lease
 lifecycle call. Auth failures stop a lease before it reaches a provider.
 
 **Symptoms**
@@ -50,14 +50,14 @@ printenv CRABBOX_PUBLIC_URL
 
 **Fixes**
 
-- Configure the broker with `crabbox config set-broker --url <worker-url>` (or
+- Configure the broker with `crabbox config set-broker --url <coordinator-url>` (or
   log in with `crabbox login`).
-- Point the CLI at the Worker URL, or at the Access-protected route only when
+- Point the CLI at the coordinator URL, or at the Access-protected route only when
   that is intended.
-- Ensure `CRABBOX_COORDINATOR_TOKEN` matches the Worker's `CRABBOX_SHARED_TOKEN`.
+- Ensure `CRABBOX_COORDINATOR_TOKEN` matches the coordinator's `CRABBOX_SHARED_TOKEN`.
 - For self-hosted GitHub browser login, create a GitHub OAuth app and set its
   callback URL to `https://<your-coordinator-host>/v1/auth/github/callback`.
-- Ensure the Worker's `CRABBOX_PUBLIC_URL` uses the same public origin as that
+- Ensure the coordinator's `CRABBOX_PUBLIC_URL` uses the same public origin as that
   GitHub OAuth callback.
 
 See [broker auth & routing](features/broker-auth-routing.md) for the full token
@@ -133,7 +133,7 @@ CRABBOX_CAPACITY_REGIONS=eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2 \
 
 **Fixes**
 
-- Set the named Worker provider secrets before retrying brokered leases.
+- Set the named coordinator provider secrets before retrying brokered leases.
 - Choose a smaller `--class`.
 - Override the AWS capacity market for a one-off launch with `--market on-demand`
   or `--market spot`.
@@ -246,11 +246,11 @@ tailscale ping <tailscale-fqdn-or-100.x-address>
 
 **Fixes**
 
-- For brokered leases, configure the Worker secrets
+- For brokered leases, configure the coordinator secrets
   `CRABBOX_TAILSCALE_CLIENT_ID` and `CRABBOX_TAILSCALE_CLIENT_SECRET`.
 - Keep `CRABBOX_TAILSCALE_ENABLED` unset or `1`; set it to `0` only to disable
   brokered Tailscale intentionally.
-- Ensure requested tags are in the Worker's `CRABBOX_TAILSCALE_TAGS` allowlist.
+- Ensure requested tags are in the coordinator's `CRABBOX_TAILSCALE_TAGS` allowlist.
 - Ensure the local client is joined to the same tailnet and that ACLs allow SSH
   to the tagged node.
 - For exit nodes, ensure the node is approved and that tailnet grants or ACLs

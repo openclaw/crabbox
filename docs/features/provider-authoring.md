@@ -189,8 +189,8 @@ Rules:
     `workspace-restore`, `provider-snapshot`).
   - `FeatureRunProof`, `FeatureRunSession` — delegated backend can return
     bounded stream/timing proof metadata or a reusable run session.
-- `Coordinator` is `CoordinatorSupported` only when the Cloudflare Worker broker
-  can provision your runners. Today that is `aws`, `azure`, `gcp`, and
+- `Coordinator` is `CoordinatorSupported` only when the shared coordinator
+  provider adapter can provision your runners. Today that is `aws`, `azure`, `gcp`, and
   `hetzner`. Everything else — all delegated run backends and Static SSH —
   sets `CoordinatorNever`. Even a `CoordinatorSupported` provider runs direct
   from the CLI unless a broker URL is configured (see
@@ -314,7 +314,7 @@ type CleanupBackend interface {
 Cleanup must honor `CleanupRequest.DryRun`, log every skip/delete decision to
 `rt.Stderr`, and filter by Crabbox labels so it never touches unrelated
 machines. When a broker is configured, core refuses to call provider cleanup at
-all — brokered cleanup belongs to the Worker's Durable Object alarm.
+all — brokered cleanup belongs to the coordinator scheduler.
 
 ### Delegated Run Backend
 

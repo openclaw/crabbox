@@ -134,6 +134,10 @@ jobs:
         run: npm run check
         working-directory: worker
 
+      - name: Typecheck Node runtime
+        run: npm run check:node
+        working-directory: worker
+
       - name: Test
         run: npm test
         working-directory: worker
@@ -141,6 +145,13 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: worker
+
+      - name: Build Node runtime
+        run: npm run build:node
+        working-directory: worker
+
+      - name: Build Node runtime image
+        run: docker build -f worker/Dockerfile.node worker
 
   scripts:
     name: Scripts

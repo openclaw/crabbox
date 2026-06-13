@@ -22,8 +22,8 @@ Each adapter declares a `Spec` that drives how Crabbox treats it:
   provider owns sync and execution; there is no SSH lease), or
   `service-control` (Crabbox can inspect or stop a provider-owned service, but
   cannot execute arbitrary run commands there).
-- **Coordinator** — `supported` means the provider *may* be brokered through the
-  Cloudflare Worker; `never` means it always runs direct from the CLI. Only
+- **Coordinator** — `supported` means the provider *may* be brokered through
+  either coordinator runtime; `never` means it always runs direct from the CLI. Only
   `aws`, `azure`, `gcp`, and `hetzner` are `supported`, and even those run direct
   unless a broker URL and token are configured (see
   [Configuration](configuration.md) and `crabbox config set-broker`).
@@ -52,10 +52,10 @@ testbed contract when those prerequisites are actually present.
 
 ## Brokered providers
 
-Four providers can be brokered through the Worker. Brokering adds lease records,
-cost guardrails, usage accounting, scheduled cleanup, and the web portal; the
-data plane (SSH, rsync, command execution) still runs directly from the CLI to
-the box.
+Four providers can be brokered through either coordinator runtime. Brokering
+adds lease records, cost guardrails, usage accounting, scheduled cleanup, and
+the web portal; the data plane (SSH, rsync, command execution) still runs
+directly from the CLI to the box.
 
 ```text
 hetzner   Hetzner Cloud servers          (Linux)
@@ -72,14 +72,14 @@ When no coordinator is configured, these providers still work in **direct mode**
 the CLI talks to the cloud API itself using local credentials (AWS SDK chain,
 Azure credentials, Google Application Default Credentials,
 `HCLOUD_TOKEN`/`HETZNER_TOKEN`, `DIGITALOCEAN_TOKEN` for DigitalOcean, or
-`LINODE_TOKEN` for Linode). Direct mode has no Durable Object alarm; cleanup is
-best-effort through provider labels and manual `crabbox cleanup`. Prefer the
+`LINODE_TOKEN` for Linode). Direct mode has no coordinator scheduler; cleanup
+is best-effort through provider labels and manual `crabbox cleanup`. Prefer the
 brokered path when a broker is available.
 
 ## Direct SSH-lease providers
 
 These provision or attach an SSH-reachable box and use the standard Crabbox SSH
-sync/run/release path. None of them go through the Worker.
+sync/run/release path. None of them go through the coordinator.
 
 ```text
 ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows

@@ -19,10 +19,10 @@ Every provider registers a backend with one of two kinds:
 SSH-lease providers further differ by how they reach the cloud:
 
 - **Brokered cloud** — `aws`, `azure`, `gcp`, and `hetzner` can run through the
-  Crabbox coordinator (the Cloudflare Worker broker). The Worker owns cloud
-  credentials, cost state, cleanup alarms, and lease accounting. This is the
-  normal shared-team path. Set with `config set-broker` and a broker URL
-  (`CRABBOX_COORDINATOR`).
+  Crabbox coordinator on Cloudflare or Node/PostgreSQL. The coordinator owns
+  cloud credentials, cost state, cleanup scheduling, and lease accounting.
+  This is the normal shared-team path. Set with `config set-broker` and a
+  broker URL (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same four providers without a configured broker, plus
   cloud providers that never broker (e.g. `digitalocean`, `linode`, `proxmox`,
   `hostinger`, `runpod`, `namespace-devbox`, `semaphore`, `sprites`, `exe-dev`,
@@ -152,11 +152,10 @@ reports.
   the provider page.
 - DigitalOcean is a direct-only Linux Droplet provider. It uses
   `DIGITALOCEAN_TOKEN`, per-lease SSH keys, and Crabbox-owned flat tags; it does
-  not run through the Worker broker in Phase 1.
+  not run through the coordinator.
 - Linode is a direct-only Linux instance provider. It uses `LINODE_TOKEN`,
   per-lease SSH keys, metadata user-data, optional attachment to an existing
-  firewall, and Crabbox-owned tags; it does not run through the Worker broker in
-  Phase 1.
+  firewall, and Crabbox-owned tags; it does not run through the coordinator.
 - Hostinger is a direct-only Linux VPS provider. Purchases require explicit
   opt-in; release stops the VPS but does not cancel its subscription.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated

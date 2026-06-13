@@ -5,13 +5,13 @@ Read this when you are:
 - choosing `provider: aws`;
 - debugging EC2 capacity, Service Quotas, AMIs, security groups, or EC2 Mac
   Dedicated Hosts;
-- changing `internal/providers/aws` or brokered AWS provisioning in the Worker.
+- changing `internal/providers/aws` or brokered AWS provisioning in the coordinator.
 
 AWS is the broad managed provider. It is an SSH-lease backend: Crabbox
 provisions an EC2 instance, then owns SSH readiness, sync, command execution,
 results, desktop tunnels, and cleanup. It supports Linux, native Windows,
 Windows under WSL2, and EC2 Mac. AWS is one of the four providers that can run
-through the Worker broker (alongside Hetzner, Azure, and GCP); without a broker
+through the coordinator (alongside Hetzner, Azure, and GCP); without a broker
 URL configured it runs direct-from-CLI against the EC2 API.
 
 ## When to use AWS

@@ -4,14 +4,14 @@ Read when:
 
 - choosing AWS as the Crabbox provider;
 - debugging EC2 capacity, quotas, AMIs, security groups, or EC2 Mac hosts;
-- changing AWS provisioning code in the CLI (`internal/cli/aws.go`) or Worker
+- changing AWS provisioning code in the CLI (`internal/cli/aws.go`) or coordinator
   (`worker/src/aws.ts`).
 
 AWS is Crabbox's broadest managed provider. It leases full SSH-reachable EC2
 boxes and supports four targets: Linux, native Windows, Windows WSL2, and EC2
 Mac. AWS is one of the four brokerable providers, so it can run two ways:
 
-- **Brokered** — the Cloudflare Worker holds the AWS credentials and provisions
+- **Brokered** — the coordinator holds the AWS credentials and provisions
   on your behalf. The CLI still talks SSH/rsync directly to the runner.
 - **Direct** — no broker configured. The CLI uses the local AWS credential chain
   (`AWS_PROFILE`, env keys, or shared config) and provisions itself. This is the
@@ -165,6 +165,7 @@ The brokered coordinator can sweep stray AWS instances itself. When
 present, the Fleet Durable Object alarm periodically scans `CRABBOX_AWS_REGION`
 plus `CRABBOX_CAPACITY_REGIONS` for Crabbox-tagged EC2 instances; the Worker cron
 handler bootstraps the alarm for idle fleets after a deploy or config change. The
+sweep uses equivalent pg-boss scheduling and reconciliation on Node/PostgreSQL. The
 sweep only terminates confirmed orphan candidates when
 `CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1`; otherwise it stores the latest report for
 admin inspection. Tune cadence and grace with
@@ -219,7 +220,7 @@ grants separately with `crabbox admin providers policy --provider aws` and
 
 ## Credentials And Configuration
 
-### Broker secrets (Worker)
+### Broker secrets
 
 ```text
 AWS_ACCESS_KEY_ID

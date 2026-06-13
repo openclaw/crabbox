@@ -26,7 +26,7 @@ Azure supports both execution modes:
 
 - **Direct mode** uses local Azure credentials and talks to Azure directly from
   the CLI.
-- **Brokered mode** routes lease lifecycle through the Worker (the broker), which
+- **Brokered mode** routes lease lifecycle through the coordinator, which
   holds an operator-owned Azure service principal. The CLI still does SSH, sync,
   and command execution directly to the runner host.
 
@@ -179,21 +179,21 @@ See [Authenticate Go apps to Azure services with service principals](https://lea
 
 ## Brokered mode
 
-Brokered leases reuse the same Azure service-principal secrets on the Worker:
+Brokered leases reuse the same Azure service-principal secrets on the coordinator:
 `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and
 `AZURE_SUBSCRIPTION_ID`. Operators own the resource group, vnet, subnet, NSG, OS
 disk mode, and SSH CIDR defaults through the `CRABBOX_AZURE_*` env vars on the
 Worker. A lease request may override only `azureLocation`, `azureImage`, and
 `azureOSDisk`.
-Set `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the Worker when brokered Azure
+Set `CRABBOX_AZURE_WINDOWS_ARM64_IMAGE` on the coordinator when brokered Azure
 Windows ARM64 leases need a default ARM64 Windows image without changing the
 global `CRABBOX_AZURE_IMAGE` fallback used by existing custom-image leases.
 
-Set `CRABBOX_AZURE_REGIONS` on the Worker for Azure-specific capacity fallback;
+Set `CRABBOX_AZURE_REGIONS` on the coordinator for Azure-specific capacity fallback;
 `CRABBOX_CAPACITY_REGIONS` remains the AWS region fallback list.
 
 Run `crabbox doctor --provider azure --target windows` before leasing through the
-broker. The coordinator readiness check reports missing Worker secret names
+broker. The coordinator readiness check reports missing coordinator secret names
 without exposing values, and lease creation fails with `provider_not_configured`
 until the required service-principal secrets are present.
 

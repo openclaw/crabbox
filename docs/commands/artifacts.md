@@ -291,10 +291,10 @@ crabbox artifacts pull [<manifest-or-dir>] --output <dir> [--overwrite] [--json]
 
 ## Coordinator artifact backend
 
-When publishing through a coordinator, configure the artifact backend on the
-Worker. These values split into non-secret Worker vars and Worker secrets.
+When publishing through a coordinator, configure the artifact backend in its
+runtime environment. These values split into non-secret settings and secrets.
 
-Worker vars (where artifacts go and how long URLs live):
+Coordinator settings (where artifacts go and how long URLs live):
 
 ```text
 CRABBOX_ARTIFACTS_BACKEND=s3|r2
@@ -307,7 +307,7 @@ CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS
 CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS
 ```
 
-Worker secrets (S3-compatible object-store keys used only by the coordinator to
+Coordinator secrets (S3-compatible object-store keys used only by the coordinator to
 sign upload/read URLs):
 
 ```text

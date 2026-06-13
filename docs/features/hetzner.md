@@ -4,14 +4,14 @@ Read this when you are:
 
 - choosing Hetzner Cloud as the Crabbox provider;
 - debugging Hetzner capacity, quotas, images, or SSH readiness;
-- changing Hetzner provisioning code in the CLI or the Worker broker.
+- changing Hetzner provisioning code in the CLI or the coordinator.
 
 Hetzner is a Linux-only managed provider. Crabbox creates a Hetzner Cloud
 server, labels it with lease metadata (`crabbox=true` plus lease/slug/class and
 related labels), waits for the standard SSH bootstrap contract, and optionally layers
 on the desktop, browser, code, and Tailscale capabilities. It is one of the
-four providers that can run **brokered** through the Cloudflare Worker
-coordinator (alongside `aws`, `azure`, and `gcp`); without a configured broker
+four providers that can run **brokered** through the coordinator (alongside
+`aws`, `azure`, and `gcp`); without a configured broker
 it runs **direct** from the CLI against the Hetzner Cloud API.
 
 ## Targets

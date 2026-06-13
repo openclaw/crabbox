@@ -121,7 +121,8 @@ Hetzner prices are returned in EUR. The broker converts them to USD using `CRABB
 
 ## Limits
 
-The `limits` block mirrors the broker's active cost guardrails, read from these environment variables on the Worker:
+The `limits` block mirrors the broker's active cost guardrails, read from these
+coordinator environment variables:
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES

@@ -6,17 +6,17 @@ Read this when:
 - debugging leaked provider resources (instances, disks, Mac hosts);
 - changing direct-provider cleanup behavior.
 
-A lease holds a remote box until it is released or expires. Two independent paths
-reclaim the underlying resources: the **brokered** path, owned by the Worker's
-Fleet Durable Object, and the **direct** path, owned by the local CLI (and, for
-GCP, a guest-side guard). Which one applies depends on whether the provider is
-brokered through the Worker.
+A lease holds a remote box until it is released or expires. Two independent
+paths reclaim the underlying resources: the **brokered** path, owned by the
+coordinator, and the **direct** path, owned by the local CLI (and, for GCP, a
+guest-side guard). Which one applies depends on whether the provider runs
+through a coordinator.
 
 ## Brokered lifecycle
 
 When a provider is brokered (only `aws`, `azure`, `gcp`, and `hetzner`, and only
-when a coordinator URL is configured), the Worker owns the lease record and its
-lifecycle. A brokered lease record moves through four states
+when a coordinator URL is configured), the coordinator owns the lease record
+and its lifecycle. A brokered lease record moves through four states
 (`worker/src/types.ts`):
 
 ```text
@@ -51,7 +51,7 @@ Both release and expiry call the same provider delete path:
 - **Release** (`POST /v1/leases/{id}/release`, e.g. `crabbox stop`) deletes the
   cloud server when the lease is still active and sets state `released`. The
   body defaults `delete` to `!keep`.
-- **Expiry** is driven by the Durable Object alarm. `expireLeases` deletes the
+- **Expiry** is driven by the runtime scheduler. `expireLeases` deletes the
   cloud server for every active lease past `expiresAt`, then sets state
   `expired`.
 
@@ -61,7 +61,7 @@ does **not** exempt a lease from idle or TTL expiry.
 ### Cleanup retries
 
 If deleting the cloud server during expiry fails, the lease stays `active` and
-the Worker records `cleanupAttempts`, `cleanupError`, `cleanupFailedAt`, and a
+the coordinator records `cleanupAttempts`, `cleanupError`, `cleanupFailedAt`, and a
 `cleanupRetryAt` set 5 minutes out (`leaseCleanupRetryDelayMs`). The next alarm
 is scheduled for the soonest of all active-lease expiry/retry times, so a failed
 delete is retried automatically. On success the cleanup metadata is cleared and

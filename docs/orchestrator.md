@@ -1,10 +1,15 @@
 # Orchestrator
 
-Crabbox has one orchestrator: the Cloudflare Worker fronting a single Fleet
-Durable Object. It is the control plane for brokered leases — it owns lease
-identity, provider credentials, server lifecycle, expiry, cost guardrails, and
-usage accounting. The CLI still performs all data-plane work (SSH, rsync,
-command execution) directly against the runner host, even in brokered mode.
+Crabbox has one logical orchestrator, `FleetCoordinator`, with two supported
+deployment runtimes:
+
+- Cloudflare Worker fronting one Fleet Durable Object;
+- Node.js service backed by PostgreSQL and pg-boss.
+
+It is the control plane for brokered leases: lease identity, provider
+credentials, server lifecycle, expiry, cost guardrails, and usage accounting.
+The CLI still performs all data-plane work (SSH, rsync, command execution)
+directly against the runner host, even in brokered mode.
 
 For the broader request flow and the Worker's internals, see
 [Architecture](architecture.md) and the
@@ -18,7 +23,7 @@ How a command reaches a provider is decided by `loadBackend`
 - **Brokered.** The provider's spec advertises coordinator support (`aws`,
   `azure`, `gcp`, `hetzner`) *and* a broker URL is configured
   (`CRABBOX_COORDINATOR` or `config set-broker`). Lease lifecycle calls go
-  through the Worker over HTTP; the CLI still opens SSH and runs commands
+  through the coordinator over HTTP; the CLI still opens SSH and runs commands
   directly against the box.
 - **Direct.** A coordinator-capable provider with no broker configured, or any
   other SSH-lease provider. The CLI talks to the cloud API itself; there is no
@@ -52,7 +57,7 @@ The CLI owns:
 
 ## Lease states
 
-The Worker stores brokered leases in one of four states:
+The coordinator stores brokered leases in one of four states:
 
 ```text
 active
@@ -85,7 +90,7 @@ crabbox run --idle-timeout 30m -- ./run-tests.sh
 While a lease is in use the CLI sends `POST /v1/leases/{id}/heartbeat`. Each
 heartbeat bumps `lastTouchedAt`, recomputes `expiresAt`, clears any pending
 cleanup metadata, refreshes provider SSH access when source CIDRs are known,
-and reschedules the Durable Object alarm.
+and reschedules the runtime's durable maintenance deadline.
 
 For Linux leases the heartbeat also carries best-effort telemetry whenever SSH
 is reachable (source `ssh-linux`): load, memory, disk, and uptime. The Durable
@@ -108,8 +113,9 @@ cleanup, or cost accounting.
 
 ## Cleanup
 
-Brokered cleanup is owned by the Durable Object alarm, which also runs on the
-scheduled cron. `crabbox cleanup` refuses to run when a coordinator is
+Brokered cleanup is owned by the coordinator scheduler: a Durable Object alarm
+plus scheduled Worker reconciliation, or pg-boss jobs plus recurring
+reconciliation. `crabbox cleanup` refuses to run when a coordinator is
 configured — sweeping provider resources from the CLI could delete live
 brokered leases. When provider deletion fails during TTL cleanup, the
 coordinator keeps the lease `active`, records `cleanupAttempts`,
@@ -117,8 +123,8 @@ coordinator keeps the lease `active`, records `cleanupAttempts`,
 5 minutes) rather than marking the lease `expired` while the machine may still
 exist. On success the lease moves to `expired`.
 
-The alarm fires at the earliest of all active-lease expiry times and the next
-AWS orphan-sweep time. The orphan sweep (report or delete mode, gated by
+Maintenance runs at the earliest active-lease expiry or AWS orphan-sweep time.
+The orphan sweep (report or delete mode, gated by
 `CRABBOX_AWS_ORPHAN_SWEEP_*`) terminates untracked instances and releases idle
 Mac dedicated hosts.
 
@@ -161,7 +167,7 @@ CRABBOX_COST_RATES_JSON='{"aws:c7a.48xlarge":9,"hetzner:ccx63":1.08}'
 CRABBOX_EUR_TO_USD=1.08
 ```
 
-Limits are read from the Worker environment:
+Limits are read from the coordinator environment:
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES
@@ -175,7 +181,7 @@ CRABBOX_DEFAULT_ORG
 
 Owner and org identity drives the per-owner and per-org limits. For signed
 GitHub login tokens, owner/org is embedded in the bearer token and forwarded to
-the Durable Object. In shared-token automation the CLI sends `X-Crabbox-Owner`
+`FleetCoordinator`. In shared-token automation the CLI sends `X-Crabbox-Owner`
 from `CRABBOX_OWNER`, then `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL`, then local
 `git config user.email`; it sends `X-Crabbox-Org` from `CRABBOX_ORG` when set.
 Raw Cloudflare Access identity headers are ignored — only a verified Access JWT

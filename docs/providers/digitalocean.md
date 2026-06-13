@@ -12,7 +12,7 @@ DigitalOcean tags, waits for SSH/bootstrap readiness, and then uses the normal
 Crabbox SSH sync/run/stop/cleanup path.
 
 DigitalOcean is **direct-only** in this release. It does not run through the
-Cloudflare Worker broker, so the local CLI must have a DigitalOcean API token
+coordinator, so the local CLI must have a DigitalOcean API token
 and direct cleanup remains the operator's responsibility.
 
 ## When To Use It
@@ -207,7 +207,7 @@ in `crabbox list --provider digitalocean --json` or the DigitalOcean console.
 
 ## Gotchas
 
-- `digitalocean` is direct-only. Worker broker secrets and cost accounting do
+- `digitalocean` is direct-only. Coordinator secrets and cost accounting do
   not cover these Droplets.
 - `--type` must be a valid Droplet size slug such as `s-1vcpu-1gb`.
 - Crabbox decodes the highest-priority state when stale tags coexist, but

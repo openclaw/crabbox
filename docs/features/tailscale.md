@@ -99,7 +99,7 @@ In direct-provider mode the auth key is read from the variable named by
 `tailscale.authKeyEnv` (default `CRABBOX_TAILSCALE_AUTH_KEY`). Managed VM
 providers normally use a one-off key. Islo requires a reusable, ephemeral key
 because its snapshot-safe memory-only node identity must re-enroll after daemon
-loss. Brokered mode does not need a local key; the Worker mints one per lease
+loss. Brokered mode does not need a local key; the coordinator mints one per lease
 (see below).
 
 ## Exit nodes
@@ -128,8 +128,8 @@ failed`), which usually means the exit node is not approved, the policy does not
 
 ## Brokered mode
 
-When a lease is created through the coordinator (Worker), the Worker mints a fresh
-auth key per lease using Tailscale OAuth. Secrets live in Worker configuration:
+When a lease is created through the coordinator, it mints a fresh auth key per
+lease using Tailscale OAuth. Secrets live in coordinator configuration:
 
 ```text
 CRABBOX_TAILSCALE_CLIENT_ID
@@ -143,9 +143,9 @@ Flow:
 
 1. The CLI sends the requested Tailscale settings (enabled, tags, hostname, optional
    exit node) in `CreateLease`.
-2. The Worker validates the requested tags against `CRABBOX_TAILSCALE_TAGS` and
+2. The coordinator validates the requested tags against `CRABBOX_TAILSCALE_TAGS` and
    rejects any tag outside that set.
-3. The Worker exchanges the OAuth client for a token and mints a one-off auth key
+3. The coordinator exchanges the OAuth client for a token and mints a one-off auth key
    that is non-reusable, ephemeral, pre-approved, tagged, and expires in 10 minutes.
 4. The key is injected only into the runner's cloud-init user-data.
 5. The runner installs Tailscale, runs `tailscale up` with the requested hostname and

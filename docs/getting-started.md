@@ -66,9 +66,10 @@ For a personal or third-party installation, pick one path:
 - **Direct-provider mode** - bring your own local cloud credentials when you want
   a quick private test lane and can accept local cleanup and state instead of
   broker usage history and shared spend caps.
-- **Self-hosted broker** - deploy the Worker yourself when you want broker-owned
-  provider credentials, active-lease limits, monthly spend caps, `crabbox usage`,
-  cleanup alarms, and a shared team endpoint.
+- **Self-hosted coordinator** - deploy on Cloudflare Workers or run the portable
+  Node.js/PostgreSQL service when you want coordinator-owned provider
+  credentials, active-lease limits, monthly spend caps, `crabbox usage`,
+  durable cleanup, and a shared team endpoint.
 - **Request access** - only when the broker operator has a defined onboarding
   path for your org. A team endpoint is not automatically an open broker.
 
@@ -79,10 +80,18 @@ crabbox doctor --provider hetzner
 crabbox run --provider hetzner -- pnpm test
 ```
 
-Self-hosting starts with the Worker and Durable Object deployment, provider
-secrets, auth config, and budget limits in
-[Infrastructure](infrastructure.md#self-hosted-broker-minimum-setup). Browser login
-needs a GitHub OAuth app and at least one allowed org/team; shared-token
+Self-hosting starts by choosing a runtime:
+
+- **Cloudflare Workers** - Durable Object state, alarms, scheduled cleanup, and
+  optional Cloudflare Access.
+- **Node.js/PostgreSQL** - an ordinary HTTP/WebSocket service, PostgreSQL 13+
+  state, pg-boss maintenance jobs, and one always-on replica. Treat it as the
+  initial portable runtime and complete the deployment proof before production
+  cutover.
+
+Both use the same provider secrets, auth config, budget limits, API, and portal.
+See [Infrastructure](infrastructure.md#choose-a-coordinator-runtime). Browser
+login needs a GitHub OAuth app and at least one allowed org/team; shared-token
 automation does not.
 
 For CI environments that cannot open a browser, use shared-token auth:

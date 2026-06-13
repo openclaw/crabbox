@@ -65,7 +65,7 @@ resolved in this order (`worker/src/auth.ts`):
    owner from `CRABBOX_SHARED_OWNER`.
 3. **Signed user token** — prefix `cbxu_`, an HMAC-SHA256 signature over a
    base64url payload, keyed by `CRABBOX_SESSION_SECRET` (falling back to
-   `CRABBOX_SHARED_TOKEN`). Issued by GitHub OAuth login; default 30-day expiry.
+   `CRABBOX_SHARED_TOKEN`). Issued by GitHub OAuth login; default 180-day expiry.
    Carries `owner`, `org`, and GitHub `login`.
 4. **Trusted reverse-proxy identity** — opt-in through
    `CRABBOX_TRUSTED_USER_HEADER` on the Node runtime, accepted only from peers in
@@ -157,7 +157,7 @@ GET    /v1/images/{id}/fast-snapshot-restore
 
 ## Browser portal surface
 
-The portal is the authenticated browser UI, served from the same Durable Object
+The portal is the authenticated browser UI served by the same coordinator
 (`worker/src/portal.ts`). Login and logout are unauthenticated; everything else
 uses the `crabbox_session` cookie.
 
@@ -227,7 +227,7 @@ provider metadata, owner/org, `createdAt`, `lastTouchedAt`, `idleTimeoutSeconds`
 
 ## What flows on a run
 
-In brokered mode, `crabbox run` mirrors progress to the Worker while executing
+In brokered mode, `crabbox run` mirrors progress to the coordinator while executing
 directly against the runner over SSH:
 
 - `POST /v1/runs` creates a `RunRecord` (state `running`).
@@ -236,7 +236,7 @@ directly against the runner over SSH:
 - `POST /v1/runs/{id}/telemetry` posts periodic host samples.
 - `POST /v1/runs/{id}/finish` posts the exit code, sync/command timings, chunked
   log (64 KiB chunks, 8 MiB stored cap), JUnit summary, and telemetry; the
-  Worker computes `durationMs` and sets state `succeeded` or `failed`.
+  coordinator computes `durationMs` and sets state `succeeded` or `failed`.
 
 Read back with `GET /v1/runs`, `/v1/runs/{id}`, `/logs`, and `/events`. The
 `/v1/control` websocket lets clients subscribe to live run events and send lease

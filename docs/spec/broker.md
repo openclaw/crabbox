@@ -63,7 +63,7 @@ POST /v1/ready-pools/:key/borrow
 POST /v1/ready-pools/:key/return
 ```
 
-The broker stores pool entries in the Fleet Durable Object. The CLI owns SSH
+The broker stores pool entries in coordinator storage. The CLI owns SSH
 keys, source sync, and Actions hydration, so it registers a lease only after it
 has proved the remote endpoint and setup. The broker is the arbiter for
 exclusive borrow/return and uses the recorded SSH endpoint so provider-specific

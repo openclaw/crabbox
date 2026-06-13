@@ -2,15 +2,15 @@
 
 Read this when you:
 
-- deploy or validate the coordinator (Cloudflare Worker);
-- change Worker secrets, routes, or provider credentials;
+- deploy or validate either coordinator runtime;
+- change coordinator secrets, routes, ingress, or provider credentials;
 - check cost limits or lease cleanup behavior;
 - need to decide whether a failure lives in the local CLI, the broker, a provider, or runner state.
 
 Crabbox operations span three layers:
 
 ```text
-local CLI -> Cloudflare Worker / Fleet Durable Object -> provider VM
+local CLI -> coordinator (Cloudflare or Node/PostgreSQL) -> provider VM
 ```
 
 The CLI owns local config, per-lease SSH keys, sync, and remote command execution. The coordinator owns auth, lease state, provider credentials, cost guardrails, and cleanup. Providers own VM creation, network reachability, and deletion. For the full request flow see [Architecture](architecture.md) and [How It Works](how-it-works.md).
@@ -97,6 +97,21 @@ after stop/cleanup.
 
 ## Deployment
 
+Choose one runtime for a coordinator installation:
+
+| Runtime | Durable state and scheduling | Deployment shape |
+| --- | --- | --- |
+| Cloudflare | Fleet Durable Object, alarms, scheduled Worker trigger | Wrangler-managed edge service |
+| Node.js | PostgreSQL 13+ plus pg-boss | Initial single-replica container or process behind TLS/WebSocket ingress |
+
+Both expose the same API and portal. They do not automatically copy state
+between Durable Object storage and PostgreSQL. Cloudflare is the established
+deployment; complete the Node deployment-proof checklist in
+[Portable Coordinator Runtime](plan/portable-coordinator.md) before production
+cutover.
+
+### Cloudflare Worker
+
 Worker source lives in `worker/`. Run the gate, then deploy:
 
 ```sh
@@ -124,16 +139,57 @@ CRABBOX_DEPLOY_SMOKE_URLS="https://$BROKER_HOST/v1/health" \
   scripts/deploy-worker-smoke.sh
 ```
 
-### Required Worker secrets
+### Node.js And PostgreSQL
 
-```text
-CRABBOX_SHARED_TOKEN
-HETZNER_TOKEN
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
+Requirements: Node.js 22.12+, PostgreSQL 13+, one always-on service replica, and
+an ingress that preserves WebSocket upgrades. Use TLS with hostname and CA
+verification for a remote database. Build and run directly:
+
+```sh
+npm ci --prefix worker
+npm run format:check --prefix worker
+npm run lint --prefix worker
+npm run check:node --prefix worker
+npm test --prefix worker
+npm run build:node --prefix worker
+
+DATABASE_URL='postgresql://crabbox:password@db.example.com/crabbox?sslmode=verify-full&sslrootcert=/run/secrets/postgres-ca.pem' \
+CRABBOX_PUBLIC_URL=https://broker.example.com \
+npm run start:node --prefix worker
 ```
 
-### Conditional Worker secrets and settings
+Or build the OCI image with `worker/` as context:
+
+```sh
+docker build -f worker/Dockerfile.node -t crabbox-coordinator:local worker
+docker run --rm -p 8080:8080 \
+  --env-file /secure/path/crabbox.env \
+  --mount type=bind,src=/secure/path/postgres-ca.pem,dst=/run/secrets/postgres-ca.pem,readonly \
+  crabbox-coordinator:local
+```
+
+The service creates PostgreSQL schemas `crabbox` and `crabbox_jobs`. Use
+`GET /v1/health` for liveness and `GET /v1/ready` for database readiness.
+`SIGTERM` and `SIGINT` stop new requests, drain active HTTP/WebSocket and
+provisioning work, then close PostgreSQL;
+`CRABBOX_SHUTDOWN_TIMEOUT_MS` defaults to 120000.
+
+For a VM, run the same image or Node process under the host service manager. For
+Kubernetes or another scheduler, use one replica, a `Recreate` deployment
+strategy, readiness on `/v1/ready`, and a termination grace period longer than
+the shutdown timeout.
+PostgreSQL state and pg-boss jobs are durable, but lifecycle serialization and
+live bridge ownership remain process-local. Do not horizontally scale yet.
+
+### Minimum coordinator configuration
+
+Configure `CRABBOX_PUBLIC_URL`, one auth model, and at least one brokered
+provider. Shared-token automation needs `CRABBOX_SHARED_TOKEN` and
+`CRABBOX_SHARED_OWNER`; browser login needs the GitHub OAuth settings below.
+Provider choices are `HETZNER_TOKEN`, an AWS credential set, an Azure service
+principal, or a GCP service account. Node additionally requires `DATABASE_URL`.
+
+### Conditional coordinator secrets and settings
 
 ```text
 AWS_SESSION_TOKEN                  optional
@@ -173,7 +229,14 @@ CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 
 
 ### Artifact backend
 
-The artifact backend vars are ordinary Worker vars except `CRABBOX_ARTIFACTS_ACCESS_KEY_ID`, `CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`, and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN`, which must be Worker **secrets**. These object-store keys let the coordinator sign short-lived artifact upload/read URLs. Scope them to the artifact bucket or prefix; they should not carry Cloudflare account, Worker deployment, lease-provider, or VM permissions.
+The artifact backend vars are ordinary coordinator settings except
+`CRABBOX_ARTIFACTS_ACCESS_KEY_ID`,
+`CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY`, and optional
+`CRABBOX_ARTIFACTS_SESSION_TOKEN`, which must use the runtime's secret
+injection. These object-store keys let the coordinator sign short-lived
+artifact upload/read URLs. Scope them to the artifact bucket or prefix; they
+should not carry Cloudflare account, Worker deployment, lease-provider, or VM
+permissions.
 
 A typical R2-compatible configuration looks like:
 
@@ -186,7 +249,9 @@ CRABBOX_ARTIFACTS_REGION=auto
 CRABBOX_ARTIFACTS_ENDPOINT_URL=<account>.r2.cloudflarestorage.com
 ```
 
-Deploy the matching access key id and secret access key as Worker secrets, not local CLI defaults. End users run `crabbox artifacts publish` without holding any S3/R2 credentials.
+Deploy the matching access key id and secret access key as coordinator secrets,
+not local CLI defaults. End users run `crabbox artifacts publish` without
+holding any S3/R2 credentials.
 
 ### Cost-control secrets and settings
 
@@ -210,14 +275,20 @@ for TTL-based reservations during busy test bursts.
 
 ## Routes And Access
 
-A deployment typically exposes two routes pointing at the same Worker:
+A deployment exposes one canonical route:
 
 ```text
-https://broker.example.com          # normal CLI and browser-login route
-https://broker-access.example.com   # same Worker, fronted by Cloudflare Access
+https://broker.example.com          # CLI, API, portal, browser login, WebSockets
 ```
 
-The plain route handles normal CLI and browser-login traffic. The Access-fronted route handles service-token proof and hardened automation. Bearer-token CLI automation authenticates with `CRABBOX_SHARED_TOKEN` / `CRABBOX_COORDINATOR_TOKEN`; GitHub browser login stores a user-scoped signed token (prefix `cbxu_`). Access-protected routes additionally require `CRABBOX_ACCESS_CLIENT_ID` plus `CRABBOX_ACCESS_CLIENT_SECRET`, or `CRABBOX_ACCESS_TOKEN` for an already-minted Access JWT. See [Auth and Admin](features/auth-admin.md) and [Broker Auth and Routing](features/broker-auth-routing.md).
+Cloudflare deployments can expose the same Worker at
+`https://broker-access.example.com` behind Cloudflare Access. Node deployments
+can use a conventional TLS/WebSocket ingress and optionally trust an
+authenticated user header only from `CRABBOX_TRUSTED_PROXY_CIDRS`. Bearer-token
+CLI automation authenticates with `CRABBOX_SHARED_TOKEN` /
+`CRABBOX_COORDINATOR_TOKEN`; GitHub browser login stores a user-scoped signed
+token (prefix `cbxu_`). See [Auth and Admin](features/auth-admin.md) and
+[Broker Auth and Routing](features/broker-auth-routing.md).
 
 Test the Cloudflare Access layer through the protected route:
 
@@ -242,7 +313,10 @@ bin/crabbox config show
 
 ## Cleanup
 
-Brokered cleanup belongs to the Durable Object alarm. The CLI refuses provider cleanup when a coordinator is configured, because deleting machines behind the broker can remove live leases:
+Brokered cleanup belongs to the coordinator scheduler: Durable Object alarms on
+Cloudflare or pg-boss jobs on Node. The CLI refuses provider cleanup when a
+coordinator is configured, because deleting machines behind the broker can
+remove live leases:
 
 ```text
 machine cleanup is disabled when a coordinator is configured;
@@ -277,7 +351,14 @@ bin/crabbox cleanup
 
 ### AWS orphan sweep
 
-The coordinator runs an AWS orphan sweep from the Durable Object alarm when AWS broker credentials are configured. The Worker cron route bootstraps the same maintenance loop for idle fleets, so cleanup does not depend on new lease traffic after deploy. It scans `CRABBOX_AWS_REGION` plus `CRABBOX_CAPACITY_REGIONS` for `crabbox=true` EC2 instances and compares their lease tags with active coordinator leases. Active matching leases always win, because provider `expires_at` tags are written at launch and can be older than a heartbeat-extended lease.
+The coordinator schedules an AWS orphan sweep when AWS broker credentials are
+configured. Cloudflare uses the Durable Object alarm plus its scheduled trigger;
+Node uses pg-boss plus recurring reconciliation, so cleanup does not depend on
+new lease traffic after deploy. The sweep scans `CRABBOX_AWS_REGION` plus
+`CRABBOX_CAPACITY_REGIONS` for `crabbox=true` EC2 instances and compares their
+lease tags with active coordinator leases. Active matching leases always win,
+because provider `expires_at` tags are written at launch and can be older than a
+heartbeat-extended lease.
 
 The sweep reports a candidate when an instance is past its provider `expires_at` tag, has no active lease, is missing a lease label, or points at an active lease whose current cloud ID differs. It skips `keep=true` instances and applies the grace window before acting on missing or mismatched lease state. Set `CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1` to terminate confirmed candidates automatically. With `CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE=1` also set, the same sweep releases Crabbox-tagged EC2 Mac Dedicated Hosts that have stayed in `pending` for at least one hour and are not attached to an active lease.
 

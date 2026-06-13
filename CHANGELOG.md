@@ -11,6 +11,7 @@
 - Added non-mutating Proxmox storage, bridge, pool, template, and cluster inventory readiness diagnostics plus guarded live lifecycle smoke coverage, with safer failed-create and cleanup claim handling. Thanks @coygeek.
 - Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
 - Added a portable Node.js and PostgreSQL coordinator runtime with durable pg-boss maintenance jobs, WebSocket bridges, trusted reverse-proxy identity support, container packaging, and the existing Cloudflare Worker/Durable Object runtime preserved as an adapter over the same fleet implementation.
+- Documented Cloudflare, Node.js/PostgreSQL, container, VM, Kubernetes, and direct coordinator deployment choices across the README and operator guides.
 - Added refreshable coordinator bearer authentication through a shell-free JSON argv token command, including HTTP and reconnecting WebSocket bridges behind expiring upstream identity proxies.
 
 ### Fixed

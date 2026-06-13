@@ -8,8 +8,8 @@ Read when:
 
 History and logs are a **brokered-mode** feature. When `crabbox run` executes
 against a brokered provider (`aws`, `azure`, `gcp`, `hetzner` with a coordinator
-configured), the CLI mirrors the run into the broker's Fleet Durable Object as a
-durable, queryable record. Direct-provider runs and delegated runs do not
+configured), the CLI mirrors the run into coordinator storage as a durable,
+queryable record. Direct-provider runs and delegated runs do not
 produce central history — there you have only the live terminal output and any
 local captures you ask for.
 
@@ -66,9 +66,10 @@ control WebSocket and falling back to polling. Use `attach` for active runs and
 
 ## Storage limits
 
-History records, run events, and run logs all live in the Fleet Durable Object.
-Log text is stored separately from run metadata and is intentionally bounded so
-noisy commands cannot exhaust storage:
+History records, run events, and run logs all live in coordinator storage:
+Durable Object storage on Cloudflare or PostgreSQL on Node. Log text is stored
+separately from run metadata and is intentionally bounded so noisy commands
+cannot exhaust storage:
 
 - The CLI keeps the **last 8 MiB** of command output and reports
   `logTruncated` when more was produced.
