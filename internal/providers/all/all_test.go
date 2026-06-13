@@ -60,6 +60,28 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestSuperserveRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("superserve")
+	if err != nil {
+		t.Fatalf("ProviderFor(superserve): %v", err)
+	}
+	if provider.Name() != "superserve" {
+		t.Fatalf("ProviderFor(superserve).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("superserve spec=%#v", spec)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("superserve features=%v", spec.Features)
+	}
+	for _, alias := range []string{"ss", "sup", "super-serve"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "superserve" {
+			t.Fatalf("%q alias unexpectedly resolves to superserve", alias)
+		}
+	}
+}
+
 func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
 		provider, err := core.ProviderFor(name)
@@ -137,6 +159,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"smolvm",
 		"sprites",
 		"ssh",
+		"superserve",
 		"tart",
 		"tenki",
 		"tensorlake",
