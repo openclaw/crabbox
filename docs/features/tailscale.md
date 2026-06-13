@@ -139,6 +139,36 @@ CRABBOX_TAILSCALE_TAGS       default/allowed comma-separated tags (default tag:c
 CRABBOX_TAILSCALE_ENABLED    set 0 to force-disable, 1 to force-enable
 ```
 
+The OAuth client's tags and each requested lease tag must also satisfy Tailscale's
+ownership rules:
+
+- **Single tag:** give the OAuth client `tag:crabbox` and set
+  `CRABBOX_TAILSCALE_TAGS=tag:crabbox`. The tag sets match exactly.
+- **Multi-tag exact match:** an OAuth client with `tag:ci,tag:staging` can mint a key
+  requesting both tags together without extra ownership rules.
+- **Multi-tag subsets:** requesting only `tag:ci` from that two-tag client requires
+  `tag:ci` to own itself in `tagOwners`; do the same for every subset tag.
+- **Deployment-owner pattern:** preferably give the OAuth client one narrow owner tag,
+  such as `tag:crabbox-deployer`, and make that tag an owner of each workload tag that
+  Crabbox may request.
+
+Example deployment-owner policy:
+
+```json
+{
+  "tagOwners": {
+    "tag:crabbox-deployer": ["autogroup:admin"],
+    "tag:ci": ["tag:crabbox-deployer"],
+    "tag:staging": ["tag:crabbox-deployer"]
+  }
+}
+```
+
+Then assign only `tag:crabbox-deployer` to the OAuth client and set
+`CRABBOX_TAILSCALE_TAGS=tag:ci,tag:staging`. This keeps the client least-privilege
+without requiring it to carry every workload tag. Do not broaden the OAuth client to
+unrelated tags just to resolve an ownership error.
+
 Flow:
 
 1. The CLI sends the requested Tailscale settings (enabled, tags, hostname, optional
@@ -157,6 +187,10 @@ Flow:
 The auth key is never stored in lease records, provider labels, run logs, or local
 config. The short-lived key can still appear in user-data at the provider, so the
 Worker only mints one-off ephemeral keys — never long-lived reusable keys.
+
+If Tailscale rejects a requested subset or unowned tag, the coordinator returns
+`invalid_tailscale_tags` with exact-match/`tagOwners` guidance and preserves the raw
+Tailscale HTTP status and response body for diagnosis.
 
 ## SSH and VNC
 

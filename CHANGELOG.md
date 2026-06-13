@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed brokered Tailscale tag-ownership failures to return actionable exact-match and `tagOwners` guidance while preserving the raw API error.
 - Fixed managed Linux Tailscale bootstrap to deliver auth keys through stdin instead of exposing them in `tailscale up` process arguments.
 - Fixed trusted reverse-proxy identity deployments to support a secret-bound assertion when direct coordinator access cannot be network-isolated.
 - Fixed direct VNC and WebVNC SSH forwards to bind explicitly to workstation loopback even when user SSH configuration enables gateway ports.

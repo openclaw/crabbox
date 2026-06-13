@@ -6,6 +6,19 @@ export interface TailscaleKeyRequest {
   description: string;
 }
 
+type TailscaleAPIOperation = "oauth token" | "create auth key";
+
+class TailscaleAPIError extends Error {
+  constructor(
+    readonly operation: TailscaleAPIOperation,
+    readonly status: number,
+    readonly responseBody: string,
+  ) {
+    super(`tailscale ${operation}: http ${status}: ${responseBody}`);
+    this.name = "TailscaleAPIError";
+  }
+}
+
 export function tailscaleAllowed(env: Env): boolean {
   if (env.CRABBOX_TAILSCALE_ENABLED === "0") {
     return false;
@@ -89,7 +102,7 @@ export async function createTailscaleAuthKey(
   );
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`tailscale create auth key: http ${response.status}: ${trimBody(text)}`);
+    throw tailscaleAPIError("create auth key", response.status, text);
   }
   const data = JSON.parse(text) as { key?: string };
   if (!data.key) {
@@ -115,13 +128,47 @@ async function tailscaleOAuthToken(
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`tailscale oauth token: http ${response.status}: ${trimBody(text)}`);
+    throw tailscaleAPIError("oauth token", response.status, text);
   }
   const data = JSON.parse(text) as { access_token?: string };
   if (!data.access_token) {
     throw new Error("tailscale oauth token returned no access token");
   }
   return data.access_token;
+}
+
+export function tailscaleTagOwnershipErrorMessage(error: unknown): string | undefined {
+  if (!(error instanceof TailscaleAPIError) || !isTailscaleTagOwnershipError(error)) {
+    return undefined;
+  }
+  return [
+    "Tailscale rejected the requested tags.",
+    "The requested tag set must exactly match the OAuth client's tags, or every requested tag must be owned by one of the OAuth client tags in tagOwners.",
+    "For multi-tag allowlists, configure self-ownership for subset requests or use a dedicated deployment-owner tag.",
+    `Raw Tailscale error: ${error.message}`,
+  ].join(" ");
+}
+
+function tailscaleAPIError(
+  operation: TailscaleAPIOperation,
+  status: number,
+  responseBody: string,
+): TailscaleAPIError {
+  return new TailscaleAPIError(operation, status, trimBody(responseBody));
+}
+
+function isTailscaleTagOwnershipError(error: TailscaleAPIError): boolean {
+  if (error.status !== 400 && error.status !== 403) {
+    return false;
+  }
+  const body = error.responseBody.toLowerCase();
+  return (
+    (body.includes("requested tags") &&
+      (body.includes("invalid or not permitted") ||
+        body.includes("invalid or not allowed") ||
+        body.includes("not owned"))) ||
+    body.includes("tailnet-owned auth key must have tags set")
+  );
 }
 
 function normalizeTags(values: string[]): string[] {

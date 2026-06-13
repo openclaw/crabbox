@@ -3156,6 +3156,46 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
+  it("translates brokered Tailscale tag ownership denials", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ message: "requested tags [tag:ci] are invalid or not permitted" }, 400),
+        ),
+    );
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      { hetzner: fakeProvider() },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:crabbox,tag:ci",
+      },
+    );
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "hetzner",
+          tailscale: true,
+          tailscaleTags: ["tag:ci"],
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(create.status).toBe(400);
+    const body = (await create.json()) as { error: string; message: string };
+    expect(body).toMatchObject({
+      error: "invalid_tailscale_tags",
+      message: expect.stringContaining("must exactly match the OAuth client's tags"),
+    });
+    expect(body.message).toContain("requested tags [tag:ci] are invalid or not permitted");
+    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
+  });
+
   it("reports brokered Tailscale disabled when OAuth secrets are absent", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, { hetzner: fakeProvider() });
