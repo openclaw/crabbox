@@ -1753,6 +1753,10 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
 			args = append(args, "--hostinger-url", cfg.Hostinger.APIURL)
 		}
+	case "nvidia-brev":
+		if DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
+			args = append(args, "--nvidia-brev-release-action", cfg.NvidiaBrev.ReleaseAction)
+		}
 	case "kubevirt":
 		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
 			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)

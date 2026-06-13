@@ -167,15 +167,27 @@ func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	if !claimMatchesWorkspace(claim, workspace) {
 		return exit(2, "lease=%s claim does not match nvidia-brev workspace %s", claim.LeaseID, safeWorkspaceRef(workspace))
 	}
-	action := b.releaseAction()
+	action := b.releaseAction(claim.Labels)
 	if action == "stop" {
 		return b.stopWorkspaceAndPersistClaim(ctx, client, workspace, claim)
 	}
-	if err := b.releaseWorkspace(ctx, client, workspace); err != nil {
+	if err := b.releaseWorkspace(ctx, client, workspace, action); err != nil {
 		return err
 	}
 	removeLeaseClaim(leaseID)
 	return nil
+}
+
+func (b *nvidiaBrevBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+	return b.releaseAction(lease.Server.Labels) == "stop"
+}
+
+func (b *nvidiaBrevBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	workspace := firstNonEmpty(lease.Server.CloudID, lease.Server.Name, "-")
+	if b.releaseAction(lease.Server.Labels) == "stop" {
+		return fmt.Sprintf("stopped lease=%s workspace=%s retained=true", lease.LeaseID, workspace)
+	}
+	return fmt.Sprintf("deleted lease=%s workspace=%s", lease.LeaseID, workspace)
 }
 
 func (b *nvidiaBrevBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
@@ -237,7 +249,8 @@ func (b *nvidiaBrevBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			continue
 		}
 		leaseID, slug := brevLeaseIdentity(workspace, claim)
-		if claimed && claim.Provider == providerName && claimMatchesWorkspace(claim, workspace) && b.releaseAction() == "stop" && brevWorkspaceStopped(workspace) {
+		action := b.releaseAction(claim.Labels)
+		if claimed && claim.Provider == providerName && claimMatchesWorkspace(claim, workspace) && action == "stop" && brevWorkspaceStopped(workspace) {
 			if strings.EqualFold(strings.TrimSpace(claim.Labels["state"]), "stopped") && claim.SSHHost == "" && claim.SSHPort == 0 {
 				fmt.Fprintf(b.rt.Stderr, "skip provider=%s lease=%s workspace=%s reason=stopped\n", providerName, leaseID, safeWorkspaceRef(workspace))
 				continue
@@ -257,16 +270,16 @@ func (b *nvidiaBrevBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stderr, "would release provider=%s lease=%s slug=%s workspace=%s action=%s\n", providerName, leaseID, slug, safeWorkspaceRef(workspace), b.releaseAction())
+			fmt.Fprintf(b.rt.Stderr, "would release provider=%s lease=%s slug=%s workspace=%s action=%s\n", providerName, leaseID, slug, safeWorkspaceRef(workspace), action)
 			continue
 		}
-		if b.releaseAction() == "stop" {
+		if action == "stop" {
 			if err := b.stopWorkspaceAndPersistClaim(ctx, client, workspace, claim); err != nil {
 				errs = append(errs, err)
 			}
 			continue
 		}
-		if err := b.releaseWorkspace(ctx, client, workspace); err != nil {
+		if err := b.releaseWorkspace(ctx, client, workspace, action); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -324,7 +337,7 @@ func parseBrevClaimTime(value string) (time.Time, bool) {
 
 func (b *nvidiaBrevBackend) stopWorkspaceAndPersistClaim(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim) error {
 	return b.persistStoppedClaim(workspace, claim, func() error {
-		return b.releaseWorkspace(ctx, client, workspace)
+		return b.releaseWorkspace(ctx, client, workspace, "stop")
 	})
 }
 
@@ -332,6 +345,7 @@ func (b *nvidiaBrevBackend) persistStoppedClaim(workspace brevWorkspace, claim L
 	stopped := workspaceToClaimedServer(b.configForRun(), workspace, claim.LeaseID, claim.Slug, claim)
 	stopped.Status = "stopped"
 	stopped.Labels["state"] = "stopped"
+	stopped.Labels["release"] = "stop"
 	if _, err := updateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, stopped, SSHTarget{}, action); err != nil {
 		return fmt.Errorf("persist stopped nvidia-brev lease claim: %w", err)
 	}
@@ -562,12 +576,12 @@ func (b *nvidiaBrevBackend) listServers(ctx context.Context, client *brevClient,
 	return servers, nil
 }
 
-func (b *nvidiaBrevBackend) releaseWorkspace(ctx context.Context, client *brevClient, workspace brevWorkspace) error {
+func (b *nvidiaBrevBackend) releaseWorkspace(ctx context.Context, client *brevClient, workspace brevWorkspace, action string) error {
 	id := workspaceIdentifier(workspace)
 	if id == "" {
 		return exit(2, "nvidia-brev release requires workspace id or name")
 	}
-	switch b.releaseAction() {
+	switch normalizeNvidiaBrevReleaseAction(action) {
 	case "stop":
 		if err := client.stop(ctx, id); err != nil {
 			return err
@@ -580,8 +594,24 @@ func (b *nvidiaBrevBackend) releaseWorkspace(ctx context.Context, client *brevCl
 	return nil
 }
 
-func (b *nvidiaBrevBackend) releaseAction() string {
-	action := strings.ToLower(strings.TrimSpace(b.configForRun().NvidiaBrev.ReleaseAction))
+func (b *nvidiaBrevBackend) releaseAction(labels map[string]string) string {
+	cfg := b.configForRun()
+	if releaseActionExplicit(cfg) {
+		return normalizeNvidiaBrevReleaseAction(cfg.NvidiaBrev.ReleaseAction)
+	}
+	if labels != nil {
+		switch strings.ToLower(strings.TrimSpace(labels["release"])) {
+		case "stop":
+			return "stop"
+		case "delete":
+			return "delete"
+		}
+	}
+	return normalizeNvidiaBrevReleaseAction(cfg.NvidiaBrev.ReleaseAction)
+}
+
+func normalizeNvidiaBrevReleaseAction(action string) string {
+	action = strings.ToLower(strings.TrimSpace(action))
 	if action == "stop" {
 		return "stop"
 	}
@@ -609,6 +639,7 @@ func findBrevWorkspace(workspaces []brevWorkspace, idOrName string) (brevWorkspa
 func workspaceToServer(cfg Config, workspace brevWorkspace, leaseID, slug string, keep bool) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep)
 	labels["state"] = normalizeBrevState(workspace)
+	labels["release"] = normalizeNvidiaBrevReleaseAction(cfg.NvidiaBrev.ReleaseAction)
 	labels["brev_workspace_id"] = workspace.ID
 	labels["brev_workspace_name"] = workspace.Name
 	labels["brev_status"] = workspace.Status

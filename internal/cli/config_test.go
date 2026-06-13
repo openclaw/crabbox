@@ -365,6 +365,9 @@ func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 		cfg.NvidiaBrev.WorkRoot != "/work/brev" {
 		t.Fatalf("file nvidiaBrev config not applied: %#v", cfg.NvidiaBrev)
 	}
+	if !DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
+		t.Fatal("file nvidiaBrev release action not marked explicit")
+	}
 
 	t.Setenv("CRABBOX_NVIDIA_BREV_CLI", "/usr/local/bin/brev")
 	t.Setenv("CRABBOX_NVIDIA_BREV_ORG", "env-example-org")
@@ -394,6 +397,9 @@ func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
 		cfg.NvidiaBrev.User != "runner" ||
 		cfg.NvidiaBrev.WorkRoot != "/workspace/brev" {
 		t.Fatalf("env nvidiaBrev config not applied: %#v", cfg.NvidiaBrev)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
+		t.Fatal("env nvidiaBrev release action not marked explicit")
 	}
 }
 
@@ -506,10 +512,13 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 		KubeVirt:  &fileKubeVirtConfig{DeleteOnRelease: &value},
 		Namespace: &fileNamespaceConfig{DeleteOnRelease: &value},
 		Morph:     &fileMorphConfig{DeleteOnRelease: &value},
+		NvidiaBrev: &fileNvidiaBrevConfig{
+			ReleaseAction: "stop",
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(cfg, provider) {
 			t.Fatalf("file release policy not explicit for %s", provider)
 		}
@@ -528,10 +537,11 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	} {
 		t.Setenv(key, "false")
 	}
+	t.Setenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION", "stop")
 	if err := applyEnv(&envCfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(envCfg, provider) {
 			t.Fatalf("environment release policy not explicit for %s", provider)
 		}

@@ -109,6 +109,21 @@ func TestNvidiaBrevApplyFlagsRejectsGenericClassAndType(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevApplyFlagsMarksReleaseActionExplicit(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterNvidiaBrevProviderFlags(fs, Config{})
+	if err := fs.Parse([]string{"--nvidia-brev-release-action", "stop"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Provider: providerName}
+	if err := ApplyNvidiaBrevProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NvidiaBrev.ReleaseAction != "stop" || !releaseActionExplicit(cfg) {
+		t.Fatalf("release action not marked explicit: %#v", cfg.NvidiaBrev)
+	}
+}
+
 func TestNvidiaBrevValidateConfigRejectsInvalidEnums(t *testing.T) {
 	if err := (Provider{}).ValidateConfig(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "archive"}}); err == nil {
 		t.Fatal("invalid release action accepted")
@@ -258,11 +273,11 @@ func TestNvidiaBrevAcquireCreatesRefreshesParsesSSHAndClaims(t *testing.T) {
 
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
-		{args: "create crabbox-demo-* --detached --gpu-name A100 --mode vm"},
+		{args: "create crabbox-demo-* --detached --stoppable --gpu-name A100 --mode vm"},
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-123","name":"{createdName}","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY","instance_type":"gpu-a100","gpu":"A100"}]}`},
 		{args: "refresh"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{GPUName: "A100", Mode: "vm"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{GPUName: "A100", Mode: "vm", ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	lease, err := backend.Acquire(context.Background(), AcquireRequest{Repo: Repo{Root: t.TempDir()}, RequestedSlug: "demo"})
 	if err != nil {
 		t.Fatal(err)
@@ -277,7 +292,7 @@ func TestNvidiaBrevAcquireCreatesRefreshesParsesSSHAndClaims(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
 	}
-	if claim.CloudID != "ws-123" || claim.Labels["brev_workspace_name"] != runner.createdName {
+	if claim.CloudID != "ws-123" || claim.Labels["brev_workspace_name"] != runner.createdName || claim.Labels["release"] != "stop" {
 		t.Fatalf("claim=%#v", claim)
 	}
 	assertNoNvidiaBrevSecretArgs(t, runner.calls)
@@ -609,7 +624,7 @@ func TestNvidiaBrevReleaseDeleteRemovesClaimAfterProviderSuccess(t *testing.T) {
 func TestNvidiaBrevReleaseStopRetainsClaimOnProviderFailure(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_abcdef123456"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-abcdef123456", Status: "RUNNING"}, leaseID, "stop", false)
+	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-abcdef123456", Status: "RUNNING"}, leaseID, "stop", false)
 	if err := claimLeaseTargetForRepoConfig(leaseID, "stop", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +632,7 @@ func TestNvidiaBrevReleaseStopRetainsClaimOnProviderFailure(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stop-abcdef123456","status":"RUNNING"}]}`},
 		{args: "stop ws-stop", err: errors.New("provider refused stop")},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err == nil {
 		t.Fatal("expected release failure")
 	}
@@ -661,7 +676,7 @@ func TestNvidiaBrevStopDoesNotMutateProviderForStaleClaim(t *testing.T) {
 func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_111122223333"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-111122223333", Status: "RUNNING"}, leaseID, "stop", true)
+	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop", Name: "crabbox-stop-111122223333", Status: "RUNNING"}, leaseID, "stop", true)
 	if err := claimLeaseTargetForRepoConfig(leaseID, "stop", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -674,7 +689,7 @@ func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stop-111122223333","status":"RUNNING"}]}`},
 		{args: "stop ws-stop"},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
@@ -684,6 +699,94 @@ func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 	}
 	if claim.Labels["state"] != "stopped" || claim.Labels["keep"] != "true" || claim.Labels["created_at"] != "1700000000" || claim.Labels["expires_at"] != "1700000200" || claim.SSHHost != "" || claim.SSHPort != 0 {
 		t.Fatalf("stopped claim not updated safely: %#v", claim)
+	}
+}
+
+func TestNvidiaBrevExplicitDeleteOverridesStoredStopPolicy(t *testing.T) {
+	isolateNvidiaBrevState(t)
+	leaseID := "cbx_444455556666"
+	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-override", Name: "crabbox-override-444455556666", Status: "RUNNING"}, leaseID, "override", false)
+	if err := claimLeaseTargetForRepoConfig(leaseID, "override", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-override","name":"crabbox-override-444455556666","status":"RUNNING"}]}`},
+		{args: "delete ws-override"},
+	}}
+	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}}
+	markReleaseActionExplicit(&cfg)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
+		t.Fatalf("claim retained ok=%v err=%v", ok, err)
+	}
+}
+
+func TestNvidiaBrevExplicitStopOverridesAndReplacesStoredDeletePolicy(t *testing.T) {
+	isolateNvidiaBrevState(t)
+	leaseID := "cbx_555566667777"
+	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-stop-override", Name: "crabbox-stop-override-555566667777", Status: "RUNNING"}, leaseID, "stop-override", false)
+	if err := claimLeaseTargetForRepoConfig(leaseID, "stop-override", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-override","name":"crabbox-stop-override-555566667777","status":"RUNNING"}]}`},
+		{args: "stop ws-stop-override"},
+	}}
+	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}
+	markReleaseActionExplicit(&cfg)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim not retained ok=%v err=%v", ok, err)
+	}
+	if claim.Labels["state"] != "stopped" || claim.Labels["release"] != "stop" {
+		t.Fatalf("explicit stop policy not persisted: %#v", claim.Labels)
+	}
+}
+
+func TestNvidiaBrevRetainLeaseClaimAfterReleaseUsesStoredPolicy(t *testing.T) {
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{}).(*nvidiaBrevBackend)
+	if !backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}) {
+		t.Fatal("stored stop policy did not retain claim")
+	}
+	if backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "delete"}}}) {
+		t.Fatal("stored delete policy retained claim")
+	}
+	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}}
+	markReleaseActionExplicit(&cfg)
+	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{}).(*nvidiaBrevBackend)
+	if backend.RetainLeaseClaimAfterRelease(LeaseTarget{Server: Server{Labels: map[string]string{"release": "stop"}}}) {
+		t.Fatal("explicit delete policy did not override stored stop policy")
+	}
+}
+
+func TestNvidiaBrevReleaseLeaseMessageUsesEffectivePolicy(t *testing.T) {
+	lease := LeaseTarget{
+		LeaseID: "cbx_123456789abc",
+		Server: Server{
+			CloudID: "ws-message",
+			Labels:  map[string]string{"release": "stop"},
+		},
+	}
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{}).(*nvidiaBrevBackend)
+	if got := backend.ReleaseLeaseMessage(lease); got != "stopped lease=cbx_123456789abc workspace=ws-message retained=true" {
+		t.Fatalf("stop message=%q", got)
+	}
+	lease.Server.Labels["release"] = "delete"
+	if got := backend.ReleaseLeaseMessage(lease); got != "deleted lease=cbx_123456789abc workspace=ws-message" {
+		t.Fatalf("delete message=%q", got)
+	}
+	cfg := Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}
+	markReleaseActionExplicit(&cfg)
+	backend = NewNvidiaBrevBackend(Provider{}.Spec(), cfg, Runtime{}).(*nvidiaBrevBackend)
+	if got := backend.ReleaseLeaseMessage(lease); got != "stopped lease=cbx_123456789abc workspace=ws-message retained=true" {
+		t.Fatalf("explicit stop message=%q", got)
 	}
 }
 
@@ -745,7 +848,7 @@ func TestNvidiaBrevCleanupDeletesOnlyCrabboxOwnedWorkspaces(t *testing.T) {
 func TestNvidiaBrevCleanupStopRetainsStoppedClaim(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_777788889999"
-	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-stop-cleanup", Name: "crabbox-stop-cleanup-777788889999", Status: "RUNNING"}, leaseID, "stop-cleanup", false)
+	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: "ws-stop-cleanup", Name: "crabbox-stop-cleanup-777788889999", Status: "RUNNING"}, leaseID, "stop-cleanup", false)
 	cfg := Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 24 * time.Hour}
 	if err := claimLeaseTargetForRepoConfig(leaseID, "stop-cleanup", cfg, server, SSHTarget{}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
@@ -757,7 +860,7 @@ func TestNvidiaBrevCleanupStopRetainsStoppedClaim(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-cleanup","name":"crabbox-stop-cleanup-777788889999","status":"STOPPED"}]}`},
 	}}
 	var stderr strings.Builder
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
 	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -783,7 +886,7 @@ func TestNvidiaBrevCleanupReconcilesAlreadyStoppedClaim(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_222233334444"
 	workspace := brevWorkspace{ID: "ws-external-stop", Name: "crabbox-external-stop-222233334444", Status: "STOPPED"}
-	server := workspaceToServer(Config{}, brevWorkspace{ID: workspace.ID, Name: workspace.Name, Status: "RUNNING"}, leaseID, "external-stop", false)
+	server := workspaceToServer(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, brevWorkspace{ID: workspace.ID, Name: workspace.Name, Status: "RUNNING"}, leaseID, "external-stop", false)
 	cfg := Config{Provider: providerName, IdleTimeout: time.Hour}
 	if err := claimLeaseTargetForRepoConfig(leaseID, "external-stop", cfg, server, SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
@@ -791,7 +894,7 @@ func TestNvidiaBrevCleanupReconcilesAlreadyStoppedClaim(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-external-stop","name":"crabbox-external-stop-222233334444","status":"STOPPED"}]}`},
 	}}
-	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}

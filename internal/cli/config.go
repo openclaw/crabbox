@@ -3856,6 +3856,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.NvidiaBrev.ReleaseAction != "" {
 			cfg.NvidiaBrev.ReleaseAction = file.NvidiaBrev.ReleaseAction
+			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
 		}
 		if file.NvidiaBrev.Target != "" {
 			cfg.NvidiaBrev.Target = file.NvidiaBrev.Target
@@ -5297,7 +5298,10 @@ func applyEnv(cfg *Config) error {
 	cfg.NvidiaBrev.Mode = getenv("CRABBOX_NVIDIA_BREV_MODE", cfg.NvidiaBrev.Mode)
 	cfg.NvidiaBrev.Launchable = getenv("CRABBOX_NVIDIA_BREV_LAUNCHABLE", cfg.NvidiaBrev.Launchable)
 	cfg.NvidiaBrev.StartupScript = getenv("CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT", cfg.NvidiaBrev.StartupScript)
-	cfg.NvidiaBrev.ReleaseAction = getenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION", cfg.NvidiaBrev.ReleaseAction)
+	if value := os.Getenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION"); value != "" {
+		cfg.NvidiaBrev.ReleaseAction = value
+		MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+	}
 	cfg.NvidiaBrev.Target = getenv("CRABBOX_NVIDIA_BREV_TARGET", cfg.NvidiaBrev.Target)
 	cfg.NvidiaBrev.User = getenv("CRABBOX_NVIDIA_BREV_USER", cfg.NvidiaBrev.User)
 	cfg.NvidiaBrev.WorkRoot = getenv("CRABBOX_NVIDIA_BREV_WORK_ROOT", cfg.NvidiaBrev.WorkRoot)

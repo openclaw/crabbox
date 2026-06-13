@@ -47,6 +47,14 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return core.FlagWasSet(fs, name)
 }
 
+func releaseActionExplicit(cfg Config) bool {
+	return core.DeleteOnReleaseExplicit(cfg, providerName)
+}
+
+func markReleaseActionExplicit(cfg *Config) {
+	core.MarkDeleteOnReleaseExplicit(cfg, providerName)
+}
+
 func cliDoctorResult(provider string, leases int, runtime string) DoctorResult {
 	return core.CLIDoctorResult(provider, leases, runtime)
 }

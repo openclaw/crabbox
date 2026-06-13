@@ -75,6 +75,7 @@ func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	}
 	if flagWasSet(fs, "nvidia-brev-release-action") {
 		cfg.NvidiaBrev.ReleaseAction = *v.ReleaseAction
+		markReleaseActionExplicit(cfg)
 	}
 	if flagWasSet(fs, "nvidia-brev-target") {
 		cfg.NvidiaBrev.Target = *v.Target

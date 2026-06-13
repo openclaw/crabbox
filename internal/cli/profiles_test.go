@@ -732,6 +732,27 @@ func TestRunStopCommandIncludesHostingerRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesExplicitNvidiaBrevReleaseAction(t *testing.T) {
+	cfg := Config{
+		Provider: "nvidia-brev",
+		TargetOS: targetLinux,
+		NvidiaBrev: NvidiaBrevConfig{
+			ReleaseAction: "stop",
+		},
+	}
+	MarkDeleteOnReleaseExplicit(&cfg, "nvidia-brev")
+	got := runStopCommand(cfg, "cbx_123")
+	for _, want := range []string{
+		"--provider nvidia-brev",
+		"--nvidia-brev-release-action stop",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRunStopCommandIncludesKubeVirtRoutingFlags(t *testing.T) {
 	cfg := Config{
 		Provider: "kubevirt",
@@ -771,8 +792,9 @@ func TestRunStopCommandOmitsAmbientReleasePolicy(t *testing.T) {
 		{Provider: "kubevirt", KubeVirt: KubeVirtConfig{DeleteOnRelease: true}},
 		{Provider: "morph", Morph: MorphConfig{DeleteOnRelease: true}},
 		{Provider: "namespace-devbox", Namespace: NamespaceConfig{DeleteOnRelease: true}},
+		{Provider: "nvidia-brev", NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "delete"}},
 	} {
-		if got := runStopCommand(cfg, "cbx_123"); strings.Contains(got, "delete-on-release") {
+		if got := runStopCommand(cfg, "cbx_123"); strings.Contains(got, "delete-on-release") || strings.Contains(got, "release-action") {
 			t.Fatalf("ambient release policy leaked into stop command:\n%s", got)
 		}
 	}
