@@ -3,6 +3,13 @@
   "name": "crabbox-coordinator",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    "cpu-features": "./src/cpu-features.cjs",
+    "./agent.js": "./src/ssh2-agent.cjs",
+    "./crypto/build/Release/sshcrypto.node": "./src/ssh2-native.cjs",
+    "./crypto/poly1305.js": "./src/ssh2-poly1305.cjs",
+  },
   "workers_dev": true,
   "preview_urls": true,
   "triggers": {
@@ -14,6 +21,9 @@
   "vars": {
     "CRABBOX_DEFAULT_ORG": "openclaw",
     "CRABBOX_GITHUB_ALLOWED_ORG": "openclaw",
+    "CRABBOX_PUBLIC_URL": "https://crabbox.openclaw.ai",
+    "CRABBOX_WORKSPACE_PROVIDER": "aws",
+    "CRABBOX_WORKSPACE_CLASS": "standard",
     "CRABBOX_USER_TOKEN_TTL_SECONDS": "15552000",
     "CRABBOX_AWS_REGION": "eu-west-1",
     "CRABBOX_CAPACITY_REGIONS": "eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2",
@@ -50,6 +60,8 @@
     "vars": {
       "CRABBOX_DEFAULT_ORG": "openclaw",
       "CRABBOX_GITHUB_ALLOWED_ORG": "openclaw",
+      "CRABBOX_WORKSPACE_PROVIDER": "aws",
+      "CRABBOX_WORKSPACE_CLASS": "standard",
       "CRABBOX_USER_TOKEN_TTL_SECONDS": "15552000",
       "CRABBOX_AWS_REGION": "eu-west-1",
       "CRABBOX_CAPACITY_REGIONS": "eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2",

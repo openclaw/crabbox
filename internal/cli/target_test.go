@@ -108,6 +108,18 @@ func TestValidateProviderTargetRejectsArchitectureTypeMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetIgnoresArchitectureForWorkerRuntime(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cloudflare-dynamic-workers"
+	cfg.TargetOS = targetWorkerRuntime
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestValidateProviderTargetAllowsAzureWindowsModes(t *testing.T) {
 	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
 		t.Run(mode, func(t *testing.T) {

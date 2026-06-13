@@ -113,8 +113,10 @@ Pick whichever matches your intent:
 - **Get the mental model:** [Vision](vision.md),
   [Architecture](architecture.md), [Orchestrator](orchestrator.md),
   [Broker auth and routing](features/broker-auth-routing.md),
-  [Coordinator](features/coordinator.md).
+  [Coordinator](features/coordinator.md),
+  [Bring your own infrastructure](features/bring-your-own-infrastructure.md).
 - **Deploy the coordinator:** [Infrastructure](infrastructure.md),
+  [Portable coordinator](features/portable-coordinator.md),
   [Operations](operations.md), [Security](security.md).
 - **Use the CLI:** [CLI overview](cli.md),
   [Command reference](commands/README.md),
@@ -161,6 +163,7 @@ Pick whichever matches your intent:
   [Performance](performance.md), [Cost and usage](features/cost-usage.md),
   [Lifecycle and cleanup](features/lifecycle-cleanup.md).
 - **Set it up or audit it:** [Infrastructure](infrastructure.md),
+  [Portable coordinator](features/portable-coordinator.md),
   [Security](security.md), [Auth and admin](features/auth-admin.md),
   [Repository onboarding](features/repository-onboarding.md),
   [SSH keys](features/ssh-keys.md), [Source Map](source-map.md).

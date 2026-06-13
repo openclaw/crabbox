@@ -44,6 +44,10 @@ What cleanup does depends on the selected provider:
   project/team/scope. It deletes idle-expired Crabbox-owned Vercel Sandboxes and
   keeps missing-or-inaccessible claims unless
   `--vercel-sandbox-forget-missing` is explicit.
+- **`cloudflare-dynamic-workers`** checks local Dynamic Workers claims against
+  the loader and removes only stale local claims whose loader metadata is
+  missing or terminal. It does not enumerate or delete every Dynamic Worker in
+  the Cloudflare account.
 - Providers that have nothing to sweep return an error rather than acting. For
   example `provider=ssh` (static / bring-your-own hosts) reports:
 
@@ -115,7 +119,7 @@ namespace ssh cleanup no crabbox files found
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|multipass|vercel-sandbox
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|cloudflare-dynamic-workers|multipass|vercel-sandbox
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```

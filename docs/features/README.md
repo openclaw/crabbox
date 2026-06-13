@@ -19,10 +19,12 @@ Read when:
 - [Lease capabilities](capabilities.md): `--desktop`, `--browser`, and `--code` selection rules.
 - [Environment forwarding](env-forwarding.md): name-based env allowlist for the remote command.
 
-## Brokered fleet
+## Coordinator and brokered fleet
 
 - [Coordinator](coordinator.md): shared broker behavior across Cloudflare
   Durable Object and Node.js/PostgreSQL runtimes.
+- [Portable coordinator](portable-coordinator.md): deploy and operate the Node/PostgreSQL runtime on a conventional container platform.
+- [Bring your own infrastructure](bring-your-own-infrastructure.md): connect a private control plane through generic providers and optional registered mode.
 - [Browser portal](portal.md): authenticated lease/run UI, detail pages, bridge routes, and runner visibility.
 - [Broker auth and routing](broker-auth-routing.md): GitHub login, shared bearer
   tokens, trusted proxy identity, optional Cloudflare Access, and public routes.

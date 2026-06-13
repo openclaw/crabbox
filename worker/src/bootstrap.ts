@@ -45,6 +45,7 @@ export function cloudInit(config: LeaseConfig): string {
     .map((port) => `      Port ${port}`)
     .join("\n");
   const readyChecks = optionalReadyChecks(config);
+  const sshHostKeys = optionalSSHHostKeys(config);
   const writeFiles = optionalWriteFiles(config);
   const bootstrap = optionalBootstrap(config);
   return `#cloud-config
@@ -57,12 +58,29 @@ users:
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     ssh_authorized_keys:
       - ${config.sshPublicKey}
+${sshHostKeys}
 write_files:
   - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf
     permissions: '0644'
     content: |
 ${portLines}
       PasswordAuthentication no
+  - path: /etc/systemd/system/crabbox-workspace-ready.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Crabbox workspace per-boot readiness
+      After=cloud-final.service
+      ConditionPathExists=/var/lib/crabbox/bootstrapped
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/crabbox-ready
+      ExecStart=/usr/bin/install -d /run/crabbox
+      ExecStart=/usr/bin/touch /run/crabbox/workspace-ready
+
+      [Install]
+      WantedBy=cloud-final.service
   - path: /usr/local/bin/crabbox-ready
     permissions: '0755'
     content: |
@@ -80,6 +98,7 @@ runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
     export DEBIAN_FRONTEND=noninteractive
+    timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
     cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
     Acquire::Retries "8";
     Acquire::http::Timeout "30";
@@ -96,13 +115,16 @@ runcmd:
       done
     }
     retry apt-get update
-    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
+    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq tmux
     mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
     timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
 ${bootstrap}
+    systemctl daemon-reload
+    systemctl enable crabbox-workspace-ready.service
+    systemctl start --no-block crabbox-workspace-ready.service
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
@@ -372,7 +394,7 @@ Acquire::https::Timeout "30";
 APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git rsync jq
+apt-get install -y --no-install-recommends ca-certificates curl git rsync jq tmux
 if [ -d /proc/sys/fs/binfmt_misc ]; then
   if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
     mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
@@ -641,6 +663,22 @@ function optionalReadyChecks(config: LeaseConfig): string {
     );
   }
   return lines.join("\n");
+}
+
+function optionalSSHHostKeys(config: LeaseConfig): string {
+  if (!config.sshHostPrivateKey || !config.sshHostPublicKey) {
+    return "";
+  }
+  const privateKey = config.sshHostPrivateKey
+    .trimEnd()
+    .split("\n")
+    .map((line) => `    ${line}`)
+    .join("\n");
+  return `ssh_keys:
+  ed25519_private: |
+${privateKey}
+  ed25519_public: ${config.sshHostPublicKey.trim()}
+`;
 }
 
 function optionalWriteFiles(config: LeaseConfig): string {
@@ -1416,6 +1454,46 @@ function indentRuncmdScript(script: string): string {
     .join("\n");
 }
 
+function tailscaleInstallBootstrap(config: LeaseConfig): string {
+  if (config.tailscaleInstallMode !== "pinned") {
+    return "retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'";
+  }
+  const version = shellQuote(config.tailscaleVersion || "1.98.4");
+  const amd64SHA = shellQuote(config.tailscaleSHA256?.amd64 || "");
+  const arm64SHA = shellQuote(config.tailscaleSHA256?.arm64 || "");
+  return `TS_VERSION=${version}
+    case "$(uname -m)" in
+      x86_64) TS_ARCH=amd64; TS_SHA256=${amd64SHA} ;;
+      aarch64|arm64) TS_ARCH=arm64; TS_SHA256=${arm64SHA} ;;
+      *) echo "unsupported Tailscale architecture: $(uname -m)" >&2; exit 3 ;;
+    esac
+    TS_INSTALL_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TS_INSTALL_DIR"' EXIT
+    TS_ARCHIVE="$TS_INSTALL_DIR/tailscale.tgz"
+    retry sh -c "curl -fsSL -o \\"$TS_ARCHIVE\\" \\"https://pkgs.tailscale.com/stable/tailscale_\${TS_VERSION}_\${TS_ARCH}.tgz\\""
+    printf '%s  %s\\n' "$TS_SHA256" "$TS_ARCHIVE" | sha256sum -c -
+    tar -xzf "$TS_ARCHIVE" -C "$TS_INSTALL_DIR" --strip-components=1
+    install -m 0755 "$TS_INSTALL_DIR/tailscale" /usr/local/bin/tailscale
+    install -m 0755 "$TS_INSTALL_DIR/tailscaled" /usr/local/sbin/tailscaled
+    install -d -m 0755 /var/lib/tailscale /run/tailscale
+    {
+      printf '%s\\n' '[Unit]'
+      printf '%s\\n' 'Description=Tailscale node agent'
+      printf '%s\\n' 'After=network-online.target'
+      printf '%s\\n' 'Wants=network-online.target'
+      printf '%s\\n' ''
+      printf '%s\\n' '[Service]'
+      printf '%s\\n' 'ExecStart=/usr/local/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock'
+      printf '%s\\n' 'Restart=on-failure'
+      printf '%s\\n' 'RuntimeDirectory=tailscale'
+      printf '%s\\n' 'StateDirectory=tailscale'
+      printf '%s\\n' ''
+      printf '%s\\n' '[Install]'
+      printf '%s\\n' 'WantedBy=multi-user.target'
+    } >/etc/systemd/system/tailscaled.service
+    systemctl daemon-reload || true`;
+}
+
 function tailscaleBootstrap(config: LeaseConfig): string {
   if (!config.tailscaleAuthKey) {
     return `    echo "tailscale requested but no auth key was injected" >&2
@@ -1423,7 +1501,7 @@ function tailscaleBootstrap(config: LeaseConfig): string {
   }
   const sshUser = config.sshUser.trim() || "crabbox";
   const upArgs = [
-    `--auth-key="$TS_AUTHKEY"`,
+    "--auth-key=file:/dev/stdin",
     `--hostname=${shellQuote(config.tailscaleHostname)}`,
     `--advertise-tags=${shellQuote(config.tailscaleTags.join(","))}`,
   ];
@@ -1433,12 +1511,18 @@ function tailscaleBootstrap(config: LeaseConfig): string {
       upArgs.push("--exit-node-allow-lan-access");
     }
   }
-  return `    retry sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
+  return `    ${tailscaleInstallBootstrap(config)}
     systemctl enable --now tailscaled || service tailscaled start || true
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable crabbox-tailscale-logout.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/crabbox-tailscale-logout.service
+      systemctl daemon-reload || true
+    fi
+    rm -f /usr/local/bin/crabbox-tailscale-logout
     install -d -m 0750 -o ${shellQuote(sshUser)} -g ${shellQuote(sshUser)} /var/lib/crabbox
     set +x
     TS_AUTHKEY=${shellQuote(config.tailscaleAuthKey)}
-    tailscale up ${upArgs.join(" ")}
+    printf '%s' "$TS_AUTHKEY" | tailscale up ${upArgs.join(" ")}
     unset TS_AUTHKEY
     set -x
     ts_ip=""
@@ -1450,12 +1534,14 @@ function tailscaleBootstrap(config: LeaseConfig): string {
     test -n "$ts_ip"
     printf '%s\\n' "$ts_ip" > /var/lib/crabbox/tailscale-ipv4
     printf '%s\\n' ${shellQuote(config.tailscaleHostname)} > /var/lib/crabbox/tailscale-hostname
+    tailscale version 2>/dev/null | head -n1 > /var/lib/crabbox/tailscale-version || true
     if [ -n ${shellQuote(config.tailscaleExitNode)} ]; then
       printf '%s\\n' ${shellQuote(config.tailscaleExitNode)} > /var/lib/crabbox/tailscale-exit-node
       printf '%s\\n' ${shellQuote(String(config.tailscaleExitNodeAllowLanAccess))} > /var/lib/crabbox/tailscale-exit-node-allow-lan-access
     fi
     if tailscale status --json >/var/lib/crabbox/tailscale-status.json 2>/dev/null; then
       jq -r '.Self.DNSName // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-fqdn || true
+      jq -r '.Self.ID // .Self.NodeID // .Self.StableID // empty' /var/lib/crabbox/tailscale-status.json > /var/lib/crabbox/tailscale-device-id || true
     fi
     chown ${shellQuote(`${sshUser}:${sshUser}`)} /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`;

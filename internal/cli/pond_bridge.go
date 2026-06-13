@@ -645,7 +645,7 @@ func realLoadBridgeProvider(provider string, rt Runtime) (BridgeProvider, error)
 	if err != nil {
 		return nil, exit(2, "unknown provider %q for pond bridge", provider)
 	}
-	backend, err := resolved.Configure(cfg, rt)
+	backend, err := configureProviderBackend(resolved, &cfg, rt)
 	if err != nil {
 		return nil, err
 	}

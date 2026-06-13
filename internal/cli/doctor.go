@@ -168,7 +168,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			record("ok", "config", fmt.Sprintf("%s permissions=0600", path), map[string]string{"path": path, "permissions": "0600"})
 		}
 	}
-	cfg.Provider = *provider
+	if err := prepareProviderSelection(&cfg, *provider); err != nil {
+		return err
+	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
@@ -176,6 +178,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
+		return err
+	}
+	if err := finalizeProviderSelection(&cfg); err != nil {
 		return err
 	}
 	var providerDef Provider
@@ -399,6 +404,7 @@ func applyDoctorFromRunContext(ctx context.Context, cfg *Config, runID string) (
 	var missing []string
 	if strings.TrimSpace(run.Provider) != "" {
 		cfg.Provider = strings.TrimSpace(run.Provider)
+		prepareProviderDefaults(cfg)
 	} else {
 		missing = append(missing, "provider")
 	}

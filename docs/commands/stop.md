@@ -50,6 +50,10 @@ Crabbox lease ID and local slug:
   ID, verifies ownership metadata, deletes the Vercel Sandbox, and removes the
   local claim. Missing remote sandboxes preserve the claim unless
   `--vercel-sandbox-forget-missing` is explicit.
+- `cloudflare-dynamic-workers` — accepts a local claim, lifecycle run ID, or
+  slug, deletes loader metadata for that run, and removes the local claim.
+  Stable and explicit Worker cache IDs are not lifecycle IDs. If the loader
+  already reports `not found`, Crabbox removes the stale local claim.
 - `docker-sandbox` — accepts only a Crabbox lease ID or local slug backed by a
   `provider=docker-sandbox` local claim, then removes the sandbox with
   `sbx rm --force`. This is destructive cleanup, not Docker Sandbox pause, and
@@ -119,6 +123,7 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --hostinger-url <url>                    Hostinger API URL
 --hostinger-release-action stop          Hostinger release action; only stop is supported
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
+--cloudflare-dynamic-workers-url <url>   Cloudflare Dynamic Workers loader URL
 ```
 
 Run `crabbox stop --help` for the full, provider-aware flag list, and

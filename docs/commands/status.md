@@ -42,6 +42,10 @@ addition to the Crabbox lease ID and local slug:
   raw or `e2b_<sandboxID>` form.
 - `vercel-sandbox` — accepts a Crabbox-created local slug or `vsbx_...` lease
   ID and verifies the Vercel Sandbox ownership metadata before reporting state.
+- `cloudflare-dynamic-workers` — accepts a local Dynamic Workers claim,
+  lifecycle run ID, or slug, then asks the loader for run metadata. Stable and
+  explicit Worker cache IDs are not lifecycle IDs. The status target is
+  `worker-runtime`, not a Linux host.
 
 ## Waiting for readiness
 

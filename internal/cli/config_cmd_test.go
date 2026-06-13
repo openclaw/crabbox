@@ -228,6 +228,81 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	}
 }
 
+func TestConfigShowRedactsCloudflareDynamicWorkers(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: aws
+cloudflareDynamicWorkers:
+  loaderUrl: https://user:pass@loader.example.test?token=query-secret#fragment-secret
+  token: secret-token
+  compatibilityDate: "2026-06-01"
+  compatibilityFlags: [nodejs_compat]
+  cacheMode: stable
+  egress: blocked
+  cpuMs: 50
+  subrequests: 12
+  timeoutSecs: 30
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if strings.Contains(text, "secret-token") || strings.Contains(text, "user:pass") || strings.Contains(text, "query-secret") || strings.Contains(text, "fragment-secret") {
+		t.Fatalf("config show leaked secret: %q", text)
+	}
+	if !strings.Contains(text, "cloudflare_dynamic_workers loader_url=https://<redacted>@loader.example.test") || !strings.Contains(text, "auth=configured") {
+		t.Fatalf("config show missing dynamic workers redacted details: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		CloudflareDynamicWorkers struct {
+			LoaderURL string `json:"loaderUrl"`
+			Auth      string `json:"auth"`
+		} `json:"cloudflareDynamicWorkers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CloudflareDynamicWorkers.LoaderURL != "https://<redacted>@loader.example.test" || got.CloudflareDynamicWorkers.Auth != "configured" {
+		t.Fatalf("json dynamic workers=%#v", got.CloudflareDynamicWorkers)
+	}
+	if strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "user:pass") || strings.Contains(stdout.String(), "query-secret") || strings.Contains(stdout.String(), "fragment-secret") {
+		t.Fatalf("config show json leaked secret: %q", stdout.String())
+	}
+}
+
+func TestRedactedConfigURLWithoutQueryStripsQueryAndFragmentWithoutUserinfo(t *testing.T) {
+	got := redactedConfigURLWithoutQuery("https://loader.example.test/v1?token=query-secret#fragment-secret")
+	if got != "https://loader.example.test/v1" {
+		t.Fatalf("redacted URL=%q", got)
+	}
+}
+
+func TestRedactedConfigURLWithoutQueryFailsClosedForMalformedURL(t *testing.T) {
+	for _, raw := range []string{
+		"https://loader.example.test/%zz?token=@query-secret",
+		"https://api-token:443#pass@host/%zz",
+	} {
+		got := redactedConfigURLWithoutQuery(raw)
+		if got != "<redacted>" || strings.Contains(got, "query-secret") || strings.Contains(got, "api-token") {
+			t.Fatalf("redacted URL for %q=%q", raw, got)
+		}
+	}
+}
+
 func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -503,6 +578,111 @@ func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "hostinger-secret-token") {
 		t.Fatalf("config show json leaked Hostinger token: %q", stdout.String())
+	}
+}
+
+func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_NVIDIA_BREV_TOKEN", "ignored-brev-secret")
+	if err := os.WriteFile(configPath, []byte(`nvidiaBrev:
+  cli: /usr/local/bin/brev
+  org: example-org
+  type: gpu
+  gpuName: L40S
+  provider: aws
+  mode: vm
+  launchable: pytorch
+  startupScript: setup.sh
+  releaseAction: stop
+  target: host
+  user: ubuntu
+  workRoot: /work/brev
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	want := "nvidia_brev cli=/usr/local/bin/brev org=example-org type=gpu gpu_name=L40S provider=aws mode=vm launchable=pytorch startup_script=setup.sh release_action=stop target=host user=ubuntu work_root=/work/brev auth=cli"
+	if !strings.Contains(text, want) {
+		t.Fatalf("config show missing nvidia-brev summary: %q", text)
+	}
+	for _, secretFragment := range []string{"ignored-brev-secret", "token", "api_key", "password", "private_key"} {
+		if strings.Contains(strings.ToLower(text), secretFragment) {
+			t.Fatalf("config show text exposed %q: %q", secretFragment, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		NvidiaBrev struct {
+			CLI           string `json:"cli"`
+			Auth          string `json:"auth"`
+			Org           string `json:"org"`
+			Type          string `json:"type"`
+			GPUName       string `json:"gpuName"`
+			Provider      string `json:"provider"`
+			Mode          string `json:"mode"`
+			Launchable    string `json:"launchable"`
+			StartupScript string `json:"startupScript"`
+			ReleaseAction string `json:"releaseAction"`
+			Target        string `json:"target"`
+			User          string `json:"user"`
+			WorkRoot      string `json:"workRoot"`
+		} `json:"nvidiaBrev"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.NvidiaBrev.CLI != "/usr/local/bin/brev" ||
+		got.NvidiaBrev.Auth != "cli" ||
+		got.NvidiaBrev.Org != "example-org" ||
+		got.NvidiaBrev.Type != "gpu" ||
+		got.NvidiaBrev.GPUName != "L40S" ||
+		got.NvidiaBrev.Provider != "aws" ||
+		got.NvidiaBrev.Mode != "vm" ||
+		got.NvidiaBrev.Launchable != "pytorch" ||
+		got.NvidiaBrev.StartupScript != "setup.sh" ||
+		got.NvidiaBrev.ReleaseAction != "stop" ||
+		got.NvidiaBrev.Target != "host" ||
+		got.NvidiaBrev.User != "ubuntu" ||
+		got.NvidiaBrev.WorkRoot != "/work/brev" {
+		t.Fatalf("unexpected nvidia-brev json: %#v", got.NvidiaBrev)
+	}
+	if strings.Contains(stdout.String(), "ignored-brev-secret") {
+		t.Fatalf("config show json leaked ignored NVIDIA Brev secret env: %q", stdout.String())
+	}
+	nvidiaBrevJSON, err := json.Marshal(got.NvidiaBrev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secretFragment := range []string{"token", "apiKey", "password", "privateKey"} {
+		if strings.Contains(string(nvidiaBrevJSON), secretFragment) {
+			t.Fatalf("nvidia-brev config show json exposed %q: %s", secretFragment, nvidiaBrevJSON)
+		}
+	}
+}
+
+func TestConfigShowAppliesNvidiaBrevGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "nvidia-brev"
+	cfg.WorkRoot = "/srv/crabbox"
+	MarkWorkRootExplicit(&cfg)
+	got := effectiveConfigForShow(cfg)
+	if got.WorkRoot != "/srv/crabbox" || got.NvidiaBrev.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("workRoot=%q nvidiaBrev.workRoot=%q", got.WorkRoot, got.NvidiaBrev.WorkRoot)
 	}
 }
 

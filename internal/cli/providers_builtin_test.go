@@ -25,6 +25,7 @@ func init() {
 	RegisterProvider(testExternalProvider{})
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
+	RegisterProvider(testNvidiaBrevProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
 	RegisterProvider(testMorphProvider{})
@@ -34,6 +35,7 @@ func init() {
 	RegisterProvider(testE2BProvider{})
 	RegisterProvider(testModalProvider{})
 	RegisterProvider(testCloudflareProvider{})
+	RegisterProvider(testCloudflareDynamicWorkersProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
 	RegisterProvider(testAppleVZProvider{})
@@ -855,6 +857,30 @@ func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
+type testNvidiaBrevProvider struct{}
+
+func (testNvidiaBrevProvider) Name() string { return "nvidia-brev" }
+func (testNvidiaBrevProvider) Aliases() []string {
+	return []string{"brev", "nvidia"}
+}
+func (testNvidiaBrevProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "nvidia-brev",
+		Family:      "nvidia-brev",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testNvidiaBrevProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testNvidiaBrevProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testNvidiaBrevProvider) Configure(Config, Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 type testBlacksmithProvider struct{}
 
 func (testBlacksmithProvider) Name() string { return "blacksmith-testbox" }
@@ -1331,6 +1357,71 @@ func (p testCloudflareProvider) ConfigureDoctor(cfg Config, rt Runtime) (DoctorB
 		return nil, err
 	}
 	return backend.(DoctorBackend), nil
+}
+
+type testCloudflareDynamicWorkersProvider struct{}
+
+type testCloudflareDynamicWorkersFlagValues struct {
+	CPUMs       *int
+	Subrequests *int
+	TimeoutSecs *int
+}
+
+func (testCloudflareDynamicWorkersProvider) Name() string { return "cloudflare-dynamic-workers" }
+func (testCloudflareDynamicWorkersProvider) Aliases() []string {
+	return []string{"cf-dynamic", "cfdw"}
+}
+func (testCloudflareDynamicWorkersProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "cloudflare-dynamic-workers",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetWorkerRuntime}},
+		Features:    FeatureSet{FeatureCleanup, FeatureModuleRun, FeatureRunSession},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testCloudflareDynamicWorkersProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testCloudflareDynamicWorkersFlagValues{
+		CPUMs:       fs.Int("cloudflare-dynamic-workers-cpu-ms", defaults.CloudflareDynamicWorkers.CPUMs, ""),
+		Subrequests: fs.Int("cloudflare-dynamic-workers-subrequests", defaults.CloudflareDynamicWorkers.Subrequests, ""),
+		TimeoutSecs: fs.Int("cloudflare-dynamic-workers-timeout-secs", defaults.CloudflareDynamicWorkers.TimeoutSecs, ""),
+	}
+}
+func (testCloudflareDynamicWorkersProvider) ApplyFlags(
+	cfg *Config,
+	fs *flag.FlagSet,
+	values any,
+) error {
+	v, ok := values.(testCloudflareDynamicWorkersFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "cloudflare-dynamic-workers-cpu-ms") {
+		cfg.CloudflareDynamicWorkers.CPUMs = *v.CPUMs
+	}
+	if flagWasSet(fs, "cloudflare-dynamic-workers-subrequests") {
+		cfg.CloudflareDynamicWorkers.Subrequests = *v.Subrequests
+	}
+	if flagWasSet(fs, "cloudflare-dynamic-workers-timeout-secs") {
+		cfg.CloudflareDynamicWorkers.TimeoutSecs = *v.TimeoutSecs
+	}
+	return nil
+}
+func (p testCloudflareDynamicWorkersProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	if cfg.TargetOS != "" && cfg.TargetOS != targetWorkerRuntime && cfg.TargetOS != targetLinux {
+		return nil, exit(2, "%s supports target=worker-runtime only", p.Name())
+	}
+	return testCloudflareDynamicWorkersBackend{
+		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
+	}, nil
+}
+
+type testCloudflareDynamicWorkersBackend struct {
+	testDelegatedBackend
+}
+
+func (testCloudflareDynamicWorkersBackend) Cleanup(context.Context, CleanupRequest) error {
+	return nil
 }
 
 type testSpritesProvider struct{}

@@ -251,6 +251,11 @@ tailscale ping <tailscale-fqdn-or-100.x-address>
 - Keep `CRABBOX_TAILSCALE_ENABLED` unset or `1`; set it to `0` only to disable
   brokered Tailscale intentionally.
 - Ensure requested tags are in the coordinator's `CRABBOX_TAILSCALE_TAGS` allowlist.
+- If `invalid_tailscale_tags` includes Tailscale's raw `requested tags ... are
+  invalid or not permitted` response, make the requested set exactly match the
+  OAuth client's tags or update `tagOwners` so an OAuth client tag owns every
+  requested tag. Multi-tag OAuth clients need explicit self-ownership for subset
+  requests; a dedicated deployment-owner tag is usually simpler and narrower.
 - Ensure the local client is joined to the same tailnet and that ACLs allow SSH
   to the tagged node.
 - For exit nodes, ensure the node is approved and that tailnet grants or ACLs

@@ -34,6 +34,7 @@ func (a App) configShow(args []string) error {
 
 func effectiveConfigForShow(cfg Config) Config {
 	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
+	cfg.NvidiaBrev.WorkRoot = EffectiveNvidiaBrevWorkRoot(cfg)
 	if cfg.Provider == "digitalocean" || cfg.Provider == "linode" {
 		base := baseConfig()
 		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
@@ -49,6 +50,10 @@ func effectiveConfigForShow(cfg Config) Config {
 		cfg.SSHUser = cfg.Hostinger.User
 		cfg.SSHPort = "22"
 		cfg.SSHFallbackPorts = nil
+	}
+	switch normalizeProviderName(cfg.Provider) {
+	case "nvidia-brev", "brev", "nvidia":
+		cfg.WorkRoot = cfg.NvidiaBrev.WorkRoot
 	}
 	return cfg
 }
@@ -134,6 +139,21 @@ func configShowView(cfg Config) map[string]any {
 			"firewall": cfg.Linode.FirewallID,
 			"sshCIDRs": cfg.Linode.SSHCIDRs,
 		},
+		"nvidiaBrev": map[string]any{
+			"cli":           cfg.NvidiaBrev.CLI,
+			"auth":          "cli",
+			"org":           cfg.NvidiaBrev.Org,
+			"type":          cfg.NvidiaBrev.Type,
+			"gpuName":       cfg.NvidiaBrev.GPUName,
+			"provider":      cfg.NvidiaBrev.Provider,
+			"mode":          cfg.NvidiaBrev.Mode,
+			"launchable":    cfg.NvidiaBrev.Launchable,
+			"startupScript": cfg.NvidiaBrev.StartupScript,
+			"releaseAction": cfg.NvidiaBrev.ReleaseAction,
+			"target":        cfg.NvidiaBrev.Target,
+			"user":          cfg.NvidiaBrev.User,
+			"workRoot":      cfg.NvidiaBrev.WorkRoot,
+		},
 		"hostinger": map[string]any{
 			"apiUrl":          cfg.Hostinger.APIURL,
 			"auth":            tokenState(cfg.Hostinger.APIToken),
@@ -203,6 +223,18 @@ func configShowView(cfg Config) map[string]any {
 			"apiUrl":  cfg.Cloudflare.APIURL,
 			"auth":    tokenState(cfg.Cloudflare.Token),
 			"workdir": cfg.Cloudflare.Workdir,
+		},
+		"cloudflareDynamicWorkers": map[string]any{
+			"loaderUrl":          redactedConfigURLWithoutQuery(cfg.CloudflareDynamicWorkers.LoaderURL),
+			"auth":               tokenState(cfg.CloudflareDynamicWorkers.Token),
+			"compatibilityDate":  cfg.CloudflareDynamicWorkers.CompatibilityDate,
+			"compatibilityFlags": cfg.CloudflareDynamicWorkers.CompatibilityFlags,
+			"cacheMode":          cfg.CloudflareDynamicWorkers.CacheMode,
+			"egress":             cfg.CloudflareDynamicWorkers.Egress,
+			"cpuMs":              cfg.CloudflareDynamicWorkers.CPUMs,
+			"subrequests":        cfg.CloudflareDynamicWorkers.Subrequests,
+			"timeoutSecs":        cfg.CloudflareDynamicWorkers.TimeoutSecs,
+			"metadata":           cfg.CloudflareDynamicWorkers.Metadata,
 		},
 		"upstashBox": map[string]any{
 			"baseUrl":   cfg.UpstashBox.BaseURL,
@@ -413,6 +445,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
 	fmt.Fprintf(w, "tart image=%s user=%s work_root=%s cpus=%d memory=%d disk=%d\n", cfg.Tart.Image, cfg.Tart.User, cfg.Tart.WorkRoot, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk)
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(cfg.Cloudflare.APIURL, "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
+	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURLWithoutQuery(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
 	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
 	fmt.Fprintf(w, "results junit=%s auto=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto)
 	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
@@ -428,6 +461,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
+	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth=cli\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
 	fmt.Fprintf(w, "hostinger api_url=%s item_id=%s payment_method_id=%s template_id=%s data_center_id=%s hostname_prefix=%s user=%s work_root=%s allow_purchase=%t release_action=%s auth=%s\n", blank(cfg.Hostinger.APIURL, "-"), blank(cfg.Hostinger.ItemID, "-"), blank(cfg.Hostinger.PaymentMethodID, "-"), blank(cfg.Hostinger.TemplateID, "-"), blank(cfg.Hostinger.DataCenterID, "-"), blank(cfg.Hostinger.HostnamePrefix, "-"), blank(cfg.Hostinger.User, "-"), blank(cfg.Hostinger.WorkRoot, "-"), cfg.Hostinger.AllowPurchase, blank(cfg.Hostinger.ReleaseAction, "-"), tokenState(cfg.Hostinger.APIToken))
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(cfg.AzureDynamicSessions.Endpoint, "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)
 	fmt.Fprintf(w, "gcp project=%s zone=%s image=%s network=%s subnet=%s root_gb=%d ssh_cidrs=%s\n", blank(cfg.GCPProject, "-"), cfg.GCPZone, cfg.GCPImage, cfg.GCPNetwork, blank(cfg.GCPSubnet, "-"), cfg.GCPRootGB, blank(strings.Join(cfg.GCPSSHCIDRs, ","), "-"))
@@ -457,6 +491,34 @@ func redactedConfigURL(value string) string {
 	redacted := *u
 	redacted.User = url.User("<redacted>")
 	out := strings.ReplaceAll(redacted.String(), "%3Credacted%3E", "<redacted>")
+	if addedScheme {
+		out = strings.TrimPrefix(out, "https://")
+	}
+	return out
+}
+
+func redactedConfigURLWithoutQuery(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return value
+	}
+	addedScheme := false
+	parseValue := raw
+	if !strings.Contains(parseValue, "://") {
+		parseValue = "https://" + parseValue
+		addedScheme = true
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil || u.Opaque != "" || u.Host == "" {
+		return "<redacted>"
+	}
+	if u.User != nil {
+		u.User = url.User("<redacted>")
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	out := strings.ReplaceAll(u.String(), "%3Credacted%3E", "<redacted>")
 	if addedScheme {
 		out = strings.TrimPrefix(out, "https://")
 	}

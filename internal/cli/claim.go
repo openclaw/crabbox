@@ -535,7 +535,8 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 }
 
 func claimEndpointInactiveState(state string) bool {
-	return statusTerminalState(state) || strings.EqualFold(strings.TrimSpace(state), "paused")
+	state = strings.TrimSpace(state)
+	return statusTerminalState(state) || strings.EqualFold(state, "paused") || strings.EqualFold(state, "deleting")
 }
 
 // updateLeaseClaimTailscale records a tailnet endpoint on an existing claim.

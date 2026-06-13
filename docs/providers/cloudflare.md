@@ -11,6 +11,12 @@ Cloudflare Containers run behind container-enabled Durable Objects, which makes
 this provider a good fit for short Linux test jobs and warm repeated commands.
 It is not suitable for SSH-oriented or interactive desktop workflows.
 
+For Worker-runtime JavaScript or TypeScript module execution, use the separate
+[Cloudflare Dynamic Workers provider](cloudflare-dynamic-workers.md)
+(`provider: cloudflare-dynamic-workers`, aliases `cf-dynamic` and `cfdw`).
+Dynamic Workers do not provide Linux shell execution, archive sync, SSH, VNC, or
+ports; they run module source through the Cloudflare Workers runtime.
+
 ## Capabilities at a glance
 
 - **Targets:** Linux only.

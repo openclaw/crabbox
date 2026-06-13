@@ -239,21 +239,33 @@ minted Access JWT in `CRABBOX_ACCESS_TOKEN`.
 
 For brokered Tailscale reachability, the coordinator mints one ephemeral, pre-approved
 auth key per lease and injects it only into cloud-init. Lease records store only
-non-secret Tailscale metadata (hostname, FQDN, 100.x address, state, tags).
+non-secret Tailscale metadata (hostname, FQDN, 100.x address, client version,
+device id, state, and tags).
 
-Create a Tailscale OAuth client with the `auth_keys` scope, limited to the tags
-Crabbox may assign (typically `tag:crabbox`), and inject the credentials as
-coordinator secrets:
+Create a Tailscale OAuth client with only the `auth_keys` scope, limited to the
+tags Crabbox may assign (typically `tag:crabbox`), and inject the credentials as
+coordinator secrets. Crabbox does not require device-management scope:
 
 ```text
 CRABBOX_TAILSCALE_ENABLED=1
 CRABBOX_TAILSCALE_CLIENT_ID
 CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
-CRABBOX_TAILSCALE_TAGS=tag:crabbox      # must match the OAuth client's allowed tags
+CRABBOX_TAILSCALE_TAGS=tag:crabbox      # requested-tag allowlist/default
+CRABBOX_TAILSCALE_INSTALL_MODE=package  # or pinned
+CRABBOX_TAILSCALE_VERSION=1.98.4        # pinned mode
+CRABBOX_TAILSCALE_SHA256_AMD64=...      # pinned mode
+CRABBOX_TAILSCALE_SHA256_ARM64=...      # pinned mode
 ```
 
-Verify end to end with `crabbox warmup --tailscale --network tailscale`. See
+For one tag, assign the same tag to the OAuth client. For multiple tags, either
+request the OAuth client's complete tag set or configure `tagOwners` so an OAuth
+client tag owns every subset tag Crabbox may request. Prefer one dedicated
+deployment-owner tag over broad OAuth permissions. Tailscale rejects unowned subset
+requests even when every tag is present in `CRABBOX_TAILSCALE_TAGS`.
+
+Preflight the coordinator with `scripts/live-tailscale-smoke.sh --json`, then verify
+end to end with `crabbox warmup --tailscale --network tailscale`. See
 [Tailscale](features/tailscale.md).
 
 ### Deploy token scope
@@ -502,6 +514,12 @@ Shared prerequisites:
 - budget limits sized before inviting users;
 - outbound network access to provider, GitHub, Tailscale, and artifact APIs that
   the enabled features use.
+
+Choose Cloudflare Workers/Durable Objects or the single-replica Node/PostgreSQL
+runtime. For the container runbook, see
+[Portable Coordinator](features/portable-coordinator.md). Design history,
+production proof, and remaining scale work are tracked in
+[Portable Coordinator Runtime](plan/portable-coordinator.md).
 
 Cloudflare prerequisites:
 

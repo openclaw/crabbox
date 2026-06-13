@@ -26,6 +26,7 @@ require (
 	github.com/islo-labs/go-sdk v0.0.0-20260528125833-04a38f6f507c
 	github.com/lima-vm/go-qcow2reader v0.7.1
 	github.com/lxc/incus/v7 v7.1.0
+	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
 	github.com/zitadel/oidc/v3 v3.47.5
 	golang.org/x/crypto v0.52.0
 	golang.org/x/oauth2 v0.36.0

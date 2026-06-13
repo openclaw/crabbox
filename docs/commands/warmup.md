@@ -188,6 +188,14 @@ reused by Crabbox slug or lease ID. The provider is delegated-run only: it
 supports archive sync and command execution through the SDK bridge, but not SSH,
 Tailscale, browser, desktop, code-server, or Actions runner hydration.
 
+### cloudflare-dynamic-workers
+
+`--provider cloudflare-dynamic-workers` rejects `warmup`. Dynamic Workers require
+module source before Cloudflare can load or cache them; use `crabbox doctor` for
+loader readiness or `crabbox run --script <file>` to load code. The provider
+does not start a Linux machine and does not support Actions runner registration,
+SSH, desktop, browser, code-server, ports, `--class`, or `--type`.
+
 ### aws — macOS
 
 `--provider aws --target macos --desktop` launches an EC2 Mac instance on an
