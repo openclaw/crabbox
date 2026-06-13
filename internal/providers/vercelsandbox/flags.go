@@ -30,7 +30,7 @@ type vercelSandboxFlagValues struct {
 
 func RegisterVercelSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	return vercelSandboxFlagValues{
-		Runtime:         fs.String("vercel-sandbox-runtime", defaults.VercelSandbox.Runtime, "Vercel Sandbox runtime (node20, node22, node24)"),
+		Runtime:         fs.String("vercel-sandbox-runtime", defaults.VercelSandbox.Runtime, "Vercel Sandbox runtime (node26, node24, node22, python3.13)"),
 		Workdir:         fs.String("vercel-sandbox-workdir", defaults.VercelSandbox.Workdir, "Absolute working directory inside the sandbox"),
 		ProjectID:       fs.String("vercel-sandbox-project-id", defaults.VercelSandbox.ProjectID, "Vercel project ID used for sandbox scoping"),
 		TeamID:          fs.String("vercel-sandbox-team-id", defaults.VercelSandbox.TeamID, "Vercel team ID used for sandbox scoping"),
@@ -118,9 +118,9 @@ func validateVercelSandboxConfig(cfg Config) error {
 		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.VercelSandbox.Runtime)) {
-	case "", "node20", "node22", "node24":
+	case "", "node26", "node24", "node22", "python3.13":
 	default:
-		return exit(2, "vercel-sandbox runtime must be one of node20, node22, node24")
+		return exit(2, "vercel-sandbox runtime must be one of node26, node24, node22, python3.13")
 	}
 	if cfg.VercelSandbox.TimeoutSecs < 0 {
 		return exit(2, "vercel-sandbox timeoutSecs must be non-negative")

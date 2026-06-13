@@ -171,8 +171,8 @@ CRABBOX_VERCEL_SANDBOX_PORTS
 CRABBOX_VERCEL_SANDBOX_FORGET_MISSING
 ```
 
-`runtime` must be `node20`, `node22`, or `node24`. Vercel may expose newer
-runtimes, but Crabbox validates this v1 surface explicitly. `workdir` must be an
+`runtime` must be `node26`, `node24`, `node22`, or `python3.13`. Vercel may
+expose newer runtimes, but Crabbox validates this v1 surface explicitly. `workdir` must be an
 absolute dedicated directory and cannot be `/`, `/tmp`, `/usr`, `/var`,
 `/home`, `/vercel`, or `/vercel/sandbox`. `networkPolicy` must be `default`,
 `public`, `private`, `restricted`, or `none`; allow and deny entries must be
@@ -193,7 +193,8 @@ domains, IP addresses, or CIDRs. `ports` accepts ports or `start-end` ranges.
    only after extraction succeeds.
 4. Commands run through Vercel Sandbox `runCommand` with `cwd` set to the
    configured workdir and forwarded non-auth environment values sent in the SDK
-   request body.
+   request body. The v1 SDK bridge returns bounded captured stdout and stderr at
+   command completion rather than a live event stream.
 5. One-shot sandboxes are deleted after successful `run` unless `--keep` is set.
    `--keep-on-failure` retains a newly created sandbox after sync, workspace, or
    command failures and prints reuse/stop guidance.

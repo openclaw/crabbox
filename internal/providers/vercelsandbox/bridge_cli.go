@@ -67,7 +67,7 @@ function summary(sandbox, metadata) {
     name: sandbox?.name || req.sandboxId || '',
     status: sandbox?.status || sandbox?.state || '',
     state: sandbox?.state || sandbox?.status || '',
-    metadata: metadata || sandbox?.tags || {},
+    metadata: sandbox?.tags || sandbox?.metadata || metadata || {},
   };
 }
 
@@ -97,6 +97,52 @@ function networkPolicy(create, cfg) {
   return Object.keys(policy).length > 0 ? policy : undefined;
 }
 
+function expandPortSpecs(values) {
+  const out = [];
+  for (const value of values || []) {
+    const text = String(value).trim();
+    if (!text) continue;
+    const parts = text.split('-');
+    const start = Number(parts[0]);
+    const end = parts.length === 2 ? Number(parts[1]) : start;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > 65535) continue;
+    for (let port = start; port <= end; port++) out.push(port);
+  }
+  return [...new Set(out)];
+}
+
+function captureStream(name) {
+  const captureLimitBytes = 4 * 1024 * 1024;
+  let captured = '';
+  let bytes = 0;
+  let truncated = false;
+  return {
+    stream: new Writable({
+      write(chunk, _enc, cb) {
+        if (truncated) {
+          cb();
+          return;
+        }
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, _enc);
+        const remaining = captureLimitBytes - bytes;
+        if (data.length <= remaining) {
+          captured += data.toString();
+          bytes += data.length;
+        } else {
+          captured += data.subarray(0, Math.max(0, remaining)).toString();
+          captured += '\n[crabbox: vercel-sandbox ' + name + ' truncated after ' + captureLimitBytes + ' bytes]\n';
+          bytes = captureLimitBytes;
+          truncated = true;
+        }
+        cb();
+      },
+    }),
+    value() {
+      return captured;
+    },
+  };
+}
+
 async function getSandbox(name) {
   return await Sandbox.get(sandboxOptions({ name, resume: false }));
 }
@@ -121,10 +167,10 @@ switch (req.action) {
     if (create.snapshot || cfg.snapshot) opts.source = { snapshotId: create.snapshot || cfg.snapshot };
     const policy = networkPolicy(create, cfg);
     if (policy !== undefined) opts.networkPolicy = policy;
-    const ports = create.ports || cfg.ports || [];
-    if (ports.length > 0) opts.ports = ports.map((port) => Number(String(port).split('-')[0])).filter((port) => Number.isInteger(port) && port > 0);
+    const ports = expandPortSpecs(create.ports || cfg.ports || []);
+    if (ports.length > 0) opts.ports = ports;
     const sandbox = await Sandbox.create(opts);
-    process.stdout.write(JSON.stringify(summary(sandbox, create.metadata || {})) + '\n');
+    process.stdout.write(JSON.stringify(summary(sandbox)) + '\n');
     break;
   }
   case 'list': {
@@ -160,10 +206,8 @@ switch (req.action) {
   case 'exec': {
     const sandbox = await getSandbox(req.sandboxId);
     const execReq = req.exec || {};
-    let out = '';
-    let err = '';
-    const stdout = new Writable({ write(chunk, _enc, cb) { out += chunk.toString(); cb(); } });
-    const stderr = new Writable({ write(chunk, _enc, cb) { err += chunk.toString(); cb(); } });
+    const stdoutCapture = captureStream('stdout');
+    const stderrCapture = captureStream('stderr');
     const controller = execReq.timeoutSecs > 0 ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(new Error('vercel-sandbox command timed out')), execReq.timeoutSecs * 1000) : null;
     let result;
@@ -173,14 +217,14 @@ switch (req.action) {
         args: ['-lc', execReq.command || ''],
         cwd: execReq.workingDir || undefined,
         env: execReq.env || undefined,
-        stdout,
-        stderr,
+        stdout: stdoutCapture.stream,
+        stderr: stderrCapture.stream,
         signal: controller?.signal,
       });
     } finally {
       if (timer) clearTimeout(timer);
     }
-    process.stdout.write(JSON.stringify({ stdout: out, stderr: err, exitCode: result.exitCode ?? 0 }) + '\n');
+    process.stdout.write(JSON.stringify({ stdout: stdoutCapture.value(), stderr: stderrCapture.value(), exitCode: result.exitCode ?? 0 }) + '\n');
     break;
   }
   default:

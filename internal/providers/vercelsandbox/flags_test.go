@@ -94,6 +94,7 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 		want string
 	}{
 		{"runtime", func(c *Config) { c.VercelSandbox.Runtime = "ruby" }, "runtime"},
+		{"removed-runtime", func(c *Config) { c.VercelSandbox.Runtime = "node20" }, "runtime"},
 		{"workdir-relative", func(c *Config) { c.VercelSandbox.Workdir = "workspace" }, "absolute"},
 		{"workdir-broad", func(c *Config) { c.VercelSandbox.Workdir = "/vercel/sandbox" }, "too broad"},
 		{"timeout", func(c *Config) { c.VercelSandbox.TimeoutSecs = -1 }, "non-negative"},
@@ -110,6 +111,19 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 			err := validateVercelSandboxConfig(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v want contains %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateVercelSandboxConfigAcceptsCurrentRuntimes(t *testing.T) {
+	for _, runtime := range []string{"node26", "node24", "node22", "python3.13"} {
+		t.Run(runtime, func(t *testing.T) {
+			cfg := Config{}
+			cfg.VercelSandbox.Runtime = runtime
+			cfg.VercelSandbox.Workdir = defaultWorkdir
+			if err := validateVercelSandboxConfig(cfg); err != nil {
+				t.Fatalf("validate runtime %q: %v", runtime, err)
 			}
 		})
 	}
