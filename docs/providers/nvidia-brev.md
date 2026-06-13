@@ -156,6 +156,13 @@ Acquire flow:
 Crabbox names workspaces as `crabbox-<slug>-<lease-suffix>` so `list` and
 `cleanup` can distinguish Crabbox-owned Brev workspaces from manual ones.
 
+If `brev create` returns an ambiguous transport error, Crabbox checks inventory
+for the deterministic workspace name and stores a recovery claim. Non-kept
+workspaces are deleted when ownership is confirmed; kept workspaces remain
+manageable by lease ID or slug. Name-only recovery claims report `failed` until
+the workspace appears and can be cleared by explicit release after the recovery
+grace period.
+
 ### SSH target selection
 
 `nvidiaBrev.target` controls which Brev SSH config host Crabbox selects:

@@ -24,6 +24,7 @@ func defaultBrevSSHConfigPath() string {
 	if err != nil || home == "" {
 		return filepath.Join(".brev", "ssh_config")
 	}
+	// brev refresh writes generated hosts here and includes this file from ~/.ssh/config.
 	return filepath.Join(home, ".brev", "ssh_config")
 }
 
