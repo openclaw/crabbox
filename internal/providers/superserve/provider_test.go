@@ -157,7 +157,9 @@ func TestValidateSuperserveConfigRejectsBadValues(t *testing.T) {
 	}
 }
 
-func TestConfigureReturnsStubbedDelegatedBackendAndDoctor(t *testing.T) {
+func TestConfigureReturnsLifecycleBackendAndCredentialedDoctor(t *testing.T) {
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "")
+	t.Setenv("SUPERSERVE_API_KEY", "")
 	provider := Provider{}
 	cfg := testConfig()
 	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
@@ -169,26 +171,20 @@ func TestConfigureReturnsStubbedDelegatedBackendAndDoctor(t *testing.T) {
 	if !ok {
 		t.Fatalf("configured backend does not implement DelegatedRunBackend: %T", configured)
 	}
-	if err := delegated.Warmup(context.Background(), WarmupRequest{}); err == nil || !strings.Contains(err.Error(), "warmup is not implemented yet") {
-		t.Fatalf("Warmup err=%v", err)
+	if _, err := delegated.Run(context.Background(), RunRequest{}); err == nil || !strings.Contains(err.Error(), "run is not implemented yet") {
+		t.Fatalf("Run err=%v", err)
 	}
 	cleanup, ok := configured.(core.CleanupBackend)
 	if !ok {
 		t.Fatalf("configured backend does not implement CleanupBackend: %T", configured)
 	}
-	if err := cleanup.Cleanup(context.Background(), CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "cleanup is not implemented yet") {
-		t.Fatalf("Cleanup err=%v", err)
-	}
+	_ = cleanup
 	doctor, err := provider.ConfigureDoctor(cfg, rt)
 	if err != nil {
 		t.Fatalf("ConfigureDoctor err=%v", err)
 	}
-	result, err := doctor.Doctor(context.Background(), DoctorRequest{})
-	if err != nil {
-		t.Fatalf("Doctor err=%v", err)
-	}
-	if result.Provider != providerName || result.Status != "ok" || !strings.Contains(result.Message, "not_implemented") {
-		t.Fatalf("doctor result=%#v", result)
+	if _, err := doctor.Doctor(context.Background(), DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Fatalf("Doctor err=%v, want API key requirement", err)
 	}
 }
 

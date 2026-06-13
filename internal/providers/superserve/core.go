@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -23,6 +24,11 @@ type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type CleanupRequest = core.CleanupRequest
+type Server = core.Server
+type Repo = core.Repo
+type LeaseClaim = core.LeaseClaim
+type ExitError = core.ExitError
+type timingReport = core.TimingReport
 
 const (
 	providerName   = "superserve"
@@ -47,6 +53,38 @@ func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
+}
+
+func newLeaseSlug(leaseID string) string {
+	return core.NewLeaseSlug(leaseID)
+}
+
+func normalizeLeaseSlug(value string) string {
+	return core.NormalizeLeaseSlug(value)
+}
+
+func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
+	return core.AllocateClaimLeaseSlug(leaseID, requested)
+}
+
+func blank(value, fallback string) string {
+	return core.Blank(value, fallback)
+}
+
+func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
+}
+
+func readLeaseClaim(leaseID string) (LeaseClaim, error) {
+	return core.ReadLeaseClaim(leaseID)
+}
+
+func listSuperserveLeaseClaims() ([]LeaseClaim, error) {
+	return core.ListLeaseClaimsWithPrefix(leasePrefix)
+}
+
+func removeLeaseClaim(leaseID string) {
+	core.RemoveLeaseClaim(leaseID)
 }
 
 func notImplemented(ctx context.Context, action string) error {
