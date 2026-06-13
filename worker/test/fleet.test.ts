@@ -361,6 +361,23 @@ describe("fleet lease identity and idle", () => {
       profile,
       capabilities: { terminal: false, desktop: false, vnc: false },
     });
+    const shortTTL = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers,
+        body: {
+          id: "fleet-too-short",
+          runtime: "crabbox",
+          ttlSeconds: 1199,
+          idleTimeoutSeconds: 360,
+          capabilities: { desktop: false },
+        },
+      }),
+    );
+    expect(shortTTL.status).toBe(400);
+    await expect(shortTTL.json()).resolves.toMatchObject({
+      error: "invalid_duration",
+      message: "workspace ttlSeconds must be at least 1200",
+    });
     await fleet.alarm();
     expect(createdClass).toBe("standard");
     expect(createdProviderKey).toBe(
@@ -1934,7 +1951,7 @@ describe("fleet lease identity and idle", () => {
             cloudID: "655",
             name: "crabbox-fleet-is-129",
             status: "initializing",
-            serverType: "cpx62",
+            serverType: "cx53",
             host: "192.0.2.129",
             labels: { lease: leaseID },
           },
@@ -1969,6 +1986,8 @@ describe("fleet lease identity and idle", () => {
         serverName: "",
         host: "",
         keep: false,
+        ttlSeconds: 3600,
+        idleTimeoutSeconds: 3600,
         state: "provisioning",
         provisioningRequestStartedAt: old,
         createdAt: old,
@@ -1992,6 +2011,9 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       cloudID: "655",
       state: "provisioning",
+      serverType: "cx53",
+      estimatedHourlyUSD: 0.1,
+      maxEstimatedUSD: 0.1,
     });
   });
 

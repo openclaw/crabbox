@@ -136,8 +136,9 @@ const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
 const workspaceReconcileIntervalMs = 10_000;
 const workspaceReconcileMaxIntervalMs = 5 * 60_000;
-const workspaceProvisionClaimMs = 20 * 60_000;
+const workspaceProvisionClaimMs = 15 * 60_000;
 const workspaceProvisionRecoveryGraceMs = 15 * 60_000;
+const workspaceMinimumTTLSeconds = 20 * 60;
 const workspaceProviderKeyPrefix = "crabbox-workspace-";
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
@@ -1631,6 +1632,15 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    if (ttlSeconds < workspaceMinimumTTLSeconds) {
+      return json(
+        {
+          error: "invalid_duration",
+          message: `workspace ttlSeconds must be at least ${workspaceMinimumTTLSeconds}`,
+        },
+        { status: 400 },
+      );
+    }
     const desktop = false;
     const key = workspaceKey(owner, org, id);
     const existingResponse = await this.state.runExclusive(async () => {
@@ -2024,6 +2034,32 @@ export class FleetCoordinator {
       }
     }
     if (server) {
+      const recoveryConfig = leaseConfig({
+        provider: workspace.provider,
+        target: lease.target,
+        profile: lease.profile,
+        class: lease.class,
+        serverType: server.serverType,
+        providerKey: lease.providerKey,
+        desktop: lease.desktop ?? false,
+        browser: lease.browser ?? false,
+        code: lease.code ?? false,
+        ttlSeconds: lease.ttlSeconds,
+        idleTimeoutSeconds: lease.idleTimeoutSeconds ?? lease.ttlSeconds,
+        keep: lease.keep,
+        sshPublicKey:
+          this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim() || readinessDummySSHPublicKey,
+      });
+      const providerHourlyUSD = await provider
+        .hourlyPriceUSD(server.serverType, recoveryConfig)
+        .catch(() => undefined);
+      const recoveredCost = leaseCost(
+        this.env,
+        workspace.provider,
+        server.serverType,
+        lease.ttlSeconds,
+        providerHourlyUSD,
+      );
       const recovered = await this.state.runExclusive(async () => {
         const current = await this.getLease(lease.id);
         if (
@@ -2039,6 +2075,8 @@ export class FleetCoordinator {
         current.serverID = server.id;
         current.serverName = server.name;
         current.serverType = server.serverType;
+        current.estimatedHourlyUSD = recoveredCost.hourlyUSD;
+        current.maxEstimatedUSD = recoveredCost.maxUSD;
         if (server.status === "running" && server.host.trim()) {
           current.state = "active";
           current.host = server.host;

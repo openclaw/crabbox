@@ -236,7 +236,8 @@ CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 
 ```
 
 Workspace leases currently use their hard TTL for provider expiry because the
-adapter does not yet receive a trustworthy activity signal.
+adapter does not yet receive a trustworthy activity signal. Workspace TTLs must
+be at least 1,200 seconds so the crash-recovery claim expires before hard TTL.
 
 ### Artifact backend
 
