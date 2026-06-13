@@ -159,6 +159,46 @@ describe("fleet lease identity and idle", () => {
     expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
   });
 
+  it("keeps ordinary Hetzner leases IP-ready while the server is still initializing", async () => {
+    const responses = [
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({
+        ssh_key: {
+          id: 1,
+          name: "ordinary-key",
+          public_key: "ssh-ed25519 ordinary-test",
+        },
+      }),
+      jsonResponse({
+        server: {
+          id: 123,
+          name: "crabbox-ordinary",
+          status: "initializing",
+          server_type: { name: "cpx62" },
+          public_net: { ipv4: { ip: "192.0.2.123" } },
+          labels: {},
+        },
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift() ?? jsonResponse({}, 500)),
+    );
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+    const config = leaseConfig({
+      provider: "hetzner",
+      providerKey: "ordinary-key",
+      sshPublicKey: "ssh-ed25519 ordinary-test",
+    });
+
+    await expect(
+      client.createServerWithFallback(config, "cbx_abcdef123456", "ordinary", "alice@example.com"),
+    ).resolves.toMatchObject({
+      server: { id: 123, status: "initializing" },
+    });
+  });
+
   it("uses the terminating Hetzner fallback error to decide retryability", async () => {
     const responses = [
       jsonResponse({ ssh_keys: [] }),
@@ -1707,6 +1747,49 @@ describe("fleet lease identity and idle", () => {
     await fleet.alarm();
 
     expect(storage.alarm()).toBe(Date.parse(terminalAt) + 24 * 60 * 60_000);
+  });
+
+  it("detaches a retained lease when its terminal workspace record is pruned", async () => {
+    const storage = new MemoryStorage();
+    const terminalAt = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+    const workspaceKey = "workspace:example-org:alice%40example.com:fleet-is-131";
+    storage.seed(workspaceKey, {
+      id: "fleet-is-131",
+      leaseID: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      provider: "hetzner",
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      createdAt: terminalAt,
+      updatedAt: terminalAt,
+      error: "workspace provisioning failed",
+    });
+    storage.seed(
+      "lease:cbx_abcdef123456",
+      testLease({
+        id: "cbx_abcdef123456",
+        slug: "fleet-is-131",
+        workspaceID: "fleet-is-131",
+        owner: "alice@example.com",
+        org: "example-org",
+        state: "failed",
+        failureError: "workspace provisioning failed",
+        provisioningResourceMayExist: false,
+        createdAt: terminalAt,
+        updatedAt: terminalAt,
+        endedAt: terminalAt,
+      }),
+    );
+    const fleet = testFleet(storage);
+
+    await fleet.alarm();
+
+    expect(storage.value(workspaceKey)).toBeUndefined();
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.workspaceID).toBeUndefined();
   });
 
   it("keeps workspace-owned leases behind workspace deletion and cleans retained resources", async () => {

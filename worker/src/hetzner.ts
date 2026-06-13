@@ -37,6 +37,8 @@ interface HetznerServerTypePrice {
   };
 }
 
+export const workspaceProviderKeyPrefix = "crabbox-workspace-";
+
 export class HetznerProvisioningError extends Error {
   constructor(
     message: string,
@@ -210,12 +212,12 @@ export class HetznerClient {
     return (await this.request<HetznerServerResponse>("GET", `/servers/${id}`)).server;
   }
 
-  async waitForServerIP(id: number): Promise<HetznerServer> {
+  async waitForServerIP(id: number, requireRunning = false): Promise<HetznerServer> {
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- polling must wait between Hetzner API reads.
       const server = await this.getServer(id);
-      if (server.status === "running" && server.public_net.ipv4.ip) {
+      if (server.public_net.ipv4.ip && (!requireRunning || server.status === "running")) {
         return server;
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- this delay is the polling interval.
@@ -275,11 +277,15 @@ export class HetznerClient {
         transientHetznerError(message) || isRetryableProvisioningError(message),
       );
     }
-    if (response.server.status === "running" && response.server.public_net.ipv4.ip) {
+    const requireRunning = config.providerKey.startsWith(workspaceProviderKeyPrefix);
+    if (
+      response.server.public_net.ipv4.ip &&
+      (!requireRunning || response.server.status === "running")
+    ) {
       return response.server;
     }
     try {
-      return await this.waitForServerIP(response.server.id);
+      return await this.waitForServerIP(response.server.id, requireRunning);
     } catch (error) {
       throw new HetznerProvisioningError(errorText(error), true, true);
     }

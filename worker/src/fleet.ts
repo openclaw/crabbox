@@ -31,6 +31,7 @@ import {
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
   sshPublicKeyIdentity,
+  workspaceProviderKeyPrefix,
 } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
@@ -140,7 +141,6 @@ const workspaceProvisionClaimMs = 15 * 60_000;
 const workspaceProvisionRecoveryGraceMs = 15 * 60_000;
 const workspaceMinimumTTLSeconds =
   (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
-const workspaceProviderKeyPrefix = "crabbox-workspace-";
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
 
@@ -1802,6 +1802,11 @@ export class FleetCoordinator {
           const terminalAt = workspaceTerminalTimestamp(current, lease);
           if (terminalAt === undefined || terminalAt > cutoff) {
             return;
+          }
+          if (lease && workspaceOwnsLease(current, lease)) {
+            const detachedLease = structuredClone(lease);
+            delete detachedLease.workspaceID;
+            await this.putLease(detachedLease);
           }
           await Promise.all([
             this.state.storage.delete(key),
