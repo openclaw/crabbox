@@ -5,6 +5,7 @@
 ### Added
 
 - Added authenticated Crabfleet workspace terminals with bounded SSH/WebSocket bridging, durable tmux resume, and lifecycle revocation.
+- Added `provider: ovh` for direct OVHcloud Public Cloud Linux SSH leases with signed API authentication, local claim-backed ownership, guarded recovery, and live lifecycle coverage. Thanks @coygeek.
 
 ### Fixed
 

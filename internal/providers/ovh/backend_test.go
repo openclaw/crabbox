@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,8 @@ type fakeAPI struct {
 	deletedKeys        []string
 	createKeys         []SSHKey
 	createInstances    []InstanceCreateRequest
+	createKeyErr       error
+	createKeyAccepted  bool
 	createInstanceErr  error
 	createAcceptedErr  bool
 	getInstanceErr     error
@@ -30,12 +34,17 @@ type fakeAPI struct {
 	deleteKeyErr       error
 	listInstancesErr   error
 	listErrAfterCreate bool
+	listSSHKeysErr     error
 	regions            []Region
 	flavors            []Flavor
 	images             []Image
 	instances          []Instance
 	sshKeys            []SSHKey
 }
+
+type fixedClock struct{ t time.Time }
+
+func (c fixedClock) Now() time.Time { return c.t }
 
 func (f *fakeAPI) AuthTime(context.Context) (int64, error) {
 	f.authCalls++
@@ -73,7 +82,10 @@ func (f *fakeAPI) GetImage(context.Context, string, string) (Image, error) {
 
 func (f *fakeAPI) ListSSHKeys(context.Context, string) ([]SSHKey, error) {
 	f.mutatingCalls++
-	return nil, nil
+	if f.listSSHKeysErr != nil {
+		return nil, f.listSSHKeysErr
+	}
+	return append([]SSHKey(nil), f.sshKeys...), nil
 }
 
 func (f *fakeAPI) GetSSHKey(context.Context, string, string) (SSHKey, error) {
@@ -85,6 +97,12 @@ func (f *fakeAPI) CreateSSHKey(_ context.Context, _ string, name, publicKey stri
 	f.mutatingCalls++
 	key := SSHKey{ID: "key-" + name, Name: name, PublicKey: publicKey}
 	f.createKeys = append(f.createKeys, key)
+	if f.createKeyErr != nil {
+		if f.createKeyAccepted {
+			f.sshKeys = append(f.sshKeys, key)
+		}
+		return SSHKey{}, f.createKeyErr
+	}
 	f.sshKeys = append(f.sshKeys, key)
 	return key, nil
 }
@@ -582,6 +600,30 @@ func TestCleanupUsesTouchedLocalClaimBeforeLiveExpiryLabels(t *testing.T) {
 	}
 }
 
+func TestCleanupIncludesClaimWhenInstanceWasDeletedExternally(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "externally-deleted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.instances = nil
+	if err := markClaimReleased(lease.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedKeys) != 1 {
+		t.Fatalf("deletedKeys=%v", fake.deletedKeys)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+}
+
 func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -659,6 +701,34 @@ func TestTouchPreservesLocalClaimMetadataWithoutLiveLabels(t *testing.T) {
 		updated.Labels["class"] != "standard" ||
 		updated.Labels["profile"] != "ci" {
 		t.Fatalf("claim labels=%#v", updated.Labels)
+	}
+}
+
+func TestTouchRejectsConcurrentClaimUpdate(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "touch-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.beforeTouchClaimUpdate = func() {
+		claim, readErr := core.ReadLeaseClaim(lease.LeaseID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		labels := copyLabels(claim.Labels)
+		labels["concurrent"] = "preserved"
+		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"}); err == nil {
+		t.Fatal("Touch succeeded despite concurrent claim update")
+	}
+	if got := mustReadClaimLabels(t, lease.LeaseID)["concurrent"]; got != "preserved" {
+		t.Fatalf("concurrent label=%q", got)
 	}
 }
 
@@ -740,7 +810,7 @@ func TestAcquirePreservesRecoveryClaimOnCreateError(t *testing.T) {
 	}
 }
 
-func TestReleaseOnlyCleansKeyOnlyRecoveryClaimWhenInstanceNotVisible(t *testing.T) {
+func TestReleaseOnlyRetainsAmbiguousInstanceClaimWhenInstanceNotVisible(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	fake := &fakeAPI{
@@ -760,21 +830,80 @@ func TestReleaseOnlyCleansKeyOnlyRecoveryClaimWhenInstanceNotVisible(t *testing.
 	if len(claims) != 1 || claims[0].CloudID != "" {
 		t.Fatalf("claims=%#v", claims)
 	}
+	backend.RT.Clock = fixedClock{t: time.Unix(mustParseUnixLabel(t, claims[0].Labels["created_at"]), 0).Add(ambiguousCreateRecoveryGrace + time.Second)}
+	backend.recoveryPolls = 2
+	backend.recoveryInterval = time.Nanosecond
 	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "recover-me", ReleaseOnly: true})
-	if err != nil {
+	if err == nil || !strings.Contains(err.Error(), "remains indeterminate") {
 		t.Fatalf("resolved=%#v err=%v", resolved, err)
 	}
-	if resolved.Server.CloudID != "" || resolved.Server.Labels[ovhSSHKeyIDLabel] == "" {
-		t.Fatalf("resolved=%#v", resolved)
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID); err != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	if len(fake.deletedKeys) != 0 || len(fake.deletedInstances) != 0 {
+		t.Fatalf("ambiguous invisible release deletes instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
+func TestAcquireReconcilesAcceptedSSHKeyAfterLostResponse(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		createKeyErr:      errors.New("response lost after key create"),
+		createKeyAccepted: true,
+	}
+	backend := testBackend(fake)
+	backend.recoveryPolls = 1
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "key-reconcile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels[ovhSSHKeyIDLabel] == "" || len(fake.createInstances) != 1 {
+		t.Fatalf("lease=%#v createInstances=%v", lease, fake.createInstances)
+	}
+}
+
+func TestAcquireRetainsAmbiguousSSHKeyClaimUntilExactKeyAppears(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:      []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:       []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		createKeyErr: errors.New("response lost after key create"),
+	}
+	backend := testBackend(fake)
+	backend.recoveryPolls = 1
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "key-recovery"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate") {
+		t.Fatalf("err=%v", err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Labels["recovery"] != "ambiguous-key-create" {
+		t.Fatalf("claims=%#v", claims)
+	}
+	keyPath, err := core.TestboxKeyPath(claims[0].LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.sshKeys = []SSHKey{{ID: "key-recovered", Name: providerKeyForLease(claims[0].LeaseID), PublicKey: strings.TrimSpace(string(publicKey))}}
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: claims[0].Slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatal(err)
 	}
-	if _, exists, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID); err != nil || exists {
-		t.Fatalf("claim exists=%t err=%v", exists, err)
-	}
-	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] == "" || len(fake.deletedInstances) != 0 {
-		t.Fatalf("ambiguous invisible release deletes instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != "key-recovered" {
+		t.Fatalf("deletedKeys=%v", fake.deletedKeys)
 	}
 }
 
@@ -911,6 +1040,15 @@ func markClaimReleased(leaseID string) error {
 	labels["state"] = "released"
 	_, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
 	return err
+}
+
+func mustParseUnixLabel(t *testing.T, value string) int64 {
+	t.Helper()
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
 
 func mustReadClaimLabels(t *testing.T, leaseID string) map[string]string {

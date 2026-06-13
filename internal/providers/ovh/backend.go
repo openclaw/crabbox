@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,17 +17,24 @@ import (
 
 type Backend struct {
 	shared.DirectSSHBackend
-	clientFactory  func(core.Config, core.Runtime) (API, error)
-	waitSSH        func(context.Context, *core.SSHTarget, string, time.Duration) error
-	ipWaitTimeout  time.Duration
-	ipWaitInterval time.Duration
+	clientFactory          func(core.Config, core.Runtime) (API, error)
+	waitSSH                func(context.Context, *core.SSHTarget, string, time.Duration) error
+	ipWaitTimeout          time.Duration
+	ipWaitInterval         time.Duration
+	recoveryGrace          time.Duration
+	recoveryPolls          int
+	recoveryInterval       time.Duration
+	beforeTouchClaimUpdate func()
 }
 
 const (
-	ovhProjectLabel     = "ovh_project"
-	ovhRegionLabel      = "ovh_region"
-	ovhSSHKeyIDLabel    = "ovh_ssh_key_id"
-	ovhSSHKeyOwnedLabel = "ovh_ssh_key_owned"
+	ovhProjectLabel              = "ovh_project"
+	ovhRegionLabel               = "ovh_region"
+	ovhSSHKeyIDLabel             = "ovh_ssh_key_id"
+	ovhSSHKeyOwnedLabel          = "ovh_ssh_key_owned"
+	ambiguousCreateRecoveryGrace = 2 * time.Minute
+	defaultRecoveryPolls         = 3
+	defaultRecoveryInterval      = 2 * time.Second
 )
 
 func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *Backend {
@@ -155,7 +163,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	now := b.now()
 	labels := ovhLeaseLabels(cfg, leaseID, slug, req.Keep, now, "provisioning")
 	committed := false
-	ambiguousCreate := false
+	recovery := ""
 	var created Instance
 	var createdKey SSHKey
 	keyCreated := false
@@ -163,8 +171,8 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		if err == nil || committed {
 			return
 		}
-		if ambiguousCreate {
-			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, labels, created, createdKey, keyCreated, req.Reclaim); claimErr != nil {
+		if recovery != "" {
+			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, labels, recovery, created, createdKey, keyCreated, req.Reclaim); claimErr != nil {
 				err = errors.Join(err, fmt.Errorf("persist ovh recovery claim: %w", claimErr))
 			}
 			return
@@ -174,7 +182,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			return
 		}
 		recoveryPersisted := false
-		if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, labels, created, createdKey, keyCreated, req.Reclaim); claimErr == nil {
+		if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, labels, "rollback-cleanup", created, createdKey, keyCreated, req.Reclaim); claimErr == nil {
 			recoveryPersisted = true
 		} else {
 			err = errors.Join(err, fmt.Errorf("persist ovh recovery claim: %w", claimErr))
@@ -183,17 +191,26 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			err = errors.Join(err, fmt.Errorf("ovh cleanup failed: %w", cleanupErr))
 			return
 		}
-		if !ambiguousCreate {
-			if recoveryPersisted {
-				core.RemoveLeaseClaim(leaseID)
-			}
-			core.RemoveStoredTestboxKey(leaseID)
+		if recoveryPersisted {
+			core.RemoveLeaseClaim(leaseID)
 		}
+		core.RemoveStoredTestboxKey(leaseID)
 	}()
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=ovh lease=%s slug=%s flavor=%s region=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, cfg.OVH.Region, cfg.OVH.Image, req.Keep)
 	createdKey, err = client.CreateSSHKey(ctx, cfg.OVH.ProjectID, cfg.ProviderKey, publicKey)
 	if err != nil {
-		return core.LeaseTarget{}, err
+		if isDeterminateCreateError(err) {
+			return core.LeaseTarget{}, err
+		}
+		reconciled, found, reconcileErr := b.reconcileSSHKey(ctx, client, cfg.OVH.ProjectID, cfg.ProviderKey, publicKey)
+		if reconcileErr != nil || !found {
+			recovery = "ambiguous-key-create"
+			if reconcileErr != nil {
+				return core.LeaseTarget{}, errors.Join(err, fmt.Errorf("reconcile ovh SSH-key create: %w", reconcileErr))
+			}
+			return core.LeaseTarget{}, errors.Join(err, core.Exit(4, "ovh SSH-key create remains indeterminate for lease=%s", leaseID))
+		}
+		createdKey = reconciled
 	}
 	keyCreated = true
 	labels[ovhSSHKeyIDLabel] = createdKey.ID
@@ -208,12 +225,12 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	})
 	if err != nil {
 		if !isDeterminateCreateError(err) {
-			ambiguousCreate = true
+			recovery = "ambiguous-create"
 		}
 		if recovered, ok, findErr := findCreatedInstance(ctx, client, cfg.OVH.ProjectID, leaseID, slug, labels); findErr != nil {
 			return core.LeaseTarget{}, errors.Join(err, fmt.Errorf("reconcile ovh create recovery: %w", findErr))
 		} else if ok {
-			ambiguousCreate = true
+			recovery = "ambiguous-create"
 			created = mergeInstanceLabels(recovered, labels)
 			created.SSHKeyID = firstNonBlank(created.SSHKeyID, createdKey.ID)
 		}
@@ -353,13 +370,40 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client API, id str
 			}
 			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
 		}
-		if claim.Labels[ovhSSHKeyOwnedLabel] == "true" && strings.TrimSpace(claim.Labels[ovhSSHKeyIDLabel]) != "" {
+		switch claim.Labels["recovery"] {
+		case "ambiguous-key-create":
+			target, found, err := b.reconcilePendingSSHKey(ctx, client, claim)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			if found {
+				return target, nil
+			}
+			return core.LeaseTarget{}, core.Exit(4, "ovh ambiguous SSH-key create remains indeterminate for lease=%s; credentials and recovery claim retained", claim.LeaseID)
+		case "ambiguous-create":
+			if b.recoveryStillPending(claim) {
+				return core.LeaseTarget{}, core.Exit(4, "ovh ambiguous instance create recovery is still pending for lease=%s; retry stop later", claim.LeaseID)
+			}
+			instance, found, err := b.reconcileCreatedInstance(ctx, client, claim)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			if found {
+				server := overlayClaimLabels(serverFromInstance(instance, b.Cfg), claim)
+				if err := validateOVHClaim(claim, server); err != nil {
+					return core.LeaseTarget{}, err
+				}
+				return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+			}
+			return core.LeaseTarget{}, core.Exit(4, "ovh ambiguous instance create remains indeterminate for lease=%s; credentials and recovery claim retained", claim.LeaseID)
+		case "rollback-cleanup":
 			return core.LeaseTarget{
 				LeaseID: claim.LeaseID,
-				Server:  core.Server{Provider: providerName, Name: claim.Slug, Labels: claim.Labels},
+				Server:  claimOnlyServer(claim),
 			}, nil
+		default:
+			return core.LeaseTarget{}, core.Exit(2, "ovh lease claim has invalid recovery state %q for lease=%s", claim.Labels["recovery"], claim.LeaseID)
 		}
-		return core.LeaseTarget{}, core.Exit(4, "ovh ambiguous create recovery for lease=%s has no visible instance yet; retry stop after OVH inventory settles", claim.LeaseID)
 	}
 	instance, err := client.GetInstance(ctx, b.Cfg.OVH.ProjectID, claim.CloudID)
 	if err == nil {
@@ -425,9 +469,11 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		return core.Server{}, err
 	}
 	labels := copyLabels(server.Labels)
-	if claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil {
+	claim, claimExists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
+	if err != nil {
 		return core.Server{}, err
-	} else if exists {
+	}
+	if claimExists {
 		if err := validateOVHClaim(claim, live); err != nil {
 			return core.Server{}, err
 		}
@@ -444,9 +490,10 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	for key, value := range tailscaleLabels {
 		labels[key] = value
 	}
-	if claim, exists, err := core.ReadLeaseClaimWithPresence(labels["lease"]); err != nil {
-		return core.Server{}, err
-	} else if exists {
+	if claimExists {
+		if b.beforeTouchClaimUpdate != nil {
+			b.beforeTouchClaimUpdate()
+		}
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(labels["lease"], claim, labels); err != nil {
 			return core.Server{}, err
 		}
@@ -492,33 +539,37 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 }
 
 func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
-	servers, err := b.List(ctx, core.ListRequest{Options: req.Options})
+	client, err := b.clientFactory(b.Cfg, b.RT)
 	if err != nil {
 		return err
 	}
-	claimedServers := make([]core.LeaseView, 0, len(servers))
-	for _, server := range servers {
-		claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
-		if err != nil {
-			return fmt.Errorf("read ovh cleanup claim: %w", err)
-		}
-		if !exists {
+	instances, err := client.ListInstances(ctx, b.Cfg.OVH.ProjectID)
+	if err != nil {
+		return err
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return fmt.Errorf("list ovh cleanup claims: %w", err)
+	}
+	servers := make([]core.LeaseView, 0, len(claims))
+	for _, claim := range claims {
+		if claim.Provider != providerName || claim.Slug == "" || !claimMatchesOVHProject(claim, b.Cfg.OVH.ProjectID) {
 			continue
+		}
+		instance, found, err := findClaimedInstance(instances, claim)
+		if err != nil {
+			return err
+		}
+		server := claimOnlyServer(claim)
+		if found {
+			server = overlayClaimLabels(serverFromInstance(instance, b.Cfg), claim)
 		}
 		if err := validateOVHClaim(claim, server); err != nil {
 			return err
 		}
-		merged := server
-		merged.Labels = make(map[string]string, len(server.Labels)+len(claim.Labels))
-		for key, value := range server.Labels {
-			merged.Labels[key] = value
-		}
-		for key, value := range claim.Labels {
-			merged.Labels[key] = value
-		}
-		claimedServers = append(claimedServers, merged)
+		servers = append(servers, server)
 	}
-	return b.CleanupServers(ctx, req, claimedServers)
+	return b.CleanupServers(ctx, req, servers)
 }
 
 func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
@@ -550,6 +601,20 @@ func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	}
 	if err := validateOVHClaim(claim, server); err != nil {
 		return err
+	}
+	if server.CloudID == "" {
+		recovered, err := b.releaseTargetFromClaim(ctx, client, claim.LeaseID)
+		if err != nil {
+			return err
+		}
+		server = recovered.Server
+		claim, exists, err = core.ReadLeaseClaimWithPresence(recovered.LeaseID)
+		if err != nil {
+			return fmt.Errorf("reread ovh cleanup claim: %w", err)
+		}
+		if !exists {
+			return core.Exit(2, "ovh cleanup claim disappeared during recovery for lease=%s", recovered.LeaseID)
+		}
 	}
 	if server.CloudID != "" {
 		if err := client.DeleteInstance(ctx, b.Cfg.OVH.ProjectID, server.CloudID); err != nil && !isOVHNotFound(err) {
@@ -657,7 +722,7 @@ func resolveImage(ctx context.Context, client API, projectID, region, value stri
 	return Image{}, core.Exit(2, "ovh image %q was not returned by project=%s region=%s", value, projectID, region)
 }
 
-func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, labels map[string]string, instance Instance, key SSHKey, keyCreated bool, reclaim bool) error {
+func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, labels map[string]string, recovery string, instance Instance, key SSHKey, keyCreated bool, reclaim bool) error {
 	if repoRoot == "" {
 		var err error
 		repoRoot, err = os.Getwd()
@@ -670,7 +735,7 @@ func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 		recoveryLabels[key] = value
 	}
 	recoveryLabels["state"] = "provisioning"
-	recoveryLabels["recovery"] = "ambiguous-create"
+	recoveryLabels["recovery"] = recovery
 	if key.ID != "" {
 		recoveryLabels[ovhSSHKeyIDLabel] = key.ID
 		recoveryLabels[ovhSSHKeyOwnedLabel] = fmt.Sprint(keyCreated)
@@ -682,6 +747,146 @@ func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 		Labels:   recoveryLabels,
 	}
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, reclaim)
+}
+
+func (b *Backend) recoveryStillPending(claim core.LeaseClaim) bool {
+	createdAt, err := strconv.ParseInt(strings.TrimSpace(claim.Labels["created_at"]), 10, 64)
+	if err != nil || createdAt <= 0 {
+		return true
+	}
+	grace := b.recoveryGrace
+	if grace <= 0 {
+		grace = ambiguousCreateRecoveryGrace
+	}
+	return b.now().Before(time.Unix(createdAt, 0).Add(grace))
+}
+
+func (b *Backend) reconcileCreatedInstance(ctx context.Context, client API, claim core.LeaseClaim) (Instance, bool, error) {
+	var lastErr error
+	for attempt := 0; attempt < b.effectiveRecoveryPolls(); attempt++ {
+		instance, found, err := findCreatedInstance(ctx, client, b.Cfg.OVH.ProjectID, claim.LeaseID, claim.Slug, claim.Labels)
+		if err == nil && found {
+			return instance, true, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+		if attempt+1 < b.effectiveRecoveryPolls() {
+			if err := sleepContext(ctx, b.effectiveRecoveryInterval()); err != nil {
+				return Instance{}, false, err
+			}
+		}
+	}
+	return Instance{}, false, lastErr
+}
+
+func (b *Backend) reconcileSSHKey(ctx context.Context, client API, projectID, name, publicKey string) (SSHKey, bool, error) {
+	var lastErr error
+	for attempt := 0; attempt < b.effectiveRecoveryPolls(); attempt++ {
+		keys, err := client.ListSSHKeys(ctx, projectID)
+		if err == nil {
+			key, found, selectErr := selectSSHKey(keys, name, publicKey)
+			if selectErr != nil {
+				return SSHKey{}, false, selectErr
+			}
+			if found {
+				return key, true, nil
+			}
+		} else {
+			lastErr = err
+		}
+		if attempt+1 < b.effectiveRecoveryPolls() {
+			if err := sleepContext(ctx, b.effectiveRecoveryInterval()); err != nil {
+				return SSHKey{}, false, err
+			}
+		}
+	}
+	return SSHKey{}, false, lastErr
+}
+
+func (b *Backend) reconcilePendingSSHKey(ctx context.Context, client API, claim core.LeaseClaim) (core.LeaseTarget, bool, error) {
+	keyPath, err := core.TestboxKeyPath(claim.LeaseID)
+	if err != nil {
+		return core.LeaseTarget{}, false, err
+	}
+	publicKey, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		return core.LeaseTarget{}, false, fmt.Errorf("read retained OVH public key: %w", err)
+	}
+	key, found, err := b.reconcileSSHKey(ctx, client, b.Cfg.OVH.ProjectID, providerKeyForLease(claim.LeaseID), strings.TrimSpace(string(publicKey)))
+	if err != nil || !found {
+		return core.LeaseTarget{}, false, err
+	}
+	labels := copyLabels(claim.Labels)
+	labels[ovhSSHKeyIDLabel] = key.ID
+	labels[ovhSSHKeyOwnedLabel] = "true"
+	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+	if err != nil {
+		return core.LeaseTarget{}, false, err
+	}
+	return core.LeaseTarget{LeaseID: updated.LeaseID, Server: claimOnlyServer(updated)}, true, nil
+}
+
+func (b *Backend) effectiveRecoveryPolls() int {
+	if b.recoveryPolls > 0 {
+		return b.recoveryPolls
+	}
+	return defaultRecoveryPolls
+}
+
+func (b *Backend) effectiveRecoveryInterval() time.Duration {
+	if b.recoveryInterval > 0 {
+		return b.recoveryInterval
+	}
+	return defaultRecoveryInterval
+}
+
+func selectSSHKey(keys []SSHKey, name, publicKey string) (SSHKey, bool, error) {
+	publicKey = strings.TrimSpace(publicKey)
+	var match SSHKey
+	nameMatches := 0
+	keyMatches := 0
+	for _, key := range keys {
+		if key.Name != name {
+			continue
+		}
+		nameMatches++
+		if strings.TrimSpace(key.PublicKey) != publicKey {
+			continue
+		}
+		match = key
+		keyMatches++
+	}
+	switch {
+	case keyMatches == 1:
+		return match, true, nil
+	case keyMatches > 1:
+		return SSHKey{}, false, core.Exit(4, "ovh SSH key %q has multiple entries matching the retained public key", name)
+	case nameMatches > 0:
+		return SSHKey{}, false, core.Exit(3, "ovh SSH key %q exists with a different public key", name)
+	default:
+		return SSHKey{}, false, nil
+	}
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func claimOnlyServer(claim core.LeaseClaim) core.Server {
+	return core.Server{
+		Provider: providerName,
+		CloudID:  claim.CloudID,
+		Name:     core.LeaseProviderName(claim.LeaseID, claim.Slug),
+		Labels:   copyLabels(claim.Labels),
+	}
 }
 
 func (b *Backend) waitForInstanceIP(ctx context.Context, client API, projectID, instanceID string) (Instance, error) {
