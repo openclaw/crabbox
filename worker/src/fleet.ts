@@ -138,7 +138,8 @@ const workspaceReconcileIntervalMs = 10_000;
 const workspaceReconcileMaxIntervalMs = 5 * 60_000;
 const workspaceProvisionClaimMs = 15 * 60_000;
 const workspaceProvisionRecoveryGraceMs = 15 * 60_000;
-const workspaceMinimumTTLSeconds = 20 * 60;
+const workspaceMinimumTTLSeconds =
+  (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
 const workspaceProviderKeyPrefix = "crabbox-workspace-";
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;

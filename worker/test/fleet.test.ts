@@ -343,7 +343,7 @@ describe("fleet lease identity and idle", () => {
       id: "fleet-is-101",
       runtime: "crabbox",
       profile,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: true },
     };
@@ -367,7 +367,7 @@ describe("fleet lease identity and idle", () => {
         body: {
           id: "fleet-too-short",
           runtime: "crabbox",
-          ttlSeconds: 1199,
+          ttlSeconds: 1799,
           idleTimeoutSeconds: 360,
           capabilities: { desktop: false },
         },
@@ -376,7 +376,7 @@ describe("fleet lease identity and idle", () => {
     expect(shortTTL.status).toBe(400);
     await expect(shortTTL.json()).resolves.toMatchObject({
       error: "invalid_duration",
-      message: "workspace ttlSeconds must be at least 1200",
+      message: "workspace ttlSeconds must be at least 1800",
     });
     await fleet.alarm();
     expect(createdClass).toBe("standard");
@@ -515,7 +515,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-102",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -573,7 +573,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-105",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -618,7 +618,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       createdAt: now,
       updatedAt: now,
@@ -630,7 +630,7 @@ describe("fleet lease identity and idle", () => {
         body: {
           id: "fleet-is-103",
           runtime: "crabbox",
-          ttlSeconds: 1200,
+          ttlSeconds: 1800,
           idleTimeoutSeconds: 360,
           capabilities: { desktop: false },
         },
@@ -671,7 +671,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       provisionClaim: "claim-121",
       provisionClaimExpiresAt: claimExpiresAt,
@@ -708,7 +708,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       provisionClaim: "expired-claim",
       provisionClaimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
@@ -989,7 +989,7 @@ describe("fleet lease identity and idle", () => {
         body: {
           id: "fleet-is-126",
           runtime: "crabbox",
-          ttlSeconds: 1200,
+          ttlSeconds: 1800,
           idleTimeoutSeconds: 360,
           capabilities: { desktop: false },
         },
@@ -1017,7 +1017,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-116",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1047,7 +1047,7 @@ describe("fleet lease identity and idle", () => {
       },
       { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
     );
-    const createdAt = new Date(Date.now() - 6 * 60_000).toISOString();
+    const createdAt = new Date(Date.now() - 16 * 60_000).toISOString();
     storage.seed("workspace:example-org:alice%40example.com:fleet-is-130", {
       id: "fleet-is-130",
       leaseID: "cbx_abcdef123456",
@@ -1057,7 +1057,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       createdAt,
       updatedAt: createdAt,
@@ -1099,7 +1099,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-110",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1129,7 +1129,7 @@ describe("fleet lease identity and idle", () => {
       sshPort: "22",
       workRoot: "/workspaces/crabbox",
       keep: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       estimatedHourlyUSD: 0,
       maxEstimatedUSD: 0,
@@ -1169,7 +1169,7 @@ describe("fleet lease identity and idle", () => {
         body: {
           id: "fleet-is-120",
           runtime: "crabbox",
-          ttlSeconds: 1200,
+          ttlSeconds: 1800,
           idleTimeoutSeconds: 360,
           capabilities: { desktop: false },
         },
@@ -1200,7 +1200,7 @@ describe("fleet lease identity and idle", () => {
           provider: "external",
           target: "linux",
           host: "host.example.test",
-          ttlSeconds: 1200,
+          ttlSeconds: 1800,
           idleTimeoutSeconds: 360,
         },
       }),
@@ -1225,7 +1225,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-111",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1284,7 +1284,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       createdAt: now,
       updatedAt: now,
@@ -1314,7 +1314,7 @@ describe("fleet lease identity and idle", () => {
       sshPort: "22",
       workRoot: "/workspaces/crabbox",
       keep: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       estimatedHourlyUSD: 0,
       maxEstimatedUSD: 0,
@@ -1364,7 +1364,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-104",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1438,7 +1438,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-112",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1510,7 +1510,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-117",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1560,7 +1560,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-119",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1610,7 +1610,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-118",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1644,7 +1644,7 @@ describe("fleet lease identity and idle", () => {
         provider: "hetzner",
         class: "standard",
         desktop: false,
-        ttlSeconds: 1200,
+        ttlSeconds: 1800,
         idleTimeoutSeconds: 360,
         createdAt: old,
         updatedAt: old,
@@ -1667,7 +1667,7 @@ describe("fleet lease identity and idle", () => {
         body: {
           id: "fleet-over-limit",
           runtime: "crabbox",
-          ttlSeconds: 1200,
+          ttlSeconds: 1800,
           idleTimeoutSeconds: 360,
           capabilities: { desktop: false },
         },
@@ -1696,7 +1696,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       createdAt: terminalAt,
       updatedAt: terminalAt,
@@ -1728,7 +1728,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-113",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1789,7 +1789,7 @@ describe("fleet lease identity and idle", () => {
     const body = {
       id: "fleet-is-115",
       runtime: "crabbox",
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       capabilities: { desktop: false },
     };
@@ -1909,7 +1909,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       provisionClaim: "expired-claim",
       provisionClaimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
@@ -1940,7 +1940,7 @@ describe("fleet lease identity and idle", () => {
       sshPort: "22",
       workRoot: "/workspaces/crabbox",
       keep: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       estimatedHourlyUSD: 0,
       maxEstimatedUSD: 0,
@@ -2081,7 +2081,7 @@ describe("fleet lease identity and idle", () => {
       provider: "hetzner",
       class: "standard",
       desktop: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       createdAt: now,
       updatedAt: now,
@@ -2110,7 +2110,7 @@ describe("fleet lease identity and idle", () => {
       sshPort: "22",
       workRoot: "/workspaces/crabbox",
       keep: false,
-      ttlSeconds: 1200,
+      ttlSeconds: 1800,
       idleTimeoutSeconds: 360,
       estimatedHourlyUSD: 0,
       maxEstimatedUSD: 0,
