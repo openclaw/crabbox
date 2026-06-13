@@ -95,6 +95,13 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		}
 		return lease, nil
 	}
+	if brevWorkspaceStopped(workspace) {
+		workspace, err = b.startStoppedWorkspace(ctx, client, workspace)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		lease.Server = workspaceToServer(cfg, workspace, leaseID, slug, false)
+	}
 	target, err := b.resolveSSHTarget(ctx, client, cfg, workspace)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -381,6 +388,18 @@ func (b *nvidiaBrevBackend) prepareLease(ctx context.Context, client *brevClient
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
+func (b *nvidiaBrevBackend) startStoppedWorkspace(ctx context.Context, client *brevClient, workspace brevWorkspace) (brevWorkspace, error) {
+	id := workspaceIdentifier(workspace)
+	if id == "" {
+		return brevWorkspace{}, exit(2, "nvidia-brev start requires workspace id or name")
+	}
+	fmt.Fprintf(b.rt.Stderr, "starting provider=%s workspace=%s\n", providerName, safeWorkspaceRef(workspace))
+	if err := client.start(ctx, id); err != nil {
+		return brevWorkspace{}, err
+	}
+	return b.waitForWorkspaceReady(ctx, client, id)
+}
+
 func (b *nvidiaBrevBackend) resolveSSHTarget(ctx context.Context, client *brevClient, cfg Config, workspace brevWorkspace) (SSHTarget, error) {
 	if strings.TrimSpace(cfg.NvidiaBrev.Org) != "" {
 		return SSHTarget{}, exit(2, "nvidiaBrev.org scopes read-only Brev inventory only; brev refresh does not support --org, so SSH lifecycle resolution is unsafe. Run `brev set` for the desired active org or remove nvidiaBrev.org before using nvidia-brev SSH lifecycle commands")
@@ -573,6 +592,10 @@ func normalizeBrevState(workspace brevWorkspace) string {
 	default:
 		return status
 	}
+}
+
+func brevWorkspaceStopped(workspace brevWorkspace) bool {
+	return oneOf(strings.ToLower(strings.TrimSpace(workspace.Status)), "stopped", "paused", "off")
 }
 
 func brevWorkspaceReady(workspace brevWorkspace) bool {

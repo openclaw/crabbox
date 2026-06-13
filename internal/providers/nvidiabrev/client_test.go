@@ -103,6 +103,7 @@ func TestNvidiaBrevClientRejectsOrgScopedMutations(t *testing.T) {
 		run  func(context.Context) error
 	}{
 		{name: "create", run: func(ctx context.Context) error { return client.create(ctx, "crabbox-demo-123456789abc") }},
+		{name: "start", run: func(ctx context.Context) error { return client.start(ctx, "ws-123") }},
 		{name: "stop", run: func(ctx context.Context) error { return client.stop(ctx, "ws-123") }},
 		{name: "delete", run: func(ctx context.Context) error { return client.delete(ctx, "ws-123") }},
 	} {
@@ -112,5 +113,18 @@ func TestNvidiaBrevClientRejectsOrgScopedMutations(t *testing.T) {
 				t.Fatalf("err=%v, want safe org-scoped mutation rejection without org value", err)
 			}
 		})
+	}
+}
+
+func TestNvidiaBrevClientAddsStoppableForStopReleaseAction(t *testing.T) {
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "create crabbox-demo-123456789abc --detached --stoppable --gpu-name A100 --mode vm"},
+	}}
+	client, err := newBrevClient(Config{NvidiaBrev: NvidiaBrevConfig{ReleaseAction: "stop"}}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.create(context.Background(), "crabbox-demo-123456789abc"); err != nil {
+		t.Fatal(err)
 	}
 }

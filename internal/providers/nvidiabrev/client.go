@@ -68,6 +68,9 @@ func (c *brevClient) create(ctx context.Context, name string) error {
 	if strings.TrimSpace(cfg.Type) != "" {
 		args = append(args, "--type", strings.TrimSpace(cfg.Type))
 	}
+	if strings.EqualFold(strings.TrimSpace(cfg.ReleaseAction), "stop") {
+		args = append(args, "--stoppable")
+	}
 	if strings.TrimSpace(cfg.GPUName) != "" {
 		args = append(args, "--gpu-name", strings.TrimSpace(cfg.GPUName))
 	}
@@ -85,6 +88,16 @@ func (c *brevClient) create(ctx context.Context, name string) error {
 	}
 	if _, err := c.run(ctx, args...); err != nil {
 		return fmt.Errorf("brev create failed: %w", err)
+	}
+	return nil
+}
+
+func (c *brevClient) start(ctx context.Context, idOrName string) error {
+	if err := c.rejectOrgScopedMutation("start"); err != nil {
+		return err
+	}
+	if _, err := c.run(ctx, "start", idOrName, "--detached"); err != nil {
+		return fmt.Errorf("brev start failed: %w", err)
 	}
 	return nil
 }

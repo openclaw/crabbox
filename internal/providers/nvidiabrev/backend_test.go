@@ -306,7 +306,7 @@ func TestNvidiaBrevAcquireRollbackDeletesEvenWhenReleaseActionStops(t *testing.T
 	defer restoreID()
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
-		{args: "create crabbox-rollback-* --detached --gpu-name A100 --mode vm"},
+		{args: "create crabbox-rollback-* --detached --stoppable --gpu-name A100 --mode vm"},
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-rollback","name":"{createdName}","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
 		{args: "refresh"},
 		{args: "delete ws-rollback"},
@@ -319,6 +319,32 @@ func TestNvidiaBrevAcquireRollbackDeletesEvenWhenReleaseActionStops(t *testing.T
 	}
 	if got := runner.joinedCalls(); !strings.Contains(got, "delete ws-rollback") || strings.Contains(got, "stop ws-rollback") {
 		t.Fatalf("rollback should delete unclaimed workspace regardless of release action; calls=%s", got)
+	}
+}
+
+func TestNvidiaBrevResolveStartsStoppedWorkspaceBeforeSSH(t *testing.T) {
+	_, home := isolateNvidiaBrevState(t)
+	writeBrevSSHConfig(t, home, `Host crabbox-stopped-cbx123456789
+  HostName 203.0.113.10
+  User brev
+  IdentityFile "`+filepath.Join(home, ".brev", "brev.pem")+`"
+`)
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stopped-cbx123456789","status":"STOPPED"}]}`},
+		{args: "start ws-stop --detached"},
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stopped-cbx123456789","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
+		{args: "refresh"},
+	}}
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "ws-stop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Status != "ready" || lease.SSH.Host != "203.0.113.10" {
+		t.Fatalf("stopped workspace not restarted and resolved: server=%#v ssh=%#v", lease.Server, lease.SSH)
+	}
+	if got := runner.joinedCalls(); !strings.Contains(got, "start ws-stop --detached") || !strings.Contains(got, "refresh") {
+		t.Fatalf("resolve did not start before SSH refresh: %s", got)
 	}
 }
 
