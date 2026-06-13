@@ -88,6 +88,8 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     runs the full lease lifecycle (sync, run, release).
   - `delegated-run`: a sandbox or proof runner that owns sync and execution
     itself; there is no SSH lease.
+  - `service-control`: Crabbox can inspect or stop a provider-owned service but
+    cannot execute arbitrary run commands there.
 - `targets`: supported OS and Windows mode combinations, such as `linux`,
   `macos`, `windows/normal`, and `windows/wsl2`.
 - `features`: advertised capability flags. Possible values include `ssh`,
@@ -103,4 +105,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
 
 - [doctor](doctor.md) — local and broker/provider readiness checks.
 - [run](run.md) — sync a checkout and run a command on a lease.
+- [Provider decision matrix](../providers/README.md#provider-decision-matrix) —
+  richer provider selection guidance, including substrate, access, GPU,
+  lifecycle, cleanup, best fit, and caveats.
 - [Provider reference](../providers/README.md) — per-provider setup and config.

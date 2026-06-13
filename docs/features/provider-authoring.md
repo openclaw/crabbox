@@ -478,13 +478,16 @@ Three doc surfaces care about a new provider:
 
 Also add the provider to:
 
-- the provider table in `docs/providers/README.md`;
-- the feature matrix in the same file;
+- `docs/providers/provider-metadata.json`, including selection, lifecycle,
+  cleanup, and caveat metadata;
 - the index in `docs/features/README.md` if you added a feature page;
 - the related-doc lists at the bottom of any pages you cross-link from.
 
-Run `scripts/check-docs.sh` before pushing — it builds the CLI, validates the
-command/help surface, checks every internal link, and rebuilds the docs site.
+Run `node scripts/generate-provider-matrix.mjs` to regenerate the provider
+decision matrix in `docs/providers/README.md`; do not edit the generated table
+by hand. Then run `scripts/check-docs.sh` before pushing — it builds the CLI,
+validates the provider metadata and command/help surface, checks every internal
+link, and rebuilds the docs site.
 
 ## Step 11. Ship The PR
 

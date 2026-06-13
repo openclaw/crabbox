@@ -50,146 +50,16 @@ matrix still skips it, while `CRABBOX_LIVE_PROVIDERS=incus` and
 `CRABBOX_LIVE_DOCTOR_PROVIDERS=incus` run the documented Apple Silicon / local
 testbed contract when those prerequisites are actually present.
 
-## Brokered providers
+## Choosing a provider
 
-Four providers can be brokered through either coordinator runtime. Brokering
-adds lease records, cost guardrails, usage accounting, scheduled cleanup, and
-the web portal; the data plane (SSH, rsync, command execution) still runs
-directly from the CLI to the box.
+Use the [canonical provider decision matrix](../providers/README.md#provider-decision-matrix)
+to compare every built-in provider by execution model, access semantics, target
+OS, substrate, location, GPU orientation, cleanup behavior, best fit, and main
+caveat. The matrix is generated from the live CLI provider spec plus checked-in
+selection metadata, so registration and documentation drift fail the docs gate.
 
-```text
-hetzner   Hetzner Cloud servers          (Linux)
-aws       AWS EC2 instances              (Linux, native Windows, Windows WSL2, EC2 Mac)
-azure     Azure Virtual Machines         (Linux, native Windows, Windows WSL2)
-gcp       Google Cloud Compute Engine    (Linux)
-```
-
-The `azure` family can also route to the delegated Azure Container Apps Dynamic
-Sessions backend with `azure.backend: dynamic-sessions` or
-`--azure-backend dynamic-sessions`.
-
-When no coordinator is configured, these providers still work in **direct mode**:
-the CLI talks to the cloud API itself using local credentials (AWS SDK chain,
-Azure credentials, Google Application Default Credentials,
-`HCLOUD_TOKEN`/`HETZNER_TOKEN`, `DIGITALOCEAN_TOKEN` for DigitalOcean, or
-`LINODE_TOKEN` for Linode). Direct mode has no coordinator scheduler; cleanup
-is best-effort through provider labels and manual `crabbox cleanup`. Prefer the
-brokered path when a broker is available.
-
-## Direct SSH-lease providers
-
-These provision or attach an SSH-reachable box and use the standard Crabbox SSH
-sync/run/release path. None of them go through the coordinator.
-
-```text
-ssh              Existing SSH host (no provisioning)      Linux, macOS, Windows
-digitalocean     DigitalOcean Droplets                    Linux
-linode           Linode instances                         Linux
-hostinger        Hostinger VPSs over public SSH           Linux
-parallels        Parallels Desktop linked clones          Linux, macOS, Windows
-proxmox          Proxmox VE QEMU VM clones                Linux
-xcp-ng           Self-hosted XCP-ng pool over XAPI        Linux (normal leases)
-incus            Incus containers or VMs over SSH         Linux
-local-container  Local Docker-compatible containers       Linux
-apple-vz         Apple Virtualization.framework Linux VM  Linux ARM64
-multipass        Canonical Multipass local Ubuntu VMs     Linux
-daytona          Daytona sandboxes (short-lived SSH)      Linux
-exe-dev          exe.dev managed VMs (public SSH)         Linux
-kubevirt         Generic KubeVirt virtual machines        Linux
-external         Configured executable provider           Linux
-namespace-devbox Namespace Devboxes                       Linux
-runpod           RunPod GPU pods (public SSH)             Linux
-semaphore        Semaphore CI jobs                        Linux
-sprites          Sprites microVMs through sprite proxy    Linux
-```
-
-XCP-ng pools for Crabbox run on dedicated 64-bit x86 server-class hardware.
-XCP-ng itself can host Linux, Windows, and BSD guests, but Crabbox's current
-`xcp-ng` lease flow provisions Linux templates only. The separate XCP-ng ISO
-E2E harness also covers Windows x86_64/x64 installer media. Use the Tart
-provider on Apple hardware for macOS VM workflows.
-
-## Delegated-run providers
-
-These run the command inside a sandbox/proof runner; Crabbox does not lease or
-SSH into a box. Local sync options (`--no-sync`, rsync flags) are rejected - the
-provider owns sync. Most are Linux-only. `anthropic-sandbox-runtime` is local
-to the current macOS or Linux host; `windows-sandbox` is local to a Windows
-host.
-
-```text
-cloudflare              Cloudflare Containers (Worker runtime)
-azure-dynamic-sessions  Azure Container Apps custom-container Dynamic Sessions
-docker-sandbox          Docker Sandboxes through the standalone sbx CLI
-e2b                     E2B Firecracker sandboxes
-freestyle               Freestyle VMs
-islo                    Islo sandboxes
-modal                   Modal Sandboxes
-opencomputer            OpenComputer Linux VMs
-anthropic-sandbox-runtime Anthropic Sandbox Runtime through the local srt CLI
-smolvm                  Smol Machines microVM sandboxes (delegated via smolfleet)
-superserve              Superserve hosted Linux sandboxes
-tensorlake              Tensorlake Firecracker sandboxes
-upstash-box             Upstash sandboxes
-blacksmith-testbox      Blacksmith CI test runner (proof/session)
-wandb                   Weights & Biases run sandboxes
-windows-sandbox         Windows Sandbox on the local Windows host
-```
-
-## Service-control providers
-
-These expose provider-native service inspection/control without an arbitrary
-command execution contract.
-
-```text
-railway                 Railway service status and stop controls
-```
-
-## Provider pages
-
-- [Provider reference](../providers/README.md): one page per built-in backend.
-- [AWS](../providers/aws.md): EC2 Linux, Windows, WSL2, EC2 Mac, capacity, AMIs, security groups.
-- [Azure](../providers/azure.md): Azure Linux/native Windows, shared infra, capacity, cleanup.
-- [Azure Dynamic Sessions](../providers/azure-dynamic-sessions.md): delegated Azure Container Apps sandbox execution.
-- [Google Cloud](../providers/gcp.md): GCP Compute Engine SSH leases.
-- [Hetzner](../providers/hetzner.md): Linux-only managed provider, classes, cleanup.
-- [DigitalOcean](../providers/digitalocean.md): direct Linux Droplet leases.
-- [Linode](../providers/linode.md): direct Linux instance leases.
-- [Hostinger](../providers/hostinger.md): direct Linux VPS leases with explicit purchase opt-in and stop-only release.
-- [Static SSH](../providers/ssh.md): existing Linux, macOS, and Windows SSH hosts.
-- [Parallels](../providers/parallels.md): local or remote Mac Parallels Desktop VM clones and small Mac fleets.
-- [Proxmox](../providers/proxmox.md): direct Proxmox VE Linux QEMU VM clones.
-- [XCP-ng](../providers/xcp-ng.md): direct XCP-ng provider on dedicated x86_64 pool hardware. Crabbox normal leases use Linux templates; the separate ISO E2E harness also covers Windows x86_64/x64 installers.
-- [Incus](../providers/incus.md): direct Incus Linux SSH leases plus an opt-in Apple Silicon / local live smoke contract.
-- [Local Container](../providers/local-container.md): local Linux containers through Docker-compatible runtimes.
-- [Apple VZ](../providers/apple-vz.md): local Linux VMs through Apple's `Virtualization.framework`.
-- [Multipass](../providers/multipass.md): local Ubuntu VMs through Canonical Multipass.
-- [Daytona](../providers/daytona.md): Daytona SDK/toolbox sandbox leases.
-- [exe.dev](../providers/exe-dev.md): exe.dev VMs exposed as SSH leases.
-- [KubeVirt](../providers/kubevirt.md): generic KubeVirt VMs over Kubernetes control-plane forwarding.
-- [External](../providers/external.md): configured executable provider protocol for private integrations.
-- [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases.
-- [Railway](../providers/railway.md): Railway service status and stop controls.
-- [RunPod](../providers/runpod.md): RunPod GPU pods over public SSH.
-- [Semaphore](../providers/semaphore.md): Semaphore CI job leases.
-- [Sprites](../providers/sprites.md): Sprites microVM SSH leases through `sprite proxy`.
-- [Tenki](../providers/tenki.md): Tenki sandbox VM SSH leases through `tenki sandbox ssh-proxy`.
-- [Cloudflare](../providers/cloudflare.md): delegated Cloudflare Containers execution.
-- [Docker Sandbox](../providers/docker-sandbox.md): delegated Docker Sandbox execution through the standalone `sbx` CLI.
-- [Anthropic Sandbox Runtime](../providers/anthropic-sandbox-runtime.md): local one-shot delegated execution through `srt` on macOS/Linux.
-- [Islo](../providers/islo.md): delegated Islo sandbox execution.
-- [E2B](../providers/e2b.md): delegated E2B sandbox execution.
-- [Freestyle](../providers/freestyle.md): delegated Freestyle VM execution.
-- [Modal](../providers/modal.md): delegated Modal Sandbox execution.
-- [OpenComputer](../providers/opencomputer.md): delegated OpenComputer Linux VM execution through the OpenComputer REST API.
-- [Tensorlake](../providers/tensorlake.md): delegated Tensorlake Firecracker sandbox execution.
-- [Upstash Box](../providers/upstash-box.md): delegated Upstash sandbox execution.
-- [SmolVM](../providers/smolvm.md): delegated Smol Machines microVM execution via smolfleet.
-- [Superserve](../providers/superserve.md): delegated Superserve hosted Linux sandbox execution.
-- [Blacksmith Testbox](../providers/blacksmith-testbox.md): delegated Blacksmith CI runner.
-- [Weights & Biases](../providers/wandb.md): delegated W&B run sandbox execution.
-- [Windows Sandbox](../providers/windows-sandbox.md): delegated Windows Sandbox execution on a local Windows host.
-- [Provider backends](../provider-backends.md): guide for adding a new provider/backend/plugin.
+`crabbox providers --json` remains the low-level live spec. `crabbox doctor`
+checks whether the selected provider is usable from the current environment.
 
 ## Machine classes
 

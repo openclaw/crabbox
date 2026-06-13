@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a generated provider decision matrix with checked metadata for execution model, access, substrate, GPU fit, lifecycle, cleanup, and provider caveats; docs validation now fails on provider drift. Thanks @coygeek.
 - Added `provider: superserve` for delegated Linux sandbox runs through the Superserve control and data planes, including archive sync, retained leases, ownership-guarded lifecycle operations, and credentialed live smoke coverage. Thanks @coygeek.
 - Added `provider: linode` for direct Linux SSH leases with per-lease keys, account-bound cleanup, preserved operator tags, interface-aware existing firewalls, and guarded live smoke coverage. Thanks @coygeek.
 - Added `provider: windows-sandbox` for disposable native Windows runs through Microsoft Windows Sandbox, including mapped workspace sync, streamed output, timeout and cancellation cleanup, and keep-on-failure inspection. Thanks @zozo123.

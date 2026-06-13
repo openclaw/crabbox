@@ -8,13 +8,15 @@ Read when:
 
 ## Provider model
 
-Every provider registers a backend with one of two kinds:
+Every provider registers a backend with one of three kinds:
 
 - **SSH lease** — Crabbox provisions or connects to an SSH-reachable box and owns
   the full lease lifecycle (warmup, sync, run, ssh, cleanup). Core does the
   rsync/command execution directly to the box over SSH.
 - **Delegated run** — a sandbox or proof runner. The provider owns sync and
   command execution end to end; there is no SSH lease and no local rsync.
+- **Service control** — Crabbox can inspect or stop a provider-owned service,
+  but cannot execute arbitrary commands there.
 
 SSH-lease providers further differ by how they reach the cloud:
 
@@ -49,75 +51,76 @@ or set `provider: <name>` in config. Provider flags are registered before
 command parsing, so provider-specific flags work even when that provider is not
 the default. Most names accept aliases (listed below).
 
-## Provider pages
+<!-- BEGIN GENERATED PROVIDER MATRIX -->
 
-Each page below maps to an adapter under `internal/providers/<dir>`. The first
-code value is the canonical `--provider` value; parenthesized values are aliases.
+## Provider decision matrix
 
-Some provider pages also preserve environment-specific validation runbooks when
-the built-in adapter needs a separate local smoke contract.
+This table combines the live provider spec compiled into the CLI with curated
+selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mjs`.
+`scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
+this generated table drift.
 
-### SSH lease
+Current built-in surface: 49 providers (29 SSH lease, 19 delegated run, 1 service control).
 
-| Provider and aliases | Runs on / mode |
-| --- | --- |
-| [AWS](aws.md) — `aws` | Linux, macOS, Windows · brokered |
-| [Azure](azure.md) — `azure` | Linux, Windows · brokered |
-| [Google Cloud](gcp.md) — `gcp` (`google`, `google-cloud`) | Linux · brokered |
-| [Hetzner](hetzner.md) — `hetzner` | Linux · brokered |
-| [DigitalOcean](digitalocean.md) — `digitalocean` | Linux · direct |
-| [Linode](linode.md) — `linode` | Linux · direct |
-| [Hostinger](hostinger.md) — `hostinger` | Linux · direct |
-| [Proxmox](proxmox.md) — `proxmox` | Linux · direct |
-| [XCP-ng](xcp-ng.md) — `xcp-ng` | Linux · direct |
-| [Incus](incus.md) — `incus` | Linux · direct |
-| [Parallels](parallels.md) — `parallels` | Linux, macOS, Windows · direct |
-| [Static SSH](ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · static |
-| [Local Container](local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · local |
-| [Apple Container](apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · local |
-| [Apple Container Machine](apple-machine.md) — `apple-machine` (`applemachine`) | Linux · local |
-| [Apple VZ](apple-vz.md) — `apple-vz` (`applevz`) | Linux ARM64 · local |
-| [Multipass](multipass.md) — `multipass` (`mp`, `canonical-multipass`) | Linux · local |
-| [Tart](tart.md) — `tart` (`local-tart`, `macos-vm`) | macOS · local |
-| [Hyper-V](hyperv.md) — `hyperv` | Windows · local |
-| [exe.dev](exe-dev.md) — `exe-dev` (`exe`, `exedev`) | Linux · direct |
-| [KubeVirt](kubevirt.md) — `kubevirt` (`kubernetes-vm`) | Linux · direct |
-| [External](external.md) — `external` (`exec-provider`) | Linux · direct |
-| [Namespace Devbox](namespace-devbox.md) — `namespace-devbox` (`namespace`, `namespace-devboxes`) | Linux · direct |
-| [Semaphore](semaphore.md) — `semaphore` (`sem`) | Linux · direct |
-| [Sprites](sprites.md) — `sprites` | Linux · direct |
-| [Tenki](tenki.md) — `tenki` | Linux · direct |
-| [Daytona](daytona.md) — `daytona` | Linux · direct |
-| [Morph](morph.md) — `morph` | Linux · direct |
-| [RunPod](runpod.md) — `runpod` (`run-pod`, `runpodio`) | Linux · direct |
-| [ASCII Box](ascii-box.md) — `ascii-box` (`ascii`, `asciibox`) | Linux · direct |
+Access terms:
 
-### Delegated run
+- **Crabbox-managed SSH**: SSH uses Crabbox's normal client; the sync column shows whether run and sync use that data plane.
+- **Provider-specific SSH**: an adapter-specific login helper, not the normal Crabbox data plane.
+- **No SSH**: the provider owns command execution end to end.
 
-| Provider and aliases | Runs on |
-| --- | --- |
-| [Azure Dynamic Sessions](azure-dynamic-sessions.md) — `azure-dynamic-sessions` | Linux |
-| [Blacksmith Testbox](blacksmith-testbox.md) — `blacksmith-testbox` (`blacksmith`) | Linux |
-| [Cloudflare](cloudflare.md) — `cloudflare` (`cf`) | Linux |
-| [Docker Sandbox](docker-sandbox.md) — `docker-sandbox` | Linux |
-| [E2B](e2b.md) — `e2b` | Linux |
-| [Freestyle](freestyle.md) — `freestyle` | Linux |
-| [Islo](islo.md) — `islo` | Linux |
-| [Modal](modal.md) — `modal` | Linux |
-| [Microsoft Execution Containers](mxc.md) — `mxc` (`execution-container`) | Windows |
-| [OpenComputer](opencomputer.md) — `opencomputer` (`oc`, `open-computer`) | Linux |
-| [OpenSandbox](opensandbox.md) — `opensandbox` | Linux |
-| [Railway](railway.md) — `railway` (`rail`, `railwayapp`) | Linux |
-| [Anthropic Sandbox Runtime](anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux |
-| [SmolVM](smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`) | Linux |
-| [Superserve](superserve.md) — `superserve` | Linux |
-| [Tensorlake](tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux |
-| [Upstash Box](upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux |
-| [W&B Sandboxes](wandb.md) — `wandb` (`weights-and-biases`) | Linux |
-| [Windows Sandbox](windows-sandbox.md) — `windows-sandbox` (`wsb`, `windows-sandbox-provider`) | Windows |
+| Provider | Status / category | Execution / access | Targets / substrate | Location / GPU | Lifecycle / cleanup | Best fit | Main caveat |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [anthropic-sandbox-runtime](anthropic-sandbox-runtime.md) (`srt`) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: none | `linux`, `macos`; Anthropic Sandbox Runtime process sandbox | `local`; GPU: no | local runtime; one-shot process exit | Local policy-constrained command execution | No persistent lease, remote box, or SSH access |
+| [apple-container](apple-container.md) (`apple`, `applecontainer`) | built-in; `ssh-lease` · local-runtime | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `cache-volume` | `linux`; Apple container runtime | `local`; GPU: no | Crabbox; container delete | Local Linux containers on Apple silicon | Requires Apple's container CLI and macOS |
+| [apple-machine](apple-machine.md) (`applemachine`) | built-in; `delegated-run` · local-vm | No SSH; `provider-owned` · direct only; features: none | `linux`; Apple container machine | `local`; GPU: no | Apple runtime; machine delete | Local delegated Linux machine execution | Delegated execution, not a normal SSH lease |
+| [apple-vz](apple-vz.md) (`applevz`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Apple Virtualization.framework VM | `local`; GPU: no | Crabbox; VM delete | Headless Linux ARM64 VM on Apple silicon | Apple silicon macOS only |
+| [ascii-box](ascii-box.md) (`ascii`, `asciibox`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; ASCII Box managed Linux box | `provider-managed`; GPU: unknown | provider CLI; provider delete | Managed Linux box over SSH | Requires the ASCII Box CLI and account |
+| [aws](aws.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`, `windows/normal`, `windows/wsl2`, `macos`; EC2 VM or dedicated Mac host | `cloud`; GPU: optional | Crabbox or coordinator; instance termination | Broad Linux, Windows, WSL2, and macOS cloud coverage | Largest configuration, quota, and cost surface |
+| [azure](azure.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`, `windows/normal`, `windows/wsl2`; Azure Virtual Machine | `cloud`; GPU: optional | Crabbox or coordinator; VM and owned resource delete | Linux or Windows workloads in Azure | Shared resource and identity setup is substantial |
+| [azure-dynamic-sessions](azure-dynamic-sessions.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Azure Container Apps Dynamic Session | `cloud`; GPU: no | Azure session pool; provider session expiry | Short delegated container sessions in Azure | No Crabbox-managed SSH lease |
+| [blacksmith-testbox](blacksmith-testbox.md) (`blacksmith`) | built-in; `delegated-run` · ci-proof-runner | No SSH; `provider-owned` · direct only; features: `cache-volume`, `run-proof`, `run-session`, `run-artifacts` | `linux`; Blacksmith Testbox runner | `provider-managed`; GPU: no | Blacksmith; provider session cleanup | CI reproduction with proof and reusable sessions | Execution and artifacts follow the Testbox contract |
+| [cloudflare](cloudflare.md) (`cf`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; Cloudflare Container | `cloud`; GPU: no | Cloudflare Worker; container delete | Fast delegated Linux container execution | Requires Worker deployment and container availability |
+| [daytona](daytona.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `archive-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Daytona sandbox | `provider-managed`; GPU: unknown | Daytona; sandbox delete | Managed development sandbox with delegated archive sync and execution | SSH access is short-lived; run and sync use Daytona toolbox APIs |
+| [digitalocean](digitalocean.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; DigitalOcean Droplet | `cloud`; GPU: optional | Crabbox; Droplet and key delete | Simple direct Linux VM | Direct-only; no coordinator scheduling |
+| [docker-sandbox](docker-sandbox.md) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Docker Sandbox | `local`; GPU: no | Docker sbx CLI; sandbox delete | Local delegated sandbox with reusable session handles | Requires the standalone sbx CLI |
+| [e2b](e2b.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `url-bridge` | `linux`; E2B Firecracker sandbox | `provider-managed`; GPU: no | E2B; sandbox kill or expiry | Hosted ephemeral code sandbox | URL bridge is provider-specific; no normal SSH lease |
+| [exe-dev](exe-dev.md) (`exe`, `exedev`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; exe.dev managed VM | `provider-managed`; GPU: unknown | exe.dev; provider lifecycle | Fast managed Linux VM exposed over SSH | Public SSH only; provider CLI owns auth |
+| [external](external.md) (`exec-provider`) | built-in; `ssh-lease` · external-provider | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; Configured executable contract | `byo`; GPU: unknown | external executable; contract-defined | Private or organization-specific provider integration | Safety and semantics depend on the configured executable |
+| [freestyle](freestyle.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Freestyle VM | `provider-managed`; GPU: unknown | Freestyle; provider VM cleanup | Hosted delegated Linux VM execution | No Crabbox-managed SSH path |
+| [gcp](gcp.md) (`google`, `google-cloud`) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Google Compute Engine VM | `cloud`; GPU: optional | Crabbox or coordinator; instance and firewall cleanup | Linux compute with broad machine selection | Project, IAM, quota, and firewall setup required |
+| [hetzner](hetzner.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`; Hetzner Cloud server | `cloud`; GPU: no | Crabbox or coordinator; server delete | Cost-effective high-CPU Linux VM | Linux-only and capacity varies by location |
+| [hostinger](hostinger.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Hostinger VPS | `cloud`; GPU: no | Hostinger subscription; stop only | Direct Linux VPS with persistent subscription | Purchase needs opt-in and release does not cancel billing |
+| [hyperv](hyperv.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `windows/normal`; Microsoft Hyper-V VM | `local`; GPU: no | Crabbox; VM delete | Local native Windows VM | Windows host with Hyper-V required |
+| [incus](incus.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Incus container or VM | `self-hosted`; GPU: optional | Crabbox; instance delete | Self-hosted Linux containers or VMs | Requires an accessible Incus environment |
+| [islo](islo.md) | built-in; `delegated-run` · delegated-sandbox | Provider-specific SSH; `provider-owned` · direct only; features: `ssh`, `url-bridge`, `run-session`, `tailscale`, `pause-resume` | `linux`; Islo sandbox | `provider-managed`; GPU: unknown | Islo; sandbox delete | Hosted delegated execution with keep, pause, and SSH helper | SSH feature is not Crabbox-managed sync/run |
+| [kubevirt](kubevirt.md) (`kubernetes-vm`) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; KubeVirt VirtualMachine | `self-hosted`; GPU: optional | Crabbox on Kubernetes; VirtualMachine delete | Kubernetes-hosted Linux VM | Needs KubeVirt, virtctl, and an SSH-ready template |
+| [linode](linode.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Linode instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Straightforward direct Linux VM | Direct-only; optional firewall must already exist |
+| [local-container](local-container.md) (`docker`, `container`, `local-docker`) | built-in; `ssh-lease` · local-runtime | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `cache-volume`, `workspace-checkpoint`, `workspace-fork` | `linux`; Docker-compatible container | `local`; GPU: optional | Crabbox; container delete | Fast local Linux test environment | Isolation follows the local container runtime |
+| [modal](modal.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Modal Sandbox | `provider-managed`; GPU: optional | Modal; sandbox termination | Hosted Python or GPU-oriented delegated workloads | Provider owns execution; no normal SSH lease |
+| [morph](morph.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Morph Cloud VM | `provider-managed`; GPU: unknown | Morph; pause by default; optional delete | Managed Linux VM over SSH | Release retains the paused instance unless deleteOnRelease is enabled |
+| [multipass](multipass.md) (`mp`, `canonical-multipass`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `cache-volume` | `linux`; Canonical Multipass VM | `local`; GPU: no | Crabbox; VM delete and purge | Portable local Ubuntu VM | Ubuntu-only first implementation |
+| [mxc](mxc.md) (`execution-container`) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: none | `windows/normal`; Microsoft Execution Container | `local`; GPU: no | Windows runtime; container termination | Local isolated Windows command execution | Windows host and execution-container support required |
+| [namespace-devbox](namespace-devbox.md) (`namespace`, `namespace-devboxes`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Namespace Devbox | `provider-managed`; GPU: unknown | Namespace devbox CLI; stop by default; optional delete | Fast managed development box over SSH | Uses the devbox product, not Namespace Compute instances |
+| [opencomputer](opencomputer.md) (`oc`, `open-computer`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; OpenComputer Linux VM | `provider-managed`; GPU: unknown | OpenComputer; VM delete | Hosted delegated Linux VM execution | REST execution contract, not an SSH lease |
+| [opensandbox](opensandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; OpenSandbox sandbox | `provider-managed`; GPU: unknown | OpenSandbox; sandbox delete | Hosted delegated sandbox through an open SDK | Requires compatible OpenSandbox control and exec endpoints |
+| [parallels](parallels.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `workspace-checkpoint`, `workspace-fork`, `workspace-restore`, `provider-snapshot` | `linux`, `macos`, `windows/normal`, `windows/wsl2`; Parallels linked-clone VM | `local`; GPU: no | Crabbox; clone delete | Local macOS, Linux, or Windows VM with snapshots | Requires prepared Parallels source VMs and SSH |
+| [proxmox](proxmox.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Proxmox VE QEMU clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM fleet | Needs a prepared template, guest agent, and network |
+| [railway](railway.md) (`rail`, `railwayapp`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: `url-bridge` | `linux`; Railway service | `cloud`; GPU: unknown | Railway; service stop only | Inspecting or stopping an existing Railway service | Cannot execute arbitrary Crabbox run commands |
+| [runpod](runpod.md) (`run-pod`, `runpodio`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; RunPod GPU pod | `cloud`; GPU: yes | RunPod; pod release | GPU-backed Linux workload over public SSH | Capacity, GPU pricing, and public SSH vary |
+| [semaphore](semaphore.md) (`sem`) | built-in; `ssh-lease` · ci-proof-runner | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Semaphore CI job | `provider-managed`; GPU: optional | Semaphore; job stop | Debugging in the same image and secret plane as CI | Depends on debug SSH metadata from the job |
+| [smolvm](smolvm.md) (`smol`, `smolmachines`, `smolfleet`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Smol Machines microVM | `provider-managed`; GPU: no | smolfleet; microVM delete | Lightweight hosted microVM execution | Delegated execution through smolfleet |
+| [sprites](sprites.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Sprite microVM | `provider-managed`; GPU: no | Sprites; sprite delete | Fast Linux microVM over provider SSH proxy | SSH transport depends on sprite proxy |
+| [ssh](ssh.md) (`static`, `static-ssh`) | built-in; `ssh-lease` · byo-ssh | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `desktop`, `browser`, `code` | `linux`, `windows/normal`, `windows/wsl2`, `macos`; Existing SSH host | `byo`; GPU: optional | user; none | Bring-your-own persistent Linux, macOS, or Windows host | Crabbox does not provision or clean up the host |
+| [superserve](superserve.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; Superserve hosted sandbox | `provider-managed`; GPU: unknown | Superserve; sandbox delete | Hosted delegated Linux sandbox | Requires both control-plane and data-plane access |
+| [tart](tart.md) (`local-tart`, `macos-vm`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop` | `macos`; Tart Apple silicon VM | `local`; GPU: no | Crabbox; VM delete | Local macOS VM testing | Apple silicon host and prepared Tart image required |
+| [tenki](tenki.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Tenki sandbox VM | `provider-managed`; GPU: unknown | Tenki; sandbox release | Managed Linux sandbox with SSH proxy | Gateway auth uses Tenki-managed key and certificate files |
+| [tensorlake](tensorlake.md) (`tl`, `tensorlake-sbx`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: none | `linux`; Tensorlake Firecracker sandbox | `provider-managed`; GPU: unknown | Tensorlake; provider sandbox cleanup | Hosted Firecracker-backed delegated execution | Does not expose raw Firecracker provisioning |
+| [upstash-box](upstash-box.md) (`upstash`, `box`, `upstashbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Upstash Box sandbox | `provider-managed`; GPU: no | Upstash; sandbox cleanup | Hosted short-lived delegated sandbox | No normal SSH access or coordinator routing |
+| [wandb](wandb.md) (`weights-and-biases`) | built-in; `delegated-run` · gpu-cloud | No SSH; `provider-owned` · direct only; features: none | `linux`; Weights & Biases run sandbox | `provider-managed`; GPU: optional | Weights & Biases; run termination | Delegated ML or GPU run environment | Execution follows the W&B run contract |
+| [windows-sandbox](windows-sandbox.md) (`wsb`, `windows-sandbox-provider`) | built-in; `delegated-run` · local-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `windows/normal`; Windows Sandbox | `local`; GPU: optional | Windows host; sandbox close | Disposable native Windows command execution | Requires Windows Sandbox and local host automation |
+| [xcp-ng](xcp-ng.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; XCP-ng VM clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM pool over XAPI | Normal leases require prepared Linux templates |
 
-Run `crabbox providers` (`--json`) to see the live capability set the binary
-reports.
+<!-- END GENERATED PROVIDER MATRIX -->
 
 ## Notes on families and capabilities
 
