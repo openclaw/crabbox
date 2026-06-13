@@ -226,6 +226,64 @@ chmod +x "$out"
   assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /^cleanup /m);
 });
 
+test("live ovh smoke cleanup retries beyond ambiguous-create grace", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ovh-retry-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const attempts = path.join(dir, "attempts.txt");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeExecutable(path.join(binDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor|list) [[ "$1" == "list" ]] && printf '[]\n' || printf 'auth=ready\n' ;;
+  warmup) exit 37 ;;
+  stop)
+    count="$(cat "${attempts}" 2>/dev/null || printf 0)"
+    count=$((count + 1))
+    printf '%s' "$count" >"${attempts}"
+    [[ "$count" -ge 61 ]]
+    ;;
+  *) exit 99 ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "ovh",
+      OVH_APPLICATION_KEY: "test-app-key",
+      OVH_APPLICATION_SECRET: "test-ovh-secret",
+      OVH_CONSUMER_KEY: "test-consumer-key",
+      CRABBOX_OVH_PROJECT_ID: "project-test",
+      CRABBOX_OVH_REGION: "BHS5",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 37, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(attempts, "utf8"), "61");
+  assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
+});
+
 test("live ovh smoke classifies quota and validation failures", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ovh-classify-"));
   const binDir = path.join(dir, "bin");

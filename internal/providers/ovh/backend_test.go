@@ -624,6 +624,75 @@ func TestCleanupIncludesClaimWhenInstanceWasDeletedExternally(t *testing.T) {
 	}
 }
 
+func TestCleanupSkipsClaimRenewedBeforeTransition(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cleanup-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := markClaimReleased(lease.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	backend.beforeCleanupClaimUpdate = func() {
+		claim, readErr := core.ReadLeaseClaim(lease.LeaseID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		labels := copyLabels(claim.Labels)
+		labels["state"] = "ready"
+		labels["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
+		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("deleted instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+	if got := mustReadClaimLabels(t, lease.LeaseID)["state"]; got != "ready" {
+		t.Fatalf("claim state=%q", got)
+	}
+}
+
+func TestFailedRollbackRecoveryIsImmediatelyCleanupEligible(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		deleteInstanceErr: errors.New("temporary delete failure"),
+	}
+	backend := testBackend(fake)
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		return errors.New("ssh never became ready")
+	}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-cleanup", Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "temporary delete failure") {
+		t.Fatalf("err=%v", err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Labels["recovery"] != "rollback-cleanup" || claims[0].Labels["keep"] != "false" || claims[0].Labels["state"] != "failed" {
+		t.Fatalf("claims=%#v", claims)
+	}
+	fake.deleteInstanceErr = nil
+	fake.deletedInstances = nil
+	fake.deletedKeys = nil
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
+		t.Fatalf("deleted instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
 func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

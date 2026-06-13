@@ -39,6 +39,7 @@ type Client struct {
 	http              *http.Client
 	now               func() int64
 	timeMu            sync.Mutex
+	timeSyncMu        sync.Mutex
 	serverTimeDelta   int64
 	hasServerTime     bool
 }
@@ -328,6 +329,11 @@ func (c *Client) DeleteInstance(ctx context.Context, projectID, instanceID strin
 }
 
 func (c *Client) do(ctx context.Context, method, requestPath string, body any, out any) error {
+	if requestPath != "/auth/time" {
+		if err := c.ensureServerTime(ctx); err != nil {
+			return fmt.Errorf("ovh synchronize server time: %w", err)
+		}
+	}
 	bodyBytes, err := encodeBody(body)
 	if err != nil {
 		return err
@@ -377,6 +383,25 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 		return fmt.Errorf("ovh %s %s decode: %w", method, requestPath, err)
 	}
 	return nil
+}
+
+func (c *Client) ensureServerTime(ctx context.Context) error {
+	c.timeMu.Lock()
+	hasServerTime := c.hasServerTime
+	c.timeMu.Unlock()
+	if hasServerTime {
+		return nil
+	}
+	c.timeSyncMu.Lock()
+	defer c.timeSyncMu.Unlock()
+	c.timeMu.Lock()
+	hasServerTime = c.hasServerTime
+	c.timeMu.Unlock()
+	if hasServerTime {
+		return nil
+	}
+	_, err := c.AuthTime(ctx)
+	return err
 }
 
 func (c *Client) cacheServerTime(serverTimestamp int64) {

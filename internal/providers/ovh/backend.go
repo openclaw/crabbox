@@ -17,14 +17,15 @@ import (
 
 type Backend struct {
 	shared.DirectSSHBackend
-	clientFactory          func(core.Config, core.Runtime) (API, error)
-	waitSSH                func(context.Context, *core.SSHTarget, string, time.Duration) error
-	ipWaitTimeout          time.Duration
-	ipWaitInterval         time.Duration
-	recoveryGrace          time.Duration
-	recoveryPolls          int
-	recoveryInterval       time.Duration
-	beforeTouchClaimUpdate func()
+	clientFactory            func(core.Config, core.Runtime) (API, error)
+	waitSSH                  func(context.Context, *core.SSHTarget, string, time.Duration) error
+	ipWaitTimeout            time.Duration
+	ipWaitInterval           time.Duration
+	recoveryGrace            time.Duration
+	recoveryPolls            int
+	recoveryInterval         time.Duration
+	beforeTouchClaimUpdate   func()
+	beforeCleanupClaimUpdate func()
 }
 
 const (
@@ -477,6 +478,9 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		if err := validateOVHClaim(claim, live); err != nil {
 			return core.Server{}, err
 		}
+		if claim.Labels["state"] == "cleanup" {
+			return core.Server{}, core.Exit(4, "ovh lease=%s cleanup is already in progress", claim.LeaseID)
+		}
 		labels = copyLabels(claim.Labels)
 	}
 	cfg := b.Cfg
@@ -526,6 +530,9 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 		if err := validateOVHClaim(claim, live); err != nil {
 			return core.Server{}, err
 		}
+		if claim.Labels["state"] == "cleanup" {
+			return core.Server{}, core.Exit(4, "ovh lease=%s cleanup is already in progress", claim.LeaseID)
+		}
 		labels = copyLabels(claim.Labels)
 		applyTailscaleMetadata(labels, meta)
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
@@ -551,7 +558,7 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return fmt.Errorf("list ovh cleanup claims: %w", err)
 	}
-	servers := make([]core.LeaseView, 0, len(claims))
+	now := b.now()
 	for _, claim := range claims {
 		if claim.Provider != providerName || claim.Slug == "" || !claimMatchesOVHProject(claim, b.Cfg.OVH.ProjectID) {
 			continue
@@ -567,9 +574,31 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if err := validateOVHClaim(claim, server); err != nil {
 			return err
 		}
-		servers = append(servers, server)
+		shouldDelete, reason := core.ShouldCleanupServer(server, now)
+		if !shouldDelete {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
+			continue
+		}
+		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
+		if req.DryRun {
+			continue
+		}
+		if b.beforeCleanupClaimUpdate != nil {
+			b.beforeCleanupClaimUpdate()
+		}
+		labels := copyLabels(claim.Labels)
+		labels["state"] = "cleanup"
+		transitioned, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+		if err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=claim changed during cleanup\n", server.DisplayID(), server.Name)
+			continue
+		}
+		server.Labels = copyLabels(transitioned.Labels)
+		if err := b.deleteServer(ctx, b.Cfg, server); err != nil {
+			return err
+		}
 	}
-	return b.CleanupServers(ctx, req, servers)
+	return nil
 }
 
 func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
@@ -736,6 +765,10 @@ func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 	}
 	recoveryLabels["state"] = "provisioning"
 	recoveryLabels["recovery"] = recovery
+	recoveryLabels["keep"] = "false"
+	if recovery == "rollback-cleanup" {
+		recoveryLabels["state"] = "failed"
+	}
 	if key.ID != "" {
 		recoveryLabels[ovhSSHKeyIDLabel] = key.ID
 		recoveryLabels[ovhSSHKeyOwnedLabel] = fmt.Sprint(keyCreated)

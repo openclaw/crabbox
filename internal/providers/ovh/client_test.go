@@ -48,6 +48,37 @@ func TestClientSignsReadOnlyRequests(t *testing.T) {
 	}
 }
 
+func TestClientSynchronizesServerTimeBeforeFirstSignedRequest(t *testing.T) {
+	var paths []string
+	var gotTimestamp string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/auth/time":
+			_, _ = w.Write([]byte("2000"))
+		case "/cloud/project":
+			gotTimestamp = r.Header.Get("X-Ovh-Timestamp")
+			_ = json.NewEncoder(w).Encode([]string{"project-test"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	client.hasServerTime = false
+	client.now = func() int64 { return 1000 }
+	if _, err := client.ListProjects(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, ",") != "/auth/time,/cloud/project" {
+		t.Fatalf("paths=%v", paths)
+	}
+	if gotTimestamp != "2000" {
+		t.Fatalf("timestamp=%q", gotTimestamp)
+	}
+}
+
 func TestCloudPathPreservesEscapedDotSegments(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -371,5 +402,6 @@ func newTestClient(t *testing.T, endpoint string) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.hasServerTime = true
 	return client
 }
