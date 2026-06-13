@@ -3,6 +3,7 @@
   "name": "crabbox-cloudflare-dynamic-workers-runner",
   "main": "src/cloudflare-dynamic-worker-runner.ts",
   "compatibility_date": "2026-06-12",
+  "compatibility_flags": ["global_fetch_strictly_public"],
   "workers_dev": true,
   "preview_urls": false,
   "worker_loaders": [

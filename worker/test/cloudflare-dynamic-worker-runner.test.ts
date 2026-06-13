@@ -3556,6 +3556,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
     );
 
     expect(config).toContain('"main": "src/cloudflare-dynamic-worker-runner.ts"');
+    expect(config).toContain('"compatibility_flags": ["global_fetch_strictly_public"]');
     expect(config).toContain('"worker_loaders"');
     expect(config).toContain('"binding": "LOADER"');
     expect(config).toContain('"kv_namespaces"');

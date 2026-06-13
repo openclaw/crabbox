@@ -26,6 +26,7 @@ type client struct {
 	token               string
 	http                *http.Client
 	responseBodyTimeout time.Duration
+	readRetryDelays     []time.Duration
 }
 
 type readinessResponse struct {
@@ -121,6 +122,13 @@ const (
 	responseHeaderTimeoutOverhead = 5 * time.Second
 )
 
+var defaultReadRetryDelays = []time.Duration{
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	time.Second,
+	2 * time.Second,
+}
+
 var newLoaderAPI = func(cfg Config, rt Runtime) (loaderAPI, error) {
 	baseURL, err := loaderURL(cfg)
 	if err != nil {
@@ -140,6 +148,7 @@ var newLoaderAPI = func(cfg Config, rt Runtime) (loaderAPI, error) {
 		token:               token,
 		http:                httpClient,
 		responseBodyTimeout: responseHeaderTimeout(cfg),
+		readRetryDelays:     append([]time.Duration(nil), defaultReadRetryDelays...),
 	}, nil
 }
 
@@ -298,7 +307,7 @@ func noRedirectHTTPClient(httpClient *http.Client) *http.Client {
 func responseHeaderTimeout(cfg Config) time.Duration {
 	runTimeout := time.Duration(cfg.CloudflareDynamicWorkers.TimeoutSecs) * time.Second
 	if runTimeout <= 0 {
-		return defaultResponseHeaderTimeout
+		return 0
 	}
 	timeout := runTimeout + responseHeaderTimeoutOverhead
 	if timeout < defaultResponseHeaderTimeout {
@@ -528,34 +537,63 @@ func (c *client) DeleteAcknowledgedComplete(ctx context.Context, id string) erro
 }
 
 func (c *client) doJSON(ctx context.Context, method, endpoint string, input any, output any) error {
-	var body io.Reader
-	if input != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(input); err != nil {
+	for attempt := 0; ; attempt++ {
+		var body io.Reader
+		if input != nil {
+			var buf bytes.Buffer
+			if err := json.NewEncoder(&buf).Encode(input); err != nil {
+				return err
+			}
+			body = &buf
+		}
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, body)
+		if err != nil {
 			return err
 		}
-		body = &buf
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		if input != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		if method == http.MethodGet && retryableReadStatus(resp.StatusCode) && attempt < len(c.readRetryDelays) {
+			_ = resp.Body.Close()
+			if err := waitForRetry(ctx, c.readRetryDelays[attempt]); err != nil {
+				return err
+			}
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return c.responseError(ctx, resp)
+		}
+		if output == nil {
+			return nil
+		}
+		return c.decodeJSONResponse(ctx, resp.Body, output)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, body)
-	if err != nil {
-		return err
+}
+
+func retryableReadStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	if input != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.responseError(ctx, resp)
-	}
-	if output == nil {
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
 		return nil
 	}
-	return c.decodeJSONResponse(ctx, resp.Body, output)
 }
 
 func (c *client) responseError(ctx context.Context, resp *http.Response) error {
@@ -595,6 +633,9 @@ func (c *client) readResponseBody(ctx context.Context, body io.ReadCloser, limit
 }
 
 func (c *client) withResponseBodyDeadline(ctx context.Context, body io.ReadCloser, read func() error) error {
+	if c.responseBodyTimeout <= 0 {
+		return read()
+	}
 	bodyCtx, cancel := context.WithTimeout(ctx, c.responseBodyTimeout)
 	defer cancel()
 	stopClose := context.AfterFunc(bodyCtx, func() {

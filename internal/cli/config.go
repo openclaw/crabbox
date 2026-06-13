@@ -639,6 +639,8 @@ type CloudflareConfig struct {
 	Workdir string
 }
 
+const DefaultCloudflareDynamicWorkersCompatibilityDate = "2026-06-12"
+
 type CloudflareDynamicWorkersConfig struct {
 	LoaderURL                      string
 	Token                          string
@@ -2053,10 +2055,11 @@ func baseConfig() Config {
 			Workdir: "/workspace/crabbox",
 		},
 		CloudflareDynamicWorkers: CloudflareDynamicWorkersConfig{
-			CacheMode:   "stable",
-			Egress:      "blocked",
-			TimeoutSecs: 60,
-			Metadata:    map[string]string{},
+			CompatibilityDate: DefaultCloudflareDynamicWorkersCompatibilityDate,
+			CacheMode:         "stable",
+			Egress:            "blocked",
+			TimeoutSecs:       60,
+			Metadata:          map[string]string{},
 		},
 		Proxmox: ProxmoxConfig{
 			User:      "crabbox",
