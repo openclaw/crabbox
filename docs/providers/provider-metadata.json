@@ -419,6 +419,20 @@
     "caveat": "Direct-only; optional firewall must already exist",
     "docs": "linode.md"
   },
+  "vultr": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Vultr instance",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "optional",
+    "lifecycle": "Crabbox",
+    "cleanup": "instance and key delete",
+    "bestFit": "Direct Linux VM on Vultr",
+    "caveat": "Direct-only; firewall groups and VPCs must already exist",
+    "docs": "vultr.md"
+  },
   "ovh": {
     "status": "built-in",
     "category": "direct-cloud",

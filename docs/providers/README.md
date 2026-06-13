@@ -26,10 +26,10 @@ SSH-lease providers further differ by how they reach the cloud:
   This is the normal shared-team path. Set with `config set-broker` and a
   broker URL (`CRABBOX_COORDINATOR`).
 - **Direct cloud** — the same four providers without a configured broker, plus
-  cloud providers that never broker (e.g. `digitalocean`, `linode`, `proxmox`,
-  `hostinger`, `runpod`, `namespace-devbox`, `namespace-instance`, `semaphore`,
-  `sprites`, `exe-dev`, `daytona`, `morph`). The CLI talks to the provider API
-  itself and cleans up best-effort via provider labels.
+  cloud providers that never broker (e.g. `digitalocean`, `linode`, `vultr`,
+  `proxmox`, `hostinger`, `runpod`, `namespace-devbox`, `namespace-instance`,
+  `semaphore`, `sprites`, `exe-dev`, `daytona`, `morph`). The CLI talks to the
+  provider API itself and cleans up best-effort via provider labels.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
   provisioning, no cleanup.
 - **Local runtime** — `local-container` starts a labeled Linux container through
@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 61 providers (35 SSH lease, 24 delegated run, 2 service control).
+Current built-in surface: 62 providers (36 SSH lease, 24 delegated run, 2 service control).
 
 Access terms:
 
@@ -129,6 +129,7 @@ Access terms:
 | [tensorlake](tensorlake.md) (`tl`, `tensorlake-sbx`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Tensorlake Firecracker sandbox | `provider-managed`; GPU: unknown | Tensorlake; provider sandbox cleanup | Hosted Firecracker-backed delegated execution | Does not expose raw Firecracker provisioning |
 | [upstash-box](upstash-box.md) (`upstash`, `box`, `upstashbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Upstash Box sandbox | `provider-managed`; GPU: no | Upstash; sandbox cleanup | Hosted short-lived delegated sandbox | No normal SSH access or coordinator routing |
 | [vercel-sandbox](vercel-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Vercel Sandbox microVM | `provider-managed`; GPU: no | Vercel Sandbox; sandbox delete | Hosted delegated Linux microVM execution | Requires SDK bridge support and Vercel Sandbox auth |
+| [vultr](vultr.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Vultr instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Direct Linux VM on Vultr | Direct-only; firewall groups and VPCs must already exist |
 | [wandb](wandb.md) (`weights-and-biases`) | built-in; `delegated-run` · gpu-cloud | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Weights & Biases run sandbox | `provider-managed`; GPU: optional | Weights & Biases; run termination | Delegated ML or GPU run environment | Execution follows the W&B run contract |
 | [windows-sandbox](windows-sandbox.md) (`wsb`, `windows-sandbox-provider`) | built-in; `delegated-run` · local-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `windows/normal`; Windows Sandbox | `local`; GPU: optional | Windows host; sandbox close | Disposable native Windows command execution | Requires Windows Sandbox and local host automation |
 | [xcp-ng](xcp-ng.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; XCP-ng VM clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM pool over XAPI | Normal leases require prepared Linux templates |
@@ -186,6 +187,10 @@ Access terms:
 - Linode is a direct-only Linux instance provider. It uses `LINODE_TOKEN`,
   per-lease SSH keys, metadata user-data, optional attachment to an existing
   firewall, and Crabbox-owned tags; it does not run through the coordinator.
+- Vultr is a direct-only Linux instance provider. It uses `VULTR_API_KEY`,
+  per-lease SSH keys, cloud-init user data, optional attachment to existing
+  firewall groups and VPCs, and Crabbox-owned tags; it does not run through the
+  coordinator.
 - Hostinger is a direct-only Linux VPS provider. Purchases require explicit
   opt-in; release stops the VPS but does not cancel its subscription.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
@@ -203,6 +208,7 @@ crabbox warmup --provider aws --class beast
 crabbox run --provider hetzner -- pnpm test
 crabbox run --provider digitalocean --type s-1vcpu-1gb -- pnpm test
 crabbox run --provider linode --type g6-standard-1 -- pnpm test
+crabbox run --provider vultr --type vc2-1c-1gb -- pnpm test
 crabbox doctor --provider hostinger
 crabbox run --provider docker -- pnpm test
 crabbox run --provider docker-sandbox -- go test ./...

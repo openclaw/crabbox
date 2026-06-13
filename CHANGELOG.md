@@ -220,6 +220,7 @@
 - Added `provider: namespace-instance` (`namespace-compute`) for short-lived Namespace Compute Linux leases through `nsc`, including per-lease SSH keys, proxy-backed sync/run, duration safeguards, ownership-filtered cleanup, and guarded live smoke coverage. Thanks @coygeek.
 - Added comprehensive guides for deploying the portable Node/PostgreSQL coordinator and integrating private control planes through generic external providers, registered inventory, sharing, and outbound WebVNC.
 - Added `provider: linode` for direct Linux SSH leases with per-lease keys, account-bound cleanup, preserved operator tags, interface-aware existing firewalls, and guarded live smoke coverage. Thanks @coygeek.
+- Added `provider: vultr` for direct Linux SSH leases with per-lease keys, account-bound cleanup, optional existing firewall/VPC attachment, and guarded live smoke coverage. Thanks @coygeek.
 - Added `provider: windows-sandbox` for disposable native Windows runs through Microsoft Windows Sandbox, including mapped workspace sync, streamed output, timeout and cancellation cleanup, and keep-on-failure inspection. Thanks @zozo123.
 - Added `provider: smolvm` for delegated Linux microVM runs through the hosted smolfleet API, including archive sync, retained leases, status, cleanup, and repository-scoped ownership checks. Thanks @zozo123.
 - Added guarded SmolVM live E2E coverage for retained reuse, archive replacement, environment forwarding, command exit propagation, diagnostics, and targeted cleanup.

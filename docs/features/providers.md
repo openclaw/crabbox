@@ -129,6 +129,9 @@ Droplet size.
 Linode maps every class to the smallest Phase 1 default size `g6-standard-1`.
 Use `--type <linode-type-slug>` when you need a different exact instance type.
 
+Vultr maps every class to the smallest Phase 1 default plan `vc2-1c-1gb`.
+Use `--type <vultr-plan-id>` when you need a different exact instance type.
+
 Scaleway maps every class to the smallest foundation default type `DEV1-S`.
 Use `--type <scaleway-commercial-type>` when you need a different exact
 Scaleway Instances commercial type. The live lifecycle backend is not
