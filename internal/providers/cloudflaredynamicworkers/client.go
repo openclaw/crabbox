@@ -26,13 +26,14 @@ type client struct {
 }
 
 type readinessResponse struct {
-	OK                bool              `json:"ok"`
-	Runner            string            `json:"runner"`
-	LoaderBinding     bool              `json:"loaderBinding"`
-	CompatibilityDate string            `json:"compatibilityDate,omitempty"`
-	Egress            string            `json:"egress,omitempty"`
-	Limits            limits            `json:"limits,omitempty"`
-	Metadata          map[string]string `json:"metadata,omitempty"`
+	OK                 bool              `json:"ok"`
+	Runner             string            `json:"runner"`
+	LoaderBinding      bool              `json:"loaderBinding"`
+	DurableRunMetadata bool              `json:"durableRunMetadata"`
+	CompatibilityDate  string            `json:"compatibilityDate,omitempty"`
+	Egress             string            `json:"egress,omitempty"`
+	Limits             limits            `json:"limits,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
 }
 
 type runRequest struct {
@@ -136,19 +137,16 @@ func loaderURL(cfg Config) (string, error) {
 func loaderURLForError(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err == nil {
+		if parsed.Opaque != "" || parsed.Host == "" {
+			return "<redacted>"
+		}
+		parsed.User = nil
 		parsed.RawQuery = ""
 		parsed.ForceQuery = false
 		parsed.Fragment = ""
 		return parsed.String()
 	}
-	out := raw
-	if before, _, ok := strings.Cut(out, "?"); ok {
-		out = before
-	}
-	if before, _, ok := strings.Cut(out, "#"); ok {
-		out = before
-	}
-	return out
+	return "<redacted>"
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {
@@ -185,8 +183,29 @@ func (c *client) Readiness(ctx context.Context) (readinessResponse, error) {
 
 func (c *client) Run(ctx context.Context, req runRequest) (runResponse, error) {
 	var out runResponse
-	err := c.doJSON(ctx, http.MethodPost, "/v1/runs", req, &out)
-	return out, err
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(req); err != nil {
+		return out, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/runs", &body)
+	if err != nil {
+		return out, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return out, json.NewDecoder(resp.Body).Decode(&out)
+	}
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if json.Unmarshal(responseBody, &out) == nil && strings.TrimSpace(out.ID) != "" && strings.TrimSpace(out.Status) != "" {
+		return out, nil
+	}
+	return out, c.responseErrorBody(resp.StatusCode, resp.Status, responseBody)
 }
 
 func (c *client) Status(ctx context.Context, id string) (runStatus, error) {
@@ -232,6 +251,10 @@ func (c *client) doJSON(ctx context.Context, method, endpoint string, input any,
 
 func (c *client) responseError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	return c.responseErrorBody(resp.StatusCode, resp.Status, body)
+}
+
+func (c *client) responseErrorBody(statusCode int, status string, body []byte) error {
 	text := strings.TrimSpace(string(body))
 	var payload struct {
 		Error   string `json:"error"`
@@ -246,10 +269,10 @@ func (c *client) responseError(resp *http.Response) error {
 		}
 	}
 	if text == "" {
-		text = resp.Status
+		text = status
 	}
 	text = redactSensitive(text, c.token)
-	return &apiError{StatusCode: resp.StatusCode, Status: providerName + " API " + resp.Status, Body: text}
+	return &apiError{StatusCode: statusCode, Status: providerName + " API " + status, Body: text}
 }
 
 func redactSensitive(text, token string) string {

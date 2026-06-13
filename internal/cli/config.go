@@ -2634,18 +2634,20 @@ func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig) {
 	}
 }
 
-func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDynamicWorkersConfig) {
+func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDynamicWorkersConfig, trusted bool) {
 	if file == nil {
 		return
 	}
-	if file.LoaderURL != "" {
-		cfg.CloudflareDynamicWorkers.LoaderURL = file.LoaderURL
-	}
-	if file.URL != "" {
-		cfg.CloudflareDynamicWorkers.LoaderURL = file.URL
-	}
-	if file.Token != "" {
-		cfg.CloudflareDynamicWorkers.Token = file.Token
+	if trusted {
+		if file.LoaderURL != "" {
+			cfg.CloudflareDynamicWorkers.LoaderURL = file.LoaderURL
+		}
+		if file.URL != "" {
+			cfg.CloudflareDynamicWorkers.LoaderURL = file.URL
+		}
+		if file.Token != "" {
+			cfg.CloudflareDynamicWorkers.Token = file.Token
+		}
 	}
 	if file.CompatibilityDate != "" {
 		cfg.CloudflareDynamicWorkers.CompatibilityDate = file.CompatibilityDate
@@ -2656,7 +2658,7 @@ func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDy
 	if file.CacheMode != "" {
 		cfg.CloudflareDynamicWorkers.CacheMode = file.CacheMode
 	}
-	if file.Egress != "" {
+	if file.Egress != "" && (trusted || strings.EqualFold(strings.TrimSpace(file.Egress), "blocked")) {
 		cfg.CloudflareDynamicWorkers.Egress = file.Egress
 	}
 	if file.CPUMs > 0 {
@@ -4327,7 +4329,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	applyCloudflareFileConfig(cfg, file.Cloudflare)
-	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers)
+	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
 	if file.Semaphore != nil {
 		if file.Semaphore.Host != "" {
 			cfg.Semaphore.Host = file.Semaphore.Host

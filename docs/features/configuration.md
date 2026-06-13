@@ -307,7 +307,6 @@ set.
 provider: cloudflare-dynamic-workers
 target: worker-runtime
 cloudflareDynamicWorkers:
-  loaderUrl: https://crabbox-cloudflare-dynamic-workers-runner.example.workers.dev
   compatibilityDate: "2026-06-12"
   compatibilityFlags:
     - nodejs_compat
@@ -326,8 +325,9 @@ ports, browser, code-server, or Actions hydration.
 Use `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL` (or the compatibility alias
 `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL`) for the loader URL and
 `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN` for bearer auth. Keep the token in
-environment or private user config, not repo YAML and not argv. Provider flags
-cover runtime settings such as
+environment or private user config, not repo YAML and not argv. Repository
+config cannot replace the loader URL or token, or enable `intercept` egress.
+Provider flags cover runtime settings such as
 `--cloudflare-dynamic-workers-compatibility-date`,
 `--cloudflare-dynamic-workers-compatibility-flags`,
 `--cloudflare-dynamic-workers-cache`,

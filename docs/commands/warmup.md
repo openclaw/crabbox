@@ -182,12 +182,11 @@ selector while routing to the `azure-dynamic-sessions` delegated backend.
 
 ### cloudflare-dynamic-workers
 
-`--provider cloudflare-dynamic-workers` runs a readiness check against the
-Dynamic Workers loader. With `--keep` or `--slug`, warmup records a local claim
-for the Worker-runtime run identity so later `status`, `list`, `stop`, and
-`cleanup` commands can resolve it. It does not start a Linux machine and does
-not support Actions runner registration, SSH, desktop, browser, code-server,
-ports, `--class`, or `--type`.
+`--provider cloudflare-dynamic-workers` rejects `warmup`. Dynamic Workers require
+module source before Cloudflare can load or cache them; use `crabbox doctor` for
+loader readiness or `crabbox run --script <file>` to load code. The provider
+does not start a Linux machine and does not support Actions runner registration,
+SSH, desktop, browser, code-server, ports, `--class`, or `--type`.
 
 ### aws — macOS
 

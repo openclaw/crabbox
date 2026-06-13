@@ -13,8 +13,8 @@ Containers and Linux command execution.
 ## Capabilities at a glance
 
 - **Target:** `worker-runtime`.
-- **Supported commands:** `run`, `warmup`, `status`, `stop`, `list`, `doctor`,
-  and local-claim `cleanup`.
+- **Supported commands:** `run`, `status`, `stop`, `list`, `doctor`, and
+  local-claim `cleanup`.
 - **Run input:** `--script <file>` or `--script-stdin` module source.
 - **Coordinator:** never brokered. The CLI talks directly to the loader Worker.
 - **Cache modes:** `one-shot`, `stable`, and `explicit`.
@@ -44,14 +44,15 @@ binding named `LOADER` plus a Workers KV namespace binding named `RUNS`.
 
 ## Configuration
 
-Keep the bearer token out of repo YAML. Repo config can select the provider and
-loader URL:
+Keep the loader URL and bearer token in trusted user config or environment; the
+loader URL also has a CLI flag. Repository config can select the provider and
+blocked runtime settings, but cannot replace the loader connection or enable
+intercepted network egress:
 
 ```yaml
 provider: cloudflare-dynamic-workers
 target: worker-runtime
 cloudflareDynamicWorkers:
-  loaderUrl: https://crabbox-cloudflare-dynamic-workers-runner.example.workers.dev
   compatibilityDate: "2026-06-12"
   compatibilityFlags:
     - nodejs_compat
@@ -80,7 +81,9 @@ Config keys map to the typed `cloudflareDynamicWorkers` section:
 | Loader timeout | `timeoutSecs` | `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS` | `--cloudflare-dynamic-workers-timeout-secs` |
 
 The token is intentionally not exposed as a command-line flag because command
-arguments can appear in shell history and process listings.
+arguments can appear in shell history and process listings. Repository-local
+config cannot override `loaderUrl` or `token`, and cannot change `egress` from
+`blocked` to `intercept`.
 
 ## Deploy
 
@@ -182,8 +185,6 @@ runtime limits for a module invocation, not VM sizing knobs; `--class` and
 
 ## Lifecycle commands
 
-- `warmup` checks loader readiness. With `--keep` or `--slug`, it also records a
-  local claim for later `status`, `list`, or `stop`.
 - `status` resolves a local claim or explicit run ID and asks the loader for run
   metadata.
 - `list` reports local Dynamic Workers claims. Add `--refresh` to query loader
@@ -212,17 +213,22 @@ environment_blocked provider=cloudflare-dynamic-workers mutation=false reason=li
 ```
 
 To allow live deploy and smoke, set both gates and the required Cloudflare
-environment:
+account:
 
 ```sh
 export CRABBOX_LIVE=1
 export CRABBOX_LIVE_PROVIDERS=cloudflare-dynamic-workers
 export CLOUDFLARE_ACCOUNT_ID=...
-export CLOUDFLARE_API_TOKEN=...
-export CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL=https://runner.example.workers.dev
-export CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN=...
 scripts/deploy-cloudflare-dynamic-workers-smoke.sh
 ```
+
+Wrangler may authenticate from its existing login or `CLOUDFLARE_API_TOKEN`.
+The harness generates an ephemeral runner token when none is supplied, creates
+a uniquely named KV namespace, deploys a uniquely named Worker, derives its
+`workers.dev` URL, and removes both resources on exit. Set
+`CRABBOX_CFDW_SKIP_DEPLOY=1` plus
+`CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL` and
+`CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN` to exercise an existing deployment.
 
 The script classifies the result as one of:
 
@@ -234,11 +240,14 @@ The script classifies the result as one of:
 - `live_cloudflare_dynamic_workers_smoke_passed` — deploy, doctor, run, status,
   list, stop, and cleanup completed.
 
-The script never prints token values. Wrangler secrets are written through stdin.
+The script never prints token values. It passes the runner token through a
+mode-0600 temporary secrets file and removes the file during cleanup.
 
 ## Limitations
 
 - Dynamic Workers execute Worker-runtime module source only.
+- `warmup` is unsupported because a Dynamic Worker cannot be loaded or cached
+  without module source; use `run --script`.
 - There is no Linux shell, SSH target, filesystem sync, archive upload, VNC,
   browser desktop, code-server, port forwarding, or Actions hydration.
 - `--download`, `--fresh-pr`, `--artifact-glob`, `--require-artifact`,

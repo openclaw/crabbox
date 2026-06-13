@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -40,7 +41,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		{Status: "pass", Check: "loader-api", Message: "readiness endpoint reachable"},
 	}
 	status := "pass"
-	if !readiness.OK || readiness.Runner != providerName || !readiness.LoaderBinding {
+	if !readiness.OK || readiness.Runner != providerName || !readiness.LoaderBinding || !readiness.DurableRunMetadata {
 		status = "fail"
 		if !readiness.OK {
 			checks = append(checks, DoctorCheck{Status: "fail", Check: "ok", Message: "readiness did not report ok=true"})
@@ -51,60 +52,20 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		if !readiness.LoaderBinding {
 			checks = append(checks, DoctorCheck{Status: "fail", Check: "loader-binding", Message: "Dynamic Workers binding unavailable"})
 		}
+		if !readiness.DurableRunMetadata {
+			checks = append(checks, DoctorCheck{Status: "fail", Check: "run-metadata", Message: "RUNS KV binding unavailable"})
+		}
 	}
 	return DoctorResult{
 		Provider: providerName,
 		Status:   status,
-		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s loader_binding=%t compatibility_date=%s egress=%s", blank(readiness.Runner, "-"), readiness.LoaderBinding, blank(readiness.CompatibilityDate, "-"), blank(readiness.Egress, "-")),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s loader_binding=%t durable_run_metadata=%t compatibility_date=%s egress=%s", blank(readiness.Runner, "-"), readiness.LoaderBinding, readiness.DurableRunMetadata, blank(readiness.CompatibilityDate, "-"), blank(readiness.Egress, "-")),
 		Checks:   checks,
 	}, nil
 }
 
-func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
-	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
-	}
-	started := now(b.rt)
-	client, err := newLoaderAPI(b.cfg, b.rt)
-	if err != nil {
-		return err
-	}
-	readiness, err := client.Readiness(ctx)
-	if err != nil {
-		return providerError("readiness", err)
-	}
-	if !readiness.OK || readiness.Runner != providerName || !readiness.LoaderBinding {
-		return exit(5, "%s readiness failed runner=%s loader_binding=%t", providerName, blank(readiness.Runner, "-"), readiness.LoaderBinding)
-	}
-	leaseID := ""
-	slug := ""
-	if req.Keep || strings.TrimSpace(req.RequestedSlug) != "" {
-		leaseID = newLeaseID()
-		slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
-		if err != nil {
-			return err
-		}
-		server := runServer(leaseID, slug, runStatus{ID: leaseID, Status: "ready"}, map[string]string{
-			"cache_mode": "warmup",
-			"remote":     "false",
-		})
-		if err := claimLease(leaseID, slug, b.cfg, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, server); err != nil {
-			return err
-		}
-		fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s local_claim=true\n", leaseID, slug, providerName)
-	}
-	total := now(b.rt).Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+func (b *backend) Warmup(context.Context, WarmupRequest) error {
+	return exit(2, "provider=%s requires module source; use crabbox run --script <file>", providerName)
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -135,13 +96,76 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	run, err := client.Run(ctx, loaderReq)
 	commandDuration := now(b.rt).Sub(commandStarted)
 	if err != nil {
-		result := RunResult{ExitCode: 1, Command: commandDuration, Total: now(b.rt).Sub(started), Provider: providerName, LeaseID: leaseID, Slug: slug}
-		shouldStop := false
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, false, &shouldStop)
+		total := now(b.rt).Sub(started)
+		result := RunResult{
+			ExitCode:    1,
+			Command:     commandDuration,
+			Total:       total,
+			Provider:    providerName,
+			LeaseID:     leaseID,
+			Slug:        slug,
+			CommandText: req.Script.Source,
+		}
+		var apiErr *apiError
+		keepRequested := req.Keep || req.KeepOnFailure || cacheMode == "explicit"
+		definitiveRejection := errors.As(err, &apiErr) &&
+			apiErr.StatusCode >= http.StatusBadRequest &&
+			apiErr.StatusCode < http.StatusInternalServerError &&
+			apiErr.StatusCode != http.StatusRequestTimeout
+		if leaseID != "" && keepRequested && !definitiveRejection {
+			probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			status, statusErr := client.Status(probeCtx, leaseID)
+			cancel()
+			if statusErr != nil {
+				status = runStatus{ID: leaseID, Status: "unknown"}
+			}
+			if strings.TrimSpace(slug) == "" {
+				slug = newLeaseSlug(leaseID)
+				result.Slug = slug
+			}
+			server := runServer(leaseID, slug, status, mergeRunLabels(status.Metadata, map[string]string{
+				"cache_mode": cacheMode,
+				"egress":     normalizeEgress(b.cfg.CloudflareDynamicWorkers.Egress),
+				"uncertain":  "true",
+			}))
+			if claimErr := claimLease(leaseID, slug, b.cfg, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, server); claimErr != nil {
+				return result, claimErr
+			}
+			result.Session = (&coreRunSessionHandle{
+				Provider:       providerName,
+				LeaseID:        leaseID,
+				Slug:           slug,
+				Reused:         reused,
+				Kept:           true,
+				RunID:          leaseID,
+				CleanupCommand: fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, leaseID),
+			}).toCore()
+			fmt.Fprintf(b.rt.Stderr, "kept uncertain run=%s slug=%s after request error\n", leaseID, slug)
+			fmt.Fprintf(b.rt.Stderr, "inspect: crabbox status --provider %s --id %s\n", providerName, slug)
+			fmt.Fprintf(b.rt.Stderr, "stop: crabbox stop --provider %s --id %s\n", providerName, slug)
+			total = now(b.rt).Sub(started)
+			result.Total = total
+			if req.TimingJSON {
+				if timingErr := writeTimingJSON(b.rt.Stderr, timingReport{
+					Provider:  providerName,
+					LeaseID:   leaseID,
+					Slug:      slug,
+					CommandMs: commandDuration.Milliseconds(),
+					TotalMs:   total.Milliseconds(),
+					ExitCode:  1,
+					Label:     strings.TrimSpace(req.Label),
+				}); timingErr != nil {
+					return result, timingErr
+				}
+			}
+		}
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, err)}
 	}
 	if strings.TrimSpace(run.ID) != "" {
 		leaseID = run.ID
+		if strings.TrimSpace(slug) == "" {
+			slug = newLeaseSlug(leaseID)
+		}
 	}
 	writeRunOutput(b.rt.Stdout, b.rt.Stderr, run)
 	exitCode := run.ExitCode
@@ -149,6 +173,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		exitCode = 1
 	}
 	total := now(b.rt).Sub(started)
+	keepRun := req.Keep || cacheMode == "explicit" || (req.KeepOnFailure && exitCode != 0)
 	result := RunResult{
 		ExitCode:    exitCode,
 		Command:     commandDuration,
@@ -162,12 +187,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			LeaseID:        leaseID,
 			Slug:           slug,
 			Reused:         reused,
-			Kept:           req.Keep || cacheMode == "explicit",
+			Kept:           keepRun,
 			RunID:          leaseID,
 			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, leaseID),
 		}).toCore(),
 	}
-	if req.Keep || cacheMode == "explicit" {
+	if keepRun {
 		server := runServer(leaseID, slug, runStatus{ID: leaseID, Status: run.Status, Metadata: run.Metadata}, map[string]string{
 			"cache_mode": cacheMode,
 			"egress":     normalizeEgress(b.cfg.CloudflareDynamicWorkers.Egress),
@@ -190,8 +215,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	if exitCode != 0 {
-		shouldStop := false
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, false, &shouldStop)
+		if req.KeepOnFailure {
+			fmt.Fprintf(b.rt.Stderr, "keep-on-failure: kept run=%s slug=%s\n", leaseID, slug)
+			fmt.Fprintf(b.rt.Stderr, "inspect: crabbox status --provider %s --id %s\n", providerName, slug)
+			fmt.Fprintf(b.rt.Stderr, "stop: crabbox stop --provider %s --id %s\n", providerName, slug)
+		}
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
 	}
 	return result, nil
@@ -344,12 +372,20 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 		return leaseID, slug, true, err
 	}
 	if cacheMode == "stable" {
-		leaseID := stableRunID(req.Script.Data, b.cfg.CloudflareDynamicWorkers, req.Env)
-		return leaseID, newLeaseSlug(leaseID), false, nil
+		leaseID := stableRunID(workerModuleName(req.Script), req.Script.Data, b.cfg.CloudflareDynamicWorkers, req.Env)
+		slug := newLeaseSlug(leaseID)
+		if req.Keep || req.KeepOnFailure {
+			var err error
+			slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+			if err != nil {
+				return "", "", false, err
+			}
+		}
+		return leaseID, slug, false, nil
 	}
 	leaseID := ""
 	slug := ""
-	if req.Keep {
+	if req.Keep || req.KeepOnFailure {
 		leaseID = newLeaseID()
 		var err error
 		slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
@@ -386,7 +422,7 @@ func (b *backend) buildRunRequest(req RunRequest, leaseID, cacheMode string) run
 	return runRequest{
 		ID:                 leaseID,
 		CacheMode:          cacheMode,
-		Module:             moduleSource{Name: req.Script.Source, Source: string(req.Script.Data)},
+		Module:             moduleSource{Name: workerModuleName(req.Script), Source: string(req.Script.Data)},
 		CompatibilityDate:  strings.TrimSpace(cfg.CompatibilityDate),
 		CompatibilityFlags: append([]string(nil), cfg.CompatibilityFlags...),
 		Egress:             normalizeEgress(cfg.Egress),
@@ -400,7 +436,7 @@ func (b *backend) buildRunRequest(req RunRequest, leaseID, cacheMode string) run
 func runMetadata(configured map[string]string, req RunRequest) map[string]string {
 	out := map[string]string{
 		"provider": providerName,
-		"source":   req.Script.Source,
+		"source":   workerModuleName(req.Script),
 	}
 	if strings.TrimSpace(req.Label) != "" {
 		out["label"] = strings.TrimSpace(req.Label)
@@ -440,8 +476,56 @@ func writeRunOutput(stdout, stderr io.Writer, run runResponse) {
 	}
 }
 
-func stableRunID(source []byte, cfg CloudflareDynamicWorkersConfig, env map[string]string) string {
+func workerModuleName(script *RunScriptSpec) string {
+	if script == nil {
+		return "index.js"
+	}
+	candidate := strings.ReplaceAll(strings.TrimSpace(script.RemotePath), "\\", "/")
+	if candidate == "" {
+		candidate = strings.ReplaceAll(strings.TrimSpace(script.Source), "\\", "/")
+	}
+	name := path.Base(candidate)
+	var cleaned strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			cleaned.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			cleaned.WriteRune(r)
+		case r >= '0' && r <= '9':
+			cleaned.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			cleaned.WriteRune(r)
+		}
+	}
+	result := cleaned.String()
+	if result == "" || result == "." || strings.Contains(result, "..") {
+		return "index.js"
+	}
+	const maxModuleNameLength = 256
+	if len(result) > maxModuleNameLength {
+		ext := path.Ext(result)
+		if ext == "" || len(ext) > 16 {
+			ext = ".js"
+		}
+		stem := strings.TrimSuffix(result, path.Ext(result))
+		maxStemLength := maxModuleNameLength - len(ext)
+		if len(stem) > maxStemLength {
+			stem = stem[:maxStemLength]
+		}
+		stem = strings.TrimRight(stem, ".")
+		if stem == "" {
+			return "index.js"
+		}
+		result = stem + ext
+	}
+	return result
+}
+
+func stableRunID(moduleName string, source []byte, cfg CloudflareDynamicWorkersConfig, env map[string]string) string {
 	h := sha256.New()
+	_, _ = h.Write([]byte(strings.TrimSpace(moduleName)))
+	_, _ = h.Write([]byte{0})
 	_, _ = h.Write(source)
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(strings.TrimSpace(cfg.CompatibilityDate)))

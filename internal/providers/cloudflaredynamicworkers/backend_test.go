@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -45,6 +46,14 @@ func TestConfigureNormalizesDefaultLinuxTarget(t *testing.T) {
 	}
 }
 
+func TestWarmupRejectsMissingModuleSource(t *testing.T) {
+	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
+	err := backend.Warmup(context.Background(), WarmupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "requires module source") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestLoaderURLRejectsUnsafeComponents(t *testing.T) {
 	tests := []string{
 		"https://user:pass@loader.example.test",
@@ -76,6 +85,49 @@ func TestLoaderURLRedactsQueryAndFragmentFromErrors(t *testing.T) {
 	}
 }
 
+func TestLoaderURLRedactsUserinfoFromInvalidHostErrors(t *testing.T) {
+	cfg := testConfig("https://user:password@")
+	_, err := loaderURL(cfg)
+	if err == nil {
+		t.Fatal("loaderURL succeeded")
+	}
+	if strings.Contains(err.Error(), "user") || strings.Contains(err.Error(), "password") {
+		t.Fatalf("loader URL error leaked userinfo: %v", err)
+	}
+}
+
+func TestLoaderURLRedactsUserinfoWhenParsingFails(t *testing.T) {
+	cfg := testConfig("https://user:secret%zz@loader.example.test")
+	_, err := loaderURL(cfg)
+	if err == nil {
+		t.Fatal("loaderURL succeeded")
+	}
+	for _, sensitive := range []string{"user", "secret", "loader.example.test"} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Fatalf("loader URL error leaked %q: %v", sensitive, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "<redacted>") {
+		t.Fatalf("loader URL error omitted redaction marker: %v", err)
+	}
+}
+
+func TestLoaderURLRedactsOpaqueUserinfo(t *testing.T) {
+	cfg := testConfig("https:user:secret@loader.example.test")
+	_, err := loaderURL(cfg)
+	if err == nil {
+		t.Fatal("loaderURL succeeded")
+	}
+	for _, sensitive := range []string{"user", "secret", "loader.example.test"} {
+		if strings.Contains(err.Error(), sensitive) {
+			t.Fatalf("loader URL error leaked %q: %v", sensitive, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "<redacted>") {
+		t.Fatalf("loader URL error omitted redaction marker: %v", err)
+	}
+}
+
 func TestDefaultHTTPClientHonorsConfiguredRunTimeout(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.CloudflareDynamicWorkers.TimeoutSecs = 60
@@ -100,11 +152,12 @@ func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(readinessResponse{
-			OK:                true,
-			Runner:            providerName,
-			LoaderBinding:     true,
-			CompatibilityDate: "2026-06-01",
-			Egress:            "blocked",
+			OK:                 true,
+			Runner:             providerName,
+			LoaderBinding:      true,
+			DurableRunMetadata: true,
+			CompatibilityDate:  "2026-06-01",
+			Egress:             "blocked",
 		})
 	}))
 	defer server.Close()
@@ -113,11 +166,30 @@ func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "pass" || !strings.Contains(result.Message, "loader_binding=true") {
+	if result.Status != "pass" || !strings.Contains(result.Message, "loader_binding=true") || !strings.Contains(result.Message, "durable_run_metadata=true") {
 		t.Fatalf("doctor result=%#v", result)
 	}
 	if strings.Join(seen, ",") != "GET /v1/readiness" {
 		t.Fatalf("requests=%v", seen)
+	}
+}
+
+func TestDoctorRequiresDurableRunMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readinessResponse{
+			OK:            true,
+			Runner:        providerName,
+			LoaderBinding: true,
+		})
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "fail" {
+		t.Fatalf("doctor result=%#v", result)
 	}
 }
 
@@ -149,8 +221,9 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	req := RunRequest{
 		Repo: Repo{Root: t.TempDir(), Name: "my-app"},
 		Script: &RunScriptSpec{
-			Source: "worker.mjs",
-			Data:   []byte("export default { fetch() { return new Response('ok') } }\n"),
+			Source:     "../worker module.mjs",
+			RemotePath: ".crabbox/scripts/abc123-worker-module.mjs",
+			Data:       []byte("export default { fetch() { return new Response('ok') } }\n"),
 		},
 		ScriptRequested: true,
 		Env:             map[string]string{"FEATURE": "on"},
@@ -162,7 +235,7 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	if !strings.HasPrefix(got.ID, "cfdw_") || got.CacheMode != "stable" || got.Egress != "blocked" {
 		t.Fatalf("request identity/cache=%#v", got)
 	}
-	if got.Module.Name != "worker.mjs" || got.Module.Source != string(req.Script.Data) {
+	if got.Module.Name != "abc123-worker-module.mjs" || got.Module.Source != string(req.Script.Data) {
 		t.Fatalf("module=%#v", got.Module)
 	}
 	if got.Limits.CPUMs != 50 || got.Limits.Subrequests != 12 || got.TimeoutMS != int64(15*time.Second/time.Millisecond) {
@@ -182,13 +255,204 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	}
 }
 
+func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var submittedID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var request runRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		submittedID = request.ID
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(runResponse{
+			ID:       request.ID,
+			Status:   "failed",
+			ExitCode: 1,
+			Stderr:   "execution failed",
+		})
+	}))
+	defer server.Close()
+	var stderr bytes.Buffer
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:            Repo{Root: t.TempDir()},
+		KeepOnFailure:   true,
+		RequestedSlug:   "debug-failure",
+		ScriptRequested: true,
+		Script: &RunScriptSpec{
+			Source:     "../worker module.mjs",
+			RemotePath: ".crabbox/scripts/abc123-worker-module.mjs",
+			Data:       []byte("export default {}"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected failed run")
+	}
+	if submittedID == "" || result.LeaseID != submittedID || result.Slug != "debug-failure" || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("result=%#v", result)
+	}
+	if _, ok, resolveErr := resolveLeaseClaim(result.Slug); resolveErr != nil || !ok {
+		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
+	}
+	if strings.Contains(stderr.String(), "-- <command>") || !strings.Contains(stderr.String(), "crabbox status") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunPreservesKeepOnFailureClaimWhenPostResponseIsLost(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var submittedID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			submittedID = request.ID
+			_ = json.NewEncoder(w).Encode(runResponse{
+				ID:       request.ID,
+				Status:   "failed",
+				ExitCode: 1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+submittedID:
+			_ = json.NewEncoder(w).Encode(runStatus{
+				ID:       submittedID,
+				Status:   "failed",
+				Metadata: map[string]string{"reason": "response-lost"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	cfg := testConfig(server.URL)
+	backend := NewBackend(Provider{}.Spec(), cfg, Runtime{
+		HTTP:   &http.Client{Transport: losePostResponseTransport{base: http.DefaultTransport}},
+		Stdout: &bytes.Buffer{},
+		Stderr: &stderr,
+	}).(*backend)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:            Repo{Root: t.TempDir()},
+		KeepOnFailure:   true,
+		RequestedSlug:   "uncertain-failure",
+		TimingJSON:      true,
+		ScriptRequested: true,
+		Script: &RunScriptSpec{
+			Source:     "../worker module.mjs",
+			RemotePath: ".crabbox/scripts/abc123-worker-module.mjs",
+			Data:       []byte("export default {}"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected lost response error")
+	}
+	if submittedID == "" || result.LeaseID != submittedID || result.Slug != "uncertain-failure" || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("result=%#v submittedID=%q", result, submittedID)
+	}
+	claim, ok, resolveErr := resolveLeaseClaim(result.Slug)
+	if resolveErr != nil || !ok {
+		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
+	}
+	if claim.Labels["state"] != "failed" || claim.Labels["uncertain"] != "true" || claim.Labels["reason"] != "response-lost" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+	if !strings.Contains(stderr.String(), "kept uncertain run="+submittedID) ||
+		!strings.Contains(stderr.String(), `"leaseId":"`+submittedID+`"`) {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunPreservesKeepOnFailureClaimAfterUnstructuredServerError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var submittedID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			submittedID = request.ID
+			http.Error(w, "upstream response lost", http.StatusBadGateway)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+submittedID:
+			_ = json.NewEncoder(w).Encode(runStatus{
+				ID:       submittedID,
+				Status:   "failed",
+				Metadata: map[string]string{"reason": "gateway-error"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:            Repo{Root: t.TempDir()},
+		KeepOnFailure:   true,
+		RequestedSlug:   "gateway-failure",
+		ScriptRequested: true,
+		Script: &RunScriptSpec{
+			Source: "worker.mjs",
+			Data:   []byte("export default {}"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected gateway error")
+	}
+	if submittedID == "" || result.LeaseID != submittedID || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("result=%#v submittedID=%q", result, submittedID)
+	}
+	claim, ok, resolveErr := resolveLeaseClaim(result.Slug)
+	if resolveErr != nil || !ok {
+		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
+	}
+	if claim.Labels["state"] != "failed" || claim.Labels["uncertain"] != "true" || claim.Labels["reason"] != "gateway-error" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
+type losePostResponseTransport struct {
+	base http.RoundTripper
+}
+
+func (t losePostResponseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || req.Method != http.MethodPost {
+		return resp, err
+	}
+	_ = resp.Body.Close()
+	return nil, fmt.Errorf("response lost after upload")
+}
+
+func TestWorkerModuleNameBoundsLongGeneratedPaths(t *testing.T) {
+	name := workerModuleName(&RunScriptSpec{
+		RemotePath: ".crabbox/scripts/abc123-" + strings.Repeat("a", 250) + ".mjs",
+	})
+	if len(name) > 256 {
+		t.Fatalf("module name length=%d, want <=256", len(name))
+	}
+	if !strings.HasSuffix(name, ".mjs") {
+		t.Fatalf("module name=%q, want preserved extension", name)
+	}
+}
+
 func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1").CloudflareDynamicWorkers
 	source := []byte("export default { fetch() { return new Response('ok') } }\n")
-	first := stableRunID(source, cfg, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
-	reordered := stableRunID(source, cfg, map[string]string{"FEATURE": "on", "TOKEN": "alpha"})
-	second := stableRunID(source, cfg, map[string]string{"TOKEN": "beta", "FEATURE": "on"})
-	empty := stableRunID(source, cfg, nil)
+	first := stableRunID("worker.mjs", source, cfg, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
+	reordered := stableRunID("worker.mjs", source, cfg, map[string]string{"FEATURE": "on", "TOKEN": "alpha"})
+	second := stableRunID("worker.mjs", source, cfg, map[string]string{"TOKEN": "beta", "FEATURE": "on"})
+	empty := stableRunID("worker.mjs", source, cfg, nil)
+	renamed := stableRunID("index.js", source, cfg, map[string]string{"TOKEN": "alpha", "FEATURE": "on"})
 
 	if first != reordered {
 		t.Fatalf("stable id should be independent of env map iteration order: %q != %q", first, reordered)
@@ -198,6 +462,9 @@ func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 	}
 	if first == empty {
 		t.Fatal("stable id should distinguish forwarded env from no forwarded env")
+	}
+	if first == renamed {
+		t.Fatal("stable id should change when the main module name changes")
 	}
 }
 

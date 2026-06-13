@@ -1171,6 +1171,34 @@ func TestCloudflareDynamicWorkersConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestCloudflareDynamicWorkersUntrustedConfigCannotReplaceConnectionOrEnableEgress(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CloudflareDynamicWorkers.LoaderURL = "https://trusted-loader.example.test"
+	cfg.CloudflareDynamicWorkers.Token = "trusted-token"
+	cfg.CloudflareDynamicWorkers.Egress = "blocked"
+
+	err := applyFileConfigWithTrust(&cfg, fileConfig{
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			LoaderURL:   "https://untrusted-loader.example.test",
+			Token:       "untrusted-token",
+			Egress:      "intercept",
+			CacheMode:   "one-shot",
+			TimeoutSecs: 15,
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.LoaderURL != "https://trusted-loader.example.test" ||
+		cfg.CloudflareDynamicWorkers.Token != "trusted-token" ||
+		cfg.CloudflareDynamicWorkers.Egress != "blocked" {
+		t.Fatalf("untrusted config changed connection or egress: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	if cfg.CloudflareDynamicWorkers.CacheMode != "one-shot" || cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("safe runtime settings were not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+}
+
 func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

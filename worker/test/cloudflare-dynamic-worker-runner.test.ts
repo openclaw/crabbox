@@ -217,6 +217,20 @@ describe("Cloudflare Dynamic Workers runner", () => {
     expect(text).not.toContain("runner-token");
   });
 
+  it("rejects non-object JSON payloads", async () => {
+    const response = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify([]),
+      }),
+      env(),
+      ctx(),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "json body must be an object" });
+  });
+
   it("runs one-shot modules with blocked egress and propagated limits", async () => {
     const loader = new MockLoader();
     loader.nextResponse = new Response("done", {
@@ -268,6 +282,45 @@ describe("Cloudflare Dynamic Workers runner", () => {
     expect(loader.worker?.request?.method).toBe("POST");
     expect(loader.worker?.request?.url).toBe("https://example.test/execute");
     await expect(loader.worker?.request?.text()).resolves.toBe("payload");
+  });
+
+  it("persists HTTP error responses as failed runs", async () => {
+    const loader = new MockLoader();
+    loader.nextResponse = new Response("not found", {
+      status: 404,
+      statusText: "Not Found",
+    });
+    const testEnv = env(loader);
+    const testCtx = ctx();
+
+    const create = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify(runPayload({ id: "run_http_error" })),
+      }),
+      testEnv,
+      testCtx,
+    );
+
+    expect(create.status).toBe(200);
+    await expect(create.json()).resolves.toMatchObject({
+      id: "run_http_error",
+      status: "failed",
+      exitCode: 1,
+      result: {
+        status: 404,
+        statusText: "Not Found",
+        body: "not found",
+      },
+    });
+
+    const status = await worker.fetch(authedRequest("/v1/runs/run_http_error"), testEnv, testCtx);
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      id: "run_http_error",
+      status: "failed",
+      exitCode: 1,
+    });
   });
 
   it("uses loader get for stable cache mode and preserves worker IDs", async () => {
@@ -331,9 +384,40 @@ describe("Cloudflare Dynamic Workers runner", () => {
     expect(loader.worker?.code).toMatchObject({
       mainModule: "worker.mjs",
       modules: {
-        "worker.mjs": "export default { fetch() { return new Response('go'); } };",
+        "worker.mjs": {
+          js: "export default { fetch() { return new Response('go'); } };",
+        },
       },
       limits: { cpuMs: 25, subRequests: 4 },
+    });
+  });
+
+  it.each([
+    ["worker.py", "py"],
+    ["worker.cjs", "cjs"],
+  ])("preserves the %s compatibility module type", async (name, moduleType) => {
+    const loader = new MockLoader();
+    const source = "compatibility module source";
+    const response = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          id: `run_${moduleType}`,
+          module: { name, source },
+        }),
+      }),
+      env(loader),
+      ctx(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(loader.worker?.code).toMatchObject({
+      mainModule: name,
+      modules: {
+        [name]: {
+          [moduleType]: source,
+        },
+      },
     });
   });
 

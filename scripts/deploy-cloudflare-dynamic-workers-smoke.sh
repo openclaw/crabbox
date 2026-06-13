@@ -10,19 +10,69 @@ repo="${CRABBOX_LIVE_REPO:-$ROOT}"
 cd "$ROOT"
 
 lease_id=""
+deploy_config=""
+deployed_worker=""
+worker_deploy_attempted=0
+kv_namespace_id=""
 smoke_tmp_files=()
 last_stdout=""
 last_stderr=""
+cleanup_done=0
+cleanup_status=0
+cleanup_reported=0
+
+delete_worker_for_cleanup() {
+  local out
+  local err
+  out="$(mktemp)"
+  err="$(mktemp)"
+  smoke_tmp_files+=("$out" "$err")
+  if (
+    cd "$ROOT/worker"
+    npx wrangler delete "$deployed_worker" --config "$deploy_config" --force >"$out" 2>"$err"
+  ); then
+    return 0
+  fi
+  grep -Eiq '(^|[^0-9])404([^0-9]|$)|worker.*not found' "$out" "$err"
+}
 
 cleanup() {
+  if [[ "$cleanup_done" == "1" ]]; then
+    return "$cleanup_status"
+  fi
+  cleanup_done=1
+  local status=0
   if [[ -n "$lease_id" && -n "${CRABBOX_BIN:-}" && -x "${CRABBOX_BIN:-}" ]]; then
-    "$CRABBOX_BIN" stop --provider "$PROVIDER" --id "$lease_id" >/dev/null 2>&1 || true
+    "$CRABBOX_BIN" stop --provider "$PROVIDER" --id "$lease_id" >/dev/null 2>&1 || status=1
+  fi
+  if [[ -n "$deploy_config" ]]; then
+    local worker_deleted=1
+    if [[ "$worker_deploy_attempted" == "1" && -n "$deployed_worker" ]]; then
+      delete_worker_for_cleanup || {
+        status=1
+        worker_deleted=0
+      }
+    fi
+    if [[ "$worker_deleted" == "1" && -n "$kv_namespace_id" ]]; then
+      (
+        cd "$ROOT/worker"
+        npx wrangler kv namespace delete --namespace-id "$kv_namespace_id" --config "$deploy_config" --skip-confirmation >/dev/null 2>&1
+      ) || status=1
+    fi
   fi
   if ((${#smoke_tmp_files[@]} > 0)); then
-    rm -f "${smoke_tmp_files[@]}"
+    rm -f "${smoke_tmp_files[@]}" || status=1
+  fi
+  cleanup_status="$status"
+  return "$status"
+}
+
+cleanup_on_exit() {
+  if ! cleanup && [[ "$cleanup_reported" != "1" ]]; then
+    print_classification environment_blocked "ephemeral_cleanup_failed" true
   fi
 }
-trap cleanup EXIT
+trap cleanup_on_exit EXIT
 
 print_classification() {
   local class="$1"
@@ -132,21 +182,70 @@ deploy_runner() {
   if [[ "$SKIP_DEPLOY" == "1" ]]; then
     return 0
   fi
+  deployed_worker="crabbox-cfdw-smoke-$(date -u +%Y%m%d%H%M%S)-$RANDOM"
+  local deploy_config_base
+  deploy_config_base="$(mktemp "$ROOT/worker/.wrangler-cfdw-smoke-XXXXXX")"
+  deploy_config="${deploy_config_base}.json"
+  mv "$deploy_config_base" "$deploy_config"
+  local secrets_file
+  local secrets_file_base
+  secrets_file_base="$(mktemp "${TMPDIR:-/tmp}/cfdw-secrets-XXXXXX")"
+  secrets_file="${secrets_file_base}.json"
+  mv "$secrets_file_base" "$secrets_file"
+  smoke_tmp_files+=("$deploy_config" "$secrets_file")
+  cat >"$deploy_config" <<EOF
+{
+  "\$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "$deployed_worker",
+  "main": "src/cloudflare-dynamic-worker-runner.ts",
+  "compatibility_date": "2026-06-12",
+  "workers_dev": true,
+  "preview_urls": false,
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "observability": { "enabled": true }
+}
+EOF
+  node -e '
+    const token = process.env.CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN;
+    if (token === undefined) process.exit(1);
+    process.stdout.write(JSON.stringify({ CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN: token }));
+  ' >"$secrets_file"
+  chmod 0600 "$secrets_file"
+
   local oldpwd
   oldpwd="$(pwd)"
   cd "$ROOT/worker"
-  run_logged npx wrangler secret put CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN \
-    --config wrangler.cloudflare-dynamic-workers.jsonc \
-    <<<"$CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN" || {
-      local status=$?
-      cd "$oldpwd"
-      return "$status"
-    }
-  run_logged npm run deploy:cloudflare-dynamic-workers || {
+  run_logged npx wrangler kv namespace create "${deployed_worker}-runs" --binding RUNS --update-config --config "$deploy_config" || {
     local status=$?
     cd "$oldpwd"
     return "$status"
   }
+  kv_namespace_id="$(
+    node -e '
+      const fs = require("node:fs");
+      const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const binding = config.kv_namespaces?.find((entry) => entry.binding === "RUNS");
+      process.stdout.write(binding?.id ?? "");
+    ' "$deploy_config"
+  )"
+  if [[ -z "$kv_namespace_id" ]]; then
+    cd "$oldpwd"
+    return 1
+  fi
+  worker_deploy_attempted=1
+  run_logged npx wrangler deploy --config "$deploy_config" --secrets-file "$secrets_file" || {
+    local status=$?
+    cd "$oldpwd"
+    return "$status"
+  }
+  local runner_url
+  runner_url="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' "$last_stdout" | tail -1)"
+  if [[ -z "$runner_url" ]]; then
+    cd "$oldpwd"
+    return 1
+  fi
+  CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL="$runner_url"
+  export CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL
   cd "$oldpwd"
 }
 
@@ -239,8 +338,13 @@ smoke_dynamic_workers() {
     print_classification "$(classify_files "$last_stdout" "$last_stderr")" "cleanup_failed" true
     return 0
   fi
-    cd "$oldpwd"
-    print_classification live_cloudflare_dynamic_workers_smoke_passed "deploy_doctor_run_status_list_stop_cleanup" true
+  cd "$oldpwd"
+  if ! cleanup; then
+    cleanup_reported=1
+    print_classification environment_blocked "ephemeral_cleanup_failed" true
+    return 0
+  fi
+  print_classification live_cloudflare_dynamic_workers_smoke_passed "deploy_doctor_run_status_list_stop_cleanup" true
 }
 
 main() {
@@ -250,12 +354,19 @@ main() {
   fi
 
   local missing
-  missing="$(missing_env_names CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN)"
+  if [[ "$SKIP_DEPLOY" == "1" ]]; then
+    missing="$(missing_env_names CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN)"
+  else
+    missing="$(missing_env_names CLOUDFLARE_ACCOUNT_ID)"
+  fi
   if [[ -n "$missing" ]]; then
     printf 'auth_blocked provider=%s mutation=false reason=missing_env missing=%s\n' "$PROVIDER" "$missing"
     return 0
   fi
 
+  if [[ -z "${CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN:-}" ]]; then
+    CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN="$(openssl rand -hex 32)"
+  fi
   export CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL
   export CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN
 

@@ -57,30 +57,42 @@ test("dynamic workers smoke classifies deploy quota failures", () => {
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
   const fakeCrabbox = path.join(dir, "crabbox");
+  const npxCalls = path.join(dir, "npx-calls.jsonl");
 
   writeExecutable(fakeCrabbox, "#!/usr/bin/env bash\nexit 0\n");
-  writeExecutable(path.join(bin, "npx"), "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n");
+  writeExecutable(path.join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
   writeExecutable(
-    path.join(bin, "npm"),
-    "#!/usr/bin/env bash\nprintf 'quota exceeded for dynamic workers\\n' >&2\nexit 7\n",
+    path.join(bin, "npx"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.CRABBOX_FAKE_NPX_CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");
+process.stderr.write("quota exceeded for dynamic workers\\n");
+process.exit(7);
+`,
   );
 
   const result = runSmoke({
     PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
     CRABBOX_BIN: fakeCrabbox,
+    CRABBOX_FAKE_NPX_CALLS: npxCalls,
     CRABBOX_LIVE: "1",
     CRABBOX_LIVE_PROVIDERS: "cloudflare-dynamic-workers",
     CRABBOX_CFDW_SKIP_LOCAL_CHECKS: "1",
     CLOUDFLARE_ACCOUNT_ID: "account",
-    CLOUDFLARE_API_TOKEN: "cloudflare-secret",
-    CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL: "https://runner.example.test",
-    CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN: "runner-secret",
   });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /quota_blocked/);
   assert.match(result.stdout, /reason=deploy_failed/);
-  assert.doesNotMatch(result.stdout + result.stderr, /cloudflare-secret|runner-secret/);
+  const seen = fs
+    .readFileSync(npxCalls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(
+    !seen.some((args) => args[0] === "wrangler" && args[1] === "delete"),
+    `unexpected Worker cleanup before deploy attempt in ${JSON.stringify(seen)}`,
+  );
 });
 
 test("dynamic workers smoke stops a kept run parsed from timing JSON after failure", () => {
@@ -240,5 +252,230 @@ process.exit(0);
         args.includes("blocked"),
     ),
     `expected egress run to force blocked mode in ${JSON.stringify(seen)}`,
+  );
+});
+
+test("dynamic workers smoke deletes its Worker before the KV namespace", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cfdw-smoke-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const npxCalls = path.join(dir, "npx-calls.jsonl");
+  const runnerToken = 'runner#token="quoted"';
+
+  writeExecutable(path.join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    path.join(bin, "npx"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CRABBOX_FAKE_NPX_CALLS, JSON.stringify(args) + "\\n");
+if (args[0] === "wrangler" && args[1] === "kv" && args[2] === "namespace" && args[3] === "create") {
+  if (!args.includes("--update-config")) process.exit(2);
+  const configPath = args[args.indexOf("--config") + 1];
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.kv_namespaces = [{ binding: "RUNS", id: "fake-kv-id" }];
+  fs.writeFileSync(configPath, JSON.stringify(config));
+}
+if (args[0] === "wrangler" && args[1] === "deploy") {
+  const secretsPath = args[args.indexOf("--secrets-file") + 1];
+  const secrets = JSON.parse(fs.readFileSync(secretsPath, "utf8"));
+  if (secrets.CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN !== process.env.CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN) process.exit(3);
+  process.stdout.write("https://crabbox-cfdw-smoke.example.workers.dev\\n");
+}
+`,
+  );
+
+  const fakeCrabbox = path.join(dir, "crabbox");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "doctor") process.exit(0);
+if (args[0] === "run" && args.includes("--keep")) {
+  process.stdout.write("CRABBOX_CFDW_OK\\n");
+  process.stderr.write(JSON.stringify({ leaseId: "cfdw_keep", provider: "cloudflare-dynamic-workers", exitCode: 0 }) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "run") {
+  process.stdout.write("CRABBOX_CFDW_EGRESS_BLOCKED\\n");
+  process.exit(0);
+}
+process.exit(0);
+`,
+  );
+
+  const result = runSmoke({
+    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    CRABBOX_BIN: fakeCrabbox,
+    CRABBOX_FAKE_NPX_CALLS: npxCalls,
+    CRABBOX_LIVE: "1",
+    CRABBOX_LIVE_PROVIDERS: "cloudflare-dynamic-workers",
+    CRABBOX_CFDW_SKIP_LOCAL_CHECKS: "1",
+    CLOUDFLARE_ACCOUNT_ID: "account",
+    CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN: runnerToken,
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /live_cloudflare_dynamic_workers_smoke_passed/);
+  assert.ok(!(result.stdout + result.stderr).includes(runnerToken));
+
+  const seen = fs
+    .readFileSync(npxCalls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const deleteKV = seen.findIndex(
+    (args) =>
+      args[0] === "wrangler" &&
+      args[1] === "kv" &&
+      args[2] === "namespace" &&
+      args[3] === "delete" &&
+      args.includes("fake-kv-id"),
+  );
+  const deleteWorker = seen.findIndex(
+    (args) => args[0] === "wrangler" && args[1] === "delete",
+  );
+  assert.ok(deleteKV >= 0, `missing KV cleanup in ${JSON.stringify(seen)}`);
+  assert.ok(deleteWorker >= 0, `missing Worker cleanup in ${JSON.stringify(seen)}`);
+  assert.ok(deleteWorker < deleteKV, `expected Worker cleanup before KV cleanup in ${JSON.stringify(seen)}`);
+});
+
+test("dynamic workers smoke does not report success when ephemeral cleanup fails", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cfdw-smoke-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const npxCalls = path.join(dir, "npx-calls.jsonl");
+
+  writeExecutable(path.join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    path.join(bin, "npx"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CRABBOX_FAKE_NPX_CALLS, JSON.stringify(args) + "\\n");
+if (args[0] === "wrangler" && args[1] === "kv" && args[2] === "namespace" && args[3] === "create") {
+  const configPath = args[args.indexOf("--config") + 1];
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.kv_namespaces = [{ binding: "RUNS", id: "cleanup-failure-kv-id" }];
+  fs.writeFileSync(configPath, JSON.stringify(config));
+  process.exit(0);
+}
+if (args[0] === "wrangler" && args[1] === "deploy") {
+  process.stdout.write("https://crabbox-cfdw-smoke.example.workers.dev\\n");
+  process.exit(0);
+}
+if (args[0] === "wrangler" && args[1] === "kv" && args[2] === "namespace" && args[3] === "delete") {
+  process.exit(9);
+}
+process.exit(0);
+`,
+  );
+
+  const fakeCrabbox = path.join(dir, "crabbox");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "run" && args.includes("--keep")) {
+  process.stdout.write("CRABBOX_CFDW_OK\\n");
+  process.stderr.write(JSON.stringify({ leaseId: "cfdw_keep", provider: "cloudflare-dynamic-workers", exitCode: 0 }) + "\\n");
+} else if (args[0] === "run") {
+  process.stdout.write("CRABBOX_CFDW_EGRESS_BLOCKED\\n");
+}
+process.exit(0);
+`,
+  );
+
+  const result = runSmoke({
+    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    CRABBOX_BIN: fakeCrabbox,
+    CRABBOX_FAKE_NPX_CALLS: npxCalls,
+    CRABBOX_LIVE: "1",
+    CRABBOX_LIVE_PROVIDERS: "cloudflare-dynamic-workers",
+    CRABBOX_CFDW_SKIP_LOCAL_CHECKS: "1",
+    CLOUDFLARE_ACCOUNT_ID: "account",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /environment_blocked/);
+  assert.match(result.stdout, /reason=ephemeral_cleanup_failed/);
+  assert.doesNotMatch(result.stdout, /live_cloudflare_dynamic_workers_smoke_passed/);
+
+  const seen = fs
+    .readFileSync(npxCalls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(
+    seen.some((args) => args[0] === "wrangler" && args[1] === "delete"),
+    `expected Worker cleanup attempt before KV failure in ${JSON.stringify(seen)}`,
+  );
+});
+
+test("dynamic workers smoke removes KV after a partial deploy failure", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cfdw-smoke-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const npxCalls = path.join(dir, "npx-calls.jsonl");
+
+  writeExecutable(path.join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    path.join(bin, "npx"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CRABBOX_FAKE_NPX_CALLS, JSON.stringify(args) + "\\n");
+if (args[0] === "wrangler" && args[1] === "kv" && args[2] === "namespace" && args[3] === "create") {
+  if (!args.includes("--update-config")) process.exit(2);
+  const configPath = args[args.indexOf("--config") + 1];
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.kv_namespaces = [{ binding: "RUNS", id: "partial-kv-id" }];
+  fs.writeFileSync(configPath, JSON.stringify(config));
+  process.exit(0);
+}
+if (args[0] === "wrangler" && args[1] === "deploy") {
+  process.stderr.write("quota exceeded for dynamic workers\\n");
+  process.exit(7);
+}
+if (args[0] === "wrangler" && args[1] === "delete") {
+  process.stderr.write("Worker not found (404)\\n");
+  process.exit(1);
+}
+process.exit(0);
+`,
+  );
+
+  const fakeCrabbox = path.join(dir, "crabbox");
+  writeExecutable(fakeCrabbox, "#!/usr/bin/env bash\nexit 0\n");
+
+  const result = runSmoke({
+    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    CRABBOX_BIN: fakeCrabbox,
+    CRABBOX_FAKE_NPX_CALLS: npxCalls,
+    CRABBOX_LIVE: "1",
+    CRABBOX_LIVE_PROVIDERS: "cloudflare-dynamic-workers",
+    CRABBOX_CFDW_SKIP_LOCAL_CHECKS: "1",
+    CLOUDFLARE_ACCOUNT_ID: "account",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /quota_blocked/);
+  assert.match(result.stdout, /reason=deploy_failed/);
+
+  const seen = fs
+    .readFileSync(npxCalls, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.ok(
+    seen.some(
+      (args) =>
+        args[0] === "wrangler" &&
+        args[1] === "kv" &&
+        args[2] === "namespace" &&
+        args[3] === "delete" &&
+        args.includes("partial-kv-id"),
+    ),
+    `expected partial KV cleanup in ${JSON.stringify(seen)}`,
   );
 });

@@ -263,7 +263,7 @@ async function createRun(
     const dynamicResponse = await entrypoint.fetch(requestForDynamicWorker(parsed));
     const result = await responseResult(dynamicResponse);
     const completedAt = Date.now();
-    record.state = "succeeded";
+    record.state = result.status < 400 ? "succeeded" : "failed";
     record.completedAt = new Date(completedAt).toISOString();
     record.durationMs = completedAt - startedAt;
     record.result = result;
@@ -524,9 +524,16 @@ function parseModuleCompat(
   return {
     mainModule: name,
     modules: {
-      [name]: source,
+      [name]: compatibilityModule(name, source),
     },
   };
+}
+
+function compatibilityModule(name: string, source: string): WorkerModule {
+  const lowerName = name.toLowerCase();
+  if (lowerName.endsWith(".py")) return { py: source };
+  if (lowerName.endsWith(".cjs")) return { cjs: source };
+  return { js: source };
 }
 
 function parseTypedModule(value: Record<string, unknown>): WorkerModule | null {
@@ -668,7 +675,7 @@ async function readObject(request: Request): Promise<Record<string, unknown> | R
   } catch {
     return json({ error: "invalid json" }, 400);
   }
-  return isRecord(value) ? value : {};
+  return isRecord(value) ? value : json({ error: "json body must be an object" }, 400);
 }
 
 function isJsonRequest(request: Request): boolean {
