@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added authenticated Crabfleet workspace terminals with bounded SSH/WebSocket bridging, durable tmux resume, and lifecycle revocation.
+
 ## 0.30.0 - 2026-06-13
 
 ### Added

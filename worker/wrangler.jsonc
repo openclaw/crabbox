@@ -3,6 +3,11 @@
   "name": "crabbox-coordinator",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    "cpu-features": "./src/cpu-features.cjs",
+    "./crypto/poly1305.js": "./src/ssh2-poly1305.cjs",
+  },
   "workers_dev": true,
   "preview_urls": true,
   "triggers": {
