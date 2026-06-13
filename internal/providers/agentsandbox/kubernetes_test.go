@@ -3,12 +3,14 @@ package agentsandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -19,6 +21,9 @@ type fakeKubernetesClient struct {
 	rbac      map[string]bool
 	pods      map[string][]podState
 	gets      []string
+	execs     []podExecRequest
+	execInput [][]byte
+	execErrs  []error
 	creates   int
 	deletes   int
 }
@@ -35,9 +40,63 @@ func (f *fakeKubernetesClient) Get(_ context.Context, gvr schema.GroupVersionRes
 	f.gets = append(f.gets, key)
 	obj := f.objects[key]
 	if obj == nil {
-		return nil, errors.New("not found " + key)
+		return nil, errKubernetesNotFound
 	}
 	return obj, nil
+}
+
+func (f *fakeKubernetesClient) Create(_ context.Context, gvr schema.GroupVersionResource, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	key := gvr.Resource + "/" + namespace + "/" + obj.GetName()
+	if f.objects == nil {
+		f.objects = map[string]*unstructured.Unstructured{}
+	}
+	if f.objects[key] != nil {
+		return nil, errors.New("already exists " + key)
+	}
+	f.creates++
+	created := obj.DeepCopy()
+	f.objects[key] = created
+	if gvr.Resource == sandboxClaimResource {
+		sandboxName := obj.GetName() + "-sandbox"
+		podName := obj.GetName() + "-pod"
+		_ = unstructured.SetNestedField(created.Object, sandboxName, "status", "sandbox", "name")
+		sandbox := &unstructured.Unstructured{Object: map[string]any{
+			"status": map[string]any{
+				"selector": "claim=" + obj.GetName(),
+				"conditions": []any{
+					map[string]any{"type": "Ready", "status": "True"},
+				},
+			},
+		}}
+		sandbox.SetName(sandboxName)
+		f.objects[sandboxResource+"/"+namespace+"/"+sandboxName] = sandbox
+		if f.pods == nil {
+			f.pods = map[string][]podState{}
+		}
+		f.pods[namespace+"/claim="+obj.GetName()] = []podState{{Name: podName, Phase: "Running", PodIP: "10.0.0.11", Ready: true}}
+	}
+	return obj.DeepCopy(), nil
+}
+
+func (f *fakeKubernetesClient) Delete(_ context.Context, gvr schema.GroupVersionResource, namespace, name string) error {
+	key := gvr.Resource + "/" + namespace + "/" + name
+	if f.objects[key] == nil {
+		return errKubernetesNotFound
+	}
+	f.deletes++
+	delete(f.objects, key)
+	return nil
+}
+
+func (f *fakeKubernetesClient) List(_ context.Context, gvr schema.GroupVersionResource, namespace string, _ metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	prefix := gvr.Resource + "/" + namespace + "/"
+	list := &unstructured.UnstructuredList{}
+	for key, obj := range f.objects {
+		if strings.HasPrefix(key, prefix) {
+			list.Items = append(list.Items, *obj.DeepCopy())
+		}
+	}
+	return list, nil
 }
 
 func (f *fakeKubernetesClient) CanI(_ context.Context, rule rbacRule) (bool, error) {
@@ -55,6 +114,20 @@ func (f *fakeKubernetesClient) GetPod(_ context.Context, namespace, name string)
 
 func (f *fakeKubernetesClient) ListPods(_ context.Context, namespace, selector string) ([]podState, error) {
 	return f.pods[namespace+"/"+selector], nil
+}
+
+func (f *fakeKubernetesClient) Exec(_ context.Context, req podExecRequest) error {
+	f.execs = append(f.execs, req)
+	if req.Stdin != nil {
+		data, _ := io.ReadAll(req.Stdin)
+		f.execInput = append(f.execInput, data)
+	}
+	if len(f.execErrs) > 0 {
+		err := f.execErrs[0]
+		f.execErrs = f.execErrs[1:]
+		return err
+	}
+	return nil
 }
 
 func TestDoctorChecksAreNonMutating(t *testing.T) {
@@ -149,6 +222,17 @@ func TestClaimNameIsKubernetesSafeAndBounded(t *testing.T) {
 	}
 	if strings.ContainsAny(name, "_/ ") || name != strings.ToLower(name) {
 		t.Fatalf("unsafe name=%q", name)
+	}
+}
+
+func TestClaimNameIncludesLeaseDerivedUniqueness(t *testing.T) {
+	a := claimName("asbx_111111111111", "same-slug")
+	b := claimName("asbx_222222222222", "same-slug")
+	if a == b {
+		t.Fatalf("claim names collided: %q", a)
+	}
+	if !strings.HasPrefix(a, "crabbox-same-slug-") || !strings.HasPrefix(b, "crabbox-same-slug-") {
+		t.Fatalf("claim names lost slug context: %q %q", a, b)
 	}
 }
 
