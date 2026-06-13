@@ -149,9 +149,8 @@ describe("NodeCoordinatorRuntime", () => {
     expect(terminal).toContain("pending.length + queuedInputFrames");
     expect(terminal).toContain("queuedInputFrames -= 1");
     expect(terminal).toContain("if (length === 0) return");
-    expect(terminal).toContain(
-      "hostVerifier: (fingerprint: string) => expectedHostKey === fingerprint",
-    );
+    expect(terminal).toContain("lastObservedHostKey = fingerprint");
+    expect(terminal).toContain("return expectedHostKey === fingerprint");
     expect(terminal).toContain("workspaceTerminalSSHReadyTimeoutMs");
     expect(terminal).toContain("for (const port of terminalPorts)");
     expect(terminal).toContain("await new Promise<void>((resolve) => setTimeout(resolve, 2_000))");

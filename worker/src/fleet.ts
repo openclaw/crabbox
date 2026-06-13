@@ -2489,6 +2489,7 @@ export class FleetCoordinator {
       const readyDeadline = Date.now() + workspaceTerminalSSHReadyTimeoutMs;
       const terminalPorts = uniqueNonEmpty([lease.sshPort, ...(lease.sshFallbackPorts ?? [])]);
       let lastConnectError: unknown = new Error("workspace SSH service is not ready");
+      let lastObservedHostKey = "";
       connect: while (Date.now() < readyDeadline) {
         for (const port of terminalPorts) {
           if (closed) break connect;
@@ -2519,7 +2520,10 @@ export class FleetCoordinator {
                   keepaliveCountMax: 3,
                   algorithms: { serverHostKey: ["ssh-ed25519"] },
                   hostHash: "sha256",
-                  hostVerifier: (fingerprint: string) => expectedHostKey === fingerprint,
+                  hostVerifier: (fingerprint: string) => {
+                    lastObservedHostKey = fingerprint;
+                    return expectedHostKey === fingerprint;
+                  },
                 });
             });
             if (closed) {
@@ -2542,7 +2546,14 @@ export class FleetCoordinator {
           await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
         }
       }
-      if (lastConnectError || !client) throw lastConnectError;
+      if (lastConnectError || !client) {
+        if (lastObservedHostKey && lastObservedHostKey !== expectedHostKey) {
+          throw new Error(
+            `workspace SSH host key mismatch expected=${expectedHostKey.slice(0, 16)} observed=${lastObservedHostKey.slice(0, 16)}`,
+          );
+        }
+        throw lastConnectError;
+      }
       if (closed) return;
       const connectedClient = client;
 
