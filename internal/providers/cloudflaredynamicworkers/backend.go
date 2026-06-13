@@ -328,7 +328,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, slug, _, err := b.resolveRunID(req.ID, "", false)
+	leaseID, slug, _, _, err := b.resolveRunID(req.ID, "", false)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -364,14 +364,16 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, _, claimed, err := b.resolveRunID(req.ID, "", false)
+	leaseID, _, claim, claimed, err := b.resolveRunID(req.ID, "", false)
 	if err != nil {
 		return err
 	}
 	if err := client.Delete(ctx, leaseID); err != nil {
 		if notFoundError(err) {
 			if claimed {
-				removeLeaseClaim(leaseID)
+				if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+					return err
+				}
 				fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
 			}
 			return nil
@@ -379,7 +381,9 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return providerError("delete metadata", err)
 	}
 	if claimed {
-		removeLeaseClaim(leaseID)
+		if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(b.rt.Stdout, "stopped %s provider=%s loader_metadata=%s\n", leaseID, providerName, leaseID)
 	return nil
@@ -406,7 +410,10 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
 				continue
 			}
-			removeLeaseClaim(claim.LeaseID)
+			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: %s claim removal failed for %s: %v\n", providerName, claim.LeaseID, err)
+				continue
+			}
 			removed++
 			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
 			continue
@@ -422,7 +429,10 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "warning: %s metadata delete failed for %s: %v\n", providerName, claim.LeaseID, err)
 			continue
 		}
-		removeLeaseClaim(claim.LeaseID)
+		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: %s claim removal failed for %s: %v\n", providerName, claim.LeaseID, err)
+			continue
+		}
 		removed++
 		fmt.Fprintf(b.rt.Stdout, "deleted terminal %s metadata and removed claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), status.Status)
 	}
@@ -473,25 +483,25 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 	return leaseID, "", slug, false, nil
 }
 
-func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, bool, error) {
+func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, LeaseClaim, bool, error) {
 	claim, ok, err := resolveLeaseClaim(identifier, b.cfg)
 	if err != nil {
-		return "", "", false, err
+		return "", "", LeaseClaim{}, false, err
 	}
 	if ok {
 		if repoRoot != "" {
 			server := claimServer(claim, blank(claim.Labels["state"], "unknown"))
 			if err := claimLease(claim.LeaseID, claim.Slug, b.cfg, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, server); err != nil {
-				return "", "", false, err
+				return "", "", LeaseClaim{}, false, err
 			}
 		}
-		return claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), true, nil
+		return claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), claim, true, nil
 	}
 	value := strings.TrimSpace(identifier)
 	if value == "" {
-		return "", "", false, exit(2, "%s id is required", providerName)
+		return "", "", LeaseClaim{}, false, exit(2, "%s id is required", providerName)
 	}
-	return value, newLeaseSlug(value), false, nil
+	return value, newLeaseSlug(value), LeaseClaim{}, false, nil
 }
 
 func (b *backend) buildRunRequest(req RunRequest, leaseID, workerID, cacheMode string) runRequest {

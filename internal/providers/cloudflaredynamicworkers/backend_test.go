@@ -1473,6 +1473,31 @@ func TestStopMissingRemotePreservesUnrelatedExactClaim(t *testing.T) {
 	}
 }
 
+func TestStopPreservesConcurrentlyReplacedClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		core.RemoveLeaseClaim("cfdw_race")
+		if err := core.ClaimLeaseForRepoProviderScope("cfdw_race", "replacement", "hetzner", "", t.TempDir(), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	if err := claimLease("cfdw_race", "race-claim", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_race", "race-claim", runStatus{ID: "cfdw_race", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := backend.Stop(context.Background(), StopRequest{ID: "race-claim"})
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, resolveErr := core.ResolveLeaseClaim("cfdw_race")
+	if resolveErr != nil || !ok || claim.Provider != "hetzner" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, resolveErr)
+	}
+}
+
 func TestCleanupDeletesTerminalMetadataBeforeClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var requests []string
@@ -1501,6 +1526,66 @@ func TestCleanupDeletesTerminalMetadataBeforeClaim(t *testing.T) {
 	}
 	if _, ok, err := resolveLeaseClaim("terminal-claim", backend.cfg); err != nil || ok {
 		t.Fatalf("claim after cleanup ok=%t err=%v", ok, err)
+	}
+}
+
+func TestCleanupPreservesClaimReplacedDuringMissingStatus(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stderr bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		core.RemoveLeaseClaim("cfdw_race")
+		if err := core.ClaimLeaseForRepoProviderScope("cfdw_race", "replacement", "hetzner", "", t.TempDir(), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	if err := claimLease("cfdw_race", "race-claim", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_race", "race-claim", runStatus{ID: "cfdw_race", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim("cfdw_race")
+	if err != nil || !ok || claim.Provider != "hetzner" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+	if !strings.Contains(stderr.String(), "claim changed; retry") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestCleanupPreservesClaimReplacedDuringTerminalDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stderr bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(runStatus{ID: "cfdw_race", Status: "succeeded"})
+			return
+		}
+		core.RemoveLeaseClaim("cfdw_race")
+		if err := core.ClaimLeaseForRepoProviderScope("cfdw_race", "replacement", "hetzner", "", t.TempDir(), time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	if err := claimLease("cfdw_race", "race-claim", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_race", "race-claim", runStatus{ID: "cfdw_race", Status: "succeeded"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := core.ResolveLeaseClaim("cfdw_race")
+	if err != nil || !ok || claim.Provider != "hetzner" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+	if !strings.Contains(stderr.String(), "claim changed; retry") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 

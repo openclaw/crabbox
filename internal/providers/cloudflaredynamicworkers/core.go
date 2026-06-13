@@ -116,6 +116,10 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+}
+
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
