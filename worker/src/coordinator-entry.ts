@@ -3,38 +3,58 @@ import { json } from "./http";
 import type { Env } from "./types";
 
 export type CoordinatorFetch = (request: Request) => Promise<Response>;
+export type PreparedCoordinatorRequest =
+  | { response: Response; authenticated: false }
+  | { request: Request; authenticated: boolean };
 
 export async function routeCoordinatorRequest(
   request: Request,
   env: Env,
   fleetFetch: CoordinatorFetch,
 ): Promise<Response> {
+  const prepared = await prepareCoordinatorRequest(request, env);
+  if ("response" in prepared) {
+    return prepared.response;
+  }
+  return fleetFetch(prepared.request);
+}
+
+export async function prepareCoordinatorRequest(
+  request: Request,
+  env: Env,
+): Promise<PreparedCoordinatorRequest> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/v1/health") {
-    return json({ ok: true, service: "crabbox-coordinator" });
+    return { response: json({ ok: true, service: "crabbox-coordinator" }), authenticated: false };
   }
   if (request.method === "GET" && url.pathname === "/") {
-    return new Response(null, { status: 302, headers: { location: "/portal" } });
+    return {
+      response: new Response(null, { status: 302, headers: { location: "/portal" } }),
+      authenticated: false,
+    };
   }
   const canonicalPortal = canonicalPortalRedirect(request, env, url);
   if (canonicalPortal) {
-    return canonicalPortal;
+    return { response: canonicalPortal, authenticated: false };
   }
   if (url.pathname.startsWith("/v1/auth/")) {
-    return fleetFetch(request);
+    return { request, authenticated: false };
   }
   if (url.pathname === "/portal/login" || url.pathname === "/portal/logout") {
-    return fleetFetch(request);
+    return { request, authenticated: false };
   }
   if (url.pathname.startsWith("/v1/internal/")) {
-    return json({ error: "not_found" }, { status: 404 });
+    return {
+      response: json({ error: "not_found" }, { status: 404 }),
+      authenticated: false,
+    };
   }
   if (
     isWebVNCAgentUpgrade(request, url) ||
     isCodeAgentUpgrade(request, url) ||
     isEgressAgentUpgrade(request, url)
   ) {
-    return fleetFetch(request);
+    return { request, authenticated: false };
   }
   const portal = url.pathname.startsWith("/portal");
   const authRequest = portal ? requestWithPortalCookie(request) : request;
@@ -43,14 +63,20 @@ export async function routeCoordinatorRequest(
     if (portal && request.method === "GET" && request.headers.get("upgrade") !== "websocket") {
       const login = new URL("/portal/login", url.origin);
       login.searchParams.set("returnTo", `${url.pathname}${url.search}`);
-      return new Response(null, {
-        status: 302,
-        headers: { location: login.pathname + login.search },
-      });
+      return {
+        response: new Response(null, {
+          status: 302,
+          headers: { location: login.pathname + login.search },
+        }),
+        authenticated: false,
+      };
     }
-    return json({ error: "unauthorized" }, { status: 401 });
+    return {
+      response: json({ error: "unauthorized" }, { status: 401 }),
+      authenticated: false,
+    };
   }
-  return fleetFetch(requestWithAuthContext(authRequest, auth));
+  return { request: requestWithAuthContext(authRequest, auth), authenticated: true };
 }
 
 function isWebVNCAgentUpgrade(request: Request, url: URL): boolean {

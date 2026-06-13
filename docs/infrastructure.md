@@ -90,6 +90,11 @@ GET /v1/health
 GET /v1/ready
 ```
 
+On `SIGTERM` or `SIGINT`, the service stops accepting requests and drains active
+HTTP, WebSocket, lifecycle, and provisioning operations before closing
+PostgreSQL. `CRABBOX_SHUTDOWN_TIMEOUT_MS` bounds that wait and defaults to two
+minutes.
+
 Build the container with `worker/` as the build context:
 
 ```sh

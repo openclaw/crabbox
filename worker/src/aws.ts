@@ -53,6 +53,7 @@ const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: strin
   },
 };
 const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 
 export interface AWSMacHost {
   id: string;
@@ -171,6 +172,7 @@ type DescribedSSHIngressRule = SSHIngressRule & { description: string };
 
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
+  allowEmpty?: boolean;
 }
 
 const sshIngressRangeFamilies = [
@@ -1205,61 +1207,118 @@ export class EC2SpotClient {
       group = items(record(existing["securityGroupInfo"])["item"])[0];
       groupID = asString(record(group)["groupId"]);
       if (!groupID) {
-        const created = await this.ec2(
-          "CreateSecurityGroup",
-          createSecurityGroupParams(name, vpcID),
-        );
-        groupID = asString(record(created)["groupId"]);
+        try {
+          const created = await this.ec2(
+            "CreateSecurityGroup",
+            createSecurityGroupParams(name, vpcID),
+          );
+          groupID = asString(record(created)["groupId"]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("InvalidGroup.Duplicate")) {
+            throw error;
+          }
+          group = await this.waitForSecurityGroup(name, vpcID, error);
+          groupID = asString(record(group)["groupId"]);
+        }
       }
     }
     if (!groupID) {
       throw new Error("aws security group id is empty");
     }
-    const cidrs = awsSSHCIDRs(config, this.env);
+    const cidrs = awsSSHCIDRs(config, this.env, options.allowEmpty);
     const ports = sshPorts(config);
-    if (options.reconcile !== "additive") {
-      await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
-    }
-    let compactedAfterRuleLimit = false;
-    for (const port of ports) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
-      await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes("InvalidPermission.NotFound")) {
-          throw error;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        if (options.reconcile !== "additive") {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- the whole ingress pass retries only on group propagation.
+          await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
         }
-      });
-      for (const cidr of cidrs) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
-        await this.allowTCP(groupID, port, cidr).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          if (message.includes("InvalidPermission.Duplicate")) {
-            return;
-          }
-          if (
-            options.reconcile !== "additive" &&
-            !compactedAfterRuleLimit &&
-            isAWSSecurityGroupRuleLimitError(message)
-          ) {
-            compactedAfterRuleLimit = true;
-            return this.compactSSHIngressForRuleLimit(groupID, ports, cidrs).then((compacted) => {
-              if (!compacted) {
-                throw error;
+        let compactedAfterRuleLimit = false;
+        for (const port of ports) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
+          await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!message.includes("InvalidPermission.NotFound")) {
+              throw error;
+            }
+          });
+          for (const cidr of cidrs) {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
+            await this.allowTCP(groupID, port, cidr).catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              if (message.includes("InvalidPermission.Duplicate")) {
+                return;
               }
-              return this.allowTCP(groupID, port, cidr).catch((retryError: unknown) => {
-                const retryMessage =
-                  retryError instanceof Error ? retryError.message : String(retryError);
-                if (!retryMessage.includes("InvalidPermission.Duplicate")) {
-                  throw retryError;
-                }
-              });
+              if (
+                options.reconcile !== "additive" &&
+                !compactedAfterRuleLimit &&
+                isAWSSecurityGroupRuleLimitError(message)
+              ) {
+                compactedAfterRuleLimit = true;
+                return this.compactSSHIngressForRuleLimit(groupID, ports, cidrs).then(
+                  (compacted) => {
+                    if (!compacted) {
+                      throw error;
+                    }
+                    return this.allowTCP(groupID, port, cidr).catch((retryError: unknown) => {
+                      const retryMessage =
+                        retryError instanceof Error ? retryError.message : String(retryError);
+                      if (!retryMessage.includes("InvalidPermission.Duplicate")) {
+                        throw retryError;
+                      }
+                    });
+                  },
+                );
+              }
+              throw error;
             });
           }
+        }
+        return groupID;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const delay = securityGroupVisibilityBackoffMs[attempt];
+        if (delay === undefined || !message.includes("InvalidGroup.NotFound")) {
           throw error;
-        });
+        }
+        // oxlint-disable-next-line eslint/no-await-in-loop -- EC2 group propagation is eventually consistent.
+        await sleep(delay);
+        group = undefined;
       }
     }
-    return groupID;
+  }
+
+  private async waitForSecurityGroup(
+    name: string,
+    vpcID: string,
+    duplicateError: unknown,
+  ): Promise<unknown> {
+    for (const delay of [0, ...securityGroupVisibilityBackoffMs]) {
+      if (delay > 0) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- EC2 group discovery is eventually consistent.
+        await sleep(delay);
+      }
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each lookup follows the bounded backoff.
+        const raced = await this.ec2("DescribeSecurityGroups", {
+          "Filter.1.Name": "group-name",
+          "Filter.1.Value.1": name,
+          "Filter.2.Name": "vpc-id",
+          "Filter.2.Value.1": vpcID,
+        });
+        const group = items(record(raced["securityGroupInfo"])["item"])[0];
+        if (asString(record(group)["groupId"])) {
+          return group;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("InvalidGroup.NotFound")) {
+          throw error;
+        }
+      }
+    }
+    throw duplicateError;
   }
 
   private async discoverMacHostID(
@@ -1624,10 +1683,10 @@ export class EC2SpotClient {
   }
 }
 
-function awsSSHCIDRs(config: LeaseConfig, env: Env): string[] {
+function awsSSHCIDRs(config: LeaseConfig, env: Env, allowEmpty = false): string[] {
   const configured = [...config.awsSSHCIDRs, ...(env.CRABBOX_AWS_SSH_CIDRS ?? "").split(",")];
   const cidrs = validatedCIDRs(configured, "CRABBOX_AWS_SSH_CIDRS");
-  if (cidrs.length === 0) {
+  if (cidrs.length === 0 && !allowEmpty) {
     throw new Error(
       "AWS SSH source CIDR is required; set CRABBOX_AWS_SSH_CIDRS or use Cloudflare request IP forwarding",
     );
@@ -1972,7 +2031,7 @@ function isCrabboxManagedSecurityGroup(group: unknown): boolean {
   );
 }
 
-function isAWSSecurityGroupRuleLimitError(message: string): boolean {
+export function isAWSSecurityGroupRuleLimitError(message: string): boolean {
   return message.includes("RulesPerSecurityGroupLimitExceeded");
 }
 

@@ -167,4 +167,49 @@ describe("NodeCoordinatorRuntime", () => {
       expect(order).toEqual(["message", "close"]);
     });
   });
+
+  it("drains socket operations before stopping jobs and closing storage", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const messageDone = deferred<void>();
+    const socket = new EventEmitter();
+    const close = vi.fn<() => void>(() => {
+      queueMicrotask(() => socket.emit("close", 1000, Buffer.from("shutdown")));
+    });
+    Object.assign(socket, {
+      close,
+      terminate: vi.fn<() => void>(),
+      readyState: 1,
+    });
+    const message = vi.fn<() => Promise<void>>(async () => {
+      await messageDone.promise;
+      await runtime.scheduleAlarm(Date.now() + 60_000);
+    });
+
+    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "code-agent" }, [], {
+      message,
+      close: vi.fn<(code: number, reason: string) => void>(),
+      error: vi.fn<() => void>(),
+    });
+    socket.emit("message", Buffer.from("{}"), false);
+    await vi.waitFor(() => expect(message).toHaveBeenCalledOnce());
+
+    runtime.beginShutdown();
+    expect(close).not.toHaveBeenCalled();
+    const stopped = runtime.stop();
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(mocks.boss.stop).not.toHaveBeenCalled();
+    expect(mocks.storage.close).not.toHaveBeenCalled();
+    messageDone.resolve();
+    await stopped;
+
+    expect(mocks.boss.send).toHaveBeenCalledWith(
+      "coordinator-alarm",
+      null,
+      expect.objectContaining({ singletonKey: "fleet" }),
+    );
+    expect(mocks.boss.send.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      mocks.boss.stop.mock.invocationCallOrder.at(-1) ?? 0,
+    );
+    expect(mocks.storage.close).toHaveBeenCalledOnce();
+  });
 });

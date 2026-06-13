@@ -4,74 +4,123 @@ import { extname, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-import { routeCoordinatorRequest } from "../src/coordinator-entry";
+import { prepareCoordinatorRequest, routeCoordinatorRequest } from "../src/coordinator-entry";
 import { FleetCoordinator } from "../src/fleet";
 import type { Env } from "../src/types";
 import { NodeCoordinatorRuntime, type NodeUpgradeContext } from "./node-runtime";
-
-const noop = () => {};
-const maxRequestBodyBytes = 16 * 1024 * 1024;
-
-class RequestBodyTooLargeError extends Error {}
-
-class AsyncMutex {
-  private tail: Promise<void> = Promise.resolve();
-
-  async run<T>(callback: () => Promise<T>): Promise<T> {
-    const previous = this.tail;
-    let release = noop;
-    this.tail = new Promise<void>((resolvePromise) => {
-      release = resolvePromise;
-    });
-    await previous;
-    try {
-      return await callback();
-    } finally {
-      release();
-    }
-  }
-}
+import {
+  AsyncMutex,
+  AsyncOperationTracker,
+  RequestBodyTooLargeError,
+  closeServer,
+  drainAndStop,
+  fleetRequestQueue,
+  isReadinessRequestMethod,
+  readNodeRequestBody,
+  requestBodyLimit,
+  settlesWithin,
+  shouldReadUnauthenticatedRequestBody,
+  unauthenticatedRequestBodyBytes,
+  writeNodeResponseBody,
+} from "./server-support";
 
 const databaseURL = requiredEnv("DATABASE_URL");
 const port = positiveInt(process.env["PORT"], 8080);
+const shutdownTimeoutMs = positiveInt(process.env["CRABBOX_SHUTDOWN_TIMEOUT_MS"], 120_000);
 const env = process.env as unknown as Env;
 const runtime = new NodeCoordinatorRuntime(databaseURL);
 const coordinator = new FleetCoordinator(runtime, env);
 const lifecycleMutex = new AsyncMutex();
+const activeRequests = new AsyncOperationTracker();
 const publicDirectory = resolve(fileURLToPath(new URL("../public", import.meta.url)));
+let shutdownPromise: Promise<void> | undefined;
 
 runtime.setOperationRunner((callback) => lifecycleMutex.run(callback));
-await runtime.start(() => lifecycleMutex.run(() => coordinator.alarm()));
+await runtime.start(() => coordinator.alarm());
 
-const server = createServer(async (request, response) => {
+const server = createServer((request, response) => {
+  void activeRequests
+    .run(() => handleRequest(request, response))
+    .catch((error) => {
+      console.error("coordinator request handler failed", error);
+      response.destroy();
+    });
+});
+
+async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   try {
-    const webRequest = await webRequestFromNode(request);
-    if (new URL(webRequest.url).pathname === "/v1/ready") {
-      await runtime.storage.ready();
-      await writeResponse(response, Response.json({ ok: true }));
+    const requestMetadata = webRequestFromNode(request);
+    if (new URL(requestMetadata.url).pathname === "/v1/ready") {
+      let result: Response;
+      if (isReadinessRequestMethod(requestMetadata.method)) {
+        await runtime.storage.ready();
+        result =
+          requestMetadata.method === "HEAD"
+            ? new Response(null, { status: 200 })
+            : Response.json({ ok: true });
+      } else {
+        result = Response.json(
+          { error: "method_not_allowed" },
+          { status: 405, headers: { allow: "GET, HEAD" } },
+        );
+      }
+      await writeResponse(response, result, true);
+      request.destroy();
       return;
     }
-    const asset = await staticAsset(webRequest);
+    const asset = await staticAsset(requestMetadata);
     if (asset) {
       await writeResponse(response, asset);
       return;
     }
-    const result = await routeCoordinatorRequest(webRequest, env, runFleetRequest);
+    const prepared = await prepareCoordinatorRequest(requestMetadata, env);
+    if ("response" in prepared) {
+      const readBody = shouldReadUnauthenticatedRequestBody(request.method);
+      if (readBody) {
+        await readNodeRequestBody(request, unauthenticatedRequestBodyBytes);
+      }
+      await writeResponse(response, prepared.response, !readBody);
+      if (!readBody) {
+        request.destroy();
+      }
+      return;
+    }
+    const webRequest = await requestWithNodeBody(
+      prepared.request,
+      request,
+      requestBodyLimit(prepared.request, prepared.authenticated),
+    );
+    const result = await runFleetRequest(webRequest);
     await writeResponse(response, result);
   } catch (error) {
     if (error instanceof RequestBodyTooLargeError) {
+      response.setHeader("connection", "close");
       await writeResponse(response, Response.json({ error: "request_too_large" }, { status: 413 }));
+      request.destroy();
       return;
     }
     console.error("coordinator request failed", error);
     await writeResponse(response, Response.json({ error: "internal_error" }, { status: 500 }));
   }
+}
+
+server.on("upgrade", (request, socket, head) => {
+  void activeRequests
+    .run(() => handleUpgrade(request, socket, head))
+    .catch((error) => {
+      console.error("coordinator websocket upgrade handler failed", error);
+      socket.destroy();
+    });
 });
 
-server.on("upgrade", async (request, socket, head) => {
+async function handleUpgrade(
+  request: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+): Promise<void> {
   const context: NodeUpgradeContext = { request, socket, head, upgraded: false };
   try {
-    const webRequest = await webRequestFromNode(request);
+    const webRequest = webRequestFromNode(request);
     const response = await runtime.runWithUpgrade(context, () =>
       routeCoordinatorRequest(webRequest, env, runFleetRequest),
     );
@@ -87,30 +136,57 @@ server.on("upgrade", async (request, socket, head) => {
       );
     }
   }
-});
+}
 
 server.listen(port, () => {
   console.log(`crabbox coordinator listening on ${port}`);
 });
 
 process.on("SIGTERM", () => {
-  void shutdown();
+  void shutdown().catch(shutdownFailed);
 });
 process.on("SIGINT", () => {
-  void shutdown();
+  void shutdown().catch(shutdownFailed);
 });
 
 async function runFleetRequest(request: Request): Promise<Response> {
-  return lifecycleMutex.run(() => coordinator.fetch(request));
+  switch (fleetRequestQueue(request)) {
+    case "direct":
+      return coordinator.fetch(request);
+    case "lifecycle":
+      return lifecycleMutex.run(() => coordinator.fetch(request));
+  }
 }
 
 async function shutdown(): Promise<void> {
-  server.close();
-  await runtime.stop();
+  if (shutdownPromise) {
+    return shutdownPromise;
+  }
+  shutdownPromise = orderlyShutdown();
+  return shutdownPromise;
+}
+
+async function orderlyShutdown(): Promise<void> {
+  runtime.beginShutdown();
+  const serverClosed = closeServer(server);
+  server.closeIdleConnections?.();
+  const drained = await settlesWithin(
+    drainAndStop(activeRequests, lifecycleMutex, () => runtime.stop(), serverClosed),
+    shutdownTimeoutMs,
+  );
+  if (!drained) {
+    console.error(`coordinator shutdown exceeded ${shutdownTimeoutMs}ms`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 
-async function webRequestFromNode(request: IncomingMessage): Promise<Request> {
+function shutdownFailed(error: unknown): void {
+  console.error("coordinator shutdown failed", error);
+  process.exit(1);
+}
+
+function webRequestFromNode(request: IncomingMessage): Request {
   const protocol = firstHeader(request.headers["x-forwarded-proto"]) || "http";
   const host =
     firstHeader(request.headers["x-forwarded-host"]) || request.headers.host || "localhost";
@@ -124,36 +200,35 @@ async function webRequestFromNode(request: IncomingMessage): Promise<Request> {
     }
   }
   const method = request.method || "GET";
-  const body = method === "GET" || method === "HEAD" ? undefined : await readRequestBody(request);
-  const init: RequestInit = { method, headers };
-  if (body !== undefined) {
-    init.body = body;
-  }
-  return new Request(url, init);
+  return new Request(url, { method, headers });
 }
 
-async function readRequestBody(request: IncomingMessage): Promise<ArrayBuffer | undefined> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.byteLength;
-    if (size > maxRequestBodyBytes) {
-      throw new RequestBodyTooLargeError();
-    }
-    chunks.push(buffer);
-  }
-  return chunks.length > 0 ? Uint8Array.from(Buffer.concat(chunks)).buffer : undefined;
+async function requestWithNodeBody(
+  request: Request,
+  nodeRequest: IncomingMessage,
+  limit: number,
+): Promise<Request> {
+  if (request.method === "GET" || request.method === "HEAD") return request;
+  const body = await readNodeRequestBody(nodeRequest, limit);
+  // oxlint-disable-next-line unicorn/no-invalid-fetch-options -- GET and HEAD return above.
+  return body === undefined ? request : new Request(request, { body });
 }
 
-async function writeResponse(response: ServerResponse, result: Response): Promise<void> {
+async function writeResponse(
+  response: ServerResponse,
+  result: Response,
+  closeConnection = false,
+): Promise<void> {
   response.statusCode = result.status;
   result.headers.forEach((value, name) => response.setHeader(name, value));
+  if (closeConnection) {
+    response.setHeader("connection", "close");
+  }
   const body = Buffer.from(await result.arrayBuffer());
   if (!response.hasHeader("content-length")) {
     response.setHeader("content-length", body.byteLength);
   }
-  response.end(body);
+  await writeNodeResponseBody(response, body);
 }
 
 async function writeUpgradeResponse(socket: Duplex, response: Response): Promise<void> {

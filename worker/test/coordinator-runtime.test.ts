@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CloudflareCoordinatorRuntime,
+  coordinatorRequestQueue,
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
@@ -38,6 +39,10 @@ class MemoryRuntime implements CoordinatorRuntime {
   alarmTime?: number;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
 
+  runExclusive<T>(callback: () => Promise<T>): Promise<T> {
+    return callback();
+  }
+
   createWebSocketUpgrade(): never {
     throw new Error("websocket upgrade not configured");
   }
@@ -73,6 +78,23 @@ class MemoryRuntime implements CoordinatorRuntime {
 }
 
 describe("coordinator runtimes", () => {
+  it("keeps provider-backed portal requests outside the lifecycle queue", () => {
+    for (const [method, path] of [
+      ["GET", "/portal"],
+      ["GET", "/portal/admin/health"],
+      ["GET", "/portal/hosts/aws/h-123"],
+      ["POST", "/portal/hosts/aws/h-123/vnc"],
+      ["POST", "/portal/leases/example/release"],
+    ]) {
+      expect(
+        coordinatorRequestQueue(new Request(`https://coordinator.test${path}`, { method })),
+      ).toBe("direct");
+    }
+    expect(coordinatorRequestQueue(new Request("https://coordinator.test/portal/login"))).toBe(
+      "lifecycle",
+    );
+  });
+
   it("runs the fleet coordinator without a Durable Object", async () => {
     const coordinator = new FleetCoordinator(new MemoryRuntime(), {
       CRABBOX_DEFAULT_ORG: "example-org",
@@ -113,5 +135,65 @@ describe("coordinator runtimes", () => {
     expect(runtime.socketAttachment(socket)).toBe(attachment);
     expect(storage.setAlarm).toHaveBeenCalledWith(1234);
     expect(storage.deleteAlarm).toHaveBeenCalledOnce();
+  });
+
+  it("serializes Cloudflare coordinator state transitions", async () => {
+    const state = {
+      storage: {},
+    } as unknown as DurableObjectState;
+    const runtime = new CloudflareCoordinatorRuntime(state);
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = runtime.runExclusive(async () => {
+      order.push("first:start");
+      await firstBlocked;
+      order.push("first:end");
+    });
+    const second = runtime.runExclusive(async () => {
+      order.push("second");
+    });
+
+    await Promise.resolve();
+    expect(order).toEqual(["first:start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first:start", "first:end", "second"]);
+  });
+
+  it("serializes fallback control socket messages with state transitions", async () => {
+    const state = {
+      storage: {},
+    } as unknown as DurableObjectState;
+    const runtime = new CloudflareCoordinatorRuntime(state);
+    const listeners = new Map<string, EventListener>();
+    const socket = {
+      accept: vi.fn<() => void>(),
+      addEventListener: vi.fn<(type: string, listener: EventListener) => void>((type, listener) => {
+        listeners.set(type, listener);
+      }),
+    } as unknown as WebSocket;
+    const message = vi.fn<() => Promise<void>>(async () => {});
+    let releaseTransition!: () => void;
+    const transitionBlocked = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    const transition = runtime.runExclusive(async () => transitionBlocked);
+    runtime.acceptWebSocket(socket, { kind: "control" }, [], {
+      message,
+      close: () => {},
+      error: () => {},
+    });
+
+    listeners.get("message")?.({ data: "{}" } as MessageEvent);
+    await Promise.resolve();
+    expect(message).not.toHaveBeenCalled();
+
+    releaseTransition();
+    await transition;
+    await vi.waitFor(() => expect(message).toHaveBeenCalledOnce());
   });
 });

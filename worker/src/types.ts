@@ -330,6 +330,8 @@ export interface LeaseRecord {
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;
+  cleanupStartedAt?: string;
+  cleanupClaimExpiresAt?: string;
   releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;
@@ -403,6 +405,8 @@ export interface ReadyPoolReturnRequest {
 export interface LeaseNetworkState {
   sshSourceCIDRs?: string[];
   sshSourceCIDRsComplete?: boolean;
+  awsSecurityGroupID?: string;
+  awsSubnetID?: string;
 }
 
 export type LeaseShareRole = "use" | "manage";

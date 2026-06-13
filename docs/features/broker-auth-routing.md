@@ -142,6 +142,19 @@ Worker sees the request. Configure either a service token or a pre-minted JWT:
 fallbacks.) These credentials satisfy Cloudflare Access only — the Worker still requires the
 Crabbox bearer or signed user token.
 
+For coordinators behind an upstream identity proxy that consumes the `Authorization` header,
+set `CRABBOX_COORDINATOR_TOKEN_COMMAND` to a JSON argv array. Crabbox executes it directly,
+without a shell, before each HTTP request and WebSocket reconnect. The command must print one
+bearer token line and takes precedence over `CRABBOX_COORDINATOR_TOKEN`. The proxy must inject a
+trusted identity header accepted by the coordinator after validating that token.
+
+```bash
+export CRABBOX_COORDINATOR_TOKEN_COMMAND='["identity-cli","token","--audience","coordinator"]'
+```
+
+Only set this in trusted machine-level configuration. Project config files cannot define token
+commands.
+
 Server-side, when `CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD` are configured, the
 Worker verifies the `Cf-Access-Jwt-Assertion` header against Cloudflare Access certs (RS256,
 matching `aud`, `iss`, and expiry) before trusting any Access identity. Without both

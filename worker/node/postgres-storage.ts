@@ -32,6 +32,11 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
       )
     `);
     await this.pool.query(`
+      alter table ${table}
+      add column if not exists value_text text,
+      add column if not exists value_text_updated_at timestamptz
+    `);
+    await this.pool.query(`
       create index if not exists coordinator_kv_updated_at_idx
       on ${table} (updated_at)
     `);
@@ -46,22 +51,38 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
   }
 
   async get<T>(key: string): Promise<T | undefined> {
-    const result = await this.pool.query<{ value: T }>(
-      `select value from ${table} where key = $1`,
+    const result = await this.pool.query<{ encoded_value: unknown }>(
+      `
+        select case
+          when value_text_updated_at = updated_at then value_text
+          else value::text
+        end as encoded_value
+        from ${table}
+        where key = $1
+      `,
       [key],
     );
-    return result.rows[0]?.value;
+    const row = result.rows[0];
+    return row ? decodeStoredValue<T>(row.encoded_value) : undefined;
   }
 
   async put<T>(key: string, value: T): Promise<void> {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) {
+      throw new TypeError("coordinator storage cannot persist undefined");
+    }
+    const jsonbEncoded = jsonbCompatibleEncoding(encoded);
     await this.pool.query(
       `
-        insert into ${table} (key, value)
-        values ($1, $2::jsonb)
+        insert into ${table} (key, value, value_text, value_text_updated_at)
+        values ($1, $2::jsonb, $3, now())
         on conflict (key) do update
-        set value = excluded.value, updated_at = now()
+        set value = excluded.value,
+            value_text = excluded.value_text,
+            value_text_updated_at = now(),
+            updated_at = now()
       `,
-      [key, JSON.stringify(value)],
+      [key, jsonbEncoded, encoded],
     );
   }
 
@@ -70,17 +91,42 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
   }
 
   async list<T>({ prefix = "" }: { prefix?: string } = {}): Promise<Map<string, T>> {
-    const result = await this.pool.query<{ key: string; value: T }>(
+    const result = await this.pool.query<{ key: string; encoded_value: unknown }>(
       `
-        select key, value
+        select key,
+               case
+                 when value_text_updated_at = updated_at then value_text
+                 else value::text
+               end as encoded_value
         from ${table}
         where key like $1 escape '\\'
         order by key
       `,
       [`${escapeLike(prefix)}%`],
     );
-    return new Map(result.rows.map((row) => [row.key, row.value]));
+    return new Map(result.rows.map((row) => [row.key, decodeStoredValue<T>(row.encoded_value)]));
   }
+}
+
+function decodeStoredValue<T>(value: unknown): T {
+  return (typeof value === "string" ? JSON.parse(value) : value) as T;
+}
+
+function jsonbCompatibleEncoding(encoded: string): string {
+  if (!encoded.includes("\\u0000")) return encoded;
+  return JSON.stringify(replaceNulCharacters(JSON.parse(encoded)));
+}
+
+function replaceNulCharacters(value: unknown): unknown {
+  if (typeof value === "string") return value.replaceAll("\0", "\uFFFD");
+  if (Array.isArray(value)) return value.map(replaceNulCharacters);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key.replaceAll("\0", "\uFFFD"),
+      replaceNulCharacters(item),
+    ]),
+  );
 }
 
 function escapeLike(value: string): string {

@@ -43,6 +43,9 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   private readonly sockets = new Set<NodeWebSocket>();
   private readonly socketAlive = new WeakMap<NodeWebSocket, boolean>();
   private readonly socketOperationTails = new WeakMap<NodeWebSocket, Promise<void>>();
+  private readonly activeSocketOperations = new Set<Promise<unknown>>();
+  private socketClosures?: Promise<void>[];
+  private shuttingDown = false;
   private alarmHandler?: () => Promise<void>;
   private operationRunner = async <T>(callback: () => Promise<T>): Promise<T> => callback();
   private alarmRun: Promise<void> = Promise.resolve();
@@ -99,11 +102,26 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     this.operationRunner = runner;
   }
 
-  async stop(): Promise<void> {
+  runExclusive<T>(callback: () => Promise<T>): Promise<T> {
+    return this.operationRunner(callback);
+  }
+
+  beginShutdown(): void {
+    this.shuttingDown = true;
     clearInterval(this.pingInterval);
-    for (const socket of this.sockets) {
-      socket.close(1012, "coordinator shutting down");
-    }
+  }
+
+  private closeSocketsForShutdown(): void {
+    if (this.socketClosures) return;
+    this.socketClosures = [...this.sockets].map((socket) => closeSocketForShutdown(socket));
+  }
+
+  async stop(): Promise<void> {
+    this.beginShutdown();
+    this.closeSocketsForShutdown();
+    await Promise.allSettled(this.socketClosures ?? []);
+    await this.drainSocketOperations();
+    await this.alarmRun;
     await this.boss.stop({ graceful: true, timeout: 10_000 });
     await this.storage.close();
   }
@@ -113,6 +131,9 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   }
 
   createWebSocketUpgrade(): CoordinatorWebSocketUpgrade {
+    if (this.shuttingDown) {
+      throw new Error("coordinator is shutting down");
+    }
     const context = this.upgradeContext.getStore();
     if (!context || context.upgraded) {
       throw new Error("websocket upgrade context is unavailable");
@@ -244,7 +265,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     // request that currently owns the lifecycle queue. Control frames mutate
     // lease state and stay serialized with HTTP requests and alarms.
     if (!isBridgeDataAttachment(attachment)) {
-      return this.operationRunner(operation);
+      return this.trackSocketOperation(this.operationRunner(operation));
     }
     const run = (this.socketOperationTails.get(socket) ?? Promise.resolve()).then(operation);
     this.socketOperationTails.set(
@@ -254,8 +275,57 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
         () => undefined,
       ),
     );
-    return run;
+    return this.trackSocketOperation(run);
   }
+
+  private trackSocketOperation<T>(operation: Promise<T>): Promise<T> {
+    this.activeSocketOperations.add(operation);
+    void operation.then(
+      () => this.activeSocketOperations.delete(operation),
+      () => this.activeSocketOperations.delete(operation),
+    );
+    return operation;
+  }
+
+  private async drainSocketOperations(): Promise<void> {
+    const active = [...this.activeSocketOperations];
+    if (active.length === 0) return;
+    await Promise.allSettled(active);
+    return this.drainSocketOperations();
+  }
+}
+
+function closeSocketForShutdown(socket: NodeWebSocket): Promise<void> {
+  if (socket.readyState === NodeWebSocket.CLOSED) {
+    return Promise.resolve();
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onClose: (() => void) | undefined;
+  const closed = new Promise<void>((resolve) => {
+    onClose = resolve;
+    socket.once("close", onClose);
+  });
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      try {
+        socket.terminate();
+      } finally {
+        resolve();
+      }
+    }, 2_000);
+    timer.unref();
+  });
+  try {
+    socket.close(1012, "coordinator shutting down");
+  } catch {
+    if (timer) clearTimeout(timer);
+    if (onClose) socket.off("close", onClose);
+    return Promise.resolve();
+  }
+  return Promise.race([closed, timedOut]).finally(() => {
+    if (timer) clearTimeout(timer);
+    if (onClose) socket.off("close", onClose);
+  });
 }
 
 function webSocketData(data: RawData, isBinary: boolean): string | ArrayBuffer {

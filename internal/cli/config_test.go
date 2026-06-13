@@ -18,6 +18,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_COORDINATOR_MODE",
 		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
 		"CRABBOX_COORDINATOR_TOKEN",
+		"CRABBOX_COORDINATOR_TOKEN_COMMAND",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
 		"CRABBOX_HOST_ID",
@@ -285,6 +286,36 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_HOSTINGER_RELEASE_ACTION",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestCoordinatorTokenCommandEnv(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", `["token-helper","--scope","example"]`)
+	cfg := baseConfig()
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.CoordTokenCommand, "\x00"); got != "token-helper\x00--scope\x00example" {
+		t.Fatalf("token command=%q", cfg.CoordTokenCommand)
+	}
+}
+
+func TestCoordinatorTokenCommandEnvRejectsInvalidArgv(t *testing.T) {
+	for name, value := range map[string]string{
+		"not-json":  "token-helper",
+		"empty":     `[]`,
+		"empty-arg": `["token-helper",""]`,
+		"newline":   `["token-helper","bad\narg"]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", value)
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err == nil {
+				t.Fatal("invalid token command was accepted")
+			}
+		})
 	}
 }
 

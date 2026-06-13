@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -44,6 +45,7 @@ type Config struct {
 	brokerProvider                string
 	BrokerAutoWebVNC              bool
 	CoordToken                    string
+	CoordTokenCommand             []string
 	CoordAdminToken               string
 	HostID                        string
 	Access                        AccessConfig
@@ -4686,6 +4688,21 @@ func applyEnv(cfg *Config) error {
 		cfg.BrokerAutoWebVNC = value
 	}
 	cfg.CoordToken = getenv("CRABBOX_COORDINATOR_TOKEN", cfg.CoordToken)
+	if raw := strings.TrimSpace(os.Getenv("CRABBOX_COORDINATOR_TOKEN_COMMAND")); raw != "" {
+		var command []string
+		if err := json.Unmarshal([]byte(raw), &command); err != nil {
+			return fmt.Errorf("CRABBOX_COORDINATOR_TOKEN_COMMAND must be a JSON argv array: %w", err)
+		}
+		if len(command) == 0 {
+			return errors.New("CRABBOX_COORDINATOR_TOKEN_COMMAND must contain an executable")
+		}
+		for _, arg := range command {
+			if strings.TrimSpace(arg) == "" || strings.ContainsAny(arg, "\r\n\x00") {
+				return errors.New("CRABBOX_COORDINATOR_TOKEN_COMMAND contains an invalid argv entry")
+			}
+		}
+		cfg.CoordTokenCommand = append([]string(nil), command...)
+	}
 	cfg.CoordAdminToken = getenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", getenv("CRABBOX_ADMIN_TOKEN", cfg.CoordAdminToken))
 	cfg.HostID = getenv("CRABBOX_HOST_ID", cfg.HostID)
 	cfg.Access.ClientID = getenv("CRABBOX_ACCESS_CLIENT_ID", getenv("CF_ACCESS_CLIENT_ID", cfg.Access.ClientID))

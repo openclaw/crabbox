@@ -67,7 +67,7 @@ func configShowView(cfg Config) map[string]any {
 		"coordinator":        cfg.Coordinator,
 		"brokerMode":         cfg.BrokerMode,
 		"brokerAutoWebVNC":   cfg.BrokerAutoWebVNC,
-		"brokerAuth":         tokenState(cfg.CoordToken),
+		"brokerAuth":         coordinatorTokenState(cfg),
 		"brokerAdminAuth":    tokenState(cfg.CoordAdminToken),
 		"accessAuth":         accessAuthState(cfg.Access),
 		"sshKey":             cfg.SSHKey,
@@ -360,7 +360,7 @@ func configShowView(cfg Config) map[string]any {
 func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "config=%s\n", userConfigPath())
 	fmt.Fprintf(w, "provider=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", cfg.Provider, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, cfg.ServerType, cfg.Profile)
-	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, tokenState(cfg.CoordToken), tokenState(cfg.CoordAdminToken))
+	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t auth=%s admin_auth=%s\n", blank(cfg.Coordinator, "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, coordinatorTokenState(cfg), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
 	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg)), len(syncIncludes(cfg)), cfg.Sync.Timeout)
@@ -639,6 +639,13 @@ func tokenState(token string) string {
 		return "missing"
 	}
 	return "configured"
+}
+
+func coordinatorTokenState(cfg Config) string {
+	if len(cfg.CoordTokenCommand) > 0 {
+		return "command"
+	}
+	return tokenState(cfg.CoordToken)
 }
 
 func accessAuthState(access AccessConfig) string {

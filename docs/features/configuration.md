@@ -982,6 +982,8 @@ over both config files. The full list is in
 CRABBOX_CONFIG                  explicit config path (replaces file search)
 CRABBOX_COORDINATOR             broker URL
 CRABBOX_COORDINATOR_TOKEN       broker user token
+CRABBOX_COORDINATOR_TOKEN_COMMAND
+                               JSON argv array that prints a fresh broker bearer token
 CRABBOX_COORDINATOR_ADMIN_TOKEN broker admin token (also CRABBOX_ADMIN_TOKEN)
 CRABBOX_ACCESS_CLIENT_ID        Cloudflare Access service-token id
 CRABBOX_ACCESS_CLIENT_SECRET    Cloudflare Access service-token secret

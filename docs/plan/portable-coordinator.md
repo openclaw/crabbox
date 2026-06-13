@@ -56,6 +56,7 @@ Runtime-dependent operations are now behind `CoordinatorRuntime`:
 ```ts
 interface CoordinatorRuntime {
   storage: CoordinatorStorage;
+  runExclusive<T>(callback: () => Promise<T>): Promise<T>;
   createWebSocketUpgrade(): CoordinatorWebSocketUpgrade;
   getWebSockets(): Iterable<WebSocket>;
   socketAttachment<T>(socket: WebSocket): T | undefined;
@@ -65,6 +66,9 @@ interface CoordinatorRuntime {
   clearAlarm(): Promise<void>;
 }
 ```
+
+`runExclusive` serializes lifecycle state transitions, alarms, and control
+messages. Provider provisioning and bridge data traffic run outside that queue.
 
 The first extraction should preserve the current key format (`lease:*`,
 `run:*`, ticket keys, image keys, and cleanup keys). A normalized relational
@@ -81,6 +85,8 @@ Start with one compatibility table:
 create table coordinator_kv (
   key text primary key,
   value jsonb not null,
+  value_text text,
+  value_text_updated_at timestamptz,
   updated_at timestamptz not null default now()
 );
 
@@ -91,17 +97,21 @@ create index coordinator_kv_updated_at_idx
 Use parameterized prefix queries. Keep pg-boss in its own schema. Do not place
 provider credentials in coordinator records.
 
-Initial deployment uses one process-level fleet mutex. Before enabling multiple
-replicas, replace it with a dedicated PostgreSQL connection holding a
-session-level advisory lock for each fleet mutation. Provider provisioning
-should then become a phased state transition:
+The initial single-replica runtime serializes fleet lifecycle mutations with a
+process queue. Lease creation uses the same queue for reservation and
+finalization while provider provisioning runs outside it. A provider call
+therefore cannot stall heartbeats, releases, control messages, or proxied code
+traffic, while concurrent creates still make cost reservations in order. Before
+enabling multiple replicas, replace the process queue with PostgreSQL advisory
+locks for each fleet mutation. Provisioning is a phased state transition:
 
 1. lock, validate limits, and persist a `provisioning` reservation;
 2. unlock and call the provider;
 3. lock and finalize the lease or record cleanup-required failure state.
 
-That avoids holding a database transaction across cloud API calls while keeping
-cost and capacity decisions atomic.
+The lease record is persisted before the cloud API call and checked again before
+finalization, so concurrent release remains recoverable without holding a
+database transaction across provisioning.
 
 ## Maintenance
 

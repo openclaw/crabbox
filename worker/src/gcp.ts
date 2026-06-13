@@ -13,6 +13,7 @@ const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const tokenURL = "https://oauth2.googleapis.com/token";
 const defaultImage = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64";
 const firewallName = "crabbox-ssh";
+const firewallVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 
 interface TokenCache {
   token: string;
@@ -471,8 +472,58 @@ export class GCPClient {
       await this.waitGlobalOperation(op);
       return;
     }
-    const op = await this.gcp<GCPOperation>("POST", "/global/firewalls", firewall);
-    await this.waitGlobalOperation(op);
+    try {
+      const op = await this.gcp<GCPOperation>("POST", "/global/firewalls", firewall);
+      await this.waitGlobalOperation(op);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("http 409")) {
+        throw error;
+      }
+      await this.reconcileRacedFirewall(name, firewall, error);
+    }
+  }
+
+  private async reconcileRacedFirewall(
+    name: string,
+    firewall: Record<string, unknown>,
+    conflictError: unknown,
+  ): Promise<void> {
+    for (const delay of [0, ...firewallVisibilityBackoffMs]) {
+      if (delay > 0) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- firewall insertion is eventually consistent.
+        await sleep(delay);
+      }
+      let raced: { description?: string } | undefined;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each lookup follows bounded propagation backoff.
+        raced = await this.gcp<{ description?: string }>("GET", `/global/firewalls/${name}`);
+      } catch (error) {
+        if (isNotFound(error)) {
+          continue;
+        }
+        throw error;
+      }
+      if (!raced.description?.includes("Crabbox-managed")) {
+        throw new Error(`gcp firewall ${name} exists but is not Crabbox-managed`, {
+          cause: conflictError,
+        });
+      }
+      try {
+        // A completed update proves the raced insert is visible and the desired policy is effective.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- a conflicting insert may still be finishing.
+        const op = await this.gcp<GCPOperation>("PUT", `/global/firewalls/${name}`, firewall);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- the raced policy must finish before this caller proceeds.
+        await this.waitGlobalOperation(op);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message.toLowerCase() : String(error);
+        if (!message.includes("http 409") && !message.includes("http 404")) {
+          throw error;
+        }
+      }
+    }
+    throw conflictError;
   }
 
   private async gcp<T>(method: string, path: string, body?: unknown): Promise<T> {

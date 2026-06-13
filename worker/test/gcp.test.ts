@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { leaseConfig } from "../src/config";
 import {
@@ -10,6 +10,10 @@ import {
   operationDone,
 } from "../src/gcp";
 import type { Env, ProviderMachine } from "../src/types";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("gcp provider", () => {
   const env: Env = {
@@ -37,6 +41,97 @@ describe("gcp provider", () => {
     expect(() => new GCPClient({ ...env, CRABBOX_GCP_SSH_CIDRS: "::::/128" })).toThrow(
       "CRABBOX_GCP_SSH_CIDRS entries must be valid",
     );
+  });
+
+  it("recovers when another create wins the shared firewall race", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    const calls: string[] = [];
+    let firewallReads = 0;
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${url.pathname}`);
+      if (url.pathname.includes("/global/firewalls/") && method === "GET") {
+        firewallReads += 1;
+        return firewallReads === 1
+          ? new Response("not found", { status: 404 })
+          : Response.json({ description: "Crabbox-managed SSH ingress" });
+      }
+      if (url.pathname.endsWith("/global/firewalls") && method === "POST") {
+        return new Response("already exists", { status: 409 });
+      }
+      return Response.json({});
+    };
+
+    await (
+      client as unknown as { ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void> }
+    ).ensureFirewall(
+      leaseConfig({
+        provider: "gcp",
+        gcpSSHCIDRs: ["198.51.100.77/32"],
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+
+    expect(calls.filter((call) => call.startsWith("GET "))).toHaveLength(2);
+    expect(calls.filter((call) => call.startsWith("POST "))).toHaveLength(1);
+    expect(calls.filter((call) => call.startsWith("PUT "))).toHaveLength(1);
+  });
+
+  it("waits for a raced firewall insert before reconciling policy", async () => {
+    vi.useFakeTimers();
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    let firewallReads = 0;
+    let firewallUpdates = 0;
+    let operationWaits = 0;
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      if (url.pathname.includes("/global/firewalls/") && method === "GET") {
+        firewallReads += 1;
+        return firewallReads < 3
+          ? new Response("not found", { status: 404 })
+          : Response.json({ description: "Crabbox-managed SSH ingress" });
+      }
+      if (url.pathname.endsWith("/global/firewalls") && method === "POST") {
+        return new Response("already exists", { status: 409 });
+      }
+      if (url.pathname.includes("/global/firewalls/") && method === "PUT") {
+        firewallUpdates += 1;
+        return firewallUpdates === 1
+          ? new Response("operation in progress", { status: 409 })
+          : Response.json({ name: "op-raced", status: "PENDING" });
+      }
+      if (url.pathname.endsWith("/global/operations/op-raced/wait") && method === "POST") {
+        operationWaits += 1;
+        return Response.json({ name: "op-raced", status: "DONE" });
+      }
+      return Response.json({});
+    };
+
+    const ensure = (
+      client as unknown as { ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void> }
+    ).ensureFirewall(
+      leaseConfig({
+        provider: "gcp",
+        gcpSSHCIDRs: ["198.51.100.77/32"],
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+    await vi.runAllTimersAsync();
+    await ensure;
+
+    expect(firewallReads).toBe(4);
+    expect(firewallUpdates).toBe(2);
+    expect(operationWaits).toBe(1);
   });
 
   it("lists Crabbox machines across aggregated GCP zones", async () => {
