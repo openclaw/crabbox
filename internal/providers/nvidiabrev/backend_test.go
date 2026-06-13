@@ -673,6 +673,37 @@ func TestNvidiaBrevStopDoesNotMutateProviderForStaleClaim(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevDeleteDoesNotMutateProviderForStaleClaim(t *testing.T) {
+	state, _ := isolateNvidiaBrevState(t)
+	leaseID := "cbx_999900002222"
+	workspace := brevWorkspace{ID: "ws-stale-delete", Name: "crabbox-stale-delete-999900002222", Status: "RUNNING"}
+	server := workspaceToServer(Config{}, workspace, leaseID, "stale-delete", false)
+	if err := claimLeaseTargetForRepoConfig(leaseID, "stale-delete", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	stale, ok, err := resolveLeaseClaimForProvider(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) {
+		labels := claim["labels"].(map[string]any)
+		labels["last_touched_at"] = "1800000000"
+	})
+	runner := &scriptedBrevRunner{}
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	client, err := backend.client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = backend.deleteWorkspaceAndRemoveClaim(context.Background(), client, workspace, stale)
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("err=%v, want stale claim conflict", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("stale claim mutated provider: %s", runner.joinedCalls())
+	}
+}
+
 func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_111122223333"
@@ -1026,6 +1057,35 @@ func TestNvidiaBrevTouchRefusesStoppedClaim(t *testing.T) {
 	}
 	if claim.Labels["state"] != "stopped" {
 		t.Fatalf("stopped claim overwritten: %#v", claim.Labels)
+	}
+}
+
+func TestNvidiaBrevSlugAllocationIncludesLocalClaims(t *testing.T) {
+	isolateNvidiaBrevState(t)
+	leaseID := "cbx_123456789abc"
+	server := workspaceToServer(Config{}, brevWorkspace{ID: "ws-shared", Name: "crabbox-shared-123456789abc", Status: "RUNNING"}, leaseID, "shared", false)
+	if err := claimLeaseTargetForRepoConfig(leaseID, "shared", Config{Provider: providerName}, server, SSHTarget{}, t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := allocateBrevLeaseSlug("cbx_abcdef123456", "shared", nil, claims); got != "shared-01" {
+		t.Fatalf("slug=%q want shared-01", got)
+	}
+}
+
+func TestNvidiaBrevCollisionSlugFitsWorkspaceNameLimit(t *testing.T) {
+	leaseID := "cbx_123456789abc"
+	first := allocateBrevLeaseSlug(leaseID, strings.Repeat("a", 80), nil, nil)
+	servers := []LeaseView{{Labels: map[string]string{"slug": first}}}
+	second := allocateBrevLeaseSlug(leaseID, strings.Repeat("a", 80), servers, nil)
+	if first == second || !strings.HasSuffix(second, "-01") {
+		t.Fatalf("collision slug first=%q second=%q", first, second)
+	}
+	if name := brevProviderName(leaseID, second); len(name) > brevWorkspaceNameMaxLen {
+		t.Fatalf("workspace name length=%d name=%q", len(name), name)
 	}
 }
 

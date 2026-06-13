@@ -14,6 +14,7 @@ import (
 const (
 	brevAcquirePollInterval = 2 * time.Second
 	brevAcquirePollTimeout  = 12 * time.Minute
+	brevWorkspaceNameMaxLen = 63
 )
 
 var normalizeBrevSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
@@ -43,7 +44,11 @@ func (b *nvidiaBrevBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	slug := allocateBrevLeaseSlug(leaseID, req.RequestedSlug, existing)
+	claims, err := listLeaseClaims()
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	slug := allocateBrevLeaseSlug(leaseID, req.RequestedSlug, existing, claims)
 	name := brevProviderName(leaseID, slug)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s gpu=%s keep=%v\n", providerName, leaseID, slug, name, cfg.NvidiaBrev.GPUName, req.Keep)
 
@@ -154,7 +159,7 @@ func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	if err != nil {
 		return err
 	}
-	workspace, leaseID, _, claim, err := b.resolveWorkspace(ctx, client, firstNonEmpty(req.Lease.LeaseID, req.Lease.Server.CloudID, req.Lease.Server.Name))
+	workspace, _, _, claim, err := b.resolveWorkspace(ctx, client, firstNonEmpty(req.Lease.LeaseID, req.Lease.Server.CloudID, req.Lease.Server.Name))
 	if err != nil {
 		return err
 	}
@@ -171,11 +176,7 @@ func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	if action == "stop" {
 		return b.stopWorkspaceAndPersistClaim(ctx, client, workspace, claim)
 	}
-	if err := b.releaseWorkspace(ctx, client, workspace, action); err != nil {
-		return err
-	}
-	removeLeaseClaim(leaseID)
-	return nil
+	return b.deleteWorkspaceAndRemoveClaim(ctx, client, workspace, claim)
 }
 
 func (b *nvidiaBrevBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
@@ -279,12 +280,8 @@ func (b *nvidiaBrevBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			}
 			continue
 		}
-		if err := b.releaseWorkspace(ctx, client, workspace, action); err != nil {
+		if err := b.deleteWorkspaceAndRemoveClaim(ctx, client, workspace, claim); err != nil {
 			errs = append(errs, err)
-			continue
-		}
-		if claimed {
-			removeLeaseClaim(claim.LeaseID)
 		}
 	}
 	return errors.Join(errs...)
@@ -338,6 +335,12 @@ func parseBrevClaimTime(value string) (time.Time, bool) {
 func (b *nvidiaBrevBackend) stopWorkspaceAndPersistClaim(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim) error {
 	return b.persistStoppedClaim(workspace, claim, func() error {
 		return b.releaseWorkspace(ctx, client, workspace, "stop")
+	})
+}
+
+func (b *nvidiaBrevBackend) deleteWorkspaceAndRemoveClaim(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim) error {
+	return removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		return b.releaseWorkspace(ctx, client, workspace, "delete")
 	})
 }
 
@@ -805,7 +808,7 @@ func isCrabboxBrevWorkspace(workspace brevWorkspace) bool {
 }
 
 func brevProviderName(leaseID, slug string) string {
-	slug = normalizeBrevSlug(slug)
+	slug = fitBrevSlugForName(slug, leaseID)
 	if slug == "" {
 		slug = "lease"
 	}
@@ -830,31 +833,66 @@ func parseBrevProviderName(name string) (string, string) {
 	return "cbx_" + id, slug
 }
 
-func allocateBrevLeaseSlug(leaseID, requested string, servers []LeaseView) string {
-	base := normalizeBrevSlug(requested)
+func allocateBrevLeaseSlug(leaseID, requested string, servers []LeaseView, claims []LeaseClaim) string {
+	base := fitBrevSlugForName(requested, leaseID)
 	if base == "" {
-		base = normalizeBrevSlug(strings.TrimPrefix(leaseID, "cbx_"))
+		base = fitBrevSlugForName(strings.TrimPrefix(leaseID, "cbx_"), leaseID)
 	}
 	if base == "" {
 		base = "lease"
 	}
 	slug := base
 	for attempt := 0; attempt < 20; attempt++ {
-		if !brevSlugInUse(slug, servers) {
+		if !brevSlugInUse(slug, leaseID, servers, claims) {
 			return slug
 		}
-		slug = fmt.Sprintf("%s-%02d", base, attempt+1)
+		slug = brevSlugWithCollisionSuffix(base, fmt.Sprintf("%02d", attempt+1), leaseID)
 	}
-	return fmt.Sprintf("%s-%s", base, strings.TrimPrefix(leaseID, "cbx_"))
+	return brevSlugWithCollisionSuffix(base, strings.TrimPrefix(leaseID, "cbx_"), leaseID)
 }
 
-func brevSlugInUse(slug string, servers []LeaseView) bool {
+func brevSlugInUse(slug, leaseID string, servers []LeaseView, claims []LeaseClaim) bool {
 	for _, server := range servers {
 		if normalizeBrevSlug(server.Labels["slug"]) == slug {
 			return true
 		}
 	}
+	for _, claim := range claims {
+		if claim.Provider == providerName && claim.LeaseID != leaseID && normalizeBrevSlug(claim.Slug) == slug {
+			return true
+		}
+	}
 	return false
+}
+
+func brevSlugWithCollisionSuffix(base, suffix, leaseID string) string {
+	suffix = "-" + normalizeBrevSlug(suffix)
+	maxLen := maxBrevSlugLength(leaseID)
+	if len(suffix) >= maxLen {
+		return strings.Trim(suffix[len(suffix)-maxLen:], "-")
+	}
+	base = fitBrevSlugForName(base, leaseID)
+	if len(base) > maxLen-len(suffix) {
+		base = strings.Trim(base[:maxLen-len(suffix)], "-")
+	}
+	return strings.Trim(base+suffix, "-")
+}
+
+func fitBrevSlugForName(value, leaseID string) string {
+	value = normalizeBrevSlug(value)
+	maxLen := maxBrevSlugLength(leaseID)
+	if len(value) > maxLen {
+		value = strings.Trim(value[:maxLen], "-")
+	}
+	return value
+}
+
+func maxBrevSlugLength(leaseID string) int {
+	maxLen := brevWorkspaceNameMaxLen - len("crabbox-") - 1 - len(strings.TrimPrefix(leaseID, "cbx_"))
+	if maxLen < 1 {
+		return 1
+	}
+	return maxLen
 }
 
 func normalizeBrevSlug(value string) string {

@@ -97,8 +97,8 @@ func listLeaseClaims() ([]LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
 
 var waitForSSH = core.WaitForSSH
