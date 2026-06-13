@@ -623,6 +623,33 @@ func TestSuperserveClientRejectsTerminalStreamError(t *testing.T) {
 	}
 }
 
+func TestSuperserveClientPreservesExitCodeWithTerminalStreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/exec/stream" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"finished\":true,\"exit_code\":23,\"error\":\"command failed\"}\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	result, err := client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+		execRequest{Command: "false"}, io.Discard, &stderr)
+	if err != nil {
+		t.Fatalf("Exec err=%v", err)
+	}
+	if result.ExitCode != 23 || !strings.Contains(stderr.String(), "command failed") {
+		t.Fatalf("result=%#v stderr=%q, want exit 23 and terminal error output", result, stderr.String())
+	}
+}
+
 func mustJSONLine(t *testing.T, v any) string {
 	t.Helper()
 	data, err := json.Marshal(v)

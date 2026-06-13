@@ -318,7 +318,7 @@ func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "superserve-secret-token")
-	if err := os.WriteFile(configPath, []byte("superserve:\n  baseUrl: https://superserve.example.test\n  template: superserve/custom\n  workdir: /workspace/test\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("superserve:\n  baseUrl: https://user:base-url-secret@superserve.example.test\n  template: superserve/custom\n  workdir: /workspace/test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -328,11 +328,11 @@ func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	if !strings.Contains(text, "superserve base_url=https://superserve.example.test template=superserve/custom snapshot=- workdir=/workspace/test") || !strings.Contains(text, "auth=configured") {
+	if !strings.Contains(text, "superserve base_url=https://<redacted>@superserve.example.test template=superserve/custom snapshot=- workdir=/workspace/test") || !strings.Contains(text, "auth=configured") {
 		t.Fatalf("config show missing superserve summary: %q", text)
 	}
-	if strings.Contains(text, "superserve-secret-token") {
-		t.Fatalf("config show leaked Superserve token: %q", text)
+	if strings.Contains(text, "superserve-secret-token") || strings.Contains(text, "base-url-secret") {
+		t.Fatalf("config show leaked Superserve credential: %q", text)
 	}
 
 	stdout.Reset()
@@ -350,11 +350,11 @@ func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Superserve.BaseURL != "https://superserve.example.test" || got.Superserve.Template != "superserve/custom" || got.Superserve.Workdir != "/workspace/test" || got.Superserve.Auth != "configured" {
+	if got.Superserve.BaseURL != "https://<redacted>@superserve.example.test" || got.Superserve.Template != "superserve/custom" || got.Superserve.Workdir != "/workspace/test" || got.Superserve.Auth != "configured" {
 		t.Fatalf("unexpected superserve json: %#v", got.Superserve)
 	}
-	if strings.Contains(stdout.String(), "superserve-secret-token") {
-		t.Fatalf("config show json leaked Superserve token: %q", stdout.String())
+	if strings.Contains(stdout.String(), "superserve-secret-token") || strings.Contains(stdout.String(), "base-url-secret") {
+		t.Fatalf("config show json leaked Superserve credential: %q", stdout.String())
 	}
 }
 

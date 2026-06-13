@@ -111,6 +111,8 @@ func TestValidateSuperserveBaseURL(t *testing.T) {
 		{name: "default", raw: "", want: defaultBaseURL},
 		{name: "https default port", raw: "HTTPS://API.EXAMPLE.TEST:443/", want: "https://api.example.test"},
 		{name: "loopback http", raw: "http://localhost:8080/", want: "http://localhost:8080"},
+		{name: "IPv6 loopback", raw: "http://[::1]/", want: "http://[::1]"},
+		{name: "IPv6 loopback default port", raw: "http://[::1]:80/", want: "http://[::1]"},
 		{name: "userinfo", raw: "https://user:pass@api.example.test", wantErr: "must not contain userinfo"},
 		{name: "query", raw: "https://api.example.test?token=secret", wantErr: "must not contain userinfo"},
 		{name: "fragment", raw: "https://api.example.test/#secret", wantErr: "must not contain userinfo"},

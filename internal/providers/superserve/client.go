@@ -613,7 +613,9 @@ func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer, secre
 				if _, err := io.WriteString(stderr, streamErr); err != nil {
 					return execResult{}, fmt.Errorf("superserve write command stderr: %w", err)
 				}
-				return result, exit(5, "superserve command stream failed: %s", streamErr)
+				if result.ExitCode == 0 {
+					return result, exit(5, "superserve command stream failed: %s", streamErr)
+				}
 			}
 		}
 	}

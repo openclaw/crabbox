@@ -168,9 +168,12 @@ func canonicalHostPort(parsed *url.URL) string {
 	host := strings.ToLower(parsed.Hostname())
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		return host
+		port = ""
 	}
 	if port == "" {
+		if strings.Contains(host, ":") {
+			return "[" + host + "]"
+		}
 		return host
 	}
 	return net.JoinHostPort(host, port)
