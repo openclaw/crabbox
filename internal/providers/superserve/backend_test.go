@@ -187,6 +187,9 @@ func TestWarmupCreatesClaimAndOwnershipMetadataWithoutToken(t *testing.T) {
 	if len(fake.created) != 1 || fake.created[0].Metadata[metadataProviderKey] != providerName || fake.created[0].Metadata[metadataScopeKey] == "" {
 		t.Fatalf("create metadata=%#v", fake.created)
 	}
+	if !strings.HasPrefix(fake.created[0].Name, "crabbox-my-app-") || fake.created[0].FromTemplate != backend.cfg.Superserve.Template || fake.created[0].TimeoutSeconds != backend.cfg.Superserve.TimeoutSecs {
+		t.Fatalf("create request did not use Superserve API fields: %#v", fake.created[0])
+	}
 	if len(fake.updates) != 1 || fake.updates[0][metadataClaimKey] != leaseID || fake.updates[0][metadataSlugKey] == "" {
 		t.Fatalf("update metadata=%#v", fake.updates)
 	}

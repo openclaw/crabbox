@@ -487,17 +487,17 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 	if err != nil {
 		return "", "", "", err
 	}
-	workdir, err := superserveWorkdir(b.cfg)
-	if err != nil {
+	if _, err := superserveWorkdir(b.cfg); err != nil {
 		return "", "", "", err
 	}
 	initialMetadata := b.ownershipMetadata(api.BaseURL(), providerScope, "", "", repo)
 	sb, err := api.CreateSandbox(ctx, createSandboxRequest{
-		Template:    strings.TrimSpace(b.cfg.Superserve.Template),
-		Snapshot:    strings.TrimSpace(b.cfg.Superserve.Snapshot),
-		Workdir:     workdir,
-		TimeoutSecs: b.cfg.Superserve.TimeoutSecs,
-		Metadata:    initialMetadata,
+		Name:           newSandboxName(repo),
+		FromTemplate:   strings.TrimSpace(b.cfg.Superserve.Template),
+		FromSnapshot:   strings.TrimSpace(b.cfg.Superserve.Snapshot),
+		TimeoutSeconds: b.cfg.Superserve.TimeoutSecs,
+		Metadata:       initialMetadata,
+		Network:        superserveNetworkConfig(b.cfg),
 	})
 	if err != nil {
 		return "", "", "", err
@@ -519,6 +519,16 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, nil
+}
+
+func superserveNetworkConfig(cfg Config) *createSandboxNetworkCfg {
+	if len(cfg.Superserve.NetworkAllowOut) == 0 && len(cfg.Superserve.NetworkDenyOut) == 0 {
+		return nil
+	}
+	return &createSandboxNetworkCfg{
+		AllowOut: append([]string(nil), cfg.Superserve.NetworkAllowOut...),
+		DenyOut:  append([]string(nil), cfg.Superserve.NetworkDenyOut...),
+	}
 }
 
 func (b *backend) ownershipMetadata(baseURL, providerScope, leaseID, slug string, repo Repo) map[string]string {

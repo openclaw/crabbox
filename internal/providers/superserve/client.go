@@ -45,11 +45,17 @@ type httpSuperserveClient struct {
 }
 
 type createSandboxRequest struct {
-	Template    string            `json:"template,omitempty"`
-	Snapshot    string            `json:"snapshot,omitempty"`
-	Workdir     string            `json:"workdir,omitempty"`
-	TimeoutSecs int               `json:"timeout_secs,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	Name           string                   `json:"name,omitempty"`
+	FromTemplate   string                   `json:"from_template,omitempty"`
+	FromSnapshot   string                   `json:"from_snapshot,omitempty"`
+	TimeoutSeconds int                      `json:"timeout_seconds,omitempty"`
+	Metadata       map[string]string        `json:"metadata,omitempty"`
+	Network        *createSandboxNetworkCfg `json:"network,omitempty"`
+}
+
+type createSandboxNetworkCfg struct {
+	AllowOut []string `json:"allow_out,omitempty"`
+	DenyOut  []string `json:"deny_out,omitempty"`
 }
 
 type updateSandboxRequest struct {
@@ -160,19 +166,24 @@ func effectiveSuperservePort(value *url.URL) string {
 func (c *httpSuperserveClient) BaseURL() string { return c.baseURL }
 
 func (c *httpSuperserveClient) doJSON(ctx context.Context, method, apiPath string, body, out any) error {
+	_, err := c.doJSONMaybeEmpty(ctx, method, apiPath, body, out, false)
+	return err
+}
+
+func (c *httpSuperserveClient) doJSONMaybeEmpty(ctx context.Context, method, apiPath string, body, out any, allowEmpty bool) (bool, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, defaultSuperserveRequestTimeout)
 	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("superserve marshal %s: %w", apiPath, err)
+			return false, fmt.Errorf("superserve marshal %s: %w", apiPath, err)
 		}
 		reader = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(requestCtx, method, c.baseURL+apiPath, reader)
 	if err != nil {
-		return fmt.Errorf("superserve request %s: %w", apiPath, err)
+		return false, fmt.Errorf("superserve request %s: %w", apiPath, err)
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
 	if body != nil {
@@ -180,20 +191,23 @@ func (c *httpSuperserveClient) doJSON(ctx context.Context, method, apiPath strin
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("superserve %s %s: %w", method, apiPath, err)
+		return false, fmt.Errorf("superserve %s %s: %w", method, apiPath, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.apiError(method, apiPath, resp)
+		return false, c.apiError(method, apiPath, resp)
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
+		return false, nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("superserve decode %s: %w", apiPath, err)
+		if allowEmpty && errors.Is(err, io.EOF) {
+			return true, nil
+		}
+		return false, fmt.Errorf("superserve decode %s: %w", apiPath, err)
 	}
-	return nil
+	return false, nil
 }
 
 func (c *httpSuperserveClient) CreateSandbox(ctx context.Context, req createSandboxRequest) (superserveSandbox, error) {
@@ -240,8 +254,12 @@ func (c *httpSuperserveClient) ActivateSandbox(ctx context.Context, id string) (
 
 func (c *httpSuperserveClient) UpdateSandboxMetadata(ctx context.Context, id string, metadata map[string]string) (superserveSandbox, error) {
 	var sb superserveSandbox
-	if err := c.doJSON(ctx, http.MethodPatch, "/sandboxes/"+url.PathEscape(id), updateSandboxRequest{Metadata: metadata}, &sb); err != nil {
+	empty, err := c.doJSONMaybeEmpty(ctx, http.MethodPatch, "/sandboxes/"+url.PathEscape(id), updateSandboxRequest{Metadata: metadata}, &sb, true)
+	if err != nil {
 		return superserveSandbox{}, err
+	}
+	if empty {
+		return c.GetSandbox(ctx, id)
 	}
 	if sb.ID == "" {
 		sb.ID = id
