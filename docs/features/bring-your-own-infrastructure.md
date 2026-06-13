@@ -191,9 +191,10 @@ The normal sequence is:
 6. stop the bridge and delete or retain the provider resource;
 7. release the coordinator registration.
 
-Coordinator expiry or release removes only the registration. It cannot invoke
-the direct provider and never deletes the underlying resource. Provider cleanup
-remains the CLI adapter's responsibility.
+Coordinator expiry or release ends the active registration but retains the
+record as `expired` or `released` history. It cannot invoke the direct provider
+and never deletes the underlying resource. Provider cleanup remains the CLI
+adapter's responsibility.
 
 A retained headless lease has no persistent background heartbeat after the
 command exits. Its coordinator record may reach idle expiry while the direct
@@ -259,7 +260,7 @@ copies an SSH private key and never grants access to the private provider API.
 | Provider response is lost after create | adapter-specific resolve/readiness may recover the named resource |
 | Coordinator registration fails | warning; direct lease remains usable |
 | Bridge disconnects | daemon reconnects; direct SSH remains usable |
-| Coordinator release succeeds | registration disappears; provider resource remains |
+| Coordinator release succeeds | record becomes inactive history; provider resource remains |
 | Provider cleanup fails | local routing remains for retry |
 | Routing is missing or ambiguous | destructive operation fails closed |
 
@@ -298,10 +299,12 @@ rollback, use a disposable config whose second acquire step fails and run:
 crabbox warmup --provider external --slug rollback-smoke --keep=false
 ```
 
-Verify that the release operation ran and provider inventory contains no
-`rollback-smoke` resource. When the coordinator can enumerate the same provider
-account, also prove its orphan sweep cannot select a live registered direct
-resource.
+Record provider inventory before the command, capture the generated
+`{{resourceName}}` from lifecycle output, then verify the release operation ran,
+that exact resource is absent, and inventory returned to its baseline. The
+friendly slug is not necessarily the provider resource name. When the
+coordinator can enumerate the same provider account, also prove its orphan
+sweep cannot select a live registered direct resource.
 
 ## Related documentation
 

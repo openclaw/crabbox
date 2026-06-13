@@ -165,12 +165,12 @@ answering.
 
 On `SIGTERM` or `SIGINT`, the service:
 
-1. stops accepting new upgrades;
-2. closes HTTP listeners and idle connections;
-3. closes sockets with restart code `1012`;
-4. drains active requests, lifecycle operations, and socket handlers;
-5. stops pg-boss gracefully;
-6. closes PostgreSQL.
+1. marks the runtime as shutting down, stops new upgrades, and closes the HTTP
+   listener plus idle connections;
+2. drains active request handlers and lifecycle operations;
+3. closes live sockets with restart code `1012` and drains their handlers;
+4. waits for the current alarm, stops pg-boss gracefully, and closes PostgreSQL;
+5. waits for the HTTP server to finish closing.
 
 CLI bridge clients reconnect with bounded backoff and obtain fresh tickets as
 needed. Ingress rollouts should still use a termination grace period at least
