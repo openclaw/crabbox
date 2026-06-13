@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
+	cfg := baseConfig()
+	cfg.NamespaceInstance.Endpoint = "https://user:secret@api.example.test/path"
+	data, err := json.Marshal(configShowView(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	for name, output := range map[string]string{"json": string(data), "text": text.String()} {
+		if strings.Contains(output, "secret") || strings.Contains(output, "user@") {
+			t.Fatalf("%s output leaked endpoint credentials: %s", name, output)
+		}
+		if !strings.Contains(output, "api.example.test/path") || !strings.Contains(output, "redacted") {
+			t.Fatalf("%s output missing redacted endpoint: %s", name, output)
+		}
+	}
+}
+
 func TestConfigSetBrokerRegisteredMode(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

@@ -182,6 +182,15 @@ describe("fleet lease identity and idle", () => {
     expect(portalHTML).toContain("client managed");
     expect(portalHTML).toContain("remove registration");
 
+    const portalIndex = await fleet.fetch(request("GET", "/portal", { headers: ownerHeaders }));
+    expect(portalIndex.status).toBe(200);
+    const portalIndexHTML = await portalIndex.text();
+    expect(portalIndexHTML).toContain('data-release-kind="registered"');
+    expect(portalIndexHTML).toContain('title="Remove test-box registration"');
+    expect(portalIndexHTML).toContain(
+      "The external machine will keep running. Use crabbox stop locally to shut it down.",
+    );
+
     const poolRegistration = await fleet.fetch(
       request("POST", "/v1/ready-pools/example/register", {
         headers: ownerHeaders,
@@ -211,15 +220,16 @@ describe("fleet lease identity and idle", () => {
     expect(friend.status).toBe(200);
 
     const released = await fleet.fetch(
-      request("POST", "/v1/leases/test-box/release", {
+      request("POST", "/portal/leases/test-box/release?return=/portal", {
         headers: ownerHeaders,
-        body: { delete: true },
       }),
     );
-    expect(released.status).toBe(200);
+    expect(released.status).toBe(303);
+    expect(released.headers.get("location")).toBe("/portal");
     expect(providerReleases).toBe(0);
-    await expect(released.json()).resolves.toMatchObject({
-      lease: { lifecycle: "registered", state: "released" },
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000099")).toMatchObject({
+      lifecycle: "registered",
+      state: "released",
     });
   });
 
@@ -1644,6 +1654,14 @@ describe("fleet lease identity and idle", () => {
     );
     expect(friendRelease.status).toBe(403);
 
+    const friendUsePortal = await fleet.fetch(
+      request("GET", "/portal", { headers: friendHeaders }),
+    );
+    expect(friendUsePortal.status).toBe(200);
+    expect(await friendUsePortal.text()).not.toContain(
+      'action="/portal/leases/cbx_000000000001/release?return=%2Fportal"',
+    );
+
     const orgShared = await fleet.fetch(
       request("PUT", "/v1/leases/blue-lobster/share", {
         headers: ownerHeaders,
@@ -1654,6 +1672,14 @@ describe("fleet lease identity and idle", () => {
     await expect(orgShared.json()).resolves.toMatchObject({
       share: { users: { "friend@example.com": "use" }, org: "manage" },
     });
+
+    const friendManagePortal = await fleet.fetch(
+      request("GET", "/portal", { headers: friendHeaders }),
+    );
+    expect(friendManagePortal.status).toBe(200);
+    expect(await friendManagePortal.text()).toContain(
+      'action="/portal/leases/cbx_000000000001/release?return=%2Fportal"',
+    );
 
     const friendSharePage = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/share", { headers: friendHeaders }),
@@ -4981,6 +5007,11 @@ describe("fleet lease identity and idle", () => {
     expect(body).toContain('title="server"');
     expect(body).toContain('data-access="vscode"');
     expect(body).toContain('data-access="vnc"');
+    expect(body).toContain('data-release-kind="managed"');
+    expect(body).toContain('title="Stop blue-lobster"');
+    expect(body).toContain("This deletes the backing machine.");
+    expect(body).toContain('action="/portal/leases/cbx_000000000001/release?return=%2Fportal"');
+    expect(body).not.toContain('action="/portal/leases/cbx_000000000003/release?return=%2Fportal"');
     expect(body).toContain("data-sort=");
     expect(body).toContain("<time datetime=");
     expect(body).not.toContain("windows / normal");

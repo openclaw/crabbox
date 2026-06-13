@@ -9,10 +9,15 @@ describe("portal theme", () => {
 
     expect(body).toContain("data-theme-source");
     expect(body).toContain("prefers-color-scheme: dark");
-    expect(body).toContain("crabbox-theme");
+    expect(body).toContain("crabbox-theme-source");
+    expect(body).not.toContain("getItem('crabbox-theme')");
+    expect(body).not.toContain('getItem("crabbox-theme")');
+    expect(body).toContain('value === "system"');
     expect(body).toContain('const next = current === "system" ? "dark"');
     expect(body).toContain('Theme: " + source');
     expect(body).toContain("crabbox-theme-change");
+    expect(body).toContain('querySelectorAll("form[data-confirm]")');
+    expect(body).toContain("window.confirm(message)");
   });
 
   it("renders an explicit admin summary when the portal is admin scoped", async () => {

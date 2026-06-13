@@ -97,6 +97,25 @@ func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
+	for _, name := range []string{"namespace-instance", "namespace-compute"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "namespace-instance" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		}
+	}
+	provider, err := core.ProviderFor("namespace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.Name() != "namespace-devbox" {
+		t.Fatalf("namespace alias resolves to %q; want namespace-devbox", provider.Name())
+	}
+}
+
 func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
 		provider, err := core.ProviderFor(name)
@@ -163,6 +182,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"multipass",
 		"mxc",
 		"namespace-devbox",
+		"namespace-instance",
 		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",

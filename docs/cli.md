@@ -557,6 +557,7 @@ CRABBOX_BLACKSMITH_*               Blacksmith Testbox
 CRABBOX_KUBEVIRT_*                 KubeVirt
 CRABBOX_EXTERNAL_*                 External executable provider
 CRABBOX_NAMESPACE_*                Namespace Devbox
+CRABBOX_NAMESPACE_INSTANCE_*       Namespace Compute Instance
 CRABBOX_SEMAPHORE_* / SEMAPHORE_*  Semaphore
 CRABBOX_E2B_API_KEY / E2B_*        E2B
 CRABBOX_MODAL_* / MODAL_*          Modal

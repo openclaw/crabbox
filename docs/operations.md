@@ -71,6 +71,7 @@ Per-provider smoke prerequisites:
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
 - **Daytona** — `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or `daytona.snapshot`.
 - **Namespace** — the authenticated `devbox` CLI on `PATH`.
+- **Namespace Compute** — the authenticated `nsc` CLI on `PATH`; run `nsc login` first.
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
 - **Tenki** — the authenticated `tenki` CLI on `PATH`; run `tenki login` and complete the browser flow.
 - **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.

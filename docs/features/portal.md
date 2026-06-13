@@ -23,7 +23,7 @@ GET  /portal                                    lease / runner / host index
 GET  /portal/leases/{id-or-slug}                lease detail
 GET  /portal/leases/{id-or-slug}/share          share page
 POST /portal/leases/{id-or-slug}/share          add/remove user, set org, clear
-POST /portal/leases/{id-or-slug}/release        stop the lease
+POST /portal/leases/{id-or-slug}/release        stop managed lease / remove registration
 GET  /portal/leases/{id-or-slug}/vnc            WebVNC viewer page
 GET  /portal/leases/{id-or-slug}/code/...       code-server bridge (HTTP/WS proxy)
 GET  /portal/runs/{run-id}                       run detail
@@ -41,6 +41,13 @@ browser calls directly: `/vnc/viewer` (the noVNC WebSocket), `/vnc/status`,
 `/vnc/control` (take control), and `/vnc/theme` (sync the desktop theme).
 Static assets, including the noVNC client at `/portal/assets/novnc/rfb.js`,
 are served from the coordinator's bundled assets.
+
+The portal defaults to the browser's system color scheme and tracks later
+system appearance changes. Explicit light, dark, or system choices use the
+`crabbox-theme-source` browser storage key; the distinct key intentionally
+resets preferences written by the older two-state switch. WebVNC sends the
+resolved light or dark appearance to connected desktops, including registered
+direct Linux leases.
 
 A `GET /` redirects to `/portal` (while `GET /v1/health` returns a JSON
 health payload). When
@@ -80,9 +87,12 @@ Access JWT email can become the portal owner.
 The index renders a searchable, paginated, sortable grid that mixes three row
 kinds:
 
-- **Leases** — Crabbox-managed boxes with compact provider/target badges,
+- **Leases** — managed or registered boxes with compact provider/target badges,
   state pills, the lease class, icon-only access capabilities (SSH, VNC,
-  code, browser), and relative time cells.
+  code, browser), relative time cells, and a confirmed lifecycle action for
+  sessions with manage access. The action stops and deletes the backing machine
+  for coordinator-managed leases; registered leases instead show **remove
+  registration** and warn that the external machine keeps running.
 - **External runners** — visibility-only rows for Blacksmith Testboxes synced
   from `crabbox list` output. They render as muted, disabled rows with status
   badges, inferred GitHub Actions run/workflow links, `stuck` markers for
@@ -119,14 +129,16 @@ The lease detail page shows:
   `crabbox run`, the WebVNC bridge, the code bridge, and (when egress is
   active) `crabbox egress status` / `crabbox egress stop`;
 - a viewport-fitted "recent runs" grid with state filters;
-- a stop button when the session can manage the lease.
+- a stop button for coordinator-managed leases, or a metadata-only remove
+  registration button for client-managed leases, when the session can manage
+  the lease.
 
 Owners and users with `manage` access see a share control in the lease
 header. The share page (`/share`) adds or removes individual users, sets
 org-wide access (`use`, `manage`, or off), or clears sharing entirely; it can
 also render embedded (`?embed=1`) inside the VNC viewer's share dialog. A
 `use` share can open visible lease pages and portal bridges; a `manage` share
-can also change sharing and stop the lease.
+can also change sharing and use the matching stop or deregistration action.
 
 `/portal/leases/{id-or-slug}/vnc` and `/portal/leases/{id-or-slug}/code/` are
 not ordinary pages. VNC opens a noVNC viewer that talks to the lease's desktop

@@ -914,6 +914,20 @@ if has_provider namespace-devbox || has_provider namespace; then
   namespace_smoke
 fi
 
+if has_provider namespace-instance || has_provider namespace-compute; then
+  run_in_repo "$cb" doctor --provider namespace-instance
+  namespace_instance_baseline="$(run_in_repo "$cb" list --provider namespace-instance --json | jq -c 'map(.CloudID) | sort')"
+  provider_smoke namespace-instance \
+    --class "${CRABBOX_LIVE_NAMESPACE_INSTANCE_CLASS:-standard}" \
+    --ttl "${CRABBOX_LIVE_NAMESPACE_INSTANCE_TTL:-10m}" \
+    --idle-timeout 5m
+  namespace_instance_after="$(run_in_repo "$cb" list --provider namespace-instance --json | jq -c 'map(.CloudID) | sort')"
+  if [[ "$namespace_instance_after" != "$namespace_instance_baseline" ]]; then
+    echo "Namespace instance smoke changed the pre-existing Crabbox-owned inventory" >&2
+    exit 1
+  fi
+fi
+
 if has_provider semaphore; then
   semaphore_smoke
 fi

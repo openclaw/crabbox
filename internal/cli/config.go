@@ -128,6 +128,7 @@ type Config struct {
 	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
+	NamespaceInstance             NamespaceInstanceConfig
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
@@ -329,6 +330,19 @@ type NamespaceConfig struct {
 	AutoStopIdleTimeout time.Duration
 	WorkRoot            string
 	DeleteOnRelease     bool
+}
+
+type NamespaceInstanceConfig struct {
+	CLIPath     string
+	MachineType string
+	Duration    time.Duration
+	Region      string
+	Endpoint    string
+	Keychain    string
+	TenantID    string
+	Volumes     []string
+	WorkRoot    string
+	Bare        bool
 }
 
 type MorphConfig struct {
@@ -1757,6 +1771,11 @@ func baseConfig() Config {
 			WorkRoot:            "/workspaces/crabbox",
 			AutoStopIdleTimeout: 30 * time.Minute,
 		},
+		NamespaceInstance: NamespaceInstanceConfig{
+			CLIPath:  "nsc",
+			WorkRoot: "/work/crabbox",
+			Bare:     true,
+		},
 		Morph: MorphConfig{
 			APIURL:         "https://cloud.morph.so",
 			SSHGatewayHost: "ssh.cloud.morph.so",
@@ -2026,6 +2045,7 @@ type fileConfig struct {
 	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
 	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
+	NamespaceInstance    *fileNamespaceInstanceConfig       `yaml:"namespaceInstance,omitempty"`
 	Morph                *fileMorphConfig                   `yaml:"morph,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
@@ -2346,6 +2366,18 @@ type fileNamespaceConfig struct {
 	AutoStopIdleTimeout string `yaml:"autoStopIdleTimeout,omitempty"`
 	WorkRoot            string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
+type fileNamespaceInstanceConfig struct {
+	CLIPath     string   `yaml:"cli,omitempty"`
+	MachineType string   `yaml:"machineType,omitempty"`
+	Duration    string   `yaml:"duration,omitempty"`
+	Region      string   `yaml:"region,omitempty"`
+	Endpoint    string   `yaml:"endpoint,omitempty"`
+	Keychain    string   `yaml:"keychain,omitempty"`
+	Volumes     []string `yaml:"volumes,omitempty"`
+	WorkRoot    string   `yaml:"workRoot,omitempty"`
+	Bare        *bool    `yaml:"bare,omitempty"`
 }
 
 type fileMorphConfig struct {
@@ -3718,6 +3750,35 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Namespace.DeleteOnRelease != nil {
 			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
 			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
+		}
+	}
+	if file.NamespaceInstance != nil {
+		if trusted {
+			if file.NamespaceInstance.CLIPath != "" {
+				cfg.NamespaceInstance.CLIPath = expandUserPath(file.NamespaceInstance.CLIPath)
+			}
+			if file.NamespaceInstance.Region != "" {
+				cfg.NamespaceInstance.Region = file.NamespaceInstance.Region
+			}
+			if file.NamespaceInstance.Endpoint != "" {
+				cfg.NamespaceInstance.Endpoint = file.NamespaceInstance.Endpoint
+			}
+			if file.NamespaceInstance.Keychain != "" {
+				cfg.NamespaceInstance.Keychain = file.NamespaceInstance.Keychain
+			}
+			if file.NamespaceInstance.Volumes != nil {
+				cfg.NamespaceInstance.Volumes = append([]string(nil), file.NamespaceInstance.Volumes...)
+			}
+		}
+		if file.NamespaceInstance.MachineType != "" {
+			cfg.NamespaceInstance.MachineType = file.NamespaceInstance.MachineType
+		}
+		applyLeaseDuration(&cfg.NamespaceInstance.Duration, file.NamespaceInstance.Duration)
+		if file.NamespaceInstance.WorkRoot != "" {
+			cfg.NamespaceInstance.WorkRoot = file.NamespaceInstance.WorkRoot
+		}
+		if file.NamespaceInstance.Bare != nil {
+			cfg.NamespaceInstance.Bare = *file.NamespaceInstance.Bare
 		}
 	}
 	if file.Morph != nil {
@@ -5259,6 +5320,21 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
 		cfg.Namespace.DeleteOnRelease = value
 		MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
+	}
+	cfg.NamespaceInstance.CLIPath = expandUserPath(getenv("CRABBOX_NAMESPACE_INSTANCE_CLI", cfg.NamespaceInstance.CLIPath))
+	cfg.NamespaceInstance.MachineType = getenv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE", cfg.NamespaceInstance.MachineType)
+	if duration := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_DURATION"); duration != "" {
+		applyLeaseDuration(&cfg.NamespaceInstance.Duration, duration)
+	}
+	cfg.NamespaceInstance.Region = getenv("CRABBOX_NAMESPACE_INSTANCE_REGION", cfg.NamespaceInstance.Region)
+	cfg.NamespaceInstance.Endpoint = getenv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT", cfg.NamespaceInstance.Endpoint)
+	cfg.NamespaceInstance.Keychain = getenv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN", cfg.NamespaceInstance.Keychain)
+	if volumes, ok := getenvList("CRABBOX_NAMESPACE_INSTANCE_VOLUMES"); ok {
+		cfg.NamespaceInstance.Volumes = volumes
+	}
+	cfg.NamespaceInstance.WorkRoot = getenv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT", cfg.NamespaceInstance.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_BARE"); ok {
+		cfg.NamespaceInstance.Bare = value
 	}
 	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
 	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
