@@ -1,0 +1,119 @@
+package nvidiabrev
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestNvidiaBrevSSHConfigParsesDirectTarget(t *testing.T) {
+	target, err := selectBrevSSHTarget(Config{}, `Host my-gpu-box
+  HostName 10.0.0.5
+  User brev
+  Port 2222
+  IdentityFile "/home/test/.brev/brev.pem"
+  UserKnownHostsFile /dev/null
+`, "my-gpu-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "10.0.0.5" || target.Port != "2222" || target.User != "brev" || target.Key != "/home/test/.brev/brev.pem" {
+		t.Fatalf("target=%#v", target)
+	}
+	if target.SSHConfigProxy || target.ProxyCommand != "" {
+		t.Fatalf("direct target unexpectedly proxy-backed: %#v", target)
+	}
+	if target.KnownHostsFile != "/dev/null" || target.NetworkKind != networkPublic {
+		t.Fatalf("target metadata=%#v", target)
+	}
+}
+
+func TestNvidiaBrevSSHConfigParsesProxyTarget(t *testing.T) {
+	target, err := selectBrevSSHTarget(Config{}, `Host my-gpu-box
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+  ProxyCommand /home/test/.brev/cloudflared access ssh --hostname proxy.example
+  UserKnownHostsFile /dev/null
+`, "my-gpu-box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "my-gpu-box" || target.Port != "22" || !target.SSHConfigProxy {
+		t.Fatalf("target=%#v", target)
+	}
+	if target.ProxyCommand != "/home/test/.brev/cloudflared access ssh --hostname proxy.example" {
+		t.Fatalf("proxy command=%q", target.ProxyCommand)
+	}
+}
+
+func TestNvidiaBrevSSHConfigSelectsHostAlias(t *testing.T) {
+	data := `Host gpu-box
+  HostName 10.0.0.5
+  User brev
+  Port 2222
+  IdentityFile "/home/test/.brev/brev.pem"
+
+Host gpu-box-host
+  HostName 10.0.0.6
+  User ubuntu
+  Port 22
+  IdentityFile "/home/test/.brev/brev.pem"
+`
+	alias := brevSSHConfigAlias("gpu-box", "host")
+	target, err := selectBrevSSHTarget(Config{}, data, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "10.0.0.6" || target.User != "ubuntu" {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
+func TestNvidiaBrevSSHConfigReportsMissingFields(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{name: "missing user", data: `Host gpu
+  HostName 10.0.0.5
+  IdentityFile "/home/test/.brev/brev.pem"
+`, want: "missing User"},
+		{name: "missing identity", data: `Host gpu
+  HostName 10.0.0.5
+  User brev
+`, want: "missing IdentityFile"},
+		{name: "missing host and proxy", data: `Host gpu
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+`, want: "missing HostName or ProxyCommand"},
+		{name: "missing alias", data: `Host other
+  HostName 10.0.0.5
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+`, want: "not found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := selectBrevSSHTarget(Config{}, tt.data, "gpu")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestNvidiaBrevSSHConfigRejectsAmbiguousAlias(t *testing.T) {
+	_, err := selectBrevSSHTarget(Config{}, `Host gpu
+  HostName 10.0.0.5
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+
+Host gpu
+  HostName 10.0.0.6
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+`, "gpu")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("err=%v", err)
+	}
+}
