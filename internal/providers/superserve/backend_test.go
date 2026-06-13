@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,19 +22,32 @@ type fakeSuperserveClient struct {
 	mu          sync.Mutex
 	baseURL     string
 	sandbox     superserveSandbox
+	accessToken string
 	created     []createSandboxRequest
 	updates     []map[string]string
 	listFilters []map[string]string
 	deleted     []string
+	activated   []string
+	uploads     []fakeSuperserveUpload
+	execs       []execRequest
+	execResults []execResult
+	execErr     error
 	probes      int
 	getErr      error
 	deleteErr   error
 	updateErr   error
 }
 
+type fakeSuperserveUpload struct {
+	sandboxID string
+	path      string
+	size      int
+}
+
 func newFakeSuperserveClient() *fakeSuperserveClient {
 	return &fakeSuperserveClient{
-		baseURL: "https://api.superserve.test",
+		baseURL:     "https://api.superserve.test",
+		accessToken: "ss_test_token",
 		sandbox: superserveSandbox{
 			ID:     "sb_test01",
 			Status: "running",
@@ -73,7 +87,10 @@ func (f *fakeSuperserveClient) GetSandbox(context.Context, string) (superserveSa
 }
 
 func (f *fakeSuperserveClient) ActivateSandbox(context.Context, string) (sandboxAccess, error) {
-	return sandboxAccess{Sandbox: cloneSandbox(f.sandbox), AccessToken: "ss_test_token"}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activated = append(f.activated, f.sandbox.ID)
+	return sandboxAccess{Sandbox: cloneSandbox(f.sandbox), AccessToken: f.accessToken}, nil
 }
 
 func (f *fakeSuperserveClient) UpdateSandboxMetadata(_ context.Context, _ string, metadata map[string]string) (superserveSandbox, error) {
@@ -103,6 +120,38 @@ func (f *fakeSuperserveClient) DeleteSandbox(_ context.Context, id string) error
 	}
 	f.deleted = append(f.deleted, id)
 	return nil
+}
+
+func (f *fakeSuperserveClient) UploadFile(_ context.Context, access *sandboxAccess, remotePath string, content io.Reader) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return err
+	}
+	f.uploads = append(f.uploads, fakeSuperserveUpload{sandboxID: access.Sandbox.ID, path: remotePath, size: len(data)})
+	return nil
+}
+
+func (f *fakeSuperserveClient) Exec(_ context.Context, _ *sandboxAccess, req execRequest, stdout, stderr io.Writer) (execResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execs = append(f.execs, req)
+	if f.execErr != nil {
+		return execResult{}, f.execErr
+	}
+	result := execResult{}
+	if len(f.execResults) > 0 {
+		result = f.execResults[0]
+		f.execResults = f.execResults[1:]
+	}
+	if result.Stdout != "" {
+		_, _ = io.WriteString(stdout, result.Stdout)
+	}
+	if result.Stderr != "" {
+		_, _ = io.WriteString(stderr, result.Stderr)
+	}
+	return result, nil
 }
 
 func (f *fakeSuperserveClient) Probe(context.Context) error {
@@ -289,12 +338,143 @@ func TestDoctorIsNonMutating(t *testing.T) {
 	}
 }
 
-func TestRunRemainsDeferredToPlan03(t *testing.T) {
-	backend := newSuperserveTestBackend(t, newFakeSuperserveClient())
-	_, err := backend.Run(context.Background(), RunRequest{})
-	if err == nil || !strings.Contains(err.Error(), "run is not implemented yet") {
+func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	fake.execResults = []execResult{
+		{},
+		{Stdout: "ok\n", Stderr: "warn\n", ExitCode: 0},
+	}
+	backend := newSuperserveTestBackend(t, fake)
+	var stdout, stderr bytes.Buffer
+	backend.rt.Stdout = &stdout
+	backend.rt.Stderr = &stderr
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:       Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:     true,
+		Command:    []string{"go", "test", "./..."},
+		Env:        map[string]string{"SUPERSERVE_API_KEY": "ss_test_not_real", "CI": "1"},
+		EnvSummary: true,
+	})
+	if err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
+	if result.ExitCode != 0 || result.Provider != providerName || result.LeaseID == "" || !result.SyncDelegated {
+		t.Fatalf("result=%#v", result)
+	}
+	if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "warn\n") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "ss_test_not_real") {
+		t.Fatalf("env summary leaked value: %q", stderr.String())
+	}
+	if len(fake.execs) != 2 {
+		t.Fatalf("execs=%#v", fake.execs)
+	}
+	commandReq := fake.execs[1]
+	if commandReq.Command != "'go' 'test' './...'" || commandReq.WorkingDir != defaultWorkdir || commandReq.TimeoutSecs != backend.cfg.Superserve.ExecTimeoutSecs {
+		t.Fatalf("command req=%#v", commandReq)
+	}
+	if commandReq.Env["SUPERSERVE_API_KEY"] != "ss_test_not_real" {
+		t.Fatalf("env not forwarded in body: %#v", commandReq.Env)
+	}
+	if strings.Contains(commandReq.Command, "ss_test_not_real") {
+		t.Fatalf("secret env value appeared in command argv: %q", commandReq.Command)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+		t.Fatalf("one-shot run should delete sandbox: %#v", fake.deleted)
+	}
+}
+
+func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	fake.execResults = []execResult{
+		{},
+		{Stderr: "boom\n", ExitCode: 7},
+	}
+	backend := newSuperserveTestBackend(t, fake)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:          Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:        true,
+		Command:       []string{"false"},
+		KeepOnFailure: true,
+	})
+	if err == nil {
+		t.Fatal("expected nonzero run error")
+	}
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%T %[1]v, want ExitError 7", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("keep-on-failure deleted sandbox: %#v", fake.deleted)
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
+		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+}
+
+func TestRunSyncOnlyUploadsArchiveExtractsAndCleansRemoteArchive(t *testing.T) {
+	repo := tempSuperserveGitRepo(t)
+	fake := newFakeSuperserveClient()
+	backend := newSuperserveTestBackend(t, fake)
+	var stdout bytes.Buffer
+	backend.rt.Stdout = &stdout
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:     Repo{Name: "my-app", Root: repo},
+		SyncOnly: true,
+		Keep:     true,
+	})
+	if err != nil {
+		t.Fatalf("Run sync-only err=%v", err)
+	}
+	if result.ExitCode != 0 || !strings.Contains(stdout.String(), "synced "+defaultWorkdir) {
+		t.Fatalf("result=%#v stdout=%q", result, stdout.String())
+	}
+	if len(fake.uploads) != 1 || !strings.HasPrefix(fake.uploads[0].path, "/tmp/crabbox-sync-") || fake.uploads[0].size == 0 {
+		t.Fatalf("uploads=%#v", fake.uploads)
+	}
+	commands := execCommands(fake.execs)
+	if !containsCommandAll(commands, "mkdir -p", defaultWorkdir) {
+		t.Fatalf("commands=%#v, want workdir prepare", commands)
+	}
+	if !containsCommand(commands, "tar -xzf ") {
+		t.Fatalf("commands=%#v, want tar extraction", commands)
+	}
+	if !containsCommandAll(commands, "rm -f", fake.uploads[0].path) {
+		t.Fatalf("commands=%#v, want remote archive cleanup", commands)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("--keep sync-only deleted sandbox: %#v", fake.deleted)
+	}
+}
+
+func TestRunRejectsTailscaleBeforeCreate(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	backend := newSuperserveTestBackend(t, fake)
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: "/repo"},
+		Options: core.LeaseOptions{
+			Tailscale: core.TailscaleConfig{Enabled: true},
+		},
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support Tailscale") {
+		t.Fatalf("Run err=%v, want Tailscale rejection", err)
+	}
+	if len(fake.created) != 0 {
+		t.Fatalf("created despite guardrail: %#v", fake.created)
+	}
+}
+
+func TestProviderDoesNotAdvertisePauseResume(t *testing.T) {
 	if (Provider{}).Spec().Features.Has(core.FeaturePauseResume) {
 		t.Fatal("superserve must not advertise pause/resume until backend methods are implemented")
 	}
@@ -357,6 +537,62 @@ func writeClaimFixture(t *testing.T, claim LeaseClaim) {
 	if err := os.WriteFile(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", claim.LeaseID+".json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func tempSuperserveGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test/my-app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "init")
+	runGit(t, dir, "add", ".")
+	return dir
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func execCommands(reqs []execRequest) []string {
+	out := make([]string, 0, len(reqs))
+	for _, req := range reqs {
+		out = append(out, req.Command)
+	}
+	return out
+}
+
+func containsCommand(commands []string, needle string) bool {
+	for _, command := range commands {
+		if strings.Contains(command, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCommandAll(commands []string, needles ...string) bool {
+	for _, command := range commands {
+		ok := true
+		for _, needle := range needles {
+			if !strings.Contains(command, needle) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneMap(in map[string]string) map[string]string {

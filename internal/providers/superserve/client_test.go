@@ -147,6 +147,321 @@ func TestSuperserveClientUpdateDoesNotFabricateMissingMetadata(t *testing.T) {
 	}
 }
 
+func TestSuperserveClientDataPlaneUploadAndStreamUseAccessTokenRouting(t *testing.T) {
+	var requests []struct {
+		method      string
+		path        string
+		query       string
+		apiKey      string
+		accessToken string
+		sandboxID   string
+		body        string
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests = append(requests, struct {
+			method      string
+			path        string
+			query       string
+			apiKey      string
+			accessToken string
+			sandboxID   string
+			body        string
+		}{
+			method:      r.Method,
+			path:        r.URL.Path,
+			query:       r.URL.RawQuery,
+			apiKey:      r.Header.Get("X-API-Key"),
+			accessToken: r.Header.Get("X-Access-Token"),
+			sandboxID:   r.Header.Get("X-Superserve-Sandbox-Id"),
+			body:        string(body),
+		})
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/files":
+			if r.URL.Query().Get("path") != "/tmp/crabbox-sync-test.tgz" {
+				t.Fatalf("upload path query=%q", r.URL.RawQuery)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"stdout\":\"out\\n\"}\n\n")
+			_, _ = io.WriteString(w, "data: {\"stderr\":\"err\\n\"}\n\n")
+			_, _ = io.WriteString(w, "data: {\"finished\":true,\"exit_code\":3}\n\n")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"}
+	if err := client.UploadFile(context.Background(), access, "/tmp/crabbox-sync-test.tgz", strings.NewReader("archive")); err != nil {
+		t.Fatalf("UploadFile err=%v", err)
+	}
+	var stdout, stderr strings.Builder
+	result, err := client.Exec(context.Background(), access, execRequest{
+		Command:     "go test ./...",
+		WorkingDir:  "/workspace/crabbox",
+		Env:         map[string]string{"SUPERSERVE_API_KEY": "ss_test_not_real"},
+		TimeoutSecs: 12,
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Exec err=%v", err)
+	}
+	if result.ExitCode != 3 || stdout.String() != "out\n" || stderr.String() != "err\n" {
+		t.Fatalf("result=%#v stdout=%q stderr=%q", result, stdout.String(), stderr.String())
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests=%#v", requests)
+	}
+	for _, req := range requests {
+		if req.apiKey != "" {
+			t.Fatalf("data-plane request used API key: %#v", req)
+		}
+		if req.accessToken != "ss_test_token" || req.sandboxID != "sb_123" {
+			t.Fatalf("data-plane auth/routing headers wrong: %#v", req)
+		}
+	}
+	if !strings.Contains(requests[1].body, `"env":{"SUPERSERVE_API_KEY":"ss_test_not_real"}`) || strings.Contains(requests[1].body, "X-API-Key") {
+		t.Fatalf("exec body=%q", requests[1].body)
+	}
+}
+
+func TestSuperserveClientRefreshesAccessTokenOnDataPlane401(t *testing.T) {
+	execAttempts := 0
+	var tokens []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/stream":
+			execAttempts++
+			tokens = append(tokens, r.Header.Get("X-Access-Token"))
+			if execAttempts == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"message":"expired token"}}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"stdout\":\"fresh\\n\"}\n\n")
+			_, _ = io.WriteString(w, "data: {\"finished\":true,\"exit_code\":0}\n\n")
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/sb_123/activate":
+			if r.Header.Get("X-API-Key") != "ss_test_key" {
+				t.Fatalf("activate X-API-Key=%q", r.Header.Get("X-API-Key"))
+			}
+			writeTestJSON(w, map[string]any{"access_token": "ss_test_token_fresh", "sandbox": map[string]any{"id": "sb_123", "status": "running"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token_old"}
+	var stdout strings.Builder
+	result, err := client.Exec(context.Background(), access, execRequest{Command: "true"}, &stdout, io.Discard)
+	if err != nil {
+		t.Fatalf("Exec err=%v", err)
+	}
+	if result.ExitCode != 0 || stdout.String() != "fresh\n" {
+		t.Fatalf("result=%#v stdout=%q", result, stdout.String())
+	}
+	if strings.Join(tokens, ",") != "ss_test_token_old,ss_test_token_fresh" || access.AccessToken != "ss_test_token_fresh" {
+		t.Fatalf("tokens=%#v access=%#v", tokens, access)
+	}
+}
+
+func TestSuperserveClientFallsBackToBufferedExecWhenStreamUnsupported(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/exec/stream":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"message":"missing"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/exec":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["command"] != "printf hi" || body["working_dir"] != "/workspace/crabbox" {
+				t.Fatalf("body=%#v", body)
+			}
+			writeTestJSON(w, map[string]any{"stdout": "hi", "stderr": "warn", "exit_code": 4})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	result, err := client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+		execRequest{Command: "printf hi", WorkingDir: "/workspace/crabbox"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Exec err=%v", err)
+	}
+	if strings.Join(paths, ",") != "/exec/stream,/exec" {
+		t.Fatalf("paths=%#v", paths)
+	}
+	if result.ExitCode != 4 || stdout.String() != "hi" || stderr.String() != "warn" {
+		t.Fatalf("result=%#v stdout=%q stderr=%q", result, stdout.String(), stderr.String())
+	}
+}
+
+func TestSuperserveClientRejectsUnknownDataPlaneHost(t *testing.T) {
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL("https://api.example.test"), Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"}
+	err = client.UploadFile(context.Background(), access, "/tmp/archive.tgz", strings.NewReader("archive"))
+	if err == nil || !strings.Contains(err.Error(), "cannot derive a data-plane sandbox host") {
+		t.Fatalf("UploadFile err=%v, want fail-closed data-plane host rejection", err)
+	}
+	_, err = client.Exec(context.Background(), access, execRequest{Command: "true"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot derive a data-plane sandbox host") {
+		t.Fatalf("Exec err=%v, want fail-closed data-plane host rejection", err)
+	}
+}
+
+func TestSuperserveClientStreamDoesNotRetainUnboundedOutput(t *testing.T) {
+	chunk := strings.Repeat("x", maxExecStreamCaptureBytes+2048)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/exec/stream" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_ = json.NewEncoder(w).Encode(map[string]string{})
+		_, _ = io.WriteString(w, "data: "+mustJSONLine(t, map[string]string{"stdout": chunk})+"\n\n")
+		_, _ = io.WriteString(w, "data: {\"finished\":true,\"exit_code\":0}\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout strings.Builder
+	result, err := client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+		execRequest{Command: "yes"}, &stdout, io.Discard)
+	if err != nil {
+		t.Fatalf("Exec err=%v", err)
+	}
+	if stdout.Len() != len(chunk) {
+		t.Fatalf("stdout len=%d want %d", stdout.Len(), len(chunk))
+	}
+	if len(result.Stdout) != maxExecStreamCaptureBytes {
+		t.Fatalf("captured stdout len=%d want %d", len(result.Stdout), maxExecStreamCaptureBytes)
+	}
+	if result.Stdout != chunk[len(chunk)-maxExecStreamCaptureBytes:] {
+		t.Fatal("captured stdout is not the bounded tail")
+	}
+}
+
+func TestSuperserveClientRedactsForwardedEnvValuesFromExecErrors(t *testing.T) {
+	t.Run("stream", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/exec/stream" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"bad env ss_test_not_real"}}`)
+		}))
+		defer server.Close()
+
+		t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+		client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+			execRequest{Command: "true", Env: map[string]string{"SECRET_TOKEN": "ss_test_not_real"}}, io.Discard, io.Discard)
+		if err == nil {
+			t.Fatal("expected exec error")
+		}
+		if strings.Contains(err.Error(), "ss_test_not_real") || !strings.Contains(err.Error(), "[redacted]") {
+			t.Fatalf("error was not redacted: %v", err)
+		}
+	})
+
+	t.Run("buffered fallback", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/exec/stream":
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"error":{"message":"stream unavailable"}}`)
+			case "/exec":
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"error":{"message":"bad env ss_test_not_real"}}`)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+		client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+			execRequest{Command: "true", Env: map[string]string{"SECRET_TOKEN": "ss_test_not_real"}}, io.Discard, io.Discard)
+		if err == nil {
+			t.Fatal("expected exec error")
+		}
+		if strings.Contains(err.Error(), "ss_test_not_real") || !strings.Contains(err.Error(), "[redacted]") {
+			t.Fatalf("error was not redacted: %v", err)
+		}
+	})
+}
+
+func TestSuperserveClientStreamRequiresFinishedEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/exec/stream" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"stdout\":\"partial\"}\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+		execRequest{Command: "long"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "without a finished event") {
+		t.Fatalf("err=%v, want unfinished stream error", err)
+	}
+}
+
+func mustJSONLine(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func TestDataPlaneHostForSandbox(t *testing.T) {
 	got := dataPlaneHostForSandbox("sb_123", "sandbox.example.test")
 	if got != "boxd-sb_123.sandbox.example.test" {
