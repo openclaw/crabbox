@@ -24,6 +24,8 @@ type Backend struct {
 	recoveryGrace            time.Duration
 	recoveryPolls            int
 	recoveryInterval         time.Duration
+	rollbackTimeout          time.Duration
+	rollbackInterval         time.Duration
 	beforeTouchClaimUpdate   func()
 	beforeCleanupClaimUpdate func()
 }
@@ -194,7 +196,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		} else {
 			err = errors.Join(err, fmt.Errorf("persist ovh recovery claim: %w", claimErr))
 		}
-		if cleanupErr := rollbackOVHAcquire(client, cfg.OVH.ProjectID, created.ID, createdKey.ID, keyCreated); cleanupErr != nil {
+		if cleanupErr := b.rollbackOVHAcquire(client, cfg.OVH.ProjectID, created.ID, createdKey.ID, keyCreated); cleanupErr != nil {
 			err = core.Exit(7, "%v; ovh cleanup failed: %v", err, cleanupErr)
 			return
 		}
@@ -255,7 +257,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err := b.waitSSH(ctx, &ssh, "ovh bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", now)
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", b.now())
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -1020,13 +1022,16 @@ func (b *Backend) waitForInstanceIP(ctx context.Context, client API, projectID, 
 	}
 	for {
 		instance, err := client.GetInstance(ctx, projectID, instanceID)
-		if err != nil {
-			return Instance{}, err
-		}
-		if publicIPv4(instance) != "" {
+		if err == nil && publicIPv4(instance) != "" {
 			return instance, nil
 		}
+		if err != nil && !isTransientOVHControlPlaneError(err) {
+			return Instance{}, err
+		}
 		if b.now().After(deadline) {
+			if err != nil {
+				return Instance{}, core.Exit(5, "timed out waiting for OVH instance IP after transient error: %v", err)
+			}
 			return Instance{}, core.Exit(5, "timed out waiting for OVH instance IP")
 		}
 		timer := time.NewTimer(interval)
@@ -1370,26 +1375,70 @@ func validateLiveOVHInstance(live, expected core.Server) error {
 	return nil
 }
 
-func rollbackOVHAcquire(client API, projectID, instanceID, keyID string, keyCreated bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func (b *Backend) rollbackOVHAcquire(client API, projectID, instanceID, keyID string, keyCreated bool) error {
+	timeout := b.rollbackTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	interval := b.rollbackInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	var errs []error
 	if instanceID != "" {
-		if err := client.DeleteInstance(ctx, projectID, instanceID); err != nil && !isOVHNotFound(err) {
-			errs = append(errs, err)
+		if err := retryOVHDelete(ctx, interval, "instance "+instanceID, func() error {
+			return client.DeleteInstance(ctx, projectID, instanceID)
+		}); err != nil {
+			return err
 		}
 	}
 	if keyCreated && keyID != "" {
-		if err := client.DeleteSSHKey(ctx, projectID, keyID); err != nil && !isOVHNotFound(err) {
-			errs = append(errs, err)
+		if err := retryOVHDelete(ctx, interval, "SSH key "+keyID, func() error {
+			return client.DeleteSSHKey(ctx, projectID, keyID)
+		}); err != nil {
+			return err
 		}
 	}
-	return errors.Join(errs...)
+	return nil
+}
+
+func retryOVHDelete(ctx context.Context, interval time.Duration, resource string, deleteResource func() error) error {
+	var lastErr error
+	for {
+		err := deleteResource()
+		if err == nil {
+			return nil
+		}
+		if !isTransientOVHControlPlaneError(err) {
+			return err
+		}
+		lastErr = err
+		if err := sleepContext(ctx, interval); err != nil {
+			return fmt.Errorf("could not confirm deletion of OVH %s: %w", resource, errors.Join(lastErr, err))
+		}
+	}
 }
 
 func isOVHNotFound(err error) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.Status == 404
+}
+
+func isTransientOVHControlPlaneError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	switch apiErr.Status {
+	case http.StatusNotFound, http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	default:
+		return apiErr.Status >= 500
+	}
 }
 
 func isDeterminateCreateError(err error) bool {

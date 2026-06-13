@@ -15,36 +15,42 @@ import (
 )
 
 type fakeAPI struct {
-	authCalls          int
-	regionCalls        int
-	flavorCalls        int
-	imageCalls         int
-	instanceCalls      int
-	mutatingCalls      int
-	deletedInstances   []string
-	deletedKeys        []string
-	createKeys         []SSHKey
-	createInstances    []InstanceCreateRequest
-	createKeyErr       error
-	createKeyAccepted  bool
-	createInstanceErr  error
-	createAcceptedErr  bool
-	getInstanceErr     error
-	deleteInstanceErr  error
-	deleteKeyErr       error
-	listInstancesErr   error
-	listErrAfterCreate bool
-	listSSHKeysErr     error
-	regions            []Region
-	flavors            []Flavor
-	images             []Image
-	instances          []Instance
-	sshKeys            []SSHKey
+	authCalls            int
+	regionCalls          int
+	flavorCalls          int
+	imageCalls           int
+	instanceCalls        int
+	mutatingCalls        int
+	deletedInstances     []string
+	deletedKeys          []string
+	createKeys           []SSHKey
+	createInstances      []InstanceCreateRequest
+	createKeyErr         error
+	createKeyAccepted    bool
+	createInstanceErr    error
+	createAcceptedErr    bool
+	getInstanceErr       error
+	getInstanceErrors    []error
+	deleteInstanceErr    error
+	deleteInstanceErrors []error
+	deleteKeyErr         error
+	listInstancesErr     error
+	listErrAfterCreate   bool
+	listSSHKeysErr       error
+	regions              []Region
+	flavors              []Flavor
+	images               []Image
+	instances            []Instance
+	sshKeys              []SSHKey
 }
 
 type fixedClock struct{ t time.Time }
 
 func (c fixedClock) Now() time.Time { return c.t }
+
+type mutableClock struct{ t time.Time }
+
+func (c *mutableClock) Now() time.Time { return c.t }
 
 func (f *fakeAPI) AuthTime(context.Context) (int64, error) {
 	f.authCalls++
@@ -123,6 +129,13 @@ func (f *fakeAPI) ListInstances(context.Context, string) ([]Instance, error) {
 
 func (f *fakeAPI) GetInstance(_ context.Context, _, instanceID string) (Instance, error) {
 	f.mutatingCalls++
+	if len(f.getInstanceErrors) > 0 {
+		err := f.getInstanceErrors[0]
+		f.getInstanceErrors = f.getInstanceErrors[1:]
+		if err != nil {
+			return Instance{}, err
+		}
+	}
 	if f.getInstanceErr != nil {
 		return Instance{}, f.getInstanceErr
 	}
@@ -164,6 +177,11 @@ func (f *fakeAPI) CreateInstance(_ context.Context, _ string, req InstanceCreate
 func (f *fakeAPI) DeleteInstance(_ context.Context, _, instanceID string) error {
 	f.mutatingCalls++
 	f.deletedInstances = append(f.deletedInstances, instanceID)
+	if len(f.deleteInstanceErrors) > 0 {
+		err := f.deleteInstanceErrors[0]
+		f.deleteInstanceErrors = f.deleteInstanceErrors[1:]
+		return err
+	}
 	return f.deleteInstanceErr
 }
 
@@ -365,6 +383,56 @@ func TestAcquireCreatesInstanceSSHKeyTargetAndClaim(t *testing.T) {
 	}
 	if claim.Labels["crabbox"] != "true" || claim.Labels["provider"] != providerName || claim.Labels["lease"] != lease.LeaseID || claim.Labels[ovhProjectLabel] != "project-test" {
 		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
+func TestAcquireRetriesTransientInstanceLookupErrors(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:  []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		getInstanceErrors: []error{
+			&APIError{Operation: "get instance", Status: 404, Body: "not visible yet"},
+			&APIError{Operation: "get instance", Status: 429, Body: "retry"},
+			errors.New("temporary transport failure"),
+		},
+	}
+	backend := testBackend(fake)
+	backend.ipWaitInterval = time.Nanosecond
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "lookup-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID == "" || len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("lease=%#v deleted instances=%v keys=%v", lease, fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
+func TestAcquireReadyTouchUsesBootstrapCompletionTime(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:  []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+	}
+	backend := testBackend(fake)
+	started := time.Unix(1_700_000_000, 0).UTC()
+	clock := &mutableClock{t: started}
+	backend.RT.Clock = clock
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		clock.t = clock.t.Add(10 * time.Minute)
+		return nil
+	}
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ready-time"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustParseUnixLabel(t, lease.Server.Labels["created_at"]); got != started.Unix() {
+		t.Fatalf("created_at=%d", got)
+	}
+	if got := mustParseUnixLabel(t, lease.Server.Labels["last_touched_at"]); got != clock.t.Unix() {
+		t.Fatalf("last_touched_at=%d want=%d", got, clock.t.Unix())
 	}
 }
 
@@ -740,6 +808,8 @@ func TestFailedRollbackRecoveryIsImmediatelyCleanupEligible(t *testing.T) {
 		deleteInstanceErr: errors.New("temporary delete failure"),
 	}
 	backend := testBackend(fake)
+	backend.rollbackTimeout = 5 * time.Millisecond
+	backend.rollbackInterval = time.Nanosecond
 	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
 		return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during ovh bootstrap")
 	}
@@ -765,6 +835,36 @@ func TestFailedRollbackRecoveryIsImmediatelyCleanupEligible(t *testing.T) {
 	}
 	if len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
 		t.Fatalf("deleted instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+}
+
+func TestRollbackRetainsRecoveryWhenCreatedInstanceDeleteStaysNotFound(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{
+		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+		deleteInstanceErr: &APIError{Operation: "delete instance", Status: 404, Body: "not visible yet"},
+	}
+	backend := testBackend(fake)
+	backend.rollbackTimeout = 5 * time.Millisecond
+	backend.rollbackInterval = time.Nanosecond
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during ovh bootstrap")
+	}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "delete-not-visible"})
+	if err == nil || !strings.Contains(err.Error(), "could not confirm deletion") {
+		t.Fatalf("err=%v", err)
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if len(claims) != 1 || claims[0].CloudID == "" {
+		t.Fatalf("claims=%#v", claims)
+	}
+	if len(fake.deletedKeys) != 0 {
+		t.Fatalf("deleted keys=%v", fake.deletedKeys)
 	}
 }
 
