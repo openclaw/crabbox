@@ -113,8 +113,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			CommandText: req.Script.Source,
 		}
 		var apiErr *apiError
+		var contractErr *responseContractError
 		keepRequested := req.Keep || req.KeepOnFailure || cacheMode == "explicit"
 		definitiveRejection := errors.As(err, &apiErr) &&
+			!errors.As(err, &contractErr) &&
 			apiErr.StatusCode >= http.StatusBadRequest &&
 			apiErr.StatusCode < http.StatusInternalServerError &&
 			apiErr.StatusCode != http.StatusRequestTimeout
@@ -165,6 +167,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				}); timingErr != nil {
 					return result, timingErr
 				}
+			}
+		}
+		cleanupID := leaseID
+		if cleanupID == "" {
+			cleanupID = strings.TrimSpace(run.ID)
+		}
+		if cleanupID != "" && !keepRequested && errors.As(err, &contractErr) {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cleanupErr := client.DeleteAcknowledgedComplete(cleanupCtx, cleanupID)
+			cancel()
+			if cleanupErr != nil && !notFoundError(cleanupErr) {
+				fmt.Fprintf(b.rt.Stderr, "warning: %s malformed response cleanup failed for %s: %v\n", providerName, cleanupID, cleanupErr)
 			}
 		}
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, err)}

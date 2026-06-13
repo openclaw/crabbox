@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -93,6 +94,19 @@ type apiError struct {
 	StatusCode int
 	Status     string
 	Body       string
+}
+
+type responseContractError struct {
+	message string
+	cause   error
+}
+
+func (e *responseContractError) Error() string {
+	return e.message
+}
+
+func (e *responseContractError) Unwrap() error {
+	return e.cause
 }
 
 func (e *apiError) Error() string {
@@ -318,29 +332,191 @@ func (c *client) Run(ctx context.Context, req runRequest) (runResponse, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		err := c.decodeJSONResponse(ctx, resp.Body, &out)
+		if err != nil {
+			return out, &responseContractError{message: "loader response is not valid JSON", cause: err}
+		}
+		err = validateRunResponse(req, out)
 		if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Crabbox-Lifecycle-Uncertain")), "true") {
 			out.LifecycleUncertain = true
 		}
 		return out, err
 	}
-	responseBody, err := c.readResponseBody(ctx, resp.Body, 64*1024)
-	if json.Unmarshal(responseBody, &out) == nil && strings.TrimSpace(out.ID) != "" && strings.TrimSpace(out.Status) != "" {
+	responseBody, readErr := c.readResponseBody(ctx, resp.Body, 64*1024)
+	responseErr := c.responseErrorBody(resp.StatusCode, resp.Status, responseBody)
+	decoded, lifecycleResponse, decodeErr := decodeRunErrorResponse(responseBody)
+	if lifecycleResponse {
+		out = decoded
+	}
+	if readErr != nil {
+		contractErr := &responseContractError{message: "loader error response body is incomplete", cause: readErr}
+		return out, errors.Join(responseErr, contractErr, readErr)
+	}
+	if lifecycleResponse {
+		if decodeErr != nil {
+			contractErr := &responseContractError{message: "loader lifecycle error response is not valid JSON", cause: decodeErr}
+			return out, errors.Join(responseErr, contractErr)
+		}
+		if contractErr := validateRunResponse(req, out); contractErr != nil {
+			return out, errors.Join(responseErr, contractErr)
+		}
 		if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Crabbox-Lifecycle-Uncertain")), "true") {
 			out.LifecycleUncertain = true
 		}
 		return out, nil
 	}
-	responseErr := c.responseErrorBody(resp.StatusCode, resp.Status, responseBody)
-	if err != nil {
-		return out, fmt.Errorf("%w: reading response body: %w", responseErr, err)
+	if decodeErr != nil && looksLikeRunResponse(responseBody) {
+		contractErr := &responseContractError{message: "loader lifecycle error response is not valid JSON", cause: decodeErr}
+		return out, errors.Join(responseErr, contractErr)
 	}
 	return out, responseErr
+}
+
+func decodeRunErrorResponse(body []byte) (runResponse, bool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		out, lifecycleResponse := decodeRunResponsePrefix(body)
+		return out, lifecycleResponse, err
+	}
+	if !hasRunResponseField(fields) {
+		return runResponse{}, false, nil
+	}
+	var out runResponse
+	err := json.Unmarshal(body, &out)
+	return out, true, err
+}
+
+func hasRunResponseField(fields map[string]json.RawMessage) bool {
+	for field := range fields {
+		if isRunResponseField(field) {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeRunResponsePrefix(body []byte) (runResponse, bool) {
+	var out runResponse
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return out, false
+	}
+	lifecycleResponse := false
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return out, lifecycleResponse
+		}
+		field, ok := token.(string)
+		if !ok {
+			return out, lifecycleResponse
+		}
+		lifecycleResponse = lifecycleResponse || isRunResponseField(field)
+		switch field {
+		case "id":
+			if err := decoder.Decode(&out.ID); err != nil {
+				return out, lifecycleResponse
+			}
+		case "workerId":
+			if err := decoder.Decode(&out.WorkerID); err != nil {
+				return out, lifecycleResponse
+			}
+		case "status":
+			if err := decoder.Decode(&out.Status); err != nil {
+				return out, lifecycleResponse
+			}
+		default:
+			var discard json.RawMessage
+			if err := decoder.Decode(&discard); err != nil {
+				return out, lifecycleResponse
+			}
+		}
+	}
+	return out, lifecycleResponse
+}
+
+func isRunResponseField(field string) bool {
+	switch field {
+	case "id", "workerId", "status", "exitCode", "stdout", "stderr", "body", "logs",
+		"timing", "metadata", "lifecycleUncertain", "lifecycleMessage":
+		return true
+	default:
+		return false
+	}
+}
+
+func looksLikeRunResponse(body []byte) bool {
+	for _, field := range [][]byte{
+		[]byte(`"id"`),
+		[]byte(`"workerId"`),
+		[]byte(`"status"`),
+		[]byte(`"exitCode"`),
+		[]byte(`"lifecycleUncertain"`),
+	} {
+		if bytes.Contains(body, field) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *client) Status(ctx context.Context, id string) (runStatus, error) {
 	var out runStatus
 	err := c.doJSON(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(id), nil, &out)
+	if err == nil {
+		err = validateRunStatus(id, out)
+	}
 	return out, err
+}
+
+func validateRunResponse(req runRequest, out runResponse) error {
+	if strings.TrimSpace(out.ID) == "" {
+		return &responseContractError{message: "loader response is missing run id"}
+	}
+	if strings.TrimSpace(req.ID) != "" && out.ID != req.ID {
+		return &responseContractError{message: "loader response run id does not match request"}
+	}
+	if strings.TrimSpace(out.Status) == "" {
+		return &responseContractError{message: "loader response is missing run status"}
+	}
+	if !validRunResponseStatus(out.Status) {
+		return &responseContractError{message: "loader response has invalid run status"}
+	}
+	return nil
+}
+
+func validateRunStatus(id string, out runStatus) error {
+	if strings.TrimSpace(out.ID) == "" {
+		return &responseContractError{message: "loader status response is missing run id"}
+	}
+	if out.ID != id {
+		return &responseContractError{message: "loader status response run id does not match request"}
+	}
+	if strings.TrimSpace(out.Status) == "" {
+		return &responseContractError{message: "loader status response is missing run status"}
+	}
+	if !validRunStatus(out.Status) {
+		return &responseContractError{message: "loader status response has invalid run status"}
+	}
+	return nil
+}
+
+func validRunResponseStatus(status string) bool {
+	switch status {
+	case "succeeded", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRunStatus(status string) bool {
+	switch status {
+	case "running", "succeeded", "failed", "stopped":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *client) Delete(ctx context.Context, id string) error {
@@ -393,7 +569,18 @@ func (c *client) responseError(ctx context.Context, resp *http.Response) error {
 
 func (c *client) decodeJSONResponse(ctx context.Context, body io.ReadCloser, output any) error {
 	return c.withResponseBodyDeadline(ctx, body, func() error {
-		return json.NewDecoder(body).Decode(output)
+		decoder := json.NewDecoder(body)
+		if err := decoder.Decode(output); err != nil {
+			return err
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				return fmt.Errorf("response contains multiple JSON values")
+			}
+			return err
+		}
+		return nil
 	})
 }
 

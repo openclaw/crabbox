@@ -38,8 +38,12 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetWorkerRuntime && cfg.TargetOS != core.TargetLinux {
-		return nil, core.Exit(2, "%s supports target=worker-runtime only", providerName)
+	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetWorkerRuntime {
+		if cfg.TargetOS == core.TargetLinux && !core.IsTargetExplicit(&cfg) {
+			cfg.TargetOS = core.TargetWorkerRuntime
+		} else {
+			return nil, core.Exit(2, "%s supports target=worker-runtime only", providerName)
+		}
 	}
 	if err := validateProviderConfig(cfg); err != nil {
 		return nil, err

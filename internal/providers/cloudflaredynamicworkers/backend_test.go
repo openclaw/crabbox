@@ -65,6 +65,29 @@ func TestConfigureNormalizesDefaultLinuxTarget(t *testing.T) {
 	}
 }
 
+func TestConfigureRejectsExplicitLinuxTarget(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.TargetOS = core.TargetLinux
+	core.MarkTargetExplicit(&cfg)
+	_, err := Provider{}.Configure(cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	if err == nil || !strings.Contains(err.Error(), "supports target=worker-runtime only") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestConfigureRejectsUnsupportedImplicitTargets(t *testing.T) {
+	for _, target := range []string{core.TargetMacOS, core.TargetWindows, "invalid"} {
+		t.Run(target, func(t *testing.T) {
+			cfg := testConfig("http://127.0.0.1:1")
+			cfg.TargetOS = target
+			_, err := Provider{}.Configure(cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			if err == nil || !strings.Contains(err.Error(), "supports target=worker-runtime only") {
+				t.Fatalf("target=%q error=%v", target, err)
+			}
+		})
+	}
+}
+
 func TestListWithoutRefreshValidatesLoaderURL(t *testing.T) {
 	cfg := testConfig("")
 	cfg.CloudflareDynamicWorkers.LoaderURL = ""
@@ -218,6 +241,276 @@ func TestClientTimeoutPreservesErrorStatus(t *testing.T) {
 	}
 }
 
+func TestClientRejectsRunResponseIdentityMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(runResponse{ID: "run_other", Status: "succeeded"})
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+	}
+
+	_, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("run error=%v, want response contract mismatch", err)
+	}
+}
+
+func TestClientRejectsMissingGeneratedRunIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(runResponse{Status: "succeeded"})
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+	}
+
+	_, err := client.Run(context.Background(), runRequest{})
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) || !strings.Contains(err.Error(), "missing run id") {
+		t.Fatalf("run error=%v, want missing run id", err)
+	}
+}
+
+func TestClientRejectsNonTerminalRunResponseState(t *testing.T) {
+	for _, status := range []string{"running", " succeeded "} {
+		t.Run(status, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(runResponse{ID: "run_expected", Status: status})
+			}))
+			defer server.Close()
+			client := &client{
+				baseURL:             server.URL,
+				token:               "test-token",
+				http:                server.Client(),
+				responseBodyTimeout: time.Second,
+			}
+
+			_, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+			var contractErr *responseContractError
+			if !errors.As(err, &contractErr) || !strings.Contains(err.Error(), "invalid run status") {
+				t.Fatalf("run error=%v, want invalid status contract error", err)
+			}
+		})
+	}
+}
+
+func TestClientRejectsTrailingRunResponseData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"run_expected","status":"succeeded"}garbage`))
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+	}
+
+	_, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) {
+		t.Fatalf("run error=%v, want response contract error", err)
+	}
+}
+
+func TestClientRejectsInvalidStatusIdentityAndState(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response runStatus
+		want     string
+	}{
+		{name: "missing id", response: runStatus{Status: "running"}, want: "missing run id"},
+		{name: "mismatched id", response: runStatus{ID: "run_other", Status: "running"}, want: "does not match"},
+		{name: "missing status", response: runStatus{ID: "run_expected"}, want: "missing run status"},
+		{name: "invalid status", response: runStatus{ID: "run_expected", Status: "garbage"}, want: "invalid run status"},
+		{name: "padded status", response: runStatus{ID: "run_expected", Status: " running "}, want: "invalid run status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(tc.response)
+			}))
+			defer server.Close()
+			client := &client{
+				baseURL:             server.URL,
+				token:               "test-token",
+				http:                server.Client(),
+				responseBodyTimeout: time.Second,
+			}
+
+			_, err := client.Status(context.Background(), "run_expected")
+			var contractErr *responseContractError
+			if !errors.As(err, &contractErr) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("status error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestClientPreservesOrdinaryJSONAPIErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+	}
+
+	_, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("run error=%v, want typed HTTP 401", err)
+	}
+	var contractErr *responseContractError
+	if errors.As(err, &contractErr) {
+		t.Fatalf("ordinary API error misclassified as response contract error: %v", err)
+	}
+}
+
+func TestClientRejectsIncompleteNon2xxLifecycleResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"id":"run_expected","status":"failed","exitCode":1}`))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: 25 * time.Millisecond,
+	}
+
+	out, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+	if out.ID != "run_expected" {
+		t.Fatalf("run id=%q, want buffered lifecycle identity", out.ID)
+	}
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("run error=%v, want typed HTTP 502", err)
+	}
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("run error=%v, want contract and deadline errors", err)
+	}
+}
+
+func TestClientRecoversRunIdentityFromTruncatedNon2xxLifecycleResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"id":"run_generated","status":"failed","message":"truncated`))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: 25 * time.Millisecond,
+	}
+
+	out, err := client.Run(context.Background(), runRequest{})
+	if out.ID != "run_generated" {
+		t.Fatalf("run id=%q, want buffered lifecycle identity", out.ID)
+	}
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("run error=%v, want typed HTTP 502", err)
+	}
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("run error=%v, want contract and deadline errors", err)
+	}
+}
+
+func TestClientRejectsMalformedNon2xxLifecycleResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"id":"run_expected","status":"failed","exitCode":"bad"}`))
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+	}
+
+	_, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("run error=%v, want typed HTTP 502", err)
+	}
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) {
+		t.Fatalf("run error=%v, want response contract error", err)
+	}
+}
+
+func TestClientDoesNotLetErrorMessageMaskMalformedLifecycleResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"id":"run_expected","status":"failed","exitCode":"bad","message":"execution failed"}`))
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+	}
+
+	out, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+	if out.ID != "run_expected" {
+		t.Fatalf("run id=%q, want lifecycle identity", out.ID)
+	}
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("run error=%v, want typed HTTP 502", err)
+	}
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) {
+		t.Fatalf("run error=%v, want response contract error", err)
+	}
+}
+
+func TestClientPreservesHTTPErrorForInvalidNon2xxLifecycleResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(runResponse{ID: "run_expected", Status: "running"})
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: time.Second,
+	}
+
+	_, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("run error=%v, want typed HTTP 400", err)
+	}
+	var contractErr *responseContractError
+	if !errors.As(err, &contractErr) {
+		t.Fatalf("run error=%v, want response contract error", err)
+	}
+}
+
 func TestClientRejectsRedirectWithoutForwardingCredentialsOrPayload(t *testing.T) {
 	var redirectedRequests int
 	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -323,7 +616,7 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(runResponse{
 			ID:       got.ID,
 			WorkerID: got.WorkerID,
-			Status:   "completed",
+			Status:   "succeeded",
 			ExitCode: 0,
 			Stdout:   "stdout\n",
 			Body:     "body\n",
@@ -409,6 +702,108 @@ func TestRunRejectsSuccessfulLoaderResponseWithoutStatus(t *testing.T) {
 	}
 	if !deleted {
 		t.Fatal("malformed successful response did not clean up run metadata")
+	}
+}
+
+func TestRunCleansGeneratedIdentityAfterMalformedSuccessfulResponse(t *testing.T) {
+	const generatedID = "run_generated"
+	var deleted bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.ID != "" {
+				t.Fatalf("one-shot request id=%q, want empty", request.ID)
+			}
+			_ = json.NewEncoder(w).Encode(runResponse{ID: generatedID})
+		case http.MethodDelete:
+			if r.URL.Path != "/v1/runs/"+generatedID || r.URL.Query().Get("acknowledgedComplete") != "true" {
+				t.Fatalf("unexpected cleanup request %s?%s", r.URL.Path, r.URL.RawQuery)
+			}
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	backend.cfg.CloudflareDynamicWorkers.CacheMode = "one-shot"
+	result, err := backend.Run(context.Background(), RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err == nil || result.ExitCode != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if !deleted {
+		t.Fatal("malformed generated response did not clean up run metadata")
+	}
+}
+
+func TestRunCleansSubmittedIdentityAfterInvalidJSONResponse(t *testing.T) {
+	var runID string
+	var deleted bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			runID = request.ID
+			_, _ = w.Write([]byte(`{"id":`))
+		case http.MethodDelete:
+			if r.URL.Path != "/v1/runs/"+runID || r.URL.Query().Get("acknowledgedComplete") != "true" {
+				t.Fatalf("unexpected cleanup request %s?%s", r.URL.Path, r.URL.RawQuery)
+			}
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	result, err := backend.Run(context.Background(), RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err == nil || result.ExitCode != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if runID == "" || !deleted {
+		t.Fatalf("run id=%q deleted=%t", runID, deleted)
+	}
+}
+
+func TestRunMalformedResponseCleanupIgnoresCanceledCallerContext(t *testing.T) {
+	loader := &contractErrorLoader{}
+	originalNewLoaderAPI := newLoaderAPI
+	newLoaderAPI = func(Config, Runtime) (loaderAPI, error) {
+		return loader, nil
+	}
+	defer func() {
+		newLoaderAPI = originalNewLoaderAPI
+	}()
+
+	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := backend.Run(ctx, RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err == nil || result.ExitCode != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if loader.cleanupID == "" || loader.cleanupContextErr != nil {
+		t.Fatalf("cleanup id=%q contextErr=%v", loader.cleanupID, loader.cleanupContextErr)
 	}
 }
 
@@ -834,6 +1229,62 @@ func TestRunPreservesKeepOnFailureClaimAfterUnstructuredServerError(t *testing.T
 	}
 }
 
+func TestRunPreservesKeepOnFailureClaimAfterInvalidLifecycleRejection(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var submittedID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			submittedID = request.ID
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":      submittedID,
+				"status":  "running",
+				"message": "invalid response",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+submittedID:
+			_ = json.NewEncoder(w).Encode(runStatus{
+				ID:       submittedID,
+				Status:   "failed",
+				Metadata: map[string]string{"reason": "invalid-response"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:            Repo{Root: t.TempDir()},
+		KeepOnFailure:   true,
+		RequestedSlug:   "invalid-response",
+		ScriptRequested: true,
+		Script: &RunScriptSpec{
+			Source: "worker.mjs",
+			Data:   []byte("export default {}"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected invalid lifecycle response error")
+	}
+	if submittedID == "" || result.LeaseID != submittedID || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("result=%#v submittedID=%q", result, submittedID)
+	}
+	claim, ok, resolveErr := resolveLeaseClaim(result.Slug, backend.cfg)
+	if resolveErr != nil || !ok {
+		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
+	}
+	if claim.Labels["state"] != "failed" || claim.Labels["uncertain"] != "true" || claim.Labels["reason"] != "invalid-response" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
 type losePostResponseTransport struct {
 	base http.RoundTripper
 }
@@ -1170,6 +1621,33 @@ func TestClientRedactsConfiguredTokenFromErrors(t *testing.T) {
 
 func newTestBackend(url string, stdout, stderr *bytes.Buffer) *backend {
 	return NewBackend(Provider{}.Spec(), testConfig(url), Runtime{Stdout: stdout, Stderr: stderr}).(*backend)
+}
+
+type contractErrorLoader struct {
+	cleanupID         string
+	cleanupContextErr error
+}
+
+func (l *contractErrorLoader) Readiness(context.Context) (readinessResponse, error) {
+	return readinessResponse{}, nil
+}
+
+func (l *contractErrorLoader) Run(_ context.Context, req runRequest) (runResponse, error) {
+	return runResponse{ID: req.ID}, &responseContractError{message: "malformed response"}
+}
+
+func (l *contractErrorLoader) Status(context.Context, string) (runStatus, error) {
+	return runStatus{}, nil
+}
+
+func (l *contractErrorLoader) Delete(context.Context, string) error {
+	return nil
+}
+
+func (l *contractErrorLoader) DeleteAcknowledgedComplete(ctx context.Context, id string) error {
+	l.cleanupID = id
+	l.cleanupContextErr = ctx.Err()
+	return l.cleanupContextErr
 }
 
 func testConfig(url string) Config {
