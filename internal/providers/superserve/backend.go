@@ -191,8 +191,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			SyncDelegated: true,
 		}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
+		activityErr := b.refreshSuperserveActivityIfRetained(leaseID, shouldStop)
+		if activityErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: refresh superserve lease activity failed lease=%s: %v\n", leaseID, activityErr)
+			result.ExitCode = 1
+		}
 		if req.TimingJSON {
-			return result, writeTimingJSON(b.rt.Stderr, timingReport{
+			if err := writeTimingJSON(b.rt.Stderr, timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -201,9 +206,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				SyncPhases:    syncPhases,
 				SyncSkipped:   req.NoSync,
 				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
+				ExitCode:      result.ExitCode,
 				Label:         strings.TrimSpace(req.Label),
-			})
+			}); err != nil {
+				return result, err
+			}
+		}
+		if activityErr != nil {
+			return result, activityErr
 		}
 		return result, nil
 	}
@@ -241,6 +251,24 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		fmt.Fprintf(b.rt.Stderr, "superserve run summary sync=%s command=%s total=%s exit=%d\n",
 			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
+	var commandErr error
+	if runErr != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		if result.ExitCode == 0 {
+			result.ExitCode = 1
+		}
+		commandErr = ExitError{Code: 1, Message: fmt.Sprintf("superserve run failed: %v", runErr)}
+	} else if result.ExitCode != 0 {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		commandErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("superserve run exited %d", result.ExitCode)}
+	}
+	activityErr := b.refreshSuperserveActivityIfRetained(leaseID, shouldStop)
+	if activityErr != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: refresh superserve lease activity failed lease=%s: %v\n", leaseID, activityErr)
+		if commandErr == nil {
+			result.ExitCode = 1
+		}
+	}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider:      providerName,
@@ -258,16 +286,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			return result, err
 		}
 	}
-	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		if result.ExitCode == 0 {
-			result.ExitCode = 1
-		}
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("superserve run failed: %v", runErr)}
+	if commandErr != nil {
+		return result, commandErr
 	}
-	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("superserve run exited %d", result.ExitCode)}
+	if activityErr != nil {
+		return result, activityErr
 	}
 	return result, nil
 }
@@ -491,10 +514,11 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 		return "", "", "", err
 	}
 	initialMetadata := b.ownershipMetadata(api.BaseURL(), providerScope, "", "", repo)
+	fromTemplate, fromSnapshot := superserveCreateSource(b.cfg)
 	sb, err := api.CreateSandbox(ctx, createSandboxRequest{
 		Name:           newSandboxName(repo),
-		FromTemplate:   strings.TrimSpace(b.cfg.Superserve.Template),
-		FromSnapshot:   strings.TrimSpace(b.cfg.Superserve.Snapshot),
+		FromTemplate:   fromTemplate,
+		FromSnapshot:   fromSnapshot,
 		TimeoutSeconds: b.cfg.Superserve.TimeoutSecs,
 		Metadata:       initialMetadata,
 		Network:        superserveNetworkConfig(b.cfg),
@@ -519,6 +543,14 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, nil
+}
+
+func superserveCreateSource(cfg Config) (string, string) {
+	snapshot := strings.TrimSpace(cfg.Superserve.Snapshot)
+	if snapshot != "" {
+		return "", snapshot
+	}
+	return strings.TrimSpace(cfg.Superserve.Template), ""
 }
 
 func superserveNetworkConfig(cfg Config) *createSandboxNetworkCfg {
@@ -706,6 +738,34 @@ func superserveClaimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
 		return false, "idle timeout not reached"
 	}
 	return true, "idle timeout"
+}
+
+func (b *backend) refreshSuperserveLeaseActivity(leaseID string) error {
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" {
+		return nil
+	}
+	idleTimeout := timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second)
+	return claimLeaseForRepoProviderScopePond(
+		claim.LeaseID,
+		claim.Slug,
+		providerName,
+		claim.ProviderScope,
+		claim.Pond,
+		claim.RepoRoot,
+		idleTimeout,
+		false,
+	)
+}
+
+func (b *backend) refreshSuperserveActivityIfRetained(leaseID string, shouldStop bool) error {
+	if shouldStop {
+		return nil
+	}
+	return b.refreshSuperserveLeaseActivity(leaseID)
 }
 
 func (b *backend) cleanupCreateFailure(ctx context.Context, api superserveClient, sandboxID string, cause error) error {

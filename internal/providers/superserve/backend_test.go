@@ -32,6 +32,7 @@ type fakeSuperserveClient struct {
 	execs       []execRequest
 	execResults []execResult
 	execErr     error
+	onExec      func(count int, req execRequest)
 	probes      int
 	getErr      error
 	deleteErr   error
@@ -137,6 +138,7 @@ func (f *fakeSuperserveClient) Exec(_ context.Context, _ *sandboxAccess, req exe
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execs = append(f.execs, req)
+	execCount := len(f.execs)
 	if f.execErr != nil {
 		return execResult{}, f.execErr
 	}
@@ -150,6 +152,9 @@ func (f *fakeSuperserveClient) Exec(_ context.Context, _ *sandboxAccess, req exe
 	}
 	if result.Stderr != "" {
 		_, _ = io.WriteString(stderr, result.Stderr)
+	}
+	if f.onExec != nil {
+		f.onExec(execCount, req)
 	}
 	return result, nil
 }
@@ -192,6 +197,23 @@ func TestWarmupCreatesClaimAndOwnershipMetadataWithoutToken(t *testing.T) {
 	}
 	if len(fake.updates) != 1 || fake.updates[0][metadataClaimKey] != leaseID || fake.updates[0][metadataSlugKey] == "" {
 		t.Fatalf("update metadata=%#v", fake.updates)
+	}
+}
+
+func TestWarmupSnapshotClearsDefaultTemplate(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	backend := newSuperserveTestBackend(t, fake)
+	backend.cfg.Superserve.Template = "superserve/base"
+	backend.cfg.Superserve.Snapshot = "snap-123"
+
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+		t.Fatalf("Warmup err=%v", err)
+	}
+	if len(fake.created) != 1 {
+		t.Fatalf("created=%#v", fake.created)
+	}
+	if fake.created[0].FromTemplate != "" || fake.created[0].FromSnapshot != "snap-123" {
+		t.Fatalf("snapshot create sent wrong source: %#v", fake.created[0])
 	}
 }
 
@@ -420,6 +442,64 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+}
+
+func TestRunRefreshesRetainedClaimActivityAfterSuccessfulCommand(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	fake.execResults = []execResult{
+		{},
+		{ExitCode: 0},
+	}
+	backend := newSuperserveTestBackend(t, fake)
+	leaseID, scope := createSuperserveClaim(t, backend, fake, "retained")
+	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "retained")
+	stale := time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	fake.onExec = func(count int, _ execRequest) {
+		if count != 2 {
+			return
+		}
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim.LastUsedAt = stale
+		writeClaimFixture(t, claim)
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		ID:      "retained",
+		Repo:    Repo{Name: "my-app", Root: "/repo"},
+		NoSync:  true,
+		Keep:    true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.LastUsedAt == stale {
+		t.Fatalf("claim activity was not refreshed after command: %#v", claim)
+	}
+	refreshed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleTime, err := time.Parse(time.RFC3339, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !refreshed.After(staleTime) {
+		t.Fatalf("last_used_at=%s should be after stale marker %s", claim.LastUsedAt, stale)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("retained run deleted sandbox: %#v", fake.deleted)
 	}
 }
 
