@@ -72,22 +72,24 @@ func (b *Backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	if cfg.OVH.Region != "" && !regionExists(regions, cfg.OVH.Region) {
 		return doctorCheckFailure("region", fmt.Sprintf("OVH region %q was not returned by the project", cfg.OVH.Region)), nil
 	}
-	flavors, err := client.ListFlavors(ctx, cfg.OVH.ProjectID, cfg.OVH.Region)
-	if err != nil {
-		return core.DoctorResult{}, err
-	}
-	if cfg.OVH.Flavor != "" {
-		if _, err := selectFlavor(flavors, cfg.OVH.Flavor); err != nil {
-			return doctorCheckFailure("flavor", err.Error()), nil
+	if cfg.OVH.Region != "" {
+		flavors, err := client.ListFlavors(ctx, cfg.OVH.ProjectID, cfg.OVH.Region)
+		if err != nil {
+			return core.DoctorResult{}, err
 		}
-	}
-	images, err := client.ListImages(ctx, cfg.OVH.ProjectID, cfg.OVH.Region)
-	if err != nil {
-		return core.DoctorResult{}, err
-	}
-	if cfg.OVH.Image != "" {
-		if _, err := selectImage(images, cfg.OVH.Image); err != nil {
-			return doctorCheckFailure("image", err.Error()), nil
+		if cfg.OVH.Flavor != "" {
+			if _, err := selectFlavor(flavors, cfg.OVH.Flavor); err != nil {
+				return doctorCheckFailure("flavor", err.Error()), nil
+			}
+		}
+		images, err := client.ListImages(ctx, cfg.OVH.ProjectID, cfg.OVH.Region)
+		if err != nil {
+			return core.DoctorResult{}, err
+		}
+		if cfg.OVH.Image != "" {
+			if _, err := selectImage(images, cfg.OVH.Image); err != nil {
+				return doctorCheckFailure("image", err.Error()), nil
+			}
 		}
 	}
 	instances, err := client.ListInstances(ctx, cfg.OVH.ProjectID)
@@ -822,6 +824,10 @@ func validateImage(image Image, selectedByID bool) (Image, error) {
 	}
 	if imageType := strings.ToLower(strings.TrimSpace(image.Type)); imageType != "" && imageType != "linux" {
 		return Image{}, core.Exit(2, "ovh image %q has type=%s, not linux", firstNonBlank(image.ID, image.Name), image.Type)
+	}
+	imageName := strings.ToLower(strings.TrimSpace(image.Name))
+	if !strings.Contains(imageName, "ubuntu") && !strings.Contains(imageName, "debian") {
+		return Image{}, core.Exit(2, "ovh image %q is not a supported Debian or Ubuntu image", firstNonBlank(image.ID, image.Name))
 	}
 	if !selectedByID {
 		visibility := strings.ToLower(strings.TrimSpace(image.Visibility))

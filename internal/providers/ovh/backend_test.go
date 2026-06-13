@@ -219,6 +219,28 @@ func TestDoctorReportsMissingProjectWithoutClient(t *testing.T) {
 	}
 }
 
+func TestDoctorWithoutRegionSkipsRegionScopedCatalogValidation(t *testing.T) {
+	fake := &fakeAPI{
+		flavors: []Flavor{{ID: "one", Name: "b3-8"}, {ID: "two", Name: "b3-8"}},
+		images:  []Image{{ID: "one", Name: "Ubuntu 24.04"}, {ID: "two", Name: "Ubuntu 24.04"}},
+	}
+	backend := NewBackend(Provider{}.Spec(), core.Config{OVH: core.OVHConfig{
+		ProjectID: "project-test",
+		Image:     "Ubuntu 24.04",
+		Flavor:    "b3-8",
+	}}, core.Runtime{})
+	backend.clientFactory = func(core.Config, core.Runtime) (API, error) {
+		return fake, nil
+	}
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Message, "inventory=ready") || fake.flavorCalls != 0 || fake.imageCalls != 0 {
+		t.Fatalf("result=%#v flavorCalls=%d imageCalls=%d", result, fake.flavorCalls, fake.imageCalls)
+	}
+}
+
 func TestDoctorReportsUnavailableFlavor(t *testing.T) {
 	fake := &fakeAPI{
 		regions: []Region{{Name: "GRA11"}},
@@ -287,6 +309,7 @@ func TestResolveImageRequiresUniquePublicActiveLinuxName(t *testing.T) {
 		{ID: "inactive", Name: "Inactive", Status: "saving", Type: "linux", Visibility: "public"},
 		{ID: "windows", Name: "Windows", Status: "active", Type: "windows", Visibility: "public"},
 		{ID: "private", Name: "Private", Status: "active", Type: "linux", Visibility: "private"},
+		{ID: "rocky", Name: "Rocky Linux 9", Status: "active", Type: "linux", Visibility: "public"},
 	} {
 		if _, err := selectImage([]Image{image}, image.Name); err == nil {
 			t.Fatalf("selectImage(%#v) succeeded", image)

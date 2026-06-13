@@ -57,7 +57,7 @@ Config keys under `ovh:`:
 | `endpoint` | `cfg.OVH.Endpoint` | `https://api.us.ovhcloud.com/1.0` | Must be an HTTPS OVH or OVHcloud API host. Endpoint aliases `ovh-us`, `ovh-ca`, and `ovh-eu` are accepted by the client. Repo config may not redirect an inherited endpoint. |
 | `projectId` | `cfg.OVH.ProjectID` | empty | Required for doctor, list, warmup, status, stop, and cleanup. |
 | `region` | `cfg.OVH.Region` | empty | Required when acquiring a new instance. Doctor verifies it is returned by the project when set. |
-| `image` | `cfg.OVH.Image` | `Ubuntu 24.04` | Public active Linux image name or exact id. Names must be unique; non-public images require an exact id. Explicit values bypass the portable `--os` mapping guard. |
+| `image` | `cfg.OVH.Image` | `Ubuntu 24.04` | Public active Debian or Ubuntu image name or exact id. Names must be unique; non-public images require an exact id. Other Linux distributions are rejected because the managed bootstrap currently uses Debian-family package and service conventions. Explicit values bypass the portable `--os` mapping guard. |
 | `flavor` | `cfg.OVH.Flavor` | `b3-8` | Available Linux flavor name or exact id with remaining project quota. Names must be unique. `--type` overrides this value for new leases. |
 
 Provider-specific flags:
@@ -122,8 +122,8 @@ permissions inside scripts.
 
 1. Validate required project and region configuration.
 2. Resolve exact ids before names, reject ambiguous image or flavor names, and
-   verify Linux image status plus flavor availability and project quota before
-   creating credentials.
+   verify Debian/Ubuntu image status plus flavor availability and project quota
+   before creating credentials.
 3. Generate a per-lease SSH key under the Crabbox testbox key directory.
 4. Create a matching OVH project SSH key.
 5. Create an instance with region, flavor, image, SSH key, and cloud-init
