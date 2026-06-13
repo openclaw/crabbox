@@ -8551,10 +8551,10 @@ function workspaceCreateInput(value: unknown): WorkspaceCreateRequest | undefine
 
 function workspaceProvider(value: string | undefined): Provider {
   const provider = value?.trim() || "hetzner";
-  if (provider !== "hetzner") {
+  if (!["hetzner", "aws", "azure", "gcp"].includes(provider)) {
     throw new Error(`unsupported workspace provider: ${provider}`);
   }
-  return provider;
+  return provider as Provider;
 }
 
 function workspaceProfile(value: string | undefined): string | undefined {

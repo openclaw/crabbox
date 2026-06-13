@@ -200,7 +200,7 @@ CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token
 CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion
 CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for /v1/workspaces lease provisioning
 CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for /v1/workspaces terminal attachment
-CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; currently hetzner only
+CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login

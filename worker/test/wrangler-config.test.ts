@@ -30,9 +30,18 @@ describe("wrangler config", () => {
       expect(values.every((value) => value > 0)).toBe(true);
     }
   });
+
+  it("routes deployed and preview workspaces through the verified AWS backend", () => {
+    expect(configStringValues("CRABBOX_WORKSPACE_PROVIDER")).toEqual(["aws", "aws"]);
+  });
 });
 
 function configValues(name: string): number[] {
   const pattern = new RegExp(`"${name}"\\s*:\\s*"(\\d+)"`, "g");
   return [...wranglerConfig.matchAll(pattern)].map((match) => Number(match[1]));
+}
+
+function configStringValues(name: string): string[] {
+  const pattern = new RegExp(`"${name}"\\s*:\\s*"([^"]+)"`, "g");
+  return [...wranglerConfig.matchAll(pattern)].map((match) => String(match[1]));
 }

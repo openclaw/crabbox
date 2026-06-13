@@ -579,6 +579,55 @@ describe("fleet lease identity and idle", () => {
     expect(providerReleases).toBe(1);
   });
 
+  it("routes workspaces through each configured brokered provider", async () => {
+    await Promise.all(
+      (["hetzner", "aws", "azure", "gcp"] as const).map(async (provider) => {
+        const storage = new MemoryStorage();
+        let createdProvider = "";
+        const fleet = testFleet(
+          storage,
+          {
+            [provider]: fakeProvider(
+              (config) => {
+                createdProvider = config.provider;
+              },
+              { provider },
+            ),
+          },
+          {
+            CRABBOX_WORKSPACE_PROVIDER: provider,
+            CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test",
+          },
+        );
+        const id = `fleet-${provider}`;
+        const headers = {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        };
+        const create = await fleet.fetch(
+          request("POST", "/v1/workspaces", {
+            headers,
+            body: {
+              id,
+              runtime: "crabbox",
+              ttlSeconds: 1800,
+              idleTimeoutSeconds: 360,
+            },
+          }),
+        );
+        expect(create.status).toBe(202);
+        const created = (await create.json()) as { providerResourceId: string };
+        await fleet.alarm();
+        expect(createdProvider).toBe(provider);
+        expect(storage.value<LeaseRecord>(`lease:${created.providerResourceId}`)?.provider).toBe(
+          provider,
+        );
+        const released = await fleet.fetch(request("DELETE", `/v1/workspaces/${id}`, { headers }));
+        await expect(released.json()).resolves.toMatchObject({ status: "stopped" });
+      }),
+    );
+  });
+
   it("rejects malformed workspace request bodies", async () => {
     const fleet = testFleet();
     const headers = {

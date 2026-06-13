@@ -6,6 +6,10 @@
 
 - Added authenticated Crabfleet workspace terminals with bounded SSH/WebSocket bridging, durable tmux resume, and lifecycle revocation.
 
+### Fixed
+
+- Fixed Crabfleet workspaces to use any configured brokered provider and route the OpenClaw deployment through its verified AWS backend.
+
 ## 0.30.0 - 2026-06-13
 
 ### Added
