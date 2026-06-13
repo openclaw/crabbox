@@ -2856,10 +2856,6 @@ func probeDirectSSHWebVNCWithSecurity(ctx context.Context, localPort, password s
 	return nil
 }
 
-func authenticateDirectSSHWebVNCRFB(conn net.Conn, password string) error {
-	return authenticateDirectSSHWebVNCRFBWithSecurity(conn, password, false)
-}
-
 func authenticateDirectSSHWebVNCRFBWithSecurity(conn net.Conn, password string, allowNone bool) error {
 	version := make([]byte, 12)
 	if _, err := io.ReadFull(conn, version); err != nil {
