@@ -17,6 +17,7 @@ import (
 
 const (
 	lifecycleOutputNone           = ""
+	lifecycleOutputJSONLease      = "json-lease"
 	lifecycleOutputJSONNameArray  = "json-name-array"
 	lifecycleOutputJSONLeaseArray = "json-lease-array"
 	externalResourceNameLabel     = "externalResourceName"
@@ -69,11 +70,15 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 	var result core.LocalCommandResult
 	for index, argv := range expandedCommands {
 		result, err = b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-			Name:   argv[0],
-			Args:   argv[1:],
-			Env:    commandEnv,
-			Stderr: b.rt.Stderr,
+			Name:                   argv[0],
+			Args:                   argv[1:],
+			Env:                    commandEnv,
+			Stderr:                 b.rt.Stderr,
+			MaxCapturedOutputBytes: externalProviderOutputMaxBytes,
 		})
+		if limitErr := validateExternalCommandOutputSize(result); limitErr != nil {
+			return protocolResponse{}, limitErr
+		}
 		if err != nil {
 			var rollbackErr error
 			if operation.RollbackOnFailure && index > 0 && !request.Keep {
@@ -109,6 +114,15 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 			return *defaultResponse, nil
 		}
 		return b.defaultLifecycleResponse(request)
+	case lifecycleOutputJSONLease:
+		var lease protocolLease
+		if err := json.Unmarshal([]byte(result.Stdout), &lease); err != nil {
+			return protocolResponse{}, core.Exit(5, "external lifecycle %s returned invalid JSON lease: %v", request.Operation, err)
+		}
+		if err := validateRawExternalLeaseIdentity(request.Operation, lease); err != nil {
+			return protocolResponse{}, err
+		}
+		return protocolResponse{ProtocolVersion: protocolVersion, Lease: &lease, RawLifecycleIdentity: true}, nil
 	case lifecycleOutputJSONNameArray:
 		namePrefix := ""
 		if operation.NamePrefix != "" {
@@ -120,6 +134,9 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 		var names []string
 		if err := json.Unmarshal([]byte(result.Stdout), &names); err != nil {
 			return protocolResponse{}, core.Exit(5, "external lifecycle %s returned invalid JSON name array: %v", request.Operation, err)
+		}
+		if names == nil {
+			return protocolResponse{}, core.Exit(5, "external lifecycle %s returned null instead of a JSON name array", request.Operation)
 		}
 		leases := make([]protocolLease, 0, len(names))
 		for _, name := range names {
@@ -142,10 +159,63 @@ func (b *leaseBackend) invokeLifecycle(ctx context.Context, request protocolRequ
 		if err := json.Unmarshal([]byte(result.Stdout), &leases); err != nil {
 			return protocolResponse{}, core.Exit(5, "external lifecycle %s returned invalid JSON lease array: %v", request.Operation, err)
 		}
+		if leases == nil {
+			return protocolResponse{}, core.Exit(5, "external lifecycle %s returned null instead of a JSON lease array", request.Operation)
+		}
+		if b.cfg.External.Capabilities.IdempotentLeaseID && lifecycleControllerIdentityAttestationConfigured(b.cfg.External) {
+			for index, lease := range leases {
+				if err := validateRawExternalLeaseIdentity(fmt.Sprintf("%s lease %d", request.Operation, index+1), lease); err != nil {
+					return protocolResponse{}, err
+				}
+			}
+		}
 		return protocolResponse{ProtocolVersion: protocolVersion, Leases: leases}, nil
 	default:
 		return protocolResponse{}, core.Exit(2, "external lifecycle %s has unsupported output %q", request.Operation, operation.Output)
 	}
+}
+
+func validateRawExternalLeaseIdentity(operation string, lease protocolLease) error {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"leaseId", lease.LeaseID},
+		{"slug", lease.Slug},
+		{"name", lease.Name},
+		{"cloudId", lease.CloudID},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return core.Exit(5, "external lifecycle %s JSON lease is missing raw %s", operation, field.name)
+		}
+		if field.value != strings.TrimSpace(field.value) || !validRawLifecycleIdentityText(field.value) {
+			return core.Exit(5, "external lifecycle %s JSON lease has invalid raw %s", operation, field.name)
+		}
+	}
+	if !core.IsCanonicalLeaseID(lease.LeaseID) {
+		return core.Exit(5, "external lifecycle %s JSON lease has invalid raw leaseId", operation)
+	}
+	if core.NormalizeLeaseSlug(lease.Slug) != lease.Slug {
+		return core.Exit(5, "external lifecycle %s JSON lease has invalid raw slug", operation)
+	}
+	for _, key := range []string{"lease", "slug", "name", externalResourceNameLabel, externalResourceNameFromEnv} {
+		if _, ok := lease.Labels[key]; ok {
+			return core.Exit(5, "external lifecycle %s JSON lease sets reserved routing label %q", operation, key)
+		}
+	}
+	return nil
+}
+
+func validRawLifecycleIdentityText(value string) bool {
+	if value == "" || len(value) > 4096 {
+		return false
+	}
+	for _, char := range value {
+		if char < 32 || char == 127 {
+			return false
+		}
+	}
+	return true
 }
 
 func lifecycleOperationConfigured(operation core.ExternalLifecycleOperation) bool {
@@ -160,6 +230,26 @@ func lifecycleOperationCommands(operation core.ExternalLifecycleOperation) [][]s
 		return [][]string{operation.Argv}
 	}
 	return nil
+}
+
+func lifecycleOperationConsumesRawCloudID(operation core.ExternalLifecycleOperation) bool {
+	commands := lifecycleOperationCommands(operation)
+	if len(commands) == 0 {
+		return false
+	}
+	for _, command := range commands {
+		consumes := false
+		for _, arg := range command {
+			if arg == "{{cloudId}}" {
+				consumes = true
+				break
+			}
+		}
+		if !consumes {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *leaseBackend) rollbackLifecycleAcquire(ctx context.Context, request protocolRequest) error {
@@ -196,6 +286,7 @@ func (b *leaseBackend) defaultLifecycleResponse(request protocolRequest) (protoc
 			!lifecycleOperationConfigured(b.cfg.External.Lifecycle.Resolve) {
 			lease := lifecycleMinimalLease(request)
 			response.Lease = &lease
+			response.SynthesizedIdentity = true
 			break
 		}
 		lease, err := b.lifecycleLease(request)
@@ -203,6 +294,7 @@ func (b *leaseBackend) defaultLifecycleResponse(request protocolRequest) (protoc
 			return protocolResponse{}, err
 		}
 		response.Lease = &lease
+		response.SynthesizedIdentity = true
 	case "touch":
 	case "list":
 		response.Leases = []protocolLease{}
@@ -226,12 +318,15 @@ func lifecycleMinimalLease(request protocolRequest) protocolLease {
 		name := strings.TrimSpace(request.ID)
 		desired = &desiredLease{LeaseID: name, Slug: core.NormalizeLeaseSlug(name), Name: name}
 	}
-	return protocolLease{
-		LeaseID: desired.LeaseID,
-		Slug:    desired.Slug,
-		Name:    desired.Name,
-		Status:  "ready",
+	lease := protocolLease{}
+	if request.Lease != nil {
+		lease = *request.Lease
 	}
+	lease.LeaseID = desired.LeaseID
+	lease.Slug = desired.Slug
+	lease.Name = desired.Name
+	lease.Status = "ready"
+	return lease
 }
 
 func lifecycleOperation(cfg core.ExternalLifecycleConfig, operation string) core.ExternalLifecycleOperation {

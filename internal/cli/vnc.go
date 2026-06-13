@@ -1,15 +1,25 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
 
-const vncLoopbackHost = "127.0.0.1"
+const (
+	vncLoopbackHost                     = "127.0.0.1"
+	vncTunnelSSHConnectTimeout          = 10 * time.Second
+	vncTunnelListenerVerificationWindow = 5 * time.Second
+)
+
+func vncTunnelReadinessTimeout() time.Duration {
+	return vncTunnelSSHConnectTimeout + vncTunnelListenerVerificationWindow
+}
 
 func (a App) vnc(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
@@ -151,23 +161,42 @@ func vncTunnelCommand(target SSHTarget, localPort string) string {
 }
 
 func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) (int, error) {
-	cmd := exec.Command("ssh", vncTunnelBackgroundArgs(target, localPort, remoteHost, remotePort)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		if strings.TrimSpace(string(out)) != "" {
-			return 0, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-		}
+	cmd := exec.Command("ssh", vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
+	configureDaemonCommand(cmd)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(vncTunnelReadinessTimeout())
+	var listenerErr error
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
+			_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+			_ = cmd.Wait()
 			return 0, context.Cause(ctx)
 		}
-		if tcpReachable(ctx, vncLoopbackHost, localPort, 200*time.Millisecond) {
-			return 0, nil
+		if ready, err := startedTunnelListenerReady(ctx, localPort, cmd.Process.Pid); ready {
+			pid := cmd.Process.Pid
+			if err := cmd.Process.Release(); err != nil {
+				_ = stopDaemonProcess(cmd.Process, pid)
+				_ = cmd.Wait()
+				return 0, err
+			}
+			return pid, nil
+		} else {
+			listenerErr = err
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+	_ = cmd.Wait()
+	if text := strings.TrimSpace(output.String()); text != "" {
+		return 0, exit(5, "start VNC SSH tunnel on 127.0.0.1:%s: %s", localPort, text)
+	}
+	if listenerErr != nil {
+		return 0, exit(5, "verify VNC SSH tunnel listener on %s:%s: %v", vncLoopbackHost, localPort, listenerErr)
 	}
 	return 0, exit(5, "timed out starting VNC SSH tunnel on %s:%s", vncLoopbackHost, localPort)
 }
@@ -177,10 +206,14 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
-		"-o", "ConnectTimeout=10",
+		"-o", "ConnectTimeout=" + strconv.Itoa(int(vncTunnelSSHConnectTimeout/time.Second)),
 		"-o", "ConnectionAttempts=1",
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "GatewayPorts=no",
+		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
+		"-o", "ControlPersist=no",
+		"-o", "ForkAfterAuthentication=no",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
@@ -197,11 +230,6 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 		target.User+"@"+target.Host,
 	)
 	return args
-}
-
-func vncTunnelBackgroundArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {
-	args := vncTunnelArgs(target, localPort, remoteHost, remotePort)
-	return append([]string{"-f"}, args...)
 }
 
 func openLocalURL(url string) error {

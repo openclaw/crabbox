@@ -2048,7 +2048,7 @@ DESKTOP
     chmod 0755 /usr/local/bin/crabbox-start-desktop
     CRABBOX_SSH_USER="$user" /usr/local/bin/crabbox-start-desktop
   else
-  x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
+  { head -c 8 /var/lib/crabbox/vnc.password; printf '\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\n\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
   chown "$user" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env

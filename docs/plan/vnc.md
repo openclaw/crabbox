@@ -104,8 +104,10 @@ These are hard requirements and remain enforced:
 
 - VNC/noVNC is never exposed to the public internet. The runner-side VNC server
   binds to `127.0.0.1`; the portal WebVNC bridge runs websockify and noVNC on
-  loopback (`127.0.0.1:6080 → 127.0.0.1:5900`) and is reached through the
-  authenticated portal, not a public port.
+  an owner-specific, collision-checked loopback port allocated under a remote
+  lock and targeting `127.0.0.1:5900`; the selected port is persisted in the
+  owner's private identity and reached through the authenticated portal, not a
+  public port.
 - No provider firewall/security-group ingress is added for VNC. SSH remains the
   only public ingress for direct/brokered cloud leases.
 - VNC passwords are not placed in command-line arguments, provider labels, run

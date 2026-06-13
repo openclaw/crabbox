@@ -58,6 +58,7 @@ type crabboxKongCLI struct {
 	Cleanup    cleanupKongCmd    `cmd:"" passthrough:"" help:"Sweep expired direct-provider machines or local provider state."`
 	Azure      azureKongCmd      `cmd:"" help:"Azure provider setup and login."`
 	Config     configKongCmd     `cmd:"" help:"Show or update user config."`
+	Adapter    adapterKongCmd    `cmd:"" help:"Serve or connect the Crabfleet runtime adapter."`
 	Pool       poolKongCmd       `cmd:"" help:"Alias commands for machine pools."`
 	Machine    machineKongCmd    `cmd:"" help:"Alias commands for direct-provider machines."`
 	Pond       pondKongCmd       `cmd:"" help:"Pond bridge plane: peer discovery for delegated providers."`
@@ -123,7 +124,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "adapter", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -486,6 +487,24 @@ type configSetBrokerKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 
+type adapterKongCmd struct {
+	Serve   controllerServeKongCmd `cmd:"" passthrough:"" help:"Serve the authenticated workspace lifecycle API."`
+	Connect adapterConnectKongCmd  `cmd:"" passthrough:"" help:"Connect a local Unix-socket runtime adapter to the configured coordinator."`
+	State   controllerStateKongCmd `cmd:"" help:"Inspect adapter state without lifecycle side effects."`
+}
+type adapterConnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type controllerServeKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type controllerStateKongCmd struct {
+	Validate controllerStateValidateKongCmd `cmd:"" passthrough:"" help:"Validate an adapter state file without modifying it."`
+}
+type controllerStateValidateKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+
 type poolKongCmd struct {
 	List     poolListKongCmd     `cmd:"" passthrough:"" help:"List machine inventory."`
 	Ready    poolReadyKongCmd    `cmd:"" passthrough:"" help:"List ready-pool leases."`
@@ -756,6 +775,17 @@ func (c *configShowKongCmd) Run(app App) error {
 }
 func (c *configSetBrokerKongCmd) Run(app App) error {
 	return app.configSetBroker(c.Args)
+}
+
+func (c *controllerServeKongCmd) Run(ctx context.Context, app App) error {
+	return app.controllerServe(ctx, stripKongCommandPath(c.Args, "adapter", "serve"))
+}
+func (c *controllerStateValidateKongCmd) Run(app App) error {
+	return app.controllerStateValidate(stripKongCommandPath(c.Args, "adapter", "state", "validate"))
+}
+
+func (c *adapterConnectKongCmd) Run(ctx context.Context, app App) error {
+	return app.adapterConnect(ctx, stripKongCommandPath(c.Args, "adapter", "connect"))
 }
 
 func (c *azureLoginKongCmd) Run(ctx context.Context, app App) error {

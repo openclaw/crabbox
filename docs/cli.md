@@ -164,12 +164,16 @@ crabbox init                                   onboard the current repo
 crabbox version                                print version
 crabbox config path|show|set-broker
 crabbox azure login                            detect Azure subscription, validate, store
+crabbox adapter connect                       connect a local Unix-socket runtime adapter to Crabfleet
+crabbox adapter serve                          authenticated workspace lifecycle API (Linux/macOS host)
+crabbox adapter state validate                 read-only adapter state compatibility check
 ```
 
 See [login](commands/login.md), [logout](commands/logout.md),
 [whoami](commands/whoami.md), [doctor](commands/doctor.md),
 [init](commands/init.md), [config](commands/config.md),
-[azure](commands/azure.md).
+[azure](commands/azure.md), [adapter connect](commands/adapter.md#outbound-connection),
+and [adapter](commands/adapter.md).
 
 ## `run`
 

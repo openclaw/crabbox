@@ -292,7 +292,15 @@ func (a App) resolveSSHTargetWithRequestConfig(ctx context.Context, cfg *Config,
 	}
 	req.Options = leaseOptionsFromConfig(*cfg)
 	req.Options.ProviderScope = providerClaimScope(backend.Spec().Name, *cfg)
-	lease, err := resolveSSHLeaseTarget(ctx, sshBackend, req)
+	var lease LeaseTarget
+	if req.NoLocalStateMutations {
+		lease, err = sshBackend.Resolve(ctx, req)
+		if err == nil {
+			err = ValidateLeaseTargetProviderIdentity(lease, req.ExpectedProviderIdentity)
+		}
+	} else {
+		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, req)
+	}
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}

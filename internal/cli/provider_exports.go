@@ -164,6 +164,12 @@ func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return removeLeaseClaimIfUnchanged(leaseID, expected)
 }
 
+// RemoveLeaseClaimIfUnchangedAfter holds the claim lock while action removes
+// provider-specific local sidecars, then deletes the unchanged claim.
+func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+}
+
 func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
 	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }
@@ -284,6 +290,18 @@ func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 
 func LeaseProviderName(leaseID, slug string) string {
 	return leaseProviderName(leaseID, slug)
+}
+
+func LocalProcessStartIdentity(pid int) (string, error) {
+	return webVNCDaemonProcessStartIdentity(pid)
+}
+
+func LocalProcessBootIdentity() (string, error) {
+	return processBootIdentity()
+}
+
+func LocalProcessBootIdentityRequired() bool {
+	return processBootIdentityRequired()
 }
 
 func AllocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {

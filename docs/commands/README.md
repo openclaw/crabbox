@@ -55,3 +55,4 @@ same order as the CLI help.
 - [pond](pond.md)
 - [azure](azure.md)
 - [config](config.md)
+- [adapter](adapter.md)

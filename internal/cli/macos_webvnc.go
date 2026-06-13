@@ -24,16 +24,42 @@ import (
 // the embedded noVNC module, and runs a loopback WebSocket relay. noVNC performs
 // Apple (ARD) authentication with credentials fetched into browser memory only
 // after the viewer proves its ephemeral session token.
-func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort string, openViewer, reclaim bool) error {
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepo(ctx, cfg, id, false, reclaim)
+func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort string, openViewer, reclaim, noProviderSideEffects bool, expected webVNCExpectedProviderIdentity) error {
+	// Claim the actual browser-facing TCP listener before provider or SSH work.
+	// Daemon children adopt the supervisor's inherited listener; foreground
+	// bridges turn their reservation into the listener directly.
+	var webListener net.Listener
+	var err error
+	if inheritedWebVNCDaemonPortReservation(webPort) {
+		webListener, err = inheritedWebVNCDaemonListener(webPort)
+		if err != nil {
+			return exit(5, "adopt local macOS WebVNC listener: %v", err)
+		}
+	} else {
+		webReservation, reserveErr := reserveWebVNCDaemonPort(webPort)
+		if reserveErr != nil {
+			return exit(5, "reserve local macOS WebVNC port: %v", reserveErr)
+		}
+		webPort = webReservation.port
+		webListener, err = webReservation.listener()
+		if err != nil {
+			webReservation.release()
+			return exit(5, "open local macOS WebVNC listener: %v", err)
+		}
+	}
+	defer webListener.Close()
+
+	server, target, leaseID, err := a.resolveWebVNCLeaseTarget(ctx, cfg, id, reclaim, noProviderSideEffects, expected)
 	if err != nil {
 		return err
 	}
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, reclaim); err != nil {
-		return err
+	if !noProviderSideEffects {
+		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, reclaim); err != nil {
+			return err
+		}
 	}
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
 		return err
@@ -43,19 +69,14 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		return exit(2, "provider=%s does not supply macOS desktop credentials", cfg.Provider)
 	}
 
-	// Resolve the browser-facing port first (honoring an explicit --local-port),
-	// then pick the SSH-tunnel port so the two never collide on the same value.
-	if webPort == "" {
-		webPort = availableLocalVNCPort()
-	}
-
 	// SSH tunnel: 127.0.0.1:vncPort -> guest 127.0.0.1:5900 (Screen Sharing).
-	vncPort := availableLocalVNCPortExcept(webPort)
-	tunnel, err := startVNCForegroundTunnel(ctx, target, vncPort, "127.0.0.1", managedVNCPort)
+	tunnel, vncPort, err := startVNCForegroundTunnelOnReservedPort(ctx, target, "", "127.0.0.1", managedVNCPort, webPort)
 	if err != nil {
 		return err
 	}
 	defer stopProcess(tunnel)
+	bridgeCtx, cancelBridge := context.WithCancelCause(ctx)
+	defer cancelBridge(context.Canceled)
 
 	// A per-session token is handed to the browser through a mode-0600 temporary
 	// viewer file. It is used only in a credential POST body and WebSocket
@@ -81,23 +102,34 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		}
 		ws.SetReadLimit(-1)
 		defer ws.Close(websocket.StatusNormalClosure, "")
-		tcp, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(r.Context(), "tcp", net.JoinHostPort("127.0.0.1", vncPort))
+		relayCtx, cancelRelay := context.WithCancelCause(bridgeCtx)
+		stopRequestCancel := context.AfterFunc(r.Context(), func() {
+			cancelRelay(context.Cause(r.Context()))
+		})
+		defer func() {
+			stopRequestCancel()
+			cancelRelay(context.Canceled)
+		}()
+		tcp, err := dialVNCForegroundTunnel(relayCtx, tunnel, vncPort)
 		if err != nil {
 			_ = ws.Close(websocket.StatusInternalError, "vnc dial failed")
 			return
 		}
 		defer tcp.Close()
-		relayWebSocketVNC(r.Context(), ws, tcp)
+		relayWebSocketVNC(relayCtx, ws, tcp)
 	})
 
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", webPort))
-	if err != nil {
-		return exit(5, "start local WebVNC server on 127.0.0.1:%s: %v", webPort, err)
-	}
-	defer ln.Close()
 	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
+	go func() { _ = srv.Serve(webListener) }()
 	defer func() { _ = srv.Close() }()
+	go func() {
+		select {
+		case <-tunnel.Done():
+			cancelBridge(tunnel.ExitError())
+		case <-bridgeCtx.Done():
+		}
+		_ = srv.Close()
+	}()
 
 	handoff, err := createMacOSWebVNCHandoff(webPort, session)
 	if err != nil {
@@ -115,8 +147,23 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		}
 		fmt.Fprintf(a.Stdout, "opened: %s\n", handoff.URL)
 	}
-	<-ctx.Done()
-	return context.Cause(ctx)
+	<-bridgeCtx.Done()
+	return context.Cause(bridgeCtx)
+}
+
+func dialVNCForegroundTunnel(ctx context.Context, tunnel *vncForegroundTunnel, port string) (net.Conn, error) {
+	if err := verifyVNCForegroundTunnelListener(tunnel, port); err != nil {
+		return nil, fmt.Errorf("verify VNC SSH tunnel before relay connect: %w", err)
+	}
+	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp4", net.JoinHostPort(vncLoopbackHost, port))
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyVNCForegroundTunnelListener(tunnel, port); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("verify VNC SSH tunnel after relay connect: %w", err)
+	}
+	return conn, nil
 }
 
 // relayWebSocketVNC pumps bytes bidirectionally between a browser WebSocket

@@ -30,7 +30,22 @@ requires that capability to be present (see
 bridge ticket over the authenticated coordinator API and connect the local
 bridge to the coordinator portal. The local container provider instead starts
 `websockify` inside the local container and tunnels that local noVNC endpoint to
-the browser.
+the browser. Direct-SSH startup records a private remote process identity and
+uses an owner-specific loopback port allocated under a host-wide remote lock.
+The owner ID supplies only the first candidate: occupied ports are skipped and
+startup bind collisions retry another candidate. The exact selected port is
+persisted in the owner's mode-`0600` identity and reused only with that owner's
+exact listener and recorded websockify process, so concurrent workspaces on one
+SSH host remain isolated even when their first candidates collide. Adapter
+raw ownership material is domain-separated into the public owner ID before any
+subprocess starts. The remote websockify process carries only a fresh per-launch
+nonce, recorded in its identity, rather than the adapter owner token. After
+the SSH tunnel opens, Crabbox
+proves that the exact expected SSH process owns the local listener before
+retrieving a VNC credential, completes a noVNC WebSocket and VNC password
+challenge, and rechecks ownership before printing any credential-bearing
+viewer URL. A missing/zero expected PID, unrelated listener, or unauthenticated
+endpoint never receives a password probe or URL.
 
 The data path is:
 
@@ -54,7 +69,9 @@ browser noVNC at 127.0.0.1:<port>
 The local `crabbox webvnc` process is not just a launcher; it is the live
 bridge between the browser and the SSH-tunneled VNC socket. Keep it running
 while the browser tab is open. If the browser tab reloads or drops, the bridge
-re-registers so the portal retry can reconnect.
+re-registers so the portal retry can reconnect. If the SSH tunnel process
+exits, the foreground bridge exits instead of leaving a stale viewer URL; a
+background supervisor observes that exit and starts a freshly resolved bridge.
 
 The bridge opens a small warm pool of backend sessions (4 slots for Linux and
 Windows targets, 2 for macOS). That pool is what the `slots=` field in
@@ -85,6 +102,10 @@ WebVNC keeps the same security boundary as `crabbox vnc`:
 - The noVNC client is served from the coordinator origin, not a third-party CDN.
 - The local `crabbox webvnc` process must keep running while the browser uses
   the desktop.
+- Direct-SSH noVNC reuses only a Crabbox-started remote websockify process whose
+  start identity, public owner ID, private process nonce, command, and exact
+  loopback socket owner all match. Status withholds the local credential URL
+  until a fresh authenticated WebSocket probe succeeds.
 
 `--network tailscale` changes only the SSH endpoint used for the local tunnel.
 The runner VNC service stays bound to loopback.
@@ -109,7 +130,7 @@ crabbox webvnc daemon list
 crabbox webvnc daemon stop --id <lease-id-or-slug>
 ```
 
-`daemon start` writes a per-lease log and pid file under the local Crabbox state
+`daemon start` writes a per-lease log and private identity file under the local Crabbox state
 directory (`webvnc/<lease>.log` and `.pid`), truncates the log on each start,
 and prints `webvnc daemon: ready` once the bridge reports connected (otherwise it
 prints a hint to check `webvnc status`). A background supervisor restarts the
@@ -117,8 +138,46 @@ child bridge if it exits. `daemon status` reports the local pid/log and whether
 the process is alive or stale. `daemon list` scans all recorded local WebVNC pid
 files and prints alive/stale state for each bridge, which is useful after agent
 runs leave helpers behind. `daemon stop` terminates both the supervisor and the
-active child bridge, but only after verifying the recorded pid is a Crabbox
-WebVNC process.
+active child bridge, but only after the recorded workspace, process start
+identity, and per-process nonce all match the live Crabbox WebVNC process. A
+legacy, copied, or PID-recycled identity is never reused or signaled. Stop also
+terminates and verifies the complete recorded process group before removing the
+private identity. If the supervisor PID was recycled while descendants may
+remain, Crabbox retains that identity and fails closed instead of losing its
+only cleanup handle.
+On Windows hosts, daemon status, reuse, and stop inspect process creation time
+and command line through native process APIs; they do not require a Unix `ps`
+binary. Manual Windows SSH and WebVNC tunnels remain supported unchanged.
+Start, status checks, stop, identity publication, and launch-gate release are
+serialized by a private per-workspace OS file lock, so concurrent Crabbox
+processes cannot publish or revoke crossed daemon identities. Automatic local
+port selection claims a host-wide per-port OS reservation before probing the
+loopback socket. The supervisor inherits that reservation for its full lifetime,
+including child restart gaps, independently of the caller's state directory.
+The reservation is a bound loopback datagram socket, so it has no replaceable
+filesystem pathname. macOS bridges claim a second reservation for their
+internal SSH-tunnel port before that tunnel starts; foreground macOS bridges
+also claim their browser-facing port before beginning SSH setup.
+The supervisor cannot start the credential-bearing bridge until its private
+identity file is flushed and installed; loss of the starting process before
+that handshake closes the launch gate instead of leaving an untracked daemon.
+Ordinary manual and automatically registered daemon children keep their normal
+provider/coordinator heartbeat across supervisor restarts. Adapter-owned
+persistent bridges are explicitly marked internal: only those children resolve
+in provider-side-effect-free mode, never reclaim or touch a lease, and never
+start a competing heartbeat. Their durable identity binds an opaque digest of
+the adapter state, provider scope, and resource identity; reuse requires an
+exact digest and live no-side-effects command. Raw ownership material remains
+adapter-local; daemon argv carries only the domain-separated public ID, and
+status reports only whether it matched while redacting the ID from command
+diagnostics. Each start and status resolution
+also receives and validates the adapter's full persisted lease, attempt,
+slug, resource, and provider-scope identity. Direct-SSH status checks the exact
+listener owner before credential retrieval and immediately before and after its
+VNC authentication probe; without a positive expected owner PID it reports no
+credential or viewer URL.
+Adapter lifecycle
+reconciliation remains their sole owner.
 
 The older `crabbox webvnc --id <lease> --daemon`, `--background`, `--status`,
 and `--stop` forms remain accepted as compatibility aliases, but new docs and
@@ -159,8 +218,16 @@ fallback.
 stuck on a stale bridge, viewer, or session. Reset closes that lease's
 coordinator WebVNC sockets, stops that lease's local daemon (after verifying it
 is a Crabbox WebVNC process), restarts the target desktop helper/VNC services,
-starts a fresh background bridge, and prints the new portal URL. As with
-`status`, the printed native fallback reflects `--network`.
+starts a fresh background bridge, and prints the new portal URL. Direct-SSH
+reset terminates remote websockify only when its persisted PID, process-start
+identity, public owner ID, private process nonce, command, and exact listener all
+match. A stale recorded-port collision is preserved and replacement startup
+allocates another free loopback port instead of signaling the unrelated
+process. As with
+`status`, the printed native fallback reflects `--network`. The public Linux
+desktop image permits only a fixed `/bin/bash` invocation of the root-owned
+reset helper; that helper uses fixed system binaries and a trusted `PATH`
+instead of granting general passwordless sudo.
 
 ## Portal and passwords
 
@@ -243,11 +310,12 @@ The selected provider is coordinator-backed. Direct desktop-capable SSH
 providers do not require coordinator login and serve noVNC locally over the
 provider SSH connection.
 
-`missing websockify` or `missing noVNC web assets`
+`missing websockify`, `missing flock`, or `missing noVNC web assets`
 
 The direct target exposes VNC but does not have the noVNC package installed.
-Install `novnc` and `websockify` in the provider image or guest bootstrap, then
-retry. `crabbox vnc` remains available as the native-client fallback.
+Install `novnc`, `websockify`, and `util-linux` in the provider image or guest
+bootstrap, then retry. `crabbox vnc` remains available as the native-client
+fallback.
 
 `target does not expose VNC on 127.0.0.1:5900`
 
