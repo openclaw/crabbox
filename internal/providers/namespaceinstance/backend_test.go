@@ -452,6 +452,16 @@ func TestServerPersistsConfiguredWorkRoot(t *testing.T) {
 	if server.Labels["work_root"] != "/workspace/custom" {
 		t.Fatalf("work_root=%q", server.Labels["work_root"])
 	}
+	for _, state := range []string{"leased", "ready", "running"} {
+		server = b.server(instance{ClusterID: "instance-1", Labels: map[string]string{"state": state}}, cfg)
+		if server.Labels["state"] != state {
+			t.Fatalf("state=%q got %q", state, server.Labels["state"])
+		}
+	}
+	server = b.server(instance{ClusterID: "instance-1", Labels: map[string]string{}}, cfg)
+	if server.Labels["state"] != "running" {
+		t.Fatalf("empty state got %q", server.Labels["state"])
+	}
 }
 
 func TestFilterNamespaceClaimsUsesProviderScope(t *testing.T) {
@@ -603,6 +613,48 @@ func TestReleaseRejectsMismatchedLeaseLabel(t *testing.T) {
 	}
 	if len(runner.calls) != 1 {
 		t.Fatalf("calls=%#v", runner.calls)
+	}
+}
+
+func TestReleaseSkipsDestroyWhenInstanceMissingFromInventory(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: "null\n"}}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	cfg.NamespaceInstance.TenantID = "tenant-test"
+	leaseID := "cbx_abcdef123456"
+	server := core.Server{
+		CloudID:  "missing-instance",
+		Provider: providerName,
+		Labels: map[string]string{
+			"crabbox":          "true",
+			"created_by":       "crabbox",
+			"lease":            leaseID,
+			"namespace_tenant": "tenant-test",
+			"provider":         providerName,
+		},
+	}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "missing", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  server,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "list --all --output json" {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claims=%#v", claims)
 	}
 }
 

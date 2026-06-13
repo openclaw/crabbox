@@ -320,11 +320,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if leaseID == "" {
 		return core.Exit(4, "refusing to destroy Namespace instance %s without a Crabbox lease id", id)
 	}
-	if err := b.validateDestroyTarget(ctx, cfg, id, leaseID); err != nil {
+	present, err := b.validateDestroyTarget(ctx, cfg, id, leaseID)
+	if err != nil {
 		return err
 	}
-	if err := b.destroy(ctx, id); err != nil {
-		return err
+	if present {
+		if err := b.destroy(ctx, id); err != nil {
+			return err
+		}
 	}
 	if leaseID != "" {
 		core.RemoveLeaseClaim(leaseID)
@@ -767,8 +770,7 @@ func (b *backend) server(item instance, cfg core.Config) core.Server {
 	labels["namespace_instance"] = item.ClusterID
 	labels["namespace_tenant"] = cfg.NamespaceInstance.TenantID
 	labels["work_root"] = cfg.WorkRoot
-	switch labels["state"] {
-	case "", "leased", "ready", "running":
+	if labels["state"] == "" {
 		labels["state"] = "running"
 	}
 	labels["server_type"] = firstNonBlank(labels["server_type"], shapeName(item.Shape), cfg.ServerType)
@@ -966,24 +968,24 @@ func (b *backend) destroy(ctx context.Context, id string) error {
 	return commandError("nsc destroy", result, err)
 }
 
-func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id, leaseID string) error {
+func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id, leaseID string) (bool, error) {
 	instances, err := b.listInstances(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, item := range instances {
 		if item.ClusterID != id {
 			continue
 		}
 		if !owned(item, cfg) {
-			return core.Exit(4, "refusing to destroy Namespace instance %s without Crabbox ownership labels", id)
+			return false, core.Exit(4, "refusing to destroy Namespace instance %s without Crabbox ownership labels", id)
 		}
 		if leaseID != "" && item.Labels["lease"] != leaseID {
-			return core.Exit(4, "refusing to destroy Namespace instance %s: lease label %q does not match %q", id, item.Labels["lease"], leaseID)
+			return false, core.Exit(4, "refusing to destroy Namespace instance %s: lease label %q does not match %q", id, item.Labels["lease"], leaseID)
 		}
-		return nil
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 func (b *backend) nsc(ctx context.Context, cfg core.Config, args []string, stderr io.Writer) (core.LocalCommandResult, error) {
