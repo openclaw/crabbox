@@ -32,6 +32,7 @@ type fakeSuperserveClient struct {
 	execs       []execRequest
 	execResults []execResult
 	execErr     error
+	activateErr error
 	onExec      func(count int, req execRequest)
 	probes      int
 	getErr      error
@@ -91,6 +92,9 @@ func (f *fakeSuperserveClient) ActivateSandbox(context.Context, string) (sandbox
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.activated = append(f.activated, f.sandbox.ID)
+	if f.activateErr != nil {
+		return sandboxAccess{}, f.activateErr
+	}
 	return sandboxAccess{Sandbox: cloneSandbox(f.sandbox), AccessToken: f.accessToken}, nil
 }
 
@@ -260,6 +264,23 @@ func TestStatusAndStopRequireOwnershipBeforeDelete(t *testing.T) {
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted despite ownership mismatch: %#v", fake.deleted)
+	}
+}
+
+func TestStatusMissingRemoteStateIsUnknownAndNotReady(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	backend := newSuperserveTestBackend(t, fake)
+	leaseID, scope := createSuperserveClaim(t, backend, fake, "unknown")
+	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "unknown")
+	fake.sandbox.Status = ""
+	fake.sandbox.State = ""
+
+	status, err := backend.Status(context.Background(), StatusRequest{ID: "unknown"})
+	if err != nil {
+		t.Fatalf("Status err=%v", err)
+	}
+	if status.State != "unknown" || status.Ready {
+		t.Fatalf("status=%#v, want unknown and not ready", status)
 	}
 }
 
@@ -456,6 +477,54 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+}
+
+func TestRunActivationFailureHonorsRetentionFlags(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		keep            bool
+		keepOnFailure   bool
+		wantDeleted     bool
+		wantFailureHint bool
+	}{
+		{name: "default cleanup", wantDeleted: true},
+		{name: "keep", keep: true},
+		{name: "keep on failure", keepOnFailure: true, wantFailureHint: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeSuperserveClient()
+			fake.activateErr = errors.New("activation unavailable")
+			backend := newSuperserveTestBackend(t, fake)
+			var stderr bytes.Buffer
+			backend.rt.Stderr = &stderr
+
+			_, err := backend.Run(context.Background(), RunRequest{
+				Repo:          Repo{Name: "my-app", Root: t.TempDir()},
+				NoSync:        true,
+				Command:       []string{"true"},
+				Keep:          tt.keep,
+				KeepOnFailure: tt.keepOnFailure,
+			})
+			if err == nil || !strings.Contains(err.Error(), "activation unavailable") {
+				t.Fatalf("Run err=%v, want activation failure", err)
+			}
+			if got := len(fake.deleted) == 1; got != tt.wantDeleted {
+				t.Fatalf("deleted=%#v, wantDeleted=%t", fake.deleted, tt.wantDeleted)
+			}
+			leaseID := leasePrefix + fake.sandbox.ID
+			claim, claimErr := readLeaseClaim(leaseID)
+			if tt.wantDeleted {
+				if claimErr != nil || claim.LeaseID != "" {
+					t.Fatalf("claim=%#v err=%v, want removed claim", claim, claimErr)
+				}
+			} else if claimErr != nil || claim.LeaseID != leaseID {
+				t.Fatalf("claim=%#v err=%v, want retained claim", claim, claimErr)
+			}
+			if got := strings.Contains(stderr.String(), "keep-on-failure: kept lease="); got != tt.wantFailureHint {
+				t.Fatalf("stderr=%q, wantFailureHint=%t", stderr.String(), tt.wantFailureHint)
+			}
+		})
 	}
 }
 

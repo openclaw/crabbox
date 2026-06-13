@@ -157,17 +157,20 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return RunResult{}, err
 		}
 	}
+	shouldStop := acquired && !req.Keep
 	access, err := api.ActivateSandbox(ctx, sandboxID)
 	if err != nil {
 		if acquired {
-			return RunResult{}, b.cleanupClaimedRunFailure(ctx, api, leaseID, sandboxID, err)
+			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+			if shouldStop {
+				return RunResult{}, b.cleanupClaimedRunFailure(ctx, api, leaseID, sandboxID, err)
+			}
 		}
 		return RunResult{}, err
 	}
 	if access.Sandbox.ID == "" {
 		access.Sandbox.ID = sandboxID
 	}
-	shouldStop := acquired && !req.Keep
 	if shouldStop {
 		defer func() {
 			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
@@ -948,7 +951,7 @@ func (b *backend) now() time.Time {
 }
 
 func normalizedSandboxState(sb superserveSandbox) string {
-	return strings.ToLower(blank(strings.TrimSpace(sb.Status), blank(strings.TrimSpace(sb.State), statusViewReady)))
+	return strings.ToLower(blank(strings.TrimSpace(sb.Status), blank(strings.TrimSpace(sb.State), "unknown")))
 }
 
 func isReadyState(state string) bool {
