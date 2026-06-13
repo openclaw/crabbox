@@ -47,10 +47,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return core.FlagWasSet(fs, name)
 }
 
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
 func cliDoctorResult(provider string, leases int, runtime string) DoctorResult {
 	return core.CLIDoctorResult(provider, leases, runtime)
 }

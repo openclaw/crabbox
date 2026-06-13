@@ -180,11 +180,3 @@ func normalizeBrevWorkspaces(items []brevWorkspace) []brevWorkspace {
 	}
 	return out
 }
-
-func countBrevWorkspaces(stdout string) (int, error) {
-	workspaces, err := parseBrevWorkspaces(stdout)
-	if err != nil {
-		return 0, err
-	}
-	return len(workspaces), nil
-}
