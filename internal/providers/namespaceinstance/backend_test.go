@@ -212,6 +212,35 @@ func TestCleanupDryRunSkipsForeignAndDoesNotDestroy(t *testing.T) {
 	}
 }
 
+func TestCleanupRequiresRawOwnershipLabelsBeforeDestroy(t *testing.T) {
+	runner := &recordingRunner{results: []LocalCommandResult{
+		{Stdout: `[
+			{"id":"owned","status":"failed","labels":{"crabbox":"true","provider":"namespace-instance","lease":"cbx_owned","slug":"owned","state":"failed"}},
+			{"id":"lease-only","status":"failed","labels":{"lease":"cbx_manual","slug":"manual","state":"failed"}},
+			{"id":"missing-provider","status":"failed","labels":{"crabbox":"true","lease":"cbx_missing_provider","slug":"missing-provider","state":"failed"}},
+			{"id":"missing-lease","status":"failed","labels":{"crabbox":"true","provider":"namespace-instance","slug":"missing-lease","state":"failed"}}
+		]`},
+		{},
+	}}
+	var stderr bytes.Buffer
+	b := newBackend(Provider{}.Spec(), core.Config{Provider: providerName, NamespaceInstance: core.NamespaceInstanceConfig{WorkRoot: defaultWorkRoot}}, core.Runtime{Exec: runner, Stderr: &stderr})
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	calls := joinCalls(runner.calls)
+	if !strings.Contains(calls, "destroy owned --force") {
+		t.Fatalf("owned instance not destroyed:\n%s", calls)
+	}
+	for _, id := range []string{"lease-only", "missing-provider", "missing-lease"} {
+		if strings.Contains(calls, "destroy "+id+" --force") || strings.Contains(stderr.String(), "delete server id="+id) {
+			t.Fatalf("foreign/partial instance %q was eligible for cleanup:\ncalls=%s\nstderr=%s", id, calls, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "skip server id="+id) {
+			t.Fatalf("foreign/partial instance %q was not reported as skipped:\n%s", id, stderr.String())
+		}
+	}
+}
+
 func TestTouchExtendsInstanceAndPreservesLabels(t *testing.T) {
 	runner := &recordingRunner{results: []LocalCommandResult{{}}}
 	b := newBackend(Provider{}.Spec(), core.Config{Provider: providerName, NamespaceInstance: core.NamespaceInstanceConfig{Duration: time.Hour, WorkRoot: defaultWorkRoot}}, core.Runtime{Exec: runner, Stderr: &bytes.Buffer{}})

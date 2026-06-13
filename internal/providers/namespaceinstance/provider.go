@@ -339,20 +339,22 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
-	servers, err := b.List(ctx, ListRequest{Options: req.Options, All: true})
-	if err != nil {
-		return err
-	}
 	client, err := newNSCClient(b.cfg, b.rt)
 	if err != nil {
 		return err
 	}
+	instances, err := client.ListInstances(ctx, true)
+	if err != nil {
+		return err
+	}
 	now := b.now()
-	for _, server := range servers {
-		if !isOwnedServer(server) {
-			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=not crabbox namespace-instance\n", server.DisplayID(), server.Name)
+	for _, instance := range instances {
+		if !isOwnedInstance(instance) {
+			name := firstNonEmpty(instance.Name, instance.ID)
+			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=not crabbox namespace-instance\n", instance.ID, name)
 			continue
 		}
+		server := serverFromInstance(instance, b.cfg)
 		shouldDelete, reason := shouldCleanupServer(server, now)
 		if !shouldDelete {
 			fmt.Fprintf(b.rt.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
