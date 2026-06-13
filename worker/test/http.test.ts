@@ -132,6 +132,20 @@ describe("coordinator auth", () => {
     ]);
   });
 
+  it("requires normal coordinator authentication for workspace terminals", async () => {
+    const prepared = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
+        headers: { upgrade: "websocket" },
+      }),
+      {},
+    );
+
+    expect(prepared).toMatchObject({
+      authenticated: false,
+      response: { status: 401 },
+    });
+  });
+
   it("keeps shared bearer token non-admin and ignores caller-supplied identity headers", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",

@@ -4,6 +4,17 @@
 
 ### Added
 
+- Added authenticated Crabfleet workspace terminals with bounded SSH/WebSocket bridging, durable tmux resume, and lifecycle revocation.
+
+### Fixed
+
+- Fixed Crabfleet workspaces to use any configured brokered provider and route the OpenClaw deployment through its canonical OAuth host and verified AWS backend with isolated, ephemeral key-only SSH access, stock-image cloud-init, and readiness-gated, pinned, Workers-compatible terminal attachment.
+
+## 0.30.0 - 2026-06-13
+
+### Added
+
+- Added an idempotent workspace adapter over coordinator leases, with durable owner-scoped lifecycle mapping and truthful capability negotiation for external control planes.
 - Added a generated provider decision matrix with checked metadata for execution model, access, substrate, GPU fit, lifecycle, cleanup, and provider caveats; docs validation now fails on provider drift. Thanks @coygeek.
 - Added confirmed lifecycle actions to portal lease rows, with provider shutdown for coordinator-managed boxes and explicitly metadata-only deregistration for client-managed boxes.
 - Added `provider: superserve` for delegated Linux sandbox runs through the Superserve control and data planes, including archive sync, retained leases, ownership-guarded lifecycle operations, and credentialed live smoke coverage. Thanks @coygeek.
@@ -21,7 +32,7 @@
 
 ### Fixed
 
-- Fixed pond ACL auto-bootstrap to preserve HuJSON comments, field ordering, and unrelated policy sections while adding only the missing pond tag owner and self-peering row.
+- Fixed pond ACL bootstrap to preserve Tailscale HuJSON comments, ordering, trailing commas, and unrelated policy sections while failing closed on ambiguous shapes. Thanks @coygeek.
 - Fixed Tailscale bootstrap and cleanup determinism with opt-in pinned static installs, recorded client/device metadata, coordinator preflight smoke coverage, and best-effort device cleanup on release.
 - Fixed brokered Tailscale tag-ownership failures to return actionable exact-match and `tagOwners` guidance while preserving the raw API error.
 - Fixed managed Linux Tailscale bootstrap to deliver auth keys through stdin instead of exposing them in `tailscale up` process arguments.

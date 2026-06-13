@@ -41,6 +41,7 @@ class MemoryStorage implements CoordinatorStorage {
 
 class MemoryRuntime implements CoordinatorRuntime {
   readonly storage = new MemoryStorage();
+  readonly ephemeralWebSocketMaxPayloadBytes = 1024 * 1024;
   alarmTime?: number;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private exclusiveTail: Promise<void> = Promise.resolve();
@@ -84,6 +85,8 @@ class MemoryRuntime implements CoordinatorRuntime {
     this.attachments.set(socket, attachment);
   }
 
+  acceptEphemeralWebSocket(_socket: WebSocket, _handlers: CoordinatorSocketHandlers): void {}
+
   async scheduleAlarm(time: number): Promise<void> {
     this.alarmTime = time;
   }
@@ -101,6 +104,9 @@ describe("coordinator runtimes", () => {
       ["GET", "/portal/hosts/aws/h-123"],
       ["POST", "/portal/hosts/aws/h-123/vnc"],
       ["POST", "/portal/leases/example/release"],
+      ["POST", "/v1/workspaces"],
+      ["GET", "/v1/workspaces/fleet-is-101"],
+      ["DELETE", "/v1/workspaces/fleet-is-101"],
     ]) {
       expect(
         coordinatorRequestQueue(new Request(`https://coordinator.test${path}`, { method })),
@@ -295,5 +301,31 @@ describe("coordinator runtimes", () => {
     releaseTransition();
     await transition;
     await vi.waitFor(() => expect(message).toHaveBeenCalledOnce());
+  });
+
+  it("accepts ephemeral sockets without Durable Object hibernation", () => {
+    const acceptWebSocket = vi.fn<(socket: WebSocket, tags?: string[]) => void>();
+    const state = {
+      storage: {},
+      acceptWebSocket,
+    } as unknown as DurableObjectState;
+    const runtime = new CloudflareCoordinatorRuntime(state);
+    const listeners = new Map<string, EventListener>();
+    const socket = {
+      accept: vi.fn<() => void>(),
+      addEventListener: vi.fn<(type: string, listener: EventListener) => void>((type, listener) => {
+        listeners.set(type, listener);
+      }),
+    } as unknown as WebSocket;
+
+    runtime.acceptEphemeralWebSocket(socket, {
+      message: () => {},
+      close: () => {},
+      error: () => {},
+    });
+
+    expect(socket.accept).toHaveBeenCalledOnce();
+    expect(acceptWebSocket).not.toHaveBeenCalled();
+    expect([...listeners.keys()]).toEqual(expect.arrayContaining(["message", "close", "error"]));
   });
 });

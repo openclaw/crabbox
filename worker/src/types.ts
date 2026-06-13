@@ -67,6 +67,10 @@ export interface Env {
   CRABBOX_GITHUB_ADMIN_OWNERS?: string;
   CRABBOX_GITHUB_ADMIN_LOGINS?: string;
   CRABBOX_PUBLIC_URL?: string;
+  CRABBOX_WORKSPACE_PROVIDER?: string;
+  CRABBOX_WORKSPACE_CLASS?: string;
+  CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?: string;
+  CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?: string;
   CRABBOX_DEFAULT_ORG?: string;
   CRABBOX_ACCESS_TEAM_DOMAIN?: string;
   CRABBOX_ACCESS_AUD?: string;
@@ -284,6 +288,7 @@ export interface RunTelemetrySummary {
 export interface LeaseRecord {
   id: string;
   slug?: string;
+  workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;
   target: TargetOS;
@@ -338,6 +343,10 @@ export interface LeaseRecord {
   cleanupRetryAt?: string;
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
+  failureError?: string;
+  provisioningResourceMayExist?: boolean;
+  provisioningFailureRetryable?: boolean;
+  provisioningRequestStartedAt?: string;
   releaseDeletesServer?: boolean;
   releasedAt?: string;
   endedAt?: string;
@@ -412,6 +421,7 @@ export interface LeaseNetworkState {
   sshSourceCIDRs?: string[];
   sshSourceCIDRsComplete?: boolean;
   awsSecurityGroupID?: string;
+  awsSecurityGroupName?: string;
   awsSubnetID?: string;
 }
 

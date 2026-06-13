@@ -45,6 +45,7 @@ export function cloudInit(config: LeaseConfig): string {
     .map((port) => `      Port ${port}`)
     .join("\n");
   const readyChecks = optionalReadyChecks(config);
+  const sshHostKeys = optionalSSHHostKeys(config);
   const writeFiles = optionalWriteFiles(config);
   const bootstrap = optionalBootstrap(config);
   return `#cloud-config
@@ -57,12 +58,29 @@ users:
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     ssh_authorized_keys:
       - ${config.sshPublicKey}
+${sshHostKeys}
 write_files:
   - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf
     permissions: '0644'
     content: |
 ${portLines}
       PasswordAuthentication no
+  - path: /etc/systemd/system/crabbox-workspace-ready.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Crabbox workspace per-boot readiness
+      After=cloud-final.service
+      ConditionPathExists=/var/lib/crabbox/bootstrapped
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/crabbox-ready
+      ExecStart=/usr/bin/install -d /run/crabbox
+      ExecStart=/usr/bin/touch /run/crabbox/workspace-ready
+
+      [Install]
+      WantedBy=cloud-final.service
   - path: /usr/local/bin/crabbox-ready
     permissions: '0755'
     content: |
@@ -80,6 +98,7 @@ runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
     export DEBIAN_FRONTEND=noninteractive
+    timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
     cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
     Acquire::Retries "8";
     Acquire::http::Timeout "30";
@@ -96,13 +115,16 @@ runcmd:
       done
     }
     retry apt-get update
-    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
+    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq tmux
     mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
     timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
 ${bootstrap}
+    systemctl daemon-reload
+    systemctl enable crabbox-workspace-ready.service
+    systemctl start --no-block crabbox-workspace-ready.service
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
@@ -372,7 +394,7 @@ Acquire::https::Timeout "30";
 APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git rsync jq
+apt-get install -y --no-install-recommends ca-certificates curl git rsync jq tmux
 if [ -d /proc/sys/fs/binfmt_misc ]; then
   if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
     mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
@@ -641,6 +663,22 @@ function optionalReadyChecks(config: LeaseConfig): string {
     );
   }
   return lines.join("\n");
+}
+
+function optionalSSHHostKeys(config: LeaseConfig): string {
+  if (!config.sshHostPrivateKey || !config.sshHostPublicKey) {
+    return "";
+  }
+  const privateKey = config.sshHostPrivateKey
+    .trimEnd()
+    .split("\n")
+    .map((line) => `    ${line}`)
+    .join("\n");
+  return `ssh_keys:
+  ed25519_private: |
+${privateKey}
+  ed25519_public: ${config.sshHostPublicKey.trim()}
+`;
 }
 
 function optionalWriteFiles(config: LeaseConfig): string {
