@@ -61,6 +61,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_DIGITALOCEAN_IMAGE",
 		"CRABBOX_DIGITALOCEAN_VPC",
 		"CRABBOX_DIGITALOCEAN_SSH_CIDRS",
+		"CRABBOX_VULTR_REGION",
+		"CRABBOX_VULTR_OS",
+		"CRABBOX_VULTR_IMAGE",
+		"CRABBOX_VULTR_SNAPSHOT",
+		"CRABBOX_VULTR_FIREWALL_GROUP",
+		"CRABBOX_VULTR_VPC_IDS",
+		"CRABBOX_VULTR_SSH_CIDRS",
+		"CRABBOX_VULTR_USER_SCHEME",
 		"CRABBOX_LINODE_REGION",
 		"CRABBOX_LINODE_IMAGE",
 		"CRABBOX_LINODE_TYPE",
@@ -966,6 +974,117 @@ func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
 	base := baseConfig()
 	if cfg.Location != base.Location || cfg.Image != base.Image {
 		t.Fatalf("digitalocean defaults leaked into generic fields: cfg=%#v", cfg)
+	}
+}
+
+func TestVultrConfigFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "vultr",
+		Vultr: &fileVultrConfig{
+			Region:        "ewr",
+			OS:            "2284",
+			Image:         "image-file",
+			Snapshot:      "snapshot-file",
+			FirewallGroup: "fw-file",
+			VPCIDs:        []string{"vpc-file-a", "vpc-file-b"},
+			SSHCIDRs:      []string{"203.0.113.0/24"},
+			UserScheme:    "limited",
+		},
+	})
+	if cfg.Provider != "vultr" ||
+		cfg.Vultr.Region != "ewr" ||
+		cfg.Vultr.OS != "2284" ||
+		cfg.Vultr.Image != "image-file" ||
+		cfg.Vultr.Snapshot != "snapshot-file" ||
+		cfg.Vultr.FirewallGroup != "fw-file" ||
+		cfg.Vultr.UserScheme != "limited" ||
+		cfg.Location == "ewr" ||
+		cfg.Image == "image-file" {
+		t.Fatalf("file vultr config not applied or leaked: cfg=%#v vultr=%#v", cfg, cfg.Vultr)
+	}
+	if strings.Join(cfg.Vultr.VPCIDs, ",") != "vpc-file-a,vpc-file-b" {
+		t.Fatalf("file vultr vpc ids=%v", cfg.Vultr.VPCIDs)
+	}
+	if strings.Join(cfg.Vultr.SSHCIDRs, ",") != "203.0.113.0/24" {
+		t.Fatalf("file vultr ssh cidrs=%v", cfg.Vultr.SSHCIDRs)
+	}
+
+	t.Setenv("CRABBOX_VULTR_REGION", "lax")
+	t.Setenv("CRABBOX_VULTR_OS", "1743")
+	t.Setenv("CRABBOX_VULTR_IMAGE", "image-env")
+	t.Setenv("CRABBOX_VULTR_SNAPSHOT", "snapshot-env")
+	t.Setenv("CRABBOX_VULTR_FIREWALL_GROUP", "fw-env")
+	t.Setenv("CRABBOX_VULTR_VPC_IDS", "vpc-env-a, vpc-env-b")
+	t.Setenv("CRABBOX_VULTR_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	t.Setenv("CRABBOX_VULTR_USER_SCHEME", "root")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Vultr.Region != "lax" ||
+		cfg.Vultr.OS != "1743" ||
+		cfg.Vultr.Image != "image-env" ||
+		cfg.Vultr.Snapshot != "snapshot-env" ||
+		cfg.Vultr.FirewallGroup != "fw-env" ||
+		cfg.Vultr.UserScheme != "root" ||
+		cfg.Location == "lax" ||
+		cfg.Image == "image-env" {
+		t.Fatalf("env vultr config not applied or leaked: cfg=%#v vultr=%#v", cfg, cfg.Vultr)
+	}
+	if strings.Join(cfg.Vultr.VPCIDs, ",") != "vpc-env-a,vpc-env-b" {
+		t.Fatalf("env vultr vpc ids=%v", cfg.Vultr.VPCIDs)
+	}
+	if strings.Join(cfg.Vultr.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
+		t.Fatalf("env vultr ssh cidrs=%v", cfg.Vultr.SSHCIDRs)
+	}
+}
+
+func TestVultrDefaultsAndIsolation(t *testing.T) {
+	clearConfigEnv(t)
+	base := baseConfig()
+	cfg := baseConfig()
+	cfg.Provider = "vultr"
+	cfg.OSImage = "ubuntu:26.04"
+	cfg.osImageExplicit = true
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.Vultr.Region != "ewr" || cfg.Vultr.UserScheme != "root" {
+		t.Fatalf("vultr defaults=%#v", cfg.Vultr)
+	}
+	if cfg.TargetOS != targetLinux || cfg.WorkRoot != defaultPOSIXWorkRoot || cfg.SSHUser != "root" || cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("vultr direct defaults not applied: %#v", cfg)
+	}
+	if cfg.Location != base.Location || cfg.Image != base.Image {
+		t.Fatalf("vultr defaults leaked into generic fields: location=%q image=%q", cfg.Location, cfg.Image)
+	}
+	if cfg.Vultr.OS != "" || cfg.Vultr.Image != "" {
+		t.Fatalf("portable OS must not silently map to unverified Vultr boot source: %#v", cfg.Vultr)
+	}
+}
+
+func TestVultrDefaultsPreserveExplicitGenericValues(t *testing.T) {
+	cfg := baseConfig()
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "vultr",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+		Vultr: &fileVultrConfig{
+			Region: "sjc",
+		},
+	})
+
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" || cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("vultr explicit generic values changed: %#v", cfg)
+	}
+	if cfg.Vultr.Region != "sjc" {
+		t.Fatalf("Vultr.Region=%q", cfg.Vultr.Region)
 	}
 }
 

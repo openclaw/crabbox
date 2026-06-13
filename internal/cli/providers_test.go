@@ -13,6 +13,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var aws *providerMatrixEntry
 	var incus *providerMatrixEntry
 	var digitalOcean *providerMatrixEntry
+	var vultr *providerMatrixEntry
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
@@ -32,6 +33,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "digitalocean" {
 			digitalOcean = &entries[i]
+		}
+		if entries[i].Provider == "vultr" {
+			vultr = &entries[i]
 		}
 		if entries[i].Provider == "nvidia-brev" {
 			nvidiaBrev = &entries[i]
@@ -72,6 +76,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if digitalOcean == nil {
 		t.Fatal("digitalocean provider not found")
+	}
+	if vultr == nil {
+		t.Fatal("vultr provider not found")
 	}
 	if nvidiaBrev == nil {
 		t.Fatal("nvidia-brev provider not found")
@@ -144,6 +151,17 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsString(digitalOcean.Targets, targetLinux) {
 		t.Fatalf("digitalocean targets=%v", digitalOcean.Targets)
+	}
+	if vultr.Kind != ProviderKindSSHLease || vultr.Family != "vultr" || vultr.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("vultr kind/family/coordinator=%q/%q/%q", vultr.Kind, vultr.Family, vultr.Coordinator)
+	}
+	if !containsString(vultr.Targets, targetLinux) {
+		t.Fatalf("vultr targets=%v", vultr.Targets)
+	}
+	for _, feature := range []Feature{FeatureSSH, FeatureCrabboxSync, FeatureCleanup} {
+		if !containsFeature(vultr.Features, feature) {
+			t.Fatalf("vultr features=%v missing %s", vultr.Features, feature)
+		}
 	}
 	if linode.Kind != ProviderKindSSHLease || linode.Family != "linode" || linode.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("linode kind/family/coordinator=%q/%q/%q", linode.Kind, linode.Family, linode.Coordinator)

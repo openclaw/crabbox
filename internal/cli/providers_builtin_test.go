@@ -13,6 +13,7 @@ import (
 func init() {
 	RegisterProvider(testHetznerProvider{})
 	RegisterProvider(testDigitalOceanProvider{})
+	RegisterProvider(testVultrProvider{})
 	RegisterProvider(testLinodeProvider{})
 	RegisterProvider(testNebiusProvider{})
 	RegisterProvider(testScalewayProvider{})
@@ -327,6 +328,30 @@ func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
 func (testDigitalOceanProvider) ServerTypeForClass(string) string  { return "s-1vcpu-1gb" }
 func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testVultrProvider struct{}
+
+func (testVultrProvider) Name() string      { return "vultr" }
+func (testVultrProvider) Aliases() []string { return nil }
+func (testVultrProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "vultr",
+		Family:      "vultr",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testVultrProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testVultrProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testVultrProvider) ServerTypeForConfig(Config) string { return "vc2-1c-1gb" }
+func (testVultrProvider) ServerTypeForClass(string) string  { return "vc2-1c-1gb" }
+func (p testVultrProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

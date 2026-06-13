@@ -645,6 +645,74 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("VULTR_API_KEY", "vultr-secret-token")
+	if err := os.WriteFile(configPath, []byte("provider: vultr\nvultr:\n  region: sjc\n  os: \"2284\"\n  image: image-123\n  snapshot: snapshot-123\n  firewallGroup: fw-123\n  vpcIds: [vpc-a, vpc-b]\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n  userScheme: limited\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "vultr region=sjc os=2284 image=image-123 snapshot=snapshot-123 firewall_group=fw-123 vpc_ids=vpc-a,vpc-b ssh_cidrs=203.0.113.0/24,2001:db8::/64 user_scheme=limited") {
+		t.Fatalf("config show missing vultr summary: %q", text)
+	}
+	if !strings.Contains(text, "ssh=root@<host>:22 fallback_ports=-") {
+		t.Fatalf("config show missing effective vultr ssh defaults: %q", text)
+	}
+	if strings.Contains(text, "vultr-secret-token") || strings.Contains(text, "auth=configured") {
+		t.Fatalf("config show leaked or reported Vultr API key: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SSHUser          string   `json:"sshUser"`
+		SSHPort          string   `json:"sshPort"`
+		SSHFallbackPorts []string `json:"sshFallbackPorts"`
+		Vultr            struct {
+			Region        string   `json:"region"`
+			OS            string   `json:"os"`
+			Image         string   `json:"image"`
+			Snapshot      string   `json:"snapshot"`
+			FirewallGroup string   `json:"firewallGroup"`
+			VPCIDs        []string `json:"vpcIds"`
+			SSHCIDRs      []string `json:"sshCIDRs"`
+			UserScheme    string   `json:"userScheme"`
+		} `json:"vultr"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Vultr.Region != "sjc" ||
+		got.Vultr.OS != "2284" ||
+		got.Vultr.Image != "image-123" ||
+		got.Vultr.Snapshot != "snapshot-123" ||
+		got.Vultr.FirewallGroup != "fw-123" ||
+		strings.Join(got.Vultr.VPCIDs, ",") != "vpc-a,vpc-b" ||
+		strings.Join(got.Vultr.SSHCIDRs, ",") != "203.0.113.0/24,2001:db8::/64" ||
+		got.Vultr.UserScheme != "limited" {
+		t.Fatalf("unexpected vultr json: %#v", got.Vultr)
+	}
+	if got.SSHUser != "root" || got.SSHPort != "22" || len(got.SSHFallbackPorts) != 0 {
+		t.Fatalf("unexpected vultr ssh json: %#v", got)
+	}
+	if strings.Contains(stdout.String(), "vultr-secret-token") {
+		t.Fatalf("config show json leaked Vultr API key: %q", stdout.String())
+	}
+}
+
 func TestConfigShowIncludesScalewayProviderConfigWithoutSecrets(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

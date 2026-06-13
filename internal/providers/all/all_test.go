@@ -349,6 +349,26 @@ func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	}
 }
 
+func TestVultrRegistersAsBuiltInProvider(t *testing.T) {
+	provider, err := core.ProviderFor("vultr")
+	if err != nil {
+		t.Fatalf("ProviderFor(vultr): %v", err)
+	}
+	if provider.Name() != "vultr" {
+		t.Fatalf("ProviderFor(vultr).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Family != "vultr" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("vultr spec=%#v", spec)
+	}
+	if !spec.Features.Has(core.FeatureSSH) || !spec.Features.Has(core.FeatureCrabboxSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("vultr features=%#v", spec.Features)
+	}
+	if spec.Features.Has(core.FeatureTailscale) {
+		t.Fatalf("vultr must not advertise tailscale before lifecycle proof: %#v", spec.Features)
+	}
+}
+
 func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
 	for _, name := range []string{"apple-vz", "applevz"} {
 		provider, err := core.ProviderFor(name)
@@ -1087,6 +1107,7 @@ func allBuiltInProviderNames() []string {
 		"tensorlake",
 		"upstash-box",
 		"vercel-sandbox",
+		"vultr",
 		"wandb",
 		"windows-sandbox",
 		"xcp-ng",

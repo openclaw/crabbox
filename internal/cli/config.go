@@ -103,6 +103,7 @@ type Config struct {
 	GCPServiceAccount             string
 	DigitalOcean                  DigitalOceanConfig
 	digitalOceanImageExplicit     bool
+	Vultr                         VultrConfig
 	Linode                        LinodeConfig
 	linodeImageExplicit           bool
 	linodeTypeExplicit            bool
@@ -250,6 +251,17 @@ type DigitalOceanConfig struct {
 	Image    string
 	VPCUUID  string
 	SSHCIDRs []string
+}
+
+type VultrConfig struct {
+	Region        string
+	OS            string
+	Image         string
+	Snapshot      string
+	FirewallGroup string
+	VPCIDs        []string
+	SSHCIDRs      []string
+	UserScheme    string
 }
 
 type LinodeConfig struct {
@@ -1427,6 +1439,40 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "vultr" {
+		if cfg.Vultr.Region == "" {
+			cfg.Vultr.Region = "ewr"
+		}
+		if cfg.Vultr.UserScheme == "" {
+			cfg.Vultr.UserScheme = "root"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = "root"
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "linode" {
 		if cfg.Linode.Region == "" {
 			cfg.Linode.Region = "us-ord"
@@ -2567,6 +2613,7 @@ type fileConfig struct {
 	Broker                   *fileBrokerConfig                   `yaml:"broker,omitempty"`
 	Hetzner                  *fileHetznerConfig                  `yaml:"hetzner,omitempty"`
 	DigitalOcean             *fileDigitalOceanConfig             `yaml:"digitalocean,omitempty"`
+	Vultr                    *fileVultrConfig                    `yaml:"vultr,omitempty"`
 	Linode                   *fileLinodeConfig                   `yaml:"linode,omitempty"`
 	Nebius                   *fileNebiusConfig                   `yaml:"nebius,omitempty"`
 	OVH                      *fileOVHConfig                      `yaml:"ovh,omitempty"`
@@ -2675,6 +2722,17 @@ type fileDigitalOceanConfig struct {
 	Image    string   `yaml:"image,omitempty"`
 	VPCUUID  string   `yaml:"vpc,omitempty"`
 	SSHCIDRs []string `yaml:"sshCIDRs,omitempty"`
+}
+
+type fileVultrConfig struct {
+	Region        string   `yaml:"region,omitempty"`
+	OS            string   `yaml:"os,omitempty"`
+	Image         string   `yaml:"image,omitempty"`
+	Snapshot      string   `yaml:"snapshot,omitempty"`
+	FirewallGroup string   `yaml:"firewallGroup,omitempty"`
+	VPCIDs        []string `yaml:"vpcIds,omitempty"`
+	SSHCIDRs      []string `yaml:"sshCIDRs,omitempty"`
+	UserScheme    string   `yaml:"userScheme,omitempty"`
 }
 
 type fileLinodeConfig struct {
@@ -4012,6 +4070,32 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if len(file.DigitalOcean.SSHCIDRs) > 0 {
 			cfg.DigitalOcean.SSHCIDRs = file.DigitalOcean.SSHCIDRs
+		}
+	}
+	if file.Vultr != nil {
+		if file.Vultr.Region != "" {
+			cfg.Vultr.Region = file.Vultr.Region
+		}
+		if file.Vultr.OS != "" {
+			cfg.Vultr.OS = file.Vultr.OS
+		}
+		if file.Vultr.Image != "" {
+			cfg.Vultr.Image = file.Vultr.Image
+		}
+		if file.Vultr.Snapshot != "" {
+			cfg.Vultr.Snapshot = file.Vultr.Snapshot
+		}
+		if file.Vultr.FirewallGroup != "" {
+			cfg.Vultr.FirewallGroup = file.Vultr.FirewallGroup
+		}
+		if len(file.Vultr.VPCIDs) > 0 {
+			cfg.Vultr.VPCIDs = file.Vultr.VPCIDs
+		}
+		if len(file.Vultr.SSHCIDRs) > 0 {
+			cfg.Vultr.SSHCIDRs = file.Vultr.SSHCIDRs
+		}
+		if file.Vultr.UserScheme != "" {
+			cfg.Vultr.UserScheme = file.Vultr.UserScheme
 		}
 	}
 	if file.Linode != nil {
@@ -6345,6 +6429,18 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {
 		cfg.DigitalOcean.SSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.Vultr.Region = getenv("CRABBOX_VULTR_REGION", cfg.Vultr.Region)
+	cfg.Vultr.OS = getenv("CRABBOX_VULTR_OS", cfg.Vultr.OS)
+	cfg.Vultr.Image = getenv("CRABBOX_VULTR_IMAGE", cfg.Vultr.Image)
+	cfg.Vultr.Snapshot = getenv("CRABBOX_VULTR_SNAPSHOT", cfg.Vultr.Snapshot)
+	cfg.Vultr.FirewallGroup = getenv("CRABBOX_VULTR_FIREWALL_GROUP", cfg.Vultr.FirewallGroup)
+	if vpcs := os.Getenv("CRABBOX_VULTR_VPC_IDS"); vpcs != "" {
+		cfg.Vultr.VPCIDs = splitCommaList(vpcs)
+	}
+	if cidrs := os.Getenv("CRABBOX_VULTR_SSH_CIDRS"); cidrs != "" {
+		cfg.Vultr.SSHCIDRs = splitCommaList(cidrs)
+	}
+	cfg.Vultr.UserScheme = getenv("CRABBOX_VULTR_USER_SCHEME", cfg.Vultr.UserScheme)
 	cfg.Linode.Region = getenv("CRABBOX_LINODE_REGION", cfg.Linode.Region)
 	if image := os.Getenv("CRABBOX_LINODE_IMAGE"); image != "" {
 		cfg.Linode.Image = image
