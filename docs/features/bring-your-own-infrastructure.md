@@ -137,8 +137,12 @@ alone may not contain enough resolved identity to release the resource.
 
 Routing is scoped by the selected lifecycle or protocol command and config.
 Two control planes may therefore use the same friendly slug without claiming
-or deleting each other's resources. Missing or ambiguous routing fails closed
-before destructive commands.
+or deleting each other's resources. Ambiguous persisted routes fail closed.
+Missing routing does not always fail closed: when the external provider is
+explicitly selected, Crabbox can fall back to the current external config as an
+ownership override. Before a destructive command in that state, verify the
+current provider scope and resource identity or restore the original routing;
+never assume a reused slug identifies the same control plane.
 
 ## Registered coordinator mode
 
@@ -155,13 +159,17 @@ broker:
 For short-lived identity tokens, prefer the shell-free command environment:
 
 ```sh
-export CRABBOX_COORDINATOR_TOKEN_COMMAND='["identityctl","token","--audience","crabbox"]'
+export CRABBOX_COORDINATOR_TOKEN_COMMAND='["credential-helper","read","crabbox-user-token"]'
 ```
 
 The command is executed directly without a shell. It must print exactly one
 token line, complete within 15 seconds, and stay within the output limit. The
 CLI reruns it for HTTP requests and reconnecting WebSockets, so an expiring
-identity token does not need to be persisted.
+token does not need to be persisted. Its output must be a bearer the
+coordinator accepts, such as its shared/admin token or a signed `cbxu_` user
+token. An audience-scoped token from another identity system works only when an
+upstream identity proxy validates it and injects the coordinator's configured
+trusted-user header.
 
 When a direct lease is claimed, the CLI idempotently registers generic
 metadata:

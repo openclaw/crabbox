@@ -172,11 +172,11 @@ On `SIGTERM` or `SIGINT`, the service:
 4. waits for the current alarm, stops pg-boss gracefully, and closes PostgreSQL;
 5. waits for the HTTP server to finish closing.
 
-WebVNC and code bridge clients reconnect with bounded backoff and obtain fresh
-tickets as needed. Ordinary egress clients do not universally reconnect after
-a coordinator restart; rerun `crabbox egress start` unless that path has its
-own supervised host daemon. Ingress rollouts should still use a termination
-grace period at least as long as `CRABBOX_SHUTDOWN_TIMEOUT_MS`.
+WebVNC bridge clients reconnect with bounded backoff and obtain fresh tickets
+as needed. Code and ordinary egress bridge processes do not universally survive
+a coordinator restart; rerun `crabbox code` or `crabbox egress start` unless
+that path has its own supervisor. Ingress rollouts should still use a
+termination grace period at least as long as `CRABBOX_SHUTDOWN_TIMEOUT_MS`.
 
 ## Trusted reverse proxies
 
