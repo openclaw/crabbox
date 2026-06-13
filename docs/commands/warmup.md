@@ -180,6 +180,14 @@ auto` resolves to managed.
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
 
+### cloudflare-dynamic-workers
+
+`--provider cloudflare-dynamic-workers` rejects `warmup`. Dynamic Workers require
+module source before Cloudflare can load or cache them; use `crabbox doctor` for
+loader readiness or `crabbox run --script <file>` to load code. The provider
+does not start a Linux machine and does not support Actions runner registration,
+SSH, desktop, browser, code-server, ports, `--class`, or `--type`.
+
 ### aws — macOS
 
 `--provider aws --target macos --desktop` launches an EC2 Mac instance on an

@@ -132,6 +132,36 @@ func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	}
 }
 
+func TestCloudflareDynamicWorkersRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"cloudflare-dynamic-workers", "cf-dynamic", "cfdw"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "cloudflare-dynamic-workers" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		}
+	}
+	if provider := mustProvider(t, "cloudflare"); provider.Name() != "cloudflare" {
+		t.Fatalf("cloudflare resolved to %q; dynamic workers must not replace Cloudflare Containers", provider.Name())
+	}
+	if provider := mustProvider(t, "cf"); provider.Name() != "cloudflare" {
+		t.Fatalf("cf alias resolved to %q; dynamic workers must not steal it", provider.Name())
+	}
+	spec := mustProvider(t, "cloudflare-dynamic-workers").Spec()
+	if spec.Family != "cloudflare" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("cloudflare-dynamic-workers spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetWorkerRuntime {
+		t.Fatalf("cloudflare-dynamic-workers targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureCleanup, core.FeatureModuleRun, core.FeatureRunSession} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("cloudflare-dynamic-workers features=%v missing %s", spec.Features, feature)
+		}
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -165,6 +195,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"azure-dynamic-sessions",
 		"blacksmith-testbox",
 		"cloudflare",
+		"cloudflare-dynamic-workers",
 		"daytona",
 		"docker-sandbox",
 		"e2b",

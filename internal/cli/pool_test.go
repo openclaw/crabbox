@@ -193,6 +193,51 @@ func TestListForwardsAllAndRefreshToBackend(t *testing.T) {
 	}
 }
 
+func TestLifecycleProviderOverrideRecomputesSingleTargetDefaults(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_PROVIDER", "tart")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+
+	tests := []struct {
+		name string
+		run  func(App) error
+	}{
+		{
+			name: "list",
+			run: func(app App) error {
+				return app.list(context.Background(), []string{"--provider", "cloudflare-dynamic-workers"})
+			},
+		},
+		{
+			name: "cleanup",
+			run: func(app App) error {
+				return app.cleanup(context.Background(), []string{"--provider", "cloudflare-dynamic-workers"})
+			},
+		},
+		{
+			name: "doctor",
+			run: func(app App) error {
+				return app.doctor(context.Background(), []string{"--provider", "cloudflare-dynamic-workers"})
+			},
+		},
+		{
+			name: "stop",
+			run: func(app App) error {
+				return app.stop(context.Background(), []string{"--provider", "cloudflare-dynamic-workers", "--id", "cfdw_test"})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := tt.run(App{Stdout: &stdout, Stderr: &stderr}); err != nil {
+				t.Fatalf("%s error=%v stderr=%q", tt.name, err, stderr.String())
+			}
+		})
+	}
+}
+
 func TestSyncExternalRunnersBestEffortPostsBlacksmithJSONList(t *testing.T) {
 	var posted struct {
 		Provider string                      `json:"provider"`

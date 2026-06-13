@@ -280,6 +280,29 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 }
 
+func TestLoadBackendResetsInferredTargetAfterProviderSwitch(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cloudflare-dynamic-workers"
+	applySingleProviderTargetDefault(&cfg)
+	if cfg.TargetOS != "worker-runtime" {
+		t.Fatalf("initial target=%q, want worker-runtime", cfg.TargetOS)
+	}
+
+	cfg.Provider = "hetzner"
+	cfg.Coordinator = "https://coordinator.example"
+	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load backend after provider switch: %v", err)
+	}
+	coordinator, ok := backend.(*coordinatorLeaseBackend)
+	if !ok {
+		t.Fatalf("backend=%T, want coordinatorLeaseBackend", backend)
+	}
+	if coordinator.cfg.TargetOS != targetLinux {
+		t.Fatalf("coordinator target=%q, want %q", coordinator.cfg.TargetOS, targetLinux)
+	}
+}
+
 func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -1006,6 +1029,33 @@ func TestRejectDelegatedSyncOptionsAllowsProofFeature(t *testing.T) {
 	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{EmitProof: "/tmp/proof.md"}); err == nil {
 		t.Fatal("plain delegated provider should reject --emit-proof")
+	}
+}
+
+func TestRejectDelegatedSyncOptionsAllowsModuleRunScriptOnly(t *testing.T) {
+	spec := ProviderSpec{Name: "module-runtime-test", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureModuleRun}}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	}); err != nil {
+		t.Fatalf("module-run provider should allow script input: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		Command: []string{"node", "worker.mjs"},
+	}); err == nil {
+		t.Fatal("module-run provider should reject trailing command argv")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ScriptRequested: true,
+		ShellMode:       true,
+	}); err == nil {
+		t.Fatal("module-run provider should reject --shell")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "e2b", Kind: ProviderKindDelegatedRun}, RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	}); err == nil {
+		t.Fatal("delegated provider without module-run feature should reject script input")
 	}
 }
 

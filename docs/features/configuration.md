@@ -301,6 +301,44 @@ port `8787`. Auth uses `az account get-access-token --resource
 https://dynamicsessions.io` unless `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` is
 set.
 
+### Cloudflare Dynamic Workers
+
+```yaml
+provider: cloudflare-dynamic-workers
+target: worker-runtime
+cloudflareDynamicWorkers:
+  compatibilityDate: "2026-06-12"
+  compatibilityFlags:
+    - nodejs_compat
+  cacheMode: stable
+  egress: blocked
+  cpuMs: 50
+  subrequests: 12
+  timeoutSecs: 30
+```
+
+`cloudflare-dynamic-workers` is a delegated Worker-runtime provider. It runs
+module source supplied through `crabbox run --script <file>` or
+`--script-stdin`; it does not expose a Linux shell, SSH, rsync/archive sync, VNC,
+ports, browser, code-server, or Actions hydration.
+
+Use `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL` (or the compatibility alias
+`CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL`) for the loader URL and
+`CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN` for bearer auth. Keep the token in
+environment or private user config, not repo YAML and not argv. Repository
+config cannot replace the loader URL or token, enable `intercept` egress, or
+loosen trusted `cpuMs`, `subrequests`, or `timeoutSecs` limits. It may tighten
+those limits.
+Provider flags cover runtime settings such as
+`--cloudflare-dynamic-workers-compatibility-date`,
+`--cloudflare-dynamic-workers-compatibility-flags`,
+`--cloudflare-dynamic-workers-cache`,
+`--cloudflare-dynamic-workers-egress`,
+`--cloudflare-dynamic-workers-cpu-ms`,
+`--cloudflare-dynamic-workers-subrequests`, and
+`--cloudflare-dynamic-workers-timeout-secs`. There is intentionally no token
+flag.
+
 ### Anthropic Sandbox Runtime
 
 ```yaml
@@ -777,6 +815,9 @@ Repo config should select the runner URL and workdir, not hold bearer tokens.
 instance types wired into the deployed runner; update
 `worker/wrangler.cloudflare.jsonc` and redeploy when changing the available
 `instance_type` bindings or `max_instances`.
+
+Use `cloudflare-dynamic-workers` instead when the target is Worker-runtime module
+source rather than Linux command execution.
 
 ### Semaphore
 

@@ -4535,21 +4535,13 @@ describe("fleet lease identity and idle", () => {
     expect(text).not.toContain("tskey-preflight-secret");
   });
 
-  it("cleans up recorded Tailscale devices before provider release", async () => {
+  it("does not trust client-posted Tailscale device IDs for privileged cleanup", async () => {
     const storage = new MemoryStorage();
     const cleanupOrder: string[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
-          return jsonResponse({ access_token: "oauth-token" });
-        }
-        if (url === "https://api.tailscale.com/api/v2/device/node-123") {
-          cleanupOrder.push(`tailscale:${init?.method ?? "GET"}`);
-          return new Response("");
-        }
-        return jsonResponse({ message: `unexpected ${url}` }, 500);
+      vi.fn(async (input: RequestInfo | URL) => {
+        throw new Error(`unexpected Tailscale API request: ${String(input)}`);
       }),
     );
     storage.seed(
@@ -4578,10 +4570,7 @@ describe("fleet lease identity and idle", () => {
           cleanupOrder.push(`provider:${id}`);
         }),
       },
-      {
-        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
-        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
-      },
+      {},
     );
 
     const response = await fleet.fetch(
@@ -4591,9 +4580,10 @@ describe("fleet lease identity and idle", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(cleanupOrder).toEqual(["tailscale:DELETE", "provider:4242"]);
+    expect(cleanupOrder).toEqual(["provider:4242"]);
     const stored = storage.value<LeaseRecord>("lease:cbx_tailscale_cleanup");
-    expect(stored?.tailscale?.cleanupState).toBe("api_delete_succeeded");
+    expect(stored?.tailscale?.deviceID).toBe("node-123");
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("does not hold the state transition lock while minting a Tailscale key", async () => {

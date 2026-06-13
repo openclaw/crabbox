@@ -46,6 +46,10 @@ Crabbox lease ID and local slug:
   slug and deletes the Islo sandbox.
 - `e2b` — accepts a Crabbox lease ID, a local slug, or a Crabbox-owned E2B
   sandbox ID in raw or `e2b_<sandboxID>` form and deletes the E2B sandbox.
+- `cloudflare-dynamic-workers` — accepts a local claim, lifecycle run ID, or
+  slug, deletes loader metadata for that run, and removes the local claim.
+  Stable and explicit Worker cache IDs are not lifecycle IDs. If the loader
+  already reports `not found`, Crabbox removes the stale local claim.
 - `docker-sandbox` — accepts only a Crabbox lease ID or local slug backed by a
   `provider=docker-sandbox` local claim, then removes the sandbox with
   `sbx rm --force`. This is destructive cleanup, not Docker Sandbox pause, and
@@ -115,6 +119,7 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --hostinger-url <url>                    Hostinger API URL
 --hostinger-release-action stop          Hostinger release action; only stop is supported
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
+--cloudflare-dynamic-workers-url <url>   Cloudflare Dynamic Workers loader URL
 ```
 
 Run `crabbox stop --help` for the full, provider-aware flag list, and

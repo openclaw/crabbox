@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createTailscaleAuthKey,
-  deleteTailscaleDevice,
   renderTailscaleHostname,
   tailscaleInstallConfig,
   tailscalePreflight,
@@ -182,39 +181,6 @@ describe("tailscale preflight", () => {
       mode: "pinned",
       version: "1.99.1",
       sha256: { amd64: "amd", arm64: "arm" },
-    });
-  });
-});
-
-describe("tailscale device cleanup", () => {
-  it("uses OAuth device scope and deletes the recorded node", async () => {
-    const calls: Array<{ url: string; body?: string; method?: string }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push({ url: String(input), body: String(init?.body ?? ""), method: init?.method });
-        if (String(input) === "https://api.tailscale.com/api/v2/oauth/token") {
-          return new Response(JSON.stringify({ access_token: "oauth-token" }));
-        }
-        if (String(input) === "https://api.tailscale.com/api/v2/device/node-123") {
-          return new Response("");
-        }
-        return new Response(JSON.stringify({ message: "unexpected" }), { status: 500 });
-      }),
-    );
-
-    await deleteTailscaleDevice(
-      {
-        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
-        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
-      },
-      "node-123",
-    );
-
-    expect(calls[0].body).toContain("scope=devices");
-    expect(calls[1]).toMatchObject({
-      url: "https://api.tailscale.com/api/v2/device/node-123",
-      method: "DELETE",
     });
   });
 });

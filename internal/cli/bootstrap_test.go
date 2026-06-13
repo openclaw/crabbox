@@ -373,7 +373,6 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"https://tailscale.com/install.sh",
-		"/usr/local/bin/crabbox-tailscale-logout",
 		"install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox",
 		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
 		"printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
@@ -391,6 +390,12 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	}
 	if strings.Contains(got, `--auth-key="$TS_AUTHKEY"`) {
 		t.Fatal("cloudInit(tailscale) must not expose the auth key through process argv")
+	}
+	if !strings.Contains(got, "systemctl disable crabbox-tailscale-logout.service") {
+		t.Fatal("cloudInit(tailscale) must remove the legacy reboot logout unit")
+	}
+	if strings.Contains(got, "tailscale logout") || strings.Contains(got, "WantedBy=halt.target reboot.target shutdown.target") {
+		t.Fatal("cloudInit(tailscale) must not install a normal-reboot logout hook")
 	}
 	if strings.Contains(cloudInit(baseConfig(), "ssh-ed25519 test"), "tailscale up") {
 		t.Fatal("cloudInit should not install Tailscale by default")

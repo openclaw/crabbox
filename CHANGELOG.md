@@ -6,9 +6,11 @@
 
 - Added authenticated Crabfleet workspace terminals with bounded SSH/WebSocket bridging, durable tmux resume, and lifecycle revocation.
 - Added `provider: ovh` for direct OVHcloud Public Cloud Linux SSH leases with signed API authentication, local claim-backed ownership, guarded recovery, and live lifecycle coverage. Thanks @coygeek.
+- Added `provider: cloudflare-dynamic-workers` for authenticated Worker-runtime module execution through Cloudflare Dynamic Workers, including blocked-by-default egress, stable caching, durable run metadata, lifecycle commands, and isolated live smoke coverage. Thanks @coygeek.
 
 ### Fixed
 
+- Fixed brokered Tailscale cleanup to avoid privileged deletion from client-posted device IDs, preserve connectivity across normal reboots, and fail live preflight on application-level errors.
 - Fixed Crabfleet workspaces to use any configured brokered provider and route the OpenClaw deployment through its canonical OAuth host and verified AWS backend with isolated, ephemeral key-only SSH access, stock-image cloud-init, and readiness-gated, pinned, Workers-compatible terminal attachment.
 
 ## 0.30.0 - 2026-06-13

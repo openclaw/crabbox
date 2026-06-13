@@ -27,7 +27,10 @@ Each adapter declares a `Spec` that drives how Crabbox treats it:
   `aws`, `azure`, `gcp`, and `hetzner` are `supported`, and even those run direct
   unless a broker URL and token are configured (see
   [Configuration](configuration.md) and `crabbox config set-broker`).
-- **Targets** — which of Linux, macOS, and Windows the provider can lease.
+- **Targets** — which runtime category the provider can satisfy. OS-backed
+  providers advertise Linux, macOS, or Windows; module/runtime providers can
+  advertise `worker-runtime` when they execute source in a hosted runtime
+  without SSH, POSIX shell, or filesystem sync semantics.
 
 `internal/cli/provider_backend.go` defines the kinds, coordinator modes, and
 feature flags; `internal/cli/config.go` holds the per-provider config sections
@@ -234,6 +237,21 @@ and syncs through its own API (gzipped archive upload for most). Islo also
 exposes a direct `crabbox ssh` login helper for kept sandboxes at
 `<sandbox>.islo`, but Islo run/sync remains delegated. See the linked
 provider pages for per-provider auth and configuration.
+
+Module-runtime delegated providers are a narrower category for Worker-isolate
+style runtimes. They should advertise `target=worker-runtime` and
+`feature=module-run`, accept `crabbox run --script <file>` or
+`--script-stdin` as source module input, and reject trailing `-- <command>`
+argv rather than implying Linux shell semantics. A module-runtime target does
+not imply SSH, rsync, archive sync, VNC, browser desktop, code-server, ports, or
+POSIX filesystem behavior unless a provider explicitly documents and advertises
+those capabilities.
+
+`cloudflare-dynamic-workers` is the Cloudflare-family module-runtime provider.
+It is distinct from `cloudflare`, which runs Linux commands in Cloudflare
+Containers. Dynamic Workers support `module-run`, local claim cleanup, and
+run-session metadata, but not SSH, Crabbox sync, Actions hydration, browser,
+desktop, code-server, ports, or container instance classes.
 
 ## Static SSH targets
 

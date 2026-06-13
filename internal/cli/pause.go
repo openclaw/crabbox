@@ -32,7 +32,9 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 	if err != nil {
 		return err
 	}
-	cfg.Provider = *provider
+	if err := prepareProviderSelection(&cfg, *provider); err != nil {
+		return err
+	}
 	if err := autoRouteExternalLease(&cfg, fs, *id); err != nil {
 		return err
 	}
@@ -40,6 +42,9 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 		return err
 	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		return err
+	}
+	if err := finalizeProviderSelection(&cfg); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))

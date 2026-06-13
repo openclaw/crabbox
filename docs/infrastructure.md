@@ -240,11 +240,11 @@ minted Access JWT in `CRABBOX_ACCESS_TOKEN`.
 For brokered Tailscale reachability, the coordinator mints one ephemeral, pre-approved
 auth key per lease and injects it only into cloud-init. Lease records store only
 non-secret Tailscale metadata (hostname, FQDN, 100.x address, client version,
-device id, state, tags, and cleanup result).
+device id, state, and tags).
 
-Create a Tailscale OAuth client with the `auth_keys` scope, limited to the tags
-Crabbox may assign (typically `tag:crabbox`), and inject the credentials as
-coordinator secrets:
+Create a Tailscale OAuth client with only the `auth_keys` scope, limited to the
+tags Crabbox may assign (typically `tag:crabbox`), and inject the credentials as
+coordinator secrets. Crabbox does not require device-management scope:
 
 ```text
 CRABBOX_TAILSCALE_ENABLED=1

@@ -11,6 +11,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/azuredynamicsessions"
 	_ "github.com/openclaw/crabbox/internal/providers/blacksmith"
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflare"
+	_ "github.com/openclaw/crabbox/internal/providers/cloudflaredynamicworkers"
 	_ "github.com/openclaw/crabbox/internal/providers/daytona"
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"
 	_ "github.com/openclaw/crabbox/internal/providers/dockersandbox"

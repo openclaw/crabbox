@@ -444,8 +444,6 @@ export interface TailscaleMetadata {
   error?: string;
   version?: string;
   deviceID?: string;
-  cleanupState?: "missing_device_id" | "api_delete_succeeded" | "api_delete_failed";
-  cleanupError?: string;
   exitNode?: string;
   exitNodeAllowLanAccess?: boolean;
 }

@@ -62,7 +62,6 @@ import {
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import {
   createTailscaleAuthKey,
-  deleteTailscaleDevice,
   renderTailscaleHostname,
   tailscaleAllowed,
   tailscaleDefaultTags,
@@ -6588,7 +6587,6 @@ export class FleetCoordinator {
         const cleanup = async () => {
           let failure: string | undefined;
           try {
-            await this.cleanupLeaseTailscaleDevice(lease, claim);
             await this.deleteLeaseServer(lease);
           } catch (error) {
             failure = errorMessage(error);
@@ -7714,51 +7712,6 @@ export class FleetCoordinator {
     await this.provider(provider, lease.region, lease.providerProject).releaseLease(lease);
   }
 
-  private async cleanupLeaseTailscaleDevice(lease: LeaseRecord, claim: string): Promise<void> {
-    const metadata = lease.tailscale;
-    if (!metadata?.enabled) {
-      return;
-    }
-    const deviceID = metadata.deviceID?.trim();
-    if (!deviceID) {
-      await this.recordTailscaleCleanupResult(lease.id, claim, "missing_device_id");
-      return;
-    }
-    try {
-      await deleteTailscaleDevice(this.env, deviceID);
-      await this.recordTailscaleCleanupResult(lease.id, claim, "api_delete_succeeded");
-    } catch (error) {
-      await this.recordTailscaleCleanupResult(
-        lease.id,
-        claim,
-        "api_delete_failed",
-        errorMessage(error),
-      );
-    }
-  }
-
-  private async recordTailscaleCleanupResult(
-    leaseID: string,
-    claim: string,
-    cleanupState: NonNullable<TailscaleMetadata["cleanupState"]>,
-    cleanupError?: string,
-  ): Promise<void> {
-    await this.state.runExclusive(async () => {
-      const current = await this.getLease(leaseID);
-      if (!current || current.cleanupStartedAt !== claim || !current.tailscale?.enabled) {
-        return;
-      }
-      current.tailscale = { ...current.tailscale, cleanupState };
-      if (cleanupError) {
-        current.tailscale.cleanupError = cleanupError;
-      } else {
-        delete current.tailscale.cleanupError;
-      }
-      current.updatedAt = new Date().toISOString();
-      await this.putLease(current);
-    });
-  }
-
   private async abortProvisionedLeaseAfterStateChange(
     record: LeaseRecord,
     config: LeaseConfig,
@@ -7818,7 +7771,6 @@ export class FleetCoordinator {
       );
     }
     try {
-      await this.cleanupLeaseTailscaleDevice(preparation.lease, preparation.cleanupStartedAt);
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
       const failure = await this.state.runExclusive(async () => {
@@ -7995,7 +7947,6 @@ export class FleetCoordinator {
       return preparation.lease;
     }
     try {
-      await this.cleanupLeaseTailscaleDevice(preparation.lease, preparation.claim);
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
       await this.state.runExclusive(async () => {
@@ -9528,7 +9479,6 @@ function mergeTailscaleMetadata(
   const error = nonSecretString(input.error) || current?.error;
   const version = nonSecretString(input.version) || current?.version;
   const deviceID = nonSecretString(input.deviceID) || current?.deviceID;
-  const cleanupError = nonSecretString(input.cleanupError) || current?.cleanupError;
   const exitNode = nonSecretString(input.exitNode) || current?.exitNode;
   if (hostname) {
     merged.hostname = hostname;
@@ -9548,18 +9498,6 @@ function mergeTailscaleMetadata(
   if (deviceID) {
     merged.deviceID = deviceID;
   }
-  if (
-    input.cleanupState === "missing_device_id" ||
-    input.cleanupState === "api_delete_succeeded" ||
-    input.cleanupState === "api_delete_failed"
-  ) {
-    merged.cleanupState = input.cleanupState;
-  } else if (current?.cleanupState) {
-    merged.cleanupState = current.cleanupState;
-  }
-  if (cleanupError) {
-    merged.cleanupError = cleanupError;
-  }
   if (exitNode) {
     merged.exitNode = exitNode;
     merged.exitNodeAllowLanAccess =
@@ -9567,9 +9505,6 @@ function mergeTailscaleMetadata(
   }
   if (merged.state !== "failed") {
     delete merged.error;
-  }
-  if (merged.cleanupState !== "api_delete_failed") {
-    delete merged.cleanupError;
   }
   return merged;
 }
