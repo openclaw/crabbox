@@ -107,7 +107,7 @@ case "$1" in
     printf 'agent-sandbox ready\\n'
     ;;
   run)
-    printf 'leased asbx_123456789abc slug=agent-sandbox-smoke-test provider=agent-sandbox claim=crabbox-agent-sandbox-smoke-test sandbox=sandbox-a pod=pod-a\\n' >&2
+    printf 'leased asbx_123456789abc slug=agent-sandbox-smoke-test-collision provider=agent-sandbox claim=crabbox-agent-sandbox-smoke-test-collision sandbox=sandbox-a pod=pod-a\\n' >&2
     printf 'AGENT_SANDBOX_SMOKE_OK\\n'
     ;;
   status)
@@ -150,6 +150,77 @@ esac
   assert.match(crabboxCalls, /doctor --provider agent-sandbox/);
   assert.match(crabboxCalls, /run --provider agent-sandbox/);
   assert.match(crabboxCalls, /--slug agent-sandbox-smoke-test/);
-  assert.match(crabboxCalls, /stop --provider agent-sandbox .* agent-sandbox-smoke-test/);
+  assert.match(crabboxCalls, /status --provider agent-sandbox .* --id asbx_123456789abc/);
+  assert.match(crabboxCalls, /stop --provider agent-sandbox .* asbx_123456789abc/);
+  assert.doesNotMatch(crabboxCalls, /stop --provider agent-sandbox .* agent-sandbox-smoke-test$/m);
   assert.doesNotMatch(crabboxCalls, /stop --provider agent-sandbox .*other/);
+});
+
+test("Agent Sandbox smoke cleanup reuses resolved provider args", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-agent-sandbox-cleanup-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  const kubeconfig = path.join(dir, "kubeconfig");
+  const config = path.join(dir, "crabbox.yaml");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(kubeconfig, "apiVersion: v1\nkind: Config\n", "utf8");
+  fs.writeFileSync(
+    config,
+    `agentSandbox:
+  kubeconfig: ${JSON.stringify(kubeconfig)}
+  context: config-context
+  namespace: config-namespace
+  warmPool: config-pool
+`,
+    "utf8",
+  );
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${crabboxLog}"
+case "$1" in
+  doctor)
+    printf 'agent-sandbox ready\\n'
+    ;;
+  run)
+    printf 'leased asbx_cleanup123 slug=agent-sandbox-smoke-cleanup provider=agent-sandbox claim=crabbox-agent-sandbox-smoke-cleanup sandbox=sandbox-a pod=pod-a\\n' >&2
+    printf 'simulated run failure\\n' >&2
+    exit 7
+    ;;
+  stop)
+    printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-agent-sandbox-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: config,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "agent-sandbox",
+      CRABBOX_AGENT_SANDBOX_SMOKE_SLUG: "agent-sandbox-smoke-cleanup",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^diagnostic_only leased asbx_cleanup123/m);
+  assert.match(result.stdout, /simulated run failure/m);
+
+  const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(
+    crabboxCalls,
+    /stop --provider agent-sandbox --agent-sandbox-kubeconfig \S+ --agent-sandbox-context config-context --agent-sandbox-namespace config-namespace --agent-sandbox-warm-pool config-pool/,
+  );
+  assert.match(crabboxCalls, /--agent-sandbox-forget-missing asbx_cleanup123/);
 });

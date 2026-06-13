@@ -16,16 +16,17 @@ import (
 )
 
 type fakeKubernetesClient struct {
-	resources map[string]map[string]bool
-	objects   map[string]*unstructured.Unstructured
-	rbac      map[string]bool
-	pods      map[string][]podState
-	gets      []string
-	execs     []podExecRequest
-	execInput [][]byte
-	execErrs  []error
-	creates   int
-	deletes   int
+	resources  map[string]map[string]bool
+	objects    map[string]*unstructured.Unstructured
+	rbac       map[string]bool
+	pods       map[string][]podState
+	gets       []string
+	execs      []podExecRequest
+	execInput  [][]byte
+	execErrs   []error
+	deleteErrs []error
+	creates    int
+	deletes    int
 }
 
 func (f *fakeKubernetesClient) CheckResource(_ context.Context, groupVersion, resource string) error {
@@ -79,6 +80,11 @@ func (f *fakeKubernetesClient) Create(_ context.Context, gvr schema.GroupVersion
 }
 
 func (f *fakeKubernetesClient) Delete(_ context.Context, gvr schema.GroupVersionResource, namespace, name string) error {
+	if len(f.deleteErrs) > 0 {
+		err := f.deleteErrs[0]
+		f.deleteErrs = f.deleteErrs[1:]
+		return err
+	}
 	key := gvr.Resource + "/" + namespace + "/" + name
 	if f.objects[key] == nil {
 		return errKubernetesNotFound
@@ -192,7 +198,7 @@ func TestClaimScopeIncludesClusterContextAndRuntimeFields(t *testing.T) {
 	cfg.AgentSandbox.WarmPool = "linux-pool"
 	cfg.AgentSandbox.Container = "worker"
 	scopeA := claimScope(cfg)
-	for _, want := range []string{"kubeconfig:/cluster-a", "context:agent-context", "namespace:sandboxes", "warmPool:linux-pool", "container:worker"} {
+	for _, want := range []string{"kubeconfig:/cluster-a", "context:agent-context", "namespace:sandboxes", "warmPool:linux-pool", "containerMode:explicit", "container:worker"} {
 		if !strings.Contains(scopeA, want) {
 			t.Fatalf("scope %q missing %q", scopeA, want)
 		}
@@ -201,6 +207,25 @@ func TestClaimScopeIncludesClusterContextAndRuntimeFields(t *testing.T) {
 	scopeB := claimScope(cfg)
 	if scopeA == scopeB || !strings.Contains(scopeB, "kubeconfig:/cluster-b") {
 		t.Fatalf("scopeA=%q scopeB=%q", scopeA, scopeB)
+	}
+}
+
+func TestClaimScopeDistinguishesImplicitAndExplicitDefaultContainer(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	implicit := claimScope(cfg)
+	cfg.AgentSandbox.Container = "default"
+	explicitDefault := claimScope(cfg)
+	if implicit == explicitDefault {
+		t.Fatalf("implicit and explicit default container scopes collapsed: %q", implicit)
+	}
+	if !strings.Contains(implicit, "containerMode:implicit|container:") {
+		t.Fatalf("implicit scope=%q", implicit)
+	}
+	if !strings.Contains(explicitDefault, "containerMode:explicit|container:default") {
+		t.Fatalf("explicit scope=%q", explicitDefault)
 	}
 }
 
@@ -275,6 +300,31 @@ func TestRetainMissingClaimRequiresExplicitForget(t *testing.T) {
 	t.Setenv("CRABBOX_STATE_DIR", temp)
 	if err := retainMissingClaim(cfg, claim); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDoctorRBACRulesSplitPodExecSubresource(t *testing.T) {
+	rules := doctorRBACRules("sandboxes")
+	var execRule rbacRule
+	for _, rule := range rules {
+		if rule.Resource == podResource && rule.Subresource == "exec" {
+			execRule = rule
+			break
+		}
+	}
+	if execRule.Resource == "" {
+		t.Fatalf("doctor rules missing pod exec subresource rule: %#v", rules)
+	}
+	if execRule.Group != "" || execRule.Namespace != "sandboxes" || strings.Join(execRule.Verbs, ",") != "create" {
+		t.Fatalf("execRule=%#v", execRule)
+	}
+	if execRule.String() != "create core/pods/exec namespace=sandboxes" {
+		t.Fatalf("execRule string=%q", execRule.String())
+	}
+	for _, rule := range rules {
+		if rule.Resource == "pods/exec" {
+			t.Fatalf("pods/exec must be represented as resource pods plus subresource exec: %#v", rule)
+		}
 	}
 }
 

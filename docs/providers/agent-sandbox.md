@@ -46,7 +46,9 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
   - `get`, `list`, and `watch` on `sandboxes`
   - `get`, `list`, and `watch` on pods
   - `create` on `pods/exec`
-- A sandbox image that provides `/bin/sh`, `tar`, and a writable workdir.
+- A sandbox image that provides `/bin/sh`, `bash`, `tar`, and a writable
+  workdir. Crabbox uses `/bin/sh` for transport scripts and `bash -lc` for
+  user shell-mode and auto-shell commands.
 
 ## Commands
 

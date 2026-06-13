@@ -140,10 +140,11 @@ func (c *dynamicKubernetesClient) CanI(ctx context.Context, rule rbacRule) (bool
 		review := &authorizationv1.SelfSubjectAccessReview{
 			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 				ResourceAttributes: &authorizationv1.ResourceAttributes{
-					Namespace: rule.Namespace,
-					Verb:      verb,
-					Group:     rule.Group,
-					Resource:  rule.Resource,
+					Namespace:   rule.Namespace,
+					Verb:        verb,
+					Group:       rule.Group,
+					Resource:    rule.Resource,
+					Subresource: rule.Subresource,
 				},
 			},
 		}
@@ -236,6 +237,12 @@ type sandboxReadiness struct {
 	PodIP       string
 }
 
+type sandboxResourceReadiness struct {
+	ClaimName   string
+	SandboxName string
+	Sandbox     *unstructured.Unstructured
+}
+
 type podState struct {
 	Name       string
 	Phase      string
@@ -301,51 +308,121 @@ func resolveSandboxPod(ctx context.Context, client kubernetesClient, namespace s
 }
 
 func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, poll time.Duration) (sandboxReadiness, error) {
+	resource, err := waitForSandboxResourceReadiness(ctx, client, namespace, claimName, poll)
+	if err != nil {
+		return sandboxReadiness{}, err
+	}
+	pod, err := waitForSandboxPodReadiness(ctx, client, namespace, resource.Sandbox, poll)
+	if err != nil {
+		return sandboxReadiness{}, err
+	}
+	return sandboxReadiness{ClaimName: resource.ClaimName, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+}
+
+func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesClient, namespace, claimName string, sandboxTimeout, podTimeout, poll time.Duration) (sandboxReadiness, error) {
+	sandboxCtx := ctx
+	sandboxCancel := func() {}
+	if sandboxTimeout > 0 {
+		sandboxCtx, sandboxCancel = context.WithTimeout(ctx, sandboxTimeout)
+	}
+	resource, err := waitForSandboxResourceReadiness(sandboxCtx, client, namespace, claimName, poll)
+	sandboxCancel()
+	if err != nil {
+		return sandboxReadiness{}, err
+	}
+	podCtx := ctx
+	podCancel := func() {}
+	if podTimeout > 0 {
+		podCtx, podCancel = context.WithTimeout(ctx, podTimeout)
+	}
+	pod, err := waitForSandboxPodReadiness(podCtx, client, namespace, resource.Sandbox, poll)
+	podCancel()
+	if err != nil {
+		return sandboxReadiness{}, err
+	}
+	return sandboxReadiness{ClaimName: resource.ClaimName, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+}
+
+func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, poll time.Duration) (sandboxResourceReadiness, error) {
 	if poll <= 0 {
 		poll = time.Second
 	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	var lastErr error
 	for {
-		ready, err := sandboxReadinessOnce(ctx, client, namespace, claimName)
+		ready, err := sandboxResourceReadinessOnce(ctx, client, namespace, claimName)
 		if err == nil {
 			return ready, nil
 		}
+		lastErr = err
 		select {
 		case <-ctx.Done():
-			return sandboxReadiness{}, fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, err)
+			return sandboxResourceReadiness{}, fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, lastErr)
 		case <-ticker.C:
 		}
 	}
 }
 
-func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string) (sandboxReadiness, error) {
+func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace string, sandbox *unstructured.Unstructured, poll time.Duration) (podState, error) {
+	if poll <= 0 {
+		poll = time.Second
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		pod, err := resolveSandboxPod(ctx, client, namespace, sandbox)
+		if err == nil && pod.Ready {
+			return pod, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return podState{}, fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.GetName(), lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string) (sandboxResourceReadiness, error) {
 	claim, err := client.Get(ctx, sandboxClaimGVR(), namespace, claimName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return sandboxReadiness{}, fmt.Errorf("%w: SandboxClaim %s/%s not found", errNotReady, namespace, claimName)
+			return sandboxResourceReadiness{}, fmt.Errorf("%w: SandboxClaim %s/%s not found", errNotReady, namespace, claimName)
 		}
-		return sandboxReadiness{}, err
+		return sandboxResourceReadiness{}, err
 	}
 	sandboxName, err := claimSandboxName(claim)
 	if err != nil {
-		return sandboxReadiness{}, err
+		return sandboxResourceReadiness{}, err
 	}
 	sandbox, err := client.Get(ctx, sandboxGVR(), namespace, sandboxName)
 	if err != nil {
-		return sandboxReadiness{}, err
+		return sandboxResourceReadiness{}, err
 	}
 	if err := sandboxReady(sandbox); err != nil {
+		return sandboxResourceReadiness{}, err
+	}
+	return sandboxResourceReadiness{ClaimName: claimName, SandboxName: sandboxName, Sandbox: sandbox}, nil
+}
+
+func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string) (sandboxReadiness, error) {
+	resource, err := sandboxResourceReadinessOnce(ctx, client, namespace, claimName)
+	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	pod, err := resolveSandboxPod(ctx, client, namespace, sandbox)
+	pod, err := resolveSandboxPod(ctx, client, namespace, resource.Sandbox)
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
 	if !pod.Ready {
 		return sandboxReadiness{}, fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
 	}
-	return sandboxReadiness{ClaimName: claimName, SandboxName: sandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+	return sandboxReadiness{ClaimName: resource.ClaimName, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
 }
 
 func podStateFromPod(pod *corev1.Pod) podState {

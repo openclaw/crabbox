@@ -76,7 +76,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if req.Options.Tailscale.Enabled {
 		return RunResult{}, exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
@@ -135,9 +135,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		if err := validateClaimOwnership(liveClaim, claim.LeaseID, claim.ProviderScope); err != nil {
 			return RunResult{}, err
 		}
-		readyCtx, cancel := context.WithTimeout(ctx, readinessTimeout(b.cfg))
-		ready, err = waitForSandboxReadiness(readyCtx, client, b.cfg.AgentSandbox.Namespace, claimName, time.Second)
-		cancel()
+		ready, err = waitForSandboxReadinessWithTimeouts(ctx, client, b.cfg.AgentSandbox.Namespace, claimName, readinessTimeout(b.cfg), podReadinessTimeout(b.cfg), time.Second)
 		if err != nil {
 			if isNotFound(err) {
 				return RunResult{}, b.missingClaimRunError(claim)
@@ -146,13 +144,28 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	shouldStop = acquired && !req.Keep && b.cfg.AgentSandbox.DeleteOnRelease
+	var pendingTiming *timingReport
 	defer func() {
 		if shouldStop {
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
 			if cleanupErr := b.deleteOwnedClaim(cleanupCtx, client, claim, leaseID, claimName, false); cleanupErr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
+				if result.ExitCode == 0 {
+					result.ExitCode = 1
+				}
+				if retErr == nil {
+					retErr = exit(1, "%v", cleanupErr)
+				} else {
+					retErr = errors.Join(retErr, cleanupErr)
+				}
 			}
+		}
+		if pendingTiming != nil {
+			pendingTiming.ExitCode = result.ExitCode
+			if result.Total > 0 {
+				pendingTiming.TotalMs = result.Total.Milliseconds()
+			}
+			_ = writeTimingJSON(b.rt.Stderr, *pendingTiming)
 		}
 	}()
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s claim=%s sandbox=%s pod=%s workdir=%s\n", providerName, leaseID, claimName, ready.SandboxName, ready.PodName, workdir)
@@ -171,7 +184,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 	if req.SyncOnly {
-		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
+		result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if !shouldStop {
 			if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil && claim.LeaseID != "" {
@@ -180,7 +193,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			}
 		}
 		if req.TimingJSON {
-			_ = writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)})
+			pendingTiming = &timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)}
 		}
 		if result.ExitCode != 0 {
 			return result, exit(result.ExitCode, "agent-sandbox sync-only completed with warnings")
@@ -190,7 +203,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	commandStart := b.now()
 	exitCode, runErr := b.runCommand(ctx, client, ready, req, workdir)
 	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, ExitCode: exitCode, Command: commandDuration, Total: b.now().Sub(started), SyncDelegated: true}
+	result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, ExitCode: exitCode, Command: commandDuration, Total: b.now().Sub(started), SyncDelegated: true}
 	fmt.Fprintf(b.rt.Stderr, "agent-sandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	var commandErr error
 	if runErr != nil {
@@ -208,7 +221,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	if req.TimingJSON {
-		_ = writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, CommandMs: commandDuration.Milliseconds(), TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)})
+		pendingTiming = &timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, CommandMs: commandDuration.Milliseconds(), TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)}
 	}
 	return result, commandErr
 }
@@ -431,9 +444,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	if _, err := client.Create(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, obj); err != nil {
 		return "", "", "", sandboxReadiness{}, err
 	}
-	readyCtx, cancel := context.WithTimeout(ctx, readinessTimeout(b.cfg))
-	defer cancel()
-	ready, err := waitForSandboxReadiness(readyCtx, client, b.cfg.AgentSandbox.Namespace, claimName, time.Second)
+	ready, err := waitForSandboxReadinessWithTimeouts(ctx, client, b.cfg.AgentSandbox.Namespace, claimName, readinessTimeout(b.cfg), podReadinessTimeout(b.cfg), time.Second)
 	if err != nil {
 		cleanupCtx, cleanupCancel := b.cleanupContext(ctx)
 		defer cleanupCancel()
@@ -547,15 +558,16 @@ func doctorRBACRules(namespace string) []rbacRule {
 		{Group: "extensions.agents.x-k8s.io", Resource: warmPoolResource, Namespace: namespace, Verbs: []string{"get"}},
 		{Group: "agents.x-k8s.io", Resource: sandboxResource, Namespace: namespace, Verbs: []string{"get", "list", "watch"}},
 		{Group: "", Resource: podResource, Namespace: namespace, Verbs: []string{"get", "list", "watch"}},
-		{Group: "", Resource: "pods/exec", Namespace: namespace, Verbs: []string{"create"}},
+		{Group: "", Resource: podResource, Subresource: "exec", Namespace: namespace, Verbs: []string{"create"}},
 	}
 }
 
 type rbacRule struct {
-	Group     string
-	Resource  string
-	Namespace string
-	Verbs     []string
+	Group       string
+	Resource    string
+	Subresource string
+	Namespace   string
+	Verbs       []string
 }
 
 func (r rbacRule) String() string {
@@ -563,5 +575,9 @@ func (r rbacRule) String() string {
 	if group == "" {
 		group = "core"
 	}
-	return strings.Join(r.Verbs, ",") + " " + group + "/" + r.Resource + " namespace=" + r.Namespace
+	resource := r.Resource
+	if r.Subresource != "" {
+		resource += "/" + r.Subresource
+	}
+	return strings.Join(r.Verbs, ",") + " " + group + "/" + resource + " namespace=" + r.Namespace
 }

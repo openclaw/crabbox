@@ -7,6 +7,7 @@ bin=""
 smoke_root=""
 smoke_repo=""
 created_slug=""
+provider_args=()
 
 classify_and_exit() {
   trap - ERR
@@ -33,9 +34,30 @@ classify_unexpected_failure() {
   classify_and_exit diagnostic_only "unexpected failure status=$status line=$line"
 }
 
+extract_created_identifier() {
+  local output="$1"
+  if [[ "$output" =~ lease=(asbx_[A-Za-z0-9_.-]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$output" =~ (^|[[:space:]])(asbx_[A-Za-z0-9_.-]+)($|[[:space:]]) ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "$output" =~ claim=([^[:space:]]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$output" =~ slug=([^[:space:]]+) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
 cleanup() {
   if [[ -n "$created_slug" && -n "$bin" && -x "$bin" ]]; then
-    "$bin" stop --provider agent-sandbox --agent-sandbox-forget-missing "$created_slug" >/dev/null 2>&1 || true
+    "$bin" stop "${provider_args[@]}" --agent-sandbox-forget-missing "$created_slug" >/dev/null 2>&1 || true
   fi
   if [[ -n "$smoke_root" ]]; then
     rm -rf -- "$smoke_root"
@@ -174,7 +196,6 @@ if [[ $doctor_status -ne 0 ]]; then
 fi
 
 slug="${CRABBOX_AGENT_SANDBOX_SMOKE_SLUG:-agent-sandbox-smoke-$$}"
-created_slug="$slug"
 
 trap - ERR
 if run_output="$("$bin" run "${provider_args[@]}" --keep --slug "$slug" --timing-json --allow-env CRABBOX_AGENT_SANDBOX_SMOKE_VALUE -- \
@@ -184,6 +205,9 @@ else
   run_status=$?
 fi
 trap 'classify_unexpected_failure "$?" "$LINENO"' ERR
+if parsed_created_slug="$(extract_created_identifier "$run_output")"; then
+  created_slug="$parsed_created_slug"
+fi
 if [[ $run_status -ne 0 ]]; then
   if grep -Eiq 'quota|capacity|rate limit|too many requests|429|insufficient|no warm pool|warm.?pool.*empty' <<<"$run_output"; then
     classify_and_exit quota_blocked "$run_output"
@@ -196,10 +220,13 @@ fi
 if ! grep -q 'AGENT_SANDBOX_SMOKE_OK' <<<"$run_output"; then
   classify_and_exit diagnostic_only "run succeeded but archive-sync marker was missing"
 fi
+if [[ -z "$created_slug" ]]; then
+  classify_and_exit diagnostic_only "run succeeded but created claim identifier was missing"
+fi
 
-"$bin" status "${provider_args[@]}" --id "$slug" --wait --wait-timeout "${CRABBOX_AGENT_SANDBOX_SMOKE_WAIT_TIMEOUT:-90s}" >/dev/null
+"$bin" status "${provider_args[@]}" --id "$created_slug" --wait --wait-timeout "${CRABBOX_AGENT_SANDBOX_SMOKE_WAIT_TIMEOUT:-90s}" >/dev/null
 "$bin" list "${provider_args[@]}" --json >/dev/null
-"$bin" stop "${provider_args[@]}" "$slug" >/dev/null 2>&1
+"$bin" stop "${provider_args[@]}" "$created_slug" >/dev/null 2>&1
 created_slug=""
 
 trap - EXIT

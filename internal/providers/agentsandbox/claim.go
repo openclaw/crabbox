@@ -64,14 +64,16 @@ func normalizeKubernetesName(value string) string {
 func claimScope(cfg Config) string {
 	values := cfg.AgentSandbox
 	container := strings.TrimSpace(values.Container)
-	if container == "" {
-		container = "default"
+	containerMode := "implicit"
+	if container != "" {
+		containerMode = "explicit"
 	}
 	return strings.Join([]string{
 		"kubeconfig:" + effectiveKubeconfigIdentity(values),
 		"context:" + strings.TrimSpace(values.Context),
 		"namespace:" + strings.TrimSpace(values.Namespace),
 		"warmPool:" + strings.TrimSpace(values.WarmPool),
+		"containerMode:" + containerMode,
 		"container:" + container,
 	}, "|")
 }
@@ -181,9 +183,37 @@ func resolveLocalClaim(identifier string) (LeaseClaim, error) {
 		return LeaseClaim{}, err
 	}
 	if !ok {
+		claim, ok, err = resolveLocalClaimByClaimName(identifier)
+		if err != nil {
+			return LeaseClaim{}, err
+		}
+	}
+	if !ok {
 		return LeaseClaim{}, exit(4, "agent-sandbox lease %q is not claimed by Crabbox", identifier)
 	}
 	return claim, nil
+}
+
+func resolveLocalClaimByClaimName(identifier string) (LeaseClaim, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return LeaseClaim{}, false, nil
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		return LeaseClaim{}, false, err
+	}
+	var match LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider != providerName || strings.TrimSpace(claim.Labels[claimLabelClaimName]) != identifier {
+			continue
+		}
+		if match.LeaseID != "" {
+			return LeaseClaim{}, false, exit(2, "multiple agent-sandbox claims match claim name %s", identifier)
+		}
+		match = claim
+	}
+	return match, match.LeaseID != "", nil
 }
 
 func listAgentSandboxLeaseClaims() ([]LeaseClaim, error) {
@@ -232,6 +262,14 @@ func newLeaseID() string {
 
 func readinessTimeout(cfg Config) time.Duration {
 	timeout := cfg.AgentSandbox.SandboxReadyTimeout
+	if timeout <= 0 {
+		timeout = 180 * time.Second
+	}
+	return timeout
+}
+
+func podReadinessTimeout(cfg Config) time.Duration {
+	timeout := cfg.AgentSandbox.PodReadyTimeout
 	if timeout <= 0 {
 		timeout = 180 * time.Second
 	}

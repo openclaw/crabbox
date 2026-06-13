@@ -51,6 +51,37 @@ func TestWarmupCreatesClaimAndPersistsLocalLease(t *testing.T) {
 	}
 }
 
+func TestListDisplayedClaimIDResolvesForStatus(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "listed"}); err != nil {
+		t.Fatal(err)
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view LeaseView
+	for _, candidate := range views {
+		if candidate.Labels["slug"] == "listed" {
+			view = candidate
+			break
+		}
+	}
+	if !strings.HasPrefix(view.CloudID, "crabbox-listed-") {
+		t.Fatalf("views=%#v", views)
+	}
+	status, err := backend.Status(context.Background(), StatusRequest{ID: view.CloudID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ServerID != view.CloudID || !status.Ready {
+		t.Fatalf("status=%#v view=%#v", status, view)
+	}
+}
+
 func TestRunSyncOnlyUploadsArchiveThroughPodExecTar(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)
@@ -106,6 +137,25 @@ func TestRunMapsRemoteExitStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exited 42") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunFailsWhenDefaultOneShotCleanupFails(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	fake.deleteErrs = []error{errors.New("delete failed")}
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+
+	result, err := backend.Run(context.Background(), RunRequest{Repo: repo, NoSync: true, TimingJSON: true, Command: []string{"true"}})
+	if err == nil || !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("expected cleanup error, got result=%#v err=%v", result, err)
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("cleanup failure should mark nonzero result: %#v", result)
+	}
+	if got := backend.rt.Stderr.(*bytes.Buffer).String(); !strings.Contains(got, `"exitCode":1`) {
+		t.Fatalf("timing JSON did not report cleanup failure: %s", got)
 	}
 }
 
@@ -226,7 +276,8 @@ func TestRunExistingLeaseValidatesLiveClaimOwnership(t *testing.T) {
 
 func TestRunExistingLeaseReadinessIsBounded(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
-	cfg.AgentSandbox.SandboxReadyTimeout = time.Millisecond
+	cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
+	cfg.AgentSandbox.PodReadyTimeout = time.Millisecond
 	fake := readyFakeClient(cfg)
 	backend := testBackend(cfg, fake, nil, nil)
 	repo := testGitRepo(t)
