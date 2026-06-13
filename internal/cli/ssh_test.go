@@ -875,7 +875,7 @@ func TestRsyncLocalPathPassesThroughNonWindowsPath(t *testing.T) {
 func TestWindowsToWSLMountPathSupportsHostMountRoot(t *testing.T) {
 	t.Parallel()
 	tests := map[string]string{
-		`C:\Users\marti\.ssh\id_ed25519`: "/mnt/host/c/Users/marti/.ssh/id_ed25519",
+		`C:\Users\alice\.ssh\id_ed25519`: "/mnt/host/c/Users/alice/.ssh/id_ed25519",
 		"C:/oc-work/my-app":              "/mnt/host/c/oc-work/my-app",
 		"/c/msys64/usr/bin/rsync.exe":    "/mnt/host/c/msys64/usr/bin/rsync.exe",
 	}
@@ -890,8 +890,8 @@ func TestWindowsToWSLMountPathSupportsHostMountRoot(t *testing.T) {
 func TestWindowsHostPathConvertsMSYSDrivePath(t *testing.T) {
 	t.Parallel()
 	tests := map[string]string{
-		`C:\Users\marti\.ssh\id_ed25519`: "C:/Users/marti/.ssh/id_ed25519",
-		"/c/Users/marti/.ssh/id_ed25519": "c:/Users/marti/.ssh/id_ed25519",
+		`C:\Users\alice\.ssh\id_ed25519`: "C:/Users/alice/.ssh/id_ed25519",
+		"/c/Users/alice/.ssh/id_ed25519": "c:/Users/alice/.ssh/id_ed25519",
 		"/work/repo":                     "/work/repo",
 	}
 	for in, want := range tests {
@@ -990,9 +990,9 @@ func TestWindowsToWSLPath(t *testing.T) {
 
 func TestWindowsToWSLPathSupportsHostMountRoot(t *testing.T) {
 	t.Parallel()
-	in := `ssh -i C:\Users\marti\AppData\Local\Temp\cbx\id_ed25519 -o UserKnownHostsFile=/c/tmp/known_hosts`
+	in := `ssh -i C:\Users\alice\AppData\Local\Temp\cbx\id_ed25519 -o UserKnownHostsFile=/c/tmp/known_hosts`
 	got := windowsToWSLPathWithRoot(in, "/mnt/host")
-	if !strings.Contains(got, "/mnt/host/c/Users/marti/AppData/Local/Temp/cbx/id_ed25519") {
+	if !strings.Contains(got, "/mnt/host/c/Users/alice/AppData/Local/Temp/cbx/id_ed25519") {
 		t.Fatalf("converted path missing host-root key path: %q", got)
 	}
 	if !strings.Contains(got, "UserKnownHostsFile=/mnt/host/c/tmp/known_hosts") {
