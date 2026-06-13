@@ -105,6 +105,43 @@ func TestClientAuthTimeIsUnsigned(t *testing.T) {
 	}
 }
 
+func TestClientSignsWithCachedOVHServerTime(t *testing.T) {
+	var gotTimestamp, gotSignature string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/time":
+			_, _ = w.Write([]byte("2000"))
+		case "/cloud/project":
+			gotTimestamp = r.Header.Get("X-Ovh-Timestamp")
+			gotSignature = r.Header.Get("X-Ovh-Signature")
+			_ = json.NewEncoder(w).Encode([]string{"project-test"})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	localNow := int64(1000)
+	client := newTestClient(t, server.URL)
+	client.now = func() int64 { return localNow }
+	if got, err := client.AuthTime(context.Background()); err != nil || got != 2000 {
+		t.Fatalf("AuthTime()=%d err=%v", got, err)
+	}
+	localNow = 1005
+	if _, err := client.ListProjects(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gotTimestamp != "2005" {
+		t.Fatalf("timestamp=%q want %q", gotTimestamp, "2005")
+	}
+	fullURL := server.URL + "/cloud/project"
+	sum := sha1.Sum([]byte(strings.Join([]string{"app-secret", "consumer-key", "GET", fullURL, "", "2005"}, "+")))
+	wantSignature := "$1$" + hex.EncodeToString(sum[:])
+	if gotSignature != wantSignature {
+		t.Fatalf("signature=%q want %q", gotSignature, wantSignature)
+	}
+}
+
 func TestClientReadOnlyDiscoveryMethods(t *testing.T) {
 	seen := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -37,6 +38,9 @@ type Client struct {
 	consumerKey       string
 	http              *http.Client
 	now               func() int64
+	timeMu            sync.Mutex
+	serverTimeDelta   int64
+	hasServerTime     bool
 }
 
 type APIError struct {
@@ -235,6 +239,7 @@ func (c *Client) AuthTime(ctx context.Context) (int64, error) {
 	if err := c.do(ctx, http.MethodGet, "/auth/time", nil, &timestamp); err != nil {
 		return 0, err
 	}
+	c.cacheServerTime(timestamp)
 	return timestamp, nil
 }
 
@@ -338,7 +343,7 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if requestPath != "/auth/time" {
-		timestamp := strconv.FormatInt(c.now(), 10)
+		timestamp := strconv.FormatInt(c.signedTimestamp(), 10)
 		req.Header.Set("X-Ovh-Timestamp", timestamp)
 		req.Header.Set("X-Ovh-Consumer", c.consumerKey)
 		req.Header.Set("X-Ovh-Signature", c.signature(method, reqURL, string(bodyBytes), timestamp))
@@ -372,6 +377,24 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 		return fmt.Errorf("ovh %s %s decode: %w", method, requestPath, err)
 	}
 	return nil
+}
+
+func (c *Client) cacheServerTime(serverTimestamp int64) {
+	localTimestamp := c.now()
+	c.timeMu.Lock()
+	defer c.timeMu.Unlock()
+	c.serverTimeDelta = serverTimestamp - localTimestamp
+	c.hasServerTime = true
+}
+
+func (c *Client) signedTimestamp() int64 {
+	localTimestamp := c.now()
+	c.timeMu.Lock()
+	defer c.timeMu.Unlock()
+	if !c.hasServerTime {
+		return localTimestamp
+	}
+	return localTimestamp + c.serverTimeDelta
 }
 
 func encodeBody(body any) ([]byte, error) {
