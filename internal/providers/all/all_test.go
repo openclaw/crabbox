@@ -98,6 +98,32 @@ func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	}
 }
 
+func TestNamespaceInstanceRegistersWithoutStealingDevboxAlias(t *testing.T) {
+	for _, name := range []string{"namespace-instance", "namespace-compute", "nsc"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "namespace-instance" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		}
+	}
+	provider, err := core.ProviderFor("namespace")
+	if err != nil {
+		t.Fatalf("ProviderFor(namespace): %v", err)
+	}
+	if provider.Name() != "namespace-devbox" {
+		t.Fatalf("namespace alias now resolves to %q; namespace-instance must not steal it", provider.Name())
+	}
+	spec := mustProvider(t, "namespace-instance").Spec()
+	if spec.Family != "namespace" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("namespace-instance spec=%#v", spec)
+	}
+	if !spec.Features.Has(core.FeatureSSH) || !spec.Features.Has(core.FeatureCrabboxSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("namespace-instance features=%v", spec.Features)
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -148,6 +174,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"multipass",
 		"mxc",
 		"namespace-devbox",
+		"namespace-instance",
 		"opencomputer",
 		"opensandbox",
 		"parallels",
