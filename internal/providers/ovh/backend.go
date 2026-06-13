@@ -424,21 +424,70 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if err := validateLiveOVHInstance(live, server); err != nil {
 		return core.Server{}, err
 	}
+	labels := copyLabels(server.Labels)
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil {
+		return core.Server{}, err
+	} else if exists {
+		if err := validateOVHClaim(claim, live); err != nil {
+			return core.Server{}, err
+		}
+		labels = copyLabels(claim.Labels)
+	}
 	cfg := b.Cfg
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
-		live.Labels = copyLabels(live.Labels)
-		delete(live.Labels, "idle_timeout")
-		delete(live.Labels, "idle_timeout_secs")
+		delete(labels, "idle_timeout")
+		delete(labels, "idle_timeout_secs")
 	}
-	live.Labels = core.TouchDirectLeaseLabels(live.Labels, cfg, req.State, b.now())
-	if claim, exists, err := core.ReadLeaseClaimWithPresence(live.Labels["lease"]); err != nil {
+	tailscaleLabels := exactTailscaleLabels(labels)
+	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
+	for key, value := range tailscaleLabels {
+		labels[key] = value
+	}
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(labels["lease"]); err != nil {
 		return core.Server{}, err
 	} else if exists {
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(live.Labels["lease"], claim, live.Labels); err != nil {
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(labels["lease"], claim, labels); err != nil {
 			return core.Server{}, err
 		}
 	}
+	live.Labels = labels
+	return live, nil
+}
+
+func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseTarget, meta core.TailscaleMetadata) (core.Server, error) {
+	server := lease.Server
+	if err := validateOVHServerOwnership(server); err != nil {
+		return core.Server{}, err
+	}
+	client, err := b.clientFactory(b.Cfg, b.RT)
+	if err != nil {
+		return core.Server{}, err
+	}
+	instance, err := client.GetInstance(ctx, b.Cfg.OVH.ProjectID, server.CloudID)
+	if err != nil {
+		return core.Server{}, err
+	}
+	live := overlayExpectedOVHLabels(serverFromInstance(instance, b.Cfg), server)
+	if err := validateLiveOVHInstance(live, server); err != nil {
+		return core.Server{}, err
+	}
+	labels := copyLabels(server.Labels)
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil {
+		return core.Server{}, err
+	} else if exists {
+		if err := validateOVHClaim(claim, live); err != nil {
+			return core.Server{}, err
+		}
+		labels = copyLabels(claim.Labels)
+		applyTailscaleMetadata(labels, meta)
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
+			return core.Server{}, err
+		}
+	} else {
+		applyTailscaleMetadata(labels, meta)
+	}
+	live.Labels = labels
 	return live, nil
 }
 
@@ -818,6 +867,58 @@ func copyLabels(labels map[string]string) map[string]string {
 	out := make(map[string]string, len(labels))
 	for key, value := range labels {
 		out[key] = value
+	}
+	return out
+}
+
+func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
+	if meta.Enabled {
+		labels["tailscale"] = "true"
+	}
+	if meta.Hostname != "" {
+		labels["tailscale_hostname"] = meta.Hostname
+	}
+	if meta.FQDN != "" {
+		labels["tailscale_fqdn"] = meta.FQDN
+	}
+	if meta.IPv4 != "" {
+		labels["tailscale_ipv4"] = meta.IPv4
+	}
+	if len(meta.Tags) > 0 {
+		labels["tailscale_tags"] = strings.Join(meta.Tags, ",")
+	}
+	if meta.State != "" {
+		labels["tailscale_state"] = meta.State
+	}
+	if meta.Error != "" {
+		labels["tailscale_error"] = meta.Error
+	} else {
+		delete(labels, "tailscale_error")
+	}
+	if meta.ExitNode != "" {
+		labels["tailscale_exit_node"] = meta.ExitNode
+	}
+	if meta.ExitNodeAllowLANAccess {
+		labels["tailscale_exit_node_allow_lan_access"] = "true"
+	}
+}
+
+func exactTailscaleLabels(labels map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, key := range []string{
+		"tailscale",
+		"tailscale_state",
+		"tailscale_hostname",
+		"tailscale_tags",
+		"tailscale_ipv4",
+		"tailscale_fqdn",
+		"tailscale_error",
+		"tailscale_exit_node",
+		"tailscale_exit_node_allow_lan_access",
+	} {
+		if value, ok := labels[key]; ok {
+			out[key] = value
+		}
 	}
 	return out
 }

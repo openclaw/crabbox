@@ -235,6 +235,9 @@ func TestBackendImplementsLeaseInterfacesWithNonMutatingStubs(t *testing.T) {
 	if _, ok := backend.(core.CleanupBackend); !ok {
 		t.Fatal("ovh backend should satisfy CleanupBackend with explicit lifecycle stub")
 	}
+	if _, ok := backend.(core.TailscaleMetadataBackend); !ok {
+		t.Fatal("ovh backend should persist direct Tailscale metadata")
+	}
 }
 
 func TestAcquireCreatesInstanceSSHKeyTargetAndClaim(t *testing.T) {
@@ -608,6 +611,97 @@ func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	}
 }
 
+func TestTouchPreservesLocalClaimMetadataWithoutLiveLabels(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "touch-claim"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := copyLabels(claim.Labels)
+	labels["tailscale"] = "true"
+	labels["tailscale_fqdn"] = "touch-claim.example.ts.net"
+	labels["tailscale_tags"] = "tag:ci,tag:crabbox"
+	labels["class"] = "standard"
+	labels["profile"] = "ci"
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
+		t.Fatal(err)
+	}
+	fake.instances[0].Labels = map[string]string{}
+
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{Server: lease.Server, LeaseID: lease.LeaseID},
+		State: "running",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if touched.Labels["state"] != "running" ||
+		touched.Labels["tailscale_fqdn"] != "touch-claim.example.ts.net" ||
+		touched.Labels["tailscale_tags"] != "tag:ci,tag:crabbox" ||
+		touched.Labels["class"] != "standard" ||
+		touched.Labels["profile"] != "ci" {
+		t.Fatalf("touched labels=%#v", touched.Labels)
+	}
+	updated, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Labels["state"] != "running" ||
+		updated.Labels["tailscale_fqdn"] != "touch-claim.example.ts.net" ||
+		updated.Labels["tailscale_tags"] != "tag:ci,tag:crabbox" ||
+		updated.Labels["class"] != "standard" ||
+		updated.Labels["profile"] != "ci" {
+		t.Fatalf("claim labels=%#v", updated.Labels)
+	}
+}
+
+func TestUpdateTailscaleMetadataPersistsOVHClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "tailnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := core.TailscaleMetadata{
+		Enabled:                true,
+		Hostname:               "tailnet",
+		FQDN:                   "tailnet.example.ts.net",
+		IPv4:                   "100.64.1.3",
+		Tags:                   []string{"tag:ci", "tag:crabbox"},
+		State:                  "ready",
+		Error:                  "last probe failed: retrying",
+		ExitNode:               "exit.example.ts.net",
+		ExitNodeAllowLANAccess: true,
+	}
+
+	updated, err := backend.UpdateTailscaleMetadata(context.Background(), lease, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, labels := range []map[string]string{updated.Labels, mustReadClaimLabels(t, lease.LeaseID)} {
+		if labels["tailscale"] != "true" ||
+			labels["tailscale_hostname"] != meta.Hostname ||
+			labels["tailscale_fqdn"] != meta.FQDN ||
+			labels["tailscale_ipv4"] != meta.IPv4 ||
+			labels["tailscale_tags"] != strings.Join(meta.Tags, ",") ||
+			labels["tailscale_state"] != meta.State ||
+			labels["tailscale_error"] != meta.Error ||
+			labels["tailscale_exit_node"] != meta.ExitNode ||
+			labels["tailscale_exit_node_allow_lan_access"] != "true" {
+			t.Fatalf("tailscale labels=%#v", labels)
+		}
+	}
+}
+
 func TestPublicIPv4PrefersPublicNonPrivateAddress(t *testing.T) {
 	instance := Instance{IPAddresses: []IPAddress{
 		{IP: "10.0.0.5", Version: 4, Type: "private"},
@@ -817,6 +911,15 @@ func markClaimReleased(leaseID string) error {
 	labels["state"] = "released"
 	_, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
 	return err
+}
+
+func mustReadClaimLabels(t *testing.T, leaseID string) map[string]string {
+	t.Helper()
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claim.Labels
 }
 
 func testBackend(fake *fakeAPI) *Backend {
