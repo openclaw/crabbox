@@ -140,6 +140,7 @@ type Config struct {
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
 	OpenSandbox                   OpenSandboxConfig
+	Superserve                    SuperserveConfig
 	DockerSandbox                 DockerSandboxConfig
 	AnthropicSRT                  AnthropicSRTConfig
 	Modal                         ModalConfig
@@ -508,6 +509,22 @@ type OpenSandboxConfig struct {
 	PlatformArch    string
 	SecureAccess    bool
 	UseServerProxy  bool
+	ForgetMissing   bool
+}
+
+// SuperserveConfig configures the delegated Superserve provider. The API key is
+// intentionally absent: it is read at runtime from
+// CRABBOX_SUPERSERVE_API_KEY / SUPERSERVE_API_KEY and sent only in request
+// headers, never persisted in Crabbox config or placed on argv.
+type SuperserveConfig struct {
+	BaseURL         string
+	Template        string
+	Snapshot        string
+	Workdir         string
+	TimeoutSecs     int
+	ExecTimeoutSecs int
+	NetworkAllowOut []string
+	NetworkDenyOut  []string
 	ForgetMissing   bool
 }
 
@@ -1723,6 +1740,12 @@ func baseConfig() Config {
 			PlatformOS:      "linux",
 			PlatformArch:    "amd64",
 		},
+		Superserve: SuperserveConfig{
+			BaseURL:         "https://api.superserve.ai",
+			Template:        "superserve/base",
+			Workdir:         "/workspace/crabbox",
+			ExecTimeoutSecs: 600,
+		},
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -1905,6 +1928,7 @@ type fileConfig struct {
 	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
 	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
 	OpenSandbox          *fileOpenSandboxConfig             `yaml:"openSandbox,omitempty"`
+	Superserve           *fileSuperserveConfig              `yaml:"superserve,omitempty"`
 	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
 	AnthropicSRT         *fileAnthropicSRTConfig            `yaml:"anthropicSandboxRuntime,omitempty"`
 	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
@@ -2356,6 +2380,18 @@ type fileOpenSandboxConfig struct {
 	PlatformArch    *string `yaml:"platformArch,omitempty"`
 	SecureAccess    *bool   `yaml:"secureAccess,omitempty"`
 	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
+}
+
+type fileSuperserveConfig struct {
+	BaseURL         string   `yaml:"baseUrl,omitempty"`
+	Template        *string  `yaml:"template,omitempty"`
+	Snapshot        *string  `yaml:"snapshot,omitempty"`
+	Workdir         *string  `yaml:"workdir,omitempty"`
+	TimeoutSecs     *int     `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int     `yaml:"execTimeoutSecs,omitempty"`
+	NetworkAllowOut []string `yaml:"networkAllowOut,omitempty"`
+	NetworkDenyOut  []string `yaml:"networkDenyOut,omitempty"`
+	ForgetMissing   *bool    `yaml:"forgetMissing,omitempty"`
 }
 
 type fileDockerSandboxConfig struct {
@@ -3882,6 +3918,41 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.OpenSandbox.UseServerProxy = *file.OpenSandbox.UseServerProxy
 		}
 	}
+	if file.Superserve != nil {
+		if trusted && strings.TrimSpace(file.Superserve.BaseURL) != "" {
+			cfg.Superserve.BaseURL = file.Superserve.BaseURL
+		}
+		if file.Superserve.Template != nil {
+			cfg.Superserve.Template = *file.Superserve.Template
+		}
+		if file.Superserve.Snapshot != nil {
+			cfg.Superserve.Snapshot = *file.Superserve.Snapshot
+		}
+		if file.Superserve.Workdir != nil {
+			cfg.Superserve.Workdir = *file.Superserve.Workdir
+		}
+		if file.Superserve.TimeoutSecs != nil {
+			if *file.Superserve.TimeoutSecs < 0 {
+				return exit(2, "superserve timeoutSecs must be non-negative")
+			}
+			cfg.Superserve.TimeoutSecs = *file.Superserve.TimeoutSecs
+		}
+		if file.Superserve.ExecTimeoutSecs != nil {
+			if *file.Superserve.ExecTimeoutSecs < 0 {
+				return exit(2, "superserve execTimeoutSecs must be non-negative")
+			}
+			cfg.Superserve.ExecTimeoutSecs = *file.Superserve.ExecTimeoutSecs
+		}
+		if file.Superserve.NetworkAllowOut != nil {
+			cfg.Superserve.NetworkAllowOut = normalizeList(file.Superserve.NetworkAllowOut)
+		}
+		if file.Superserve.NetworkDenyOut != nil {
+			cfg.Superserve.NetworkDenyOut = normalizeList(file.Superserve.NetworkDenyOut)
+		}
+		if file.Superserve.ForgetMissing != nil {
+			cfg.Superserve.ForgetMissing = *file.Superserve.ForgetMissing
+		}
+	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
 			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
@@ -5116,6 +5187,27 @@ func applyEnv(cfg *Config) error {
 	}
 	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
 		cfg.OpenSandbox.UseServerProxy = v
+	}
+	cfg.Superserve.BaseURL = getenv("CRABBOX_SUPERSERVE_BASE_URL", getenv("SUPERSERVE_BASE_URL", cfg.Superserve.BaseURL))
+	cfg.Superserve.Template = getenv("CRABBOX_SUPERSERVE_TEMPLATE", cfg.Superserve.Template)
+	cfg.Superserve.Snapshot = getenv("CRABBOX_SUPERSERVE_SNAPSHOT", cfg.Superserve.Snapshot)
+	cfg.Superserve.Workdir = getenv("CRABBOX_SUPERSERVE_WORKDIR", cfg.Superserve.Workdir)
+	cfg.Superserve.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_SUPERSERVE_TIMEOUT_SECS", cfg.Superserve.TimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.Superserve.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_SUPERSERVE_EXEC_TIMEOUT_SECS", cfg.Superserve.ExecTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	if allowOut := os.Getenv("CRABBOX_SUPERSERVE_NETWORK_ALLOW_OUT"); allowOut != "" {
+		cfg.Superserve.NetworkAllowOut = splitCommaList(allowOut)
+	}
+	if denyOut := os.Getenv("CRABBOX_SUPERSERVE_NETWORK_DENY_OUT"); denyOut != "" {
+		cfg.Superserve.NetworkDenyOut = splitCommaList(denyOut)
+	}
+	if v, ok := getenvBool("CRABBOX_SUPERSERVE_FORGET_MISSING"); ok {
+		cfg.Superserve.ForgetMissing = v
 	}
 	cfg.DockerSandbox.CLIPath = getenv("CRABBOX_DOCKER_SANDBOX_CLI", cfg.DockerSandbox.CLIPath)
 	cfg.DockerSandbox.Agent = getenv("CRABBOX_DOCKER_SANDBOX_AGENT", cfg.DockerSandbox.Agent)

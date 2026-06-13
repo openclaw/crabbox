@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,18 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_OPENSANDBOX_PLATFORM_ARCH",
 		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
 		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
+		"CRABBOX_SUPERSERVE_API_KEY",
+		"SUPERSERVE_API_KEY",
+		"CRABBOX_SUPERSERVE_BASE_URL",
+		"SUPERSERVE_BASE_URL",
+		"CRABBOX_SUPERSERVE_TEMPLATE",
+		"CRABBOX_SUPERSERVE_SNAPSHOT",
+		"CRABBOX_SUPERSERVE_WORKDIR",
+		"CRABBOX_SUPERSERVE_TIMEOUT_SECS",
+		"CRABBOX_SUPERSERVE_EXEC_TIMEOUT_SECS",
+		"CRABBOX_SUPERSERVE_NETWORK_ALLOW_OUT",
+		"CRABBOX_SUPERSERVE_NETWORK_DENY_OUT",
+		"CRABBOX_SUPERSERVE_FORGET_MISSING",
 		"CRABBOX_ISLO_API_KEY",
 		"ISLO_API_KEY",
 		"CRABBOX_ISLO_BASE_URL",
@@ -1419,6 +1432,51 @@ func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
 	}
 }
 
+func TestSuperserveConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
+	cfg := baseConfig()
+	if cfg.Superserve.BaseURL != "https://api.superserve.ai" || cfg.Superserve.Template != "superserve/base" || cfg.Superserve.Workdir != "/workspace/crabbox" || cfg.Superserve.ExecTimeoutSecs != 600 {
+		t.Fatalf("unexpected superserve defaults: %#v", cfg.Superserve)
+	}
+	fieldName := "API" + "Key"
+	if _, ok := reflect.TypeOf(SuperserveConfig{}).FieldByName(fieldName); ok {
+		t.Fatal("provider config must not persist API keys")
+	}
+	if _, ok := reflect.TypeOf(fileSuperserveConfig{}).FieldByName(fieldName); ok {
+		t.Fatal("file config must not accept API keys")
+	}
+}
+
+func TestSuperserveRepoConfigCannotSetBaseURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("superserve:\n  baseUrl: https://attacker.example\n  template: superserve/repo\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Superserve.BaseURL != "https://api.superserve.ai" {
+		t.Fatalf("repository config set Superserve base URL to %q", cfg.Superserve.BaseURL)
+	}
+	if cfg.Superserve.Template != "superserve/repo" {
+		t.Fatalf("repository config did not set non-secret template: %#v", cfg.Superserve)
+	}
+}
+
+func TestSuperserveTrustedConfigCanSetBaseURL(t *testing.T) {
+	cfg := baseConfig()
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("superserve:\n  baseUrl: https://trusted.example\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Superserve.BaseURL != "https://trusted.example" {
+		t.Fatalf("trusted config base URL=%q", cfg.Superserve.BaseURL)
+	}
+}
+
 func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -2293,6 +2351,20 @@ openSandbox:
   platformArch: arm64
   secureAccess: true
   useServerProxy: true
+superserve:
+  baseUrl: https://superserve-file-ignored.example.test
+  template: superserve/custom
+  snapshot: snap-file
+  workdir: /workspace/ss-test
+  timeoutSecs: 777
+  execTimeoutSecs: 888
+  networkAllowOut:
+    - api.example.test
+    - ""
+    - pkg.example.test
+  networkDenyOut:
+    - metadata.google.internal
+  forgetMissing: true
 cloudflare:
   apiUrl: https://cloudflare.example.test
   token: cloudflare-token
@@ -2479,6 +2551,12 @@ ssh:
 	}
 	if cfg.OpenSandbox.APIURL != "" || cfg.OpenSandbox.Image != "docker.io/library/python:3.12" || cfg.OpenSandbox.Workdir != "/workspace/osb-test" || cfg.OpenSandbox.CPU != "2" || cfg.OpenSandbox.Memory != "4Gi" || cfg.OpenSandbox.TimeoutSecs != 900 || cfg.OpenSandbox.ExecTimeoutSecs != 1800 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "arm64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
 		t.Fatalf("opensandbox config not loaded safely: %#v", cfg.OpenSandbox)
+	}
+	if cfg.Superserve.BaseURL != "https://superserve-file-ignored.example.test" || cfg.Superserve.Template != "superserve/custom" || cfg.Superserve.Snapshot != "snap-file" || cfg.Superserve.Workdir != "/workspace/ss-test" || cfg.Superserve.TimeoutSecs != 777 || cfg.Superserve.ExecTimeoutSecs != 888 || !cfg.Superserve.ForgetMissing {
+		t.Fatalf("superserve config not loaded safely: %#v", cfg.Superserve)
+	}
+	if len(cfg.Superserve.NetworkAllowOut) != 2 || cfg.Superserve.NetworkAllowOut[0] != "api.example.test" || cfg.Superserve.NetworkAllowOut[1] != "pkg.example.test" || len(cfg.Superserve.NetworkDenyOut) != 1 || cfg.Superserve.NetworkDenyOut[0] != "metadata.google.internal" {
+		t.Fatalf("superserve network config not normalized: %#v", cfg.Superserve)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare.example.test" || cfg.Cloudflare.Token != "cloudflare-token" || cfg.Cloudflare.Workdir != "/workspace/cf-test" {
 		t.Fatalf("cloudflare config not loaded: %#v", cfg.Cloudflare)
@@ -2849,6 +2927,18 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", "amd64")
 	t.Setenv("CRABBOX_OPENSANDBOX_SECURE_ACCESS", "true")
 	t.Setenv("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY", "true")
+	t.Setenv("SUPERSERVE_BASE_URL", "https://superserve-file.example")
+	t.Setenv("CRABBOX_SUPERSERVE_BASE_URL", "https://superserve-env.example")
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "superserve-key-ignored-by-config")
+	t.Setenv("SUPERSERVE_API_KEY", "superserve-vendor-key-ignored-by-config")
+	t.Setenv("CRABBOX_SUPERSERVE_TEMPLATE", "superserve/env-template")
+	t.Setenv("CRABBOX_SUPERSERVE_SNAPSHOT", "snap-env")
+	t.Setenv("CRABBOX_SUPERSERVE_WORKDIR", "/workspace/ss-env")
+	t.Setenv("CRABBOX_SUPERSERVE_TIMEOUT_SECS", "321")
+	t.Setenv("CRABBOX_SUPERSERVE_EXEC_TIMEOUT_SECS", "654")
+	t.Setenv("CRABBOX_SUPERSERVE_NETWORK_ALLOW_OUT", "api.env.example, ,pkg.env.example")
+	t.Setenv("CRABBOX_SUPERSERVE_NETWORK_DENY_OUT", "metadata.env.example")
+	t.Setenv("CRABBOX_SUPERSERVE_FORGET_MISSING", "true")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_URL", "https://cloudflare-env.example")
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-env-token")
 	t.Setenv("CRABBOX_CLOUDFLARE_WORKDIR", "/workspace/cloudflare-env")
@@ -3024,6 +3114,12 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.OpenSandbox.APIURL != "https://opensandbox-env.example" || cfg.OpenSandbox.Image != "ubuntu:osb-env" || cfg.OpenSandbox.Workdir != "/workspace/osb-env" || cfg.OpenSandbox.CPU != "750m" || cfg.OpenSandbox.Memory != "1536Mi" || cfg.OpenSandbox.TimeoutSecs != 123 || cfg.OpenSandbox.ExecTimeoutSecs != 456 || cfg.OpenSandbox.PlatformOS != "linux" || cfg.OpenSandbox.PlatformArch != "amd64" || !cfg.OpenSandbox.SecureAccess || !cfg.OpenSandbox.UseServerProxy {
 		t.Fatalf("unexpected opensandbox env: %#v", cfg.OpenSandbox)
+	}
+	if cfg.Superserve.BaseURL != "https://superserve-env.example" || cfg.Superserve.Template != "superserve/env-template" || cfg.Superserve.Snapshot != "snap-env" || cfg.Superserve.Workdir != "/workspace/ss-env" || cfg.Superserve.TimeoutSecs != 321 || cfg.Superserve.ExecTimeoutSecs != 654 || !cfg.Superserve.ForgetMissing {
+		t.Fatalf("unexpected superserve env: %#v", cfg.Superserve)
+	}
+	if len(cfg.Superserve.NetworkAllowOut) != 2 || cfg.Superserve.NetworkAllowOut[0] != "api.env.example" || cfg.Superserve.NetworkAllowOut[1] != "pkg.env.example" || len(cfg.Superserve.NetworkDenyOut) != 1 || cfg.Superserve.NetworkDenyOut[0] != "metadata.env.example" {
+		t.Fatalf("unexpected superserve env network lists: %#v", cfg.Superserve)
 	}
 	if cfg.Cloudflare.APIURL != "https://cloudflare-env.example" || cfg.Cloudflare.Token != "cloudflare-env-token" || cfg.Cloudflare.Workdir != "/workspace/cloudflare-env" {
 		t.Fatalf("unexpected cloudflare env: %#v", cfg.Cloudflare)
