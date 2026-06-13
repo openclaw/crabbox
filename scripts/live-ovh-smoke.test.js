@@ -149,8 +149,9 @@ chmod +x "$out"
   assert.match(seen[4], /^run --provider ovh --id ovh-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
   assert.equal(seen[5], "list --provider ovh --json");
   assert.match(seen[6], /^stop --provider ovh ovh-smoke-\d{14}-\d+$/);
-  assert.equal(seen[7], "cleanup --provider ovh --dry-run");
-  assert.equal(seen[8], "list --provider ovh --json");
+  assert.equal(seen[7], "doctor --provider ovh");
+  assert.equal(seen[8], "cleanup --provider ovh --dry-run");
+  assert.equal(seen[9], "list --provider ovh --json");
 });
 
 test("live ovh smoke attempts targeted cleanup after partial failure", () => {
@@ -182,7 +183,7 @@ cat >"$out" <<'SCRIPT'
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 if [[ "$1" == "doctor" ]]; then
-  printf 'auth=ready\n'
+  printf 'auth=ready leases=0\n'
   exit 0
 fi
 if [[ "$1" == "list" ]]; then
@@ -248,7 +249,7 @@ cat >"$out" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
-  doctor|list) [[ "$1" == "list" ]] && printf '[]\n' || printf 'auth=ready\n' ;;
+  doctor|list) [[ "$1" == "list" ]] && printf '[]\n' || printf 'auth=ready leases=0\n' ;;
   warmup) exit 37 ;;
   stop)
     count="$(cat "${attempts}" 2>/dev/null || printf 0)"
@@ -284,6 +285,55 @@ chmod +x "$out"
   assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
 });
 
+test("live ovh smoke rejects claim-independent orphan inventory", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ovh-orphan-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  doctor) printf 'auth=ready inventory=ready leases=1\n' ;;
+  *) exit 99 ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "ovh",
+      OVH_APPLICATION_KEY: "test-app-key",
+      OVH_APPLICATION_SECRET: "test-ovh-secret",
+      OVH_CONSUMER_KEY: "test-consumer-key",
+      CRABBOX_OVH_PROJECT_ID: "project-test",
+      CRABBOX_OVH_REGION: "BHS5",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=validation_failed/);
+  assert.match(result.stderr, /OVH cloud inventory is not empty/);
+});
+
 test("live ovh smoke classifies quota and validation failures", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ovh-classify-"));
   const binDir = path.join(dir, "bin");
@@ -305,7 +355,7 @@ cat >"$out" <<'SCRIPT'
 set -euo pipefail
 case "$1" in
   doctor)
-    printf 'auth=ready\n'
+    printf 'auth=ready leases=0\n'
     ;;
   list)
     if [[ "\${CRABBOX_TEST_NONEMPTY:-}" == "1" ]]; then

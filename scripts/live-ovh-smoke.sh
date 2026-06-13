@@ -121,6 +121,19 @@ if payload != []:
   fi
 }
 
+doctor_inventory_empty() {
+  grep -Eq '(^|[[:space:]])leases=0($|[[:space:]])' <<<"$1"
+}
+
+validate_doctor_inventory_empty() {
+  local command="$1"
+  local output="$2"
+  if ! doctor_inventory_empty "$output"; then
+    classify_validation_failure "$command" 1 "OVH cloud inventory is not empty or did not report leases=0"
+    exit 1
+  fi
+}
+
 cleanup_armed=0
 slug="ovh-smoke-$(date +%Y%m%d%H%M%S)-$$"
 config_file=""
@@ -215,6 +228,7 @@ export OVH_APPLICATION_SECRET
 export OVH_CONSUMER_KEY
 
 doctor_output="$(run_capture "bin/crabbox doctor --provider ovh" bin/crabbox doctor --provider ovh)"
+validate_doctor_inventory_empty "bin/crabbox doctor --provider ovh" "$doctor_output"
 printf '%s\n' "$doctor_output"
 initial_list_output="$(run_capture "bin/crabbox list --provider ovh --json" bin/crabbox list --provider ovh --json)"
 validate_list_json_empty "bin/crabbox list --provider ovh --json" "$initial_list_output"
@@ -227,9 +241,21 @@ printf '%s\n' "$list_output"
 validate_list_json_contains_slug "bin/crabbox list --provider ovh --json" "$list_output"
 run_capture "bin/crabbox stop --provider ovh $slug" bin/crabbox stop --provider ovh "$slug" >/dev/null
 cleanup_armed=0
+post_doctor_output=""
+for attempt in {1..30}; do
+  post_doctor_output="$(run_capture "bin/crabbox doctor --provider ovh" bin/crabbox doctor --provider ovh)"
+  if doctor_inventory_empty "$post_doctor_output"; then
+    break
+  fi
+  if [ "$attempt" -lt 30 ]; then
+    sleep 2
+  fi
+done
+validate_doctor_inventory_empty "bin/crabbox doctor --provider ovh" "$post_doctor_output"
 cleanup_output="$(run_capture "bin/crabbox cleanup --provider ovh --dry-run" bin/crabbox cleanup --provider ovh --dry-run)"
 post_list_output="$(run_capture "bin/crabbox list --provider ovh --json" bin/crabbox list --provider ovh --json)"
 validate_list_json_empty "bin/crabbox list --provider ovh --json" "$post_list_output"
 printf '%s\n' "$cleanup_output"
+printf '%s\n' "$post_doctor_output"
 printf '%s\n' "$post_list_output"
 printf 'classification=live_ovh_smoke_passed slug=%s cleanup=complete\n' "$slug"
