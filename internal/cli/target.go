@@ -134,10 +134,11 @@ func validateProviderTarget(cfg Config) error {
 	if !providerSpecSupportsTarget(provider.Spec(), cfg.TargetOS, cfg.WindowsMode) {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
-	if (provider.Name() == "tart" || provider.Name() == "apple-vz") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+	machineTarget := cfg.TargetOS != targetWorkerRuntime
+	if machineTarget && (provider.Name() == "tart" || provider.Name() == "apple-vz") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
-	if effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
+	if machineTarget && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
 		if provider.Name() != "azure" && provider.Name() != "aws" && provider.Name() != "tart" && provider.Name() != "apple-vz" {
 			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, or provider=apple-vz")
 		}
