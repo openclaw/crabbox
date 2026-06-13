@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1275,6 +1276,9 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.ServerType = serverTypeForConfig(*cfg)
 		}
 		normalizeTargetConfig(cfg)
+		if err := validateNamespaceInstanceWorkRoot(cfg.NamespaceInstance.WorkRoot); err != nil {
+			return err
+		}
 		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "hyperv" {
@@ -5868,6 +5872,19 @@ func serverTypeForConfig(cfg Config) string {
 		return parallelsServerTypeForConfig(cfg)
 	}
 	return serverTypeForClass(cfg.Class)
+}
+
+func validateNamespaceInstanceWorkRoot(workRoot string) error {
+	clean := path.Clean(strings.TrimSpace(workRoot))
+	if clean == "." || !path.IsAbs(clean) {
+		return exit(2, "namespaceInstance.workRoot %q must resolve to an absolute path", workRoot)
+	}
+	switch clean {
+	case "/", "/tmp", "/var", "/work", "/home":
+		return exit(2, "namespaceInstance.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	default:
+		return nil
+	}
 }
 
 func serverTypeForProviderClass(provider, class string) string {

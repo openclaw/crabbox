@@ -58,7 +58,7 @@ esac
 `;
 }
 
-function lifecycleCrabboxBody({ failAfterWarmup = false } = {}) {
+function lifecycleCrabboxBody({ doctorFailure = false, failAfterWarmup = false } = {}) {
   return `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
@@ -68,6 +68,7 @@ case "$1" in
     ;;
   doctor)
     [[ "$*" == "doctor --provider namespace-instance" ]] || exit 97
+    ${doctorFailure ? "printf 'nsc auth check-login failed\\n' >&2\n    exit 2" : ""}
     printf 'ok provider=namespace-instance\\n'
     ;;
   warmup)
@@ -179,16 +180,10 @@ test("namespace-instance live smoke requires nsc on PATH", () => {
   assert.equal(fs.existsSync(crabboxLog), false);
 });
 
-test("namespace-instance live smoke classifies missing nsc auth", () => {
+test("namespace-instance live smoke uses routed doctor readiness", () => {
   const harness = makeTempHarness(
-    "namespace-instance-auth",
-    lifecycleCrabboxBody(),
-    `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\\n' "$*" >>"\${NSC_FAKE_LOG:?}"
-printf 'not logged in\\n' >&2
-exit 7
-`,
+    "namespace-instance-doctor-readiness",
+    lifecycleCrabboxBody({ doctorFailure: true }),
   );
   const result = runLiveSmoke(harness, {
     CRABBOX_LIVE: "1",
@@ -197,9 +192,9 @@ exit 7
   });
 
   assert.equal(result.status, 2, result.stdout + result.stderr);
-  assert.match(result.stderr, /requires an authenticated nsc CLI/);
-  assert.equal(fs.existsSync(harness.crabboxLog), false);
-  assert.match(fs.readFileSync(harness.nscLog, "utf8"), /^auth check-login$/m);
+  assert.match(result.stderr, /nsc auth check-login failed/);
+  assert.match(fs.readFileSync(harness.crabboxLog, "utf8"), /^doctor --provider namespace-instance$/m);
+  assert.equal(fs.existsSync(harness.nscLog), false);
 });
 
 test("namespace-instance live smoke dispatches the lifecycle sequence", () => {
@@ -220,7 +215,7 @@ test("namespace-instance live smoke dispatches the lifecycle sequence", () => {
   assert.match(calls, /^run --provider namespace-instance --id namespace-instance-smoke-test --no-sync -- echo crabbox-namespace-instance-ok$/m);
   assert.match(calls, /^list --provider namespace-instance --json$/m);
   assert.match(calls, /^stop --provider namespace-instance namespace-instance-smoke-test$/m);
-  assert.match(fs.readFileSync(harness.nscLog, "utf8"), /^auth check-login$/m);
+  assert.equal(fs.existsSync(harness.nscLog), false);
 });
 
 test("namespace-instance live smoke cleanup trap stops created lease", () => {

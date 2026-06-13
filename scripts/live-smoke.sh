@@ -385,10 +385,6 @@ namespace_instance_smoke() {
     echo "namespace-instance smoke requires the authenticated Namespace nsc CLI on PATH" >&2
     return 2
   fi
-  if ! nsc auth check-login >/dev/null 2>&1; then
-    echo "namespace-instance smoke requires an authenticated nsc CLI; run nsc login" >&2
-    return 2
-  fi
 
   local lease=""
   local slug=""

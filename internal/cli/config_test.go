@@ -4279,6 +4279,43 @@ func TestNamespaceInstanceConfigEnvAndFlags(t *testing.T) {
 	}
 }
 
+func TestNamespaceInstanceRejectsUnsafeWorkRootFromConfigAndEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		env  string
+	}{
+		{
+			name: "config-file",
+			body: "provider: namespace-instance\nnamespaceInstance:\n  workRoot: /work\n",
+		},
+		{
+			name: "environment",
+			body: "provider: namespace-instance\n",
+			env:  "/tmp",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			configPath := filepath.Join(home, "config.yaml")
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			if tc.env != "" {
+				t.Setenv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT", tc.env)
+			}
+			if err := os.WriteFile(configPath, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := loadConfig()
+			if err == nil || !strings.Contains(err.Error(), "namespaceInstance.workRoot") || !strings.Contains(err.Error(), "too broad") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestConfigServerTypeHelperBranches(t *testing.T) {
 	if got := incusServerTypeForConfig(Config{}); got != "container" {
 		t.Fatalf("incus default=%q", got)
