@@ -277,7 +277,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
-	claims, err := providerClaims()
+	claims, err := providerClaims(b.cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +372,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	claims, err := providerClaims()
+	claims, err := providerClaims(b.cfg)
 	if err != nil {
 		return err
 	}
@@ -452,7 +452,7 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 }
 
 func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, error) {
-	claim, ok, err := resolveLeaseClaim(identifier)
+	claim, ok, err := resolveLeaseClaim(identifier, b.cfg)
 	if err != nil {
 		return "", "", err
 	}
@@ -637,14 +637,18 @@ func durationMillisecondsCeil(duration time.Duration) int64 {
 	return int64((duration + time.Millisecond - 1) / time.Millisecond)
 }
 
-func providerClaims() ([]LeaseClaim, error) {
+func providerClaims(cfg Config) ([]LeaseClaim, error) {
+	scope, err := loaderClaimScope(cfg)
+	if err != nil {
+		return nil, err
+	}
 	claims, err := listLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
 	out := make([]LeaseClaim, 0, len(claims))
 	for _, claim := range claims {
-		if claim.Provider == providerName {
+		if claim.Provider == providerName && claim.ProviderScope == scope {
 			out = append(out, claim)
 		}
 	}

@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestProviderSpecAndFlags(t *testing.T) {
@@ -59,6 +62,16 @@ func TestConfigureNormalizesDefaultLinuxTarget(t *testing.T) {
 	}
 	if got := configured.(*backend).cfg.TargetOS; got != targetWorker {
 		t.Fatalf("target=%q want %q", got, targetWorker)
+	}
+}
+
+func TestListWithoutRefreshValidatesLoaderURL(t *testing.T) {
+	cfg := testConfig("")
+	cfg.CloudflareDynamicWorkers.LoaderURL = ""
+	configured := NewBackend(Provider{}.Spec(), cfg, Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	_, err := configured.(*backend).List(context.Background(), ListRequest{})
+	if err == nil || !strings.Contains(err.Error(), "requires cloudflareDynamicWorkers.loaderUrl") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -477,7 +490,7 @@ func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
 	if submittedID == "" || result.LeaseID != submittedID || result.Slug != "debug-failure" || result.Session == nil || !result.Session.Kept {
 		t.Fatalf("result=%#v", result)
 	}
-	if _, ok, resolveErr := resolveLeaseClaim(result.Slug); resolveErr != nil || !ok {
+	if _, ok, resolveErr := resolveLeaseClaim(result.Slug, backend.cfg); resolveErr != nil || !ok {
 		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
 	}
 	if strings.Contains(stderr.String(), "-- <command>") || !strings.Contains(stderr.String(), "crabbox status") {
@@ -575,7 +588,7 @@ func TestRunKeepsLifecycleUncertainClaimFromLiveStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, ok, resolveErr := resolveLeaseClaim(result.Slug)
+	claim, ok, resolveErr := resolveLeaseClaim(result.Slug, backend.cfg)
 	if resolveErr != nil || !ok {
 		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
 	}
@@ -720,7 +733,7 @@ func TestRunPreservesKeepOnFailureClaimWhenPostResponseIsLost(t *testing.T) {
 	if submittedID == "" || result.LeaseID != submittedID || result.Slug != "uncertain-failure" || result.Session == nil || !result.Session.Kept {
 		t.Fatalf("result=%#v submittedID=%q", result, submittedID)
 	}
-	claim, ok, resolveErr := resolveLeaseClaim(result.Slug)
+	claim, ok, resolveErr := resolveLeaseClaim(result.Slug, backend.cfg)
 	if resolveErr != nil || !ok {
 		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
 	}
@@ -775,7 +788,7 @@ func TestRunPreservesKeepOnFailureClaimAfterUnstructuredServerError(t *testing.T
 	if submittedID == "" || result.LeaseID != submittedID || result.Session == nil || !result.Session.Kept {
 		t.Fatalf("result=%#v submittedID=%q", result, submittedID)
 	}
-	claim, ok, resolveErr := resolveLeaseClaim(result.Slug)
+	claim, ok, resolveErr := resolveLeaseClaim(result.Slug, backend.cfg)
 	if resolveErr != nil || !ok {
 		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
 	}
@@ -944,8 +957,126 @@ func TestStopMissingRemoteRemovesStaleLocalClaim(t *testing.T) {
 	if !strings.Contains(stdout.String(), "removed stale cloudflare-dynamic-workers claim cfdw_stale reason=not-found") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
-	if _, ok, err := resolveLeaseClaim("stale-claim"); err != nil || ok {
+	if _, ok, err := resolveLeaseClaim("stale-claim", backend.cfg); err != nil || ok {
 		t.Fatalf("claim after stop ok=%t err=%v state_home=%s", ok, err, filepath.Join(stateHome, "crabbox", "claims"))
+	}
+}
+
+func TestClaimsAreScopedToLoaderEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfgA := testConfig("https://Loader-A.example.test/api/")
+	cfgB := testConfig("https://loader-b.example.test/api")
+	if err := claimLease("cfdw_scope_a", "scope-a", cfgA, t.TempDir(), time.Minute, false, runServer("cfdw_scope_a", "scope-a", runStatus{ID: "cfdw_scope_a", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLease("cfdw_scope_b", "scope-b", cfgB, t.TempDir(), time.Minute, false, runServer("cfdw_scope_b", "scope-b", runStatus{ID: "cfdw_scope_b", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	claimsA, err := providerClaims(cfgA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimsA) != 1 || claimsA[0].LeaseID != "cfdw_scope_a" || claimsA[0].ProviderScope != "endpoint:https://loader-a.example.test/api" {
+		t.Fatalf("loader A claims=%#v", claimsA)
+	}
+	claimsB, err := providerClaims(cfgB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimsB) != 1 || claimsB[0].LeaseID != "cfdw_scope_b" {
+		t.Fatalf("loader B claims=%#v", claimsB)
+	}
+	if _, ok, err := resolveLeaseClaim("scope-b", cfgA); err != nil || ok {
+		t.Fatalf("loader A resolved loader B claim ok=%t err=%v", ok, err)
+	}
+	if _, ok, err := resolveLeaseClaim("cfdw_scope_b", cfgA); err == nil || ok || !strings.Contains(err.Error(), "different loader endpoint") {
+		t.Fatalf("loader A exact loader B claim ok=%t err=%v", ok, err)
+	}
+	if claim, ok, err := resolveLeaseClaim("scope-b", cfgB); err != nil || !ok || claim.LeaseID != "cfdw_scope_b" {
+		t.Fatalf("loader B claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+func TestLoaderClaimScopePreservesEscapedPathSemantics(t *testing.T) {
+	escaped := mustLoaderClaimScope(t, testConfig("https://loader.example.test/tenant%2Fone"))
+	literal := mustLoaderClaimScope(t, testConfig("https://loader.example.test/tenant/one"))
+	if escaped == literal {
+		t.Fatalf("escaped scope=%q collides with literal scope=%q", escaped, literal)
+	}
+	if !strings.Contains(escaped, "/tenant%2Fone") {
+		t.Fatalf("escaped scope=%q", escaped)
+	}
+	lowercaseEscape := mustLoaderClaimScope(t, testConfig("https://loader.example.test/tenant%2fone"))
+	if lowercaseEscape != escaped {
+		t.Fatalf("escape case scopes differ: lowercase=%q uppercase=%q", lowercaseEscape, escaped)
+	}
+	escapedTrailingSlash := mustLoaderClaimScope(t, testConfig("https://loader.example.test/tenant%2F"))
+	literalWithoutSlash := mustLoaderClaimScope(t, testConfig("https://loader.example.test/tenant"))
+	if escapedTrailingSlash == literalWithoutSlash || !strings.Contains(escapedTrailingSlash, "/tenant%2F") {
+		t.Fatalf("escaped trailing scope=%q literal scope=%q", escapedTrailingSlash, literalWithoutSlash)
+	}
+}
+
+func TestLoaderClaimScopeCanonicalizesDefaultPorts(t *testing.T) {
+	implicitHTTPS := mustLoaderClaimScope(t, testConfig("https://loader.example.test/api"))
+	explicitHTTPS := mustLoaderClaimScope(t, testConfig("https://loader.example.test:443/api"))
+	if implicitHTTPS != explicitHTTPS {
+		t.Fatalf("https scopes differ: implicit=%q explicit=%q", implicitHTTPS, explicitHTTPS)
+	}
+	implicitHTTP := mustLoaderClaimScope(t, testConfig("http://127.0.0.1/api"))
+	explicitHTTP := mustLoaderClaimScope(t, testConfig("http://127.0.0.1:80/api"))
+	if implicitHTTP != explicitHTTP {
+		t.Fatalf("http scopes differ: implicit=%q explicit=%q", implicitHTTP, explicitHTTP)
+	}
+}
+
+func TestLoaderClaimScopeCanonicalizesUnreservedEscapes(t *testing.T) {
+	literal := mustLoaderClaimScope(t, testConfig("https://loader.example.test/api/~tenant"))
+	escaped := mustLoaderClaimScope(t, testConfig("https://loader.example.test/%61pi/%7etenant"))
+	if literal != escaped {
+		t.Fatalf("unreserved scopes differ: literal=%q escaped=%q", literal, escaped)
+	}
+}
+
+func mustLoaderClaimScope(t *testing.T, cfg Config) string {
+	t.Helper()
+	scope, err := loaderClaimScope(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
+}
+
+func TestScopedSlugLookupSkipsWrongProviderExactClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig("https://loader.example.test")
+	if err := claimLease("cfdw_slug_target", "shared-identifier", cfg, t.TempDir(), time.Minute, false, runServer("cfdw_slug_target", "shared-identifier", runStatus{ID: "cfdw_slug_target", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.ClaimLeaseForRepoProviderScope("shared-identifier", "other", "hetzner", "", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveLeaseClaim("shared-identifier", cfg)
+	if err != nil || !ok || claim.LeaseID != "cfdw_slug_target" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+func TestExactClaimLookupIgnoresUnrelatedCorruptClaim(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	cfg := testConfig("https://loader.example.test")
+	if err := claimLease("cfdw_exact", "exact-claim", cfg, t.TempDir(), time.Minute, false, runServer("cfdw_exact", "exact-claim", runStatus{ID: "cfdw_exact", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := filepath.Join(stateHome, "crabbox", "claims")
+	if err := os.WriteFile(filepath.Join(claimsDir, "unrelated.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolveLeaseClaim("cfdw_exact", cfg)
+	if err != nil || !ok || claim.LeaseID != "cfdw_exact" {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
 	}
 }
 

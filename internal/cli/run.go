@@ -2752,7 +2752,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg.Provider = *provider
+	if err := prepareProviderSelection(&cfg, *provider); err != nil {
+		return err
+	}
 	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
 		return err
 	}
@@ -2763,6 +2765,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		return err
+	}
+	if err := finalizeProviderSelection(&cfg); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))

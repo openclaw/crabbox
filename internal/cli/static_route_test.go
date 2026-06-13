@@ -49,6 +49,40 @@ func TestAutoRouteStaticLeaseRestoresHostFromStaticClaim(t *testing.T) {
 	}
 }
 
+func TestAutoRouteStaticLeasePreservesRestoredDefaultsAfterProviderChange(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claimed := baseConfig()
+	claimed.Provider = staticProvider
+	claimed.Static.Host = "builder.example.com"
+	claimed.Static.User = "builder"
+	claimed.Static.Port = "2202"
+	claimed.Static.WorkRoot = "/srv/claimed"
+	claimed.TargetOS = targetLinux
+	if err := claimLeaseForRepoConfig("static_builder-example-com", "builder-example-com", claimed, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	fs := newFlagSet("test", io.Discard)
+	registerTargetFlags(fs, cfg)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := autoRouteStaticLease(&cfg, fs, "static_builder-example-com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != staticProvider || cfg.WorkRoot != "/srv/claimed" || cfg.SSHUser != "builder" || cfg.SSHPort != "2202" {
+		t.Fatalf("routed static defaults changed: cfg=%#v static=%#v", cfg, cfg.Static)
+	}
+}
+
 func TestAutoRouteStaticLeaseRestoresFriendlySlugClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	claimed := baseConfig()

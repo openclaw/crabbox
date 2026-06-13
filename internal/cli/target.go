@@ -279,6 +279,7 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if !isStaticProvider(cfg.Provider) {
 		return nil
 	}
+	prepareProviderDefaults(cfg)
 	if hasClaim {
 		restoreStaticClaimIdentity(cfg, claim)
 		restoreStaticClaimTarget(cfg, fs, claim)
@@ -395,8 +396,13 @@ func loadExternalRoutingConfig(cfg *Config, path string) error {
 }
 
 func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit bool) error {
+	prepareProviderDefaults(cfg)
+	if strings.TrimSpace(cfg.External.WorkRoot) != "" {
+		cfg.WorkRoot = cfg.External.WorkRoot
+	}
 	if !targetExplicit {
 		cfg.TargetOS = targetLinux
+		cfg.inferredTargetProvider = ""
 	}
 	if !windowsModeExplicit {
 		cfg.WindowsMode = windowsModeNormal
@@ -484,6 +490,7 @@ func restoreStaticClaimTarget(cfg *Config, fs *flag.FlagSet, claim leaseClaim) {
 	}
 	if !flagWasSet(fs, "target") && strings.TrimSpace(claim.TargetOS) != "" {
 		cfg.TargetOS = strings.TrimSpace(claim.TargetOS)
+		cfg.inferredTargetProvider = ""
 	}
 	if !flagWasSet(fs, "windows-mode") && strings.TrimSpace(claim.WindowsMode) != "" {
 		cfg.WindowsMode = strings.TrimSpace(claim.WindowsMode)

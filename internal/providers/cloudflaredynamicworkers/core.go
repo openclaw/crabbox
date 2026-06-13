@@ -63,11 +63,49 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 }
 
 func claimLease(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server) error {
-	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, "", cfg.Pond, repoRoot, idleTimeout, reclaim, server, core.SSHTarget{TargetOS: targetWorker})
+	scope, err := loaderClaimScope(cfg)
+	if err != nil {
+		return err
+	}
+	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, scope, cfg.Pond, repoRoot, idleTimeout, reclaim, server, core.SSHTarget{TargetOS: targetWorker})
 }
 
-func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaimForProvider(identifier, providerName)
+func resolveLeaseClaim(identifier string, cfg Config) (core.LeaseClaim, bool, error) {
+	scope, err := loaderClaimScope(cfg)
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	if identifier != "" {
+		exact, exists, err := core.ReadLeaseClaimWithPresence(identifier)
+		if err != nil {
+			return core.LeaseClaim{}, false, err
+		}
+		if exists {
+			if exact.Provider == providerName && exact.ProviderScope == scope {
+				return exact, true, nil
+			}
+			if exact.Provider == providerName {
+				return core.LeaseClaim{}, false, exit(2, "%s claim %s belongs to a different loader endpoint", providerName, identifier)
+			}
+		}
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	var matched core.LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider != providerName || claim.ProviderScope != scope {
+			continue
+		}
+		if claim.LeaseID == identifier {
+			return claim, true, nil
+		}
+		if matched.LeaseID == "" && core.LeaseClaimMatchesIdentifier(claim, identifier) {
+			matched = claim
+		}
+	}
+	return matched, matched.LeaseID != "", nil
 }
 
 func listLeaseClaims() ([]core.LeaseClaim, error) {

@@ -165,6 +165,100 @@ func loaderURLForError(raw string) string {
 	return "<redacted>"
 }
 
+func loaderClaimScope(cfg Config) (string, error) {
+	raw, err := loaderURL(cfg)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "", exit(2, "%s loader URL is invalid", providerName)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	parsed.Host = host
+	if port != "" {
+		parsed.Host += ":" + port
+	}
+	escapedPath := canonicalPercentEscapes(strings.TrimRight(parsed.EscapedPath(), "/"))
+	decodedPath, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", exit(2, "%s loader URL path is invalid", providerName)
+	}
+	parsed.Path = decodedPath
+	if escapedPath == decodedPath {
+		parsed.RawPath = ""
+	} else {
+		parsed.RawPath = escapedPath
+	}
+	return "endpoint:" + strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func canonicalPercentEscapes(value string) string {
+	var canonical strings.Builder
+	canonical.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		if value[i] == '%' && i+2 < len(value) {
+			decoded, ok := percentEncodedByte(value[i+1], value[i+2])
+			if ok && isURIUnreserved(decoded) {
+				canonical.WriteByte(decoded)
+				i += 2
+				continue
+			}
+			canonical.WriteByte('%')
+			canonical.WriteByte(asciiUpperHex(value[i+1]))
+			canonical.WriteByte(asciiUpperHex(value[i+2]))
+			i += 2
+			continue
+		}
+		canonical.WriteByte(value[i])
+	}
+	return canonical.String()
+}
+
+func percentEncodedByte(high, low byte) (byte, bool) {
+	highValue, highOK := asciiHexValue(high)
+	lowValue, lowOK := asciiHexValue(low)
+	if !highOK || !lowOK {
+		return 0, false
+	}
+	return highValue<<4 | lowValue, true
+}
+
+func asciiHexValue(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func isURIUnreserved(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' ||
+		value == '-' || value == '.' || value == '_' || value == '~'
+}
+
+func asciiUpperHex(value byte) byte {
+	if value >= 'a' && value <= 'f' {
+		return value - ('a' - 'A')
+	}
+	return value
+}
+
 func isLoopbackHTTPURL(parsed *url.URL) bool {
 	if parsed.Scheme != "http" {
 		return false

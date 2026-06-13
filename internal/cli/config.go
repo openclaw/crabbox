@@ -19,9 +19,11 @@ type Config struct {
 	Profile                       string
 	Provider                      string
 	providerExplicit              bool
+	providerDefaultsApplied       string
 	TargetOS                      string
 	targetExplicit                bool
 	targetFlagExplicit            bool
+	inferredTargetProvider        string
 	Architecture                  string
 	architectureExplicit          bool
 	OSImage                       string
@@ -113,6 +115,8 @@ type Config struct {
 	SSHPort                       string
 	explicitSSHPort               string
 	SSHFallbackPorts              []string
+	sshFallbackPortsExplicit      bool
+	explicitSSHFallbackPorts      []string
 	ProviderKey                   string
 	WorkRoot                      string
 	explicitWorkRoot              string
@@ -1168,7 +1172,21 @@ func canonicalizeConfigProvider(cfg *Config) {
 	}
 }
 
+func prepareProviderSelection(cfg *Config, provider string) error {
+	cfg.Provider = strings.TrimSpace(provider)
+	prepareProviderDefaults(cfg)
+	return nil
+}
+
+func finalizeProviderSelection(cfg *Config) error {
+	if err := routeConfiguredProvider(cfg); err != nil {
+		return err
+	}
+	return applyProviderConfigDefaults(cfg)
+}
+
 func applyProviderConfigDefaults(cfg *Config) error {
+	prepareProviderDefaults(cfg)
 	if normalized, err := normalizeArchitecture(cfg.Architecture); err != nil {
 		return err
 	} else {
@@ -1179,8 +1197,8 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	} else {
 		cfg.OSImage = normalized
 	}
-	applyOSImageProviderDefaults(cfg, false)
 	applySingleProviderTargetDefault(cfg)
+	applyOSImageProviderDefaults(cfg, false)
 	if cfg.Provider == "digitalocean" {
 		if cfg.DigitalOcean.Region == "" {
 			cfg.DigitalOcean.Region = "nyc3"
@@ -1413,14 +1431,28 @@ func applyProviderConfigDefaults(cfg *Config) error {
 }
 
 func applySingleProviderTargetDefault(cfg *Config) {
-	if cfg == nil || IsTargetExplicit(cfg) {
-		return
-	}
-	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
+	if cfg == nil {
 		return
 	}
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {
+		return
+	}
+	providerName := provider.Name()
+	if IsTargetExplicit(cfg) {
+		cfg.inferredTargetProvider = ""
+		return
+	}
+	if cfg.inferredTargetProvider != "" && cfg.inferredTargetProvider != providerName {
+		cfg.TargetOS = targetLinux
+		cfg.inferredTargetProvider = ""
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+	}
+	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 		return
 	}
 	spec := provider.Spec()
@@ -1432,12 +1464,70 @@ func applySingleProviderTargetDefault(cfg *Config) {
 		return
 	}
 	cfg.TargetOS = strings.TrimSpace(target.OS)
+	cfg.inferredTargetProvider = providerName
 	if cfg.TargetOS == targetWindows {
 		if strings.TrimSpace(target.WindowsMode) != "" {
 			cfg.WindowsMode = strings.TrimSpace(target.WindowsMode)
 		}
 	} else if cfg.explicitWindowsMode == "" {
 		cfg.WindowsMode = windowsModeNormal
+	}
+}
+
+func prepareProviderDefaults(cfg *Config) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return
+	}
+	providerName := provider.Name()
+	if cfg.providerDefaultsApplied != "" && cfg.providerDefaultsApplied != providerName {
+		if cfg.providerDefaultsApplied == parallelsProvider {
+			cfg.parallelsTemplateApplied = false
+		}
+		resetProviderDerivedDefaults(cfg)
+		if !IsTargetExplicit(cfg) && cfg.inferredTargetProvider != "" {
+			cfg.TargetOS = targetLinux
+			cfg.inferredTargetProvider = ""
+			if cfg.explicitWindowsMode != "" {
+				cfg.WindowsMode = cfg.explicitWindowsMode
+			} else {
+				cfg.WindowsMode = windowsModeNormal
+			}
+		}
+	}
+	cfg.providerDefaultsApplied = providerName
+}
+
+func resetProviderDerivedDefaults(cfg *Config) {
+	base := baseConfig()
+	if cfg.explicitSSHUser != "" {
+		cfg.SSHUser = cfg.explicitSSHUser
+	} else {
+		cfg.SSHUser = base.SSHUser
+	}
+	if cfg.explicitSSHPort != "" {
+		cfg.SSHPort = cfg.explicitSSHPort
+	} else {
+		cfg.SSHPort = base.SSHPort
+	}
+	if !cfg.sshFallbackPortsExplicit {
+		cfg.SSHFallbackPorts = append([]string(nil), base.SSHFallbackPorts...)
+	} else {
+		cfg.SSHFallbackPorts = append([]string(nil), cfg.explicitSSHFallbackPorts...)
+	}
+	if cfg.explicitWorkRoot != "" {
+		cfg.WorkRoot = cfg.explicitWorkRoot
+	} else {
+		cfg.WorkRoot = base.WorkRoot
+	}
+	if !cfg.locationExplicit {
+		cfg.Location = base.Location
+	}
+	if !cfg.imageExplicit {
+		cfg.Image = base.Image
+	}
+	if !cfg.ServerTypeExplicit {
+		cfg.ServerType = base.ServerType
 	}
 }
 
@@ -3660,6 +3750,8 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.SSH.FallbackPorts != nil {
 			cfg.SSHFallbackPorts = normalizeList(*file.SSH.FallbackPorts)
+			cfg.sshFallbackPortsExplicit = true
+			cfg.explicitSSHFallbackPorts = append([]string(nil), cfg.SSHFallbackPorts...)
 		}
 	}
 	if file.WorkRoot != "" {
@@ -5339,6 +5431,8 @@ func applyEnv(cfg *Config) error {
 	}
 	if ports, ok := getenvList("CRABBOX_SSH_FALLBACK_PORTS"); ok {
 		cfg.SSHFallbackPorts = ports
+		cfg.sshFallbackPortsExplicit = true
+		cfg.explicitSSHFallbackPorts = append([]string(nil), ports...)
 	}
 	cfg.ProviderKey = getenv("CRABBOX_HETZNER_SSH_KEY", cfg.ProviderKey)
 	if workRoot := os.Getenv("CRABBOX_WORK_ROOT"); workRoot != "" {
@@ -6159,6 +6253,9 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	}
 	if template.TargetOS != "" {
 		cfg.TargetOS = normalizeTargetOS(template.TargetOS)
+		if !IsTargetExplicit(cfg) {
+			cfg.inferredTargetProvider = parallelsProvider
+		}
 	}
 	if template.WindowsMode != "" {
 		cfg.WindowsMode = template.WindowsMode

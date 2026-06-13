@@ -1383,7 +1383,20 @@ func (testCloudflareDynamicWorkersProvider) ApplyFlags(
 	return nil
 }
 func (p testCloudflareDynamicWorkersProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDelegatedBackend{spec: p.Spec()}, nil
+	if cfg.TargetOS != "" && cfg.TargetOS != targetWorkerRuntime && cfg.TargetOS != targetLinux {
+		return nil, exit(2, "%s supports target=worker-runtime only", p.Name())
+	}
+	return testCloudflareDynamicWorkersBackend{
+		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
+	}, nil
+}
+
+type testCloudflareDynamicWorkersBackend struct {
+	testDelegatedBackend
+}
+
+func (testCloudflareDynamicWorkersBackend) Cleanup(context.Context, CleanupRequest) error {
+	return nil
 }
 
 type testSpritesProvider struct{}

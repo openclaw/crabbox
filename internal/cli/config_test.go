@@ -795,6 +795,216 @@ func TestDigitalOceanDefaultsDoNotLeakAcrossProviderOverride(t *testing.T) {
 	}
 }
 
+func TestProviderOverrideRecomputesInferredTarget(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cloudflare-dynamic-workers"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetWorkerRuntime {
+		t.Fatalf("dynamic workers target=%q", cfg.TargetOS)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux {
+		t.Fatalf("hetzner target after override=%q, want linux", cfg.TargetOS)
+	}
+	base := baseConfig()
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(base.SSHFallbackPorts, ",") ||
+		cfg.WorkRoot != base.WorkRoot || cfg.ServerType == cfg.Tart.Image {
+		t.Fatalf("tart defaults leaked after provider override: %#v", cfg)
+	}
+
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS {
+		t.Fatalf("tart target=%q", cfg.TargetOS)
+	}
+
+	cfg.Provider = "cloudflare-dynamic-workers"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetWorkerRuntime {
+		t.Fatalf("dynamic workers target after tart override=%q", cfg.TargetOS)
+	}
+}
+
+func TestProviderFlagOverrideRecomputesTargetBeforeAWSDefaults(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS {
+		t.Fatalf("tart target=%q", cfg.TargetOS)
+	}
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--provider", "aws"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "cbx_existing"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux {
+		t.Fatalf("aws target=%q, want linux", cfg.TargetOS)
+	}
+	if cfg.ServerType == "mac2.metal" {
+		t.Fatalf("aws server type retained macOS default: %q", cfg.ServerType)
+	}
+	if cfg.Capacity.Market != "spot" {
+		t.Fatalf("aws market=%q, want spot", cfg.Capacity.Market)
+	}
+}
+
+func TestProviderOverridePreservesExplicitGenericFields(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.SSHUser = "alice"
+	cfg.explicitSSHUser = "alice"
+	cfg.SSHPort = "2200"
+	cfg.explicitSSHPort = "2200"
+	cfg.SSHFallbackPorts = []string{"2222"}
+	cfg.sshFallbackPortsExplicit = true
+	cfg.explicitSSHFallbackPorts = []string{"2222"}
+	cfg.WorkRoot = "/srv/work"
+	cfg.explicitWorkRoot = "/srv/work"
+	cfg.ServerType = "custom-type"
+	cfg.ServerTypeExplicit = true
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != "2222" ||
+		cfg.WorkRoot != "/srv/work" || cfg.ServerType != "custom-type" {
+		t.Fatalf("explicit generic fields changed after provider override: %#v", cfg)
+	}
+}
+
+func TestProviderOverrideWithExplicitTargetResetsPreviousProviderDefaults(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Provider = "hetzner"
+	cfg.TargetOS = targetLinux
+	cfg.targetExplicit = true
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := baseConfig()
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(base.SSHFallbackPorts, ",") ||
+		cfg.WorkRoot != base.WorkRoot || cfg.ServerType == cfg.Tart.Image {
+		t.Fatalf("tart defaults leaked through explicit target override: %#v", cfg)
+	}
+}
+
+func TestProviderOverrideReappliesExplicitOSImageDefaults(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Provider = "local-container"
+	cfg.OSImage = "ubuntu:24.04"
+	cfg.osImageExplicit = true
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.LocalContainer.Image != "ubuntu:24.04" {
+		t.Fatalf("provider override target=%q image=%q", cfg.TargetOS, cfg.LocalContainer.Image)
+	}
+}
+
+func TestProviderOverrideResetsParallelsTemplateTarget(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = parallelsProvider
+	cfg.Parallels.Template = "windows"
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"windows": {
+			TargetOS:    targetWindows,
+			WindowsMode: windowsModeWSL2,
+		},
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetWindows || !cfg.parallelsTemplateApplied {
+		t.Fatalf("parallels target=%q applied=%t", cfg.TargetOS, cfg.parallelsTemplateApplied)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.parallelsTemplateApplied {
+		t.Fatalf("hetzner target=%q template_applied=%t", cfg.TargetOS, cfg.parallelsTemplateApplied)
+	}
+}
+
+func TestProviderOverrideRestoresExplicitWindowsMode(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = parallelsProvider
+	cfg.WindowsMode = windowsModeNormal
+	cfg.explicitWindowsMode = windowsModeNormal
+	cfg.Parallels.Template = "windows"
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"windows": {
+			TargetOS:    targetWindows,
+			WindowsMode: windowsModeWSL2,
+		},
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WindowsMode != windowsModeWSL2 {
+		t.Fatalf("parallels windows mode=%q", cfg.WindowsMode)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("hetzner target=%q windows_mode=%q", cfg.TargetOS, cfg.WindowsMode)
+	}
+}
+
+func TestProviderSelectionDefersDefaultsUntilAfterFlagOverrides(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Parallels.Template = "stale"
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"valid": {TargetOS: targetLinux},
+	}
+
+	if err := prepareProviderSelection(&cfg, parallelsProvider); err != nil {
+		t.Fatalf("provider selection validated stale defaults before flags: %v", err)
+	}
+	cfg.Parallels.Template = "valid"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("provider defaults after flag override: %v", err)
+	}
+}
+
 func TestLinodeConfigFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
