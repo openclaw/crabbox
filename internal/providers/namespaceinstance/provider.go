@@ -124,6 +124,13 @@ func (b *backend) acquire(ctx context.Context, req AcquireRequest) (lease LeaseT
 		Volumes:       cfg.NamespaceInstance.Volumes,
 	})
 	if err != nil {
+		if strings.TrimSpace(instance.ID) != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if cleanupErr := client.DestroyInstance(cleanupCtx, instance.ID); cleanupErr != nil && !nscNotFoundError(cleanupErr) {
+				fmt.Fprintf(b.rt.Stderr, "warning: cleanup namespace-instance lease=%s after create failure: %v\n", leaseID, cleanupErr)
+			}
+		}
 		return LeaseTarget{}, err
 	}
 	createdID := instance.ID

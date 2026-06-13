@@ -58,6 +58,10 @@ func commandTimeout() time.Duration {
 	return 30 * time.Second
 }
 
+func createCommandTimeout() time.Duration {
+	return 20 * time.Minute
+}
+
 var newLeaseID = core.NewLeaseID
 var allocateDirectLeaseSlug = core.AllocateDirectLeaseSlug
 var ensureTestboxKeyForConfig = core.EnsureTestboxKeyForConfig

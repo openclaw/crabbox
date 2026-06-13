@@ -115,6 +115,29 @@ func TestAcquireMissingSSHMetadataReturnsPlanGapAndDestroysCreatedInstance(t *te
 	}
 }
 
+func TestAcquireDestroysCIDFileInstanceWhenCreateReturnsError(t *testing.T) {
+	oldNewLeaseID := newLeaseID
+	oldEnsureKey := ensureTestboxKeyForConfig
+	defer func() {
+		newLeaseID = oldNewLeaseID
+		ensureTestboxKeyForConfig = oldEnsureKey
+	}()
+	newLeaseID = func() string { return "cbx_test003" }
+	ensureTestboxKeyForConfig = func(Config, string) (string, string, error) {
+		return "/tmp/crabbox-test-key", "ssh-ed25519 synthetic", nil
+	}
+	runner := &createErrorArtifactRunner{createID: "inst-created-before-error"}
+	var stderr bytes.Buffer
+	b := newBackend(Provider{}.Spec(), core.Config{Provider: providerName, NamespaceInstance: core.NamespaceInstanceConfig{MachineType: "linux-small", WorkRoot: defaultWorkRoot}}, core.Runtime{Exec: runner, Stderr: &stderr})
+	_, err := b.Acquire(context.Background(), AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "nsc create failed") {
+		t.Fatalf("err=%v", err)
+	}
+	if !strings.Contains(joinCalls(runner.calls), "destroy inst-created-before-error --force") {
+		t.Fatalf("create-error rollback destroy not called:\n%s", joinCalls(runner.calls))
+	}
+}
+
 func TestResolveUsesClaimAndDoesNotRequireSSHForStatusOnly(t *testing.T) {
 	oldResolve := resolveLeaseClaimForProvider
 	oldResolveCloud := resolveLeaseClaimForProviderCloudID

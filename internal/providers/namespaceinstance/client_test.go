@@ -3,6 +3,7 @@ package namespaceinstance
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +16,12 @@ type recordingRunner struct {
 	results []LocalCommandResult
 	errs    []error
 	calls   []LocalCommandRequest
+}
+
+type createErrorArtifactRunner struct {
+	createID          string
+	calls             []LocalCommandRequest
+	sawCreateDeadline bool
 }
 
 func TestCreateInstanceBuildsFakeableNSCCommandAndParsesSSH(t *testing.T) {
@@ -58,6 +65,28 @@ func TestCreateInstanceBuildsFakeableNSCCommandAndParsesSSH(t *testing.T) {
 	}
 }
 
+func TestCreateInstanceReturnsCIDFileIDOnCommandError(t *testing.T) {
+	runner := &createErrorArtifactRunner{createID: "inst-created"}
+	client, err := newNSCClient(core.Config{}, core.Runtime{Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := client.CreateInstance(context.Background(), createInstanceRequest{
+		MachineType:   "linux-small",
+		Duration:      time.Hour,
+		PublicKeyPath: "/tmp/key.pub",
+	})
+	if err == nil {
+		t.Fatal("expected create error")
+	}
+	if instance.ID != "inst-created" {
+		t.Fatalf("instance=%#v", instance)
+	}
+	if !runner.sawCreateDeadline {
+		t.Fatal("create did not receive an extended command deadline")
+	}
+}
+
 func TestResolveSSHRequiresNormalTarget(t *testing.T) {
 	client := &nscClient{}
 	_, err := client.ResolveSSH(namespaceInstance{ID: "inst-synthetic"}, core.Config{}, "/tmp/key")
@@ -92,6 +121,15 @@ func containsArg(args []string, want string) bool {
 	return false
 }
 
+func argAfter(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	idx := len(r.calls) - 1
@@ -104,6 +142,22 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 		err = r.errs[idx]
 	}
 	return result, err
+}
+
+func (r *createErrorArtifactRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	r.calls = append(r.calls, req)
+	if !containsArg(req.Args, "create") {
+		return LocalCommandResult{Stdout: "[]"}, nil
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > 15*time.Minute {
+		r.sawCreateDeadline = true
+	}
+	if path := argAfter(req.Args, "--cidfile"); path != "" {
+		if err := os.WriteFile(path, []byte(r.createID+"\n"), 0o600); err != nil {
+			return LocalCommandResult{ExitCode: 1}, err
+		}
+	}
+	return LocalCommandResult{ExitCode: 124}, errors.New("nsc create timed out after allocating instance")
 }
 
 func TestCheckReadinessUsesNonMutatingNSCCommands(t *testing.T) {

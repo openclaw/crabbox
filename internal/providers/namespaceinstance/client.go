@@ -76,11 +76,27 @@ func (c *nscClient) CreateInstance(ctx context.Context, req createInstanceReques
 			args = append(args, "--label", key+"="+value)
 		}
 	}
-	result, err := c.run(ctx, args...)
-	if err != nil {
-		return namespaceInstance{}, err
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = contextWithTimeout(ctx, createCommandTimeout())
+		defer cancel()
 	}
-	instance, parseErr := parseNSCInstance(result.Stdout)
+	result, err := c.run(ctx, args...)
+	instance, parseErr := parseNSCCreateResult(result.Stdout, jsonPath, cidPath)
+	if err != nil {
+		return instance, err
+	}
+	if instance.ID == "" {
+		if parseErr != nil {
+			return namespaceInstance{}, fmt.Errorf("decode nsc create output: %w", parseErr)
+		}
+		return namespaceInstance{}, exit(2, "nsc create did not return an instance id")
+	}
+	return instance, nil
+}
+
+func parseNSCCreateResult(stdout, jsonPath, cidPath string) (namespaceInstance, error) {
+	instance, parseErr := parseNSCInstance(stdout)
 	if parseErr != nil || instance.ID == "" {
 		if data, readErr := os.ReadFile(jsonPath); readErr == nil {
 			instance, parseErr = parseNSCInstance(string(data))
@@ -91,13 +107,7 @@ func (c *nscClient) CreateInstance(ctx context.Context, req createInstanceReques
 			instance.ID = strings.TrimSpace(string(data))
 		}
 	}
-	if instance.ID == "" {
-		if parseErr != nil {
-			return namespaceInstance{}, fmt.Errorf("decode nsc create output: %w", parseErr)
-		}
-		return namespaceInstance{}, exit(2, "nsc create did not return an instance id")
-	}
-	return instance, nil
+	return instance, parseErr
 }
 
 func (c *nscClient) DescribeInstance(ctx context.Context, id string) (namespaceInstance, error) {
