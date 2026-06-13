@@ -281,10 +281,11 @@ function quoteStrategy(strategy: MarketplaceStrategy | undefined): MarketplaceSt
 
 function providerSupportsTarget(provider: Provider, target: TargetOS): boolean {
   if (target === "linux") return true;
-  // Known Linux-only providers per current lease/provider backends (see Hetzner/GCP examples in docs and lease config).
-  // Other providers (aws, azure, etc.) support Windows/macOS in their adapters.
-  const linuxOnly = new Set<Provider>(["hetzner", "gcp"]);
-  return !linuxOnly.has(provider);
+  // Mirror documented/lease target compatibility for the quote preview (see lease config, provider backends, and docs).
+  // macOS: only AWS today; Windows: AWS + Azure; Hetzner/GCP and others are Linux-only for brokered use.
+  if (target === "macos") return provider === "aws";
+  if (target === "windows") return provider === "aws" || provider === "azure";
+  return false;
 }
 
 function marketplaceProviders(env: Env): Provider[] {
