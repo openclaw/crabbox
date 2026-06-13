@@ -64,23 +64,23 @@ func TestProviderServerTypeDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigureReturnsDoctorAndClearLifecycleStubs(t *testing.T) {
+func TestConfigureReturnsLeaseAndDoctorBackend(t *testing.T) {
 	backend, err := Provider{}.Configure(core.Config{}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
 	leaseBackend, ok := backend.(core.SSHLeaseBackend)
 	if !ok {
-		t.Fatalf("backend=%T, want SSHLeaseBackend skeleton", backend)
-	}
-	if _, err := leaseBackend.Acquire(context.Background(), core.AcquireRequest{}); err == nil || !strings.Contains(err.Error(), "provider=vultr acquire lifecycle is not implemented yet") {
-		t.Fatalf("Acquire err=%v", err)
+		t.Fatalf("backend=%T, want SSHLeaseBackend", backend)
 	}
 	cleanup, ok := backend.(core.CleanupBackend)
 	if !ok {
-		t.Fatalf("backend=%T, want CleanupBackend skeleton", backend)
+		t.Fatalf("backend=%T, want CleanupBackend", backend)
 	}
-	if err := cleanup.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "provider=vultr cleanup lifecycle is not implemented yet") {
+	if _, err := leaseBackend.Acquire(context.Background(), core.AcquireRequest{}); err == nil || !strings.Contains(err.Error(), "VULTR_API_KEY is required") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if err := cleanup.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "VULTR_API_KEY is required") {
 		t.Fatalf("Cleanup err=%v", err)
 	}
 	doctor, ok := backend.(core.DoctorBackend)
@@ -88,10 +88,7 @@ func TestConfigureReturnsDoctorAndClearLifecycleStubs(t *testing.T) {
 		t.Fatalf("backend=%T, want DoctorBackend", backend)
 	}
 	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Provider != providerName || result.Status != "missing" || !strings.Contains(result.Message, "lifecycle=not-implemented") || strings.Contains(result.Message, "VULTR_API_KEY") {
-		t.Fatalf("doctor result=%#v", result)
+	if err == nil || !strings.Contains(err.Error(), "VULTR_API_KEY is required") {
+		t.Fatalf("doctor result=%#v err=%v", result, err)
 	}
 }
