@@ -247,6 +247,35 @@ describe("fleet lease identity and idle", () => {
     ).resolves.toEqual(existing);
   });
 
+  it("finds an existing Hetzner SSH key by identity on a later page", async () => {
+    const existing = {
+      id: 99,
+      name: "older-workspace-key",
+      fingerprint: "fingerprint",
+      public_key: "ssh-ed25519 workspace-test old-comment",
+    };
+    const firstPage = Array.from({ length: 50 }, (_, index) => ({
+      id: index + 1,
+      name: `unrelated-${index}`,
+      fingerprint: `fingerprint-${index}`,
+      public_key: `ssh-ed25519 unrelated-${index}`,
+    }));
+    const responses = [
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: firstPage }),
+      jsonResponse({ ssh_keys: [existing] }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responses.shift() ?? jsonResponse({}, 500)),
+    );
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+
+    await expect(
+      client.ensureSSHKey("crabbox-workspace-new", "ssh-ed25519 workspace-test new-comment"),
+    ).resolves.toEqual(existing);
+  });
+
   it("treats an already-absent Hetzner server as successful cleanup", async () => {
     vi.stubGlobal(
       "fetch",

@@ -287,7 +287,7 @@ export class HetznerClient {
 
   private async listSSHKeys(): Promise<HetznerSSHKey[]> {
     const keys: HetznerSSHKey[] = [];
-    const perPage = 100;
+    const perPage = 50;
     for (let page = 1; page <= 100; page += 1) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- Hetzner SSH key pagination is sequential.
       const response = await this.request<HetznerListSSHKeysResponse>(
