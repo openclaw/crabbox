@@ -503,6 +503,12 @@ Shared prerequisites:
 - outbound network access to provider, GitHub, Tailscale, and artifact APIs that
   the enabled features use.
 
+Choose Cloudflare Workers/Durable Objects or the single-replica Node/PostgreSQL
+runtime. For the container runbook, see
+[Portable Coordinator](features/portable-coordinator.md). Design history,
+production proof, and remaining scale work are tracked in
+[Portable Coordinator Runtime](plan/portable-coordinator.md).
+
 Cloudflare prerequisites:
 
 - a Cloudflare account with Workers and Durable Objects enabled;

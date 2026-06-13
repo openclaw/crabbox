@@ -183,6 +183,8 @@ Provider docs:
 - Shared fleet routes and behavior: `worker/src/fleet.ts`
 - Cloudflare runtime adapter: `worker/src/coordinator-runtime.ts`
 - Node.js/PostgreSQL runtime, HTTP/WebSocket server, and durable jobs: `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`, `worker/node/server.ts`
+- Node request limits, trusted proxy handling, and graceful shutdown: `worker/node/server-support.ts`, `worker/node/server.ts`
+- Direct-provider coordinator registration and automatic WebVNC bridge startup: `internal/cli/coordinator_registration.go`, `internal/cli/coordinator.go`, `internal/cli/webvnc.go`
 - Browser portal lease detail, bridge status, and run log/event pages: `worker/src/portal.ts`, `worker/src/fleet.ts`
 - Usage aggregation, pricing fallback, owner/org limits, and cost guardrails: `worker/src/usage.ts`
 - Worker package scripts and dependencies: `worker/package.json`

@@ -494,6 +494,7 @@ Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment liv
 - **Choose a provider:** [Providers](docs/providers/README.md), [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [GCP](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md), [DigitalOcean](docs/providers/digitalocean.md), [Linode](docs/providers/linode.md), [Hostinger](docs/providers/hostinger.md)
 - **Advanced features:** [Actions hydration](docs/features/actions-hydration.md), [Capsules](docs/features/capsules.md), [Checkpoints](docs/features/checkpoints.md), [Jobs](docs/features/jobs.md), [Pond](docs/features/pond.md)
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)
+- **Integrate infrastructure:** [Bring Your Own Infrastructure](docs/features/bring-your-own-infrastructure.md), [Portable Coordinator](docs/features/portable-coordinator.md), [External Provider](docs/providers/external.md)
 - **Operate it:** [Operations](docs/operations.md), [Observability](docs/observability.md), [Troubleshooting](docs/troubleshooting.md), [Performance](docs/performance.md)
 - **Set it up or audit it:** [Infrastructure](docs/infrastructure.md), [Security](docs/security.md), [Getting Started](docs/getting-started.md), [Source Map](docs/source-map.md)
 - **Changes:** [CHANGELOG.md](CHANGELOG.md)
