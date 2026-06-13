@@ -250,8 +250,14 @@ CRABBOX_TAILSCALE_ENABLED=1
 CRABBOX_TAILSCALE_CLIENT_ID
 CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
-CRABBOX_TAILSCALE_TAGS=tag:crabbox      # must match the OAuth client's allowed tags
+CRABBOX_TAILSCALE_TAGS=tag:crabbox      # requested-tag allowlist/default
 ```
+
+For one tag, assign the same tag to the OAuth client. For multiple tags, either
+request the OAuth client's complete tag set or configure `tagOwners` so an OAuth
+client tag owns every subset tag Crabbox may request. Prefer one dedicated
+deployment-owner tag over broad OAuth permissions. Tailscale rejects unowned subset
+requests even when every tag is present in `CRABBOX_TAILSCALE_TAGS`.
 
 Verify end to end with `crabbox warmup --tailscale --network tailscale`. See
 [Tailscale](features/tailscale.md).

@@ -55,6 +55,7 @@ import {
   renderTailscaleHostname,
   tailscaleAllowed,
   tailscaleDefaultTags,
+  tailscaleTagOwnershipErrorMessage,
   validateTailscaleTags,
 } from "./tailscale";
 import type {
@@ -1774,6 +1775,13 @@ export class FleetCoordinator {
       const message = errorMessage(error);
       if (message.includes("tags not allowed") || message.includes("requires at least one")) {
         return json({ error: "invalid_tailscale_tags", message }, { status: 400 });
+      }
+      const tagOwnershipMessage = tailscaleTagOwnershipErrorMessage(error);
+      if (tagOwnershipMessage) {
+        return json(
+          { error: "invalid_tailscale_tags", message: tagOwnershipMessage },
+          { status: 400 },
+        );
       }
       return json({ error: "tailscale_unavailable", message }, { status: 502 });
     }
