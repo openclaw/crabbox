@@ -224,6 +224,18 @@ func configShowView(cfg Config) map[string]any {
 			"auth":    tokenState(cfg.Cloudflare.Token),
 			"workdir": cfg.Cloudflare.Workdir,
 		},
+		"cloudflareDynamicWorkers": map[string]any{
+			"loaderUrl":          redactedConfigURLWithoutQuery(cfg.CloudflareDynamicWorkers.LoaderURL),
+			"auth":               tokenState(cfg.CloudflareDynamicWorkers.Token),
+			"compatibilityDate":  cfg.CloudflareDynamicWorkers.CompatibilityDate,
+			"compatibilityFlags": cfg.CloudflareDynamicWorkers.CompatibilityFlags,
+			"cacheMode":          cfg.CloudflareDynamicWorkers.CacheMode,
+			"egress":             cfg.CloudflareDynamicWorkers.Egress,
+			"cpuMs":              cfg.CloudflareDynamicWorkers.CPUMs,
+			"subrequests":        cfg.CloudflareDynamicWorkers.Subrequests,
+			"timeoutSecs":        cfg.CloudflareDynamicWorkers.TimeoutSecs,
+			"metadata":           cfg.CloudflareDynamicWorkers.Metadata,
+		},
 		"upstashBox": map[string]any{
 			"baseUrl":   cfg.UpstashBox.BaseURL,
 			"auth":      tokenState(cfg.UpstashBox.APIKey),
@@ -433,6 +445,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
 	fmt.Fprintf(w, "tart image=%s user=%s work_root=%s cpus=%d memory=%d disk=%d\n", cfg.Tart.Image, cfg.Tart.User, cfg.Tart.WorkRoot, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk)
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(cfg.Cloudflare.APIURL, "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
+	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURLWithoutQuery(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
 	fmt.Fprintf(w, "static id=%s name=%s host=%s user=%s port=%s work_root=%s\n", blank(cfg.Static.ID, "-"), blank(cfg.Static.Name, "-"), blank(cfg.Static.Host, "-"), blank(cfg.Static.User, "-"), blank(cfg.Static.Port, "-"), blank(cfg.Static.WorkRoot, "-"))
 	fmt.Fprintf(w, "results junit=%s auto=%t\n", blank(strings.Join(cfg.Results.JUnit, ","), "-"), cfg.Results.Auto)
 	fmt.Fprintf(w, "cache pnpm=%t npm=%t docker=%t git=%t max_gb=%d purge_on_release=%t volumes=%d\n", cfg.Cache.Pnpm, cfg.Cache.Npm, cfg.Cache.Docker, cfg.Cache.Git, cfg.Cache.MaxGB, cfg.Cache.PurgeOnRelease, len(cfg.Cache.Volumes))
@@ -478,6 +491,34 @@ func redactedConfigURL(value string) string {
 	redacted := *u
 	redacted.User = url.User("<redacted>")
 	out := strings.ReplaceAll(redacted.String(), "%3Credacted%3E", "<redacted>")
+	if addedScheme {
+		out = strings.TrimPrefix(out, "https://")
+	}
+	return out
+}
+
+func redactedConfigURLWithoutQuery(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return value
+	}
+	addedScheme := false
+	parseValue := raw
+	if !strings.Contains(parseValue, "://") {
+		parseValue = "https://" + parseValue
+		addedScheme = true
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil || u.Opaque != "" || u.Host == "" {
+		return "<redacted>"
+	}
+	if u.User != nil {
+		u.User = url.User("<redacted>")
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	out := strings.ReplaceAll(u.String(), "%3Credacted%3E", "<redacted>")
 	if addedScheme {
 		out = strings.TrimPrefix(out, "https://")
 	}

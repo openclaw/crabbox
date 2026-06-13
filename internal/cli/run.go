@@ -449,6 +449,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	options := leaseOptionsFromConfig(cfg)
 	scriptRequested := *scriptPath != "" || *scriptStdin
+	var script *RunScriptSpec
 	runReq := RunRequest{
 		Repo:                  repo,
 		ID:                    *leaseIDFlag,
@@ -495,6 +496,13 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		if err := RejectDelegatedSyncOptionsForSpec(backend.Spec(), runReq); err != nil {
 			return err
 		}
+		if scriptRequested && backend.Spec().Features.Has(FeatureModuleRun) {
+			script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
+			if err != nil {
+				return err
+			}
+			runReq.Script = script
+		}
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
@@ -530,7 +538,6 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			registrationCoord = client
 		}
 	}
-	var script *RunScriptSpec
 	if scriptRequested {
 		script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
 		if err != nil {
@@ -2758,7 +2765,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg.Provider = *provider
+	if err := prepareProviderSelection(&cfg, *provider); err != nil {
+		return err
+	}
 	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
 		return err
 	}
@@ -2769,6 +2778,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+		return err
+	}
+	if err := finalizeProviderSelection(&cfg); err != nil {
 		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))

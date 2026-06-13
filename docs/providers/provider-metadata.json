@@ -139,6 +139,20 @@
     "caveat": "Requires Worker deployment and container availability",
     "docs": "cloudflare.md"
   },
+  "cloudflare-dynamic-workers": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Cloudflare Dynamic Worker",
+    "location": "cloud",
+    "ssh": "no",
+    "sync": "provider-owned",
+    "gpu": "no",
+    "lifecycle": "Cloudflare loader Worker",
+    "cleanup": "terminal metadata and local claim removal",
+    "bestFit": "Hosted Worker module execution",
+    "caveat": "No shell, SSH, or filesystem sync; Dynamic Workers must be enabled",
+    "docs": "cloudflare-dynamic-workers.md"
+  },
   "daytona": {
     "status": "built-in",
     "category": "direct-cloud",

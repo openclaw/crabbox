@@ -199,10 +199,10 @@ binaries, and record the client version. The built-in pinned defaults track the
 Islo Tailscale build so both bootstrap paths use the same binary version.
 
 On release, `crabbox stop` attempts a best-effort remote `tailscale logout` before
-provider cleanup when SSH is still reachable. Coordinator cleanup also attempts a
-best-effort Tailscale device delete when the lease record has a `deviceID`; missing
-device ids or Tailscale API failures are recorded in lease metadata without blocking
-provider deletion.
+provider cleanup when SSH is still reachable. Coordinator cleanup does not delete a
+device by an ID posted from the lease client; that metadata is diagnostic, not
+trusted authorization for a privileged tailnet operation. One-off nodes are
+ephemeral and age out in Tailscale if remote logout is unavailable.
 
 If Tailscale rejects a requested subset or unowned tag, the coordinator returns
 `invalid_tailscale_tags` with exact-match/`tagOwners` guidance and preserves the raw

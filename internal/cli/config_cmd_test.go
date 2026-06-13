@@ -228,6 +228,81 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	}
 }
 
+func TestConfigShowRedactsCloudflareDynamicWorkers(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: aws
+cloudflareDynamicWorkers:
+  loaderUrl: https://user:pass@loader.example.test?token=query-secret#fragment-secret
+  token: secret-token
+  compatibilityDate: "2026-06-01"
+  compatibilityFlags: [nodejs_compat]
+  cacheMode: stable
+  egress: blocked
+  cpuMs: 50
+  subrequests: 12
+  timeoutSecs: 30
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if strings.Contains(text, "secret-token") || strings.Contains(text, "user:pass") || strings.Contains(text, "query-secret") || strings.Contains(text, "fragment-secret") {
+		t.Fatalf("config show leaked secret: %q", text)
+	}
+	if !strings.Contains(text, "cloudflare_dynamic_workers loader_url=https://<redacted>@loader.example.test") || !strings.Contains(text, "auth=configured") {
+		t.Fatalf("config show missing dynamic workers redacted details: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		CloudflareDynamicWorkers struct {
+			LoaderURL string `json:"loaderUrl"`
+			Auth      string `json:"auth"`
+		} `json:"cloudflareDynamicWorkers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CloudflareDynamicWorkers.LoaderURL != "https://<redacted>@loader.example.test" || got.CloudflareDynamicWorkers.Auth != "configured" {
+		t.Fatalf("json dynamic workers=%#v", got.CloudflareDynamicWorkers)
+	}
+	if strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "user:pass") || strings.Contains(stdout.String(), "query-secret") || strings.Contains(stdout.String(), "fragment-secret") {
+		t.Fatalf("config show json leaked secret: %q", stdout.String())
+	}
+}
+
+func TestRedactedConfigURLWithoutQueryStripsQueryAndFragmentWithoutUserinfo(t *testing.T) {
+	got := redactedConfigURLWithoutQuery("https://loader.example.test/v1?token=query-secret#fragment-secret")
+	if got != "https://loader.example.test/v1" {
+		t.Fatalf("redacted URL=%q", got)
+	}
+}
+
+func TestRedactedConfigURLWithoutQueryFailsClosedForMalformedURL(t *testing.T) {
+	for _, raw := range []string{
+		"https://loader.example.test/%zz?token=@query-secret",
+		"https://api-token:443#pass@host/%zz",
+	} {
+		got := redactedConfigURLWithoutQuery(raw)
+		if got != "<redacted>" || strings.Contains(got, "query-secret") || strings.Contains(got, "api-token") {
+			t.Fatalf("redacted URL for %q=%q", raw, got)
+		}
+	}
+}
+
 func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

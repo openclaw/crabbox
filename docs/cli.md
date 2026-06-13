@@ -210,9 +210,15 @@ transport to the provider's own API or CLI. For these, SSH-specific options
 (`ssh`, `desktop`, `vnc`, `code`, Actions hydration, `--checksum`, `--sync-only`)
 are unavailable or partly restricted, and sync timing is reported as `delegated`.
 Examples include `blacksmith-testbox`, `azure-dynamic-sessions`, `e2b`, `modal`,
-`islo`, `cloudflare`, `upstash-box`, `tensorlake`, and `wandb`. See
+`islo`, `cloudflare`, `cloudflare-dynamic-workers`, `upstash-box`, `tensorlake`,
+and `wandb`. See
 [providers](features/providers.md) for the full adapter list and which surface
 each one supports.
+
+Module-runtime delegated providers such as `cloudflare-dynamic-workers` run
+Worker module source instead of shell commands. Use `--script <file>` or
+`--script-stdin`; trailing `-- <command>` argv, SSH, sync, ports, VNC, browser,
+code-server, and Actions hydration are not part of that target.
 
 ## Exit codes
 
@@ -562,6 +568,7 @@ CRABBOX_SEMAPHORE_* / SEMAPHORE_*  Semaphore
 CRABBOX_E2B_API_KEY / E2B_*        E2B
 CRABBOX_MODAL_* / MODAL_*          Modal
 CRABBOX_AZURE_DYNAMIC_SESSIONS_*   Azure Dynamic Sessions
+CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_* Cloudflare Dynamic Workers
 CRABBOX_WANDB_API_KEY / WANDB_*    Weights & Biases
 HCLOUD_TOKEN / HETZNER_TOKEN       Hetzner
 DAYTONA_API_KEY / DAYTONA_*        Daytona

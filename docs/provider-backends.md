@@ -115,9 +115,12 @@ can declare that feature in `spec` so `--sync-only` and `--force-sync-large`
 are allowed while the rest stay rejected. The helper rejects checksum sync,
 full resync, local stdout/stderr captures, capture-on-fail, downloads, artifact
 globs, uploaded scripts, env helpers, `--stop-after`, fresh PR checkouts, and
-`--emit-proof` (unless the provider declares `FeatureRunProof`). Do not pretend
-a delegated provider is SSH-like unless it has a stable SSH contract. If
-Crabbox cannot run rsync and remote commands itself, use `DelegatedRunBackend`.
+`--emit-proof` (unless the provider declares `FeatureRunProof`). Providers that
+execute source modules instead of shell commands may declare `FeatureModuleRun`;
+then `--script` and `--script-stdin` are accepted as module source input, while
+trailing shell command argv remains rejected. Do not pretend a delegated
+provider is SSH-like unless it has a stable SSH contract. If Crabbox cannot run
+rsync and remote commands itself, use `DelegatedRunBackend`.
 
 ### Optional interfaces
 
@@ -365,9 +368,12 @@ Pick `Kind` carefully:
 - `ProviderKindSSHLease`: provider returns SSH targets and Crabbox owns sync/run.
 - `ProviderKindDelegatedRun`: provider owns execution and output streaming.
 
-`Targets` should describe what the provider can actually satisfy. Do not list
-`windows`, `macos`, `desktop`, `browser`, or `code` unless the backend supports
-that path end to end.
+`Targets` should describe what the provider can actually satisfy. Use `linux`,
+`macos`, or `windows` only for real operating-system targets. Use
+`worker-runtime` for Worker-isolate or module-runtime providers that execute
+source in a hosted runtime without POSIX shell, SSH, filesystem sync, ports, or
+desktop semantics. Do not list `windows`, `macos`, `desktop`, `browser`, or
+`code` unless the backend supports that path end to end.
 
 Feature flags are concrete capability declarations:
 
@@ -388,6 +394,7 @@ cli.FeatureSnapshot     // "provider-snapshot"
 cli.FeatureCacheVolume  // "cache-volume"
 cli.FeatureRunProof     // "run-proof"
 cli.FeatureRunSession   // "run-session"
+cli.FeatureModuleRun    // "module-run"
 ```
 
 Actions runner hydration is intentionally not a provider feature. It is a core
@@ -413,6 +420,8 @@ Checkpoint-related features are reserved for versioned workspaces:
   for core `crabbox run --emit-proof` rendering.
 - `FeatureRunSession`: delegated proof/session runner that exposes a run session
   handle.
+- `FeatureModuleRun`: delegated provider accepts `--script` or `--script-stdin`
+  as source module input and does not interpret trailing argv as a shell command.
 - `FeatureArchiveSync`: provider syncs the checkout as an uploaded archive rather
   than over rsync.
 - `FeatureURLBridge`: delegated provider can expose a lease's port through the

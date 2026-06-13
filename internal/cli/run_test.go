@@ -22,6 +22,7 @@ func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
 	RegisterProvider(runEnvProfileTestProvider{})
 	RegisterProvider(runPrepareTestProvider{})
+	RegisterProvider(runModuleRuntimeTestProvider{})
 }
 
 type windowsEnvHelperTestProvider struct{}
@@ -190,6 +191,70 @@ func (b runPrepareTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest
 }
 func (b runPrepareTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: b.spec.Name}, nil
+}
+
+type runModuleRuntimeTestProvider struct{}
+
+func (runModuleRuntimeTestProvider) Name() string { return "module-runtime-test" }
+func (runModuleRuntimeTestProvider) Aliases() []string {
+	return nil
+}
+func (runModuleRuntimeTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "module-runtime-test",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetWorkerRuntime}},
+		Features:    FeatureSet{FeatureModuleRun},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (runModuleRuntimeTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (runModuleRuntimeTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p runModuleRuntimeTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return runModuleRuntimeTestBackend{spec: p.Spec()}, nil
+}
+
+type runModuleRuntimeTestBackend struct {
+	spec ProviderSpec
+}
+
+var runModuleRuntimeTestRequests []RunRequest
+
+type countingReader struct {
+	data  string
+	reads int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.data == "" {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func (b runModuleRuntimeTestBackend) Spec() ProviderSpec { return b.spec }
+func (b runModuleRuntimeTestBackend) Warmup(context.Context, WarmupRequest) error {
+	return nil
+}
+func (b runModuleRuntimeTestBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
+	runModuleRuntimeTestRequests = append(runModuleRuntimeTestRequests, req)
+	return RunResult{Provider: b.spec.Name, LeaseID: "mod_test", Slug: "module-runtime-test"}, nil
+}
+func (b runModuleRuntimeTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b runModuleRuntimeTestBackend) Status(context.Context, StatusRequest) (StatusView, error) {
+	return StatusView{}, nil
+}
+func (b runModuleRuntimeTestBackend) Stop(context.Context, StopRequest) error {
+	return nil
 }
 
 func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
@@ -457,6 +522,137 @@ func TestRunCommandRejectsDelegatedScriptStdinBeforeReading(t *testing.T) {
 	}
 	if !strings.Contains(exitErr.Message, "e2b delegates run execution; --script is not supported") {
 		t.Fatalf("message=%q", exitErr.Message)
+	}
+}
+
+func TestRunCommandPassesScriptToModuleDelegatedProvider(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	script := filepath.Join(t.TempDir(), "worker.mjs")
+	if err := os.WriteFile(script, []byte("export default { fetch() { return new Response('ok') } }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--script", script,
+	})
+	if err != nil {
+		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
+	}
+	if len(runModuleRuntimeTestRequests) != 1 {
+		t.Fatalf("run requests=%#v, want one", runModuleRuntimeTestRequests)
+	}
+	req := runModuleRuntimeTestRequests[0]
+	if !req.ScriptRequested || req.Script == nil {
+		t.Fatalf("script not loaded in request: %#v", req)
+	}
+	if req.Script.Source != script || string(req.Script.Data) != "export default { fetch() { return new Response('ok') } }\n" {
+		t.Fatalf("script=%#v", req.Script)
+	}
+	if len(req.Command) != 0 {
+		t.Fatalf("command=%v, want none", req.Command)
+	}
+}
+
+func TestRunCommandPassesScriptStdinToModuleDelegatedProvider(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  strings.NewReader("export default { fetch() { return new Response('stdin') } }\n"),
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--script-stdin",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
+	}
+	if len(runModuleRuntimeTestRequests) != 1 {
+		t.Fatalf("run requests=%#v, want one", runModuleRuntimeTestRequests)
+	}
+	req := runModuleRuntimeTestRequests[0]
+	if req.Script == nil || req.Script.Source != "stdin" || string(req.Script.Data) != "export default { fetch() { return new Response('stdin') } }\n" {
+		t.Fatalf("script=%#v", req.Script)
+	}
+}
+
+func TestRunCommandRejectsModuleDelegatedTrailingCommand(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--",
+		"node",
+		"worker.mjs",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; trailing shell commands are not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
+	}
+}
+
+func TestRunCommandRejectsModuleDelegatedScriptStdinTrailingCommandBeforeReading(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	stdin := &countingReader{data: "export default {}"}
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  stdin,
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--script-stdin",
+		"--",
+		"echo",
+		"nope",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; trailing shell commands are not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if stdin.reads != 0 {
+		t.Fatalf("stdin was read %d times before delegated option validation", stdin.reads)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
+	}
+}
+
+func TestRunCommandRejectsModuleDelegatedShellBeforeReadingScriptStdin(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	stdin := &countingReader{data: "export default {}"}
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  stdin,
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--shell",
+		"--script-stdin",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; --shell is not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if stdin.reads != 0 {
+		t.Fatalf("stdin was read %d times before delegated option validation", stdin.reads)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
 	}
 }
 

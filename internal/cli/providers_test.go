@@ -15,6 +15,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var digitalOcean *providerMatrixEntry
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
+	var moduleRuntime *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
 			aws = &entries[i]
@@ -30,6 +31,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "linode" {
 			linode = &entries[i]
+		}
+		if entries[i].Provider == "module-runtime-test" {
+			moduleRuntime = &entries[i]
 		}
 	}
 	if aws == nil {
@@ -82,6 +86,15 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if !containsString(linode.Targets, targetLinux) {
 		t.Fatalf("linode targets=%v", linode.Targets)
 	}
+	if moduleRuntime == nil {
+		t.Fatal("module-runtime-test provider not found")
+	}
+	if moduleRuntime.Kind != ProviderKindDelegatedRun || !containsString(moduleRuntime.Targets, targetWorkerRuntime) {
+		t.Fatalf("module-runtime-test kind/targets=%q/%v", moduleRuntime.Kind, moduleRuntime.Targets)
+	}
+	if !containsFeature(moduleRuntime.Features, FeatureModuleRun) {
+		t.Fatalf("module-runtime-test features=%v missing %s", moduleRuntime.Features, FeatureModuleRun)
+	}
 	if nvidiaBrev.Kind != ProviderKindSSHLease || nvidiaBrev.Family != "nvidia-brev" || nvidiaBrev.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("nvidia-brev kind/family/coordinator=%q/%q/%q", nvidiaBrev.Kind, nvidiaBrev.Family, nvidiaBrev.Coordinator)
 	}
@@ -127,6 +140,9 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers output missing %q:\n%s", want, text)
 		}
+	}
+	if !strings.Contains(text, "module-runtime-test\n") || !strings.Contains(text, "  targets: worker-runtime\n") || !strings.Contains(text, "  features: module-run\n") {
+		t.Fatalf("providers output missing module runtime contract:\n%s", text)
 	}
 	if !strings.Contains(text, "incus\n") {
 		t.Fatalf("providers output missing incus:\n%s", text)

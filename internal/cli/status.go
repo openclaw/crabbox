@@ -135,7 +135,7 @@ func statusWaitTerminalError(id string, state statusView) error {
 
 func statusTerminalState(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "deleting", "expired", "failed", "released", "stopped", "stopped_with_code", "terminated":
+	case "deleting", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated":
 		return true
 	default:
 		return false

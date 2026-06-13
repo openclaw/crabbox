@@ -60,7 +60,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 51 providers (31 SSH lease, 19 delegated run, 1 service control).
+Current built-in surface: 52 providers (31 SSH lease, 20 delegated run, 1 service control).
 
 Access terms:
 
@@ -80,6 +80,7 @@ Access terms:
 | [azure-dynamic-sessions](azure-dynamic-sessions.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Azure Container Apps Dynamic Session | `cloud`; GPU: no | Azure session pool; provider session expiry | Short delegated container sessions in Azure | No Crabbox-managed SSH lease |
 | [blacksmith-testbox](blacksmith-testbox.md) (`blacksmith`) | built-in; `delegated-run` · ci-proof-runner | No SSH; `provider-owned` · direct only; features: `cache-volume`, `run-proof`, `run-session`, `run-artifacts` | `linux`; Blacksmith Testbox runner | `provider-managed`; GPU: no | Blacksmith; provider session cleanup | CI reproduction with proof and reusable sessions | Execution and artifacts follow the Testbox contract |
 | [cloudflare](cloudflare.md) (`cf`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; Cloudflare Container | `cloud`; GPU: no | Cloudflare Worker; container delete | Fast delegated Linux container execution | Requires Worker deployment and container availability |
+| [cloudflare-dynamic-workers](cloudflare-dynamic-workers.md) (`cf-dynamic`, `cfdw`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `cleanup`, `module-run`, `run-session` | `worker-runtime`; Cloudflare Dynamic Worker | `cloud`; GPU: no | Cloudflare loader Worker; terminal metadata and local claim removal | Hosted Worker module execution | No shell, SSH, or filesystem sync; Dynamic Workers must be enabled |
 | [daytona](daytona.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `archive-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Daytona sandbox | `provider-managed`; GPU: unknown | Daytona; sandbox delete | Managed development sandbox with delegated archive sync and execution | SSH access is short-lived; run and sync use Daytona toolbox APIs |
 | [digitalocean](digitalocean.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; DigitalOcean Droplet | `cloud`; GPU: optional | Crabbox; Droplet and key delete | Simple direct Linux VM | Direct-only; no coordinator scheduling |
 | [docker-sandbox](docker-sandbox.md) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Docker Sandbox | `local`; GPU: no | Docker sbx CLI; sandbox delete | Local delegated sandbox with reusable session handles | Requires the standalone sbx CLI |
@@ -130,6 +131,10 @@ Access terms:
   (`provider: azure`) and the delegated `azure-dynamic-sessions` provider
   (Azure Container Apps dynamic sessions). They share the `azure` family but are
   distinct adapters.
+- The Cloudflare family ships two delegated backends: `cloudflare` for
+  Cloudflare Containers and Linux commands, and `cloudflare-dynamic-workers` for
+  Worker-runtime module execution. They are separate providers with separate
+  runner configs and token env vars.
 - Tensorlake is Crabbox's Firecracker-backed delegated provider; Crabbox does
   not provision raw Firecracker instances directly.
 - Docker Sandbox is a delegated-run provider driven by the standalone `sbx`

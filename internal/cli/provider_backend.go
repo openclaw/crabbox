@@ -336,6 +336,7 @@ const (
 	FeatureRunProof     Feature = "run-proof"
 	FeatureRunSession   Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeatureModuleRun    Feature = "module-run"
 	FeaturePauseResume  Feature = "pause-resume"
 )
 
@@ -795,10 +796,17 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	}
 	after, err := ProviderFor(cfg.Provider)
 	if err != nil || after.Name() == before {
+		if err == nil {
+			applyCloudflareDynamicWorkersRepositoryCaps(cfg)
+		}
 		return err
 	}
 	cfg.Provider = after.Name()
-	return after.ApplyFlags(cfg, fs, values[after.Name()])
+	if err := after.ApplyFlags(cfg, fs, values[after.Name()]); err != nil {
+		return err
+	}
+	applyCloudflareDynamicWorkersRepositoryCaps(cfg)
+	return nil
 }
 
 func validateProviderConfig(cfg Config) error {
@@ -906,8 +914,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Provider = provider.Name()
-	backend, err := provider.Configure(cfg, rt)
+	backend, err := configureProviderBackend(provider, &cfg, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -919,6 +926,12 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 		return &coordinatorLeaseBackend{spec: provider.Spec(), cfg: cfg, direct: ssh, coord: coord, rt: rt}, nil
 	}
 	return backend, nil
+}
+
+func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backend, error) {
+	cfg.Provider = provider.Name()
+	applySingleProviderTargetDefault(cfg)
+	return provider.Configure(*cfg, rt)
 }
 
 func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
@@ -988,6 +1001,7 @@ func featureSetHas(features FeatureSet, feature Feature) bool {
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
 	provider := spec.Name
 	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
+	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)
 	if req.SyncOnly && !archiveSync {
 		return exit(2, "%s delegates sync; --sync-only is not supported", provider)
 	}
@@ -1028,8 +1042,14 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.StopAfter != "" {
 		return exit(2, "%s delegates run execution; --stop-after is not supported", provider)
 	}
-	if req.Script != nil || req.ScriptRequested {
+	if (req.Script != nil || req.ScriptRequested) && !moduleRun {
 		return exit(2, "%s delegates run execution; --script is not supported", provider)
+	}
+	if moduleRun && len(req.Command) > 0 {
+		return exit(2, "%s executes module source; trailing shell commands are not supported", provider)
+	}
+	if moduleRun && req.ShellMode {
+		return exit(2, "%s executes module source; --shell is not supported", provider)
 	}
 	if !req.FreshPR.Empty() {
 		return exit(2, "%s delegates sync; --fresh-pr is not supported", provider)

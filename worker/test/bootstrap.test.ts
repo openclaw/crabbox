@@ -396,7 +396,9 @@ describe("cloud-init bootstrap", () => {
       tailscaleExitNodeAllowLanAccess: true,
     });
     expect(got).toContain("https://tailscale.com/install.sh");
-    expect(got).toContain("/usr/local/bin/crabbox-tailscale-logout");
+    expect(got).toContain("systemctl disable crabbox-tailscale-logout.service");
+    expect(got).not.toContain("tailscale logout");
+    expect(got).not.toContain("WantedBy=halt.target reboot.target shutdown.target");
     expect(got).toContain("install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox");
     expect(got).toContain(
       "printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
