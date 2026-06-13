@@ -27,11 +27,19 @@ type lifecycleFakeClient struct {
 	uploads       []string
 	logs          ProcessLogs
 	exitCode      int
+	omitExitCode  bool
+	processStatus string
 	getErr        error
 	deleteErr     error
 	updateErr     error
+	updateEmptyID bool
 	processErr    error
 	nextSandboxID string
+	createStatus  string
+	listPages     map[string]ListSandboxesResult
+	listReqs      []ListSandboxesRequest
+	stopped       []string
+	stopDeadline  bool
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
@@ -53,7 +61,11 @@ func (f *lifecycleFakeClient) CreateSandbox(_ context.Context, req CreateSandbox
 	if id == "" {
 		id = "sbx_1"
 	}
-	sb := Sandbox{ID: id, Name: req.Name, Status: "running", Region: req.Region, Image: req.Image, Labels: cloneLabels(req.Labels)}
+	status := f.createStatus
+	if status == "" {
+		status = "running"
+	}
+	sb := Sandbox{ID: id, Name: req.Name, Status: status, Region: req.Region, Image: req.Image, Labels: cloneLabels(req.Labels)}
 	f.sandboxes[id] = sb
 	return sb, nil
 }
@@ -67,7 +79,11 @@ func (f *lifecycleFakeClient) GetSandbox(_ context.Context, id string) (Sandbox,
 	}
 	return sb, nil
 }
-func (f *lifecycleFakeClient) ListSandboxes(context.Context, ListSandboxesRequest) (ListSandboxesResult, error) {
+func (f *lifecycleFakeClient) ListSandboxes(_ context.Context, req ListSandboxesRequest) (ListSandboxesResult, error) {
+	f.listReqs = append(f.listReqs, req)
+	if f.listPages != nil {
+		return f.listPages[req.Cursor], nil
+	}
 	out := make([]Sandbox, 0, len(f.sandboxes))
 	for _, sb := range f.sandboxes {
 		out = append(out, sb)
@@ -82,6 +98,9 @@ func (f *lifecycleFakeClient) UpdateSandboxLabels(_ context.Context, id string, 
 	sb := f.sandboxes[id]
 	sb.Labels = cloneLabels(labels)
 	f.sandboxes[id] = sb
+	if f.updateEmptyID {
+		sb.ID = ""
+	}
 	return sb, nil
 }
 func (f *lifecycleFakeClient) DeleteSandbox(_ context.Context, id string) error {
@@ -97,15 +116,19 @@ func (f *lifecycleFakeClient) ExecuteProcess(_ context.Context, _ string, req Ex
 		return Process{}, f.processErr
 	}
 	f.execReqs = append(f.execReqs, req)
-	return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(f.exitCode)}, nil
+	return Process{ID: "proc_1", Status: f.effectiveProcessStatus(), ExitCode: f.processExitCode()}, nil
 }
 func (f *lifecycleFakeClient) GetProcess(context.Context, string, string) (Process, error) {
-	return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(f.exitCode)}, nil
+	return Process{ID: "proc_1", Status: f.effectiveProcessStatus(), ExitCode: f.processExitCode()}, nil
 }
 func (f *lifecycleFakeClient) GetProcessLogs(context.Context, string, string) (ProcessLogs, error) {
 	return f.logs, nil
 }
-func (f *lifecycleFakeClient) StopProcess(context.Context, string, string) error { return nil }
+func (f *lifecycleFakeClient) StopProcess(ctx context.Context, _ string, process string) error {
+	_, f.stopDeadline = ctx.Deadline()
+	f.stopped = append(f.stopped, process)
+	return nil
+}
 func (f *lifecycleFakeClient) WriteFile(context.Context, string, WriteFileRequest) error {
 	return nil
 }
@@ -116,6 +139,20 @@ func (f *lifecycleFakeClient) UploadFile(_ context.Context, _ string, remotePath
 }
 func (f *lifecycleFakeClient) GetDirectoryTree(context.Context, string, string) (DirectoryTree, error) {
 	return DirectoryTree{}, nil
+}
+
+func (f *lifecycleFakeClient) processExitCode() *int {
+	if f.omitExitCode {
+		return nil
+	}
+	return intPtr(f.exitCode)
+}
+
+func (f *lifecycleFakeClient) effectiveProcessStatus() string {
+	if f.processStatus != "" {
+		return f.processStatus
+	}
+	return "completed"
 }
 
 func TestWarmupCreatesClaimAndCompletesRemoteLabels(t *testing.T) {
@@ -148,6 +185,40 @@ func TestWarmupCreatesClaimAndCompletesRemoteLabels(t *testing.T) {
 	}
 }
 
+func TestWarmupPreservesCreateIDWhenLabelUpdateOmitsID(t *testing.T) {
+	backend, fake, _, stdout, _ := newLifecycleBackend(t)
+	fake.updateEmptyID = true
+	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "empty-update"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%#v", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != leasePrefix+"sbx_1" {
+		t.Fatalf("claim=%#v err=%v", claim, err)
+	}
+	if !strings.Contains(stdout.String(), "sandbox=sbx_1") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestBlaxelWorkdirRejectsBroadPaths(t *testing.T) {
+	for _, workdir := range []string{"/", "/tmp", "/workspace", "/home", "/root", "/usr", "/var"} {
+		cfg := Config{Blaxel: BlaxelConfig{Workdir: workdir}}
+		if _, err := blaxelWorkdir(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
+			t.Fatalf("blaxelWorkdir(%q) err=%v, want too broad", workdir, err)
+		}
+		if err := validateBlaxelConfig(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
+			t.Fatalf("validateBlaxelConfig(%q) err=%v, want too broad", workdir, err)
+		}
+	}
+	cfg := Config{Blaxel: BlaxelConfig{Workdir: " /workspace/crabbox/../project "}}
+	if got, err := blaxelWorkdir(cfg); err != nil || got != "/workspace/project" {
+		t.Fatalf("blaxelWorkdir cleaned=%q err=%v", got, err)
+	}
+}
+
 func TestRunForwardsEnvInProcessBodyAndReturnsRemoteExit(t *testing.T) {
 	backend, fake, _, stdout, stderr := newLifecycleBackend(t)
 	result, err := backend.Run(context.Background(), RunRequest{
@@ -163,6 +234,15 @@ func TestRunForwardsEnvInProcessBodyAndReturnsRemoteExit(t *testing.T) {
 	}
 	if result.ExitCode != 0 || result.Provider != providerName || result.LeaseID != leasePrefix+"sbx_1" {
 		t.Fatalf("result=%#v", result)
+	}
+	if result.Session == nil ||
+		result.Session.Provider != providerName ||
+		result.Session.LeaseID != leasePrefix+"sbx_1" ||
+		result.Session.Slug == "" ||
+		result.Session.Reused ||
+		!result.Session.Kept ||
+		result.Session.CleanupCommand != "crabbox stop --provider blaxel "+leasePrefix+"sbx_1" {
+		t.Fatalf("session=%#v", result.Session)
 	}
 	if len(fake.execReqs) < 2 {
 		t.Fatalf("execReqs=%#v, want ensure workspace and command", fake.execReqs)
@@ -181,7 +261,7 @@ func TestRunForwardsEnvInProcessBodyAndReturnsRemoteExit(t *testing.T) {
 
 func TestRunSyncOnlyUploadsArchiveAndSkipsUserCommand(t *testing.T) {
 	backend, fake, _, stdout, _ := newLifecycleBackend(t)
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:     testRepo(t),
 		SyncOnly: true,
 		Keep:     true,
@@ -193,6 +273,9 @@ func TestRunSyncOnlyUploadsArchiveAndSkipsUserCommand(t *testing.T) {
 	if len(fake.uploads) != 1 {
 		t.Fatalf("uploads=%#v", fake.uploads)
 	}
+	if result.Session == nil || result.Session.LeaseID != leasePrefix+"sbx_1" || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
 	if got := len(fake.execReqs); got < 2 {
 		t.Fatalf("execReqs=%#v, want sync shell helpers", fake.execReqs)
 	}
@@ -203,6 +286,67 @@ func TestRunSyncOnlyUploadsArchiveAndSkipsUserCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "synced /workspace/crabbox") {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestExecCommandReturnsWhenTerminalProcessOmitsExitCode(t *testing.T) {
+	backend, fake, _, _, _ := newLifecycleBackend(t)
+	fake.omitExitCode = true
+	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"true"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "without an exit code") {
+		t.Fatalf("execCommand code=%d err=%v, want missing exit code error", code, err)
+	}
+	if code != 1 {
+		t.Fatalf("code=%d, want 1", code)
+	}
+}
+
+func TestWaitProcessTreatsStoppedAsTerminal(t *testing.T) {
+	backend, fake, _, _, _ := newLifecycleBackend(t)
+	fake.processStatus = "stopped"
+	got, err := backend.waitProcess(context.Background(), fake, "sbx_1", Process{ID: "proc_1", Status: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "stopped" {
+		t.Fatalf("status=%q", got.Status)
+	}
+	if len(fake.stopped) != 0 {
+		t.Fatalf("stopped=%#v", fake.stopped)
+	}
+}
+
+func TestExecCommandEnforcesLocalProcessWaitTimeout(t *testing.T) {
+	backend, fake, _, _, _ := newLifecycleBackend(t)
+	backend.cfg.Blaxel.ExecTimeoutSecs = 1
+	fake.processStatus = "running"
+	fake.omitExitCode = true
+	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"sleep", "600"}, nil)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("execCommand code=%d err=%v, want deadline exceeded", code, err)
+	}
+	if len(fake.stopped) != 1 || fake.stopped[0] != "proc_1" {
+		t.Fatalf("stopped=%#v", fake.stopped)
+	}
+	if !fake.stopDeadline {
+		t.Fatal("StopProcess context had no deadline")
+	}
+}
+
+func TestBuildCommandPreservesExplicitShellScript(t *testing.T) {
+	got, err := buildCommand([]string{"python3 --version && pytest"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, "\x00") != "bash\x00-lc\x00python3 --version && pytest" {
+		t.Fatalf("shell command=%#v", got)
+	}
+	auto, err := buildCommand([]string{"KEY=value", "pytest"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(auto, "\x00") != "bash\x00-lc\x00KEY='value' 'pytest'" {
+		t.Fatalf("auto-shell command=%#v", auto)
 	}
 }
 
@@ -351,6 +495,70 @@ func TestCreateCleanupFailureWritesRecoveryClaimAndCleanupDeletesMatch(t *testin
 	}
 	if claim, err := readLeaseClaim(recovery.LeaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("recovery claim=%#v err=%v, want removed", claim, err)
+	}
+}
+
+func TestRecoveryCleanupPaginatesBeforeRemovingRecoveryClaim(t *testing.T) {
+	backend, fake, _, _, _ := newLifecycleBackend(t)
+	scope, err := newBlaxelClaimScope(fake.baseURL, backend.cfg.Blaxel.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery := LeaseClaim{
+		LeaseID:            recoveryPrefix + "abc123",
+		Provider:           providerName,
+		ProviderScope:      scope,
+		ClaimedAt:          time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339),
+		IdleTimeoutSeconds: 1,
+	}
+	writeClaimForTest(t, recovery)
+	fake.listPages = map[string]ListSandboxesResult{
+		"": {Sandboxes: []Sandbox{{ID: "foreign", Labels: map[string]string{"crabbox": "true"}}}, Next: "page-2"},
+		"page-2": {Sandboxes: []Sandbox{{
+			ID: "sbx_2",
+			Labels: map[string]string{
+				"crabbox":          "true",
+				"crabbox.provider": providerName,
+				blaxelClaimKey:     recovery.ProviderScope,
+			},
+		}}},
+	}
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.listReqs) != 2 || fake.listReqs[0].Limit != 200 || fake.listReqs[1].Cursor != "page-2" {
+		t.Fatalf("listReqs=%#v", fake.listReqs)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "sbx_2" {
+		t.Fatalf("deleted=%#v", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(recovery.LeaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("recovery claim=%#v err=%v, want removed", claim, err)
+	}
+}
+
+func TestStandbySandboxStateIsReady(t *testing.T) {
+	if !isReadyState("STANDBY") {
+		t.Fatal("standby sandbox should be ready because Blaxel resumes it on use")
+	}
+}
+
+func TestCreateReadinessFailureDeletesOneShotSandboxAndClaim(t *testing.T) {
+	backend, fake, _, _, _ := newLifecycleBackend(t)
+	fake.createStatus = "failed"
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    testRepo(t),
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "entered terminal state") {
+		t.Fatalf("Run err=%v, want readiness failure", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "sbx_1" {
+		t.Fatalf("deleted=%#v", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
+		t.Fatalf("claim=%#v err=%v, want removed", claim, err)
 	}
 }
 

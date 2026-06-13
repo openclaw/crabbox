@@ -26,8 +26,8 @@ func TestProviderSpecAndRegistration(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("Targets=%#v", spec.Targets)
 	}
-	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
-		t.Fatalf("Features=%#v, want archive-sync and cleanup", spec.Features)
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) || !spec.Features.Has(core.FeatureRunSession) {
+		t.Fatalf("Features=%#v, want archive-sync, cleanup, and run-session", spec.Features)
 	}
 	if spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("Coordinator=%q want never", spec.Coordinator)

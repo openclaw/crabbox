@@ -240,7 +240,7 @@ func TestBlaxelRegistersCanonicalWithoutAliases(t *testing.T) {
 	if spec.Family != "blaxel" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("blaxel spec=%#v", spec)
 	}
-	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) || !spec.Features.Has(core.FeatureRunSession) {
 		t.Fatalf("blaxel features=%#v", spec.Features)
 	}
 }

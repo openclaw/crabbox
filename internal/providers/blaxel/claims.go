@@ -78,7 +78,7 @@ func newSandboxName(repo Repo) string {
 	}
 	base = strings.TrimPrefix(base, strings.TrimSuffix(namePrefix, "-")+"-")
 	const suffixLen = 6
-	maxBase := 63 - len(namePrefix) - 1 - suffixLen
+	maxBase := sandboxNameMaxLen - len(namePrefix) - 1 - suffixLen
 	if len(base) > maxBase {
 		base = strings.Trim(base[:maxBase], "-")
 	}

@@ -21,6 +21,7 @@ type DoctorCheck = core.DoctorCheck
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -47,6 +48,7 @@ const (
 	leasePrefix       = "blx_"
 	recoveryPrefix    = "blxr_"
 	namePrefix        = "crabbox-"
+	sandboxNameMaxLen = 49
 
 	blaxelCleanupTimeout = 15 * time.Second
 	blaxelReadyTimeout   = 5 * time.Minute
