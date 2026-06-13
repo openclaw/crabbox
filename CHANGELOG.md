@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed Cloudflare container runs to fail when streamed stdout or stderr cannot be written instead of silently reporting success after output loss.
 - Fixed Proxmox bridge readiness on PVE 8 by falling back to its compatible local-bridge and SDN-vnet inventory filter.
 
 ## 0.29.0 - 2026-06-12

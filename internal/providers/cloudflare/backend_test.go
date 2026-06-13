@@ -592,6 +592,61 @@ func TestCloudflareClientExecStream(t *testing.T) {
 	}
 }
 
+func TestCloudflareClientExecStreamPropagatesWriterErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     string
+		stdout    io.Writer
+		stderr    io.Writer
+		want      string
+		writerErr string
+	}{
+		{
+			name:      "stdout",
+			event:     `{"type":"stdout","data":"hello"}`,
+			stdout:    cloudflareErrWriter("stdout closed"),
+			stderr:    io.Discard,
+			want:      "write cloudflare stdout",
+			writerErr: "stdout closed",
+		},
+		{
+			name:      "stderr",
+			event:     `{"type":"stderr","data":"warn"}`,
+			stdout:    io.Discard,
+			stderr:    cloudflareErrWriter("stderr closed"),
+			want:      "write cloudflare stderr",
+			writerErr: "stderr closed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				_, _ = io.WriteString(w, tc.event+"\n")
+			}))
+			defer server.Close()
+
+			cfg := Config{}
+			cfg.Cloudflare.APIURL = server.URL
+			cfg.Cloudflare.Token = "test-token"
+			client, err := newCloudflareClient(cfg, Runtime{HTTP: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, tc.stdout, tc.stderr)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.writerErr) {
+				t.Fatalf("execStream error = %v, want %q and %q", err, tc.want, tc.writerErr)
+			}
+		})
+	}
+}
+
+type cloudflareErrWriter string
+
+func (w cloudflareErrWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("%s", string(w))
+}
+
 func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 	execCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
