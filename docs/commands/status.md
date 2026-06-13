@@ -27,6 +27,8 @@ addition to the Crabbox lease ID and local slug:
   normalized status view from `blacksmith testbox list --all`.
 - `namespace-devbox` — accepts a lease ID, local slug, or existing Devbox name;
   prepares SSH through the Namespace CLI.
+- `namespace-instance` — accepts a lease ID, local slug, or Compute instance ID;
+  prepares SSH through `nsc proxy`.
 - `exe-dev` — accepts a lease ID, local slug, or exe.dev VM name; resolves the
   VM through `ssh exe.dev ls`.
 - `semaphore` — resolves local claims and Semaphore job state through the

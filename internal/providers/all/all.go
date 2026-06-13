@@ -32,6 +32,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/multipass"
 	_ "github.com/openclaw/crabbox/internal/providers/mxc"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
+	_ "github.com/openclaw/crabbox/internal/providers/namespaceinstance"
 	_ "github.com/openclaw/crabbox/internal/providers/opencomputer"
 	_ "github.com/openclaw/crabbox/internal/providers/opensandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"

@@ -38,6 +38,8 @@ What cleanup does depends on the selected provider:
   or cancel Hostinger subscriptions.
 - **`namespace-devbox`** removes only Crabbox-owned local Namespace SSH files;
   it does not delete remote Devboxes.
+- **`namespace-instance`** destroys only Namespace Compute instances carrying
+  Crabbox ownership labels and removes claims for instances already gone.
 - Providers that have nothing to sweep return an error rather than acting. For
   example `provider=ssh` (static / bring-your-own hosts) reports:
 

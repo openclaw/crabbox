@@ -32,6 +32,8 @@ Crabbox lease ID and local slug:
   its local claim and SSH files for reuse. Set `namespace.deleteOnRelease` (or
   pass `--namespace-delete-on-release`) to delete the Devbox and local SSH
   files instead.
+- `namespace-instance` — accepts a lease ID, local slug, or Namespace instance
+  ID and destroys the Compute instance with `nsc destroy --force`.
 - `morph` — pauses the instance by default and retains its local claim and SSH
   key for reuse. Set `morph.deleteOnRelease` (or pass
   `--morph-delete-on-release`) to delete the instance and key instead.
