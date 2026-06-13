@@ -600,6 +600,34 @@ func TestRunStopCommandIncludesProviderRoutingFlags(t *testing.T) {
 	}
 }
 
+func TestRunStopCommandIncludesNamespaceInstanceRoutingFlags(t *testing.T) {
+	got := runStopCommand(Config{
+		Provider: "namespace-instance",
+		TargetOS: targetLinux,
+		NamespaceInstance: NamespaceInstanceConfig{
+			CLIPath:  "/opt/Namespace CLI/nsc",
+			Endpoint: "https://user:secret@api.example.test/path",
+			Region:   "eu west",
+			Keychain: "ci",
+		},
+	}, "cbx_123")
+	for _, want := range []string{
+		"--provider namespace-instance",
+		"--namespace-instance-cli '/opt/Namespace CLI/nsc'",
+		"--namespace-instance-endpoint https://api.example.test/path",
+		"--namespace-instance-region 'eu west'",
+		"--namespace-instance-keychain ci",
+		"--id cbx_123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stop command missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "secret") || strings.Contains(got, "user") {
+		t.Fatalf("stop command leaked endpoint credentials:\n%s", got)
+	}
+}
+
 func TestRunStopCommandIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
 	got := runStopCommand(Config{
 		Provider: "xcp-ng",

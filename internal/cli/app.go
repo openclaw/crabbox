@@ -34,6 +34,8 @@ func (a App) Run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "__namespace-instance-proxy":
+		return a.namespaceInstanceProxy(ctx, args[1:])
 	case "-h", "--help":
 		a.printHelp()
 		return nil

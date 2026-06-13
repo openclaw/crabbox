@@ -433,6 +433,20 @@
     "caveat": "Uses the devbox product, not Namespace Compute instances",
     "docs": "namespace-devbox.md"
   },
+  "namespace-instance": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Namespace Compute instance",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "unknown",
+    "lifecycle": "Namespace nsc CLI",
+    "cleanup": "instance delete",
+    "bestFit": "Short-lived managed Linux compute over SSH",
+    "caveat": "Requires the nsc CLI and direct provider credentials",
+    "docs": "namespace-instance.md"
+  },
   "opencomputer": {
     "status": "built-in",
     "category": "delegated-sandbox",

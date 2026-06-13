@@ -146,6 +146,7 @@ Pick whichever matches your intent:
   [Blacksmith Testbox](providers/blacksmith-testbox.md),
   [KubeVirt](providers/kubevirt.md), [External](providers/external.md),
   [Namespace Devbox](providers/namespace-devbox.md),
+  [Namespace Compute Instance](providers/namespace-instance.md),
   [Semaphore](providers/semaphore.md), [Sprites](providers/sprites.md),
   [Tenki](providers/tenki.md),
   [Daytona](providers/daytona.md), [Islo](providers/islo.md),

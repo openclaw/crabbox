@@ -1663,6 +1663,19 @@ func runStopCommand(cfg Config, id string) string {
 
 func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []string {
 	switch normalizeProviderName(cfg.Provider) {
+	case "namespace-instance":
+		if strings.TrimSpace(cfg.NamespaceInstance.CLIPath) != "" && cfg.NamespaceInstance.CLIPath != "nsc" {
+			args = append(args, "--namespace-instance-cli", cfg.NamespaceInstance.CLIPath)
+		}
+		if strings.TrimSpace(cfg.NamespaceInstance.Endpoint) != "" {
+			args = append(args, "--namespace-instance-endpoint", routingSafeURL(cfg.NamespaceInstance.Endpoint))
+		}
+		if strings.TrimSpace(cfg.NamespaceInstance.Region) != "" {
+			args = append(args, "--namespace-instance-region", cfg.NamespaceInstance.Region)
+		}
+		if strings.TrimSpace(cfg.NamespaceInstance.Keychain) != "" {
+			args = append(args, "--namespace-instance-keychain", cfg.NamespaceInstance.Keychain)
+		}
 	case "proxmox":
 		if strings.TrimSpace(cfg.Proxmox.APIURL) != "" {
 			args = append(args, "--proxmox-api-url", cfg.Proxmox.APIURL)
