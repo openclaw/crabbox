@@ -773,57 +773,140 @@ func rsyncLocalPathForGOOS(goos, path string) string {
 // into WSL /tmp with correct permissions, and paths within args are
 // converted to WSL mount paths.
 func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *exec.Cmd {
-	if _, err := exec.LookPath("wsl"); err != nil {
-		// No WSL — fall back to native rsync with MSYS2 workarounds.
-		cmd := exec.CommandContext(ctx, "rsync", args...)
-		cmd.Env = append(os.Environ(), "MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning")
-		return cmd
+	wslExe, err := exec.LookPath("wsl.exe")
+	if err != nil {
+		wslExe, err = exec.LookPath("wsl")
 	}
+	// Fall back to native rsync when WSL is absent or lacks native tools.
+	if err != nil || !windowsWSLHasNativeRsyncSSH(ctx, wslExe) {
+		return windowsNativeRsyncCommand(ctx, args)
+	}
+	mountRoot := windowsWSLMountRoot(ctx, wslExe)
 
 	// Prepare WSL key: copy with correct permissions.
 	wslKey := ""
 	knownHostsPath := ""
+	wslKnownHosts := ""
 	if target.Key != "" {
 		wslKey = "/tmp/crabbox-wsl-" + filepath.Base(filepath.Dir(target.Key))
-		knownHostsPath = filepath.Join(filepath.Dir(target.Key), "known_hosts")
-		cpCmd := exec.Command("wsl", "bash", "-c",
-			fmt.Sprintf("mkdir -p /tmp && cp %s %s 2>/dev/null; chmod 600 %s 2>/dev/null",
-				shellQuote(windowsToWSLMountPath(target.Key)),
-				shellQuote(wslKey),
-				shellQuote(wslKey)))
-		_ = cpCmd.Run()
+		knownHostsPath = knownHostsFile(target)
+		if keyData, err := os.ReadFile(windowsHostPath(target.Key)); err == nil {
+			cpCmd := exec.CommandContext(ctx, wslExe, "sh", "-c",
+				fmt.Sprintf("umask 077; cat > %s && chmod 600 %s",
+					shellQuote(wslKey),
+					shellQuote(wslKey)))
+			cpCmd.Stdin = bytes.NewReader(keyData)
+			if err := cpCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: copy SSH key into WSL for rsync failed: %v\n", err)
+				return windowsNativeRsyncCommand(ctx, args)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: read SSH key for WSL rsync failed: %s: %v\n", target.Key, err)
+			return windowsNativeRsyncCommand(ctx, args)
+		}
+		if knownHostsData, err := os.ReadFile(windowsHostPath(knownHostsPath)); err == nil {
+			wslKnownHosts = wslKey + "-known_hosts"
+			cpKnownHostsCmd := exec.CommandContext(ctx, wslExe, "sh", "-c",
+				fmt.Sprintf("cat > %s && chmod 600 %s",
+					shellQuote(wslKnownHosts),
+					shellQuote(wslKnownHosts)))
+			cpKnownHostsCmd.Stdin = bytes.NewReader(knownHostsData)
+			if err := cpKnownHostsCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: copy known_hosts into WSL for rsync failed: %v\n", err)
+				wslKnownHosts = ""
+			}
+		}
 	}
 
 	// Convert all args: replace Windows paths inside strings (including
 	// the -e "ssh ..." arg which embeds key and known_hosts paths).
 	wslArgs := make([]string, len(args))
 	for i, arg := range args {
-		converted := windowsToWSLPath(arg)
+		converted := windowsToWSLPathWithRoot(arg, mountRoot)
 		// Replace key path with WSL temp copy inside -e string
 		if wslKey != "" && target.Key != "" {
-			keyWSL := windowsToWSLMountPath(target.Key)
+			keyWSL := windowsToWSLMountPathWithRoot(target.Key, mountRoot)
 			converted = strings.ReplaceAll(converted, keyWSL, wslKey)
 		}
 		// Replace known_hosts path
-		if knownHostsPath != "" {
-			khWSL := windowsToWSLMountPath(knownHostsPath)
-			wslKH := wslKey + "-known_hosts"
-			converted = strings.ReplaceAll(converted, khWSL, wslKH)
+		if knownHostsPath != "" && wslKnownHosts != "" {
+			khWSL := windowsToWSLMountPathWithRoot(knownHostsPath, mountRoot)
+			converted = strings.ReplaceAll(converted, khWSL, wslKnownHosts)
 		}
 		wslArgs[i] = converted
 	}
-	return exec.CommandContext(ctx, "wsl", append([]string{"rsync"}, wslArgs...)...)
+	return exec.CommandContext(ctx, wslExe, append([]string{"rsync"}, wslArgs...)...)
 }
 
-// windowsToWSLMountPath converts a single Windows path to WSL /mnt/ form.
-func windowsToWSLMountPath(path string) string {
+func windowsNativeRsyncCommand(ctx context.Context, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	cmd.Env = append(os.Environ(), "MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning")
+	return cmd
+}
+
+func windowsHostPath(path string) string {
+	path = strings.ReplaceAll(path, `\`, "/")
+	if len(path) >= 3 && path[0] == '/' && path[2] == '/' &&
+		(path[1] >= 'a' && path[1] <= 'z' || path[1] >= 'A' && path[1] <= 'Z') {
+		return string(path[1]) + ":" + path[2:]
+	}
+	return path
+}
+
+func windowsWSLHasNativeRsyncSSH(ctx context.Context, wslExe string) bool {
+	if strings.TrimSpace(wslExe) == "" {
+		return false
+	}
+	out, err := exec.CommandContext(ctx, wslExe, "sh", "-c", "rsync_path=$(command -v rsync) || exit 1; ssh_path=$(command -v ssh) || exit 1; printf '%s\\n%s\\n' \"$rsync_path\" \"$ssh_path\"").Output()
+	return err == nil && windowsWSLNativeToolPaths(string(out))
+}
+
+func windowsWSLNativeToolPaths(output string) bool {
+	paths := 0
+	for _, line := range strings.Split(output, "\n") {
+		path := strings.TrimSpace(line)
+		if path == "" {
+			continue
+		}
+		paths++
+		if !windowsWSLNativeToolPath(path) {
+			return false
+		}
+	}
+	return paths >= 2
+}
+
+func windowsWSLNativeToolPath(path string) bool {
+	path = strings.ToLower(strings.TrimSpace(path))
+	if path == "" {
+		return false
+	}
+	if strings.HasSuffix(path, ".exe") {
+		return false
+	}
+	if windowsWSLMountedDrivePath(path) {
+		return false
+	}
+	return true
+}
+
+func windowsWSLMountedDrivePath(path string) bool {
+	rest, ok := strings.CutPrefix(path, "/mnt/")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimPrefix(rest, "host/")
+	return len(rest) >= 1 && rest[0] >= 'a' && rest[0] <= 'z' && (len(rest) == 1 || rest[1] == '/')
+}
+
+func windowsToWSLMountPathWithRoot(path, mountRoot string) string {
 	path = strings.ReplaceAll(path, `\`, "/")
 	if len(path) >= 2 && path[1] == ':' {
 		drive := strings.ToLower(string(path[0]))
-		return "/mnt/" + drive + path[2:]
+		return strings.TrimRight(mountRoot, "/") + "/" + drive + path[2:]
 	}
 	if len(path) >= 3 && path[0] == '/' && path[2] == '/' && path[1] >= 'a' && path[1] <= 'z' {
-		return "/mnt" + path
+		return strings.TrimRight(mountRoot, "/") + path
 	}
 	return path
 }
@@ -832,32 +915,51 @@ func windowsToWSLMountPath(path string) string {
 // WSL mount paths. Handles both C:\... and /c/... formats embedded in
 // larger strings (like the -e "ssh -i C:\path\key ..." argument).
 func windowsToWSLPath(s string) string {
+	return windowsToWSLPathWithRoot(s, "/mnt")
+}
+
+func windowsToWSLPathWithRoot(s, mountRoot string) string {
+	mountRoot = strings.TrimRight(mountRoot, "/")
 	s = strings.ReplaceAll(s, `\`, "/")
-	// Replace drive-letter paths: C:/... -> /mnt/c/...
+	// Replace drive-letter paths: C:/... -> /mnt/c/... or /mnt/host/c/...
 	for i := 0; i < len(s)-2; i++ {
 		c := s[i]
 		if (c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z') && s[i+1] == ':' && s[i+2] == '/' {
 			// Only replace if at start of string or preceded by a non-path char
 			if i == 0 || s[i-1] == ' ' || s[i-1] == '\'' || s[i-1] == '"' || s[i-1] == '=' {
 				drive := strings.ToLower(string(c))
-				s = s[:i] + "/mnt/" + drive + s[i+2:]
-				i += 4 // skip past /mnt/X
+				replacement := mountRoot + "/" + drive + s[i+2:]
+				s = s[:i] + replacement
+				i += len(mountRoot) + 2 // skip past /mnt[/host]/X
 			}
 		}
 	}
-	// Also handle /c/... -> /mnt/c/... (from rsyncLocalPath conversion)
+	// Also handle /c/... -> /mnt/c/... or /mnt/host/c/... (from rsyncLocalPath conversion)
 	for i := 0; i < len(s)-2; i++ {
 		if s[i] == '/' && s[i+1] >= 'a' && s[i+1] <= 'z' && s[i+2] == '/' {
 			if i == 0 || s[i-1] == ' ' || s[i-1] == '\'' || s[i-1] == '"' || s[i-1] == '=' {
 				// Avoid converting remote paths like crabbox@host:/work
 				if i == 0 || s[i-1] != ':' {
-					s = s[:i] + "/mnt" + s[i:]
-					i += 4
+					s = s[:i] + mountRoot + s[i:]
+					i += len(mountRoot)
 				}
 			}
 		}
 	}
 	return s
+}
+
+func windowsWSLMountRoot(ctx context.Context, wslExe string) string {
+	if runtime.GOOS != "windows" {
+		return "/mnt"
+	}
+	out, err := exec.CommandContext(ctx, wslExe, "sh", "-c", "if [ -d /mnt/host/c ]; then printf /mnt/host; else printf /mnt; fi").Output()
+	if err == nil {
+		if value := strings.TrimSpace(string(out)); value != "" {
+			return value
+		}
+	}
+	return "/mnt"
 }
 
 func shellQuote(s string) string {

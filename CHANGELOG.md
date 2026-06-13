@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed Windows local-container sync to avoid unusable WSL command shims, support Docker Desktop mount roots, and fall back to native rsync when WSL lacks native SSH tooling. Thanks @brokemac79.
 - Fixed brokered Tailscale cleanup to avoid privileged deletion from client-posted device IDs, preserve connectivity across normal reboots, and fail live preflight on application-level errors.
 - Fixed Crabfleet workspaces to use any configured brokered provider and route the OpenClaw deployment through its canonical OAuth host and verified AWS backend with isolated, ephemeral key-only SSH access, stock-image cloud-init, and readiness-gated, pinned, Workers-compatible terminal attachment.
 
