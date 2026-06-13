@@ -277,6 +277,24 @@ if (args[0] === "wrangler" && args[1] === "kv" && args[2] === "namespace" && arg
   fs.writeFileSync(configPath, JSON.stringify(config));
 }
 if (args[0] === "wrangler" && args[1] === "deploy") {
+  const configPath = args[args.indexOf("--config") + 1];
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const cleanupMigration = config.migrations?.some((migration) =>
+    migration.deleted_classes?.includes("DynamicWorkerRunCoordinator")
+  );
+  if (cleanupMigration) {
+    if (config.durable_objects !== undefined) process.exit(6);
+    process.exit(0);
+  }
+  const coordinator = config.durable_objects?.bindings?.find(
+    (binding) => binding.name === "RUN_COORDINATOR",
+  );
+  if (coordinator?.class_name !== "DynamicWorkerRunCoordinator") process.exit(4);
+  if (
+    !config.migrations?.some((migration) =>
+      migration.new_sqlite_classes?.includes("DynamicWorkerRunCoordinator"),
+    )
+  ) process.exit(5);
   const secretsPath = args[args.indexOf("--secrets-file") + 1];
   const secrets = JSON.parse(fs.readFileSync(secretsPath, "utf8"));
   if (secrets.CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN !== process.env.CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN) process.exit(3);
@@ -335,8 +353,22 @@ process.exit(0);
   const deleteWorker = seen.findIndex(
     (args) => args[0] === "wrangler" && args[1] === "delete",
   );
+  const retireDurableObject = seen.findIndex(
+    (args) =>
+      args[0] === "wrangler" &&
+      args[1] === "deploy" &&
+      !args.includes("--secrets-file"),
+  );
   assert.ok(deleteKV >= 0, `missing KV cleanup in ${JSON.stringify(seen)}`);
   assert.ok(deleteWorker >= 0, `missing Worker cleanup in ${JSON.stringify(seen)}`);
+  assert.ok(
+    retireDurableObject >= 0,
+    `missing Durable Object cleanup migration in ${JSON.stringify(seen)}`,
+  );
+  assert.ok(
+    retireDurableObject < deleteWorker,
+    `expected Durable Object cleanup before Worker cleanup in ${JSON.stringify(seen)}`,
+  );
   assert.ok(deleteWorker < deleteKV, `expected Worker cleanup before KV cleanup in ${JSON.stringify(seen)}`);
 });
 
@@ -412,7 +444,7 @@ process.exit(0);
   );
 });
 
-test("dynamic workers smoke removes KV after a partial deploy failure", () => {
+test("dynamic workers smoke attempts all cleanup after an ambiguous deploy failure", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cfdw-smoke-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -434,6 +466,12 @@ if (args[0] === "wrangler" && args[1] === "kv" && args[2] === "namespace" && arg
   process.exit(0);
 }
 if (args[0] === "wrangler" && args[1] === "deploy") {
+  const configPath = args[args.indexOf("--config") + 1];
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const cleanupMigration = config.migrations?.some((migration) =>
+    migration.deleted_classes?.includes("DynamicWorkerRunCoordinator")
+  );
+  if (cleanupMigration) process.stderr.write("cleanup migration also failed\\n");
   process.stderr.write("quota exceeded for dynamic workers\\n");
   process.exit(7);
 }
@@ -467,15 +505,37 @@ process.exit(0);
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
+  const retireDurableObject = seen.findIndex(
+    (args) =>
+      args[0] === "wrangler" &&
+      args[1] === "deploy" &&
+      !args.includes("--secrets-file"),
+  );
+  const deleteWorker = seen.findIndex(
+    (args) => args[0] === "wrangler" && args[1] === "delete",
+  );
+  const deleteKV = seen.findIndex(
+    (args) =>
+      args[0] === "wrangler" &&
+      args[1] === "kv" &&
+      args[2] === "namespace" &&
+      args[3] === "delete" &&
+      args.includes("partial-kv-id"),
+  );
   assert.ok(
-    seen.some(
-      (args) =>
-        args[0] === "wrangler" &&
-        args[1] === "kv" &&
-        args[2] === "namespace" &&
-        args[3] === "delete" &&
-        args.includes("partial-kv-id"),
-    ),
+    retireDurableObject >= 0,
+    `expected Durable Object retirement after ambiguous deploy in ${JSON.stringify(seen)}`,
+  );
+  assert.ok(
+    retireDurableObject < deleteWorker,
+    `expected Durable Object retirement before Worker deletion in ${JSON.stringify(seen)}`,
+  );
+  assert.ok(
+    deleteWorker < deleteKV,
+    `expected Worker deletion before partial KV cleanup in ${JSON.stringify(seen)}`,
+  );
+  assert.ok(
+    deleteKV >= 0,
     `expected partial KV cleanup in ${JSON.stringify(seen)}`,
   );
 });

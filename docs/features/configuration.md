@@ -326,7 +326,9 @@ Use `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL` (or the compatibility alias
 `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL`) for the loader URL and
 `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN` for bearer auth. Keep the token in
 environment or private user config, not repo YAML and not argv. Repository
-config cannot replace the loader URL or token, or enable `intercept` egress.
+config cannot replace the loader URL or token, enable `intercept` egress, or
+loosen trusted `cpuMs`, `subrequests`, or `timeoutSecs` limits. It may tighten
+those limits.
 Provider flags cover runtime settings such as
 `--cloudflare-dynamic-workers-compatibility-date`,
 `--cloudflare-dynamic-workers-compatibility-flags`,

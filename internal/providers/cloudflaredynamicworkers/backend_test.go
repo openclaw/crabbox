@@ -155,6 +155,7 @@ func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 			OK:                 true,
 			Runner:             providerName,
 			LoaderBinding:      true,
+			CoordinatorBinding: true,
 			DurableRunMetadata: true,
 			CompatibilityDate:  "2026-06-01",
 			Egress:             "blocked",
@@ -177,9 +178,10 @@ func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 func TestDoctorRequiresDurableRunMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(readinessResponse{
-			OK:            true,
-			Runner:        providerName,
-			LoaderBinding: true,
+			OK:                 true,
+			Runner:             providerName,
+			LoaderBinding:      true,
+			CoordinatorBinding: true,
 		})
 	}))
 	defer server.Close()
@@ -196,6 +198,13 @@ func TestDoctorRequiresDurableRunMetadata(t *testing.T) {
 func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	var got runRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			if r.URL.Path != "/v1/runs/"+got.ID || r.URL.Query().Get("acknowledgedComplete") != "true" {
+				t.Fatalf("unexpected cleanup request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(runResponse{ID: got.ID, Status: "stopped"})
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -207,6 +216,7 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(runResponse{
 			ID:       got.ID,
+			WorkerID: got.WorkerID,
 			Status:   "completed",
 			ExitCode: 0,
 			Stdout:   "stdout\n",
@@ -232,8 +242,12 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
 	}
-	if !strings.HasPrefix(got.ID, "cfdw_") || got.CacheMode != "stable" || got.Egress != "blocked" {
+	if !strings.HasPrefix(got.ID, "cbx_") || !strings.HasPrefix(got.WorkerID, "cfdw_") ||
+		got.ID == got.WorkerID || got.CacheMode != "stable" || got.Egress != "blocked" {
 		t.Fatalf("request identity/cache=%#v", got)
+	}
+	if got.RetainMetadata || got.RetainOnFailure {
+		t.Fatalf("unexpected retention=%#v", got)
 	}
 	if got.Module.Name != "abc123-worker-module.mjs" || got.Module.Source != string(req.Script.Data) {
 		t.Fatalf("module=%#v", got.Module)
@@ -255,6 +269,78 @@ func TestRunPostsModuleSourceWithStableCacheAndLimits(t *testing.T) {
 	}
 }
 
+func TestRunStableCacheUsesUniqueRunIDsAndStableWorkerID(t *testing.T) {
+	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
+	req := RunRequest{
+		Script: &RunScriptSpec{
+			Source: "worker.mjs",
+			Data:   []byte("export default { fetch() { return new Response('ok') } }"),
+		},
+	}
+
+	firstRun, firstWorker, _, _, err := backend.runIdentity(req, "stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRun, secondWorker, _, _, err := backend.runIdentity(req, "stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRun == secondRun || firstWorker == "" || firstWorker != secondWorker {
+		t.Fatalf("first=%q/%q second=%q/%q", firstRun, firstWorker, secondRun, secondWorker)
+	}
+}
+
+func TestRunTimingJSONRemainsFinalLineAfterUnterminatedLoaderOutput(t *testing.T) {
+	var runID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			if r.URL.Path != "/v1/runs/"+runID || r.URL.Query().Get("acknowledgedComplete") != "true" {
+				t.Fatalf("unexpected cleanup request %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(runResponse{ID: runID, Status: "stopped"})
+			return
+		}
+		var request runRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		runID = request.ID
+		_ = json.NewEncoder(w).Encode(runResponse{
+			ID:       request.ID,
+			WorkerID: request.WorkerID,
+			Status:   "succeeded",
+			Stderr:   "stderr without newline",
+			Logs:     "logs without newline",
+		})
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		TimingJSON:      true,
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	if len(lines) != 3 || lines[0] != "stderr without newline" || lines[1] != "logs without newline" {
+		t.Fatalf("stderr lines=%q", lines)
+	}
+	var timing struct {
+		LeaseID string `json:"leaseId"`
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &timing); err != nil {
+		t.Fatalf("timing line=%q err=%v", lines[2], err)
+	}
+	if timing.LeaseID != result.LeaseID {
+		t.Fatalf("timing lease=%q result=%q", timing.LeaseID, result.LeaseID)
+	}
+}
+
 func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	var submittedID string
@@ -265,6 +351,9 @@ func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
 		var request runRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
+		}
+		if request.RetainMetadata || !request.RetainOnFailure {
+			t.Fatal("keep-on-failure request did not retain failed metadata")
 		}
 		submittedID = request.ID
 		w.WriteHeader(http.StatusBadGateway)
@@ -300,6 +389,175 @@ func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "-- <command>") || !strings.Contains(stderr.String(), "crabbox status") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunKeepOnFailureRemovesMetadataAfterAcknowledgedSuccess(t *testing.T) {
+	var deletedID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.RetainMetadata || !request.RetainOnFailure {
+				t.Fatalf("retention=%#v", request)
+			}
+			_ = json.NewEncoder(w).Encode(runResponse{
+				ID:       request.ID,
+				WorkerID: request.WorkerID,
+				Status:   "succeeded",
+			})
+		case http.MethodDelete:
+			if r.URL.Query().Get("acknowledgedComplete") != "true" {
+				t.Fatalf("delete query=%q", r.URL.RawQuery)
+			}
+			deletedID = strings.TrimPrefix(r.URL.Path, "/v1/runs/")
+			_ = json.NewEncoder(w).Encode(runResponse{ID: deletedID, Status: "stopped"})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	result, err := backend.Run(context.Background(), RunRequest{
+		KeepOnFailure:   true,
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletedID == "" || deletedID != result.LeaseID {
+		t.Fatalf("deleted=%q result=%#v", deletedID, result)
+	}
+}
+
+func TestRunKeepsLifecycleUncertainClaimFromLiveStatus(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var submittedID string
+	deleteCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			submittedID = request.ID
+			w.Header().Set("X-Crabbox-Lifecycle-Uncertain", "true")
+			_ = json.NewEncoder(w).Encode(runResponse{
+				ID:                 request.ID,
+				WorkerID:           request.WorkerID,
+				Status:             "succeeded",
+				LifecycleUncertain: true,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+submittedID:
+			_ = json.NewEncoder(w).Encode(runStatus{
+				ID:       submittedID,
+				WorkerID: "worker-live",
+				Status:   "running",
+				Metadata: map[string]string{"phase": "reconciling"},
+			})
+		case r.Method == http.MethodDelete:
+			deleteCalled = true
+			t.Fatalf("unexpected cleanup request %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:            Repo{Root: t.TempDir()},
+		Keep:            true,
+		RequestedSlug:   "uncertain-success",
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, resolveErr := resolveLeaseClaim(result.Slug)
+	if resolveErr != nil || !ok {
+		t.Fatalf("claim slug=%q ok=%t err=%v", result.Slug, ok, resolveErr)
+	}
+	if claim.Labels["state"] != "running" || claim.Labels["worker_id"] != "worker-live" ||
+		claim.Labels["phase"] != "reconciling" || claim.Labels["uncertain"] != "true" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+	if deleteCalled || !strings.Contains(stderr.String(), "lifecycle reconciliation pending") {
+		t.Fatalf("deleteCalled=%t stderr=%q", deleteCalled, stderr.String())
+	}
+}
+
+func TestRunServerProtectsStructuralLabels(t *testing.T) {
+	server := runServer(
+		"lease-real",
+		"slug-real",
+		runStatus{ID: "lease-real", WorkerID: "worker-real", Status: "running"},
+		map[string]string{
+			"provider":  "wrong",
+			"lease":     "wrong",
+			"slug":      "wrong",
+			"target":    "wrong",
+			"state":     "wrong",
+			"worker_id": "wrong",
+			"team":      "platform",
+		},
+	)
+	want := map[string]string{
+		"provider":  providerName,
+		"lease":     "lease-real",
+		"slug":      "slug-real",
+		"target":    targetWorker,
+		"state":     "running",
+		"worker_id": "worker-real",
+		"team":      "platform",
+	}
+	for key, value := range want {
+		if server.Labels[key] != value {
+			t.Fatalf("label %s=%q want %q labels=%#v", key, server.Labels[key], value, server.Labels)
+		}
+	}
+}
+
+func TestRunWarnsWhenCompatibilityCleanupFailsAfterSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var request runRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(runResponse{
+				ID:       request.ID,
+				WorkerID: request.WorkerID,
+				Status:   "succeeded",
+			})
+		case http.MethodDelete:
+			http.Error(w, "temporary cleanup failure", http.StatusServiceUnavailable)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	result, err := backend.Run(context.Background(), RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || !strings.Contains(stderr.String(), "warning: cloudflare-dynamic-workers completed run metadata cleanup failed") {
+		t.Fatalf("result=%#v stderr=%q", result, stderr.String())
 	}
 }
 
@@ -484,6 +742,65 @@ func TestRunExplicitCacheRequiresID(t *testing.T) {
 		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
 	})
 	if err == nil || !strings.Contains(err.Error(), "cache=explicit requires --id") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunExplicitCachePrintsGeneratedLifecycleID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request runRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(runResponse{
+			ID:       request.ID,
+			WorkerID: request.WorkerID,
+			Status:   "succeeded",
+		})
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+	backend.cfg.CloudflareDynamicWorkers.CacheMode = "explicit"
+	result, err := backend.Run(context.Background(), RunRequest{
+		ID:              "named-worker",
+		Repo:            Repo{Root: t.TempDir()},
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.LeaseID == "" || !strings.Contains(
+		stderr.String(),
+		"dynamic worker run="+result.LeaseID+" worker=named-worker",
+	) {
+		t.Fatalf("result=%#v stderr=%q", result, stderr.String())
+	}
+}
+
+func TestRunRejectsIDOutsideExplicitCache(t *testing.T) {
+	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
+	_, err := backend.Run(context.Background(), RunRequest{
+		ID:              "named-worker",
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "--id requires cache=explicit") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunRejectsInterceptEgressWithReusableCache(t *testing.T) {
+	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
+	backend.cfg.CloudflareDynamicWorkers.Egress = "intercept"
+	_, err := backend.Run(context.Background(), RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "egress=intercept requires cache=one-shot") {
 		t.Fatalf("err=%v", err)
 	}
 }

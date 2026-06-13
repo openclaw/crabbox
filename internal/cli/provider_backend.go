@@ -796,10 +796,17 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	}
 	after, err := ProviderFor(cfg.Provider)
 	if err != nil || after.Name() == before {
+		if err == nil {
+			applyCloudflareDynamicWorkersRepositoryCaps(cfg)
+		}
 		return err
 	}
 	cfg.Provider = after.Name()
-	return after.ApplyFlags(cfg, fs, values[after.Name()])
+	if err := after.ApplyFlags(cfg, fs, values[after.Name()]); err != nil {
+		return err
+	}
+	applyCloudflareDynamicWorkersRepositoryCaps(cfg)
+	return nil
 }
 
 func validateProviderConfig(cfg Config) error {

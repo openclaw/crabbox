@@ -17,6 +17,7 @@ type loaderAPI interface {
 	Run(context.Context, runRequest) (runResponse, error)
 	Status(context.Context, string) (runStatus, error)
 	Delete(context.Context, string) error
+	DeleteAcknowledgedComplete(context.Context, string) error
 }
 
 type client struct {
@@ -29,6 +30,7 @@ type readinessResponse struct {
 	OK                 bool              `json:"ok"`
 	Runner             string            `json:"runner"`
 	LoaderBinding      bool              `json:"loaderBinding"`
+	CoordinatorBinding bool              `json:"coordinatorBinding"`
 	DurableRunMetadata bool              `json:"durableRunMetadata"`
 	CompatibilityDate  string            `json:"compatibilityDate,omitempty"`
 	Egress             string            `json:"egress,omitempty"`
@@ -38,7 +40,10 @@ type readinessResponse struct {
 
 type runRequest struct {
 	ID                 string            `json:"id,omitempty"`
+	WorkerID           string            `json:"workerId,omitempty"`
 	CacheMode          string            `json:"cacheMode"`
+	RetainMetadata     bool              `json:"retainMetadata"`
+	RetainOnFailure    bool              `json:"retainOnFailure,omitempty"`
 	Module             moduleSource      `json:"module"`
 	CompatibilityDate  string            `json:"compatibilityDate,omitempty"`
 	CompatibilityFlags []string          `json:"compatibilityFlags,omitempty"`
@@ -60,19 +65,23 @@ type limits struct {
 }
 
 type runResponse struct {
-	ID       string            `json:"id"`
-	Status   string            `json:"status"`
-	ExitCode int               `json:"exitCode"`
-	Stdout   string            `json:"stdout,omitempty"`
-	Stderr   string            `json:"stderr,omitempty"`
-	Body     string            `json:"body,omitempty"`
-	Logs     string            `json:"logs,omitempty"`
-	Timing   map[string]int64  `json:"timing,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty"`
+	ID                 string            `json:"id"`
+	WorkerID           string            `json:"workerId,omitempty"`
+	Status             string            `json:"status"`
+	ExitCode           int               `json:"exitCode"`
+	Stdout             string            `json:"stdout,omitempty"`
+	Stderr             string            `json:"stderr,omitempty"`
+	Body               string            `json:"body,omitempty"`
+	Logs               string            `json:"logs,omitempty"`
+	Timing             map[string]int64  `json:"timing,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
+	LifecycleUncertain bool              `json:"lifecycleUncertain,omitempty"`
+	LifecycleMessage   string            `json:"lifecycleMessage,omitempty"`
 }
 
 type runStatus struct {
 	ID        string            `json:"id"`
+	WorkerID  string            `json:"workerId,omitempty"`
 	Status    string            `json:"status"`
 	CreatedAt string            `json:"createdAt,omitempty"`
 	UpdatedAt string            `json:"updatedAt,omitempty"`
@@ -199,10 +208,17 @@ func (c *client) Run(ctx context.Context, req runRequest) (runResponse, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return out, json.NewDecoder(resp.Body).Decode(&out)
+		err := json.NewDecoder(resp.Body).Decode(&out)
+		if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Crabbox-Lifecycle-Uncertain")), "true") {
+			out.LifecycleUncertain = true
+		}
+		return out, err
 	}
 	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if json.Unmarshal(responseBody, &out) == nil && strings.TrimSpace(out.ID) != "" && strings.TrimSpace(out.Status) != "" {
+		if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Crabbox-Lifecycle-Uncertain")), "true") {
+			out.LifecycleUncertain = true
+		}
 		return out, nil
 	}
 	return out, c.responseErrorBody(resp.StatusCode, resp.Status, responseBody)
@@ -216,6 +232,10 @@ func (c *client) Status(ctx context.Context, id string) (runStatus, error) {
 
 func (c *client) Delete(ctx context.Context, id string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/v1/runs/"+url.PathEscape(id), nil, nil)
+}
+
+func (c *client) DeleteAcknowledgedComplete(ctx context.Context, id string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/v1/runs/"+url.PathEscape(id)+"?acknowledgedComplete=true", nil, nil)
 }
 
 func (c *client) doJSON(ctx context.Context, method, endpoint string, input any, output any) error {

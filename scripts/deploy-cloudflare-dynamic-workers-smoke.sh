@@ -36,6 +36,34 @@ delete_worker_for_cleanup() {
   grep -Eiq '(^|[^0-9])404([^0-9]|$)|worker.*not found' "$out" "$err"
 }
 
+retire_durable_object_for_cleanup() {
+  node - "$deploy_config" <<'NODE'
+const fs = require("node:fs");
+const configPath = process.argv[2];
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+delete config.durable_objects;
+config.migrations = [
+  ...(Array.isArray(config.migrations) ? config.migrations : []),
+  {
+    tag: "cloudflare-dynamic-workers-v2-cleanup",
+    deleted_classes: ["DynamicWorkerRunCoordinator"],
+  },
+];
+fs.writeFileSync(configPath, JSON.stringify(config));
+NODE
+  local oldpwd
+  oldpwd="$(pwd)"
+  cd "$ROOT/worker"
+  if run_logged npx wrangler deploy --config "$deploy_config"; then
+    cd "$oldpwd"
+    return 0
+  else
+    local status=$?
+    cd "$oldpwd"
+    return "$status"
+  fi
+}
+
 cleanup() {
   if [[ "$cleanup_done" == "1" ]]; then
     return "$cleanup_status"
@@ -48,6 +76,9 @@ cleanup() {
   if [[ -n "$deploy_config" ]]; then
     local worker_deleted=1
     if [[ "$worker_deploy_attempted" == "1" && -n "$deployed_worker" ]]; then
+      retire_durable_object_for_cleanup || {
+        status=1
+      }
       delete_worker_for_cleanup || {
         status=1
         worker_deleted=0
@@ -202,6 +233,17 @@ deploy_runner() {
   "workers_dev": true,
   "preview_urls": false,
   "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "RUN_COORDINATOR", "class_name": "DynamicWorkerRunCoordinator" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "cloudflare-dynamic-workers-v1",
+      "new_sqlite_classes": ["DynamicWorkerRunCoordinator"]
+    }
+  ],
   "observability": { "enabled": true }
 }
 EOF

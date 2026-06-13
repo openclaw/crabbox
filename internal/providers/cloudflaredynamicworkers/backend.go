@@ -41,7 +41,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		{Status: "pass", Check: "loader-api", Message: "readiness endpoint reachable"},
 	}
 	status := "pass"
-	if !readiness.OK || readiness.Runner != providerName || !readiness.LoaderBinding || !readiness.DurableRunMetadata {
+	if !readiness.OK || readiness.Runner != providerName || !readiness.LoaderBinding || !readiness.CoordinatorBinding || !readiness.DurableRunMetadata {
 		status = "fail"
 		if !readiness.OK {
 			checks = append(checks, DoctorCheck{Status: "fail", Check: "ok", Message: "readiness did not report ok=true"})
@@ -52,6 +52,9 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 		if !readiness.LoaderBinding {
 			checks = append(checks, DoctorCheck{Status: "fail", Check: "loader-binding", Message: "Dynamic Workers binding unavailable"})
 		}
+		if !readiness.CoordinatorBinding {
+			checks = append(checks, DoctorCheck{Status: "fail", Check: "coordinator-binding", Message: "RUN_COORDINATOR Durable Object binding unavailable"})
+		}
 		if !readiness.DurableRunMetadata {
 			checks = append(checks, DoctorCheck{Status: "fail", Check: "run-metadata", Message: "RUNS KV binding unavailable"})
 		}
@@ -59,7 +62,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	return DoctorResult{
 		Provider: providerName,
 		Status:   status,
-		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s loader_binding=%t durable_run_metadata=%t compatibility_date=%s egress=%s", blank(readiness.Runner, "-"), readiness.LoaderBinding, readiness.DurableRunMetadata, blank(readiness.CompatibilityDate, "-"), blank(readiness.Egress, "-")),
+		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s loader_binding=%t coordinator_binding=%t durable_run_metadata=%t compatibility_date=%s egress=%s", blank(readiness.Runner, "-"), readiness.LoaderBinding, readiness.CoordinatorBinding, readiness.DurableRunMetadata, blank(readiness.CompatibilityDate, "-"), blank(readiness.Egress, "-")),
 		Checks:   checks,
 	}, nil
 }
@@ -84,11 +87,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if cacheMode == "" {
 		cacheMode = "stable"
 	}
-	leaseID, slug, reused, err := b.runIdentity(req, cacheMode)
+	if normalizeEgress(b.cfg.CloudflareDynamicWorkers.Egress) == "intercept" && cacheMode != "one-shot" {
+		return RunResult{}, exit(2, "%s egress=intercept requires cache=one-shot because gateway context is run-scoped", providerName)
+	}
+	leaseID, workerID, slug, reused, err := b.runIdentity(req, cacheMode)
 	if err != nil {
 		return RunResult{}, err
 	}
-	loaderReq := b.buildRunRequest(req, leaseID, cacheMode)
+	loaderReq := b.buildRunRequest(req, leaseID, workerID, cacheMode)
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -117,7 +123,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			status, statusErr := client.Status(probeCtx, leaseID)
 			cancel()
 			if statusErr != nil {
-				status = runStatus{ID: leaseID, Status: "unknown"}
+				status = runStatus{ID: leaseID, WorkerID: workerID, Status: "unknown"}
+			} else if strings.TrimSpace(status.WorkerID) == "" {
+				status.WorkerID = workerID
 			}
 			if strings.TrimSpace(slug) == "" {
 				slug = newLeaseSlug(leaseID)
@@ -167,7 +175,38 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			slug = newLeaseSlug(leaseID)
 		}
 	}
+	if strings.TrimSpace(run.WorkerID) == "" {
+		run.WorkerID = workerID
+	}
+	if cacheMode == "explicit" {
+		fmt.Fprintf(b.rt.Stderr, "dynamic worker run=%s worker=%s\n", leaseID, run.WorkerID)
+	}
 	writeRunOutput(b.rt.Stdout, b.rt.Stderr, run)
+	claimStatus := runStatus{
+		ID:       leaseID,
+		WorkerID: run.WorkerID,
+		Status:   run.Status,
+		Metadata: run.Metadata,
+	}
+	claimLabels := map[string]string{
+		"cache_mode": cacheMode,
+		"egress":     normalizeEgress(b.cfg.CloudflareDynamicWorkers.Egress),
+	}
+	if run.LifecycleUncertain {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		status, statusErr := client.Status(probeCtx, leaseID)
+		cancel()
+		if statusErr != nil {
+			claimStatus.Status = "unknown"
+		} else {
+			if strings.TrimSpace(status.WorkerID) == "" {
+				status.WorkerID = run.WorkerID
+			}
+			claimStatus = status
+		}
+		claimLabels = mergeRunLabels(claimLabels, map[string]string{"uncertain": "true"})
+		fmt.Fprintf(b.rt.Stderr, "warning: %s lifecycle reconciliation pending for run %s\n", providerName, leaseID)
+	}
 	exitCode := run.ExitCode
 	if exitCode == 0 && !runSucceeded(run.Status) {
 		exitCode = 1
@@ -193,12 +232,24 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}).toCore(),
 	}
 	if keepRun {
-		server := runServer(leaseID, slug, runStatus{ID: leaseID, Status: run.Status, Metadata: run.Metadata}, map[string]string{
-			"cache_mode": cacheMode,
-			"egress":     normalizeEgress(b.cfg.CloudflareDynamicWorkers.Egress),
-		})
+		server := runServer(
+			leaseID,
+			slug,
+			claimStatus,
+			mergeRunLabels(run.Metadata, mergeRunLabels(claimStatus.Metadata, claimLabels)),
+		)
 		if err := claimLease(leaseID, slug, b.cfg, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, server); err != nil {
 			return result, err
+		}
+	}
+	var cleanupErr error
+	if !keepRun && !run.LifecycleUncertain && strings.TrimSpace(leaseID) != "" {
+		cleanupErr = client.DeleteAcknowledgedComplete(ctx, leaseID)
+		if cleanupErr != nil && notFoundError(cleanupErr) {
+			cleanupErr = nil
+		}
+		if cleanupErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: %s completed run metadata cleanup failed for %s: %v\n", providerName, leaseID, cleanupErr)
 		}
 	}
 	if req.TimingJSON {
@@ -359,29 +410,33 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string, bool, error) {
+func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string, string, bool, error) {
 	if cacheMode == "explicit" {
 		if strings.TrimSpace(req.ID) == "" {
-			return "", "", false, exit(2, "%s cache=explicit requires --id", providerName)
+			return "", "", "", false, exit(2, "%s cache=explicit requires --id", providerName)
 		}
-		leaseID, slug, err := b.resolveRunID(req.ID, req.Repo.Root, req.Reclaim)
-		return leaseID, slug, true, err
+		leaseID := newLeaseID()
+		slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		return leaseID, strings.TrimSpace(req.ID), slug, true, nil
 	}
 	if strings.TrimSpace(req.ID) != "" {
-		leaseID, slug, err := b.resolveRunID(req.ID, req.Repo.Root, req.Reclaim)
-		return leaseID, slug, true, err
+		return "", "", "", false, exit(2, "%s --id requires cache=explicit", providerName)
 	}
 	if cacheMode == "stable" {
-		leaseID := stableRunID(workerModuleName(req.Script), req.Script.Data, b.cfg.CloudflareDynamicWorkers, req.Env)
+		leaseID := newLeaseID()
+		workerID := stableRunID(workerModuleName(req.Script), req.Script.Data, b.cfg.CloudflareDynamicWorkers, req.Env)
 		slug := newLeaseSlug(leaseID)
 		if req.Keep || req.KeepOnFailure {
 			var err error
 			slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 			if err != nil {
-				return "", "", false, err
+				return "", "", "", false, err
 			}
 		}
-		return leaseID, slug, false, nil
+		return leaseID, workerID, slug, false, nil
 	}
 	leaseID := ""
 	slug := ""
@@ -390,10 +445,10 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 		var err error
 		slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 		if err != nil {
-			return "", "", false, err
+			return "", "", "", false, err
 		}
 	}
-	return leaseID, slug, false, nil
+	return leaseID, "", slug, false, nil
 }
 
 func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, error) {
@@ -417,11 +472,14 @@ func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (strin
 	return value, newLeaseSlug(value), nil
 }
 
-func (b *backend) buildRunRequest(req RunRequest, leaseID, cacheMode string) runRequest {
+func (b *backend) buildRunRequest(req RunRequest, leaseID, workerID, cacheMode string) runRequest {
 	cfg := b.cfg.CloudflareDynamicWorkers
 	return runRequest{
 		ID:                 leaseID,
+		WorkerID:           workerID,
 		CacheMode:          cacheMode,
+		RetainMetadata:     req.Keep || cacheMode == "explicit",
+		RetainOnFailure:    req.KeepOnFailure,
 		Module:             moduleSource{Name: workerModuleName(req.Script), Source: string(req.Script.Data)},
 		CompatibilityDate:  strings.TrimSpace(cfg.CompatibilityDate),
 		CompatibilityFlags: append([]string(nil), cfg.CompatibilityFlags...),
@@ -468,11 +526,19 @@ func writeRunOutput(stdout, stderr io.Writer, run runResponse) {
 	if run.Body != "" && stdout != nil {
 		_, _ = io.WriteString(stdout, run.Body)
 	}
-	if run.Stderr != "" && stderr != nil {
-		_, _ = io.WriteString(stderr, run.Stderr)
+	if stderr != nil {
+		writeStderrPart(stderr, run.Stderr)
+		writeStderrPart(stderr, run.Logs)
 	}
-	if run.Logs != "" && stderr != nil {
-		_, _ = io.WriteString(stderr, run.Logs)
+}
+
+func writeStderrPart(stderr io.Writer, value string) {
+	if value == "" {
+		return
+	}
+	_, _ = io.WriteString(stderr, value)
+	if !strings.HasSuffix(value, "\n") {
+		_, _ = io.WriteString(stderr, "\n")
 	}
 }
 
@@ -594,12 +660,24 @@ func runServer(leaseID, slug string, status runStatus, extra map[string]string) 
 		"target":   targetWorker,
 		"state":    blank(status.Status, "unknown"),
 	}
+	if strings.TrimSpace(status.WorkerID) != "" {
+		labels["worker_id"] = status.WorkerID
+	}
 	for key, value := range extra {
 		if strings.TrimSpace(key) != "" {
 			labels[key] = value
 		}
 	}
+	labels["provider"] = providerName
+	labels["lease"] = leaseID
+	labels["slug"] = blank(slug, newLeaseSlug(leaseID))
+	labels["target"] = targetWorker
 	labels["state"] = blank(status.Status, "unknown")
+	if strings.TrimSpace(status.WorkerID) != "" {
+		labels["worker_id"] = status.WorkerID
+	} else {
+		delete(labels, "worker_id")
+	}
 	server := Server{
 		Provider: providerName,
 		CloudID:  leaseID,

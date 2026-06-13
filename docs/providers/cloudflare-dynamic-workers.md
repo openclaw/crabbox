@@ -3,9 +3,9 @@
 Select with `provider: cloudflare-dynamic-workers` (aliases `cf-dynamic` and
 `cfdw`) to run Cloudflare Workers module source through Cloudflare Dynamic
 Workers. This is a **delegated-run** provider with `target=worker-runtime`: the
-local CLI sends a JavaScript or TypeScript module to a deployed Crabbox loader
-Worker, the loader creates or reuses a Dynamic Worker, invokes its `fetch`
-handler, and returns the result. There is no Linux host and no SSH lease.
+local CLI sends a JavaScript, CommonJS, or Python module to a deployed Crabbox
+loader Worker, the loader creates or reuses a Dynamic Worker, invokes its
+`fetch` handler, and returns the result. There is no Linux host and no SSH lease.
 
 Use the separate [Cloudflare provider](cloudflare.md) when you need Cloudflare
 Containers and Linux command execution.
@@ -32,15 +32,20 @@ Containers and Linux command execution.
 - Wrangler authenticated for that account.
 - The deployed Crabbox Dynamic Workers loader from
   `worker/wrangler.cloudflare-dynamic-workers.jsonc`.
-- A Workers KV namespace bound as `RUNS` for durable run metadata used by
-  `status`, `list --refresh`, `stop`, and `cleanup`.
+- A Workers KV namespace bound as `RUNS` for retained terminal metadata and
+  upgrade compatibility.
+- A Durable Object binding named `RUN_COORDINATOR` using
+  `DynamicWorkerRunCoordinator` for atomic run lifecycle coordination,
+  authoritative status, and the run index used by `list --refresh`.
 - The Worker secret `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN`.
 - CLI-side `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL` and
   `CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN`.
 
 The Worker entrypoint is `worker/src/cloudflare-dynamic-worker-runner.ts`. It is
 separate from the Cloudflare Containers runner and uses a `worker_loaders`
-binding named `LOADER` plus a Workers KV namespace binding named `RUNS`.
+binding named `LOADER`, a Workers KV namespace binding named `RUNS`, and a
+Durable Object binding named `RUN_COORDINATOR`. Python modules automatically
+enable Cloudflare's required `python_workers` compatibility flag.
 
 ## Configuration
 
@@ -83,7 +88,8 @@ Config keys map to the typed `cloudflareDynamicWorkers` section:
 The token is intentionally not exposed as a command-line flag because command
 arguments can appear in shell history and process listings. Repository-local
 config cannot override `loaderUrl` or `token`, and cannot change `egress` from
-`blocked` to `intercept`.
+`blocked` to `intercept`. Repository-local `cpuMs`, `subrequests`, and
+`timeoutSecs` values can tighten trusted limits but cannot loosen them.
 
 ## Deploy
 
@@ -164,9 +170,13 @@ crabbox run --provider cloudflare-dynamic-workers -- echo not-supported
 
 - `one-shot` creates an uncached one-off run.
 - `stable` uses a stable ID derived from module source and runtime settings so
-  repeated same-code runs can reuse Cloudflare's Dynamic Worker cache.
+  repeated same-code runs can reuse Cloudflare's Dynamic Worker cache. Each
+  invocation receives a separate run ID for lifecycle metadata.
 - `explicit` requires `--id` and is the mode to use when an operator wants a
-  named Worker identity and explicit cleanup with `crabbox stop`.
+  named Worker cache identity. Each invocation still receives a unique run ID
+  for `status`, `list`, and `stop`; Crabbox prints that lifecycle ID alongside
+  the named Worker ID. Reuse the explicit ID only with identical module source
+  and runtime settings.
 
 Cloudflare bills Dynamic Workers according to the platform's current pricing and
 limits. Stable IDs can improve repeat-run startup behavior, but they should be
@@ -177,7 +187,8 @@ treated as a cache key, not as durable user data.
 The default egress mode is `blocked`. In `blocked` mode the loader does not wire
 an outbound gateway into the Dynamic Worker. `intercept` mode routes outbound
 fetches through the loader's `HttpGateway` and `LogTailer` exports when the live
-Cloudflare runtime supports those bindings.
+Cloudflare runtime supports those bindings. Because those bindings contain
+run-scoped context, `intercept` requires `cacheMode: one-shot`.
 
 Use `cpuMs`, `subrequests`, and `timeoutSecs` to bound execution. These are
 runtime limits for a module invocation, not VM sizing knobs; `--class` and
@@ -189,11 +200,17 @@ runtime limits for a module invocation, not VM sizing knobs; `--class` and
   metadata.
 - `list` reports local Dynamic Workers claims. Add `--refresh` to query loader
   metadata for each claim.
-- `stop` deletes loader metadata for the run and removes the local claim. If the
-  loader reports the run is missing, Crabbox removes the stale local claim.
+- `stop` deletes terminal loader metadata and removes the local claim. Active
+  runs cannot be stopped because the loader cannot cancel an in-flight Dynamic
+  Worker invocation; wait for completion first. If the loader reports the run
+  is missing, Crabbox removes the stale local claim.
 - `cleanup` checks local claims and removes stale claims whose loader metadata
   is missing or terminal. `--dry-run` prints the same decisions without removing
   local state.
+
+Completed non-kept runs remove their loader metadata automatically. Use `--keep`,
+`--keep-on-failure`, or `cacheMode: explicit` when lifecycle inspection must
+remain available after the invocation.
 
 Cleanup is local-claim cleanup. It is not a global Cloudflare account inventory
 sweeper.
@@ -246,6 +263,7 @@ mode-0600 temporary secrets file and removes the file during cleanup.
 ## Limitations
 
 - Dynamic Workers execute Worker-runtime module source only.
+- TypeScript must be transpiled to JavaScript before upload.
 - `warmup` is unsupported because a Dynamic Worker cannot be loaded or cached
   without module source; use `run --script`.
 - There is no Linux shell, SSH target, filesystem sync, archive upload, VNC,

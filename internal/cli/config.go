@@ -616,16 +616,22 @@ type CloudflareConfig struct {
 }
 
 type CloudflareDynamicWorkersConfig struct {
-	LoaderURL          string
-	Token              string
-	CompatibilityDate  string
-	CompatibilityFlags []string
-	CacheMode          string
-	Egress             string
-	CPUMs              int
-	Subrequests        int
-	TimeoutSecs        int
-	Metadata           map[string]string
+	LoaderURL                      string
+	Token                          string
+	CompatibilityDate              string
+	CompatibilityFlags             []string
+	CacheMode                      string
+	Egress                         string
+	CPUMs                          int
+	Subrequests                    int
+	TimeoutSecs                    int
+	Metadata                       map[string]string
+	repositoryCPUMsCap             int
+	repositoryCPUMsCapActive       bool
+	repositorySubrequestsCap       int
+	repositorySubrequestsCapActive bool
+	repositoryTimeoutSecsCap       int
+	repositoryTimeoutSecsCapActive bool
 }
 
 type ProxmoxConfig struct {
@@ -1099,6 +1105,7 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
 	}
+	applyCloudflareDynamicWorkersRepositoryCaps(&cfg)
 	if coordinator = strings.TrimSpace(coordinator); coordinator != "" {
 		cfg.Coordinator = coordinator
 	}
@@ -2661,14 +2668,30 @@ func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDy
 	if file.Egress != "" && (trusted || strings.EqualFold(strings.TrimSpace(file.Egress), "blocked")) {
 		cfg.CloudflareDynamicWorkers.Egress = file.Egress
 	}
-	if file.CPUMs > 0 {
-		cfg.CloudflareDynamicWorkers.CPUMs = file.CPUMs
-	}
-	if file.Subrequests > 0 {
-		cfg.CloudflareDynamicWorkers.Subrequests = file.Subrequests
-	}
-	if file.TimeoutSecs > 0 {
-		cfg.CloudflareDynamicWorkers.TimeoutSecs = file.TimeoutSecs
+	if trusted {
+		if file.CPUMs > 0 {
+			cfg.CloudflareDynamicWorkers.CPUMs = file.CPUMs
+		}
+		if file.Subrequests > 0 {
+			cfg.CloudflareDynamicWorkers.Subrequests = file.Subrequests
+		}
+		if file.TimeoutSecs > 0 {
+			cfg.CloudflareDynamicWorkers.TimeoutSecs = file.TimeoutSecs
+		}
+	} else {
+		cfg.CloudflareDynamicWorkers.repositoryCPUMsCap = positiveMinimum(
+			cfg.CloudflareDynamicWorkers.repositoryCPUMsCap,
+			file.CPUMs,
+		)
+		cfg.CloudflareDynamicWorkers.repositorySubrequestsCap = positiveMinimum(
+			cfg.CloudflareDynamicWorkers.repositorySubrequestsCap,
+			file.Subrequests,
+		)
+		cfg.CloudflareDynamicWorkers.repositoryTimeoutSecsCap = positiveMinimum(
+			cfg.CloudflareDynamicWorkers.repositoryTimeoutSecsCap,
+			file.TimeoutSecs,
+		)
+		applyCloudflareDynamicWorkersRepositoryCaps(cfg)
 	}
 	if len(file.Metadata) > 0 {
 		cfg.CloudflareDynamicWorkers.Metadata = map[string]string{}
@@ -2679,6 +2702,53 @@ func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDy
 			}
 		}
 	}
+}
+
+func applyCloudflareDynamicWorkersRepositoryCaps(cfg *Config) {
+	dynamicWorkers := &cfg.CloudflareDynamicWorkers
+	if dynamicWorkers.repositoryCPUMsCap > 0 &&
+		(dynamicWorkers.CPUMs > 0 || dynamicWorkers.repositoryCPUMsCapActive) {
+		if dynamicWorkers.CPUMs <= 0 {
+			dynamicWorkers.CPUMs = dynamicWorkers.repositoryCPUMsCap
+		} else {
+			dynamicWorkers.CPUMs = min(dynamicWorkers.CPUMs, dynamicWorkers.repositoryCPUMsCap)
+		}
+		dynamicWorkers.repositoryCPUMsCapActive = true
+	}
+	if dynamicWorkers.repositorySubrequestsCap > 0 &&
+		(dynamicWorkers.Subrequests > 0 || dynamicWorkers.repositorySubrequestsCapActive) {
+		if dynamicWorkers.Subrequests <= 0 {
+			dynamicWorkers.Subrequests = dynamicWorkers.repositorySubrequestsCap
+		} else {
+			dynamicWorkers.Subrequests = min(
+				dynamicWorkers.Subrequests,
+				dynamicWorkers.repositorySubrequestsCap,
+			)
+		}
+		dynamicWorkers.repositorySubrequestsCapActive = true
+	}
+	if dynamicWorkers.repositoryTimeoutSecsCap > 0 &&
+		(dynamicWorkers.TimeoutSecs > 0 || dynamicWorkers.repositoryTimeoutSecsCapActive) {
+		if dynamicWorkers.TimeoutSecs <= 0 {
+			dynamicWorkers.TimeoutSecs = dynamicWorkers.repositoryTimeoutSecsCap
+		} else {
+			dynamicWorkers.TimeoutSecs = min(
+				dynamicWorkers.TimeoutSecs,
+				dynamicWorkers.repositoryTimeoutSecsCap,
+			)
+		}
+		dynamicWorkers.repositoryTimeoutSecsCapActive = true
+	}
+}
+
+func positiveMinimum(current, candidate int) int {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 {
+		return candidate
+	}
+	return min(current, candidate)
 }
 
 type fileSemaphoreConfig struct {

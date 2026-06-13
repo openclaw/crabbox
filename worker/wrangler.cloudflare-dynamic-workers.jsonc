@@ -17,6 +17,20 @@
       "preview_id": "replace-with-cloudflare-dynamic-workers-runs-preview-kv-namespace-id",
     },
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RUN_COORDINATOR",
+        "class_name": "DynamicWorkerRunCoordinator",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "cloudflare-dynamic-workers-v1",
+      "new_sqlite_classes": ["DynamicWorkerRunCoordinator"],
+    },
+  ],
   "observability": {
     "enabled": true,
   },

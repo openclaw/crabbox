@@ -1176,6 +1176,9 @@ func TestCloudflareDynamicWorkersUntrustedConfigCannotReplaceConnectionOrEnableE
 	cfg.CloudflareDynamicWorkers.LoaderURL = "https://trusted-loader.example.test"
 	cfg.CloudflareDynamicWorkers.Token = "trusted-token"
 	cfg.CloudflareDynamicWorkers.Egress = "blocked"
+	cfg.CloudflareDynamicWorkers.CPUMs = 25
+	cfg.CloudflareDynamicWorkers.Subrequests = 7
+	cfg.CloudflareDynamicWorkers.TimeoutSecs = 30
 
 	err := applyFileConfigWithTrust(&cfg, fileConfig{
 		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
@@ -1183,7 +1186,9 @@ func TestCloudflareDynamicWorkersUntrustedConfigCannotReplaceConnectionOrEnableE
 			Token:       "untrusted-token",
 			Egress:      "intercept",
 			CacheMode:   "one-shot",
-			TimeoutSecs: 15,
+			CPUMs:       100,
+			Subrequests: 20,
+			TimeoutSecs: 90,
 		},
 	}, false)
 	if err != nil {
@@ -1194,8 +1199,120 @@ func TestCloudflareDynamicWorkersUntrustedConfigCannotReplaceConnectionOrEnableE
 		cfg.CloudflareDynamicWorkers.Egress != "blocked" {
 		t.Fatalf("untrusted config changed connection or egress: %#v", cfg.CloudflareDynamicWorkers)
 	}
-	if cfg.CloudflareDynamicWorkers.CacheMode != "one-shot" || cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
-		t.Fatalf("safe runtime settings were not applied: %#v", cfg.CloudflareDynamicWorkers)
+	if cfg.CloudflareDynamicWorkers.CacheMode != "one-shot" ||
+		cfg.CloudflareDynamicWorkers.CPUMs != 25 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 7 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 30 {
+		t.Fatalf("untrusted config loosened runtime limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	err = applyFileConfigWithTrust(&cfg, fileConfig{
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			CPUMs:       10,
+			Subrequests: 3,
+			TimeoutSecs: 15,
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("untrusted config did not tighten runtime limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+}
+
+func TestCloudflareDynamicWorkersUntrustedConfigCannotSetUnsetResourceLimits(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CloudflareDynamicWorkers.CPUMs = 0
+	cfg.CloudflareDynamicWorkers.Subrequests = 0
+
+	err := applyFileConfigWithTrust(&cfg, fileConfig{
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			CPUMs:       300_000,
+			Subrequests: 10_000,
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 0 || cfg.CloudflareDynamicWorkers.Subrequests != 0 {
+		t.Fatalf("untrusted config set unset resource limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+}
+
+func TestCloudflareDynamicWorkersRepositoryCapsApplyAfterEnvironment(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", "50")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", "12")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", "30")
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.WriteFile(
+		".crabbox.yaml",
+		[]byte("provider: cloudflare-dynamic-workers\ncloudflareDynamicWorkers:\n  cpuMs: 10\n  subrequests: 3\n  timeoutSecs: 15\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("repository caps did not constrain environment limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{
+		"--cloudflare-dynamic-workers-cpu-ms", "100",
+		"--cloudflare-dynamic-workers-subrequests", "20",
+		"--cloudflare-dynamic-workers-timeout-secs", "90",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("repository caps did not constrain provider flags: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	fs = newFlagSet("test-zero", io.Discard)
+	values = registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{
+		"--cloudflare-dynamic-workers-cpu-ms", "0",
+		"--cloudflare-dynamic-workers-subrequests", "0",
+		"--cloudflare-dynamic-workers-timeout-secs", "0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("zero provider flags disabled repository caps: %#v", cfg.CloudflareDynamicWorkers)
 	}
 }
 
