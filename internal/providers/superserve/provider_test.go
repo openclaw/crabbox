@@ -171,8 +171,8 @@ func TestConfigureReturnsLifecycleBackendAndCredentialedDoctor(t *testing.T) {
 	if !ok {
 		t.Fatalf("configured backend does not implement DelegatedRunBackend: %T", configured)
 	}
-	if _, err := delegated.Run(context.Background(), RunRequest{}); err == nil || !strings.Contains(err.Error(), "run is not implemented yet") {
-		t.Fatalf("Run err=%v", err)
+	if _, err := delegated.Run(context.Background(), RunRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Fatalf("Run err=%v, want API key requirement", err)
 	}
 	cleanup, ok := configured.(core.CleanupBackend)
 	if !ok {

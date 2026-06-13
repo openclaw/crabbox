@@ -1,6 +1,7 @@
 package superserve
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -17,7 +18,10 @@ import (
 	"time"
 )
 
-const defaultSuperserveRequestTimeout = 2 * time.Minute
+const (
+	defaultSuperserveRequestTimeout = 2 * time.Minute
+	maxExecStreamCaptureBytes       = 16 * 1024
+)
 
 type superserveClient interface {
 	BaseURL() string
@@ -29,6 +33,8 @@ type superserveClient interface {
 	PauseSandbox(context.Context, string) (superserveSandbox, error)
 	ResumeSandbox(context.Context, string) (sandboxAccess, error)
 	DeleteSandbox(context.Context, string) error
+	UploadFile(context.Context, *sandboxAccess, string, io.Reader) error
+	Exec(context.Context, *sandboxAccess, execRequest, io.Writer, io.Writer) (execResult, error)
 	Probe(context.Context) error
 }
 
@@ -60,6 +66,28 @@ type superserveSandbox struct {
 type sandboxAccess struct {
 	Sandbox     superserveSandbox
 	AccessToken string
+}
+
+type execRequest struct {
+	Command    string            `json:"command"`
+	WorkingDir string            `json:"working_dir,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	// Superserve data-plane exec uses timeout_s; sandbox lifetime uses timeout_secs.
+	TimeoutSecs int `json:"timeout_s,omitempty"`
+}
+
+type execResult struct {
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	ExitCode int    `json:"exit_code"`
+}
+
+type execStreamEvent struct {
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	ExitCode int    `json:"exit_code,omitempty"`
+	Finished bool   `json:"finished,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 type superserveAPIError struct {
@@ -240,6 +268,61 @@ func (c *httpSuperserveClient) DeleteSandbox(ctx context.Context, id string) err
 	return c.doJSON(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(id), nil, nil)
 }
 
+func (c *httpSuperserveClient) UploadFile(ctx context.Context, access *sandboxAccess, remotePath string, content io.Reader) error {
+	if strings.TrimSpace(remotePath) == "" || !strings.HasPrefix(remotePath, "/") || strings.Contains(remotePath, "..") {
+		return exit(2, "superserve file path must be absolute and must not contain '..': %q", remotePath)
+	}
+	seeker, canSeek := content.(io.Seeker)
+	return c.withAccessRetry(ctx, access, func(token string) error {
+		if canSeek {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return exit(6, "rewind sync archive: %v", err)
+			}
+		}
+		target, err := c.dataPlaneTarget(access.Sandbox.ID)
+		if err != nil {
+			return err
+		}
+		apiPath := "/files?path=" + url.QueryEscape(remotePath)
+		requestCtx, cancel := context.WithTimeout(ctx, defaultSuperserveRequestTimeout)
+		defer cancel()
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, target.baseURL+apiPath, content)
+		if err != nil {
+			return fmt.Errorf("superserve file upload request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("X-Access-Token", token)
+		for k, v := range target.headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return fmt.Errorf("superserve file upload %s: %w", remotePath, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return c.apiError(http.MethodPost, "files?path="+remotePath, resp, token)
+		}
+		return nil
+	})
+}
+
+func (c *httpSuperserveClient) Exec(ctx context.Context, access *sandboxAccess, req execRequest, stdout, stderr io.Writer) (execResult, error) {
+	var result execResult
+	err := c.withAccessRetry(ctx, access, func(token string) error {
+		var err error
+		result, err = c.execStream(ctx, access.Sandbox.ID, token, req, stdout, stderr)
+		if isSuperserveUnsupportedStream(err) {
+			result, err = c.execBuffered(ctx, access.Sandbox.ID, token, req)
+			if err == nil {
+				writeExecResultOutput(result, stdout, stderr)
+			}
+		}
+		return err
+	})
+	return result, err
+}
+
 func (c *httpSuperserveClient) Probe(ctx context.Context) error {
 	var raw json.RawMessage
 	return c.doJSON(ctx, http.MethodGet, "/sandboxes", nil, &raw)
@@ -278,17 +361,290 @@ func (c *httpSuperserveClient) postAccess(ctx context.Context, apiPath string) (
 	return sandboxAccess{Sandbox: sb, AccessToken: token}, nil
 }
 
-func (c *httpSuperserveClient) apiError(method, apiPath string, resp *http.Response) error {
+func (c *httpSuperserveClient) withAccessRetry(ctx context.Context, access *sandboxAccess, send func(token string) error) error {
+	if access == nil || strings.TrimSpace(access.Sandbox.ID) == "" {
+		return exit(5, "superserve data-plane request needs an activated sandbox")
+	}
+	if strings.TrimSpace(access.AccessToken) == "" {
+		return exit(5, "superserve activated sandbox %s returned no access token", access.Sandbox.ID)
+	}
+	err := send(access.AccessToken)
+	if !isSuperserveUnauthorized(err) {
+		return err
+	}
+	fresh, refreshErr := c.ActivateSandbox(ctx, access.Sandbox.ID)
+	if refreshErr != nil {
+		return refreshErr
+	}
+	access.AccessToken = fresh.AccessToken
+	if fresh.Sandbox.ID != "" {
+		access.Sandbox = fresh.Sandbox
+	}
+	return send(access.AccessToken)
+}
+
+type dataPlaneTarget struct {
+	baseURL string
+	headers map[string]string
+}
+
+func (c *httpSuperserveClient) dataPlaneTarget(sandboxID string) (dataPlaneTarget, error) {
+	parsed, err := url.Parse(c.baseURL)
+	if err != nil {
+		return dataPlaneTarget{}, err
+	}
+	if isLoopbackHost(parsed.Hostname()) {
+		return dataPlaneTarget{
+			baseURL: strings.TrimRight(parsed.String(), "/"),
+			headers: map[string]string{
+				"X-Superserve-Sandbox-Id": sandboxID,
+			},
+		}, nil
+	}
+	sandboxHost, ok := deriveSuperserveSandboxHost(parsed.Hostname())
+	if !ok {
+		return dataPlaneTarget{}, exit(2, "provider=superserve cannot derive a data-plane sandbox host from base URL %s; use the production/staging Superserve API or a loopback development endpoint", c.baseURL)
+	}
+	if supportsSuperserveSharedHost(sandboxHost) {
+		return dataPlaneTarget{
+			baseURL: "https://" + sandboxHost,
+			headers: map[string]string{
+				"X-Superserve-Sandbox-Id": sandboxID,
+			},
+		}, nil
+	}
+	return dataPlaneTarget{baseURL: "https://" + dataPlaneSubdomainHost(sandboxID, sandboxHost)}, nil
+}
+
+func deriveSuperserveSandboxHost(apiHost string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(apiHost)) {
+	case "api-staging.superserve.ai":
+		return "staging-sandbox.superserve.ai", true
+	case "api.superserve.ai":
+		return "sandbox.superserve.ai", true
+	default:
+		return "", false
+	}
+}
+
+func supportsSuperserveSharedHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "sandbox.superserve.ai", "staging-sandbox.superserve.ai":
+		return true
+	default:
+		return false
+	}
+}
+
+func dataPlaneSubdomainHost(sandboxID, sandboxHost string) string {
+	return "boxd-" + strings.TrimSpace(sandboxID) + "." + strings.TrimSpace(sandboxHost)
+}
+
+func (c *httpSuperserveClient) execBuffered(ctx context.Context, sandboxID, token string, body execRequest) (execResult, error) {
+	target, err := c.dataPlaneTarget(sandboxID)
+	if err != nil {
+		return execResult{}, err
+	}
+	var result execResult
+	timeout := c.execRequestTimeout(body.TimeoutSecs)
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := c.doDataPlaneJSON(requestCtx, http.MethodPost, target, "/exec", token, body, &result, envSecretValues(body.Env)...); err != nil {
+		return execResult{}, err
+	}
+	return result, nil
+}
+
+func (c *httpSuperserveClient) execStream(ctx context.Context, sandboxID, token string, body execRequest, stdout, stderr io.Writer) (execResult, error) {
+	target, err := c.dataPlaneTarget(sandboxID)
+	if err != nil {
+		return execResult{}, err
+	}
+	timeout := c.execRequestTimeout(body.TimeoutSecs)
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var reader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return execResult{}, fmt.Errorf("superserve marshal /exec/stream: %w", err)
+	}
+	reader = bytes.NewReader(buf)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, target.baseURL+"/exec/stream", reader)
+	if err != nil {
+		return execResult{}, fmt.Errorf("superserve request /exec/stream: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("X-Access-Token", token)
+	for k, v := range target.headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return execResult{}, fmt.Errorf("superserve POST /exec/stream: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return execResult{}, &superserveStreamUnsupportedError{err: c.apiError(http.MethodPost, "/exec/stream", resp, append([]string{token}, envSecretValues(body.Env)...)...)}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return execResult{}, c.apiError(http.MethodPost, "/exec/stream", resp, append([]string{token}, envSecretValues(body.Env)...)...)
+	}
+	return consumeSuperserveExecStream(resp.Body, stdout, stderr)
+}
+
+func (c *httpSuperserveClient) doDataPlaneJSON(ctx context.Context, method string, target dataPlaneTarget, apiPath, token string, body, out any, secrets ...string) error {
+	var reader io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("superserve marshal %s: %w", apiPath, err)
+		}
+		reader = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target.baseURL+apiPath, reader)
+	if err != nil {
+		return fmt.Errorf("superserve request %s: %w", apiPath, err)
+	}
+	req.Header.Set("X-Access-Token", token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range target.headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("superserve %s %s: %w", method, apiPath, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return c.apiError(method, apiPath, resp, append([]string{token}, secrets...)...)
+	}
+	if out == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("superserve decode %s: %w", apiPath, err)
+	}
+	return nil
+}
+
+func (c *httpSuperserveClient) execRequestTimeout(timeoutSecs int) time.Duration {
+	if timeoutSecs > 0 {
+		return time.Duration(timeoutSecs)*time.Second + 5*time.Second
+	}
+	return defaultSuperserveRequestTimeout
+}
+
+type superserveStreamUnsupportedError struct {
+	err error
+}
+
+func (e *superserveStreamUnsupportedError) Error() string { return e.err.Error() }
+func (e *superserveStreamUnsupportedError) Unwrap() error { return e.err }
+
+func isSuperserveUnsupportedStream(err error) bool {
+	var streamErr *superserveStreamUnsupportedError
+	return errors.As(err, &streamErr)
+}
+
+func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer) (execResult, error) {
+	var result execResult
+	sawFinished := false
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if raw == "" || raw == "[DONE]" {
+			continue
+		}
+		var event execStreamEvent
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			continue
+		}
+		if event.Stdout != "" {
+			result.Stdout = appendBounded(result.Stdout, event.Stdout, maxExecStreamCaptureBytes)
+			_, _ = io.WriteString(stdout, event.Stdout)
+		}
+		if event.Stderr != "" {
+			result.Stderr = appendBounded(result.Stderr, event.Stderr, maxExecStreamCaptureBytes)
+			_, _ = io.WriteString(stderr, event.Stderr)
+		}
+		if event.Finished {
+			sawFinished = true
+			result.ExitCode = event.ExitCode
+			if event.Error != "" {
+				result.Stderr = appendBounded(result.Stderr, event.Error, maxExecStreamCaptureBytes)
+				_, _ = io.WriteString(stderr, event.Error)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return execResult{}, fmt.Errorf("superserve read /exec/stream: %w", err)
+	}
+	if !sawFinished {
+		return execResult{}, exit(5, "superserve command stream ended without a finished event")
+	}
+	return result, nil
+}
+
+func appendBounded(current, chunk string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(chunk) >= limit {
+		return chunk[len(chunk)-limit:]
+	}
+	if len(current)+len(chunk) <= limit {
+		return current + chunk
+	}
+	combined := current + chunk
+	return combined[len(combined)-limit:]
+}
+
+func writeExecResultOutput(result execResult, stdout, stderr io.Writer) {
+	if result.Stdout != "" {
+		_, _ = io.WriteString(stdout, result.Stdout)
+	}
+	if result.Stderr != "" {
+		_, _ = io.WriteString(stderr, result.Stderr)
+	}
+}
+
+func envSecretValues(env map[string]string) []string {
+	secrets := make([]string, 0, len(env))
+	for _, value := range env {
+		if strings.TrimSpace(value) != "" {
+			secrets = append(secrets, value)
+		}
+	}
+	return secrets
+}
+
+func (c *httpSuperserveClient) apiError(method, apiPath string, resp *http.Response, secrets ...string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	msg := strings.TrimSpace(string(body))
 	var wrapped struct {
-		Error   string `json:"error"`
+		Error   any    `json:"error"`
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(body, &wrapped) == nil {
-		msg = blank(wrapped.Error, blank(wrapped.Message, msg))
+		switch value := wrapped.Error.(type) {
+		case string:
+			msg = blank(value, blank(wrapped.Message, msg))
+		case map[string]any:
+			if message, ok := value["message"].(string); ok {
+				msg = blank(message, blank(wrapped.Message, msg))
+			}
+		}
 	}
-	msg = redactSuperserveSecrets(msg, c.apiKey)
+	msg = redactSuperserveSecrets(msg, append([]string{c.apiKey}, secrets...)...)
 	return &superserveAPIError{
 		StatusCode: resp.StatusCode,
 		err:        exit(5, "superserve %s %s failed: %s: %s", method, apiPath, resp.Status, msg),
@@ -298,6 +654,11 @@ func (c *httpSuperserveClient) apiError(method, apiPath string, resp *http.Respo
 func isSuperserveNotFound(err error) bool {
 	var apiErr *superserveAPIError
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func isSuperserveUnauthorized(err error) bool {
+	var apiErr *superserveAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized
 }
 
 func redactSuperserveSecrets(value string, secrets ...string) string {
