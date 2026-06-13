@@ -573,6 +573,9 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 }
 
 func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo Repo, reclaim bool, requestedSlug string) (string, string, string, func(), error) {
+	if err := validateSuperserveConfig(b.cfg); err != nil {
+		return "", "", "", nil, err
+	}
 	providerScope, err := newSuperserveClaimScope(api.BaseURL())
 	if err != nil {
 		return "", "", "", nil, err
@@ -895,14 +898,8 @@ func (b *backend) execTimeoutSecs() int {
 }
 
 func (b *backend) sandboxTimeoutSecs() int {
-	if b.cfg.Superserve.TimeoutSecs > 0 {
-		return b.cfg.Superserve.TimeoutSecs
-	}
-	lifetime := b.cfg.TTL
-	if lifetime <= 0 {
-		lifetime = 90 * time.Minute
-	}
-	return int((lifetime + time.Second - 1) / time.Second)
+	timeout, _ := superserveSandboxTimeoutSecs(b.cfg)
+	return timeout
 }
 
 func superserveCommandEnv(env map[string]string) (map[string]string, []string) {

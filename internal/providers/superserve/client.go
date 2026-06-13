@@ -445,7 +445,9 @@ func deriveSuperserveSandboxHost(apiHost string) (string, bool) {
 	case "api.superserve.ai":
 		return "sandbox.superserve.ai", true
 	default:
-		return "", false
+		// Match the official SDK: custom control-plane URLs use the production
+		// sandbox data plane unless the caller is using a loopback endpoint.
+		return "sandbox.superserve.ai", true
 	}
 }
 
@@ -512,7 +514,7 @@ func (c *httpSuperserveClient) execStream(ctx context.Context, sandboxID, token 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return execResult{}, c.apiError(http.MethodPost, "/exec/stream", resp, append([]string{token}, envSecretValues(body.Env)...)...)
 	}
-	return consumeSuperserveExecStream(resp.Body, stdout, stderr)
+	return consumeSuperserveExecStream(resp.Body, stdout, stderr, envSecretValues(body.Env)...)
 }
 
 func (c *httpSuperserveClient) doDataPlaneJSON(ctx context.Context, method string, target dataPlaneTarget, apiPath, token string, body, out any, secrets ...string) error {
@@ -572,7 +574,7 @@ func isSuperserveUnsupportedStream(err error) bool {
 	return errors.As(err, &streamErr)
 }
 
-func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer) (execResult, error) {
+func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer, secrets ...string) (execResult, error) {
 	var result execResult
 	sawFinished := false
 	scanner := bufio.NewScanner(body)
@@ -606,10 +608,12 @@ func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer) (exec
 			sawFinished = true
 			result.ExitCode = event.ExitCode
 			if event.Error != "" {
-				result.Stderr = appendBounded(result.Stderr, event.Error, maxExecStreamCaptureBytes)
-				if _, err := io.WriteString(stderr, event.Error); err != nil {
+				streamErr := redactSuperserveSecrets(event.Error, secrets...)
+				result.Stderr = appendBounded(result.Stderr, streamErr, maxExecStreamCaptureBytes)
+				if _, err := io.WriteString(stderr, streamErr); err != nil {
 					return execResult{}, fmt.Errorf("superserve write command stderr: %w", err)
 				}
+				return result, exit(5, "superserve command stream failed: %s", streamErr)
 			}
 		}
 	}

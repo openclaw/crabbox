@@ -123,11 +123,14 @@ CRABBOX_SUPERSERVE_FORGET_MISSING
 ```
 
 Defaults: API URL `https://api.superserve.ai`, template `superserve/base`,
-workdir `/workspace/crabbox`, command timeout `600` seconds, and service
-default sandbox lifetime.
+workdir `/workspace/crabbox`, command timeout `600` seconds, and a sandbox
+lifetime derived from Crabbox's TTL. Superserve caps sandbox lifetimes at
+`604800` seconds (7 days).
 
 The base URL must be absolute, must not include userinfo, query parameters, or
 a fragment, and must use HTTPS except for loopback development endpoints.
+Like the official SDK, custom control-plane URLs use Superserve's production
+sandbox data plane.
 
 ## Lifecycle
 

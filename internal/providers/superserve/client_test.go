@@ -368,20 +368,14 @@ func TestSuperserveClientFallsBackToBufferedExecWhenStreamUnsupported(t *testing
 	}
 }
 
-func TestSuperserveClientRejectsUnknownDataPlaneHost(t *testing.T) {
-	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
-	client, err := newSuperserveClient(testConfigWithBaseURL("https://api.example.test"), Runtime{})
+func TestSuperserveClientCustomControlPlaneUsesProductionDataPlane(t *testing.T) {
+	client := &httpSuperserveClient{baseURL: "https://api.example.test"}
+	target, err := client.dataPlaneTarget("sb_123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	access := &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"}
-	err = client.UploadFile(context.Background(), access, "/tmp/archive.tgz", strings.NewReader("archive"))
-	if err == nil || !strings.Contains(err.Error(), "cannot derive a data-plane sandbox host") {
-		t.Fatalf("UploadFile err=%v, want fail-closed data-plane host rejection", err)
-	}
-	_, err = client.Exec(context.Background(), access, execRequest{Command: "true"}, io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "cannot derive a data-plane sandbox host") {
-		t.Fatalf("Exec err=%v, want fail-closed data-plane host rejection", err)
+	if target.baseURL != "https://sandbox.superserve.ai" || target.headers["X-Superserve-Sandbox-Id"] != "sb_123" {
+		t.Fatalf("target=%#v, want official SDK production data-plane fallback", target)
 	}
 }
 
@@ -596,6 +590,36 @@ func TestSuperserveClientStreamRequiresFinishedEvent(t *testing.T) {
 		execRequest{Command: "long"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "without a finished event") {
 		t.Fatalf("err=%v, want unfinished stream error", err)
+	}
+}
+
+func TestSuperserveClientRejectsTerminalStreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/exec/stream" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"finished\":true,\"error\":\"failed with project_test_not_real\"}\n\n")
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	result, err := client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+		execRequest{Command: "false", Env: map[string]string{"PROJECT_TOKEN": "project_test_not_real"}}, io.Discard, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "command stream failed") {
+		t.Fatalf("result=%#v err=%v, want terminal stream failure", result, err)
+	}
+	if strings.Contains(err.Error(), "project_test_not_real") || strings.Contains(stderr.String(), "project_test_not_real") {
+		t.Fatalf("terminal stream error leaked env value: err=%v stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[redacted]") {
+		t.Fatalf("stderr=%q, want redacted terminal error", stderr.String())
 	}
 }
 

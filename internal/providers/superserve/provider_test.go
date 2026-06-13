@@ -146,6 +146,8 @@ func TestValidateSuperserveConfigRejectsBadValues(t *testing.T) {
 		{name: "system workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "/etc" }, wantErr: "too broad"},
 		{name: "negative timeout", mutate: func(cfg *Config) { cfg.Superserve.TimeoutSecs = -1 }, wantErr: "timeoutSecs must be non-negative"},
 		{name: "negative exec timeout", mutate: func(cfg *Config) { cfg.Superserve.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
+		{name: "timeout over seven days", mutate: func(cfg *Config) { cfg.Superserve.TimeoutSecs = maxSuperserveSandboxTimeoutSecs + 1 }, wantErr: "must not exceed 604800"},
+		{name: "derived TTL over seven days", mutate: func(cfg *Config) { cfg.TTL = 7*24*time.Hour + time.Millisecond }, wantErr: "must not exceed 604800"},
 		{name: "deny hostname", mutate: func(cfg *Config) { cfg.Superserve.NetworkDenyOut = []string{"metadata.example.test"} }, wantErr: "must be a CIDR"},
 	}
 	for _, tt := range tests {

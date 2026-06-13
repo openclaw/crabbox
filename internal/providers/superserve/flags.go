@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 type superserveFlagValues struct {
@@ -19,6 +20,8 @@ type superserveFlagValues struct {
 	NetworkDenyOut  *string
 	ForgetMissing   *bool
 }
+
+const maxSuperserveSandboxTimeoutSecs = 7 * 24 * 60 * 60
 
 func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	return superserveFlagValues{
@@ -90,12 +93,30 @@ func validateSuperserveConfig(cfg Config) error {
 	if cfg.Superserve.ExecTimeoutSecs < 0 {
 		return exit(2, "superserve execTimeoutSecs must be non-negative")
 	}
+	if _, err := superserveSandboxTimeoutSecs(cfg); err != nil {
+		return err
+	}
 	for _, deny := range cfg.Superserve.NetworkDenyOut {
 		if _, _, err := net.ParseCIDR(deny); err != nil {
 			return exit(2, "superserve networkDenyOut entry %q must be a CIDR", deny)
 		}
 	}
 	return nil
+}
+
+func superserveSandboxTimeoutSecs(cfg Config) (int, error) {
+	timeout := cfg.Superserve.TimeoutSecs
+	if timeout == 0 {
+		lifetime := cfg.TTL
+		if lifetime <= 0 {
+			lifetime = 90 * time.Minute
+		}
+		timeout = int((lifetime + time.Second - 1) / time.Second)
+	}
+	if timeout > maxSuperserveSandboxTimeoutSecs {
+		return 0, exit(2, "superserve sandbox lifetime must not exceed %d seconds (7 days)", maxSuperserveSandboxTimeoutSecs)
+	}
+	return timeout, nil
 }
 
 func validateSuperserveBaseURL(raw string) (string, error) {
