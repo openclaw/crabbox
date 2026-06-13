@@ -21,9 +21,10 @@ type loaderAPI interface {
 }
 
 type client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL             string
+	token               string
+	http                *http.Client
+	responseBodyTimeout time.Duration
 }
 
 type readinessResponse struct {
@@ -119,7 +120,12 @@ var newLoaderAPI = func(cfg Config, rt Runtime) (loaderAPI, error) {
 	if httpClient == nil {
 		httpClient = defaultHTTPClient(cfg)
 	}
-	return &client{baseURL: baseURL, token: token, http: httpClient}, nil
+	return &client{
+		baseURL:             baseURL,
+		token:               token,
+		http:                httpClient,
+		responseBodyTimeout: responseHeaderTimeout(cfg),
+	}, nil
 }
 
 func loaderURL(cfg Config) (string, error) {
@@ -208,20 +214,24 @@ func (c *client) Run(ctx context.Context, req runRequest) (runResponse, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		err := json.NewDecoder(resp.Body).Decode(&out)
+		err := c.decodeJSONResponse(ctx, resp.Body, &out)
 		if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Crabbox-Lifecycle-Uncertain")), "true") {
 			out.LifecycleUncertain = true
 		}
 		return out, err
 	}
-	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	responseBody, err := c.readResponseBody(ctx, resp.Body, 64*1024)
 	if json.Unmarshal(responseBody, &out) == nil && strings.TrimSpace(out.ID) != "" && strings.TrimSpace(out.Status) != "" {
 		if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Crabbox-Lifecycle-Uncertain")), "true") {
 			out.LifecycleUncertain = true
 		}
 		return out, nil
 	}
-	return out, c.responseErrorBody(resp.StatusCode, resp.Status, responseBody)
+	responseErr := c.responseErrorBody(resp.StatusCode, resp.Status, responseBody)
+	if err != nil {
+		return out, fmt.Errorf("%w: reading response body: %w", responseErr, err)
+	}
+	return out, responseErr
 }
 
 func (c *client) Status(ctx context.Context, id string) (runStatus, error) {
@@ -261,17 +271,51 @@ func (c *client) doJSON(ctx context.Context, method, endpoint string, input any,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.responseError(resp)
+		return c.responseError(ctx, resp)
 	}
 	if output == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(output)
+	return c.decodeJSONResponse(ctx, resp.Body, output)
 }
 
-func (c *client) responseError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	return c.responseErrorBody(resp.StatusCode, resp.Status, body)
+func (c *client) responseError(ctx context.Context, resp *http.Response) error {
+	body, err := c.readResponseBody(ctx, resp.Body, 64*1024)
+	responseErr := c.responseErrorBody(resp.StatusCode, resp.Status, body)
+	if err != nil {
+		return fmt.Errorf("%w: reading response body: %w", responseErr, err)
+	}
+	return responseErr
+}
+
+func (c *client) decodeJSONResponse(ctx context.Context, body io.ReadCloser, output any) error {
+	return c.withResponseBodyDeadline(ctx, body, func() error {
+		return json.NewDecoder(body).Decode(output)
+	})
+}
+
+func (c *client) readResponseBody(ctx context.Context, body io.ReadCloser, limit int64) ([]byte, error) {
+	var out []byte
+	err := c.withResponseBodyDeadline(ctx, body, func() error {
+		var err error
+		out, err = io.ReadAll(io.LimitReader(body, limit))
+		return err
+	})
+	return out, err
+}
+
+func (c *client) withResponseBodyDeadline(ctx context.Context, body io.ReadCloser, read func() error) error {
+	bodyCtx, cancel := context.WithTimeout(ctx, c.responseBodyTimeout)
+	defer cancel()
+	stopClose := context.AfterFunc(bodyCtx, func() {
+		_ = body.Close()
+	})
+	defer stopClose()
+	err := read()
+	if bodyCtx.Err() != nil {
+		return bodyCtx.Err()
+	}
+	return err
 }
 
 func (c *client) responseErrorBody(statusCode int, status string, body []byte) error {

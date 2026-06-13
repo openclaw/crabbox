@@ -142,6 +142,54 @@ func TestDefaultHTTPClientHonorsConfiguredRunTimeout(t *testing.T) {
 	}
 }
 
+func TestClientTimeoutCoversResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":`))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: 25 * time.Millisecond,
+	}
+
+	_, err := client.Readiness(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("readiness error=%v, want deadline exceeded", err)
+	}
+}
+
+func TestClientTimeoutPreservesErrorStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid`))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := &client{
+		baseURL:             server.URL,
+		token:               "test-token",
+		http:                server.Client(),
+		responseBodyTimeout: 25 * time.Millisecond,
+	}
+
+	_, err := client.Run(context.Background(), runRequest{})
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("run error=%v, want typed HTTP 400", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("run error=%v, want wrapped deadline exceeded", err)
+	}
+}
+
 func TestDoctorReadinessUsesBearerAuthAndDoesNotMutate(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

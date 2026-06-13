@@ -237,7 +237,7 @@ func TestConfigShowRedactsCloudflareDynamicWorkers(t *testing.T) {
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	if err := os.WriteFile(configPath, []byte(`provider: aws
 cloudflareDynamicWorkers:
-  loaderUrl: https://user:pass@loader.example.test
+  loaderUrl: https://user:pass@loader.example.test?token=query-secret#fragment-secret
   token: secret-token
   compatibilityDate: "2026-06-01"
   compatibilityFlags: [nodejs_compat]
@@ -256,7 +256,7 @@ cloudflareDynamicWorkers:
 		t.Fatal(err)
 	}
 	text := stdout.String()
-	if strings.Contains(text, "secret-token") || strings.Contains(text, "user:pass") {
+	if strings.Contains(text, "secret-token") || strings.Contains(text, "user:pass") || strings.Contains(text, "query-secret") || strings.Contains(text, "fragment-secret") {
 		t.Fatalf("config show leaked secret: %q", text)
 	}
 	if !strings.Contains(text, "cloudflare_dynamic_workers loader_url=https://<redacted>@loader.example.test") || !strings.Contains(text, "auth=configured") {
@@ -279,8 +279,27 @@ cloudflareDynamicWorkers:
 	if got.CloudflareDynamicWorkers.LoaderURL != "https://<redacted>@loader.example.test" || got.CloudflareDynamicWorkers.Auth != "configured" {
 		t.Fatalf("json dynamic workers=%#v", got.CloudflareDynamicWorkers)
 	}
-	if strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "user:pass") {
+	if strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "user:pass") || strings.Contains(stdout.String(), "query-secret") || strings.Contains(stdout.String(), "fragment-secret") {
 		t.Fatalf("config show json leaked secret: %q", stdout.String())
+	}
+}
+
+func TestRedactedConfigURLWithoutQueryStripsQueryAndFragmentWithoutUserinfo(t *testing.T) {
+	got := redactedConfigURLWithoutQuery("https://loader.example.test/v1?token=query-secret#fragment-secret")
+	if got != "https://loader.example.test/v1" {
+		t.Fatalf("redacted URL=%q", got)
+	}
+}
+
+func TestRedactedConfigURLWithoutQueryFailsClosedForMalformedURL(t *testing.T) {
+	for _, raw := range []string{
+		"https://loader.example.test/%zz?token=@query-secret",
+		"https://api-token:443#pass@host/%zz",
+	} {
+		got := redactedConfigURLWithoutQuery(raw)
+		if got != "<redacted>" || strings.Contains(got, "query-secret") || strings.Contains(got, "api-token") {
+			t.Fatalf("redacted URL for %q=%q", raw, got)
+		}
 	}
 }
 
