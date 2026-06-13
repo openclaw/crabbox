@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -523,6 +524,19 @@ func TestRunServerProtectsStructuralLabels(t *testing.T) {
 		if server.Labels[key] != value {
 			t.Fatalf("label %s=%q want %q labels=%#v", key, server.Labels[key], value, server.Labels)
 		}
+	}
+}
+
+func TestNotFoundErrorDoesNotTrustTypedServerErrorText(t *testing.T) {
+	if notFoundError(&apiError{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     "service unavailable",
+		Body:       "binding not found",
+	}) {
+		t.Fatal("typed 503 must not be treated as not found")
+	}
+	if !notFoundError(errors.New("legacy API 404 not found")) {
+		t.Fatal("untyped legacy 404 should remain compatible")
 	}
 }
 

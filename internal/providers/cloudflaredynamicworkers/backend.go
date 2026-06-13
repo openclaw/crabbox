@@ -736,8 +736,8 @@ func notFoundError(err error) bool {
 		return false
 	}
 	var apiErr *apiError
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-		return true
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusNotFound
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "404") || strings.Contains(text, "not found")

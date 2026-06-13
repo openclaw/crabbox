@@ -28,6 +28,8 @@ const coordinationMaxLogEntries = 32;
 const coordinationMaxLogMessageLength = 1024;
 const coordinationMaxErrorMessageLength = 4096;
 const retainedMaxLogEntries = 256;
+const dynamicResponseBodyLimitBytes = 1024 * 1024;
+const dynamicResponseBodyReadTimeoutMs = 30 * 1000;
 const supportedCacheModes = ["one-shot", "stable", "explicit"] as const;
 const supportedEgressModes = ["blocked", "intercept"] as const;
 
@@ -52,7 +54,18 @@ export class HttpGateway extends WorkerEntrypoint<Env, GatewayProps> {
       return Response.json({ error: "egress blocked" }, { status: 403 });
     }
 
-    return fetch(request);
+    if (props.allowHostnames.length === 0) return fetch(request);
+    const response = await fetch(new Request(request, { redirect: "manual" }));
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      appendLog(props.executionId, {
+        level: "warn",
+        message: "egress redirect blocked",
+        time: new Date().toISOString(),
+      });
+      void response.body?.cancel();
+      return Response.json({ error: "egress redirect blocked" }, { status: 403 });
+    }
+    return response;
   }
 }
 
@@ -1100,7 +1113,10 @@ async function createRun(
           : env.LOADER.get(parsed.workerId, async () => workerCodeResult);
       const entrypoint = worker.getEntrypoint(undefined, entrypointOptions(parsed.limits));
       const dynamicResponse = await entrypoint.fetch(requestForDynamicWorker(parsed));
-      const result = await responseResult(dynamicResponse);
+      const result = await responseResult(
+        dynamicResponse,
+        responseBodyTimeoutMs(parsed.timeoutMs, startedAt),
+      );
       const completedAt = Date.now();
       record.state = result.status < 400 ? "succeeded" : "failed";
       record.completedAt = new Date(completedAt).toISOString();
@@ -1307,7 +1323,7 @@ function entrypointOptions(limits: WorkerLimits | undefined): EntrypointOptions 
   return limits === undefined ? undefined : { limits };
 }
 
-async function responseResult(response: Response): Promise<RunResult> {
+async function responseResult(response: Response, bodyTimeoutMs: number): Promise<RunResult> {
   const headers: Record<string, string> = {};
   for (const [key, value] of response.headers) {
     headers[key] = value;
@@ -1316,8 +1332,63 @@ async function responseResult(response: Response): Promise<RunResult> {
     status: response.status,
     statusText: response.statusText,
     headers,
-    body: await response.text(),
+    body: await readBoundedResponseBody(response, bodyTimeoutMs),
   };
+}
+
+function responseBodyTimeoutMs(timeoutMs: number | undefined, startedAt: number): number {
+  if (timeoutMs === undefined) return dynamicResponseBodyReadTimeoutMs;
+  return Math.max(1, timeoutMs - (Date.now() - startedAt));
+}
+
+async function readBoundedResponseBody(response: Response, timeoutMs: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let body = "";
+  let bytes = 0;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      void reader.cancel("response body read timed out");
+      throw new Error("dynamic worker response body read timed out");
+    }
+    // Stream reads are intentionally sequential so the byte cap is enforced before buffering.
+    // oxlint-disable-next-line eslint/no-await-in-loop
+    const result = await readResponseChunk(reader, remainingMs);
+    if (result === undefined) {
+      void reader.cancel("response body read timed out");
+      throw new Error("dynamic worker response body read timed out");
+    }
+    if (result.done) return body + decoder.decode();
+    const chunk = result.value;
+    const remainingBytes = dynamicResponseBodyLimitBytes - bytes;
+    if (chunk.byteLength > remainingBytes) {
+      body += decoder.decode(chunk.subarray(0, remainingBytes), { stream: true });
+      void reader.cancel("response body exceeded limit");
+      return `${body}${decoder.decode()}\n[crabbox response body truncated]`;
+    }
+    bytes += chunk.byteLength;
+    body += decoder.decode(chunk, { stream: true });
+  }
+}
+
+async function readResponseChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+): Promise<ReadableStreamReadResult<Uint8Array> | undefined> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 }
 
 type ParsedRunRequest = {

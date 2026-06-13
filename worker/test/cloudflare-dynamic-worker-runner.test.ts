@@ -2,8 +2,11 @@ import { readFileSync } from "node:fs";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { default: worker, DynamicWorkerRunCoordinator } =
-  await import("../src/cloudflare-dynamic-worker-runner");
+const {
+  default: worker,
+  DynamicWorkerRunCoordinator,
+  HttpGateway,
+} = await import("../src/cloudflare-dynamic-worker-runner");
 
 function isRunIndexObject(id: string): boolean {
   return id === "__crabbox/run-index__" || id.startsWith("__crabbox/run-index__/");
@@ -2327,6 +2330,86 @@ describe("Cloudflare Dynamic Workers runner", () => {
     });
     expect(loader.worker?.code?.globalOutbound).toBe(gateway);
     expect(loader.worker?.code?.tails).toEqual([tailer]);
+  });
+
+  it("blocks redirects when intercept egress uses an allowlist", async () => {
+    const fetchMock = vi.fn<(request: Request) => Promise<Response>>(async (request) => {
+      expect(request.redirect).toBe("manual");
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "https://blocked.example.test/private" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const gateway = new HttpGateway({} as never, {
+        executionId: "redirect_execution",
+        allowHostnames: ["allowed.example.test"],
+      });
+      const response = await gateway.fetch(new Request("https://allowed.example.test/redirect"));
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toEqual({ error: "egress redirect blocked" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("truncates oversized dynamic worker response bodies", async () => {
+    const loader = new MockLoader();
+    loader.nextResponse = new Response("x".repeat(1024 * 1024 + 1024));
+    const response = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify(
+          runPayload({
+            id: "run_large_response",
+            retainMetadata: false,
+          }),
+        ),
+      }),
+      env(loader),
+      ctx(),
+    );
+    const body = (await response.json()) as { body: string };
+
+    expect(response.status).toBe(200);
+    expect(body.body.length).toBeLessThan(1024 * 1024 + 100);
+    expect(body.body.endsWith("[crabbox response body truncated]")).toBe(true);
+  });
+
+  it("fails runs when response bodies exceed the configured deadline", async () => {
+    const loader = new MockLoader();
+    loader.nextResponse = new Response(
+      new ReadableStream({
+        start() {},
+      }),
+    );
+    const responsePromise = worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify(
+          runPayload({
+            id: "run_response_timeout",
+            retainMetadata: true,
+            timeoutMs: 10,
+          }),
+        ),
+      }),
+      env(loader, new MockKVNamespace()),
+      ctx(),
+    );
+    await loader.workerCreated;
+    await vi.advanceTimersByTimeAsync(20);
+    const response = await responsePromise;
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      id: "run_response_timeout",
+      status: "failed",
+      exitCode: 1,
+      error: { message: "dynamic worker response body read timed out" },
+    });
   });
 
   it("rejects intercept egress with reusable cache modes", async () => {
