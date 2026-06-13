@@ -13,6 +13,20 @@
     "caveat": "No persistent lease, remote box, or SSH access",
     "docs": "anthropic-sandbox-runtime.md"
   },
+  "agent-sandbox": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Kubernetes Agent Sandbox warm pool",
+    "location": "self-hosted",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "Agent Sandbox SandboxClaim",
+    "cleanup": "owned SandboxClaim delete",
+    "bestFit": "Kubernetes-hosted delegated Linux execution",
+    "caveat": "Requires Agent Sandbox CRDs, warm pool, kubeconfig context, and RBAC",
+    "docs": "agent-sandbox.md"
+  },
   "apple-container": {
     "status": "built-in",
     "category": "local-runtime",

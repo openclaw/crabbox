@@ -153,6 +153,7 @@ Pick whichever matches your intent:
   [Tenki](providers/tenki.md),
   [Daytona](providers/daytona.md), [Islo](providers/islo.md),
   [E2B](providers/e2b.md), [Modal](providers/modal.md),
+  [Agent Sandbox](providers/agent-sandbox.md),
   [OpenComputer](providers/opencomputer.md),
   [Freestyle](providers/freestyle.md),
   [Anthropic Sandbox Runtime](providers/anthropic-sandbox-runtime.md),

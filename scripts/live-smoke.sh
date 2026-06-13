@@ -971,6 +971,10 @@ if has_provider kubevirt; then
   kubevirt_smoke
 fi
 
+if has_provider agent-sandbox; then
+  "$root/scripts/live-agent-sandbox-smoke.sh"
+fi
+
 if has_provider external; then
   external_smoke
 fi
