@@ -163,6 +163,9 @@ func TestWarmupStampsClaimMetadataAtCreateWhenNameIsRemoteID(t *testing.T) {
 		if sb.Metadata[metadataClaimKey] != leaseID || sb.Metadata[metadataSlugKey] == "" {
 			t.Fatalf("metadata not stamped at create: id=%s metadata=%#v", id, sb.Metadata)
 		}
+		if len(sb.Metadata) > 5 {
+			t.Fatalf("metadata exceeds Vercel's five-tag limit: %#v", sb.Metadata)
+		}
 	}
 }
 
@@ -412,6 +415,7 @@ func testBackend(fake *lifecycleFakeClient, stdout, stderr io.Writer) *backend {
 	cfg.VercelSandbox.Runtime = defaultRuntime
 	cfg.VercelSandbox.Workdir = defaultWorkdir
 	cfg.VercelSandbox.ProjectID = "prj_test"
+	cfg.VercelSandbox.TeamID = "team_test"
 	cfg.IdleTimeout = time.Hour
 	return &backend{
 		spec: Provider{}.Spec(),

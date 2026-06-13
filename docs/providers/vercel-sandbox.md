@@ -58,12 +58,19 @@ CRABBOX_VERCEL_AUTH_TOKEN -> VERCEL_AUTH_TOKEN
 VERCEL_AUTH_TOKEN
 ```
 
-`sandbox login` can also satisfy the CLI readiness check. The provider still
-uses the SDK bridge for normal lifecycle and command execution, so make sure the
-SDK auth path is available before running a live workload.
+`sandbox login` satisfies both the CLI readiness check and the default SDK
+bridge. The bridge reads the official Vercel auth store through the SDK's
+exported auth helpers, refreshes expired stored OAuth tokens, and resolves the
+project/team scope before lifecycle operations. Explicit OIDC or access-token
+environment credentials take precedence. OIDC scope comes from the token's
+project/team claims, so Crabbox rejects explicit `projectId`, `teamId`, or
+`scope` configuration when `VERCEL_OIDC_TOKEN` is set. For access-token and
+stored-login auth, explicit scope configuration takes precedence over a
+`.vercel/project.json` link in the current checkout.
 
 Set at least one project scoping value when your token or local project link
-does not imply it:
+does not imply it. An explicit `projectId` must be paired with `teamId` or
+`scope`, matching the official SDK credential contract:
 
 ```sh
 export CRABBOX_VERCEL_SANDBOX_PROJECT_ID=prj_example
@@ -191,10 +198,12 @@ domains, IP addresses, or CIDRs. `ports` accepts ports or `start-end` ranges.
    working tree and uploads it through the SDK bridge. With `sync.delete: true`,
    Crabbox extracts into a staging directory and replaces the configured workdir
    only after extraction succeeds.
-4. Commands run through Vercel Sandbox `runCommand` with `cwd` set to the
-   configured workdir and forwarded non-auth environment values sent in the SDK
-   request body. The v1 SDK bridge returns bounded captured stdout and stderr at
-   command completion rather than a live event stream.
+4. Uploads and commands automatically resume a retained sandbox session when
+   needed. Commands run through Vercel Sandbox `runCommand` with `cwd` set to
+   the configured workdir and forwarded non-auth environment values sent in the
+   SDK request body. Stdout and stderr stream through the bridge as they arrive,
+   with a 4 MiB limit per stream, and command timeouts are enforced by the
+   sandbox service.
 5. One-shot sandboxes are deleted after successful `run` unless `--keep` is set.
    `--keep-on-failure` retains a newly created sandbox after sync, workspace, or
    command failures and prints reuse/stop guidance.
@@ -217,7 +226,8 @@ domains, IP addresses, or CIDRs. `ports` accepts ports or `start-end` ranges.
 - Desktop / browser / code / VNC: no.
 - Actions hydration: no.
 - Coordinator broker: no, Vercel Sandbox runs direct from the CLI.
-- Pause/resume: not advertised in v1.
+- Pause/resume: retained sessions resume automatically for sync and execution;
+  explicit pause/resume commands are not advertised in v1.
 - Ports, snapshots, and persistence: configuration is accepted and passed to
   creation, but Crabbox does not expose post-create port, checkpoint, fork,
   pause, or resume commands for this provider in v1.
@@ -245,6 +255,7 @@ short-lived Vercel Sandbox:
 CRABBOX_LIVE=1 \
 CRABBOX_LIVE_PROVIDERS=vercel-sandbox \
 CRABBOX_VERCEL_SANDBOX_PROJECT_ID=prj_example \
+CRABBOX_VERCEL_SANDBOX_TEAM_ID=team_example \
 scripts/live-vercel-sandbox-smoke.sh
 ```
 
@@ -252,9 +263,14 @@ The smoke builds `bin/crabbox` unless `CRABBOX_BIN` points at an existing
 binary, preflights `sandbox --help` and read-only
 `sandbox list --all --limit 1`, creates one uniquely named Crabbox-owned
 sandbox, verifies archive sync and off-argv environment forwarding, checks
-`doctor`, `status`, and `list`, reuses the same sandbox for a second sync that
-adds, updates, and deletes files, proves nonzero exit-code propagation, then
-stops the sandbox and confirms that no matching Crabbox-owned inventory remains.
+`doctor`, `status`, and `list`, stops the underlying session through the
+official CLI, proves that sync and execution resume it, verifies stdout arrives
+before command completion, reuses the same sandbox for a second sync that adds,
+updates, and deletes files, proves nonzero exit-code propagation, then stops the
+sandbox and confirms that no matching Crabbox-owned inventory remains.
+Cleanup proof also polls the official `sandbox list` inventory for remote
+absence; a still-visible sandbox is targeted with `sandbox rm` and the smoke
+fails instead of reporting success.
 
 The script prints exactly one classification:
 

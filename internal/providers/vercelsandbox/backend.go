@@ -20,9 +20,7 @@ const (
 	metadataScopeKey    = "crabbox.scope"
 	metadataClaimKey    = "crabbox.claim"
 	metadataRepoKey     = "crabbox.repo"
-	metadataPondKey     = "crabbox.pond"
 	metadataSlugKey     = "crabbox.slug"
-	metadataNameKey     = "crabbox.name"
 )
 
 func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
@@ -590,7 +588,6 @@ func (b *backend) ownershipMetadata(providerScope, leaseID, slug string, repo Re
 	out := map[string]string{
 		metadataProviderKey: providerName,
 		metadataScopeKey:    providerScope,
-		metadataNameKey:     newSandboxName(repo),
 		metadataRepoKey:     repoScope(repo),
 	}
 	if leaseID != "" {
@@ -598,9 +595,6 @@ func (b *backend) ownershipMetadata(providerScope, leaseID, slug string, repo Re
 	}
 	if slug != "" {
 		out[metadataSlugKey] = slug
-	}
-	if pond := strings.TrimSpace(b.cfg.Pond); pond != "" {
-		out[metadataPondKey] = pond
 	}
 	return out
 }

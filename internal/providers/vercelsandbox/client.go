@@ -41,11 +41,12 @@ type commandSpec struct {
 }
 
 type bridgeClient struct {
-	cfg    Config
-	rt     Runtime
-	lookup func(string) (string, error)
-	run    func(context.Context, commandSpec) error
-	call   func(context.Context, bridgeRequest, any) error
+	cfg      Config
+	rt       Runtime
+	lookup   func(string) (string, error)
+	run      func(context.Context, commandSpec) error
+	call     func(context.Context, bridgeRequest, any) error
+	execCall func(context.Context, commandSpec, bridgeRequest, io.Writer, io.Writer) (execResult, error)
 }
 
 func newBridgeClient(cfg Config, rt Runtime) (vercelSandboxClient, error) {
@@ -55,6 +56,9 @@ func newBridgeClient(cfg Config, rt Runtime) (vercelSandboxClient, error) {
 		lookup: exec.LookPath,
 		run:    runBridgeCommand,
 		call:   runBridgeJSON,
+		execCall: func(ctx context.Context, spec commandSpec, req bridgeRequest, stdout, stderr io.Writer) (execResult, error) {
+			return runBridgeExec(ctx, spec, req, stdout, stderr)
+		},
 	}, nil
 }
 
@@ -228,8 +232,12 @@ func (c *bridgeClient) UploadFile(ctx context.Context, id, remotePath string, co
 }
 
 func (c *bridgeClient) Exec(ctx context.Context, id string, req execRequest, stdout, stderr io.Writer) (execResult, error) {
+	bridgeReq := bridgeRequest{Action: "exec", SandboxID: id, Exec: &req, Config: c.bridgeConfig()}
+	if c.execCall != nil {
+		return c.execCall(ctx, c.bridgeCommandSpec(), bridgeReq, stdout, stderr)
+	}
 	var out execResult
-	if err := c.bridgeCall(ctx, bridgeRequest{Action: "exec", SandboxID: id, Exec: &req}, &out); err != nil {
+	if err := c.bridgeCall(ctx, bridgeReq, &out); err != nil {
 		return execResult{}, err
 	}
 	if out.Stdout != "" {
@@ -323,13 +331,9 @@ func runBridgeJSON(ctx context.Context, req bridgeRequest, out any) error {
 }
 
 func runBridgeJSONWithPayload(ctx context.Context, spec commandSpec, req bridgeRequest, payload []byte, out any) error {
-	body := struct {
-		Request bridgeRequest `json:"request"`
-		Payload []byte        `json:"payload,omitempty"`
-	}{Request: req, Payload: payload}
-	buf, err := json.Marshal(body)
+	buf, err := marshalBridgeRequest(req, payload)
 	if err != nil {
-		return fmt.Errorf("marshal vercel-sandbox bridge request: %w", err)
+		return err
 	}
 	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	cmd.Env = spec.Env
@@ -347,6 +351,122 @@ func runBridgeJSONWithPayload(ctx context.Context, spec commandSpec, req bridgeR
 		return fmt.Errorf("decode vercel-sandbox bridge %s response: %w", req.Action, err)
 	}
 	return nil
+}
+
+type bridgeExecFrame struct {
+	Type     string `json:"type,omitempty"`
+	Data     string `json:"data,omitempty"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	ExitCode int    `json:"exitCode"`
+}
+
+const bridgeExecCaptureLimit = 4 * 1024 * 1024
+
+func appendBridgeExecOutput(dst *string, value string) {
+	remaining := bridgeExecCaptureLimit - len(*dst)
+	if remaining <= 0 {
+		return
+	}
+	if len(value) > remaining {
+		value = value[:remaining]
+	}
+	*dst += value
+}
+
+func runBridgeExec(ctx context.Context, spec commandSpec, req bridgeRequest, stdout, stderr io.Writer) (execResult, error) {
+	buf, err := marshalBridgeRequest(req, nil)
+	if err != nil {
+		return execResult{}, err
+	}
+	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	cmd.Env = spec.Env
+	cmd.Stdin = bytes.NewReader(buf)
+	bridgeStdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return execResult{}, fmt.Errorf("open vercel-sandbox bridge stdout: %w", err)
+	}
+	var bridgeStderr bytes.Buffer
+	cmd.Stderr = &bridgeStderr
+	if err := cmd.Start(); err != nil {
+		return execResult{}, fmt.Errorf("start vercel-sandbox bridge exec: %w", err)
+	}
+
+	var result execResult
+	sawResult := false
+	decoder := json.NewDecoder(bridgeStdout)
+	for {
+		var frame bridgeExecFrame
+		if err := decoder.Decode(&frame); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return execResult{}, fmt.Errorf("decode vercel-sandbox bridge exec frame: %w", err)
+		}
+		switch frame.Type {
+		case "stdout":
+			appendBridgeExecOutput(&result.Stdout, frame.Data)
+			if _, err := io.WriteString(stdout, frame.Data); err != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				return execResult{}, fmt.Errorf("write vercel-sandbox stdout: %w", err)
+			}
+		case "stderr":
+			appendBridgeExecOutput(&result.Stderr, frame.Data)
+			if _, err := io.WriteString(stderr, frame.Data); err != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				return execResult{}, fmt.Errorf("write vercel-sandbox stderr: %w", err)
+			}
+		case "result":
+			result.ExitCode = frame.ExitCode
+			sawResult = true
+		case "":
+			if frame.Stdout != "" {
+				appendBridgeExecOutput(&result.Stdout, frame.Stdout)
+				if _, err := io.WriteString(stdout, frame.Stdout); err != nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					return execResult{}, fmt.Errorf("write vercel-sandbox stdout: %w", err)
+				}
+			}
+			if frame.Stderr != "" {
+				appendBridgeExecOutput(&result.Stderr, frame.Stderr)
+				if _, err := io.WriteString(stderr, frame.Stderr); err != nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+					return execResult{}, fmt.Errorf("write vercel-sandbox stderr: %w", err)
+				}
+			}
+			result.ExitCode = frame.ExitCode
+			sawResult = true
+		default:
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return execResult{}, fmt.Errorf("unsupported vercel-sandbox bridge exec frame %q", frame.Type)
+		}
+	}
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		return execResult{}, fmt.Errorf("vercel-sandbox bridge exec failed: %s: %s", waitErr, redactSecrets(bridgeStderr.String()))
+	}
+	if !sawResult {
+		return execResult{}, errors.New("vercel-sandbox bridge exec returned no result frame")
+	}
+	return result, nil
+}
+
+func marshalBridgeRequest(req bridgeRequest, payload []byte) ([]byte, error) {
+	body := struct {
+		Request bridgeRequest `json:"request"`
+		Payload []byte        `json:"payload,omitempty"`
+	}{Request: req, Payload: payload}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal vercel-sandbox bridge request: %w", err)
+	}
+	return buf, nil
 }
 
 func vercelSandboxBridgeEnv(base []string) []string {

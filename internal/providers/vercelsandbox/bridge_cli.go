@@ -38,6 +38,8 @@ func RunBridgeCLI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer
 func vercelSandboxBridgeScript() string {
 	return `
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { Writable } from 'node:stream';
 
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -52,13 +54,76 @@ try {
 }
 const { Sandbox } = mod;
 
-function sandboxOptions(extra = {}) {
+let authMod;
+function linkedProjectCwd(start) {
+  let current = path.resolve(start);
+  while (true) {
+    if (fs.existsSync(path.join(current, '.vercel', 'project.json'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return start;
+    current = parent;
+  }
+}
+
+async function resolvedCredentials() {
   const cfg = req.config || {};
-  const out = { ...extra };
-  if (cfg.projectId) out.projectId = cfg.projectId;
-  if (cfg.teamId) out.teamId = cfg.teamId;
-  if (cfg.scope) out.scope = cfg.scope;
-  return out;
+  if (process.env.VERCEL_OIDC_TOKEN) {
+    if (cfg.projectId || cfg.teamId || cfg.scope) {
+      throw new Error('Vercel OIDC tokens are scoped by their claims; remove explicit projectId, teamId, and scope');
+    }
+    return {};
+  }
+
+  let token = process.env.VERCEL_TOKEN || process.env.VERCEL_AUTH_TOKEN || '';
+  if (!token) {
+    authMod ||= await import('@vercel/sandbox/dist/auth/index.js');
+    let auth = authMod.getAuth();
+    if (auth?.refreshToken && auth.expiresAt && auth.expiresAt.getTime() <= Date.now()) {
+      const refreshed = await (await authMod.OAuth()).refreshToken(auth.refreshToken);
+      auth = {
+        expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
+        token: refreshed.access_token,
+        refreshToken: refreshed.refresh_token || auth.refreshToken,
+      };
+      authMod.updateAuthConfig(auth);
+    }
+    token = auth?.token || '';
+  }
+  if (!token) {
+    throw new Error('Vercel Sandbox authentication unavailable; run sandbox login or set VERCEL_OIDC_TOKEN/VERCEL_TOKEN');
+  }
+
+  let projectId = cfg.projectId || '';
+  let teamId = cfg.teamId || (projectId ? cfg.scope || '' : '');
+  if (projectId && !teamId && !cfg.scope) {
+    throw new Error('Vercel Sandbox projectId requires teamId or scope');
+  }
+  if (!projectId || !teamId) {
+    authMod ||= await import('@vercel/sandbox/dist/auth/index.js');
+    let inferCwd = linkedProjectCwd(process.cwd());
+    let isolatedCwd = '';
+    if (cfg.projectId || cfg.teamId || cfg.scope) {
+      isolatedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'crabbox-vercel-scope-'));
+      inferCwd = isolatedCwd;
+    }
+    let inferred;
+    try {
+      inferred = await authMod.inferScope({
+        token,
+        teamId: teamId || cfg.scope || undefined,
+        cwd: inferCwd,
+      });
+    } finally {
+      if (isolatedCwd) fs.rmSync(isolatedCwd, { recursive: true, force: true });
+    }
+    projectId ||= inferred.projectId;
+    teamId ||= inferred.teamId;
+  }
+  return { token, projectId, teamId };
+}
+
+async function sandboxOptions(extra = {}) {
+  return { ...extra, ...(await resolvedCredentials()) };
 }
 
 function summary(sandbox, metadata) {
@@ -111,40 +176,41 @@ function expandPortSpecs(values) {
   return [...new Set(out)];
 }
 
-function captureStream(name) {
-  const captureLimitBytes = 4 * 1024 * 1024;
-  let captured = '';
-  let bytes = 0;
-  let truncated = false;
-  return {
-    stream: new Writable({
-      write(chunk, _enc, cb) {
-        if (truncated) {
-          cb();
-          return;
-        }
-        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, _enc);
-        const remaining = captureLimitBytes - bytes;
-        if (data.length <= remaining) {
-          captured += data.toString();
-          bytes += data.length;
-        } else {
-          captured += data.subarray(0, Math.max(0, remaining)).toString();
-          captured += '\n[crabbox: vercel-sandbox ' + name + ' truncated after ' + captureLimitBytes + ' bytes]\n';
-          bytes = captureLimitBytes;
-          truncated = true;
-        }
-        cb();
-      },
-    }),
-    value() {
-      return captured;
-    },
-  };
+function writeFrame(type, data = '', exitCode = undefined) {
+  const frame = { type };
+  if (data !== '') frame.data = data;
+  if (exitCode !== undefined) frame.exitCode = exitCode;
+  return JSON.stringify(frame) + '\n';
 }
 
-async function getSandbox(name) {
-  return await Sandbox.get(sandboxOptions({ name, resume: false }));
+function frameStream(type) {
+  const outputLimitBytes = 4 * 1024 * 1024;
+  let outputBytes = 0;
+  let truncated = false;
+  return new Writable({
+    write(chunk, encoding, callback) {
+      if (truncated) {
+        callback();
+        return;
+      }
+      const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+      const remaining = outputLimitBytes - outputBytes;
+      if (data.length <= remaining) {
+        process.stdout.write(writeFrame(type, data.toString()));
+        outputBytes += data.length;
+      } else {
+        if (remaining > 0) process.stdout.write(writeFrame(type, data.subarray(0, remaining).toString()));
+        process.stdout.write(writeFrame(type, '\n[crabbox: vercel-sandbox ' + type + ' truncated after ' + outputLimitBytes + ' bytes]\n'));
+        outputBytes = outputLimitBytes;
+        truncated = true;
+      }
+      callback();
+    },
+  });
+}
+
+async function getSandbox(name, resume = false) {
+  return await Sandbox.get(await sandboxOptions({ name, resume }));
 }
 
 switch (req.action) {
@@ -154,7 +220,7 @@ switch (req.action) {
   case 'create': {
     const create = req.create || {};
     const cfg = req.config || {};
-    const opts = sandboxOptions({
+    const opts = await sandboxOptions({
       name: create.name,
       runtime: create.runtime || cfg.runtime || 'node24',
       persistent: !!create.persistent,
@@ -174,7 +240,7 @@ switch (req.action) {
     break;
   }
   case 'list': {
-    const result = await Sandbox.list(sandboxOptions({ sortBy: 'name' }));
+    const result = await Sandbox.list(await sandboxOptions({ sortBy: 'name' }));
     const out = [];
     for await (const sandbox of result) out.push(summary(sandbox));
     process.stdout.write(JSON.stringify(out) + '\n');
@@ -197,34 +263,25 @@ switch (req.action) {
     break;
   }
   case 'upload': {
-    const sandbox = await getSandbox(req.sandboxId);
+    const sandbox = await getSandbox(req.sandboxId, true);
     const content = fs.readFileSync(req.payloadPath);
     await sandbox.writeFiles([{ path: req.remotePath, content }]);
     process.stdout.write('{}\n');
     break;
   }
   case 'exec': {
-    const sandbox = await getSandbox(req.sandboxId);
+    const sandbox = await getSandbox(req.sandboxId, true);
     const execReq = req.exec || {};
-    const stdoutCapture = captureStream('stdout');
-    const stderrCapture = captureStream('stderr');
-    const controller = execReq.timeoutSecs > 0 ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(new Error('vercel-sandbox command timed out')), execReq.timeoutSecs * 1000) : null;
-    let result;
-    try {
-      result = await sandbox.runCommand({
-        cmd: 'bash',
-        args: ['-lc', execReq.command || ''],
-        cwd: execReq.workingDir || undefined,
-        env: execReq.env || undefined,
-        stdout: stdoutCapture.stream,
-        stderr: stderrCapture.stream,
-        signal: controller?.signal,
-      });
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-    process.stdout.write(JSON.stringify({ stdout: stdoutCapture.value(), stderr: stderrCapture.value(), exitCode: result.exitCode ?? 0 }) + '\n');
+    const result = await sandbox.runCommand({
+      cmd: 'bash',
+      args: ['-lc', execReq.command || ''],
+      cwd: execReq.workingDir || undefined,
+      env: execReq.env || undefined,
+      stdout: frameStream('stdout'),
+      stderr: frameStream('stderr'),
+      timeoutMs: execReq.timeoutSecs > 0 ? execReq.timeoutSecs * 1000 : undefined,
+    });
+    process.stdout.write(writeFrame('result', '', result.exitCode ?? 0));
     break;
   }
   default:

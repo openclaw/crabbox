@@ -16,6 +16,7 @@ function setupFakeTools() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-vercel-sandbox-live-smoke-"));
 	const calls = path.join(dir, "calls.log");
 	const state = path.join(dir, "lease.state");
+	const remoteStopped = path.join(dir, "remote-stopped.state");
 	const fakeCrabbox = path.join(dir, "crabbox");
 	const fakeSandbox = path.join(dir, "sandbox");
 	writeExecutable(
@@ -36,7 +37,24 @@ case "\${1:-}" in
       printf 'login required\\n' >&2
       exit 1
     fi
-    printf 'No sandboxes found\\n'
+    if [[ -f "${remoteStopped}" && "\${FAKE_SANDBOX_FAIL_POST_STOP_LIST:-0}" == "1" ]]; then
+      printf 'login required\\n' >&2
+      exit 1
+    fi
+    if [[ -f "${remoteStopped}" && "\${FAKE_SANDBOX_STALE_LIST:-0}" == "1" ]]; then
+      printf 'NAME STATUS\\n'
+      printf 'test stopped\\n'
+    else
+      printf 'No sandboxes found\\n'
+    fi
+    ;;
+  stop)
+    : >"${remoteStopped}"
+    printf 'Stopped %s\\n' "\${*: -1}"
+    ;;
+  rm)
+    rm -f "${remoteStopped}"
+    printf 'Removed %s\\n' "\${*: -1}"
     ;;
   *)
     printf 'unexpected sandbox command %s\\n' "\${1:-}" >&2
@@ -89,6 +107,11 @@ case "$1" in
       test -f "${state}"
       printf 'VERCEL_SANDBOX_SMOKE_V2_OK\\n'
       printf '{"provider":"vercel-sandbox","leaseId":"vsbx_test"}\\n' >&2
+    elif [[ "$*" == *"VERCEL_SANDBOX_STREAM_START"* ]]; then
+      test -f "${state}"
+      printf 'VERCEL_SANDBOX_STREAM_START\\n'
+      sleep 0.3
+      printf 'VERCEL_SANDBOX_STREAM_END\\n'
     elif [[ "$*" == *"VERCEL_SANDBOX_SMOKE_EXIT_23"* ]]; then
       test -f "${state}"
       printf 'VERCEL_SANDBOX_SMOKE_EXIT_23\\n'
@@ -126,7 +149,7 @@ case "$1" in
 esac
 `,
 	);
-	return { dir, calls, state, fakeCrabbox, fakeSandbox };
+	return { dir, calls, state, remoteStopped, fakeCrabbox, fakeSandbox };
 }
 
 function runSmoke(fake, env) {
@@ -162,6 +185,33 @@ test("requires vercel-sandbox provider filter before mutation or sandbox preflig
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	assert.match(result.stdout, /classification=environment_blocked reason=set_CRABBOX_LIVE_PROVIDERS=vercel-sandbox/);
+	assert.equal(fs.existsSync(fake.calls), false);
+});
+
+test("rejects project-only scope before mutation or sandbox preflight", () => {
+	const fake = setupFakeTools();
+	const result = runSmoke(fake, {
+		CRABBOX_LIVE: "1",
+		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
+		CRABBOX_VERCEL_SANDBOX_PROJECT_ID: "prj_test",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /classification=environment_blocked reason=project_requires_team_or_scope/);
+	assert.equal(fs.existsSync(fake.calls), false);
+});
+
+test("rejects explicit scope with OIDC before mutation or sandbox preflight", () => {
+	const fake = setupFakeTools();
+	const result = runSmoke(fake, {
+		CRABBOX_LIVE: "1",
+		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
+		VERCEL_OIDC_TOKEN: "header.payload.signature",
+		CRABBOX_VERCEL_SANDBOX_SCOPE: "example-org",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /classification=environment_blocked reason=oidc_scope_must_come_from_token/);
 	assert.equal(fs.existsSync(fake.calls), false);
 });
 
@@ -205,6 +255,7 @@ test("runs retained reuse lifecycle and verifies cleanup", () => {
 		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
 		CRABBOX_VERCEL_SANDBOX_AUTH_TOKEN: secret,
 		CRABBOX_VERCEL_SANDBOX_PROJECT_ID: "prj_test",
+		CRABBOX_VERCEL_SANDBOX_TEAM_ID: "team_test",
 		CRABBOX_VERCEL_SANDBOX_CLEANUP_RETRY_DELAY_SECONDS: "0",
 	});
 
@@ -219,6 +270,10 @@ test("runs retained reuse lifecycle and verifies cleanup", () => {
 	assert.match(calls, /^crabbox doctor --provider vercel-sandbox --json$/m);
 	assert.match(calls, /^crabbox run --provider vercel-sandbox --keep --slug vs-live-/m);
 	assert.match(calls, /^crabbox status --provider vercel-sandbox --id vs-live-.* --wait --json$/m);
+	assert.match(calls, /^sandbox stop --project prj_test --scope team_test test$/m);
+	assert.match(calls, /^sandbox list --project prj_test --scope team_test --all --name-prefix test --sort-by name --limit 50$/m);
+	assert.match(calls, /^crabbox run --provider vercel-sandbox --id vs-live-.*VERCEL_SANDBOX_SMOKE_V2_OK/m);
+	assert.match(calls, /^crabbox run --provider vercel-sandbox --id vs-live-.*VERCEL_SANDBOX_STREAM_START/m);
 	assert.match(calls, /^crabbox run --provider vercel-sandbox --id vs-live-.* --no-sync -- /m);
 	assert.match(calls, /^crabbox stop --provider vercel-sandbox vs-live-/m);
 });
@@ -285,4 +340,33 @@ test("does not pass when post-stop inventory cannot be confirmed", () => {
 	assert.doesNotMatch(result.stdout, /classification=live_vercel_sandbox_smoke_passed/);
 	assert.match(result.stdout, /classification=diagnostic_only reason=lease_cleanup_unconfirmed/);
 	assert.match(result.stderr, /cleanup=failed provider=vercel-sandbox/);
+});
+
+test("does not pass while official inventory still lists the sandbox", () => {
+	const fake = setupFakeTools();
+	const result = runSmoke(fake, {
+		CRABBOX_LIVE: "1",
+		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
+		CRABBOX_VERCEL_SANDBOX_CLEANUP_RETRY_DELAY_SECONDS: "0",
+		FAKE_SANDBOX_STALE_LIST: "1",
+	});
+
+	assert.equal(result.status, 1);
+	assert.doesNotMatch(result.stdout, /classification=live_vercel_sandbox_smoke_passed/);
+	assert.match(result.stdout, /classification=diagnostic_only reason=remote_sandbox_cleanup_unconfirmed/);
+	assert.match(fs.readFileSync(fake.calls, "utf8"), /^sandbox rm test$/m);
+});
+
+test("classifies official cleanup inventory failures", () => {
+	const fake = setupFakeTools();
+	const result = runSmoke(fake, {
+		CRABBOX_LIVE: "1",
+		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
+		CRABBOX_VERCEL_SANDBOX_CLEANUP_RETRY_DELAY_SECONDS: "0",
+		FAKE_SANDBOX_FAIL_POST_STOP_LIST: "1",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /classification=environment_blocked reason=remote_inventory_failed/);
+	assert.match(fs.readFileSync(fake.calls, "utf8"), /^sandbox rm test$/m);
 });

@@ -117,6 +117,11 @@ func validateVercelSandboxConfig(cfg Config) error {
 	if _, err := vercelSandboxWorkdir(cfg); err != nil {
 		return err
 	}
+	if strings.TrimSpace(cfg.VercelSandbox.ProjectID) != "" &&
+		strings.TrimSpace(cfg.VercelSandbox.TeamID) == "" &&
+		strings.TrimSpace(cfg.VercelSandbox.Scope) == "" {
+		return exit(2, "vercel-sandbox projectId requires teamId or scope")
+	}
 	switch strings.ToLower(strings.TrimSpace(cfg.VercelSandbox.Runtime)) {
 	case "", "node26", "node24", "node22", "python3.13":
 	default:

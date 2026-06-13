@@ -8,6 +8,9 @@ repo_root=""
 bin=""
 smoke_root=""
 smoke_repo=""
+sandbox_name=""
+sandbox_scope_args=()
+remote_inventory_output=""
 slug="vs-live-$(date -u +%Y%m%d)-$(printf '%06x%06x' "$$" "$RANDOM")"
 cleanup_needed=0
 cleanup_retry_delay="${CRABBOX_VERCEL_SANDBOX_CLEANUP_RETRY_DELAY_SECONDS:-2}"
@@ -120,6 +123,38 @@ stop_and_confirm() {
   [[ $inventory_status -eq 1 ]]
 }
 
+remote_sandbox_present() {
+  if ! remote_inventory_output="$(sandbox list "${sandbox_scope_args[@]}" --all --name-prefix "$sandbox_name" --sort-by name --limit 50 2>&1)"; then
+    return 2
+  fi
+  if awk -v name="$sandbox_name" 'NR > 1 && $1 == name { found = 1 } END { exit found ? 0 : 1 }' <<<"$remote_inventory_output"; then
+    return 0
+  fi
+  return 1
+}
+
+confirm_remote_absence() {
+  local attempt
+  local inventory_status
+  for attempt in 1 2 3 4 5; do
+    if remote_sandbox_present; then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+    if [[ $inventory_status -eq 1 ]]; then
+      return 0
+    fi
+    if [[ $attempt -lt 5 ]]; then
+      sleep "$cleanup_retry_delay"
+    fi
+  done
+  if [[ $inventory_status -eq 2 ]]; then
+    return 2
+  fi
+  return 1
+}
+
 cleanup() {
   local status=$?
   trap - EXIT
@@ -147,6 +182,15 @@ fi
 providers=",${CRABBOX_LIVE_PROVIDERS:-},"
 if [[ "$providers" != *",vercel-sandbox,"* ]]; then
   classify_and_exit environment_blocked "set_CRABBOX_LIVE_PROVIDERS=vercel-sandbox"
+fi
+
+if [[ -n "${VERCEL_OIDC_TOKEN:-}" ]] &&
+  [[ -n "${CRABBOX_VERCEL_SANDBOX_PROJECT_ID:-}${CRABBOX_VERCEL_SANDBOX_TEAM_ID:-}${CRABBOX_VERCEL_SANDBOX_SCOPE:-}" ]]; then
+  classify_and_exit environment_blocked "oidc_scope_must_come_from_token"
+fi
+if [[ -n "${CRABBOX_VERCEL_SANDBOX_PROJECT_ID:-}" ]] &&
+  [[ -z "${CRABBOX_VERCEL_SANDBOX_TEAM_ID:-}${CRABBOX_VERCEL_SANDBOX_SCOPE:-}" ]]; then
+  classify_and_exit environment_blocked "project_requires_team_or_scope"
 fi
 
 need_tool git
@@ -246,10 +290,37 @@ fi
 if ! grep -q '"provider":"vercel-sandbox"' <<<"$run_output"; then
   classify_and_exit diagnostic_only "initial_timing_provider_missing"
 fi
+lease_id="$(sed -n 's/.*"leaseId":"\(vsbx_[^"]*\)".*/\1/p' <<<"$run_output" | tail -n 1)"
+sandbox_name="${lease_id#vsbx_}"
+if [[ -z "$lease_id" || -z "$sandbox_name" || "$sandbox_name" == "$lease_id" ]]; then
+  classify_and_exit diagnostic_only "initial_sandbox_id_missing"
+fi
 
 "$bin" status --provider vercel-sandbox --id "$slug" --wait --json >/dev/null
 "$bin" list --provider vercel-sandbox --json |
   jq -e --arg slug "$slug" 'any(.[]; ((.slug // .Slug // .labels.slug // .Labels.slug // "") == $slug))' >/dev/null
+
+if [[ -n "${CRABBOX_VERCEL_SANDBOX_PROJECT_ID:-}" ]]; then
+  sandbox_scope_args+=(--project "$CRABBOX_VERCEL_SANDBOX_PROJECT_ID")
+fi
+if [[ -n "${CRABBOX_VERCEL_SANDBOX_TEAM_ID:-}" ]]; then
+  sandbox_scope_args+=(--scope "$CRABBOX_VERCEL_SANDBOX_TEAM_ID")
+elif [[ -n "${CRABBOX_VERCEL_SANDBOX_SCOPE:-}" ]]; then
+  sandbox_scope_args+=(--scope "$CRABBOX_VERCEL_SANDBOX_SCOPE")
+fi
+sandbox_stop_args=(stop "${sandbox_scope_args[@]}")
+sandbox_stop_args+=("$sandbox_name")
+trap - ERR
+if sandbox_stop_output="$(sandbox "${sandbox_stop_args[@]}" 2>&1)"; then
+  sandbox_stop_status=0
+else
+  sandbox_stop_status=$?
+fi
+trap 'unexpected_failure "$LINENO"' ERR
+if [[ $sandbox_stop_status -ne 0 ]]; then
+  classify_failure "$sandbox_stop_output" "sandbox_session_stop_failed"
+fi
+printf 'session_stop=confirmed provider=vercel-sandbox sandbox=%s\n' "$sandbox_name"
 
 printf 'v2\n' >proof.txt
 printf 'second\n' >second.txt
@@ -272,6 +343,42 @@ if ! grep -q 'VERCEL_SANDBOX_SMOKE_V2_OK' <<<"$reuse_output" || ! grep -q '"prov
   classify_and_exit diagnostic_only "reuse_run_proof_incomplete"
 fi
 
+stream_output_file="$smoke_root/stream.out"
+"$bin" run --provider vercel-sandbox --id "$slug" --no-sync -- \
+  /bin/sh -lc "printf 'VERCEL_SANDBOX_STREAM_START\n'; sleep 3; printf 'VERCEL_SANDBOX_STREAM_END\n'" \
+  >"$stream_output_file" 2>&1 &
+stream_pid=$!
+stream_observed=0
+for ((attempt = 1; attempt <= 80; attempt++)); do
+  if grep -q 'VERCEL_SANDBOX_STREAM_START' "$stream_output_file" &&
+    ! grep -q 'VERCEL_SANDBOX_STREAM_END' "$stream_output_file" &&
+    kill -0 "$stream_pid" 2>/dev/null; then
+    stream_observed=1
+    break
+  fi
+  if ! kill -0 "$stream_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+trap - ERR
+if wait "$stream_pid"; then
+  stream_status=0
+else
+  stream_status=$?
+fi
+trap 'unexpected_failure "$LINENO"' ERR
+stream_output="$(<"$stream_output_file")"
+if [[ $stream_status -ne 0 ]]; then
+  classify_failure "$stream_output" "streaming_run_failed"
+fi
+if [[ $stream_observed -ne 1 ]] ||
+  ! grep -q 'VERCEL_SANDBOX_STREAM_START' <<<"$stream_output" ||
+  ! grep -q 'VERCEL_SANDBOX_STREAM_END' <<<"$stream_output"; then
+  classify_and_exit diagnostic_only "streaming_output_not_observed_live"
+fi
+printf 'streaming=confirmed provider=vercel-sandbox sandbox=%s\n' "$sandbox_name"
+
 trap - ERR
 if exit_output="$("$bin" run --provider vercel-sandbox --id "$slug" --no-sync -- \
   /bin/sh -lc 'printf VERCEL_SANDBOX_SMOKE_EXIT_23; exit 23' 2>&1)"; then
@@ -287,8 +394,23 @@ fi
 if ! stop_and_confirm; then
   classify_and_exit diagnostic_only "lease_cleanup_unconfirmed"
 fi
+trap - ERR
+if confirm_remote_absence; then
+  remote_cleanup_status=0
+else
+  remote_cleanup_status=$?
+fi
+trap 'unexpected_failure "$LINENO"' ERR
+if [[ $remote_cleanup_status -eq 2 ]]; then
+  sandbox rm "${sandbox_scope_args[@]}" "$sandbox_name" >/dev/null 2>&1 || true
+  classify_failure "$remote_inventory_output" "remote_inventory_failed"
+fi
+if [[ $remote_cleanup_status -ne 0 ]]; then
+  sandbox rm "${sandbox_scope_args[@]}" "$sandbox_name" >/dev/null 2>&1 || true
+  classify_and_exit diagnostic_only "remote_sandbox_cleanup_unconfirmed"
+fi
 cleanup_needed=0
-printf 'cleanup=confirmed provider=vercel-sandbox slug=%s\n' "$slug"
+printf 'cleanup=confirmed provider=vercel-sandbox slug=%s sandbox=%s\n' "$slug" "$sandbox_name"
 
 trap - EXIT
 rm -rf -- "$smoke_root"

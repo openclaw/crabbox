@@ -97,6 +97,7 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 		{"removed-runtime", func(c *Config) { c.VercelSandbox.Runtime = "node20" }, "runtime"},
 		{"workdir-relative", func(c *Config) { c.VercelSandbox.Workdir = "workspace" }, "absolute"},
 		{"workdir-broad", func(c *Config) { c.VercelSandbox.Workdir = "/vercel/sandbox" }, "too broad"},
+		{"project-without-team", func(c *Config) { c.VercelSandbox.ProjectID = "prj_123" }, "requires teamId or scope"},
 		{"timeout", func(c *Config) { c.VercelSandbox.TimeoutSecs = -1 }, "non-negative"},
 		{"exec-timeout", func(c *Config) { c.VercelSandbox.ExecTimeoutSecs = -1 }, "non-negative"},
 		{"vcpus", func(c *Config) { c.VercelSandbox.VCPUs = -1 }, "vcpus"},
@@ -113,6 +114,31 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("err=%v want contains %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateVercelSandboxConfigAcceptsProjectWithTeamOrScope(t *testing.T) {
+	for _, cfg := range []Config{
+		func() Config {
+			cfg := Config{}
+			cfg.VercelSandbox.Runtime = defaultRuntime
+			cfg.VercelSandbox.Workdir = defaultWorkdir
+			cfg.VercelSandbox.ProjectID = "prj_123"
+			cfg.VercelSandbox.TeamID = "team_123"
+			return cfg
+		}(),
+		func() Config {
+			cfg := Config{}
+			cfg.VercelSandbox.Runtime = defaultRuntime
+			cfg.VercelSandbox.Workdir = defaultWorkdir
+			cfg.VercelSandbox.ProjectID = "prj_123"
+			cfg.VercelSandbox.Scope = "example-org"
+			return cfg
+		}(),
+	} {
+		if err := validateVercelSandboxConfig(cfg); err != nil {
+			t.Fatalf("validate project scope %#v: %v", cfg.VercelSandbox, err)
+		}
 	}
 }
 
