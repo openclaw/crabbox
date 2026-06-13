@@ -316,6 +316,51 @@ describe("fleet lease identity and idle", () => {
     ).resolves.toEqual(existing);
   });
 
+  it("preserves workspace readiness when its SSH key is reused under another name", async () => {
+    const existingKey = {
+      id: 42,
+      name: "legacy-key",
+      fingerprint: "fingerprint",
+      public_key: "ssh-ed25519 workspace-test",
+    };
+    const initializingServer = {
+      id: 123,
+      name: "crabbox-workspace",
+      status: "initializing",
+      server_type: { name: "cpx62" },
+      public_net: { ipv4: { ip: "192.0.2.123" } },
+      labels: {},
+    };
+    const responses = [
+      jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [existingKey] }),
+      jsonResponse({ server: initializingServer }),
+      jsonResponse({
+        server: {
+          ...initializingServer,
+          status: "running",
+        },
+      }),
+    ];
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () => responses.shift() ?? jsonResponse({}, 500),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+    const config = leaseConfig({
+      provider: "hetzner",
+      providerKey: "crabbox-workspace-deadbeef0000",
+      sshPublicKey: "ssh-ed25519 workspace-test",
+    });
+
+    await expect(
+      client.createServerWithFallback(config, "cbx_abcdef123456", "workspace", "alice@example.com"),
+    ).resolves.toMatchObject({
+      server: { id: 123, status: "running" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
   it("treats an already-absent Hetzner server as successful cleanup", async () => {
     vi.stubGlobal(
       "fetch",

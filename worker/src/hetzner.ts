@@ -170,6 +170,7 @@ export class HetznerClient {
     slug: string,
     owner: string,
   ): Promise<{ server: HetznerServer; serverType: string }> {
+    const requireRunning = config.providerKey.startsWith(workspaceProviderKeyPrefix);
     let key: HetznerSSHKey;
     try {
       key = await this.ensureSSHKey(config.providerKey, config.sshPublicKey);
@@ -193,6 +194,7 @@ export class HetznerClient {
           leaseID,
           slug,
           owner,
+          requireRunning,
         );
         return { server, serverType };
       } catch (error) {
@@ -248,6 +250,7 @@ export class HetznerClient {
     leaseID: string,
     slug: string,
     owner: string,
+    requireRunning: boolean,
   ): Promise<HetznerServer> {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
@@ -277,7 +280,6 @@ export class HetznerClient {
         transientHetznerError(message) || isRetryableProvisioningError(message),
       );
     }
-    const requireRunning = config.providerKey.startsWith(workspaceProviderKeyPrefix);
     if (
       response.server.public_net.ipv4.ip &&
       (!requireRunning || response.server.status === "running")
