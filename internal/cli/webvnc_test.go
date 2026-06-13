@@ -93,7 +93,9 @@ func TestGuardMacOSDirectWebVNC(t *testing.T) {
 	if err == nil {
 		t.Fatal("macOS lease should be guarded out of the direct WebVNC browser path")
 	}
-	if !strings.Contains(err.Error(), "native VNC client") || !strings.Contains(err.Error(), "ssh -L 5900") {
+	if !strings.Contains(err.Error(), "native VNC client") ||
+		!strings.Contains(err.Error(), "GatewayPorts=no") ||
+		!strings.Contains(err.Error(), "-L 127.0.0.1:5900:127.0.0.1:5900") {
 		t.Fatalf("guard error should give native-client guidance, got: %v", err)
 	}
 	// Even with TargetOS unresolved (as the webvnc subcommands leave it), tart is

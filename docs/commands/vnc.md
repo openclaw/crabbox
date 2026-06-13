@@ -79,7 +79,7 @@ lease: cbx_... slug=blue-lobster provider=aws target=linux
 managed: true
 display: :99
 ssh tunnel:
-  ssh -i ... -p 2222 -N -L 5901:127.0.0.1:5900 alice@203.0.113.10
+  ssh -i ... -p 2222 -N -o GatewayPorts=no -L 127.0.0.1:5901:127.0.0.1:5900 alice@203.0.113.10
 vnc:
   localhost:5901
 password: ...

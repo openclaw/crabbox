@@ -178,6 +178,7 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 		"-o", "ConnectTimeout=10",
 		"-o", "ConnectionAttempts=1",
 		"-o", "ExitOnForwardFailure=yes",
+		"-o", "GatewayPorts=no",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
@@ -190,7 +191,7 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 	}
 	args = append(args,
 		"-N",
-		"-L", fmt.Sprintf("%s:%s:%s", localPort, remoteHost, remotePort),
+		"-L", fmt.Sprintf("127.0.0.1:%s:%s:%s", localPort, remoteHost, remotePort),
 		target.User+"@"+target.Host,
 	)
 	return args
