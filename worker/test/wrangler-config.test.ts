@@ -16,6 +16,7 @@ const requiredCostGuardrails = [
 
 describe("wrangler config", () => {
   it("uses the portable ssh2 crypto implementation", () => {
+    expect(wranglerConfig).toContain('"./agent.js": "./src/ssh2-agent.cjs"');
     expect(wranglerConfig).toContain(
       '"./crypto/build/Release/sshcrypto.node": "./src/ssh2-native.cjs"',
     );
