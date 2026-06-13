@@ -103,6 +103,17 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_OPENSANDBOX_PLATFORM_ARCH",
 		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
 		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
+		"CRABBOX_AGENT_SANDBOX_KUBECONFIG",
+		"CRABBOX_AGENT_SANDBOX_CONTEXT",
+		"CRABBOX_AGENT_SANDBOX_NAMESPACE",
+		"CRABBOX_AGENT_SANDBOX_WARM_POOL",
+		"CRABBOX_AGENT_SANDBOX_CONTAINER",
+		"CRABBOX_AGENT_SANDBOX_WORKDIR",
+		"CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT",
+		"CRABBOX_AGENT_SANDBOX_POD_READY_TIMEOUT",
+		"CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS",
+		"CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE",
+		"CRABBOX_AGENT_SANDBOX_FORGET_MISSING",
 		"CRABBOX_SUPERSERVE_API_KEY",
 		"SUPERSERVE_API_KEY",
 		"CRABBOX_SUPERSERVE_BASE_URL",
@@ -412,14 +423,15 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	value := true
 	cfg := baseConfig()
 	if err := applyFileConfig(&cfg, fileConfig{
-		Incus:     &fileIncusConfig{DeleteOnRelease: &value},
-		KubeVirt:  &fileKubeVirtConfig{DeleteOnRelease: &value},
-		Namespace: &fileNamespaceConfig{DeleteOnRelease: &value},
-		Morph:     &fileMorphConfig{DeleteOnRelease: &value},
+		Incus:        &fileIncusConfig{DeleteOnRelease: &value},
+		KubeVirt:     &fileKubeVirtConfig{DeleteOnRelease: &value},
+		AgentSandbox: &fileAgentSandboxConfig{DeleteOnRelease: &value},
+		Namespace:    &fileNamespaceConfig{DeleteOnRelease: &value},
+		Morph:        &fileMorphConfig{DeleteOnRelease: &value},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph"} {
 		if !DeleteOnReleaseExplicit(cfg, provider) {
 			t.Fatalf("file release policy not explicit for %s", provider)
 		}
@@ -433,6 +445,7 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	for _, key := range []string{
 		"CRABBOX_INCUS_DELETE_ON_RELEASE",
 		"CRABBOX_KUBEVIRT_DELETE_ON_RELEASE",
+		"CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE",
 		"CRABBOX_NAMESPACE_DELETE_ON_RELEASE",
 		"CRABBOX_MORPH_DELETE_ON_RELEASE",
 	} {
@@ -441,10 +454,108 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	if err := applyEnv(&envCfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "namespace-devbox", "morph"} {
+	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph"} {
 		if !DeleteOnReleaseExplicit(envCfg, provider) {
 			t.Fatalf("environment release policy not explicit for %s", provider)
 		}
+	}
+}
+
+func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.AgentSandbox.Namespace != "default" ||
+		cfg.AgentSandbox.Workdir != "/workspace/crabbox" ||
+		cfg.AgentSandbox.SandboxReadyTimeout != 180*time.Second ||
+		cfg.AgentSandbox.PodReadyTimeout != 180*time.Second ||
+		cfg.AgentSandbox.ExecTimeoutSecs != 600 ||
+		!cfg.AgentSandbox.DeleteOnRelease {
+		t.Fatalf("agentSandbox defaults not applied: %#v", cfg.AgentSandbox)
+	}
+
+	execTimeout := 42
+	deleteOnRelease := false
+	forgetMissing := true
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "agent-sandbox",
+		AgentSandbox: &fileAgentSandboxConfig{
+			Kubeconfig:          "~/.kube/agent-sandbox",
+			Context:             "agent-context",
+			Namespace:           "sandboxes",
+			WarmPool:            "linux-pool",
+			Container:           "worker",
+			Workdir:             "/workspace/my-app",
+			SandboxReadyTimeout: "2m",
+			PodReadyTimeout:     "45s",
+			ExecTimeoutSecs:     &execTimeout,
+			DeleteOnRelease:     &deleteOnRelease,
+			ForgetMissing:       &forgetMissing,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "agent-sandbox" ||
+		!strings.HasSuffix(cfg.AgentSandbox.Kubeconfig, "/.kube/agent-sandbox") ||
+		cfg.AgentSandbox.Context != "agent-context" ||
+		cfg.AgentSandbox.Namespace != "sandboxes" ||
+		cfg.AgentSandbox.WarmPool != "linux-pool" ||
+		cfg.AgentSandbox.Container != "worker" ||
+		cfg.AgentSandbox.Workdir != "/workspace/my-app" ||
+		cfg.AgentSandbox.SandboxReadyTimeout != 2*time.Minute ||
+		cfg.AgentSandbox.PodReadyTimeout != 45*time.Second ||
+		cfg.AgentSandbox.ExecTimeoutSecs != 42 ||
+		cfg.AgentSandbox.DeleteOnRelease ||
+		!cfg.AgentSandbox.ForgetMissing {
+		t.Fatalf("file agentSandbox config not applied: %#v", cfg.AgentSandbox)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "agent-sandbox") {
+		t.Fatal("file agentSandbox deleteOnRelease was not marked explicit")
+	}
+
+	t.Setenv("CRABBOX_AGENT_SANDBOX_KUBECONFIG", "/tmp/kubeconfig")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_CONTEXT", "env-context")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_NAMESPACE", "env-ns")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_WARM_POOL", "env-pool")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_CONTAINER", "env-container")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_WORKDIR", "/workspace/env")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT", "3m")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_POD_READY_TIMEOUT", "90s")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", "99")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE", "true")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_FORGET_MISSING", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentSandbox.Kubeconfig != "/tmp/kubeconfig" ||
+		cfg.AgentSandbox.Context != "env-context" ||
+		cfg.AgentSandbox.Namespace != "env-ns" ||
+		cfg.AgentSandbox.WarmPool != "env-pool" ||
+		cfg.AgentSandbox.Container != "env-container" ||
+		cfg.AgentSandbox.Workdir != "/workspace/env" ||
+		cfg.AgentSandbox.SandboxReadyTimeout != 3*time.Minute ||
+		cfg.AgentSandbox.PodReadyTimeout != 90*time.Second ||
+		cfg.AgentSandbox.ExecTimeoutSecs != 99 ||
+		!cfg.AgentSandbox.DeleteOnRelease ||
+		cfg.AgentSandbox.ForgetMissing {
+		t.Fatalf("env agentSandbox config not applied: %#v", cfg.AgentSandbox)
+	}
+}
+
+func TestAgentSandboxConfigRejectsNegativeExecTimeout(t *testing.T) {
+	timeout := -1
+	cfg := baseConfig()
+	err := applyFileConfig(&cfg, fileConfig{
+		AgentSandbox: &fileAgentSandboxConfig{ExecTimeoutSecs: &timeout},
+	})
+	if err == nil {
+		t.Fatal("negative agentSandbox exec timeout was accepted")
+	}
+
+	clearConfigEnv(t)
+	cfg = baseConfig()
+	t.Setenv("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", "-1")
+	if err := applyEnv(&cfg); err == nil {
+		t.Fatal("negative env agentSandbox exec timeout was accepted")
 	}
 }
 
