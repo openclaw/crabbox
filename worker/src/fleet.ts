@@ -1956,7 +1956,19 @@ export class FleetCoordinator {
         this.visibleExternalRunners(request),
         this.portalMacHosts(),
       ]);
-      return portalHome(leases, runners, request, this.attachPortalMacHostLeases(macHosts, leases));
+      const admin = isAdminRequest(request);
+      const manageableLeaseIDs = new Set(
+        leases
+          .filter((lease) => this.leaseManageableByRequest(lease, request, admin))
+          .map((lease) => lease.id),
+      );
+      return portalHome(
+        leases,
+        runners,
+        request,
+        this.attachPortalMacHostLeases(macHosts, leases),
+        manageableLeaseIDs,
+      );
     }
     if (method === "GET" && parts[1] === "admin") {
       if (!isAdminRequest(request)) {

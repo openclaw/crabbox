@@ -119,6 +119,9 @@ desktop in the support matrix.
 For kept registered desktop leases, `broker.autoWebVNC: true` starts the bridge
 daemon automatically. The daemon heartbeats the registration while connected;
 `crabbox stop` stops it and removes the registration after provider cleanup.
+The portal defaults to the viewer's system appearance and sends the resolved
+light or dark theme through that bridge on connect and whenever the operating
+system appearance changes.
 
 ### Collaborative WebVNC
 

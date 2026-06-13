@@ -11,6 +11,7 @@ const novncModuleURL = "/portal/assets/novnc/rfb.js";
 const copyIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>`;
 const lockIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`;
 const ejectIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17h14"/><path d="m12 5 7 9H5z"/></svg>`;
+const powerIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9"/><path d="M6.3 5.7a8 8 0 1 0 11.4 0"/></svg>`;
 const serverIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/></svg>`;
 const dedicatedHostIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M7 7V4h10v3"/><rect x="5" y="7" width="14" height="13" rx="2"/><path d="M9 11h6M9 15h3"/></svg>`;
 const vncIcon = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>`;
@@ -119,6 +120,7 @@ export function portalHome(
   runners: ExternalRunnerRecord[],
   request: Request,
   macHosts: PortalMacHostRecord[] = [],
+  manageableLeaseIDs: ReadonlySet<string> = new Set(),
 ): Response {
   const sortedLeases = leases.toSorted((a, b) => leaseSortTime(b).localeCompare(leaseSortTime(a)));
   const active = sortedLeases.filter((lease) => lease.state === "active");
@@ -160,7 +162,12 @@ export function portalHome(
     .toSorted((a, b) => b.sort.localeCompare(a.sort))
     .map((row) =>
       row.kind === "lease"
-        ? leaseRow(row.lease, { admin, owner, org })
+        ? leaseRow(row.lease, {
+            admin,
+            owner,
+            org,
+            canManage: manageableLeaseIDs.has(row.lease.id),
+          })
         : row.kind === "runner"
           ? externalRunnerLeaseRow(row.runner, { admin, owner, org })
           : macHostRow(row.host, { admin, owner, org }),
@@ -405,6 +412,7 @@ function adminLeaseRow(
     lease.state === "active" || lease.state === "provisioning" || lease.state === "failed";
   const releaseLabel =
     lease.lifecycle === "registered" ? "Remove registration" : "Emergency release";
+  const releaseConfirmation = leaseReleaseConfirmation(lease);
   return `<tr data-filter-tags="${escapeHTML([stateGroup, lease.state, lease.provider, lease.owner, lease.org, lease.target, lease.serverType].join(" "))}">
     <td><a class="lease-link" href="/portal/leases/${encodeURIComponent(lease.id)}"><strong>${escapeHTML(lease.slug || lease.id)}</strong><small>${escapeHTML(lease.id)}</small></a></td>
     <td><span class="pill" data-state="${escapeHTML(lease.state)}">${escapeHTML(lease.state)}</span></td>
@@ -413,7 +421,7 @@ function adminLeaseRow(
     <td>${targetBadge(lease.target)}</td>
     <td>${escapeHTML(`${lease.class} / ${lease.serverType}`)}</td>
     ${timeCell(lease.state === "active" || lease.state === "provisioning" ? lease.expiresAt : lease.updatedAt)}
-    <td>${canEject ? `<form class="admin-eject-form" method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release?return=${encodeURIComponent(returnPath)}"><button class="admin-eject" type="submit" title="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}" aria-label="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}">${ejectIcon}</button></form>` : ""}</td>
+    <td>${canEject ? `<form class="admin-eject-form" method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release?return=${encodeURIComponent(returnPath)}" data-confirm="${escapeHTML(releaseConfirmation)}"><button class="admin-eject" type="submit" title="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}" aria-label="${releaseLabel} ${escapeHTML(lease.slug || lease.id)}">${ejectIcon}</button></form>` : ""}</td>
   </tr>`;
 }
 
@@ -557,7 +565,7 @@ export function portalLeaseDetail(
           ${leaseTelemetryTimeline(lease.telemetry, lease.telemetryHistory)}
           ${
             active && options.canManage
-              ? `<form method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release" class="stop-form">
+              ? `<form method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release" class="stop-form" data-confirm="${escapeHTML(leaseReleaseConfirmation(lease))}">
                   <button class="button ${registered ? "secondary" : "danger"}" type="submit">${registered ? "remove registration" : "stop lease"}</button>
                 </form>`
               : ""
@@ -1922,7 +1930,7 @@ function shellArg(value: string): string {
 
 function leaseRow(
   lease: LeaseRecord,
-  context: { admin: boolean; owner: string; org: string },
+  context: { admin: boolean; owner: string; org: string; canManage: boolean },
 ): string {
   const label = lease.slug || lease.id;
   const detailPath = `/portal/leases/${encodeURIComponent(lease.id)}`;
@@ -1952,8 +1960,28 @@ function leaseRow(
     <td>${escapeHTML(lease.class)}</td>
     <td>${accessCell(lease, detailPath)}</td>
     ${timeCell(timeLabel)}
-    <td></td>
+    <td>${active && context.canManage ? leaseReleaseAction(lease) : ""}</td>
   </tr>`;
+}
+
+function leaseReleaseAction(lease: LeaseRecord): string {
+  const registered = lease.lifecycle === "registered";
+  const label = lease.slug || lease.id;
+  const actionLabel = registered ? `Remove ${label} registration` : `Stop ${label}`;
+  return `<form class="lease-release-form" method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release?return=%2Fportal" data-confirm="${escapeHTML(leaseReleaseConfirmation(lease))}">
+    <button class="access-icon lease-release" data-release-kind="${registered ? "registered" : "managed"}" type="submit" title="${escapeHTML(actionLabel)}" aria-label="${escapeHTML(actionLabel)}">${registered ? ejectIcon : powerIcon}</button>
+  </form>`;
+}
+
+function leaseReleaseConfirmation(lease: {
+  id: string;
+  slug?: string;
+  lifecycle?: LeaseRecord["lifecycle"];
+}): string {
+  const label = lease.slug || lease.id;
+  return lease.lifecycle === "registered"
+    ? `Remove ${label} from Crabbox? The external machine will keep running. Use crabbox stop locally to shut it down.`
+    : `Stop ${label}? This deletes the backing machine.`;
 }
 
 function portalRowFilterGroupTags(groups: Record<string, string | string[] | undefined>): string {
@@ -2873,7 +2901,7 @@ function html(
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#0b0d0f">
   <title>${escapeHTML(title)}</title>
-  <script nonce="${pageNonce}">(function(){var s;try{s=localStorage.getItem('crabbox-theme')}catch(e){}var m=(s==='light'||s==='dark')?s:'system';var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.themeSource=m;document.documentElement.dataset.theme=m==='system'?(d?'dark':'light'):m})();</script>
+  <script nonce="${pageNonce}">(function(){var s;try{s=localStorage.getItem('crabbox-theme-source')}catch(e){}var m=(s==='light'||s==='dark'||s==='system')?s:'system';var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.themeSource=m;document.documentElement.dataset.theme=m==='system'?(d?'dark':'light'):m})();</script>
   <style>
     :root {
       color-scheme: dark;
@@ -3080,6 +3108,11 @@ function html(
     .access-icon[data-access="vscode"] { color:#d8b4fe; }
     .access-icon[data-access="vnc"] { color:#38bdf8; }
     .access-icon:hover { border-color:var(--hover-line); background:var(--hover); }
+    .lease-release-form { display:flex; justify-content:flex-end; }
+    .lease-release { color:var(--muted); cursor:pointer; }
+    .lease-release[data-release-kind="managed"] { color:var(--bad); }
+    .lease-release:hover,.lease-release:focus-visible { border-color:color-mix(in srgb, var(--bad) 45%, var(--line)); background:color-mix(in srgb, var(--bad) 12%, transparent); }
+    .lease-release:disabled { opacity:0.5; cursor:wait; }
     .table-panel { min-height:0; display:grid; grid-template-rows:auto auto minmax(0,1fr) auto; overflow:hidden; }
     .command-panel,.log-panel { min-height:0; overflow:hidden; }
     .run-shell .table-panel { max-height:55dvh; }
@@ -3125,7 +3158,7 @@ function html(
     .lease-table th:nth-child(5) { width:82px; }
     .lease-table th:nth-child(6) { width:118px; }
     .lease-table th:nth-child(7) { width:148px; }
-    .lease-table th:nth-child(8) { width:24px; }
+    .lease-table th:nth-child(8),.lease-table td:nth-child(8) { width:40px; padding-left:4px; padding-right:4px; text-align:right; }
     .run-table th:nth-child(2) { width:104px; }
     .run-table th:nth-child(3) { width:112px; }
     .run-table th:nth-child(4) { width:92px; }
@@ -3282,10 +3315,10 @@ function portalEnhancementsScript(): string {
   const themeRoot = document.documentElement;
   const systemDark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)");
   function storedTheme() {
-    try { return localStorage.getItem("crabbox-theme"); } catch (_) { return null; }
+    try { return localStorage.getItem("crabbox-theme-source"); } catch (_) { return null; }
   }
   function themeSource(value) {
-    return value === "light" || value === "dark" ? value : "system";
+    return value === "light" || value === "dark" || value === "system" ? value : "system";
   }
   function resolvedTheme(source) {
     return source === "system" ? (systemDark && systemDark.matches ? "dark" : "light") : source;
@@ -3311,7 +3344,7 @@ function portalEnhancementsScript(): string {
       const current = themeSource(themeRoot.dataset.themeSource);
       const next = current === "system" ? "dark" : current === "dark" ? "light" : "system";
       applyTheme(next);
-      try { localStorage.setItem("crabbox-theme", next); } catch (_) {}
+      try { localStorage.setItem("crabbox-theme-source", next); } catch (_) {}
     });
   });
   if (systemDark) {
@@ -3322,6 +3355,19 @@ function portalEnhancementsScript(): string {
     if (systemDark.addEventListener) systemDark.addEventListener("change", onSystemChange);
     else if (systemDark.addListener) systemDark.addListener(onSystemChange);
   }
+  document.querySelectorAll("form[data-confirm]").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+      const message = form.dataset.confirm || "";
+      if (message && !window.confirm(message)) {
+        event.preventDefault();
+        return;
+      }
+      if (event.submitter) {
+        event.submitter.disabled = true;
+        event.submitter.setAttribute("aria-busy", "true");
+      }
+    });
+  });
   function copyText(text, source) {
     const finish = () => {
       source.dataset.state = "ok";
