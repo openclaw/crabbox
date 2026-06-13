@@ -132,10 +132,12 @@ pg-boss uses its own `crabbox_jobs` schema. It owns:
 - a reconciliation job every 15 minutes;
 - a startup reconciliation pass after deployment or restart.
 
-Back up both schemas together. Restoring only coordinator records or only jobs
-can delay cleanup until the recurring reconciliation pass repairs scheduling.
-Provider operations and cleanup are idempotent, so repeated job delivery is
-expected and safe.
+Back up both schemas together. If coordinator records are intact but job state
+is missing, startup and recurring reconciliation can rebuild scheduling from
+those records. Job state alone cannot reconstruct missing leases, runs, or
+cleanup obligations; recover `crabbox.coordinator_kv` before resuming the
+service or managed resources may be stranded. Provider operations and cleanup
+are idempotent, so repeated job delivery is expected and safe.
 
 ## Lifecycle serialization
 
@@ -172,11 +174,12 @@ On `SIGTERM` or `SIGINT`, the service:
 4. waits for the current alarm, stops pg-boss gracefully, and closes PostgreSQL;
 5. waits for the HTTP server to finish closing.
 
-WebVNC bridge clients reconnect with bounded backoff and obtain fresh tickets
-as needed. Code and ordinary egress bridge processes do not universally survive
-a coordinator restart; rerun `crabbox code` or `crabbox egress start` unless
-that path has its own supervisor. Ingress rollouts should still use a
-termination grace period at least as long as `CRABBOX_SHUTDOWN_TIMEOUT_MS`.
+The supervised WebVNC daemon restarts foreground bridge processes and obtains
+fresh tickets after interruption. A foreground `crabbox webvnc`, code bridge,
+or ordinary egress bridge may exit on coordinator restart; rerun
+`crabbox webvnc`, `crabbox code`, or `crabbox egress start` unless that path has
+its own supervisor. Ingress rollouts should still use a termination grace
+period at least as long as `CRABBOX_SHUTDOWN_TIMEOUT_MS`.
 
 ## Trusted reverse proxies
 
