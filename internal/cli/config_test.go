@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -89,6 +90,19 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_E2B_TEMPLATE",
 		"CRABBOX_E2B_WORKDIR",
 		"CRABBOX_E2B_USER",
+		"CRABBOX_CODESANDBOX_API_KEY",
+		"CSB_API_KEY",
+		"CRABBOX_CODESANDBOX_TEMPLATE_ID",
+		"CRABBOX_CODESANDBOX_WORKDIR",
+		"CRABBOX_CODESANDBOX_VM_TIER",
+		"CRABBOX_CODESANDBOX_PRIVACY",
+		"CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS",
+		"CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP",
+		"CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_WEBSOCKET",
+		"CRABBOX_CODESANDBOX_BRIDGE_COMMAND",
+		"CRABBOX_CODESANDBOX_SDK_PACKAGE",
+		"CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT",
+		"CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS",
 		"CRABBOX_OPENSANDBOX_API_URL",
 		"OPEN_SANDBOX_API_URL",
 		"CRABBOX_OPENSANDBOX_API_KEY",
@@ -2182,6 +2196,114 @@ func TestOpenComputerConfigYAMLCannotSetAPIURL(t *testing.T) {
 	}
 	if cfg.OpenComputer.APIURL != "" {
 		t.Fatalf("repository config set OpenComputer API URL to %q", cfg.OpenComputer.APIURL)
+	}
+}
+
+func TestCodeSandboxConfigDefaultsFileEnvAndNoPersistentSecretSurface(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.CodeSandbox.Workdir != "/project/workspace" ||
+		cfg.CodeSandbox.Privacy != "private" ||
+		!cfg.CodeSandbox.AutomaticWakeupHTTP ||
+		cfg.CodeSandbox.AutomaticWakeupWebSocket ||
+		cfg.CodeSandbox.BridgeCommand != "node" ||
+		cfg.CodeSandbox.SDKPackage != "@codesandbox/sdk" ||
+		cfg.CodeSandbox.DoctorListLimit != 1 ||
+		cfg.CodeSandbox.OperationTimeoutSecs != 30 {
+		t.Fatalf("unexpected codesandbox defaults: %#v", cfg.CodeSandbox)
+	}
+	if _, ok := reflect.TypeOf(CodeSandboxConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("provider config must not persist CodeSandbox API keys")
+	}
+	if _, ok := reflect.TypeOf(fileCodeSandboxConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("file config must not accept CodeSandbox API keys")
+	}
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(strings.Join([]string{
+		"codeSandbox:",
+		"  apiKey: should-not-load",
+		"  templateId: tmpl_file",
+		"  workdir: /project/workspace/file",
+		"  vmTier: micro",
+		"  privacy: public-hosts",
+		"  hibernationTimeoutSecs: 600",
+		"  automaticWakeupHTTP: false",
+		"  automaticWakeupWebSocket: true",
+		"  bridgeCommand: /opt/node",
+		"  sdkPackage: '@codesandbox/sdk@2.4.2'",
+		"  doctorListLimit: 2",
+		"  operationTimeoutSecs: 45",
+	}, "\n")), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodeSandbox.TemplateID != "tmpl_file" ||
+		cfg.CodeSandbox.Workdir != "/project/workspace/file" ||
+		cfg.CodeSandbox.VMTier != "micro" ||
+		cfg.CodeSandbox.Privacy != "public-hosts" ||
+		cfg.CodeSandbox.HibernationTimeoutSecs != 600 ||
+		cfg.CodeSandbox.AutomaticWakeupHTTP ||
+		!cfg.CodeSandbox.AutomaticWakeupWebSocket ||
+		cfg.CodeSandbox.BridgeCommand != "/opt/node" ||
+		cfg.CodeSandbox.SDKPackage != "@codesandbox/sdk@2.4.2" ||
+		cfg.CodeSandbox.DoctorListLimit != 2 ||
+		cfg.CodeSandbox.OperationTimeoutSecs != 45 {
+		t.Fatalf("file codesandbox config not applied: %#v", cfg.CodeSandbox)
+	}
+
+	t.Setenv("CRABBOX_CODESANDBOX_API_KEY", "env-primary-secret")
+	t.Setenv("CSB_API_KEY", "env-fallback-secret")
+	t.Setenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", "tmpl_env")
+	t.Setenv("CRABBOX_CODESANDBOX_WORKDIR", "/project/workspace/env")
+	t.Setenv("CRABBOX_CODESANDBOX_VM_TIER", "small")
+	t.Setenv("CRABBOX_CODESANDBOX_PRIVACY", "private")
+	t.Setenv("CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", "900")
+	t.Setenv("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP", "true")
+	t.Setenv("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_WEBSOCKET", "false")
+	t.Setenv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND", "/usr/local/bin/node")
+	t.Setenv("CRABBOX_CODESANDBOX_SDK_PACKAGE", "@codesandbox/sdk@latest")
+	t.Setenv("CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", "3")
+	t.Setenv("CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS", "60")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodeSandbox.TemplateID != "tmpl_env" ||
+		cfg.CodeSandbox.Workdir != "/project/workspace/env" ||
+		cfg.CodeSandbox.VMTier != "small" ||
+		cfg.CodeSandbox.Privacy != "private" ||
+		cfg.CodeSandbox.HibernationTimeoutSecs != 900 ||
+		!cfg.CodeSandbox.AutomaticWakeupHTTP ||
+		cfg.CodeSandbox.AutomaticWakeupWebSocket ||
+		cfg.CodeSandbox.BridgeCommand != "/usr/local/bin/node" ||
+		cfg.CodeSandbox.SDKPackage != "@codesandbox/sdk@latest" ||
+		cfg.CodeSandbox.DoctorListLimit != 3 ||
+		cfg.CodeSandbox.OperationTimeoutSecs != 60 {
+		t.Fatalf("env codesandbox config not applied: %#v", cfg.CodeSandbox)
+	}
+	if value := reflect.ValueOf(cfg.CodeSandbox); strings.Contains(fmt.Sprint(value.Interface()), "env-primary-secret") || strings.Contains(fmt.Sprint(value.Interface()), "env-fallback-secret") {
+		t.Fatalf("CodeSandbox env API key leaked into config: %#v", cfg.CodeSandbox)
+	}
+}
+
+func TestCodeSandboxConfigRejectsNegativeYAMLValues(t *testing.T) {
+	tests := []string{
+		"codeSandbox:\n  hibernationTimeoutSecs: -1\n",
+		"codeSandbox:\n  doctorListLimit: -1\n",
+		"codeSandbox:\n  operationTimeoutSecs: -1\n",
+	}
+	for _, yamlText := range tests {
+		t.Run(yamlText, func(t *testing.T) {
+			cfg := baseConfig()
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfig(&cfg, file); err == nil {
+				t.Fatalf("negative CodeSandbox config accepted for %q", yamlText)
+			}
+		})
 	}
 }
 

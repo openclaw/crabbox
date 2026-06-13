@@ -162,6 +162,31 @@ func TestCloudflareDynamicWorkersRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"codesandbox", "csb", "code-sandbox"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "codesandbox" {
+			t.Fatalf("ProviderFor(%q).Name=%q want codesandbox", name, provider.Name())
+		}
+		if _, ok := provider.(core.DoctorProvider); !ok {
+			t.Fatalf("ProviderFor(%q) does not expose doctor", name)
+		}
+	}
+	spec := mustProvider(t, "codesandbox").Spec()
+	if spec.Family != "codesandbox" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("codesandbox spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("codesandbox targets=%#v", spec.Targets)
+	}
+	if len(spec.Features) != 0 {
+		t.Fatalf("codesandbox features=%v want none before lifecycle plan", spec.Features)
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -196,6 +221,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"blacksmith-testbox",
 		"cloudflare",
 		"cloudflare-dynamic-workers",
+		"codesandbox",
 		"daytona",
 		"docker-sandbox",
 		"e2b",
