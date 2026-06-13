@@ -41,7 +41,7 @@ export interface TailscalePreflightResult {
   message?: string;
 }
 
-type TailscaleAPIOperation = "oauth token" | "create auth key" | "delete device";
+type TailscaleAPIOperation = "oauth token" | "create auth key";
 
 class TailscaleAPIError extends Error {
   constructor(
@@ -160,30 +160,6 @@ export async function createTailscaleAuthKey(
     throw new Error("tailscale create auth key returned no key");
   }
   return data.key;
-}
-
-export async function deleteTailscaleDevice(env: Env, deviceID: string): Promise<void> {
-  const trimmed = deviceID.trim();
-  if (!trimmed) {
-    throw new Error("tailscale device id is empty");
-  }
-  const clientID = env.CRABBOX_TAILSCALE_CLIENT_ID;
-  const clientSecret = env.CRABBOX_TAILSCALE_CLIENT_SECRET;
-  if (!clientID || !clientSecret) {
-    throw new Error("tailscale OAuth secrets are not configured");
-  }
-  const token = await tailscaleOAuthToken(clientID, clientSecret, { scope: "devices" });
-  const response = await fetch(
-    `https://api.tailscale.com/api/v2/device/${encodeURIComponent(trimmed)}`,
-    {
-      method: "DELETE",
-      headers: { authorization: `Bearer ${token}` },
-    },
-  );
-  const text = await response.text();
-  if (!response.ok && response.status !== 404) {
-    throw tailscaleAPIError("delete device", response.status, text);
-  }
 }
 
 export async function tailscalePreflight(env: Env): Promise<TailscalePreflightResult> {

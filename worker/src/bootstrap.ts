@@ -1494,34 +1494,6 @@ function tailscaleInstallBootstrap(config: LeaseConfig): string {
     systemctl daemon-reload || true`;
 }
 
-function tailscaleLogoutBootstrap(): string {
-  return `{
-      printf '%s\\n' '#!/usr/bin/env sh'
-      printf '%s\\n' 'if command -v tailscale >/dev/null 2>&1; then'
-      printf '%s\\n' '  tailscale logout >/dev/null 2>&1 || true'
-      printf '%s\\n' 'fi'
-    } >/usr/local/bin/crabbox-tailscale-logout
-    chmod 0755 /usr/local/bin/crabbox-tailscale-logout
-    if command -v systemctl >/dev/null 2>&1; then
-      {
-        printf '%s\\n' '[Unit]'
-        printf '%s\\n' 'Description=Crabbox Tailscale logout on shutdown'
-        printf '%s\\n' 'DefaultDependencies=no'
-        printf '%s\\n' 'Before=shutdown.target reboot.target halt.target'
-        printf '%s\\n' ''
-        printf '%s\\n' '[Service]'
-        printf '%s\\n' 'Type=oneshot'
-        printf '%s\\n' 'ExecStart=/usr/local/bin/crabbox-tailscale-logout'
-        printf '%s\\n' 'TimeoutStartSec=20'
-        printf '%s\\n' ''
-        printf '%s\\n' '[Install]'
-        printf '%s\\n' 'WantedBy=halt.target reboot.target shutdown.target'
-      } >/etc/systemd/system/crabbox-tailscale-logout.service
-      systemctl daemon-reload || true
-      systemctl enable crabbox-tailscale-logout.service || true
-    fi`;
-}
-
 function tailscaleBootstrap(config: LeaseConfig): string {
   if (!config.tailscaleAuthKey) {
     return `    echo "tailscale requested but no auth key was injected" >&2
@@ -1541,7 +1513,12 @@ function tailscaleBootstrap(config: LeaseConfig): string {
   }
   return `    ${tailscaleInstallBootstrap(config)}
     systemctl enable --now tailscaled || service tailscaled start || true
-    ${tailscaleLogoutBootstrap()}
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable crabbox-tailscale-logout.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/crabbox-tailscale-logout.service
+      systemctl daemon-reload || true
+    fi
+    rm -f /usr/local/bin/crabbox-tailscale-logout
     install -d -m 0750 -o ${shellQuote(sshUser)} -g ${shellQuote(sshUser)} /var/lib/crabbox
     set +x
     TS_AUTHKEY=${shellQuote(config.tailscaleAuthKey)}

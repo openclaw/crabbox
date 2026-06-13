@@ -1512,7 +1512,12 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 	loginServerFlag := `${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`
 	tailscaleUpScript := `    ` + cloudInitTailscaleInstallBootstrap() + `
     systemctl enable --now tailscaled || service tailscaled start || true
-    ` + cloudInitTailscaleLogoutBootstrap() + `
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable crabbox-tailscale-logout.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/crabbox-tailscale-logout.service
+      systemctl daemon-reload || true
+    fi
+    rm -f /usr/local/bin/crabbox-tailscale-logout
     install -d -m 0750 -o ` + sshUserOwner + ` -g ` + sshUserGroup + ` /var/lib/crabbox
     set +x
     ` + loginServerExport + `TS_AUTHKEY=` + shellQuote(authKey) + `
@@ -1583,34 +1588,6 @@ func cloudInitTailscaleInstallBootstrap() string {
       printf '%s\n' 'WantedBy=multi-user.target'
     } >/etc/systemd/system/tailscaled.service
     systemctl daemon-reload || true`
-}
-
-func cloudInitTailscaleLogoutBootstrap() string {
-	return `{
-      printf '%s\n' '#!/usr/bin/env sh'
-      printf '%s\n' 'if command -v tailscale >/dev/null 2>&1; then'
-      printf '%s\n' '  tailscale logout >/dev/null 2>&1 || true'
-      printf '%s\n' 'fi'
-    } >/usr/local/bin/crabbox-tailscale-logout
-    chmod 0755 /usr/local/bin/crabbox-tailscale-logout
-    if command -v systemctl >/dev/null 2>&1; then
-      {
-        printf '%s\n' '[Unit]'
-        printf '%s\n' 'Description=Crabbox Tailscale logout on shutdown'
-        printf '%s\n' 'DefaultDependencies=no'
-        printf '%s\n' 'Before=shutdown.target reboot.target halt.target'
-        printf '%s\n' ''
-        printf '%s\n' '[Service]'
-        printf '%s\n' 'Type=oneshot'
-        printf '%s\n' 'ExecStart=/usr/local/bin/crabbox-tailscale-logout'
-        printf '%s\n' 'TimeoutStartSec=20'
-        printf '%s\n' ''
-        printf '%s\n' '[Install]'
-        printf '%s\n' 'WantedBy=halt.target reboot.target shutdown.target'
-      } >/etc/systemd/system/crabbox-tailscale-logout.service
-      systemctl daemon-reload || true
-      systemctl enable crabbox-tailscale-logout.service || true
-    fi`
 }
 
 // cloudInitPondHostsBootstrap installs /usr/local/bin/crabbox-pond-hosts and a

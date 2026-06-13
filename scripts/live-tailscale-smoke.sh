@@ -103,12 +103,16 @@ if [[ "$http_code" != "200" ]]; then
   exit 1
 fi
 
+status="$(jq -r '.tailscale.status // "unknown"' "$tmp_body")"
 if [[ "$json" == "1" ]]; then
   jq -c . "$tmp_body"
 else
-  status="$(jq -r '.tailscale.status // "unknown"' "$tmp_body")"
   enabled="$(jq -r '.tailscale.enabled // false' "$tmp_body")"
   tags="$(jq -r '(.tailscale.tags // []) | join(",")' "$tmp_body")"
   install_mode="$(jq -r '.tailscale.install.mode // "unknown"' "$tmp_body")"
   echo "tailscale status=$status enabled=$enabled tags=${tags:-none} install=$install_mode"
+fi
+if [[ "$status" != "ok" ]]; then
+  echo "tailscale preflight failed status=$status" >&2
+  exit 1
 fi
