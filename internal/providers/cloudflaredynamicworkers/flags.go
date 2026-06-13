@@ -38,6 +38,9 @@ func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		if flagWasSet(fs, "type") {
 			return exit(2, "--type is not supported for provider=%s", providerName)
 		}
+		if flagWasSet(fs, "expose") {
+			return exit(2, "--expose is not supported for provider=%s", providerName)
+		}
 	}
 	v, ok := values.(flagValues)
 	if !ok {

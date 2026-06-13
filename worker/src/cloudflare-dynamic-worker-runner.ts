@@ -255,9 +255,11 @@ type RunCoordinationState = {
   generation: number;
   terminal: boolean;
   releaseWhenIdle: boolean;
+  cleanupWhenIdle?: boolean;
   record?: RunRecord;
   deletedAt?: number;
   deletionPending?: boolean;
+  deletionConditional?: boolean;
   deletionRunId?: string;
 };
 
@@ -477,11 +479,13 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
 
     if (request.method === "POST" && url.pathname === "/complete") {
       const body = (await request.json()) as {
+        cleanupPending?: unknown;
         executionId?: unknown;
         release?: unknown;
         record?: unknown;
       };
       if (
+        (body.cleanupPending !== undefined && typeof body.cleanupPending !== "boolean") ||
         typeof body.executionId !== "string" ||
         typeof body.release !== "boolean" ||
         !coordinationRecord(body.record)
@@ -512,7 +516,12 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
       mergeRunLogs(body.record, current.executions[body.executionId]?.record);
       mergeRunLogs(body.record, current.record);
       delete current.executions[body.executionId];
-      if (body.release) current.releaseWhenIdle = true;
+      if (body.cleanupPending === true) {
+        current.cleanupWhenIdle = true;
+        current.releaseWhenIdle = true;
+      } else if (body.release) {
+        current.releaseWhenIdle = true;
+      }
       if (Object.keys(current.executions).length > 0) {
         let activeRecord: RunRecord | undefined;
         if (current.record?.executionId === body.executionId) {
@@ -529,6 +538,28 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
         });
       }
       current.record = body.record;
+      if (current.cleanupWhenIdle === true) {
+        current.terminal = false;
+        current.releaseWhenIdle = false;
+        current.cleanupWhenIdle = false;
+        current.deletedAt = Date.now();
+        current.deletionPending = true;
+        current.deletionConditional = true;
+        current.deletionRunId = body.record.id;
+        rememberCompletion(current, body.executionId, {
+          indexGeneration: current.generation,
+          released: true,
+        });
+        await this.ctx.storage.put("state", current);
+        await this.scheduleAlarm(current);
+        await this.finishPendingDeletion(current);
+        return json({
+          ok: true,
+          finalized: true,
+          released: true,
+          indexGeneration: current.generation,
+        });
+      }
       if (current.releaseWhenIdle) {
         current.terminal = false;
         current.releaseWhenIdle = false;
@@ -626,6 +657,7 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
       current.executions = {};
       current.terminal = false;
       current.releaseWhenIdle = false;
+      current.cleanupWhenIdle = false;
       if (record === undefined) {
         delete current.record;
       } else {
@@ -633,6 +665,7 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
       }
       current.deletedAt = Date.now();
       current.deletionPending = true;
+      current.deletionConditional = false;
       current.deletionRunId = body.runId;
       await this.ctx.storage.put("state", current);
       await this.scheduleAlarm(current);
@@ -849,22 +882,35 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
             true,
           );
         }
-        await deleteRun(this.env, runId);
+        const tombstone =
+          current.deletionConditional === true && current.record !== undefined
+            ? await deletePrecedingRunMetadata(this.env, current.record)
+            : await deleteRun(this.env, runId).then(() => true);
         if (this.env.RUN_COORDINATOR) {
           await coordinateRunIndexDelete(
             runIndexCoordinator(this.env, runId),
             runId,
             current.generation,
-            true,
+            tombstone,
             false,
           );
         }
-        current.deletedAt = Date.now();
+        if (tombstone) {
+          current.deletedAt = Date.now();
+        } else {
+          delete current.deletedAt;
+        }
         current.deletionPending = false;
+        delete current.deletionConditional;
         delete current.record;
         delete current.deletionRunId;
-        await this.ctx.storage.put("state", current);
-        await this.scheduleAlarm(current);
+        if (tombstone) {
+          await this.ctx.storage.put("state", current);
+          await this.scheduleAlarm(current);
+        } else {
+          await this.ctx.storage.deleteAlarm();
+          await this.ctx.storage.deleteAll();
+        }
         return true;
       } catch {
         await this.ctx.storage.setAlarm(Date.now() + deletionRetryDelayMs);
@@ -1093,6 +1139,7 @@ async function createRun(
 
   let executionResponse: Response | undefined;
   let lifecycleUncertain = false;
+  let cleanupPending = false;
   try {
     if (parsed.legacyReusableID) {
       try {
@@ -1142,8 +1189,17 @@ async function createRun(
     }
     delete record.expiresAt;
     const retain = retainRunMetadata(parsed, record);
-    releaseCoordination = false;
-    const finalized = await finalizeRun(env, record, responseStatus, retain);
+    releaseCoordination = !retain;
+    let finalized: Awaited<ReturnType<typeof finalizeRun>>;
+    try {
+      finalized = await finalizeRun(env, record, responseStatus, retain);
+    } catch (error) {
+      if (!retain) {
+        releaseCoordination = false;
+        cleanupPending = true;
+      }
+      throw error;
+    }
     releaseCoordination = !retain;
     executionResponse = finalized.response;
   } finally {
@@ -1156,9 +1212,12 @@ async function createRun(
           executionId,
           record,
           releaseCoordination,
+          cleanupPending,
         );
         if (completion.finalized) {
-          if (completion.released && !releaseCoordination) await deleteRun(env, parsed.id);
+          if (completion.released && !releaseCoordination && !cleanupPending) {
+            await deleteRun(env, parsed.id);
+          }
         } else if (completion.activeRecord) {
           bestEffortRunIndex(
             ctx,
@@ -1818,18 +1877,18 @@ async function persistRun(env: Env, record: RunRecord): Promise<void> {
   await retryKVWrite(() => env.RUNS!.put(runMetadataKey(record.id), JSON.stringify(record)));
 }
 
-async function deletePrecedingRunMetadata(env: Env, record: RunRecord): Promise<void> {
-  if (!env.RUNS) return;
+async function deletePrecedingRunMetadata(env: Env, record: RunRecord): Promise<boolean> {
+  if (!env.RUNS) return true;
   const key = runMetadataKey(record.id);
   const raw = await env.RUNS.get(key);
-  if (!raw) return;
+  if (!raw) return true;
 
   let stored: RunRecord;
   try {
     stored = JSON.parse(raw) as RunRecord;
   } catch {
     await retryKVWrite(() => env.RUNS!.delete(key));
-    return;
+    return true;
   }
   const storedStartedAt = Date.parse(stored.startedAt);
   const currentStartedAt = Date.parse(record.startedAt);
@@ -1839,7 +1898,9 @@ async function deletePrecedingRunMetadata(env: Env, record: RunRecord): Promise<
     storedStartedAt <= currentStartedAt
   ) {
     await retryKVWrite(() => env.RUNS!.delete(key));
+    return true;
   }
+  return false;
 }
 
 async function storedRun(env: Env, runId: string): Promise<RunRecord | undefined> {
@@ -1998,6 +2059,7 @@ async function coordinateRunComplete(
   executionId: string,
   record: RunRecord,
   release: boolean,
+  cleanupPending: boolean,
 ): Promise<{
   finalized: boolean;
   indexGeneration: number;
@@ -2007,7 +2069,12 @@ async function coordinateRunComplete(
   const response = await runCoordinator(env, runId).fetch("https://run-coordinator/complete", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ executionId, record: runCoordinationRecord(record), release }),
+    body: JSON.stringify({
+      cleanupPending,
+      executionId,
+      record: runCoordinationRecord(record),
+      release,
+    }),
   });
   if (!response.ok) throw new Error(`run coordinator completion failed: ${response.status}`);
   const result = (await response.json()) as {
@@ -2036,13 +2103,22 @@ async function coordinateRunCompleteWithRetry(
   executionId: string,
   record: RunRecord,
   release: boolean,
+  cleanupPending: boolean,
   attempt = 1,
 ): ReturnType<typeof coordinateRunComplete> {
   try {
-    return await coordinateRunComplete(env, runId, executionId, record, release);
+    return await coordinateRunComplete(env, runId, executionId, record, release, cleanupPending);
   } catch (error) {
     if (attempt >= 3) throw error;
-    return coordinateRunCompleteWithRetry(env, runId, executionId, record, release, attempt + 1);
+    return coordinateRunCompleteWithRetry(
+      env,
+      runId,
+      executionId,
+      record,
+      release,
+      cleanupPending,
+      attempt + 1,
+    );
   }
 }
 

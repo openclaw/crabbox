@@ -35,6 +35,21 @@ func TestProviderSpecAndFlags(t *testing.T) {
 	}
 }
 
+func TestProviderFlagsRejectExpose(t *testing.T) {
+	cfg := testConfig("https://loader.example.test")
+	cfg.Provider = providerName
+	fs := newTestFlagSet()
+	_ = fs.String("expose", "", "")
+	values := Provider{}.RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--expose", "8080"}); err != nil {
+		t.Fatal(err)
+	}
+	err := Provider{}.ApplyFlags(&cfg, fs, values)
+	if err == nil || !strings.Contains(err.Error(), "--expose is not supported") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestConfigureNormalizesDefaultLinuxTarget(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.TargetOS = "linux"

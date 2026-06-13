@@ -2804,7 +2804,7 @@ describe("Cloudflare Dynamic Workers runner", () => {
     });
   });
 
-  it("retains coordinator metadata when stale KV cleanup fails", async () => {
+  it("retries unretained coordinator cleanup when stale KV deletion fails", async () => {
     const runs = new MockKVNamespace();
     runs.values.set(
       "runs:run_ephemeral_cleanup_failure",
@@ -2823,7 +2823,8 @@ describe("Cloudflare Dynamic Workers runner", () => {
     );
     runs.deleteError = new Error("KV DELETE failed");
     const loader = new MockLoader();
-    const testEnv = env(loader, runs);
+    const coordinator = new MockRunCoordinatorNamespace();
+    const testEnv = env(loader, runs, coordinator);
 
     await expect(
       worker.fetch(
@@ -2848,8 +2849,126 @@ describe("Cloudflare Dynamic Workers runner", () => {
       testEnv,
       ctx(),
     );
+    expect(status.status).toBe(404);
+    expect(
+      coordinator.requests.find(
+        (request) => request.id === "run_ephemeral_cleanup_failure" && request.path === "/complete",
+      )?.body,
+    ).toMatchObject({
+      cleanupPending: true,
+      release: false,
+    });
+    expect(runs.deleteCalls).toHaveLength(2);
+
+    const blockedReplacement = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify(
+          runPayload({
+            id: "run_ephemeral_cleanup_failure",
+            workerId: "replacement_worker",
+            retainMetadata: false,
+          }),
+        ),
+      }),
+      testEnv,
+      ctx(),
+    );
+    expect(blockedReplacement.status).toBe(409);
+    await expect(blockedReplacement.json()).resolves.toEqual({
+      error: "run deletion is pending",
+    });
+
+    runs.deleteError = undefined;
+    await coordinator.alarm("run_ephemeral_cleanup_failure");
+    expect(runs.deleteCalls).toHaveLength(3);
+    expect(runs.values.has("runs:run_ephemeral_cleanup_failure")).toBe(false);
+
+    const replacement = await worker.fetch(
+      authedRequest("/v1/runs", {
+        method: "POST",
+        body: JSON.stringify(
+          runPayload({
+            id: "run_ephemeral_cleanup_failure",
+            workerId: "replacement_worker",
+            retainMetadata: false,
+          }),
+        ),
+      }),
+      testEnv,
+      ctx(),
+    );
+    expect(replacement.status).toBe(200);
+  });
+
+  it("preserves newer metadata during deferred unretained cleanup", async () => {
+    const runs = new MockKVNamespace();
+    runs.values.set(
+      "runs:run_deferred_cleanup_newer",
+      JSON.stringify({
+        id: "run_deferred_cleanup_newer",
+        executionId: "old_execution",
+        workerId: "old_worker",
+        state: "succeeded",
+        cacheMode: "one-shot",
+        egress: "blocked",
+        createdAt: "2026-06-12T20:00:00.000Z",
+        startedAt: "2026-06-12T20:00:00.000Z",
+        completedAt: "2026-06-12T20:01:00.000Z",
+        logs: [],
+      }),
+    );
+    runs.deleteError = new Error("KV DELETE failed");
+    const coordinator = new MockRunCoordinatorNamespace();
+    const testEnv = env(new MockLoader(), runs, coordinator);
+
+    await expect(
+      worker.fetch(
+        authedRequest("/v1/runs", {
+          method: "POST",
+          body: JSON.stringify(
+            runPayload({
+              id: "run_deferred_cleanup_newer",
+              workerId: "current_worker",
+              retainMetadata: false,
+            }),
+          ),
+        }),
+        testEnv,
+        ctx(),
+      ),
+    ).rejects.toThrow("KV DELETE failed");
+
+    runs.deleteError = undefined;
+    runs.values.set(
+      "runs:run_deferred_cleanup_newer",
+      JSON.stringify({
+        id: "run_deferred_cleanup_newer",
+        executionId: "newer_execution",
+        workerId: "newer_worker",
+        state: "succeeded",
+        cacheMode: "stable",
+        egress: "blocked",
+        createdAt: "2026-06-12T23:00:00.000Z",
+        startedAt: "2026-06-12T23:00:00.000Z",
+        completedAt: "2026-06-12T23:01:00.000Z",
+        logs: [],
+      }),
+    );
+    await coordinator.alarm("run_deferred_cleanup_newer");
+
+    expect(JSON.parse(runs.values.get("runs:run_deferred_cleanup_newer")!)).toMatchObject({
+      executionId: "newer_execution",
+    });
+    const status = await worker.fetch(
+      authedRequest("/v1/runs/run_deferred_cleanup_newer"),
+      testEnv,
+      ctx(),
+    );
+    expect(status.status).toBe(200);
     await expect(status.json()).resolves.toMatchObject({
-      id: "run_ephemeral_cleanup_failure",
+      id: "run_deferred_cleanup_newer",
+      workerId: "newer_worker",
       status: "succeeded",
     });
   });
