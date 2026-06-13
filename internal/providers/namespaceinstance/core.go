@@ -3,6 +3,7 @@ package namespaceinstance
 import (
 	"context"
 	"flag"
+	"io"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -27,6 +28,9 @@ type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type LeaseTarget = core.LeaseTarget
 type Server = core.Server
+type SSHTarget = core.SSHTarget
+type CleanupRequest = core.CleanupRequest
+type LeaseClaim = core.LeaseClaim
 
 const (
 	providerName       = "namespace-instance"
@@ -52,4 +56,28 @@ var contextWithTimeout = context.WithTimeout
 
 func commandTimeout() time.Duration {
 	return 30 * time.Second
+}
+
+var newLeaseID = core.NewLeaseID
+var allocateDirectLeaseSlug = core.AllocateDirectLeaseSlug
+var ensureTestboxKeyForConfig = core.EnsureTestboxKeyForConfig
+var providerKeyForLease = core.ProviderKeyForLease
+var sshTargetFromConfig = core.SSHTargetFromConfig
+var waitForSSHReady = func(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	return core.WaitForSSH(ctx, target, stderr)
+}
+var bootstrapWaitTimeout = core.BootstrapWaitTimeout
+var claimLeaseTargetForConfig = core.ClaimLeaseTargetForConfig
+var resolveLeaseClaimForProvider = core.ResolveLeaseClaimForProvider
+var resolveLeaseClaimForProviderCloudID = core.ResolveLeaseClaimForProviderCloudID
+var listLeaseClaims = core.ListLeaseClaims
+var removeLeaseClaim = core.RemoveLeaseClaim
+var removeStoredTestboxKey = core.RemoveStoredTestboxKey
+var useStoredTestboxKey = core.UseStoredTestboxKey
+var directLeaseLabels = core.DirectLeaseLabels
+var touchDirectLeaseLabels = core.TouchDirectLeaseLabels
+var shouldCleanupServer = core.ShouldCleanupServer
+
+func leaseLabelTime(t time.Time) string {
+	return core.LeaseLabelTime(t)
 }

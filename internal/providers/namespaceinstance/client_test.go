@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -14,6 +15,81 @@ type recordingRunner struct {
 	results []LocalCommandResult
 	errs    []error
 	calls   []LocalCommandRequest
+}
+
+func TestCreateInstanceBuildsFakeableNSCCommandAndParsesSSH(t *testing.T) {
+	runner := &recordingRunner{results: []LocalCommandResult{
+		{Stdout: `{"id":"inst-synthetic","status":"running","ssh":{"host":"203.0.113.10","user":"root","port":2222},"labels":{"crabbox":"true","provider":"namespace-instance","lease":"cbx_test"}}`},
+	}}
+	client, err := newNSCClient(core.Config{NamespaceInstance: core.NamespaceInstanceConfig{
+		Endpoint: "https://namespace.example.test",
+		Region:   "us-test",
+		Keychain: "kc",
+	}}, core.Runtime{Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := client.CreateInstance(context.Background(), createInstanceRequest{
+		MachineType:   "linux-small",
+		Duration:      2 * time.Hour,
+		Ephemeral:     true,
+		PublicKeyPath: "/tmp/key.pub",
+		UniqueTag:     "crabbox-cbx-test",
+		Labels:        map[string]string{"crabbox": "true", "provider": "namespace-instance", "lease": "cbx_test"},
+		Volumes:       []string{"cache:tag:/cache:10Gi"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.ID != "inst-synthetic" || instance.SSHHost != "203.0.113.10" || instance.SSHUser != "root" || instance.SSHPort != "2222" {
+		t.Fatalf("instance=%#v", instance)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls=%d", len(runner.calls))
+	}
+	args := runner.calls[0].Args
+	for _, want := range []string{"--endpoint", "https://namespace.example.test", "--region", "us-test", "--keychain", "kc", "create", "--machine_type", "linux-small", "--duration", "2h0m0s", "--ephemeral", "--ssh_key", "/tmp/key.pub", "--unique_tag", "crabbox-cbx-test", "--volume", "cache:tag:/cache:10Gi", "-o", "json"} {
+		if !containsArg(args, want) {
+			t.Fatalf("args missing %q: %#v", want, args)
+		}
+	}
+	if !containsArg(args, "--label") || !containsArg(args, "provider=namespace-instance") {
+		t.Fatalf("label args missing: %#v", args)
+	}
+}
+
+func TestResolveSSHRequiresNormalTarget(t *testing.T) {
+	client := &nscClient{}
+	_, err := client.ResolveSSH(namespaceInstance{ID: "inst-synthetic"}, core.Config{}, "/tmp/key")
+	if err == nil || !strings.Contains(err.Error(), "plan_gap") {
+		t.Fatalf("err=%v", err)
+	}
+	target, err := client.ResolveSSH(namespaceInstance{ID: "inst-synthetic", SSHHost: "203.0.113.10", SSHUser: "ubuntu", SSHPort: "2202"}, core.Config{}, "/tmp/key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "203.0.113.10" || target.User != "ubuntu" || target.Port != "2202" || target.Key != "/tmp/key" {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
+func TestParseNSCInstancesFiltersWrappedShapes(t *testing.T) {
+	instances, err := parseNSCInstances(`{"instances":[{"instance_id":"inst-one","ssh_host":"203.0.113.10"},{"id":"inst-two","ssh":{"endpoint":"198.51.100.20","username":"root","port":22}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 2 || instances[0].ID != "inst-one" || instances[0].SSHHost != "203.0.113.10" || instances[1].SSHHost != "198.51.100.20" {
+		t.Fatalf("instances=%#v", instances)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
