@@ -12,7 +12,7 @@ import (
 )
 
 func TestStatusWaitDoneTreatsTerminalStatesAsDone(t *testing.T) {
-	for _, state := range []string{"expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated"} {
+	for _, state := range []string{"deleting", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated"} {
 		if !statusWaitDone(statusView{State: state}) {
 			t.Fatalf("statusWaitDone(%q) = false, want true", state)
 		}
@@ -40,7 +40,7 @@ func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 }
 
 func TestLeaseStatusStateCanBeReadyRejectsTerminalStates(t *testing.T) {
-	for _, state := range []string{"stopped", "released", "terminated"} {
+	for _, state := range []string{"deleting", "stopped", "released", "terminated"} {
 		if leaseStatusStateCanBeReady(LeaseTarget{}, state) {
 			t.Fatalf("leaseStatusStateCanBeReady(%q) = true, want false", state)
 		}

@@ -25,6 +25,7 @@ func init() {
 	RegisterProvider(testExternalProvider{})
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
+	RegisterProvider(testNvidiaBrevProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
 	RegisterProvider(testMorphProvider{})
@@ -853,6 +854,30 @@ func (testRunPodProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testNvidiaBrevProvider struct{}
+
+func (testNvidiaBrevProvider) Name() string { return "nvidia-brev" }
+func (testNvidiaBrevProvider) Aliases() []string {
+	return []string{"brev", "nvidia"}
+}
+func (testNvidiaBrevProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "nvidia-brev",
+		Family:      "nvidia-brev",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testNvidiaBrevProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testNvidiaBrevProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testNvidiaBrevProvider) Configure(Config, Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

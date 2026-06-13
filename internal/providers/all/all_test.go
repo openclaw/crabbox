@@ -60,6 +60,21 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"nvidia-brev", "brev", "nvidia"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "nvidia-brev" {
+			t.Fatalf("ProviderFor(%q).Name=%q want nvidia-brev", name, provider.Name())
+		}
+		if _, ok := provider.(core.DoctorProvider); !ok {
+			t.Fatalf("ProviderFor(%q) does not expose doctor", name)
+		}
+	}
+}
+
 func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("superserve")
 	if err != nil {
@@ -199,6 +214,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"mxc",
 		"namespace-devbox",
 		"namespace-instance",
+		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",
 		"parallels",
