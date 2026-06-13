@@ -90,6 +90,10 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+}
+
 func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }
@@ -128,11 +132,4 @@ func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, s
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
-}
-
-func notImplemented(ctx context.Context, action string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return exit(2, "provider=superserve %s is not implemented yet; lifecycle support lands in the Superserve client/lifecycle plan", action)
 }

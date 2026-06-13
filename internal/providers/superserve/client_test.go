@@ -3,11 +3,13 @@ package superserve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSuperserveClientCreateListActivateAndDelete(t *testing.T) {
@@ -383,6 +385,38 @@ func TestSuperserveClientRejectsUnknownDataPlaneHost(t *testing.T) {
 	}
 }
 
+func TestSuperserveUploadHonorsCallerDeadline(t *testing.T) {
+	var remaining time.Duration
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Fatal("upload request has no deadline")
+		}
+		remaining = time.Until(deadline)
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Status:     "204 No Content",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	})}
+	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+	client, err := newSuperserveClient(testConfigWithBaseURL("http://localhost"), Runtime{HTTP: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := client.UploadFile(ctx, &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+		"/tmp/archive.tgz", strings.NewReader("archive")); err != nil {
+		t.Fatal(err)
+	}
+	if remaining < 9*time.Minute {
+		t.Fatalf("upload deadline remaining=%s, caller deadline was shortened", remaining)
+	}
+}
+
 func TestSuperserveClientStreamDoesNotRetainUnboundedOutput(t *testing.T) {
 	chunk := strings.Repeat("x", maxExecStreamCaptureBytes+2048)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -416,6 +450,57 @@ func TestSuperserveClientStreamDoesNotRetainUnboundedOutput(t *testing.T) {
 	}
 	if result.Stdout != chunk[len(chunk)-maxExecStreamCaptureBytes:] {
 		t.Fatal("captured stdout is not the bounded tail")
+	}
+}
+
+func TestSuperserveClientPropagatesOutputWriterFailures(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		stream     bool
+		failStdout bool
+		want       string
+	}{
+		{name: "stream stdout", stream: true, failStdout: true, want: "write command stdout"},
+		{name: "stream stderr", stream: true, want: "write command stderr"},
+		{name: "buffered stdout", failStdout: true, want: "write command stdout"},
+		{name: "buffered stderr", want: "write command stderr"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/exec/stream":
+					if !test.stream {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"stdout\":\"out\",\"stderr\":\"err\"}\n\n")
+					_, _ = io.WriteString(w, "data: {\"finished\":true,\"exit_code\":0}\n\n")
+				case "/exec":
+					writeTestJSON(w, map[string]any{"stdout": "out", "stderr": "err", "exit_code": 0})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "ss_test_key")
+			client, err := newSuperserveClient(testConfigWithBaseURL(server.URL), Runtime{HTTP: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr := io.Writer(io.Discard), io.Writer(io.Discard)
+			if test.failStdout {
+				stdout = failingWriter{err: errors.New("stdout closed")}
+			} else {
+				stderr = failingWriter{err: errors.New("stderr closed")}
+			}
+			_, err = client.Exec(context.Background(), &sandboxAccess{Sandbox: superserveSandbox{ID: "sb_123"}, AccessToken: "ss_test_token"},
+				execRequest{Command: "true"}, stdout, stderr)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Exec err=%v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -475,6 +560,20 @@ func TestSuperserveClientRedactsForwardedEnvValuesFromExecErrors(t *testing.T) {
 			t.Fatalf("error was not redacted: %v", err)
 		}
 	})
+}
+
+type failingWriter struct {
+	err error
+}
+
+func (w failingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func TestSuperserveClientStreamRequiresFinishedEvent(t *testing.T) {

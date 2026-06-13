@@ -124,7 +124,7 @@ func superserveWorkdir(cfg Config) (string, error) {
 	}
 	clean := path.Clean(workdir)
 	switch clean {
-	case "/", "/tmp", "/workspace":
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
 		return "", exit(2, "superserve workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil

@@ -142,6 +142,7 @@ func TestValidateSuperserveConfigRejectsBadValues(t *testing.T) {
 	}{
 		{name: "relative workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "workspace" }, wantErr: "workdir must be absolute"},
 		{name: "broad workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "/workspace" }, wantErr: "too broad"},
+		{name: "system workdir", mutate: func(cfg *Config) { cfg.Superserve.Workdir = "/etc" }, wantErr: "too broad"},
 		{name: "negative timeout", mutate: func(cfg *Config) { cfg.Superserve.TimeoutSecs = -1 }, wantErr: "timeoutSecs must be non-negative"},
 		{name: "negative exec timeout", mutate: func(cfg *Config) { cfg.Superserve.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
 	}
@@ -154,6 +155,15 @@ func TestValidateSuperserveConfigRejectsBadValues(t *testing.T) {
 				t.Fatalf("err=%v want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestSuperserveExecTimeoutPreservesExplicitZero(t *testing.T) {
+	cfg := testConfig()
+	cfg.Superserve.ExecTimeoutSecs = 0
+	backend := NewSuperserveBackend((Provider{}).Spec(), cfg, Runtime{}).(*backend)
+	if got := backend.execTimeoutSecs(); got != 0 {
+		t.Fatalf("exec timeout=%d, want service default marker 0", got)
 	}
 }
 

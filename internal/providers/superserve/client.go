@@ -302,7 +302,11 @@ func (c *httpSuperserveClient) UploadFile(ctx context.Context, access *sandboxAc
 			return err
 		}
 		apiPath := "/files?path=" + url.QueryEscape(remotePath)
-		requestCtx, cancel := context.WithTimeout(ctx, defaultSuperserveRequestTimeout)
+		requestCtx := ctx
+		cancel := func() {}
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			requestCtx, cancel = context.WithTimeout(ctx, defaultSuperserveRequestTimeout)
+		}
 		defer cancel()
 		req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, target.baseURL+apiPath, content)
 		if err != nil {
@@ -333,7 +337,7 @@ func (c *httpSuperserveClient) Exec(ctx context.Context, access *sandboxAccess, 
 		if isSuperserveUnsupportedStream(err) {
 			result, err = c.execBuffered(ctx, access.Sandbox.ID, token, req)
 			if err == nil {
-				writeExecResultOutput(result, stdout, stderr)
+				err = writeExecResultOutput(result, stdout, stderr)
 			}
 		}
 		return err
@@ -588,18 +592,24 @@ func consumeSuperserveExecStream(body io.Reader, stdout, stderr io.Writer) (exec
 		}
 		if event.Stdout != "" {
 			result.Stdout = appendBounded(result.Stdout, event.Stdout, maxExecStreamCaptureBytes)
-			_, _ = io.WriteString(stdout, event.Stdout)
+			if _, err := io.WriteString(stdout, event.Stdout); err != nil {
+				return execResult{}, fmt.Errorf("superserve write command stdout: %w", err)
+			}
 		}
 		if event.Stderr != "" {
 			result.Stderr = appendBounded(result.Stderr, event.Stderr, maxExecStreamCaptureBytes)
-			_, _ = io.WriteString(stderr, event.Stderr)
+			if _, err := io.WriteString(stderr, event.Stderr); err != nil {
+				return execResult{}, fmt.Errorf("superserve write command stderr: %w", err)
+			}
 		}
 		if event.Finished {
 			sawFinished = true
 			result.ExitCode = event.ExitCode
 			if event.Error != "" {
 				result.Stderr = appendBounded(result.Stderr, event.Error, maxExecStreamCaptureBytes)
-				_, _ = io.WriteString(stderr, event.Error)
+				if _, err := io.WriteString(stderr, event.Error); err != nil {
+					return execResult{}, fmt.Errorf("superserve write command stderr: %w", err)
+				}
 			}
 		}
 	}
@@ -626,13 +636,18 @@ func appendBounded(current, chunk string, limit int) string {
 	return combined[len(combined)-limit:]
 }
 
-func writeExecResultOutput(result execResult, stdout, stderr io.Writer) {
+func writeExecResultOutput(result execResult, stdout, stderr io.Writer) error {
 	if result.Stdout != "" {
-		_, _ = io.WriteString(stdout, result.Stdout)
+		if _, err := io.WriteString(stdout, result.Stdout); err != nil {
+			return fmt.Errorf("superserve write command stdout: %w", err)
+		}
 	}
 	if result.Stderr != "" {
-		_, _ = io.WriteString(stderr, result.Stderr)
+		if _, err := io.WriteString(stderr, result.Stderr); err != nil {
+			return fmt.Errorf("superserve write command stderr: %w", err)
+		}
 	}
+	return nil
 }
 
 func envSecretValues(env map[string]string) []string {

@@ -445,6 +445,29 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 	}
 }
 
+func TestRunPropagatesOneShotDeleteFailureAndPreservesClaim(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	fake.execResults = []execResult{{}, {ExitCode: 0}}
+	fake.deleteErr = errors.New("delete denied")
+	backend := newSuperserveTestBackend(t, fake)
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "delete denied") {
+		t.Fatalf("Run err=%v, want delete failure", err)
+	}
+	if result.ExitCode != 1 {
+		t.Fatalf("result=%#v, want cleanup failure exit 1", result)
+	}
+	leaseID := leasePrefix + fake.sandbox.ID
+	if claim, claimErr := readLeaseClaim(leaseID); claimErr != nil || claim.LeaseID != leaseID {
+		t.Fatalf("claim should remain for cleanup retry: %#v err=%v", claim, claimErr)
+	}
+}
+
 func TestRunRefreshesRetainedClaimActivityAfterSuccessfulCommand(t *testing.T) {
 	fake := newFakeSuperserveClient()
 	fake.execResults = []execResult{
@@ -500,6 +523,59 @@ func TestRunRefreshesRetainedClaimActivityAfterSuccessfulCommand(t *testing.T) {
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("retained run deleted sandbox: %#v", fake.deleted)
+	}
+}
+
+func TestCleanupSerializesAndRechecksLeaseActivity(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	backend := newSuperserveTestBackend(t, fake)
+	leaseID, scope := createSuperserveClaim(t, backend, fake, "active")
+	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "active")
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim.LastUsedAt = time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	claim.IdleTimeoutSeconds = 60
+	writeClaimFixture(t, claim)
+
+	unlock, err := lockSuperserveLeaseOperation(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- backend.Cleanup(context.Background(), CleanupRequest{})
+	}()
+	select {
+	case err := <-cleanupDone:
+		t.Fatalf("cleanup completed while lease operation lock was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	claim.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	writeClaimFixture(t, claim)
+	unlock()
+	if err := <-cleanupDone; err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("cleanup deleted refreshed active sandbox: %#v", fake.deleted)
+	}
+}
+
+func TestSuperserveOperationLockHonorsContextCancellation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	unlock, err := lockSuperserveLeaseOperation(context.Background(), leasePrefix+"lock-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := lockSuperserveLeaseOperation(ctx, leasePrefix+"lock-test"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context deadline", err)
 	}
 }
 

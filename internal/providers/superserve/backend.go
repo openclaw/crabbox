@@ -80,10 +80,11 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, slug, err := b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
+	leaseID, sandboxID, slug, unlockOperation, err := b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
+	defer unlockOperation()
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: superserve warmup keeps the sandbox until explicit stop\n")
@@ -102,7 +103,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if req.Options.Tailscale.Enabled {
 		return RunResult{}, exit(2, "provider=superserve is delegated-run only and does not support Tailscale options")
 	}
@@ -117,15 +118,29 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	leaseID, sandboxID, slug := "", "", ""
 	acquired := false
+	var unlockOperation func()
+	defer func() {
+		if unlockOperation != nil {
+			unlockOperation()
+		}
+	}()
 	if req.ID == "" {
-		leaseID, sandboxID, slug, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
+		leaseID, sandboxID, slug, unlockOperation, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
 		if err != nil {
 			return RunResult{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 		acquired = true
 	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
+		leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
+		if err != nil {
+			return RunResult{}, err
+		}
+		unlockOperation, err = lockSuperserveLeaseOperation(ctx, leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		leaseID, sandboxID, _, err = resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -154,16 +169,16 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
 		defer func() {
-			if !shouldStop {
-				return
+			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+				if result.ExitCode == 0 {
+					result.ExitCode = 1
+				}
+				if retErr == nil {
+					retErr = exit(1, "%v", cleanupErr)
+				} else {
+					retErr = errors.Join(retErr, cleanupErr)
+				}
 			}
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			defer cancel()
-			if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isSuperserveNotFound(err) {
-				fmt.Fprintf(b.rt.Stderr, "warning: superserve delete failed for %s: %v\n", sandboxID, err)
-				return
-			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
@@ -195,6 +210,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		if activityErr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: refresh superserve lease activity failed lease=%s: %v\n", leaseID, activityErr)
 			result.ExitCode = 1
+		}
+		if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+			result.ExitCode = 1
+			return result, cleanupErr
 		}
 		if req.TimingJSON {
 			if err := writeTimingJSON(b.rt.Stderr, timingReport{
@@ -234,7 +253,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		TimeoutSecs: b.execTimeoutSecs(),
 	}, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
+	result = RunResult{
 		Provider:      providerName,
 		LeaseID:       leaseID,
 		Slug:          slug,
@@ -268,6 +287,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		if commandErr == nil {
 			result.ExitCode = 1
 		}
+	}
+	if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+		if result.ExitCode == 0 {
+			result.ExitCode = 1
+		}
+		commandErr = errorsJoin(commandErr, cleanupErr)
 	}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
@@ -413,7 +438,16 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, err := resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
+	leaseID, _, _, err := resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
+	if err != nil {
+		return err
+	}
+	unlockOperation, err := lockSuperserveLeaseOperation(ctx, leaseID)
+	if err != nil {
+		return err
+	}
+	defer unlockOperation()
+	leaseID, sandboxID, _, err := resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
 	if err != nil {
 		return err
 	}
@@ -453,51 +487,76 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if listed.Provider != providerName || !superserveClaimMatchesEndpoint(listed, api.BaseURL()) {
 			continue
 		}
-		claim, err := readLeaseClaim(listed.LeaseID)
+		var removedOne, claimRemovedOne, checkedOne bool
+		err := func() error {
+			unlockOperation, err := lockSuperserveLeaseOperation(ctx, listed.LeaseID)
+			if err != nil {
+				return err
+			}
+			defer unlockOperation()
+			claim, err := readLeaseClaim(listed.LeaseID)
+			if err != nil {
+				return err
+			}
+			if claim.LeaseID == "" || claim.Provider != providerName || !superserveClaimMatchesEndpoint(claim, api.BaseURL()) {
+				return nil
+			}
+			checkedOne = true
+			sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
+			sb, getErr := api.GetSandbox(ctx, sandboxID)
+			if getErr != nil {
+				if !isSuperserveNotFound(getErr) {
+					return getErr
+				}
+				if !b.cfg.Superserve.ForgetMissing {
+					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set superserve forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
+					return nil
+				}
+				if req.DryRun {
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					return nil
+				}
+				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+					return err
+				}
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				claimRemovedOne = true
+				return nil
+			}
+			due, reason := superserveClaimCleanupDue(claim, now)
+			if !due {
+				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+				return nil
+			}
+			if err := validateSuperserveSandboxOwnership(claim, sb); err != nil {
+				return err
+			}
+			if req.DryRun {
+				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+				return nil
+			}
+			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isSuperserveNotFound(err) {
+				return err
+			}
+			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+				return err
+			}
+			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+			removedOne = true
+			return nil
+		}()
 		if err != nil {
 			return err
 		}
-		if claim.LeaseID == "" || claim.Provider != providerName || !superserveClaimMatchesEndpoint(claim, api.BaseURL()) {
-			continue
+		if checkedOne {
+			checked++
 		}
-		checked++
-		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
-		sb, getErr := api.GetSandbox(ctx, sandboxID)
-		if getErr != nil {
-			if !isSuperserveNotFound(getErr) {
-				return getErr
-			}
-			if !b.cfg.Superserve.ForgetMissing {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set superserve forget-missing to remove the claim\n", sandboxID, claim.LeaseID)
-				continue
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-				continue
-			}
-			removeLeaseClaim(claim.LeaseID)
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+		if removedOne {
+			removed++
+		}
+		if claimRemovedOne {
 			claimsRemoved++
-			continue
 		}
-		due, reason := superserveClaimCleanupDue(claim, now)
-		if !due {
-			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			continue
-		}
-		if err := validateSuperserveSandboxOwnership(claim, sb); err != nil {
-			return err
-		}
-		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			continue
-		}
-		if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isSuperserveNotFound(err) {
-			return err
-		}
-		removeLeaseClaim(claim.LeaseID)
-		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-		removed++
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
@@ -505,13 +564,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo Repo, reclaim bool, requestedSlug string) (string, string, string, func(), error) {
 	providerScope, err := newSuperserveClaimScope(api.BaseURL())
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", nil, err
 	}
 	if _, err := superserveWorkdir(b.cfg); err != nil {
-		return "", "", "", err
+		return "", "", "", nil, err
 	}
 	initialMetadata := b.ownershipMetadata(api.BaseURL(), providerScope, "", "", repo)
 	fromTemplate, fromSnapshot := superserveCreateSource(b.cfg)
@@ -524,25 +583,36 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 		Network:        superserveNetworkConfig(b.cfg),
 	})
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", nil, err
 	}
 	leaseID := leasePrefix + sb.ID
+	unlockOperation, err := lockSuperserveLeaseOperation(ctx, leaseID)
+	if err != nil {
+		return leaseID, sb.ID, "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+	}
+	keepLock := false
+	defer func() {
+		if !keepLock {
+			unlockOperation()
+		}
+	}()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return leaseID, sb.ID, "", b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, sb.ID, "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	metadata := b.ownershipMetadata(api.BaseURL(), providerScope, leaseID, slug, repo)
 	sb, err = api.UpdateSandboxMetadata(ctx, sb.ID, metadata)
 	if err != nil {
-		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, sb.ID, slug, nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	if err := validateSuperserveSandboxOwnership(LeaseClaim{LeaseID: leaseID, Provider: providerName, ProviderScope: providerScope}, sb); err != nil {
-		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, sb.ID, slug, nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, providerScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, sb.ID, slug, nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
-	return leaseID, sb.ID, slug, nil
+	keepLock = true
+	return leaseID, sb.ID, slug, unlockOperation, nil
 }
 
 func superserveCreateSource(cfg Config) (string, string) {
@@ -790,6 +860,20 @@ func (b *backend) cleanupClaimedRunFailure(ctx context.Context, api superserveCl
 	return cause
 }
 
+func (b *backend) cleanupCreatedRun(ctx context.Context, api superserveClient, leaseID, sandboxID string, shouldStop *bool) error {
+	if !*shouldStop {
+		return nil
+	}
+	*shouldStop = false
+	cleanupCtx, cancel := b.cleanupContext(ctx)
+	defer cancel()
+	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isSuperserveNotFound(err) {
+		return fmt.Errorf("superserve delete failed for %s: %w", sandboxID, err)
+	}
+	removeLeaseClaim(leaseID)
+	return nil
+}
+
 func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	timeout := superserveCleanupTimeout
 	if b.cleanupTimeoutOverride > 0 {
@@ -799,10 +883,7 @@ func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.
 }
 
 func (b *backend) execTimeoutSecs() int {
-	if b.cfg.Superserve.ExecTimeoutSecs > 0 {
-		return b.cfg.Superserve.ExecTimeoutSecs
-	}
-	return 600
+	return b.cfg.Superserve.ExecTimeoutSecs
 }
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {
