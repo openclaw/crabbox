@@ -22,7 +22,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      providerFamily,
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{},
+		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup},
 		Coordinator: core.CoordinatorNever,
 	}
 }
@@ -44,9 +44,9 @@ func validateCodeSandboxConfig(cfg Config) error {
 	if strings.TrimSpace(csb.Workdir) == "" {
 		return exit(2, "codesandbox workdir must not be empty")
 	}
-	workdir := strings.TrimRight(strings.TrimSpace(csb.Workdir), "/")
-	if workdir != defaultWorkdir && !strings.HasPrefix(workdir, defaultWorkdir+"/") {
-		return exit(2, "codesandbox workdir must be under %s", defaultWorkdir)
+	cfg.Provider = providerName
+	if _, err := codeSandboxWorkdir(cfg); err != nil {
+		return err
 	}
 	if strings.TrimSpace(csb.BridgeCommand) == "" {
 		return exit(2, "codesandbox bridgeCommand must not be empty")

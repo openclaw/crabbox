@@ -1,7 +1,9 @@
 package codesandbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -115,6 +117,76 @@ func TestCodeSandboxClientListsThroughBridge(t *testing.T) {
 	}
 	if result.TotalCount != 7 || len(result.Sandboxes) != 1 || result.Sandboxes[0].ID != "csb_1" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
+	seen := []BridgeRequest{}
+	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		var payload BridgeRequest
+		if err := json.Unmarshal([]byte(readRequestBody(req)), &payload); err != nil {
+			t.Fatalf("stdin payload: %v", err)
+		}
+		seen = append(seen, payload)
+		switch payload.Operation {
+		case "create_sandbox":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandbox":{"id":"sb_1","state":"running","tags":["crabbox"]}}`)
+		case "get_sandbox":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandbox":{"id":"sb_1","state":"running"}}`)
+		case "run_command":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":4,"stdout":"out\n","stderr":"err\n"}}`)
+		case "write_file":
+			if got, _ := base64.StdEncoding.DecodeString(payload.ContentBase64); string(got) != "archive-bytes" {
+				t.Fatalf("upload content=%q", got)
+			}
+			_, _ = io.WriteString(req.Stdout, `{"ok":true}`)
+		case "delete_sandbox":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true}`)
+		default:
+			t.Fatalf("unexpected operation %q", payload.Operation)
+		}
+		return LocalCommandResult{ExitCode: 0}, nil
+	}}
+	client := &codeSandboxClient{
+		cfg:    newTestConfig().CodeSandbox,
+		rt:     Runtime{Exec: runner},
+		bridge: NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner}),
+		token:  "secret",
+	}
+
+	if _, err := client.CreateSandbox(context.Background(), CreateSandboxRequest{Title: "crabbox-app", Tags: []string{"crabbox"}}); err != nil {
+		t.Fatalf("CreateSandbox err=%v", err)
+	}
+	if _, err := client.GetSandbox(context.Background(), "sb_1"); err != nil {
+		t.Fatalf("GetSandbox err=%v", err)
+	}
+	got, err := client.RunCommand(context.Background(), "sb_1", CommandRequest{
+		Command: []string{"bash", "-lc", "echo ok"},
+		Cwd:     "/project/workspace/app",
+		Env:     map[string]string{"SECRET_TOKEN": "value"},
+	})
+	if err != nil {
+		t.Fatalf("RunCommand err=%v", err)
+	}
+	if got.ExitCode != 4 || got.Stdout != "out\n" || got.Stderr != "err\n" {
+		t.Fatalf("command result=%#v", got)
+	}
+	if err := client.UploadFile(context.Background(), "sb_1", "/tmp/archive.tgz", bytes.NewReader([]byte("archive-bytes"))); err != nil {
+		t.Fatalf("UploadFile err=%v", err)
+	}
+	if err := client.DeleteSandbox(context.Background(), "sb_1"); err != nil {
+		t.Fatalf("DeleteSandbox err=%v", err)
+	}
+	ops := make([]string, 0, len(seen))
+	for _, req := range seen {
+		ops = append(ops, req.Operation)
+	}
+	wantOps := []string{"create_sandbox", "get_sandbox", "run_command", "write_file", "delete_sandbox"}
+	if !reflect.DeepEqual(ops, wantOps) {
+		t.Fatalf("ops=%v want %v", ops, wantOps)
+	}
+	if seen[2].Env["SECRET_TOKEN"] != "value" || seen[2].Cwd != "/project/workspace/app" {
+		t.Fatalf("run payload=%#v", seen[2])
 	}
 }
 

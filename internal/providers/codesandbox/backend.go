@@ -2,7 +2,12 @@ package codesandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
 )
 
 type codeSandboxBackend struct {
@@ -13,24 +18,318 @@ type codeSandboxBackend struct {
 
 func (b *codeSandboxBackend) Spec() ProviderSpec { return b.spec }
 
-func (b *codeSandboxBackend) Warmup(context.Context, WarmupRequest) error {
-	return exit(2, "provider=codesandbox lifecycle warmup is deferred to the lifecycle implementation")
+func (b *codeSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+	if req.ActionsRunner {
+		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+	}
+	started := b.now()
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	leaseID, sandboxID, slug, err := b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
+	if !req.Keep {
+		fmt.Fprintf(b.rt.Stderr, "warning: codesandbox warmup keeps the sandbox until explicit stop\n")
+	}
+	total := b.now().Sub(started)
+	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
+	if req.TimingJSON {
+		return writeTimingJSON(b.rt.Stderr, timingReport{
+			Provider: providerName,
+			LeaseID:  leaseID,
+			Slug:     slug,
+			TotalMs:  total.Milliseconds(),
+			ExitCode: 0,
+		})
+	}
+	return nil
 }
 
-func (b *codeSandboxBackend) Run(context.Context, RunRequest) (RunResult, error) {
-	return RunResult{}, exit(2, "provider=codesandbox run is deferred to the lifecycle implementation")
+func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
+		return RunResult{}, err
+	}
+	workdir, err := codeSandboxWorkdir(b.cfg)
+	if err != nil {
+		return RunResult{}, err
+	}
+	if !req.SyncOnly && (len(req.Command) == 0 || (len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "")) {
+		return RunResult{}, exit(2, "missing command")
+	}
+	started := b.now()
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return RunResult{}, err
+	}
+	leaseID, sandboxID, slug := "", "", ""
+	acquired := false
+	if req.ID == "" {
+		leaseID, sandboxID, slug, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
+		if err != nil {
+			return RunResult{}, err
+		}
+		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
+		acquired = true
+	} else {
+		var claim LeaseClaim
+		leaseID, sandboxID, slug, claim, err = resolveLeaseID(req.ID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		sb, err := api.GetSandbox(ctx, sandboxID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+			return RunResult{}, err
+		}
+		if req.Repo.Root != "" {
+			if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claim.ProviderScope, b.cfg.Pond, req.Repo.Root,
+				timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), req.Reclaim); err != nil {
+				return RunResult{}, err
+			}
+		}
+	}
+	shouldStop := acquired && !req.Keep
+	if shouldStop {
+		defer func() {
+			if !shouldStop {
+				return
+			}
+			cleanupCtx, cancel := b.cleanupContext(ctx)
+			defer cancel()
+			if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: codesandbox stop failed for %s: %v\n", sandboxID, err)
+				return
+			}
+			removeLeaseClaim(leaseID)
+		}()
+	}
+	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
+
+	syncDuration := time.Duration(0)
+	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
+	if !req.NoSync {
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, sandboxID, req, workdir)
+		if err != nil {
+			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+			return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}, err
+		}
+		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
+	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		return RunResult{}, err
+	}
+
+	if req.SyncOnly {
+		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}
+		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
+		if req.TimingJSON {
+			return result, writeTimingJSON(b.rt.Stderr, timingReport{
+				Provider:      providerName,
+				LeaseID:       leaseID,
+				Slug:          slug,
+				SyncDelegated: true,
+				SyncMs:        syncDuration.Milliseconds(),
+				SyncPhases:    syncPhases,
+				SyncSkipped:   req.NoSync,
+				TotalMs:       result.Total.Milliseconds(),
+				ExitCode:      0,
+				Label:         strings.TrimSpace(req.Label),
+				Workdir:       workdir,
+			})
+		}
+		return result, nil
+	}
+
+	command, err := buildCommand(req.Command, req.ShellMode)
+	if err != nil {
+		return RunResult{}, err
+	}
+	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+	}
+	commandStart := b.now()
+	exitCode, runErr := b.execCommand(ctx, api, sandboxID, workdir, command, req.Env)
+	commandDuration := b.now().Sub(commandStart)
+	result := RunResult{
+		ExitCode:      exitCode,
+		Command:       commandDuration,
+		Total:         b.now().Sub(started),
+		SyncDelegated: true,
+		Provider:      providerName,
+		LeaseID:       leaseID,
+		Slug:          slug,
+		CommandText:   strings.Join(command, " "),
+	}
+	if req.NoSync {
+		fmt.Fprintf(b.rt.Stderr, "codesandbox run summary sync_skipped=true command=%s total=%s exit=%d\n",
+			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+	} else {
+		fmt.Fprintf(b.rt.Stderr, "codesandbox run summary sync=%s command=%s total=%s exit=%d\n",
+			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+	}
+	if req.TimingJSON {
+		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+			Provider:      providerName,
+			LeaseID:       leaseID,
+			Slug:          slug,
+			SyncDelegated: true,
+			SyncMs:        syncDuration.Milliseconds(),
+			SyncPhases:    syncPhases,
+			SyncSkipped:   req.NoSync,
+			CommandMs:     result.Command.Milliseconds(),
+			TotalMs:       result.Total.Milliseconds(),
+			ExitCode:      exitCode,
+			Label:         strings.TrimSpace(req.Label),
+			Workdir:       workdir,
+		}); err != nil {
+			return result, err
+		}
+	}
+	if runErr != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		return result, ExitError{Code: 1, Message: fmt.Sprintf("codesandbox run failed: %v", runErr)}
+	}
+	if exitCode != 0 {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("codesandbox run exited %d", exitCode)}
+	}
+	return result, nil
 }
 
-func (b *codeSandboxBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
-	return nil, exit(2, "provider=codesandbox list is deferred to the lifecycle implementation")
+func (b *codeSandboxBackend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return nil, err
+	}
+	claims, err := listCodeSandboxLeaseClaims()
+	if err != nil {
+		return nil, err
+	}
+	servers := make([]Server, 0, len(claims))
+	for _, claim := range claims {
+		if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
+			continue
+		}
+		if validateCodeSandboxClaimScope(claim) != nil {
+			continue
+		}
+		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
+		sb, getErr := api.GetSandbox(ctx, sandboxID)
+		state := ""
+		if getErr != nil {
+			state = "missing-or-inaccessible"
+		} else {
+			if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+				return nil, err
+			}
+			state = blank(sb.State, "ready")
+		}
+		servers = append(servers, codeSandboxServerView(claim, SandboxSummary{ID: sandboxID, Title: sb.Title, State: state, URL: sb.URL}))
+	}
+	return servers, nil
 }
 
-func (b *codeSandboxBackend) Status(context.Context, StatusRequest) (StatusView, error) {
-	return StatusView{}, exit(2, "provider=codesandbox status is deferred to the lifecycle implementation")
+func (b *codeSandboxBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return StatusView{}, err
+	}
+	leaseID, sandboxID, slug, claim, err := resolveLeaseID(req.ID)
+	if err != nil {
+		return StatusView{}, err
+	}
+	waitTimeout := req.WaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 5 * time.Minute
+	}
+	deadline := b.now().Add(waitTimeout)
+	pollCtx := ctx
+	cancel := func() {}
+	if req.Wait {
+		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
+	}
+	defer cancel()
+	for {
+		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
+		if getErr != nil {
+			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return StatusView{}, exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
+			}
+			if ctx.Err() != nil {
+				return StatusView{}, ctx.Err()
+			}
+			return StatusView{}, getErr
+		}
+		if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+			return StatusView{}, err
+		}
+		state := strings.ToLower(strings.TrimSpace(blank(sb.State, "ready")))
+		view := StatusView{
+			ID:       leaseID,
+			Slug:     slug,
+			Provider: providerName,
+			TargetOS: targetLinux,
+			State:    state,
+			ServerID: sandboxID,
+			Host:     sb.URL,
+			Pond:     claim.Pond,
+			Network:  NetworkPublic,
+			Ready:    isReadyState(state),
+			Labels: map[string]string{
+				"provider": providerName,
+				"lease":    leaseID,
+				"pond":     claim.Pond,
+				"state":    state,
+			},
+		}
+		if !req.Wait || view.Ready {
+			return view, nil
+		}
+		if isTerminalState(state) {
+			return StatusView{}, exit(5, "codesandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+		}
+		if b.now().After(deadline) {
+			return StatusView{}, exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
+		}
+		select {
+		case <-pollCtx.Done():
+			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return StatusView{}, exit(5, "timed out waiting for codesandbox sandbox %s to become ready", sandboxID)
+			}
+			return StatusView{}, pollCtx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
-func (b *codeSandboxBackend) Stop(context.Context, StopRequest) error {
-	return exit(2, "provider=codesandbox stop is deferred to the lifecycle implementation")
+func (b *codeSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	leaseID, sandboxID, _, claim, err := resolveLeaseID(req.ID)
+	if err != nil {
+		return err
+	}
+	sb, err := api.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+		return err
+	}
+	if err := api.DeleteSandbox(ctx, sandboxID); err != nil {
+		return err
+	}
+	removeLeaseClaim(leaseID)
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
+	return nil
 }
 
 func (b *codeSandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
@@ -70,6 +369,58 @@ func (b *codeSandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (Docto
 	result.Status = "ok"
 	result.Message = inventoryDoctorResult(providerName, len(listed.Sandboxes)).Message
 	return result, nil
+}
+
+func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI, sandboxID, workdir string, command []string, env map[string]string) (int, error) {
+	if len(command) == 0 {
+		return 2, errors.New("missing command")
+	}
+	res, err := api.RunCommand(ctx, sandboxID, CommandRequest{
+		Command: command,
+		Cwd:     workdir,
+		Env:     env,
+		Timeout: b.execTimeoutSecs(),
+	})
+	if err != nil {
+		return 1, err
+	}
+	if res.Stdout != "" {
+		_, _ = io.WriteString(b.rt.Stdout, res.Stdout)
+	}
+	if res.Stderr != "" {
+		_, _ = io.WriteString(b.rt.Stderr, res.Stderr)
+	}
+	return res.ExitCode, nil
+}
+
+func codeSandboxServerView(claim LeaseClaim, sb SandboxSummary) Server {
+	state := blank(sb.State, "ready")
+	sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
+	if strings.TrimSpace(sb.ID) != "" {
+		sandboxID = sb.ID
+	}
+	name := blank(sb.Title, sandboxID)
+	return Server{
+		Provider: providerName,
+		CloudID:  sandboxID,
+		Name:     name,
+		Status:   state,
+		Labels: map[string]string{
+			"provider": providerName,
+			"lease":    claim.LeaseID,
+			"slug":     claim.Slug,
+			"pond":     claim.Pond,
+			"target":   targetLinux,
+			"state":    state,
+		},
+	}
+}
+
+func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
+	if primary > 0 {
+		return primary
+	}
+	return fallback
 }
 
 var _ interface {

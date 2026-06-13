@@ -20,8 +20,11 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("spec kind/coordinator=%#v", spec)
 	}
-	if len(spec.Features) != 0 {
-		t.Fatalf("features=%v want none before lifecycle plan", spec.Features)
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("features=%v want archive-sync and cleanup", spec.Features)
+	}
+	if spec.Features.Has(core.FeaturePauseResume) || spec.Features.Has(core.FeatureURLBridge) {
+		t.Fatalf("features=%v includes Plan 03 capabilities", spec.Features)
 	}
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v", spec.Targets)
@@ -109,7 +112,7 @@ func TestDoctorRequiresEnvOnlyAuthBeforeBridge(t *testing.T) {
 	t.Setenv(codesandboxPrimaryAPIKeyEnv, "")
 	t.Setenv(codesandboxFallbackAPIKeyEnv, "")
 	calls := 0
-	restore := replaceClientFactory(func(Config, Runtime) (SandboxLister, error) {
+	restore := replaceClientFactory(func(Config, Runtime) (codeSandboxAPI, error) {
 		calls++
 		return &fakeSandboxLister{}, nil
 	})
@@ -132,7 +135,7 @@ func TestDoctorIsNonMutatingListReadiness(t *testing.T) {
 			TotalCount: 1,
 		},
 	}
-	restore := replaceClientFactory(func(Config, Runtime) (SandboxLister, error) {
+	restore := replaceClientFactory(func(Config, Runtime) (codeSandboxAPI, error) {
 		return fake, nil
 	})
 	defer restore()
@@ -163,7 +166,7 @@ func newTestBackend(cfg Config) *codeSandboxBackend {
 	return backend.(*codeSandboxBackend)
 }
 
-func replaceClientFactory(fn func(Config, Runtime) (SandboxLister, error)) func() {
+func replaceClientFactory(fn func(Config, Runtime) (codeSandboxAPI, error)) func() {
 	prev := newCodeSandboxClient
 	newCodeSandboxClient = fn
 	return func() { newCodeSandboxClient = prev }
@@ -181,4 +184,24 @@ func (f *fakeSandboxLister) ListSandboxes(_ context.Context, req ListSandboxesRe
 		return ListSandboxesResult{}, f.err
 	}
 	return f.result, nil
+}
+
+func (f *fakeSandboxLister) CreateSandbox(context.Context, CreateSandboxRequest) (SandboxSummary, error) {
+	return SandboxSummary{}, nil
+}
+
+func (f *fakeSandboxLister) GetSandbox(context.Context, string) (SandboxSummary, error) {
+	return SandboxSummary{}, nil
+}
+
+func (f *fakeSandboxLister) DeleteSandbox(context.Context, string) error {
+	return nil
+}
+
+func (f *fakeSandboxLister) RunCommand(context.Context, string, CommandRequest) (CommandResult, error) {
+	return CommandResult{}, nil
+}
+
+func (f *fakeSandboxLister) UploadFile(context.Context, string, string, io.Reader) error {
+	return nil
 }
