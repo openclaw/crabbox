@@ -89,6 +89,8 @@ func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Serv
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, cfg.IdleTimeout, reclaim)
 }
 
+var persistLeaseTargetForRepoConfig = claimLeaseTargetForRepoConfig
+
 func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, reclaim bool, expected LeaseClaim, expectedExists bool) (LeaseClaim, error) {
 	return core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, cfg.IdleTimeout, reclaim, expected, expectedExists)
 }
@@ -113,8 +115,8 @@ func listLeaseClaims() ([]LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }
 
-func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
-	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
 
 var waitForSSH = core.WaitForSSH

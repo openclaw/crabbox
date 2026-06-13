@@ -175,7 +175,21 @@ The default release action is `delete`:
 crabbox stop --provider nvidia-brev gpu-smoke
 ```
 
-`delete` removes the Brev workspace and then removes the local Crabbox claim.
+`delete` records the claim as deleting, clears its SSH endpoint, runs
+`brev delete`, and keeps polling until Brev inventory confirms that the
+workspace is absent. The local claim remains available for a later `stop` or
+`cleanup` retry if polling is interrupted.
+
+Crabbox stores the active Brev organization ID in each claim. Because Brev
+mutations do not accept an organization selector, lifecycle commands reject an
+active-org mismatch and retain the claim. Run `brev set` for the lease's
+original organization, then retry the command.
+
+If the active organization changes while a workspace is being created, Crabbox
+does not delete from either organization automatically. It retains a recovery
+claim with both observed organization IDs for manual reconciliation, avoiding
+deletion of an unrelated same-named workspace.
+
 If `nvidiaBrev.releaseAction` is `stop`, Crabbox runs `brev stop`, keeps the
 local claim, and records the lease as stopped for later reuse or cleanup.
 

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -475,58 +474,6 @@ func TestConditionalClaimActionUpdateRejectsChangedState(t *testing.T) {
 	}
 	if updated.Labels["state"] != "stopped" {
 		t.Fatalf("updated claim=%#v", updated)
-	}
-}
-
-func TestConditionalClaimRemoveRunsActionOnlyForUnchangedClaim(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := "cbx_conditionalremove123"
-	if err := claimLeaseTargetForRepoConfig(leaseID, "remove", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-123"}, SSHTarget{}, "/repo", time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	stale, err := readLeaseClaim(leaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
-		t.Fatal(err)
-	}
-	actionCalled := false
-	if err := removeLeaseClaimIfUnchangedAfter(leaseID, stale, func() error {
-		actionCalled = true
-		return nil
-	}); err == nil || !strings.Contains(err.Error(), "claim changed") {
-		t.Fatalf("stale conditional remove err=%v", err)
-	}
-	if actionCalled {
-		t.Fatal("conditional remove ran action for changed claim")
-	}
-	current, err := readLeaseClaim(leaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actionErr := errors.New("provider delete failed")
-	if err := removeLeaseClaimIfUnchangedAfter(leaseID, current, func() error {
-		actionCalled = true
-		return actionErr
-	}); !errors.Is(err, actionErr) {
-		t.Fatalf("action failure err=%v", err)
-	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
-		t.Fatalf("failed action removed claim exists=%v err=%v", exists, err)
-	}
-	actionCalled = false
-	if err := removeLeaseClaimIfUnchangedAfter(leaseID, current, func() error {
-		actionCalled = true
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !actionCalled {
-		t.Fatal("conditional remove did not run action")
-	}
-	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
-		t.Fatalf("successful action retained claim exists=%v err=%v", exists, err)
 	}
 }
 

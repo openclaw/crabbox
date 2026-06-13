@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type brevSSHConfigEntry struct {
@@ -154,6 +155,9 @@ func selectBrevSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 	if strings.TrimSpace(user) == "" {
 		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q is missing User", alias)
 	}
+	if !validBrevSSHUser(user) {
+		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q has invalid User %q", alias, user)
+	}
 	if strings.TrimSpace(entry.IdentityFile) == "" {
 		return SSHTarget{}, exit(2, "nvidia-brev SSH config entry %q is missing IdentityFile", alias)
 	}
@@ -186,6 +190,15 @@ func selectBrevSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		target.ProxyCommand = proxy
 	}
 	return target, nil
+}
+
+func validBrevSSHUser(user string) bool {
+	if user == "" || strings.HasPrefix(user, "-") || strings.Contains(user, "@") {
+		return false
+	}
+	return strings.IndexFunc(user, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) == -1
 }
 
 func brevSSHConfigAlias(workspaceName, target string) string {

@@ -130,6 +130,48 @@ func TestNvidiaBrevSSHConfigReportsMissingFields(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevSSHConfigRejectsInvalidUsers(t *testing.T) {
+	for _, user := range []string{"-oProxyCommand=sh", "alice@example.com", "alice bob"} {
+		data := `Host gpu
+  HostName 10.0.0.5
+  User ` + user + `
+  IdentityFile "/home/test/.brev/brev.pem"
+`
+		for _, cfg := range []Config{{NvidiaBrev: NvidiaBrevConfig{User: user}}, {}} {
+			_, err := selectBrevSSHTarget(cfg, data, "gpu")
+			if err == nil || !strings.Contains(err.Error(), "invalid User") {
+				t.Fatalf("user=%q cfg=%#v err=%v", user, cfg.NvidiaBrev, err)
+			}
+		}
+	}
+	data := `Host gpu
+  HostName 10.0.0.5
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+`
+	for _, user := range []string{"alice\nbob", "alice\tbob"} {
+		_, err := selectBrevSSHTarget(Config{NvidiaBrev: NvidiaBrevConfig{User: user}}, data, "gpu")
+		if err == nil || !strings.Contains(err.Error(), "invalid User") {
+			t.Fatalf("configured user=%q err=%v", user, err)
+		}
+	}
+}
+
+func TestNvidiaBrevSSHConfigAllowsOpenSSHUsernames(t *testing.T) {
+	user := "1" + strings.Repeat("a", 64)
+	target, err := selectBrevSSHTarget(Config{NvidiaBrev: NvidiaBrevConfig{User: user}}, `Host gpu
+  HostName 10.0.0.5
+  User brev
+  IdentityFile "/home/test/.brev/brev.pem"
+`, "gpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.User != user {
+		t.Fatalf("user=%q want %q", target.User, user)
+	}
+}
+
 func TestNvidiaBrevSSHConfigRejectsAmbiguousAlias(t *testing.T) {
 	_, err := selectBrevSSHTarget(Config{}, `Host gpu
   HostName 10.0.0.5

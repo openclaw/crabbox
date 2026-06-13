@@ -164,10 +164,6 @@ func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return removeLeaseClaimIfUnchanged(leaseID, expected)
 }
 
-func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
-	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, action)
-}
-
 func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
 	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }

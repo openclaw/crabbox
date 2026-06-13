@@ -2,7 +2,10 @@ package nvidiabrev
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -106,6 +109,122 @@ func TestNvidiaBrevClientScopesReadOnlyListByOrg(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevClientValidatesCachedActiveOrgWithCLI(t *testing.T) {
+	isolateBrevContextFiles(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".brev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".brev", "active_org.json"), []byte(`{"id":"org-cached","name":"cached"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "ls orgs --json", stdout: `[{"name":"current","id":"org-current","is_active":true}]`},
+	}}
+	client, err := newBrevClient(Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := client.activeOrg(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org.ID != "org-current" || org.Name != "current" {
+		t.Fatalf("org=%#v", org)
+	}
+}
+
+func TestNvidiaBrevClientFallsBackToActiveOrgJSON(t *testing.T) {
+	isolateBrevContextFiles(t)
+	t.Setenv("HOME", t.TempDir())
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "ls orgs --json", stdout: `[{"name":"one","id":"org-one","is_active":false},{"name":"two","id":"org-two","is_active":true}]`},
+	}}
+	client, err := newBrevClient(Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := client.activeOrg(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org.ID != "org-two" || org.Name != "two" {
+		t.Fatalf("org=%#v", org)
+	}
+}
+
+func TestNvidiaBrevClientUsesFirstOrganizationWhenNoneIsSelected(t *testing.T) {
+	isolateBrevContextFiles(t)
+	t.Setenv("HOME", t.TempDir())
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "ls orgs --json", stdout: `[{"name":"default","id":"org-default","is_active":false},{"name":"other","id":"org-other","is_active":false}]`},
+	}}
+	client, err := newBrevClient(Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := client.activeOrg(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org.ID != "org-default" || org.Name != "default" || !org.IsActive {
+		t.Fatalf("org=%#v", org)
+	}
+}
+
+func TestNvidiaBrevClientUsesAPIKeyOrganizationWithoutCache(t *testing.T) {
+	isolateBrevContextFiles(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".brev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".brev", "credentials.json"), []byte(`{"api_key":"bak-secret","api_key_org_id":"org-api"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := newBrevClient(Config{}, Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := client.activeOrg(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org.ID != "org-api" {
+		t.Fatalf("org=%#v", org)
+	}
+}
+
+func TestNvidiaBrevClientUsesAPIKeyOrganizationBeforeWorkspace(t *testing.T) {
+	isolateBrevContextFiles(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".brev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".brev", "credentials.json"), []byte(`{"api_key":"bak-secret","api_key_org_id":"org-api"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".brev", "active_org.json"), []byte(`{"id":"org-stale","name":"stale"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(brevWorkspaceMetaPath, []byte(`{"workspaceId":"ws-local","organizationId":"org-workspace"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := newBrevClient(Config{}, Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := client.activeOrg(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org.ID != "org-api" {
+		t.Fatalf("org=%#v", org)
+	}
+}
+
 func TestNvidiaBrevClientRejectsOrgScopedMutations(t *testing.T) {
 	client, err := newBrevClient(Config{NvidiaBrev: NvidiaBrevConfig{CLI: "brev", Org: "example-org"}}, Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
@@ -129,6 +248,16 @@ func TestNvidiaBrevClientRejectsOrgScopedMutations(t *testing.T) {
 	}
 }
 
+func isolateBrevContextFiles(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	oldMeta := brevWorkspaceMetaPath
+	brevWorkspaceMetaPath = filepath.Join(dir, "workspace.json")
+	t.Cleanup(func() {
+		brevWorkspaceMetaPath = oldMeta
+	})
+}
+
 func TestNvidiaBrevClientAddsStoppableForStopReleaseAction(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "create crabbox-demo-123456789abc --detached --stoppable --gpu-name A100 --mode vm"},
@@ -139,5 +268,19 @@ func TestNvidiaBrevClientAddsStoppableForStopReleaseAction(t *testing.T) {
 	}
 	if err := client.create(context.Background(), "crabbox-demo-123456789abc"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNvidiaBrevClientIncludesProviderDiagnosticsInErrors(t *testing.T) {
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "create crabbox-demo-123456789abc --detached --gpu-name A100 --mode vm", stderr: "insufficient GPU capacity in selected region", err: errors.New("exit status 1")},
+	}}
+	client, err := newBrevClient(Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.create(context.Background(), "crabbox-demo-123456789abc")
+	if err == nil || !strings.Contains(err.Error(), "insufficient GPU capacity") {
+		t.Fatalf("err=%v", err)
 	}
 }

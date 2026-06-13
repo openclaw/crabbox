@@ -535,7 +535,8 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 }
 
 func claimEndpointInactiveState(state string) bool {
-	return statusTerminalState(state) || strings.EqualFold(strings.TrimSpace(state), "paused")
+	state = strings.TrimSpace(state)
+	return statusTerminalState(state) || strings.EqualFold(state, "paused") || strings.EqualFold(state, "deleting")
 }
 
 // updateLeaseClaimTailscale records a tailnet endpoint on an existing claim.
@@ -992,10 +993,6 @@ func removeLeaseClaim(leaseID string) {
 }
 
 func removeLeaseClaimIfUnchanged(leaseID string, expected leaseClaim) error {
-	return removeLeaseClaimIfUnchangedAfter(leaseID, expected, nil)
-}
-
-func removeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, action func() error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -1007,11 +1004,6 @@ func removeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, actio
 		}
 		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
 			return err
-		}
-		if action != nil {
-			if err := action(); err != nil {
-				return err
-			}
 		}
 		if err := os.Remove(path); err != nil {
 			return exit(2, "remove claim %s: %v", path, err)

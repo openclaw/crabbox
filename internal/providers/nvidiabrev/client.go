@@ -3,7 +3,10 @@ package nvidiabrev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -24,6 +27,24 @@ type brevWorkspace struct {
 	GPU            string `json:"gpu"`
 	WorkspaceClass string `json:"workspace_class"`
 }
+
+type brevOrg struct {
+	Name     string `json:"name"`
+	ID       string `json:"id"`
+	IsActive bool   `json:"is_active"`
+}
+
+type brevCredentials struct {
+	APIKey      string `json:"api_key"`
+	APIKeyOrgID string `json:"api_key_org_id"`
+}
+
+type brevWorkspaceMeta struct {
+	WorkspaceID    string `json:"workspaceId"`
+	OrganizationID string `json:"organizationId"`
+}
+
+var brevWorkspaceMetaPath = "/etc/meta/workspace.json"
 
 func newBrevClient(cfg Config, rt Runtime) (*brevClient, error) {
 	applyNvidiaBrevDefaults(&cfg)
@@ -57,6 +78,112 @@ func (c *brevClient) list(ctx context.Context, all bool) ([]brevWorkspace, error
 		return nil, fmt.Errorf("parse brev ls JSON: %w", err)
 	}
 	return workspaces, nil
+}
+
+func (c *brevClient) activeOrg(ctx context.Context) (brevOrg, error) {
+	org, found, err := readLocalEffectiveBrevOrg()
+	if err != nil {
+		return brevOrg{}, err
+	}
+	if found {
+		return org, nil
+	}
+	result, err := c.run(ctx, "ls", "orgs", "--json")
+	if err != nil {
+		return brevOrg{}, fmt.Errorf("brev active organization lookup failed: %w", err)
+	}
+	var orgs []brevOrg
+	if err := json.Unmarshal([]byte(result.Stdout), &orgs); err != nil {
+		return brevOrg{}, fmt.Errorf("parse brev organization JSON: %w", err)
+	}
+	var active brevOrg
+	var fallback brevOrg
+	for i, candidate := range orgs {
+		candidate.ID = strings.TrimSpace(candidate.ID)
+		candidate.Name = strings.TrimSpace(candidate.Name)
+		if i == 0 {
+			fallback = candidate
+		}
+		if !candidate.IsActive {
+			continue
+		}
+		if candidate.ID == "" {
+			return brevOrg{}, exit(2, "brev active organization has no id")
+		}
+		if active.ID != "" {
+			return brevOrg{}, exit(2, "brev returned multiple active organizations")
+		}
+		active = candidate
+	}
+	if active.ID == "" {
+		if fallback.ID == "" {
+			return brevOrg{}, exit(2, "brev returned no accessible organization")
+		}
+		fallback.IsActive = true
+		return fallback, nil
+	}
+	return active, nil
+}
+
+func readLocalEffectiveBrevOrg() (brevOrg, bool, error) {
+	credentials, foundCredentials, err := readBrevCredentials()
+	if err != nil {
+		return brevOrg{}, false, err
+	}
+	if foundCredentials && strings.HasPrefix(strings.TrimSpace(credentials.APIKey), "bak-") {
+		orgID := strings.TrimSpace(credentials.APIKeyOrgID)
+		if orgID == "" {
+			return brevOrg{}, false, exit(2, "Brev API-key credentials have no organization id")
+		}
+		return brevOrg{ID: orgID, Name: orgID, IsActive: true}, true, nil
+	}
+	workspaceOrg, inWorkspace, err := readBrevWorkspaceOrg()
+	if err != nil {
+		return brevOrg{}, false, err
+	}
+	if inWorkspace {
+		return workspaceOrg, true, nil
+	}
+	return brevOrg{}, false, nil
+}
+
+func readBrevWorkspaceOrg() (brevOrg, bool, error) {
+	data, err := os.ReadFile(brevWorkspaceMetaPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return brevOrg{}, false, nil
+	}
+	if err != nil {
+		return brevOrg{}, false, nil
+	}
+	var meta brevWorkspaceMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return brevOrg{}, false, nil
+	}
+	meta.WorkspaceID = strings.TrimSpace(meta.WorkspaceID)
+	meta.OrganizationID = strings.TrimSpace(meta.OrganizationID)
+	if meta.WorkspaceID == "" || meta.OrganizationID == "" {
+		return brevOrg{}, false, nil
+	}
+	return brevOrg{ID: meta.OrganizationID, Name: meta.OrganizationID, IsActive: true}, true, nil
+}
+
+func readBrevCredentials() (brevCredentials, bool, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return brevCredentials{}, false, fmt.Errorf("resolve home directory for Brev credentials: %w", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".brev", "credentials.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return brevCredentials{}, false, nil
+	}
+	if err != nil {
+		return brevCredentials{}, false, nil
+	}
+	var credentials brevCredentials
+	if err := json.Unmarshal(data, &credentials); err != nil {
+		return brevCredentials{}, false, nil
+	}
+	return credentials, true, nil
 }
 
 func (c *brevClient) create(ctx context.Context, name string) error {
@@ -137,10 +264,24 @@ func (c *brevClient) rejectOrgScopedMutation(operation string) error {
 }
 
 func (c *brevClient) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
-	return c.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
 		Name: strings.TrimSpace(c.cfg.NvidiaBrev.CLI),
 		Args: append([]string(nil), args...),
 	})
+	if err == nil {
+		return result, nil
+	}
+	detail := strings.TrimSpace(result.Stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(result.Stdout)
+	}
+	if len(detail) > 4096 {
+		detail = detail[:4096] + "..."
+	}
+	if detail != "" {
+		return result, fmt.Errorf("%w: %s", err, detail)
+	}
+	return result, err
 }
 
 type brevWorkspaceListJSON struct {
