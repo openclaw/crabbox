@@ -332,7 +332,11 @@ func applyNvidiaBrevDefaults(cfg *Config) {
 		cfg.NvidiaBrev.Target = "container"
 	}
 	if cfg.NvidiaBrev.WorkRoot == "" {
-		cfg.NvidiaBrev.WorkRoot = "/tmp/crabbox"
+		if !isDefaultWorkRoot(cfg.WorkRoot) {
+			cfg.NvidiaBrev.WorkRoot = cfg.WorkRoot
+		} else {
+			cfg.NvidiaBrev.WorkRoot = "/tmp/crabbox"
+		}
 	}
 	if cfg.NvidiaBrev.User != "" {
 		cfg.SSHUser = cfg.NvidiaBrev.User

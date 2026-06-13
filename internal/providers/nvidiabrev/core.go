@@ -91,3 +91,7 @@ func isNvidiaBrevProviderName(provider string) bool {
 		return false
 	}
 }
+
+func isDefaultWorkRoot(value string) bool {
+	return core.IsDefaultWorkRoot(value)
+}

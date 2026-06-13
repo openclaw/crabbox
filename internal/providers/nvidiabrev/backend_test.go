@@ -46,6 +46,14 @@ func TestNvidiaBrevProviderDefaults(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := Config{WorkRoot: "/srv/crabbox"}
+	applyNvidiaBrevDefaults(&cfg)
+	if cfg.WorkRoot != "/srv/crabbox" || cfg.NvidiaBrev.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("workRoot=%q nvidiaBrev.workRoot=%q", cfg.WorkRoot, cfg.NvidiaBrev.WorkRoot)
+	}
+}
+
 func TestNvidiaBrevSecretFlagsAreNotRegistered(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	RegisterNvidiaBrevProviderFlags(fs, Config{})
