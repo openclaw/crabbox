@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Fixed trusted reverse-proxy identity deployments to support a secret-bound assertion when direct coordinator access cannot be network-isolated.
 - Fixed the portal and connected WebVNC desktops to default to the current system appearance by migrating away from legacy two-state browser theme preferences.
 - Fixed Cloudflare container runs to fail when streamed stdout or stderr cannot be written instead of silently reporting success after output loss.
 - Fixed Proxmox bridge readiness on PVE 8 by falling back to its compatible local-bridge and SDN-vnet inventory filter.

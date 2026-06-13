@@ -1,4 +1,9 @@
-import { authenticateRequest, requestWithAuthContext, type AuthRequestContext } from "./auth";
+import {
+  authenticateRequest,
+  requestWithAuthContext,
+  requestWithoutProxySecret,
+  type AuthRequestContext,
+} from "./auth";
 import { json } from "./http";
 import type { Env } from "./types";
 
@@ -40,10 +45,10 @@ export async function prepareCoordinatorRequest(
     return { response: canonicalPortal, authenticated: false };
   }
   if (url.pathname.startsWith("/v1/auth/")) {
-    return { request, authenticated: false };
+    return { request: requestWithoutProxySecret(request), authenticated: false };
   }
   if (url.pathname === "/portal/login" || url.pathname === "/portal/logout") {
-    return { request, authenticated: false };
+    return { request: requestWithoutProxySecret(request), authenticated: false };
   }
   if (url.pathname.startsWith("/v1/internal/")) {
     return {
@@ -56,7 +61,7 @@ export async function prepareCoordinatorRequest(
     isCodeAgentUpgrade(request, url) ||
     isEgressAgentUpgrade(request, url)
   ) {
-    return { request, authenticated: false };
+    return { request: requestWithoutProxySecret(request), authenticated: false };
   }
   const portal = url.pathname.startsWith("/portal");
   const authRequest = portal ? requestWithPortalCookie(request) : request;

@@ -174,16 +174,22 @@ second Crabbox login by forwarding the verified user in a header:
 CRABBOX_TRUSTED_USER_HEADER=X-Authenticated-User
 CRABBOX_TRUSTED_USER_ORG=example-org
 CRABBOX_TRUSTED_PROXY_CIDRS=10.42.7.19/32,fd00:1234::19/128
+CRABBOX_TRUSTED_PROXY_SECRET=replace-with-a-random-secret
 ```
 
 The Node runtime accepts the identity only when the connection peer is within
-`CRABBOX_TRUSTED_PROXY_CIDRS`. Enable this only when the ingress removes
-caller-supplied copies of the configured identity header. Use only the ingress
-proxy's exact addresses or dedicated subnets, and enforce network policy that
-prevents callers from reaching the coordinator directly. The forwarded
+`CRABBOX_TRUSTED_PROXY_CIDRS`. When `CRABBOX_TRUSTED_PROXY_SECRET` is set, the
+ingress must also send the same value in `X-Crabbox-Proxy-Secret`; the coordinator
+strips that header before routing the request. Enable this only when the ingress
+removes caller-supplied identity and secret headers. Use exact proxy addresses or
+dedicated subnets, or require the secret when direct coordinator access cannot be
+blocked. The forwarded
 identity receives non-admin scope; keep `CRABBOX_ADMIN_TOKEN` separate. The
 Cloudflare Worker runtime does not expose a trusted socket peer, so use its
 verified Access JWT support instead.
+
+`X-Crabbox-Proxy-Secret` is reserved and cannot be used as
+`CRABBOX_TRUSTED_USER_HEADER`.
 
 The same peer allowlist controls whether the Node runtime honors forwarded host,
 protocol, and client-IP headers. It walks the forwarded-for chain from the socket
