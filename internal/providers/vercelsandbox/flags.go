@@ -43,7 +43,7 @@ func RegisterVercelSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		SnapshotMode:    fs.String("vercel-sandbox-snapshot-mode", defaults.VercelSandbox.SnapshotMode, "snapshot/checkpoint mode for future lifecycle use"),
 		NetworkPolicy:   fs.String("vercel-sandbox-network-policy", defaults.VercelSandbox.NetworkPolicy, "sandbox network policy: default, public, private, restricted, or none"),
 		NetworkAllow:    fs.String("vercel-sandbox-network-allow", strings.Join(defaults.VercelSandbox.NetworkAllow, ","), "comma-separated outbound CIDR/domain allow list"),
-		NetworkDeny:     fs.String("vercel-sandbox-network-deny", strings.Join(defaults.VercelSandbox.NetworkDeny, ","), "comma-separated outbound CIDR/domain deny list"),
+		NetworkDeny:     fs.String("vercel-sandbox-network-deny", strings.Join(defaults.VercelSandbox.NetworkDeny, ","), "comma-separated outbound IP/CIDR deny list"),
 		Ports:           fs.String("vercel-sandbox-ports", strings.Join(defaults.VercelSandbox.Ports, ","), "comma-separated ports or ranges to expose later"),
 		ForgetMissing:   fs.Bool("vercel-sandbox-forget-missing", defaults.VercelSandbox.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
 	}
@@ -152,6 +152,15 @@ func validateVercelSandboxConfig(cfg Config) error {
 	for _, entry := range append([]string{}, cfg.VercelSandbox.NetworkDeny...) {
 		if err := validateNetworkEntry(entry); err != nil {
 			return exit(2, "vercel-sandbox networkDeny entry %q is invalid: %v", entry, err)
+		}
+		value := strings.TrimSpace(entry)
+		if value == "" {
+			continue
+		}
+		if net.ParseIP(value) == nil {
+			if _, _, err := net.ParseCIDR(value); err != nil {
+				return exit(2, "vercel-sandbox networkDeny entry %q must be an IP address or CIDR; Vercel does not support domain deny rules", entry)
+			}
 		}
 	}
 	for _, port := range cfg.VercelSandbox.Ports {

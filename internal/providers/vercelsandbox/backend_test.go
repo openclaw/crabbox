@@ -28,6 +28,7 @@ type lifecycleFakeClient struct {
 	stdout    string
 	stderr    string
 	useNameID bool
+	creates   []createSandboxRequest
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
@@ -49,6 +50,7 @@ func (f *lifecycleFakeClient) ListSandboxes(context.Context) ([]sandboxSummary, 
 
 func (f *lifecycleFakeClient) CreateSandbox(_ context.Context, req createSandboxRequest) (sandboxSummary, error) {
 	f.calls = append(f.calls, "create")
+	f.creates = append(f.creates, req)
 	f.nextID++
 	id := "sbx_" + string(rune('a'+f.nextID-1))
 	if f.useNameID && strings.TrimSpace(req.Name) != "" {
@@ -399,6 +401,9 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	}
 	if len(fake.sandboxes) != 1 {
 		t.Fatalf("sandbox should be retained on failure: %#v", fake.sandboxes)
+	}
+	if len(fake.creates) != 1 || !fake.creates[0].Persistent {
+		t.Fatalf("keep-on-failure sandbox is not persistent: %#v", fake.creates)
 	}
 	var leaseID string
 	for id := range fake.sandboxes {

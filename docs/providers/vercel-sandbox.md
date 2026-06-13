@@ -183,13 +183,18 @@ expose newer runtimes, but Crabbox validates this v1 surface explicitly. `workdi
 absolute dedicated directory and cannot be `/`, `/tmp`, `/usr`, `/var`,
 `/home`, `/vercel`, or `/vercel/sandbox`. `networkPolicy` must be `default`,
 `public`, `private`, `restricted`, or `none`; allow and deny entries must be
-domains, IP addresses, or CIDRs. `ports` accepts ports or `start-end` ranges.
+valid network entries. Allows accept domains, IP addresses, or CIDRs. Denies
+accept only IP addresses or CIDRs because the Vercel SDK does not support
+domain deny rules. Raw IPs are normalized to host CIDRs. `ports` accepts ports
+or `start-end` ranges.
 
 ## Lifecycle
 
 1. `warmup` or `run` without `--id` creates a Vercel Sandbox with the configured
    runtime, project/team/scope, vCPU count, lifetime cap, persistence flag,
-   snapshot, network policy, ports, and Crabbox ownership metadata.
+   snapshot, network policy, ports, and Crabbox ownership metadata. Snapshot
+   creation uses the official `{type: "snapshot", snapshotId: ...}` source
+   contract.
 2. The local lease is stored as `vsbx_<sandbox-name>` with a friendly slug and a
    repo claim. The claim scope includes configured project, team, and scope plus
    a random ownership marker. Crabbox verifies that scope before reusing,

@@ -38,6 +38,7 @@ func RunBridgeCLI(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer
 func vercelSandboxBridgeScript() string {
 	return `
 import fs from 'node:fs';
+import { isIP } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { Writable } from 'node:stream';
@@ -55,17 +56,23 @@ try {
 const { Sandbox } = mod;
 
 let authMod;
-function linkedProjectCwd(start) {
+function linkedProject(start) {
   let current = path.resolve(start);
   while (true) {
-    if (fs.existsSync(path.join(current, '.vercel', 'project.json'))) return current;
+    try {
+      const value = JSON.parse(fs.readFileSync(path.join(current, '.vercel', 'project.json'), 'utf8'));
+      if (typeof value.projectId === 'string' && value.projectId.trim() !== '' &&
+          typeof value.orgId === 'string' && value.orgId.trim() !== '') {
+        return { cwd: current, projectId: value.projectId, teamId: value.orgId };
+      }
+    } catch {}
     const parent = path.dirname(current);
-    if (parent === current) return start;
+    if (parent === current) return null;
     current = parent;
   }
 }
 
-async function resolvedCredentials() {
+async function resolvedCredentials(readOnly = false) {
   const cfg = req.config || {};
   if (process.env.VERCEL_OIDC_TOKEN) {
     if (cfg.projectId || cfg.teamId || cfg.scope) {
@@ -95,12 +102,20 @@ async function resolvedCredentials() {
 
   let projectId = cfg.projectId || '';
   let teamId = cfg.teamId || (projectId ? cfg.scope || '' : '');
+  const linked = linkedProject(process.cwd());
+  if (!projectId && !teamId && !cfg.scope && linked) {
+    projectId = linked.projectId;
+    teamId = linked.teamId;
+  }
   if (projectId && !teamId && !cfg.scope) {
     throw new Error('Vercel Sandbox projectId requires teamId or scope');
   }
+  if (readOnly && (!projectId || !teamId)) {
+    throw new Error('Vercel Sandbox project scope cannot be validated read-only; set projectId with teamId/scope, use OIDC, or link the checkout');
+  }
   if (!projectId || !teamId) {
     authMod ||= await import('@vercel/sandbox/dist/auth/index.js');
-    let inferCwd = linkedProjectCwd(process.cwd());
+    let inferCwd = process.cwd();
     let isolatedCwd = '';
     if (cfg.projectId || cfg.teamId || cfg.scope) {
       isolatedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'crabbox-vercel-scope-'));
@@ -122,8 +137,8 @@ async function resolvedCredentials() {
   return { token, projectId, teamId };
 }
 
-async function sandboxOptions(extra = {}) {
-  return { ...extra, ...(await resolvedCredentials()) };
+async function sandboxOptions(extra = {}, readOnly = false) {
+  return { ...extra, ...(await resolvedCredentials(readOnly)) };
 }
 
 function summary(sandbox, metadata) {
@@ -140,20 +155,30 @@ function isCIDR(value) {
   return typeof value === 'string' && /^([0-9a-fA-F:.]+)\/[0-9]+$/.test(value);
 }
 
+function subnetCIDR(value) {
+  if (isCIDR(value)) return value;
+  const version = isIP(value);
+  if (version === 4) return value + '/32';
+  if (version === 6) return value + '/128';
+  return '';
+}
+
 function networkPolicy(create, cfg) {
   const mode = String(create.networkPolicy || cfg.networkPolicy || '').trim().toLowerCase();
-  const allow = [...(create.networkAllow || []), ...(cfg.networkAllow || [])].filter(Boolean);
-  const deny = [...(create.networkDeny || []), ...(cfg.networkDeny || [])].filter(Boolean);
+  const allow = [...(create.networkAllow || []), ...(cfg.networkAllow || [])].map((entry) => String(entry).trim()).filter(Boolean);
+  const deny = [...(create.networkDeny || []), ...(cfg.networkDeny || [])].map((entry) => String(entry).trim()).filter(Boolean);
   if ((mode === '' || mode === 'default' || mode === 'none') && allow.length === 0 && deny.length === 0) return undefined;
-  if (mode === 'public') return 'allow-all';
-  const allowDomains = allow.filter((entry) => !isCIDR(entry));
-  const allowCIDRs = allow.filter(isCIDR);
-  const denyCIDRs = deny.filter(isCIDR);
-  const denyDomains = deny.filter((entry) => !isCIDR(entry));
-  if ((mode === 'private' || mode === 'restricted') && allowDomains.length === 0 && allowCIDRs.length === 0 && denyCIDRs.length === 0 && denyDomains.length === 0) return 'deny-all';
+  const allowDomains = allow.filter((entry) => !subnetCIDR(entry));
+  const allowCIDRs = allow.map(subnetCIDR).filter(Boolean);
+  const denyCIDRs = deny.map(subnetCIDR).filter(Boolean);
+  if (mode === 'public' && denyCIDRs.length === 0) return 'allow-all';
+  if ((mode === 'private' || mode === 'restricted') && allowDomains.length === 0 && allowCIDRs.length === 0) return 'deny-all';
   const policy = {};
-  if (allowDomains.length > 0) policy.allow = allowDomains;
-  if (denyDomains.length > 0) policy.deny = denyDomains;
+  if (mode === 'public' || ((mode === '' || mode === 'default' || mode === 'none') && allowDomains.length === 0 && allowCIDRs.length === 0 && denyCIDRs.length > 0)) {
+    policy.allow = ['*'];
+  } else if (allowDomains.length > 0) {
+    policy.allow = allowDomains;
+  }
   if (allowCIDRs.length > 0 || denyCIDRs.length > 0) {
     policy.subnets = {};
     if (allowCIDRs.length > 0) policy.subnets.allow = allowCIDRs;
@@ -217,12 +242,17 @@ switch (req.action) {
   case 'check':
     process.stdout.write('{}\n');
     break;
+  case 'check-project':
+    await Sandbox.list(await sandboxOptions({ sortBy: 'name' }, true));
+    process.stdout.write('{}\n');
+    break;
   case 'create': {
     const create = req.create || {};
     const cfg = req.config || {};
+    const snapshotId = create.snapshot || cfg.snapshot || '';
     const opts = await sandboxOptions({
       name: create.name,
-      runtime: create.runtime || cfg.runtime || 'node24',
+      ...(!snapshotId && { runtime: create.runtime || cfg.runtime || 'node24' }),
       persistent: !!create.persistent,
       tags: create.metadata || {},
     });
@@ -230,7 +260,7 @@ switch (req.action) {
     if (timeoutSeconds > 0) opts.timeout = timeoutSeconds * 1000;
     const vcpus = create.vcpus || cfg.vcpus || 0;
     if (vcpus > 0) opts.resources = { vcpus };
-    if (create.snapshot || cfg.snapshot) opts.source = { snapshotId: create.snapshot || cfg.snapshot };
+    if (snapshotId) opts.source = { type: 'snapshot', snapshotId };
     const policy = networkPolicy(create, cfg);
     if (policy !== undefined) opts.networkPolicy = policy;
     const ports = expandPortSpecs(create.ports || cfg.ports || []);

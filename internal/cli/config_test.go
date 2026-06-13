@@ -2280,7 +2280,7 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 		"  snapshotMode: restore",
 		"  networkPolicy: restricted",
 		"  networkAllow: [api.example.com, 10.0.0.0/8]",
-		"  networkDeny: [metadata.google.internal]",
+		"  networkDeny: [169.254.169.254/32]",
 		"  ports: [3000, 8080-8090]",
 		"  forgetMissing: true",
 	}, "\n")
@@ -2296,7 +2296,7 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 	if cfg.VercelSandbox.VCPUs != 2 || cfg.VercelSandbox.TimeoutSecs != 120 || cfg.VercelSandbox.ExecTimeoutSecs != 60 || !cfg.VercelSandbox.Persistent || cfg.VercelSandbox.Snapshot != "snap_123" || cfg.VercelSandbox.SnapshotMode != "restore" || cfg.VercelSandbox.NetworkPolicy != "restricted" || !cfg.VercelSandbox.ForgetMissing {
 		t.Fatalf("vercel-sandbox YAML config not applied: %#v", cfg.VercelSandbox)
 	}
-	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"api.example.com", "10.0.0.0/8"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"metadata.google.internal"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"3000", "8080-8090"}) {
+	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"api.example.com", "10.0.0.0/8"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"169.254.169.254/32"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"3000", "8080-8090"}) {
 		t.Fatalf("vercel-sandbox YAML lists not applied: %#v", cfg.VercelSandbox)
 	}
 
@@ -2313,7 +2313,7 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 	t.Setenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE", "checkpoint")
 	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY", "public")
 	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW", "example.com,192.168.0.0/16")
-	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_DENY", "bad.example")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_DENY", "10.0.0.5")
 	t.Setenv("CRABBOX_VERCEL_SANDBOX_PORTS", "443,9000-9001")
 	t.Setenv("CRABBOX_VERCEL_SANDBOX_FORGET_MISSING", "false")
 	if err := applyEnv(&cfg); err != nil {
@@ -2325,7 +2325,7 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 	if cfg.VercelSandbox.VCPUs != 4 || cfg.VercelSandbox.TimeoutSecs != 240 || cfg.VercelSandbox.ExecTimeoutSecs != 90 || cfg.VercelSandbox.Persistent || cfg.VercelSandbox.Snapshot != "snap_env" || cfg.VercelSandbox.SnapshotMode != "checkpoint" || cfg.VercelSandbox.NetworkPolicy != "public" || cfg.VercelSandbox.ForgetMissing {
 		t.Fatalf("vercel-sandbox env config not applied: %#v", cfg.VercelSandbox)
 	}
-	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"example.com", "192.168.0.0/16"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"bad.example"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"443", "9000-9001"}) {
+	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"example.com", "192.168.0.0/16"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"10.0.0.5"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"443", "9000-9001"}) {
 		t.Fatalf("vercel-sandbox env lists not applied: %#v", cfg.VercelSandbox)
 	}
 }

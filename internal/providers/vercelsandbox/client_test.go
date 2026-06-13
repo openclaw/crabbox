@@ -188,22 +188,23 @@ func TestRedactSecretsRemovesTokenValues(t *testing.T) {
 	}
 }
 
-func TestCheckProjectAcceptsProjectScopeOrTeam(t *testing.T) {
-	projectCfg := Config{}
-	projectCfg.VercelSandbox.ProjectID = "prj_123"
-	teamCfg := Config{}
-	teamCfg.VercelSandbox.TeamID = "team_123"
-	scopeCfg := Config{}
-	scopeCfg.VercelSandbox.Scope = "example-org"
-	for _, cfg := range []Config{projectCfg, teamCfg, scopeCfg} {
-		client := &bridgeClient{cfg: cfg}
-		if err := client.CheckProject(context.Background()); err != nil {
-			t.Fatalf("CheckProject(%#v): %v", cfg.VercelSandbox, err)
-		}
+func TestCheckProjectUsesReadOnlyBridgeScopeValidation(t *testing.T) {
+	cfg := Config{}
+	cfg.VercelSandbox.ProjectID = "prj_123"
+	cfg.VercelSandbox.TeamID = "team_123"
+	var got bridgeRequest
+	client := &bridgeClient{
+		cfg: cfg,
+		call: func(_ context.Context, req bridgeRequest, _ any) error {
+			got = req
+			return nil
+		},
 	}
-	client := &bridgeClient{}
-	if err := client.CheckProject(context.Background()); err == nil {
-		t.Fatal("CheckProject without project/team/scope succeeded")
+	if err := client.CheckProject(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got.Action != "check-project" || got.Config.ProjectID != "prj_123" || got.Config.TeamID != "team_123" {
+		t.Fatalf("request=%#v", got)
 	}
 }
 

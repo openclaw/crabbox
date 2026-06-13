@@ -82,11 +82,8 @@ func (c *bridgeClient) CheckAuth(ctx context.Context) error {
 	return nil
 }
 
-func (c *bridgeClient) CheckProject(context.Context) error {
-	if strings.TrimSpace(c.cfg.VercelSandbox.ProjectID) == "" && strings.TrimSpace(c.cfg.VercelSandbox.Scope) == "" && strings.TrimSpace(c.cfg.VercelSandbox.TeamID) == "" {
-		return errors.New("set projectId, teamId, or scope for project-scoped readiness")
-	}
-	return nil
+func (c *bridgeClient) CheckProject(ctx context.Context) error {
+	return c.bridgeCall(ctx, bridgeRequest{Action: "check-project"}, nil)
 }
 
 func (c *bridgeClient) ListSandboxes(context.Context) ([]sandboxSummary, error) {

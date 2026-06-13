@@ -46,7 +46,7 @@ func TestVercelSandboxFlagsApplyAndValidate(t *testing.T) {
 		"--vercel-sandbox-snapshot-mode", "restore",
 		"--vercel-sandbox-network-policy", "restricted",
 		"--vercel-sandbox-network-allow", "api.example.com,10.0.0.0/8",
-		"--vercel-sandbox-network-deny", "metadata.google.internal",
+		"--vercel-sandbox-network-deny", "169.254.169.254/32",
 		"--vercel-sandbox-ports", "3000,8080-8090",
 		"--vercel-sandbox-forget-missing",
 	}
@@ -103,6 +103,7 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 		{"vcpus", func(c *Config) { c.VercelSandbox.VCPUs = -1 }, "vcpus"},
 		{"network-policy", func(c *Config) { c.VercelSandbox.NetworkPolicy = "mystery" }, "networkPolicy"},
 		{"network-entry", func(c *Config) { c.VercelSandbox.NetworkAllow = []string{"bad_host!"} }, "networkAllow"},
+		{"network-domain-deny", func(c *Config) { c.VercelSandbox.NetworkDeny = []string{"blocked.example.com"} }, "does not support domain deny"},
 		{"port", func(c *Config) { c.VercelSandbox.Ports = []string{"70000"} }, "port"},
 	}
 	for _, tc := range tests {

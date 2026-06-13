@@ -19,7 +19,39 @@ func TestBridgeScriptUsesServiceExecTimeout(t *testing.T) {
 
 func TestBridgeScriptPassesNetworkAndFailsClosedOnMetadataUpdate(t *testing.T) {
 	script := vercelSandboxBridgeScript()
-	for _, want := range []string{"opts.networkPolicy = policy", "expandPortSpecs", "opts.ports = ports", "cannot update sandbox metadata after creation", "process.exit(2)"} {
+	for _, want := range []string{
+		"opts.networkPolicy = policy",
+		"policy.allow = ['*']",
+		"policy.subnets.deny = denyCIDRs",
+		"String(entry).trim()",
+		"value + '/32'",
+		"value + '/128'",
+		"expandPortSpecs",
+		"opts.ports = ports",
+		"cannot update sandbox metadata after creation",
+		"process.exit(2)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bridge script missing %q", want)
+		}
+	}
+	if strings.Contains(script, "policy.deny") {
+		t.Fatal("bridge script emits unsupported domain deny policy")
+	}
+}
+
+func TestBridgeScriptUsesOfficialSnapshotSourceShape(t *testing.T) {
+	script := vercelSandboxBridgeScript()
+	for _, want := range []string{"...(!snapshotId && { runtime:", "opts.source = { type: 'snapshot', snapshotId }"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bridge script missing %q", want)
+		}
+	}
+}
+
+func TestBridgeScriptChecksProjectScopeReadOnly(t *testing.T) {
+	script := vercelSandboxBridgeScript()
+	for _, want := range []string{"case 'check-project':", "sandboxOptions({ sortBy: 'name' }, true)"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("bridge script missing %q", want)
 		}
@@ -41,9 +73,11 @@ func TestBridgeScriptUsesOfficialAuthAndResumesMutationPaths(t *testing.T) {
 		"@vercel/sandbox/dist/auth/index.js",
 		"let auth = authMod.getAuth()",
 		"authMod.inferScope",
-		"linkedProjectCwd(process.cwd())",
-		"path.join(current, '.vercel', 'project.json')",
+		"linkedProject(process.cwd())",
+		"JSON.parse(fs.readFileSync(path.join(current, '.vercel', 'project.json'), 'utf8'))",
+		"projectId: value.projectId, teamId: value.orgId",
 		"fs.mkdtempSync(path.join(os.tmpdir(), 'crabbox-vercel-scope-'))",
+		"project scope cannot be validated read-only",
 		"Vercel OIDC tokens are scoped by their claims",
 		"cfg.teamId || (projectId ? cfg.scope || '' : '')",
 		"projectId requires teamId or scope",

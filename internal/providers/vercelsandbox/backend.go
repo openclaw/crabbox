@@ -83,7 +83,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 	}()
 	if req.ID == "" {
-		leaseID, sandboxID, slug, unlockOperation, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug, req.Keep)
+		leaseID, sandboxID, slug, unlockOperation, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug, req.Keep || req.KeepOnFailure)
 		if err != nil {
 			return RunResult{}, err
 		}
