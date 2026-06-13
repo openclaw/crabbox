@@ -3,6 +3,7 @@ package vercelsandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -43,6 +44,36 @@ func TestBridgeListCommandKeepsSecretsOffArgv(t *testing.T) {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env missing %q in %q", want, env)
 		}
+	}
+}
+
+func TestBridgeExecSendsEnvInStructuredRequest(t *testing.T) {
+	var seen bridgeRequest
+	client := &bridgeClient{
+		call: func(_ context.Context, req bridgeRequest, out any) error {
+			seen = req
+			if result, ok := out.(*execResult); ok {
+				*result = execResult{}
+			}
+			return nil
+		},
+	}
+	_, err := client.Exec(context.Background(), "sbx_1", execRequest{
+		Command:    "printenv PUBLIC_VALUE",
+		WorkingDir: "/work",
+		Env:        map[string]string{"PUBLIC_VALUE": "visible"},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen.Action != "exec" || seen.Exec == nil {
+		t.Fatalf("request=%#v", seen)
+	}
+	if seen.Exec.Env["PUBLIC_VALUE"] != "visible" {
+		t.Fatalf("env not carried in structured request: %#v", seen.Exec.Env)
+	}
+	if strings.Contains(strings.Join(client.bridgeCommandSpec().Args, " "), "PUBLIC_VALUE=visible") {
+		t.Fatalf("env leaked through bridge argv")
 	}
 }
 
