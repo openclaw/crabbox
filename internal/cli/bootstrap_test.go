@@ -374,7 +374,7 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 	for _, want := range []string{
 		"https://tailscale.com/install.sh",
 		"install -d -m 0750 -o 'runner' -g 'runner' /var/lib/crabbox",
-		"tailscale up --auth-key=\"$TS_AUTHKEY\" --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
+		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-blue-lobster' --advertise-tags='tag:crabbox' --exit-node='mac-studio.tailnet.ts.net' --exit-node-allow-lan-access",
 		"printf '%s\\n' 'crabbox-blue-lobster' > /var/lib/crabbox/tailscale-hostname",
 		"printf '%s\\n' 'mac-studio.tailnet.ts.net' > /var/lib/crabbox/tailscale-exit-node",
 		"printf '%s\\n' 'true' > /var/lib/crabbox/tailscale-exit-node-allow-lan-access",
@@ -385,6 +385,9 @@ func TestCloudInitTailscaleProfile(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(tailscale) missing %q", want)
 		}
+	}
+	if strings.Contains(got, `--auth-key="$TS_AUTHKEY"`) {
+		t.Fatal("cloudInit(tailscale) must not expose the auth key through process argv")
 	}
 	if strings.Contains(cloudInit(baseConfig(), "ssh-ed25519 test"), "tailscale up") {
 		t.Fatal("cloudInit should not install Tailscale by default")
@@ -430,7 +433,7 @@ func TestCloudInitTailscaleDefaultsAndMissingAuthKey(t *testing.T) {
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"install -d -m 0750 -o 'crabbox' -g 'crabbox' /var/lib/crabbox",
-		"tailscale up --auth-key=\"$TS_AUTHKEY\" --hostname='crabbox-lease'",
+		"printf '%s' \"$TS_AUTHKEY\" | tailscale up --auth-key=file:/dev/stdin --hostname='crabbox-lease'",
 		"printf '%s\\n' 'crabbox-lease' > /var/lib/crabbox/tailscale-hostname",
 	} {
 		if !strings.Contains(got, want) {

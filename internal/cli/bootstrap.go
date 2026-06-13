@@ -1482,7 +1482,7 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 	sshUserChown := shellQuote(sshUser + ":" + sshUser)
 	tags := strings.Join(cfg.Tailscale.Tags, ",")
 	tailscaleUpArgs := []string{
-		"--auth-key=\"$TS_AUTHKEY\"",
+		"--auth-key=file:/dev/stdin",
 		"--hostname=" + shellQuote(hostname),
 		"--advertise-tags=" + shellQuote(tags),
 	}
@@ -1512,7 +1512,7 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
     install -d -m 0750 -o ` + sshUserOwner + ` -g ` + sshUserGroup + ` /var/lib/crabbox
     set +x
     ` + loginServerExport + `TS_AUTHKEY=` + shellQuote(authKey) + `
-    tailscale up ` + strings.Join(tailscaleUpArgs, " ") + " " + loginServerFlag + `
+    printf '%s' "$TS_AUTHKEY" | tailscale up ` + strings.Join(tailscaleUpArgs, " ") + " " + loginServerFlag + `
     unset TS_AUTHKEY
     set -x
     ts_ip=""

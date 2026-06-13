@@ -1423,7 +1423,7 @@ function tailscaleBootstrap(config: LeaseConfig): string {
   }
   const sshUser = config.sshUser.trim() || "crabbox";
   const upArgs = [
-    `--auth-key="$TS_AUTHKEY"`,
+    "--auth-key=file:/dev/stdin",
     `--hostname=${shellQuote(config.tailscaleHostname)}`,
     `--advertise-tags=${shellQuote(config.tailscaleTags.join(","))}`,
   ];
@@ -1438,7 +1438,7 @@ function tailscaleBootstrap(config: LeaseConfig): string {
     install -d -m 0750 -o ${shellQuote(sshUser)} -g ${shellQuote(sshUser)} /var/lib/crabbox
     set +x
     TS_AUTHKEY=${shellQuote(config.tailscaleAuthKey)}
-    tailscale up ${upArgs.join(" ")}
+    printf '%s' "$TS_AUTHKEY" | tailscale up ${upArgs.join(" ")}
     unset TS_AUTHKEY
     set -x
     ts_ip=""

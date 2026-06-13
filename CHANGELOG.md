@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Fixed managed Linux Tailscale bootstrap to deliver auth keys through stdin instead of exposing them in `tailscale up` process arguments.
 - Fixed trusted reverse-proxy identity deployments to support a secret-bound assertion when direct coordinator access cannot be network-isolated.
 - Fixed the portal and connected WebVNC desktops to default to the current system appearance by migrating away from legacy two-state browser theme preferences.
 - Fixed Cloudflare container runs to fail when streamed stdout or stderr cannot be written instead of silently reporting success after output loss.
