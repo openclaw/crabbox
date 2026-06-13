@@ -108,6 +108,25 @@ func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	}
 }
 
+func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
+	for _, name := range []string{"namespace-instance", "namespace-compute"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "namespace-instance" {
+			t.Fatalf("ProviderFor(%q).Name=%q want namespace-instance", name, provider.Name())
+		}
+	}
+	provider, err := core.ProviderFor("namespace")
+	if err != nil {
+		t.Fatalf("ProviderFor(namespace): %v", err)
+	}
+	if provider.Name() != "namespace-devbox" {
+		t.Fatalf("namespace alias now resolves to %q; namespace-instance must not steal it", provider.Name())
+	}
+}
+
 func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
 	for _, name := range []string{"apple-vz", "applevz"} {
 		provider, err := core.ProviderFor(name)
@@ -148,6 +167,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"multipass",
 		"mxc",
 		"namespace-devbox",
+		"namespace-instance",
 		"opencomputer",
 		"opensandbox",
 		"parallels",

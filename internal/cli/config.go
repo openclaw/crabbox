@@ -128,6 +128,7 @@ type Config struct {
 	deleteOnReleaseExplicit       map[string]bool
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
+	NamespaceInstance             NamespaceInstanceConfig
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
@@ -327,6 +328,17 @@ type NamespaceConfig struct {
 	AutoStopIdleTimeout time.Duration
 	WorkRoot            string
 	DeleteOnRelease     bool
+}
+
+type NamespaceInstanceConfig struct {
+	MachineType string
+	Duration    time.Duration
+	Ephemeral   bool
+	Region      string
+	Endpoint    string
+	Keychain    string
+	WorkRoot    string
+	Volumes     []string
 }
 
 type MorphConfig struct {
@@ -1226,6 +1238,45 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "namespace-instance" {
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+			if cfg.NamespaceInstance.WorkRoot == "" || cfg.NamespaceInstance.WorkRoot == baseConfig().NamespaceInstance.WorkRoot {
+				cfg.NamespaceInstance.WorkRoot = cfg.explicitWorkRoot
+			}
+		} else if cfg.NamespaceInstance.WorkRoot != "" {
+			cfg.WorkRoot = cfg.NamespaceInstance.WorkRoot
+		} else {
+			cfg.NamespaceInstance.WorkRoot = "/work/crabbox"
+			cfg.WorkRoot = cfg.NamespaceInstance.WorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else if cfg.SSHUser == "" {
+			cfg.SSHUser = baseConfig().SSHUser
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = "22"
+		}
+		if cfg.NamespaceInstance.Duration == 0 && cfg.TTL > 0 {
+			cfg.NamespaceInstance.Duration = cfg.TTL
+		}
+		if cfg.ServerType == "" || !cfg.ServerTypeExplicit {
+			cfg.ServerType = serverTypeForConfig(*cfg)
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
@@ -1717,6 +1768,10 @@ func baseConfig() Config {
 			WorkRoot:            "/workspaces/crabbox",
 			AutoStopIdleTimeout: 30 * time.Minute,
 		},
+		NamespaceInstance: NamespaceInstanceConfig{
+			Ephemeral: true,
+			WorkRoot:  "/work/crabbox",
+		},
 		Morph: MorphConfig{
 			APIURL:         "https://cloud.morph.so",
 			SSHGatewayHost: "ssh.cloud.morph.so",
@@ -1978,6 +2033,7 @@ type fileConfig struct {
 	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
 	External             *fileExternalConfig                `yaml:"external,omitempty"`
 	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
+	NamespaceInstance    *fileNamespaceInstanceConfig       `yaml:"namespaceInstance,omitempty"`
 	Morph                *fileMorphConfig                   `yaml:"morph,omitempty"`
 	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
 	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
@@ -2297,6 +2353,45 @@ type fileNamespaceConfig struct {
 	AutoStopIdleTimeout string `yaml:"autoStopIdleTimeout,omitempty"`
 	WorkRoot            string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
+}
+
+type fileNamespaceInstanceConfig struct {
+	MachineType string   `yaml:"machineType,omitempty"`
+	Duration    string   `yaml:"duration,omitempty"`
+	Ephemeral   *bool    `yaml:"ephemeral,omitempty"`
+	Region      string   `yaml:"region,omitempty"`
+	Endpoint    string   `yaml:"endpoint,omitempty"`
+	Keychain    string   `yaml:"keychain,omitempty"`
+	WorkRoot    string   `yaml:"workRoot,omitempty"`
+	Volume      []string `yaml:"volume,omitempty"`
+}
+
+func (cfg *fileNamespaceInstanceConfig) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		MachineType string   `yaml:"machineType,omitempty"`
+		Duration    string   `yaml:"duration,omitempty"`
+		Ephemeral   *bool    `yaml:"ephemeral,omitempty"`
+		Region      string   `yaml:"region,omitempty"`
+		Endpoint    string   `yaml:"endpoint,omitempty"`
+		Keychain    string   `yaml:"keychain,omitempty"`
+		WorkRoot    string   `yaml:"workRoot,omitempty"`
+		Volume      []string `yaml:"volume,omitempty"`
+		Volumes     []string `yaml:"volumes,omitempty"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*cfg = fileNamespaceInstanceConfig{
+		MachineType: raw.MachineType,
+		Duration:    raw.Duration,
+		Ephemeral:   raw.Ephemeral,
+		Region:      raw.Region,
+		Endpoint:    raw.Endpoint,
+		Keychain:    raw.Keychain,
+		WorkRoot:    raw.WorkRoot,
+		Volume:      append(append([]string(nil), raw.Volume...), raw.Volumes...),
+	}
+	return nil
 }
 
 type fileMorphConfig struct {
@@ -3656,6 +3751,36 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
 		}
 	}
+	if file.NamespaceInstance != nil {
+		if file.NamespaceInstance.MachineType != "" {
+			cfg.NamespaceInstance.MachineType = file.NamespaceInstance.MachineType
+		}
+		if file.NamespaceInstance.Duration != "" {
+			parsed, err := time.ParseDuration(file.NamespaceInstance.Duration)
+			if err != nil || parsed <= 0 {
+				return exit(2, "namespaceInstance.duration must be a positive duration")
+			}
+			cfg.NamespaceInstance.Duration = parsed
+		}
+		if file.NamespaceInstance.Ephemeral != nil {
+			cfg.NamespaceInstance.Ephemeral = *file.NamespaceInstance.Ephemeral
+		}
+		if file.NamespaceInstance.Region != "" {
+			cfg.NamespaceInstance.Region = file.NamespaceInstance.Region
+		}
+		if file.NamespaceInstance.Endpoint != "" {
+			cfg.NamespaceInstance.Endpoint = file.NamespaceInstance.Endpoint
+		}
+		if file.NamespaceInstance.Keychain != "" {
+			cfg.NamespaceInstance.Keychain = file.NamespaceInstance.Keychain
+		}
+		if file.NamespaceInstance.WorkRoot != "" {
+			cfg.NamespaceInstance.WorkRoot = file.NamespaceInstance.WorkRoot
+		}
+		if len(file.NamespaceInstance.Volume) > 0 {
+			cfg.NamespaceInstance.Volumes = append([]string(nil), file.NamespaceInstance.Volume...)
+		}
+	}
 	if file.Morph != nil {
 		if file.Morph.APIKey != "" {
 			cfg.Morph.APIKey = file.Morph.APIKey
@@ -5001,6 +5126,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Linode.FirewallID = getenv("CRABBOX_LINODE_FIREWALL", cfg.Linode.FirewallID)
 	if cidrs := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); cidrs != "" {
 		cfg.Linode.SSHCIDRs = splitCommaList(cidrs)
+	}
+	cfg.NamespaceInstance.MachineType = getenv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE", cfg.NamespaceInstance.MachineType)
+	if duration := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_DURATION"); duration != "" {
+		parsed, err := time.ParseDuration(duration)
+		if err != nil || parsed <= 0 {
+			return exit(2, "CRABBOX_NAMESPACE_INSTANCE_DURATION must be a positive duration")
+		}
+		cfg.NamespaceInstance.Duration = parsed
+	}
+	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_EPHEMERAL"); ok {
+		cfg.NamespaceInstance.Ephemeral = value
+	}
+	cfg.NamespaceInstance.Region = getenv("CRABBOX_NAMESPACE_INSTANCE_REGION", cfg.NamespaceInstance.Region)
+	cfg.NamespaceInstance.Endpoint = getenv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT", cfg.NamespaceInstance.Endpoint)
+	cfg.NamespaceInstance.Keychain = getenv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN", cfg.NamespaceInstance.Keychain)
+	cfg.NamespaceInstance.WorkRoot = getenv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT", cfg.NamespaceInstance.WorkRoot)
+	if raw := os.Getenv("CRABBOX_NAMESPACE_INSTANCE_VOLUME"); strings.TrimSpace(raw) != "" {
+		cfg.NamespaceInstance.Volumes = splitCommaList(raw)
 	}
 	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
 	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)

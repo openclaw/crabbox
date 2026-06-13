@@ -27,6 +27,7 @@ func init() {
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
+	RegisterProvider(testNamespaceInstanceProvider{})
 	RegisterProvider(testMorphProvider{})
 	RegisterProvider(testDaytonaProvider{})
 	RegisterProvider(testIsloProvider{})
@@ -957,6 +958,92 @@ type testNamespaceFlagValues struct {
 	Image    *string
 	Size     *string
 	WorkRoot *string
+}
+
+type testNamespaceInstanceProvider struct{}
+
+func (testNamespaceInstanceProvider) Name() string { return "namespace-instance" }
+func (testNamespaceInstanceProvider) Aliases() []string {
+	return []string{"namespace-compute"}
+}
+func (testNamespaceInstanceProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "namespace-instance",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testNamespaceInstanceProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testNamespaceInstanceFlagValues{
+		MachineType: fs.String("namespace-instance-machine-type", defaults.NamespaceInstance.MachineType, ""),
+		Duration:    fs.String("namespace-instance-duration", defaults.NamespaceInstance.Duration.String(), ""),
+		Ephemeral:   fs.Bool("namespace-instance-ephemeral", defaults.NamespaceInstance.Ephemeral, ""),
+		Region:      fs.String("namespace-instance-region", defaults.NamespaceInstance.Region, ""),
+		Endpoint:    fs.String("namespace-instance-endpoint", defaults.NamespaceInstance.Endpoint, ""),
+		Keychain:    fs.String("namespace-instance-keychain", defaults.NamespaceInstance.Keychain, ""),
+		WorkRoot:    fs.String("namespace-instance-work-root", defaults.NamespaceInstance.WorkRoot, ""),
+		Volume:      fs.String("namespace-instance-volume", strings.Join(defaults.NamespaceInstance.Volumes, ","), ""),
+	}
+}
+func (testNamespaceInstanceProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, ok := values.(testNamespaceInstanceFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "namespace-instance-machine-type") {
+		cfg.NamespaceInstance.MachineType = *v.MachineType
+		cfg.ServerType = *v.MachineType
+		cfg.ServerTypeExplicit = true
+	}
+	if flagWasSet(fs, "namespace-instance-duration") {
+		applyLeaseDuration(&cfg.NamespaceInstance.Duration, *v.Duration)
+	}
+	if flagWasSet(fs, "namespace-instance-ephemeral") {
+		cfg.NamespaceInstance.Ephemeral = *v.Ephemeral
+	}
+	if flagWasSet(fs, "namespace-instance-region") {
+		cfg.NamespaceInstance.Region = *v.Region
+	}
+	if flagWasSet(fs, "namespace-instance-endpoint") {
+		cfg.NamespaceInstance.Endpoint = *v.Endpoint
+	}
+	if flagWasSet(fs, "namespace-instance-keychain") {
+		cfg.NamespaceInstance.Keychain = *v.Keychain
+	}
+	if flagWasSet(fs, "namespace-instance-work-root") {
+		cfg.NamespaceInstance.WorkRoot = *v.WorkRoot
+		cfg.WorkRoot = *v.WorkRoot
+	}
+	if flagWasSet(fs, "namespace-instance-volume") {
+		cfg.NamespaceInstance.Volumes = splitCommaList(*v.Volume)
+	}
+	return nil
+}
+func (p testNamespaceInstanceProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+func (testNamespaceInstanceProvider) ServerTypeForConfig(cfg Config) string {
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		return strings.TrimSpace(cfg.ServerType)
+	}
+	if strings.TrimSpace(cfg.NamespaceInstance.MachineType) != "" {
+		return strings.TrimSpace(cfg.NamespaceInstance.MachineType)
+	}
+	return "linux-small"
+}
+func (testNamespaceInstanceProvider) ServerTypeForClass(string) string { return "linux-small" }
+
+type testNamespaceInstanceFlagValues struct {
+	MachineType *string
+	Duration    *string
+	Ephemeral   *bool
+	Region      *string
+	Endpoint    *string
+	Keychain    *string
+	WorkRoot    *string
+	Volume      *string
 }
 
 type testMorphProvider struct{}

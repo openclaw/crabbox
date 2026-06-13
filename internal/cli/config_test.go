@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -64,6 +65,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_LINODE_TYPE",
 		"CRABBOX_LINODE_FIREWALL",
 		"CRABBOX_LINODE_SSH_CIDRS",
+		"CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE",
+		"CRABBOX_NAMESPACE_INSTANCE_DURATION",
+		"CRABBOX_NAMESPACE_INSTANCE_EPHEMERAL",
+		"CRABBOX_NAMESPACE_INSTANCE_REGION",
+		"CRABBOX_NAMESPACE_INSTANCE_ENDPOINT",
+		"CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN",
+		"CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT",
+		"CRABBOX_NAMESPACE_INSTANCE_VOLUME",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -4170,6 +4179,103 @@ func TestNamespaceDevboxSizeForConfig(t *testing.T) {
 				t.Fatalf("size=%q want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNamespaceInstanceConfigFileAndDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "")
+	data := []byte(`
+provider: namespace-instance
+ttl: 75m
+namespaceInstance:
+  machineType: linux-large
+  duration: 2h
+  ephemeral: false
+  region: us-west
+  endpoint: https://namespace.example.test
+  keychain: test-keychain
+  workRoot: /work/crabbox-file
+  volume:
+    - cache:/cache
+    - tmp:/tmp/cache
+`)
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "namespace-instance" || cfg.TargetOS != targetLinux || cfg.WorkRoot != "/work/crabbox-file" {
+		t.Fatalf("provider defaults not applied: provider=%q target=%q workRoot=%q", cfg.Provider, cfg.TargetOS, cfg.WorkRoot)
+	}
+	if cfg.NamespaceInstance.MachineType != "linux-large" || cfg.ServerType != "linux-large" || cfg.NamespaceInstance.Duration != 2*time.Hour || cfg.NamespaceInstance.Ephemeral || cfg.NamespaceInstance.Region != "us-west" || cfg.NamespaceInstance.Endpoint != "https://namespace.example.test" || cfg.NamespaceInstance.Keychain != "test-keychain" || cfg.NamespaceInstance.WorkRoot != "/work/crabbox-file" {
+		t.Fatalf("namespaceInstance config not loaded: %#v serverType=%q", cfg.NamespaceInstance, cfg.ServerType)
+	}
+	if len(cfg.NamespaceInstance.Volumes) != 2 || cfg.NamespaceInstance.Volumes[1] != "tmp:/tmp/cache" {
+		t.Fatalf("volumes=%#v", cfg.NamespaceInstance.Volumes)
+	}
+}
+
+func TestNamespaceInstanceConfigEnvAndFlags(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_PROVIDER", "namespace-instance")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE", "linux-env")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_DURATION", "3h")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_EPHEMERAL", "false")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_REGION", "eu-env")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_ENDPOINT", "https://namespace-env.example.test")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_KEYCHAIN", "env-keychain")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_WORK_ROOT", "/work/crabbox-env")
+	t.Setenv("CRABBOX_NAMESPACE_INSTANCE_VOLUME", "cache:/cache,go:/go")
+	if err := os.WriteFile(configPath, []byte("provider: namespace-instance\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NamespaceInstance.MachineType != "linux-env" || cfg.NamespaceInstance.Duration != 3*time.Hour || cfg.NamespaceInstance.Ephemeral || cfg.NamespaceInstance.Region != "eu-env" || cfg.NamespaceInstance.Endpoint != "https://namespace-env.example.test" || cfg.NamespaceInstance.Keychain != "env-keychain" || cfg.NamespaceInstance.WorkRoot != "/work/crabbox-env" || cfg.WorkRoot != "/work/crabbox-env" {
+		t.Fatalf("namespaceInstance env not loaded: %#v", cfg.NamespaceInstance)
+	}
+	if len(cfg.NamespaceInstance.Volumes) != 2 || cfg.NamespaceInstance.Volumes[0] != "cache:/cache" {
+		t.Fatalf("env volumes=%#v", cfg.NamespaceInstance.Volumes)
+	}
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--namespace-instance-machine-type", "linux-flag",
+		"--namespace-instance-duration", "4h",
+		"--namespace-instance-ephemeral=true",
+		"--namespace-instance-region", "flag-region",
+		"--namespace-instance-endpoint", "https://namespace-flag.example.test",
+		"--namespace-instance-keychain", "flag-keychain",
+		"--namespace-instance-work-root", "/work/crabbox-flag",
+		"--namespace-instance-volume", "flag:/flag",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NamespaceInstance.MachineType != "linux-flag" || cfg.ServerType != "linux-flag" || cfg.NamespaceInstance.Duration != 4*time.Hour || !cfg.NamespaceInstance.Ephemeral || cfg.NamespaceInstance.Region != "flag-region" || cfg.NamespaceInstance.Endpoint != "https://namespace-flag.example.test" || cfg.NamespaceInstance.Keychain != "flag-keychain" || cfg.NamespaceInstance.WorkRoot != "/work/crabbox-flag" || cfg.WorkRoot != "/work/crabbox-flag" {
+		t.Fatalf("namespaceInstance flags not applied: %#v serverType=%q", cfg.NamespaceInstance, cfg.ServerType)
+	}
+	if len(cfg.NamespaceInstance.Volumes) != 1 || cfg.NamespaceInstance.Volumes[0] != "flag:/flag" {
+		t.Fatalf("flag volumes=%#v", cfg.NamespaceInstance.Volumes)
 	}
 }
 
