@@ -1422,17 +1422,20 @@ export class FleetCoordinator {
       return { started: true as const, current };
     });
     if (!provisioningStart.started) {
+      let current = provisioningStart.current;
       if (provisioningStart.workspace) {
-        await this.finalizeAbsentWorkspaceLease(
+        current = await this.finalizeAbsentWorkspaceLease(
           provisioningStart.workspace,
           provisioningStart.current,
         );
+      } else {
+        current = await this.removeReleasedLeaseReservation(record);
       }
       return json(
         {
           error: "lease_state_changed",
           message: "lease changed state before provider provisioning began",
-          lease: provisioningStart.current,
+          lease: current,
         },
         { status: 409 },
       );

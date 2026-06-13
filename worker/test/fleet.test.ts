@@ -4093,6 +4093,64 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
   });
 
+  it("removes a release canceled after provider preparation", async () => {
+    const storage = new MemoryStorage();
+    const prepareStarted = deferred<void>();
+    const finishPrepare = deferred<void>();
+    let providerCalled = false;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        () => {
+          providerCalled = true;
+        },
+        {
+          provider: "aws",
+          async onPrepareLeaseCreate(config, lease) {
+            prepareStarted.resolve();
+            await finishPrepare.promise;
+            return {
+              config,
+              lease,
+              provisioning: {
+                sshIngressReconcile: "authoritative",
+                publishAccessBeforeProvisioning: true,
+              },
+            };
+          },
+        },
+      ),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    await prepareStarted.promise;
+    const releasePromise = fleet.fetch(
+      request("POST", "/v1/leases/cbx_abcdef123456/release", {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    finishPrepare.resolve();
+
+    expect((await releasePromise).status).toBe(200);
+    expect((await createPromise).status).toBe(409);
+    expect(providerCalled).toBe(false);
+    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
+    expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
+  });
+
   it("removes a retained release when Tailscale preparation fails", async () => {
     const storage = new MemoryStorage();
     let oauthStarted!: () => void;
@@ -11933,6 +11991,17 @@ function fakeProvider(
             publishAccessBeforeProvisioning?: boolean;
           };
         }
+      | Promise<
+          | {
+              config: LeaseConfig;
+              lease: LeaseRecord;
+              provisioning?: {
+                sshIngressReconcile?: "authoritative" | "additive";
+                publishAccessBeforeProvisioning?: boolean;
+              };
+            }
+          | undefined
+        >
       | undefined;
     onRefreshLeaseAccess?: (
       lease: LeaseRecord,
