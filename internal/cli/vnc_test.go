@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestVNCTunnelCommandQuotesKeyPath(t *testing.T) {
@@ -41,6 +46,77 @@ func TestVNCTunnelCommandForwardsProxyCommand(t *testing.T) {
 	}
 	if !strings.Contains(got, "ProxyCommand=ssh -W 10.211.55.3:%p mac-host") {
 		t.Fatalf("tunnel should preserve proxy command: %q", got)
+	}
+}
+
+func TestVNCTunnelDisablesSSHMultiplexing(t *testing.T) {
+	args := strings.Join(vncTunnelArgs(SSHTarget{
+		Port: "22", User: "crabbox", Host: "192.0.2.10",
+	}, "5907", "127.0.0.1", "5900"), "\n")
+	for _, want := range []string{"ExitOnForwardFailure=yes", "ControlMaster=no", "ControlPath=none", "ControlPersist=no", "ForkAfterAuthentication=no"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("dedicated tunnel missing %q: %s", want, args)
+		}
+	}
+	for _, unwanted := range []string{"ControlMaster=auto", "ControlPersist=10m"} {
+		if strings.Contains(args, unwanted) {
+			t.Fatalf("dedicated tunnel inherited %q: %s", unwanted, args)
+		}
+	}
+	if !strings.Contains(args, "127.0.0.1:5907:127.0.0.1:5900") {
+		t.Fatalf("dedicated tunnel did not bind explicit IPv4 loopback: %s", args)
+	}
+}
+
+func TestVNCTunnelReadinessCoversSSHConnectAndListenerVerification(t *testing.T) {
+	want := vncTunnelSSHConnectTimeout + vncTunnelListenerVerificationWindow
+	if got := vncTunnelReadinessTimeout(); got != want || got <= vncTunnelSSHConnectTimeout {
+		t.Fatalf("readiness timeout=%s want=%s connect=%s", got, want, vncTunnelSSHConnectTimeout)
+	}
+	args := strings.Join(vncTunnelArgs(SSHTarget{Port: "22", User: "crabbox", Host: "192.0.2.10"}, "5907", "127.0.0.1", "5900"), " ")
+	if !strings.Contains(args, "ConnectTimeout=10") {
+		t.Fatalf("tunnel args do not share readiness connect timeout: %s", args)
+	}
+}
+
+func TestStartVNCTunnelVerifiesOwnedLoopbackListener(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("listener ownership verification requires Linux or macOS")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+forward=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -L ]; then shift; forward=$1; break; fi
+  shift
+done
+port=$(printf '%s' "$forward" | cut -d: -f2)
+export CRABBOX_TEST_CONTROLLER_LISTENER_PORT="$port"
+exec "$CRABBOX_TEST_BINARY" -test.run='^TestControllerOwnedListenerHelper$'
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_BINARY", os.Args[0])
+	port := availableControllerListenerTestPort(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pid, err := startVNCTunnel(ctx, SSHTarget{Port: "22", User: "crabbox", Host: "192.0.2.10"}, port, "127.0.0.1", "5900")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid <= 0 {
+		t.Fatal("verified tunnel did not return its owning pid")
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopDaemonProcess(process, pid)
+	if err := controllerVerifyDaemonOwnedListener(port, pid); err != nil {
+		t.Fatalf("returned tunnel does not own exact loopback listener: %v", err)
 	}
 }
 

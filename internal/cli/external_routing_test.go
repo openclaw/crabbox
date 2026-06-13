@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,13 +19,195 @@ func setExternalRoutingTestHome(t *testing.T) string {
 	return root
 }
 
+func TestExternalRoutingPathHonorsAbsoluteXDGConfigHome(t *testing.T) {
+	root := t.TempDir()
+	xdgDir := filepath.Join(root, "xdg-config")
+	t.Setenv("HOME", filepath.Join(root, "different-home"))
+	t.Setenv("XDG_CONFIG_HOME", xdgDir)
+
+	path, err := ExternalRoutingPath("cbx_abcdef123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDir := filepath.Join(xdgDir, "crabbox", "external")
+	if filepath.Dir(path) != wantDir {
+		t.Fatalf("routing directory=%q, want %q", filepath.Dir(path), wantDir)
+	}
+}
+
+func TestExternalRoutingPathRejectsInvalidXDGConfigHome(t *testing.T) {
+	for _, dir := range []string{
+		"relative/config",
+		" " + filepath.Join(t.TempDir(), "config"),
+		filepath.Join(t.TempDir(), "config") + " ",
+	} {
+		t.Run(dir, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			if _, err := ExternalRoutingPath("cbx_abcdef123456"); err == nil || !strings.Contains(err.Error(), "XDG_CONFIG_HOME must be an absolute path") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestWriteExternalRoutingAtomicSyncsBeforeRenameAndThroughDirectoryChain(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new", "routing", "chain")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "route.json")
+	events := []string{}
+	err := writeExternalRoutingAtomic(
+		path,
+		[]byte("{}\n"),
+		func(file *os.File) error {
+			events = append(events, "file")
+			return file.Sync()
+		},
+		func(from, to string) error {
+			events = append(events, "rename")
+			return os.Rename(from, to)
+		},
+		func(syncPath string) error {
+			events = append(events, "dir:"+filepath.Clean(syncPath))
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 3 || events[0] != "file" || events[1] != "rename" {
+		t.Fatalf("persistence order=%v, want file sync then rename", events)
+	}
+	current := filepath.Clean(dir)
+	for i := 2; ; i++ {
+		if i >= len(events) || events[i] != "dir:"+current {
+			t.Fatalf("persistence order=%v, want directory %q at index %d", events, current, i)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			if i != len(events)-1 {
+				t.Fatalf("persistence order has extra events after filesystem root: %v", events)
+			}
+			break
+		}
+		current = parent
+	}
+}
+
+func TestWriteExternalRoutingAtomicDoesNotRenameUnsyncedTemp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "route.json")
+	syncErr := errors.New("file sync unavailable")
+	renameCalled := false
+	err := writeExternalRoutingAtomic(
+		path,
+		[]byte("{}\n"),
+		func(*os.File) error { return syncErr },
+		func(string, string) error {
+			renameCalled = true
+			return nil
+		},
+		func(string) error { return nil },
+	)
+	if !errors.Is(err, syncErr) || !strings.Contains(err.Error(), "sync external routing file") {
+		t.Fatalf("error=%v, want file sync failure", err)
+	}
+	if renameCalled {
+		t.Fatal("rename ran after temp file sync failure")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("routing file exists after temp sync failure: %v", err)
+	}
+}
+
+func TestWriteExternalRoutingAtomicRetriesExistingAncestorChainAfterSyncFailure(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "first", "second")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "route.json")
+	failedAncestor := filepath.Join(base, "first")
+	syncErr := errors.New("ancestor sync unavailable")
+	err := writeExternalRoutingAtomic(
+		path,
+		[]byte("{\"command\":\"provider\"}\n"),
+		func(file *os.File) error { return file.Sync() },
+		os.Rename,
+		func(syncPath string) error {
+			if filepath.Clean(syncPath) == filepath.Clean(failedAncestor) {
+				return syncErr
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("error=%v, want ancestor sync failure", err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("installed routing file missing after directory sync failure: %v", statErr)
+	}
+
+	calls := map[string]int{}
+	err = writeExternalRoutingAtomic(
+		path,
+		[]byte("{\"command\":\"provider\"}\n"),
+		func(file *os.File) error { return file.Sync() },
+		os.Rename,
+		func(syncPath string) error {
+			calls[filepath.Clean(syncPath)]++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[filepath.Clean(dir)] != 1 || calls[filepath.Clean(failedAncestor)] != 1 {
+		t.Fatalf("retry did not sync installed directory and existing ancestor chain: %v", calls)
+	}
+	root := filepath.VolumeName(path) + string(os.PathSeparator)
+	if calls[filepath.Clean(root)] != 1 {
+		t.Fatalf("retry did not sync chain through filesystem root: %v", calls)
+	}
+}
+
+func TestConfirmedAbsentRoutingRemovalRequiresDirectorySyncAndRetriesAfterDeletion(t *testing.T) {
+	setExternalRoutingTestHome(t)
+	const leaseID = "cbx_123456789abc"
+	cfg := ExternalConfig{Command: "provider"}
+	path, err := PersistExternalRouting(leaseID, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("routing directory sync unavailable")
+	err = removeExternalRoutingIfUnchangedWithSync(leaseID, cfg, func(string) error { return syncErr })
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("routing removal error=%v", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("routing file remains after removal sync failure: %v", statErr)
+	}
+	var synced string
+	if err := removeExternalRoutingIfUnchangedWithSync(leaseID, cfg, func(dir string) error {
+		synced = filepath.Clean(dir)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if synced != filepath.Clean(filepath.Dir(path)) {
+		t.Fatalf("retry synced %q want %q", synced, filepath.Dir(path))
+	}
+}
+
 func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	setExternalRoutingTestHome(t)
 	cfg := ExternalConfig{
-		Command:  "node",
-		Args:     []string{"/tmp/provider.mjs", "--token", "secret-arg"},
-		Config:   map[string]any{"token": "secret-config"},
-		WorkRoot: "/workspaces/crabbox",
+		Command:      "node",
+		Args:         []string{"/tmp/provider.mjs", "--token", "secret-arg"},
+		Config:       map[string]any{"token": "secret-config"},
+		Capabilities: ExternalCapabilitiesConfig{IdempotentLeaseID: true},
+		WorkRoot:     "/workspaces/crabbox",
 	}
 	path, err := PersistExternalRouting("../unsafe/lease", cfg)
 	if err != nil {
@@ -42,7 +225,7 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Command != cfg.Command || len(loaded.Args) != 3 || loaded.Config["token"] != "secret-config" || loaded.WorkRoot != cfg.WorkRoot {
+	if loaded.Command != cfg.Command || len(loaded.Args) != 3 || loaded.Config["token"] != "secret-config" || !loaded.Capabilities.IdempotentLeaseID || loaded.WorkRoot != cfg.WorkRoot {
 		t.Fatalf("loaded=%#v", loaded)
 	}
 	RemoveExternalRouting("../unsafe/lease")

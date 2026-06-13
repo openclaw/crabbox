@@ -228,6 +228,36 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 	}
 }
 
+func TestConfigShowExportsControllerProviderContract(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := "provider: external\nbroker:\n  url: https://broker.example.test/root/\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow([]string{"--json", "--provider", "external"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Provider                   string `json:"provider"`
+		ProviderScope              string `json:"providerScope"`
+		IdempotentLeaseID          bool   `json:"idempotentLeaseId"`
+		CoordinatorRegistrationURL string `json:"coordinatorRegistrationUrl"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != "external" || got.ProviderScope != "test-external:provider-a" || !got.IdempotentLeaseID || got.CoordinatorRegistrationURL != "https://broker.example.test/root" {
+		t.Fatalf("controller provider contract=%#v", got)
+	}
+}
+
 func TestConfigShowRedactsCloudflareDynamicWorkers(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

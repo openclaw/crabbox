@@ -200,13 +200,23 @@ local_checks() {
   if [[ "$SKIP_LOCAL_CHECKS" == "1" ]]; then
     return 0
   fi
-  run_logged npm ci --prefix "$ROOT/worker" || return $?
-  run_logged npm run format:check --prefix "$ROOT/worker" || return $?
-  run_logged npm run lint --prefix "$ROOT/worker" || return $?
-  run_logged npm run check --prefix "$ROOT/worker" || return $?
-  run_logged npm test --prefix "$ROOT/worker" -- cloudflare-dynamic-worker-runner || return $?
-  run_logged npm test --prefix "$ROOT/worker" -- cloudflare-container-runner || return $?
-  run_logged npm run build:cloudflare-dynamic-workers --prefix "$ROOT/worker" || return $?
+  local clean_env=(
+    env
+    -u CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN
+    -u CLOUDFLARE_API_TOKEN
+    -u CLOUDFLARE_API_KEY
+    -u CLOUDFLARE_EMAIL
+    -u CF_API_TOKEN
+    -u CF_API_KEY
+    -u CF_API_EMAIL
+  )
+  run_logged "${clean_env[@]}" npm ci --prefix "$ROOT/worker" || return $?
+  run_logged "${clean_env[@]}" npm run format:check --prefix "$ROOT/worker" || return $?
+  run_logged "${clean_env[@]}" npm run lint --prefix "$ROOT/worker" || return $?
+  run_logged "${clean_env[@]}" npm run check --prefix "$ROOT/worker" || return $?
+  run_logged "${clean_env[@]}" npm test --prefix "$ROOT/worker" -- cloudflare-dynamic-worker-runner || return $?
+  run_logged "${clean_env[@]}" npm test --prefix "$ROOT/worker" -- cloudflare-container-runner || return $?
+  run_logged "${clean_env[@]}" npm run build:cloudflare-dynamic-workers --prefix "$ROOT/worker" || return $?
 }
 
 deploy_runner() {
@@ -215,7 +225,7 @@ deploy_runner() {
   fi
   deployed_worker="crabbox-cfdw-smoke-$(date -u +%Y%m%d%H%M%S)-$RANDOM"
   local deploy_config_base
-  deploy_config_base="$(mktemp "$ROOT/worker/.wrangler-cfdw-smoke-XXXXXX")"
+  deploy_config_base="$(mktemp "${TMPDIR:-/tmp}/wrangler-cfdw-smoke-XXXXXX")"
   deploy_config="${deploy_config_base}.json"
   mv "$deploy_config_base" "$deploy_config"
   local secrets_file
@@ -226,10 +236,10 @@ deploy_runner() {
   smoke_tmp_files+=("$deploy_config" "$secrets_file")
   cat >"$deploy_config" <<EOF
 {
-  "\$schema": "./node_modules/wrangler/config-schema.json",
   "name": "$deployed_worker",
-  "main": "src/cloudflare-dynamic-worker-runner.ts",
+  "main": "$ROOT/worker/src/cloudflare-dynamic-worker-runner.ts",
   "compatibility_date": "2026-06-12",
+  "compatibility_flags": ["global_fetch_strictly_public"],
   "workers_dev": true,
   "preview_urls": false,
   "worker_loaders": [{ "binding": "LOADER" }],

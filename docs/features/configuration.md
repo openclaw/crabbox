@@ -735,7 +735,8 @@ not shell commands. Acquire steps can opt into release cleanup with
 `allowEnvArgv: true` compatibility opt-in, and environment-derived resource
 names require `connection.allowEnvResourceName: true`. See
 [External Provider](../providers/external.md) for placeholders, output
-semantics, inventory formats, routing behavior, and security guidance.
+semantics, inventory formats, routing behavior, controller-safe raw
+`json-lease` identity attestation, and security guidance.
 
 ### Daytona
 

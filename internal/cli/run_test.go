@@ -25,6 +25,44 @@ func init() {
 	RegisterProvider(runModuleRuntimeTestProvider{})
 }
 
+type warmupFailureReleaseBackend struct {
+	releases int
+}
+
+func (b *warmupFailureReleaseBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "warmup-release-test"}
+}
+func (b *warmupFailureReleaseBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b *warmupFailureReleaseBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b *warmupFailureReleaseBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b *warmupFailureReleaseBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	b.releases++
+	return nil
+}
+func (b *warmupFailureReleaseBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	return Server{}, nil
+}
+
+func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing.T) {
+	backend := &warmupFailureReleaseBackend{}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	lease := LeaseTarget{LeaseID: "cbx_abcdef123456"}
+	app.releaseWarmupLeaseAfterFailure(context.Background(), backend, defaultConfig(), lease, true)
+	if backend.releases != 0 {
+		t.Fatalf("controller-owned cleanup released provider directly: %d", backend.releases)
+	}
+	app.releaseWarmupLeaseAfterFailure(context.Background(), backend, defaultConfig(), lease, false)
+	if backend.releases != 1 {
+		t.Fatalf("standalone warmup cleanup releases=%d", backend.releases)
+	}
+}
+
 type windowsEnvHelperTestProvider struct{}
 
 func (windowsEnvHelperTestProvider) Name() string { return "windows-env-helper-test" }

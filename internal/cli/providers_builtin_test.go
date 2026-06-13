@@ -51,6 +51,8 @@ func init() {
 
 type testExternalProvider struct{}
 
+var testExternalResolveHook func(ResolveRequest) (LeaseTarget, error)
+
 func (testExternalProvider) Name() string      { return "external" }
 func (testExternalProvider) Aliases() []string { return nil }
 func (testExternalProvider) Spec() ProviderSpec {
@@ -85,13 +87,27 @@ func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any
 func (p testExternalProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
 	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}, cfg: cfg}, nil
 }
+func (testExternalProvider) ControllerProviderScope(cfg Config) (string, error) {
+	return "test-external:" + strings.TrimSpace(cfg.External.Command), nil
+}
+func (testExternalProvider) SupportsControllerFixedLeaseID(cfg Config) bool {
+	return cfg.External.Capabilities.IdempotentLeaseID
+}
 
 type testExternalSSHBackend struct {
 	testSSHBackend
 	cfg Config
 }
 
+func (b testExternalSSHBackend) CleanupConfirmedAbsentLocalState(_ context.Context, req ConfirmedAbsentLocalCleanupRequest) error {
+	leaseID := firstNonBlank(req.ExpectedProviderIdentity.LeaseID, req.ExpectedProviderIdentity.AttemptLeaseID)
+	return RemoveExternalRoutingIfUnchanged(leaseID, b.cfg.External)
+}
+
 func (b testExternalSSHBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	if testExternalResolveHook != nil {
+		return testExternalResolveHook(req)
+	}
 	return LeaseTarget{LeaseID: req.ID, Server: Server{Name: b.cfg.External.Command}}, nil
 }
 

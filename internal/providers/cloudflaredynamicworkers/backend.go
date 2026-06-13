@@ -513,7 +513,7 @@ func (b *backend) buildRunRequest(req RunRequest, leaseID, workerID, cacheMode s
 		RetainMetadata:     req.Keep || cacheMode == "explicit",
 		RetainOnFailure:    req.KeepOnFailure,
 		Module:             moduleSource{Name: workerModuleName(req.Script), Source: string(req.Script.Data)},
-		CompatibilityDate:  strings.TrimSpace(cfg.CompatibilityDate),
+		CompatibilityDate:  effectiveCompatibilityDate(cfg.CompatibilityDate),
 		CompatibilityFlags: append([]string(nil), cfg.CompatibilityFlags...),
 		Egress:             normalizeEgress(cfg.Egress),
 		Limits:             limits{CPUMs: cfg.CPUMs, Subrequests: cfg.Subrequests},
@@ -629,7 +629,7 @@ func stableRunID(moduleName string, source []byte, cfg CloudflareDynamicWorkersC
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write(source)
 	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(strings.TrimSpace(cfg.CompatibilityDate)))
+	_, _ = h.Write([]byte(effectiveCompatibilityDate(cfg.CompatibilityDate)))
 	_, _ = h.Write([]byte{0})
 	flags := append([]string(nil), cfg.CompatibilityFlags...)
 	sort.Strings(flags)
@@ -653,6 +653,10 @@ func stableRunID(moduleName string, source []byte, cfg CloudflareDynamicWorkersC
 
 func normalizeCacheMode(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func effectiveCompatibilityDate(value string) string {
+	return blank(strings.TrimSpace(value), defaultCompatibilityDate)
 }
 
 func normalizeEgress(value string) string {

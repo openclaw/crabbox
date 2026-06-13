@@ -383,6 +383,27 @@ func (a App) resolveNetworkLeaseTarget(ctx context.Context, cfg Config, id strin
 	return a.resolveNetworkLeaseTargetWithConfig(ctx, &cfg, id, printFallback)
 }
 
+func (a App) resolveNetworkLeaseTargetReadOnly(ctx context.Context, cfg Config, id string, expected ProviderIdentityExpectation) (Server, SSHTarget, string, error) {
+	req := ResolveRequest{
+		ID:                       id,
+		ExpectedProviderIdentity: expected,
+		NoLocalStateMutations:    true,
+	}
+	server, target, leaseID, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, req)
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	resolved, err := resolveSSHTargetNetwork(ctx, cfg, server, target, false)
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	target = resolved.Target
+	if target.Host != "" {
+		_ = probeSSHTransport(ctx, &target, 4*time.Second)
+	}
+	return server, target, leaseID, nil
+}
+
 func (a App) resolveNetworkLeaseTargetWithConfig(ctx context.Context, cfg *Config, id string, printFallback bool) (Server, SSHTarget, string, error) {
 	return a.resolveNetworkLeaseTargetWithRepoConfig(ctx, cfg, id, printFallback, Repo{}, false)
 }

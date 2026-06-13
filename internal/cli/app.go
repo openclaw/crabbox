@@ -209,6 +209,7 @@ Commands:
   pond        Bridge plane peer discovery for delegated providers
   azure       Azure provider setup and login
   config      Show or update user config
+  adapter     Serve or connect the Crabfleet runtime adapter
 
 Common Flows:
   crabbox run --class beast -- pnpm check
@@ -264,6 +265,8 @@ Common Flows:
   crabbox run --provider ssh --target macos --static-host mac.local -- echo ok
   crabbox run --provider ssh --target windows --windows-mode normal --static-host win.local -- pwsh -NoProfile -Command '$PSVersionTable'
   crabbox stop blue-lobster
+  crabbox adapter connect --id mac-lab --local-socket "$HOME/.local/run/crabbox/adapter.sock" --token-file ~/.config/crabbox/adapter.token
+  crabbox adapter serve --unix-socket "$HOME/.local/run/crabbox/adapter.sock" --token-file ~/.config/crabbox/adapter.token --provider external
 
 Global:
   -h, --help     Show help

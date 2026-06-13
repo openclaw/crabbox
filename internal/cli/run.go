@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,6 +45,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("warmup", a.Stderr)
 	leaseFlags := registerLeaseCreateFlags(fs, defaults)
+	requestedLeaseID := fs.String("lease-id", "", "fixed lease ID for idempotent external-provider orchestration")
 	keep := fs.Bool("keep", true, "keep server after warmup")
 	actionsRunner := fs.Bool("actions-runner", false, "register this box as an ephemeral GitHub Actions runner")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -69,6 +72,15 @@ func (a App) warmup(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(*requestedLeaseID) != "" {
+		if !canonicalLeaseIDPattern.MatchString(strings.TrimSpace(*requestedLeaseID)) {
+			return exit(2, "--lease-id must match cbx_<12 lowercase hex characters>")
+		}
+		capable, ok := backend.(IdempotentLeaseIDBackend)
+		if !ok || !capable.SupportsRequestedLeaseID() {
+			return exit(2, "provider=%s does not support fixed idempotent lease IDs", backend.Spec().Name)
+		}
+	}
 	options := leaseOptionsFromConfig(cfg)
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if err := delegated.Warmup(ctx, WarmupRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON}); err != nil {
@@ -86,14 +98,26 @@ func (a App) warmup(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
+	providerName := backend.Spec().Name
+	var controllerOwnsCleanup atomic.Bool
+	lease, err := sshBackend.Acquire(ctx, AcquireRequest{
+		Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
+		RequestedLeaseID: strings.TrimSpace(*requestedLeaseID), RequestedSlug: requestedSlug,
+		OnAcquired: func(acquired LeaseTarget) error {
+			err := acknowledgeControllerAcquireIdentity(ctx, controllerAcquireIdentityFromLease(providerName, acquired))
+			if err == nil && controllerAcquireIdentityAcknowledgmentConfigured() {
+				controllerOwnsCleanup.Store(true)
+			}
+			return err
+		},
+	})
 	if err != nil {
 		return err
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
 	applyResolvedServerConfig(&cfg, server)
 	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
-		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
 		return err
 	}
 	if serverTailscaleMetadata(server).Enabled {
@@ -106,7 +130,7 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		}
 	}
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
-		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
 		return err
 	} else {
 		target = resolved.Target
@@ -147,6 +171,13 @@ func (a App) warmup(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+func (a App) releaseWarmupLeaseAfterFailure(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget, controllerOwnsCleanup bool) {
+	if controllerOwnsCleanup {
+		return
+	}
+	a.releaseBackendLeaseBestEffort(ctx, backend, cfg, lease)
 }
 
 func (a App) runCommand(ctx context.Context, args []string) (err error) {
@@ -2751,6 +2782,13 @@ func (a App) stop(ctx context.Context, args []string) error {
 	fs := newFlagSet("stop", a.Stderr)
 	provider := fs.String("provider", defaults.Provider, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
+	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
+	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
+	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
+	expectedResourceID := fs.String("expected-provider-resource-id", "", "internal: immutable provider resource identity")
+	expectedProviderScope := fs.String("expected-provider-scope", "", "internal: immutable provider configuration scope")
+	expectedCoordinatorRegistrationURL := fs.String("expected-coordinator-registration-url", "", "internal: immutable coordinator registration binding")
+	confirmedAbsentLocalCleanup := fs.Bool("confirmed-absent-local-cleanup", false, "internal: remove local state after complete provider absence proof")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -2761,12 +2799,74 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
 		return exit(2, "usage: crabbox stop --id <lease-or-server-id>")
 	}
+	expectedFlagNames := []string{
+		"expected-provider-lease-id",
+		"expected-provider-attempt-lease-id",
+		"expected-provider-slug",
+		"expected-provider-resource-id",
+	}
+	expectedFlagCount := 0
+	for _, name := range expectedFlagNames {
+		if flagWasSet(fs, name) {
+			expectedFlagCount++
+		}
+	}
+	if expectedFlagCount != 0 && expectedFlagCount != len(expectedFlagNames) {
+		return exit(2, "internal provider release requires the complete expected identity set")
+	}
+	if *confirmedAbsentLocalCleanup && (expectedFlagCount != len(expectedFlagNames) || !flagWasSet(fs, "expected-provider-scope") || !flagWasSet(fs, "expected-coordinator-registration-url") || !flagWasSet(fs, "provider")) {
+		return exit(2, "confirmed-absence local cleanup requires explicit provider, scope, coordinator binding, and complete expected identity set")
+	}
+	if flagWasSet(fs, "expected-coordinator-registration-url") {
+		if !*confirmedAbsentLocalCleanup {
+			return exit(2, "expected coordinator registration binding is only valid for confirmed-absence cleanup")
+		}
+		if err := validateControllerCoordinatorRegistrationURL(*expectedCoordinatorRegistrationURL); err != nil {
+			return exit(2, "invalid expected coordinator registration binding: %v", err)
+		}
+	}
+	if flagWasSet(fs, "expected-provider-scope") {
+		scope := strings.TrimSpace(*expectedProviderScope)
+		if scope == "" || scope != *expectedProviderScope || !validControllerInventoryIdentity(scope) {
+			return exit(2, "invalid expected provider scope")
+		}
+	}
+	expectedIdentity := ProviderIdentityExpectation{
+		LeaseID:        *expectedLeaseID,
+		AttemptLeaseID: *expectedAttemptLeaseID,
+		Slug:           *expectedSlug,
+		ResourceID:     *expectedResourceID,
+	}
+	if expectedFlagCount != 0 {
+		if err := ValidateProviderIdentityExpectation(expectedIdentity); err != nil {
+			return err
+		}
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
+	}
+	if *confirmedAbsentLocalCleanup {
+		resolvedProvider, err := ProviderFor(cfg.Provider)
+		if err != nil {
+			return err
+		}
+		if resolvedProvider.Name() == "external" {
+			leaseID := firstNonBlank(expectedIdentity.LeaseID, expectedIdentity.AttemptLeaseID)
+			path, err := ExternalRoutingPath(leaseID)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(path); err == nil {
+				cfg.External.RoutingFile = path
+				cfg.External.routingLoaded = false
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
 	}
 	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
 		return err
@@ -2783,18 +2883,59 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := finalizeProviderSelection(&cfg); err != nil {
 		return err
 	}
+	if flagWasSet(fs, "expected-provider-scope") {
+		_, actualScope, _, err := controllerProviderIdentityForConfig(cfg)
+		if err != nil {
+			return err
+		}
+		if actualScope != *expectedProviderScope {
+			return exit(4, "provider configuration scope changed before lifecycle operation")
+		}
+	}
+	if *confirmedAbsentLocalCleanup {
+		actualCoordinatorRegistrationURL, err := coordinatorRegistrationURLForConfig(cfg)
+		if err != nil {
+			return err
+		}
+		if actualCoordinatorRegistrationURL != *expectedCoordinatorRegistrationURL {
+			return exit(4, "coordinator registration binding changed before confirmed-absence cleanup")
+		}
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
 	}
+	if *confirmedAbsentLocalCleanup {
+		// Validate the immutable local identity before the network mutation, but
+		// retain its route and claim until coordinator deregistration succeeds.
+		// A failed deregistration must remain retryable with the persisted route.
+		if _, err := confirmedAbsentLocalStateSnapshot(ctx, backend, expectedIdentity, *expectedProviderScope); err != nil {
+			return err
+		}
+		if err := a.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(ctx, cfg, expectedIdentity.LeaseID); err != nil {
+			return fmt.Errorf("deregister coordinator lease after confirmed provider absence: %w", err)
+		}
+		if err := cleanupConfirmedAbsentLocalState(ctx, backend, expectedIdentity, *expectedProviderScope); err != nil {
+			return err
+		}
+		return nil
+	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
+		if !expectedIdentity.empty() {
+			return exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
+		}
 		return delegated.Stop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
 		return exit(2, "provider=%s does not support stop", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, ReleaseOnly: true})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{
+		Options:                  leaseOptionsFromConfig(cfg),
+		ID:                       *id,
+		ReleaseOnly:              true,
+		ExpectedProviderIdentity: expectedIdentity,
+	})
 	if err != nil {
 		if backendCoordinator(backend) != nil {
 			fmt.Fprintf(a.Stderr, "warning: could not inspect lease before release: %v\n", err)
@@ -2803,11 +2944,18 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+	if err := ValidateLeaseTargetProviderIdentity(lease, expectedIdentity); err != nil {
+		return err
+	}
 	if lease.SSH.Host != "" {
 		a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
 	}
 	a.logoutRemoteTailscaleBestEffort(ctx, lease)
-	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
+		Lease:                    lease,
+		Force:                    true,
+		ExpectedProviderIdentity: expectedIdentity,
+	}); err != nil {
 		return err
 	}
 	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
@@ -2821,6 +2969,68 @@ func (a App) stop(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stderr, "deleted lease=%s server=%s name=%s\n", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 	return nil
+}
+
+type confirmedAbsentLocalState struct {
+	leaseID     string
+	claim       leaseClaim
+	claimExists bool
+}
+
+func confirmedAbsentLocalStateSnapshot(ctx context.Context, backend Backend, expected ProviderIdentityExpectation, providerScope string) (confirmedAbsentLocalState, error) {
+	if err := ctx.Err(); err != nil {
+		return confirmedAbsentLocalState{}, err
+	}
+	if err := ValidateProviderIdentityExpectation(expected); err != nil {
+		return confirmedAbsentLocalState{}, err
+	}
+	leaseID := firstNonBlank(expected.LeaseID, expected.AttemptLeaseID)
+	if expected.LeaseID != "" && expected.AttemptLeaseID != "" && expected.LeaseID != expected.AttemptLeaseID {
+		return confirmedAbsentLocalState{}, exit(4, "provider lease identity changed before confirmed-absence cleanup")
+	}
+	provider := backend.Spec().Name
+	claim, claimExists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return confirmedAbsentLocalState{}, err
+	}
+	if claimExists {
+		if claim.Provider != provider {
+			return confirmedAbsentLocalState{}, exit(4, "lease claim provider changed before confirmed-absence cleanup")
+		}
+		if claim.ProviderScope != providerScope {
+			return confirmedAbsentLocalState{}, exit(4, "lease claim provider scope changed before confirmed-absence cleanup")
+		}
+		for _, identity := range []string{expected.LeaseID, expected.AttemptLeaseID} {
+			if identity != "" && claim.LeaseID != identity {
+				return confirmedAbsentLocalState{}, exit(4, "lease claim identity changed before confirmed-absence cleanup")
+			}
+		}
+		if expected.Slug != "" && claim.Slug != expected.Slug {
+			return confirmedAbsentLocalState{}, exit(4, "lease claim slug changed before confirmed-absence cleanup")
+		}
+		if expected.ResourceID != "" && claim.CloudID != expected.ResourceID {
+			return confirmedAbsentLocalState{}, exit(4, "lease claim resource identity changed before confirmed-absence cleanup")
+		}
+	}
+	return confirmedAbsentLocalState{leaseID: leaseID, claim: claim, claimExists: claimExists}, nil
+}
+
+func cleanupConfirmedAbsentLocalState(ctx context.Context, backend Backend, expected ProviderIdentityExpectation, providerScope string) error {
+	state, err := confirmedAbsentLocalStateSnapshot(ctx, backend, expected, providerScope)
+	if err != nil {
+		return err
+	}
+	cleanupSidecars := func() error {
+		cleaner, ok := backend.(ConfirmedAbsentLocalStateCleaner)
+		if !ok {
+			return nil
+		}
+		return cleaner.CleanupConfirmedAbsentLocalState(ctx, ConfirmedAbsentLocalCleanupRequest{
+			ExpectedProviderIdentity: expected,
+			ProviderScope:            providerScope,
+		})
+	}
+	return cleanupLeaseClaimIfUnchangedAfter(state.leaseID, state.claim, state.claimExists, cleanupSidecars)
 }
 
 func (a App) writeActionsHydrationStopBestEffort(ctx context.Context, target SSHTarget, leaseID string) {
