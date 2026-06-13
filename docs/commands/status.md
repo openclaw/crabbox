@@ -40,6 +40,8 @@ addition to the Crabbox lease ID and local slug:
   slug.
 - `e2b` — accepts a lease ID, local slug, or a Crabbox-owned E2B sandbox ID in
   raw or `e2b_<sandboxID>` form.
+- `vercel-sandbox` — accepts a Crabbox-created local slug or `vsbx_...` lease
+  ID and verifies the Vercel Sandbox ownership metadata before reporting state.
 
 ## Waiting for readiness
 
@@ -55,7 +57,7 @@ from idling out.
 
 ```text
 --id <lease-id-or-slug>
---provider hetzner|aws|azure|azure-dynamic-sessions|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b
+--provider hetzner|aws|azure|azure-dynamic-sessions|gcp|proxmox|ssh|exe-dev|blacksmith-testbox|namespace-devbox|semaphore|sprites|daytona|islo|e2b|vercel-sandbox
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>

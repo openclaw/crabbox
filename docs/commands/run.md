@@ -73,10 +73,10 @@ with `--keep` to write a small JSON lease handle for orchestrators.
 
 Most providers connect over SSH and Crabbox owns sync and command transport.
 Delegated providers (for example Blacksmith Testbox, Daytona, Islo, Azure
-Dynamic Sessions, and E2B) own command transport themselves: Crabbox uploads
-the checkout through the provider's APIs, runs the command through the
-provider, and prints `sync=delegated` in the final timing summary. These
-providers reject the SSH-run-only features `--capture-stdout`,
+Dynamic Sessions, E2B, Superserve, OpenSandbox, and Vercel Sandbox) own command
+transport themselves: Crabbox uploads the checkout through the provider's APIs,
+runs the command through the provider, and prints `sync=delegated` in the final
+timing summary. These providers reject the SSH-run-only features `--capture-stdout`,
 `--capture-stderr`, `--capture-on-fail`, `--download`, `--script`,
 `--script-stdin`, and `--fresh-pr`. Delegated artifact features
 `--artifact-glob` and `--require-artifact` are accepted only by delegated
@@ -84,6 +84,12 @@ adapters that explicitly advertise bounded run artifact retrieval.
 `--keep-on-failure` is supported for one-shot delegated runs. See the
 per-provider docs under [providers](../features/providers.md) for how `--id`
 resolves and any extra sync limitations.
+
+Vercel Sandbox forwards non-auth command environment values through the SDK
+bridge request body and strips Vercel provider auth variables from
+`--allow-env` forwarding. Use Crabbox env forwarding for live secrets; raw
+`sandbox --env key=value` places values on argv and is only suitable for manual
+non-secret debugging.
 
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.

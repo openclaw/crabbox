@@ -40,6 +40,10 @@ What cleanup does depends on the selected provider:
   it does not delete remote Devboxes.
 - **`namespace-instance`** destroys only Namespace Compute instances carrying
   Crabbox ownership labels and removes claims for instances already gone.
+- **`vercel-sandbox`** sweeps only local `vsbx_...` claims in the configured
+  project/team/scope. It deletes idle-expired Crabbox-owned Vercel Sandboxes and
+  keeps missing-or-inaccessible claims unless
+  `--vercel-sandbox-forget-missing` is explicit.
 - Providers that have nothing to sweep return an error rather than acting. For
   example `provider=ssh` (static / bring-your-own hosts) reports:
 
@@ -111,7 +115,7 @@ namespace ssh cleanup no crabbox files found
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|multipass
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|multipass|vercel-sandbox
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```
