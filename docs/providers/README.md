@@ -90,6 +90,7 @@ the built-in adapter needs a separate local smoke contract.
 | [Daytona](daytona.md) — `daytona` | Linux · direct |
 | [Morph](morph.md) — `morph` | Linux · direct |
 | [RunPod](runpod.md) — `runpod` (`run-pod`, `runpodio`) | Linux · direct |
+| [NVIDIA Brev](nvidia-brev.md) — `nvidia-brev` (`brev`, `nvidia`) | Linux · direct |
 | [ASCII Box](ascii-box.md) — `ascii-box` (`ascii`, `asciibox`) | Linux · direct |
 
 ### Delegated run
@@ -159,6 +160,9 @@ reports.
   Phase 1.
 - Hostinger is a direct-only Linux VPS provider. Purchases require explicit
   opt-in; release stops the VPS but does not cancel its subscription.
+- NVIDIA Brev is a direct-only Linux GPU workspace provider. Crabbox shells out
+  to the Brev CLI, reuses the CLI's credential store and generated SSH config,
+  and deletes Crabbox-owned workspaces on release by default.
 - Capability flags (`--desktop`, `--browser`, `--code`, VNC) are validated
   against each provider's declared feature set. Among the SSH-lease providers,
   desktop/browser/code surfaces are richest on `aws`, `azure`, `hetzner`,

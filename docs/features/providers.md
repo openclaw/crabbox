@@ -99,6 +99,7 @@ kubevirt         Generic KubeVirt virtual machines        Linux
 external         Configured executable provider           Linux
 namespace-devbox Namespace Devboxes                       Linux
 runpod           RunPod GPU pods (public SSH)             Linux
+nvidia-brev      NVIDIA Brev GPU workspaces               Linux
 semaphore        Semaphore CI jobs                        Linux
 sprites          Sprites microVMs through sprite proxy    Linux
 ```
@@ -170,6 +171,7 @@ railway                 Railway service status and stop controls
 - [Namespace Devbox](../providers/namespace-devbox.md): Namespace Devbox SSH leases.
 - [Railway](../providers/railway.md): Railway service status and stop controls.
 - [RunPod](../providers/runpod.md): RunPod GPU pods over public SSH.
+- [NVIDIA Brev](../providers/nvidia-brev.md): NVIDIA Brev GPU workspaces through the Brev CLI and generated SSH config.
 - [Semaphore](../providers/semaphore.md): Semaphore CI job leases.
 - [Sprites](../providers/sprites.md): Sprites microVM SSH leases through `sprite proxy`.
 - [Tenki](../providers/tenki.md): Tenki sandbox VM SSH leases through `tenki sandbox ssh-proxy`.
