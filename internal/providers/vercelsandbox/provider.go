@@ -1,7 +1,6 @@
 package vercelsandbox
 
 import (
-	"context"
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -81,28 +80,4 @@ func (b *backend) client() (vercelSandboxClient, error) {
 		return b.newClient(b.cfg, b.rt)
 	}
 	return newBridgeClient(b.cfg, b.rt)
-}
-
-func (b *backend) Warmup(context.Context, WarmupRequest) error {
-	return exit(2, "provider=%s lifecycle is not implemented in the foundation; run PLAN-02 before using warmup", providerName)
-}
-
-func (b *backend) Run(context.Context, RunRequest) (RunResult, error) {
-	return RunResult{}, exit(2, "provider=%s lifecycle is not implemented in the foundation; run PLAN-02 before using run", providerName)
-}
-
-func (b *backend) List(context.Context, ListRequest) ([]LeaseView, error) {
-	return nil, exit(2, "provider=%s lifecycle is not implemented in the foundation; run PLAN-02 before using list", providerName)
-}
-
-func (b *backend) Status(context.Context, StatusRequest) (StatusView, error) {
-	return StatusView{}, exit(2, "provider=%s lifecycle is not implemented in the foundation; run PLAN-02 before using status", providerName)
-}
-
-func (b *backend) Stop(context.Context, StopRequest) error {
-	return exit(2, "provider=%s lifecycle is not implemented in the foundation; run PLAN-02 before using stop", providerName)
-}
-
-func (b *backend) Cleanup(context.Context, CleanupRequest) error {
-	return exit(2, "provider=%s lifecycle is not implemented in the foundation; run PLAN-02 before using cleanup", providerName)
 }

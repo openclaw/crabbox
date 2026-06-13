@@ -3,6 +3,7 @@ package vercelsandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 )
 
@@ -40,6 +41,36 @@ func (f *fakeClient) CheckProject(context.Context) error {
 func (f *fakeClient) ListSandboxes(context.Context) ([]sandboxSummary, error) {
 	f.calls = append(f.calls, "list")
 	return f.list, f.listErr
+}
+
+func (f *fakeClient) CreateSandbox(context.Context, createSandboxRequest) (sandboxSummary, error) {
+	f.calls = append(f.calls, "create")
+	return sandboxSummary{}, errors.New("not implemented")
+}
+
+func (f *fakeClient) GetSandbox(context.Context, string) (sandboxSummary, error) {
+	f.calls = append(f.calls, "get")
+	return sandboxSummary{}, errors.New("not implemented")
+}
+
+func (f *fakeClient) UpdateSandboxMetadata(context.Context, string, map[string]string) (sandboxSummary, error) {
+	f.calls = append(f.calls, "update")
+	return sandboxSummary{}, errors.New("not implemented")
+}
+
+func (f *fakeClient) DeleteSandbox(context.Context, string) error {
+	f.calls = append(f.calls, "delete")
+	return errors.New("not implemented")
+}
+
+func (f *fakeClient) UploadFile(context.Context, string, string, io.Reader) error {
+	f.calls = append(f.calls, "upload")
+	return errors.New("not implemented")
+}
+
+func (f *fakeClient) Exec(context.Context, string, execRequest, io.Writer, io.Writer) (execResult, error) {
+	f.calls = append(f.calls, "exec")
+	return execResult{}, errors.New("not implemented")
 }
 
 func TestDoctorReadyIsNonMutating(t *testing.T) {
