@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CloudflareCoordinatorRuntime,
@@ -8,7 +8,12 @@ import {
   type CoordinatorStorage,
 } from "../src/coordinator-runtime";
 import { FleetCoordinator } from "../src/fleet";
+import { githubAuthRoute } from "../src/oauth";
 import type { Env } from "../src/types";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 class MemoryStorage implements CoordinatorStorage {
   private readonly values = new Map<string, unknown>();
@@ -38,9 +43,20 @@ class MemoryRuntime implements CoordinatorRuntime {
   readonly storage = new MemoryStorage();
   alarmTime?: number;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
+  private exclusiveTail: Promise<void> = Promise.resolve();
 
-  runExclusive<T>(callback: () => Promise<T>): Promise<T> {
-    return callback();
+  async runExclusive<T>(callback: () => Promise<T>): Promise<T> {
+    const predecessor = this.exclusiveTail;
+    let release!: () => void;
+    this.exclusiveTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await predecessor;
+    try {
+      return await callback();
+    } finally {
+      release();
+    }
   }
 
   createWebSocketUpgrade(): never {
@@ -93,6 +109,90 @@ describe("coordinator runtimes", () => {
     expect(coordinatorRequestQueue(new Request("https://coordinator.test/portal/login"))).toBe(
       "lifecycle",
     );
+    expect(
+      coordinatorRequestQueue(
+        new Request("https://coordinator.test/v1/auth/github/callback?code=x&state=y"),
+      ),
+    ).toBe("direct");
+    expect(
+      coordinatorRequestQueue(
+        new Request("https://coordinator.test/v1/auth/github/start", { method: "POST" }),
+      ),
+    ).toBe("lifecycle");
+  });
+
+  it("does not hold the lifecycle queue across GitHub OAuth requests", async () => {
+    const runtime = new MemoryRuntime();
+    const env = {
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_CLIENT_ID: "github-client",
+      CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+      CRABBOX_SHARED_TOKEN: "shared",
+    } as Env;
+    const start = await runtime.runExclusive(() =>
+      githubAuthRoute(
+        new Request("https://coordinator.test/v1/auth/github/start", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ pollSecretHash: "0".repeat(64) }),
+        }),
+        "start",
+        runtime,
+        env,
+      ),
+    );
+    const startBody = (await start.json()) as { url: string };
+    const state = new URL(startBody.url).searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    let releaseTokenExchange!: () => void;
+    const tokenExchangeBlocked = new Promise<void>((resolve) => {
+      releaseTokenExchange = resolve;
+    });
+    let signalTokenExchange!: () => void;
+    const tokenExchangeStarted = new Promise<void>((resolve) => {
+      signalTokenExchange = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === "https://github.com/login/oauth/access_token") {
+          signalTokenExchange();
+          await tokenExchangeBlocked;
+          return Response.json({ access_token: "github-access-token" });
+        }
+        if (url === "https://api.github.com/user") {
+          return Response.json({ login: "friend", email: "friend@example.com" });
+        }
+        if (url === "https://api.github.com/user/emails") {
+          return Response.json([]);
+        }
+        if (url === "https://api.github.com/user/memberships/orgs/example-org") {
+          return Response.json({
+            state: "active",
+            organization: { login: "example-org" },
+          });
+        }
+        throw new Error(`unexpected GitHub URL: ${url}`);
+      }),
+    );
+
+    const callbackRequest = new Request(
+      `https://coordinator.test/v1/auth/github/callback?code=ok&state=${state}`,
+    );
+    const callback = githubAuthRoute(callbackRequest, "callback", runtime, env);
+    await tokenExchangeStarted;
+
+    await expect(runtime.runExclusive(async () => "lifecycle-completed")).resolves.toBe(
+      "lifecycle-completed",
+    );
+    const duplicate = await githubAuthRoute(callbackRequest, "callback", runtime, env);
+    expect(duplicate.status).toBe(409);
+
+    releaseTokenExchange();
+    await expect(callback).resolves.toMatchObject({ status: 200 });
   });
 
   it("runs the fleet coordinator without a Durable Object", async () => {

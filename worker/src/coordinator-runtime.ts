@@ -11,6 +11,9 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
   const method = request.method.toUpperCase();
+  if (method === "GET" && path.join("/") === "v1/auth/github/callback") {
+    return "direct";
+  }
   if (method === "POST" && path.join("/") === "v1/leases") {
     return "direct";
   }
