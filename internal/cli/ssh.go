@@ -791,7 +791,7 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 		wslKey = "/tmp/crabbox-wsl-" + filepath.Base(filepath.Dir(target.Key))
 		knownHostsPath = knownHostsFile(target)
 		if keyData, err := os.ReadFile(windowsHostPath(target.Key)); err == nil {
-			cpCmd := exec.CommandContext(ctx, wslExe, "sh", "-lc",
+			cpCmd := exec.CommandContext(ctx, wslExe, "sh", "-c",
 				fmt.Sprintf("umask 077; cat > %s && chmod 600 %s",
 					shellQuote(wslKey),
 					shellQuote(wslKey)))
@@ -806,7 +806,7 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 		}
 		if knownHostsData, err := os.ReadFile(windowsHostPath(knownHostsPath)); err == nil {
 			wslKnownHosts = wslKey + "-known_hosts"
-			cpKnownHostsCmd := exec.CommandContext(ctx, wslExe, "sh", "-lc",
+			cpKnownHostsCmd := exec.CommandContext(ctx, wslExe, "sh", "-c",
 				fmt.Sprintf("cat > %s && chmod 600 %s",
 					shellQuote(wslKnownHosts),
 					shellQuote(wslKnownHosts)))
@@ -857,7 +857,7 @@ func windowsWSLHasNativeRsyncSSH(ctx context.Context, wslExe string) bool {
 	if strings.TrimSpace(wslExe) == "" {
 		return false
 	}
-	out, err := exec.CommandContext(ctx, wslExe, "sh", "-lc", "rsync_path=$(command -v rsync) || exit 1; ssh_path=$(command -v ssh) || exit 1; printf '%s\\n%s\\n' \"$rsync_path\" \"$ssh_path\"").Output()
+	out, err := exec.CommandContext(ctx, wslExe, "sh", "-c", "rsync_path=$(command -v rsync) || exit 1; ssh_path=$(command -v ssh) || exit 1; printf '%s\\n%s\\n' \"$rsync_path\" \"$ssh_path\"").Output()
 	return err == nil && windowsWSLNativeToolPaths(string(out))
 }
 
@@ -953,7 +953,7 @@ func windowsWSLMountRoot(ctx context.Context, wslExe string) string {
 	if runtime.GOOS != "windows" {
 		return "/mnt"
 	}
-	out, err := exec.CommandContext(ctx, wslExe, "sh", "-lc", "if [ -d /mnt/host/c ]; then printf /mnt/host; else printf /mnt; fi").Output()
+	out, err := exec.CommandContext(ctx, wslExe, "sh", "-c", "if [ -d /mnt/host/c ]; then printf /mnt/host; else printf /mnt; fi").Output()
 	if err == nil {
 		if value := strings.TrimSpace(string(out)); value != "" {
 			return value
