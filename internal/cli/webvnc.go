@@ -2955,7 +2955,6 @@ func directSSHWebVNCChallengeResponse(password string, challenge []byte) ([]byte
 	}
 	response := make([]byte, len(challenge))
 	for offset := 0; offset < len(challenge); offset += des.BlockSize {
-		// codeql[go/weak-cryptographic-algorithm]
 		cipher.Encrypt(response[offset:offset+des.BlockSize], challenge[offset:offset+des.BlockSize])
 	}
 	return response, nil
@@ -3447,8 +3446,13 @@ func (b *webVNCBridge) handleControlFrame(ctx context.Context, data []byte) (boo
 	if msg.Type != "desktop_theme" {
 		return false, nil
 	}
-	theme := strings.TrimSpace(msg.Theme)
-	if theme != "light" && theme != "dark" {
+	var theme string
+	switch strings.TrimSpace(msg.Theme) {
+	case "light":
+		theme = "light"
+	case "dark":
+		theme = "dark"
+	default:
 		return true, fmt.Errorf("ignore invalid desktop theme %q", msg.Theme)
 	}
 	if b.target.TargetOS != "" && b.target.TargetOS != targetLinux {
@@ -3466,8 +3470,12 @@ func (b *webVNCBridge) handleControlFrame(ctx context.Context, data []byte) (boo
 }
 
 func webVNCDesktopThemeCommand(theme, user string) string {
-	theme = strings.TrimSpace(theme)
-	if theme != "light" && theme != "dark" {
+	switch strings.TrimSpace(theme) {
+	case "light":
+		theme = "light"
+	case "dark":
+		theme = "dark"
+	default:
 		theme = "dark"
 	}
 	user = strings.TrimSpace(user)

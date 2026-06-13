@@ -855,8 +855,8 @@ func TestWebVNCDesktopThemeCommand(t *testing.T) {
 			t.Fatalf("theme command missing %q in %s", want, got)
 		}
 	}
-	if strings.Contains(webVNCDesktopThemeCommand("neon", ""), "neon") {
-		t.Fatal("invalid theme should fall back to dark")
+	if got := webVNCDesktopThemeCommand("light; touch /tmp/pwned", ""); strings.Contains(got, "touch") || strings.Contains(got, "pwned") {
+		t.Fatalf("invalid theme reached remote command: %s", got)
 	}
 }
 
