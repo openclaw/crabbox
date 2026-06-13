@@ -3,12 +3,14 @@ package agentsandbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
@@ -19,6 +21,14 @@ const (
 	annotationScope     = "crabbox.openclaw.dev/provider-scope"
 	annotationWorkdir   = "crabbox.openclaw.dev/workdir"
 	annotationContainer = "crabbox.openclaw.dev/container"
+
+	claimLabelClaimName   = "claim"
+	claimLabelSandboxName = "sandbox"
+	claimLabelPodName     = "pod"
+	claimLabelNamespace   = "namespace"
+	claimLabelWarmPool    = "warm_pool"
+	claimLabelContainer   = "container"
+	claimLabelWorkdir     = "workdir"
 )
 
 var dns1123LabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -31,13 +41,13 @@ func claimName(leaseID, slug string) string {
 	if base == "" {
 		base = "sandbox"
 	}
-	name := namePrefix + base
+	sum := sha256.Sum256([]byte(leaseID))
+	leaseSuffix := "-" + hex.EncodeToString(sum[:])[:8]
+	name := namePrefix + base + leaseSuffix
 	if len(name) <= 63 {
 		return name
 	}
-	sum := sha256.Sum256([]byte(name))
-	suffix := "-" + hex.EncodeToString(sum[:])[:8]
-	return strings.TrimRight(name[:63-len(suffix)], "-") + suffix
+	return strings.TrimRight(name[:63-len(leaseSuffix)], "-") + leaseSuffix
 }
 
 func normalizeKubernetesName(value string) string {
@@ -99,6 +109,54 @@ func claimLeaseForRepo(cfg Config, leaseID, slug string, repo Repo, reclaim bool
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
 }
 
+func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName string) error {
+	if err := claimLeaseForRepo(cfg, leaseID, slug, repo, reclaim); err != nil {
+		return err
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	_, err = updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName))
+	return err
+}
+
+func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 && claim.IdleTimeoutSeconds > 0 {
+		idleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	}
+	if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false); err != nil {
+		return err
+	}
+	updated, err := readLeaseClaim(claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	_, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claim.Labels)
+	return err
+}
+
+func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, claimName string) map[string]string {
+	container := strings.TrimSpace(cfg.AgentSandbox.Container)
+	if container == "" {
+		container = "default"
+	}
+	return map[string]string{
+		"provider":            providerName,
+		"lease":               leaseID,
+		claimLabelClaimName:   claimName,
+		claimLabelSandboxName: ready.SandboxName,
+		claimLabelPodName:     ready.PodName,
+		claimLabelNamespace:   cfg.AgentSandbox.Namespace,
+		claimLabelWarmPool:    cfg.AgentSandbox.WarmPool,
+		claimLabelContainer:   container,
+		claimLabelWorkdir:     cfg.AgentSandbox.Workdir,
+		"target":              targetLinux,
+		"state":               statusViewReady,
+	}
+}
+
 func authorizeClaimScope(cfg Config, claim LeaseClaim) error {
 	if claim.Provider != "" && claim.Provider != providerName {
 		return exit(2, "lease %s belongs to provider=%s, not %s", claim.LeaseID, claim.Provider, providerName)
@@ -115,6 +173,57 @@ func retainMissingClaim(cfg Config, claim LeaseClaim) error {
 		return nil
 	}
 	return fmt.Errorf("agent-sandbox claim %s is missing in Kubernetes; local claim retained because forgetMissing=false", claim.LeaseID)
+}
+
+func resolveLocalClaim(identifier string) (LeaseClaim, error) {
+	claim, ok, err := resolveLeaseClaimForProvider(identifier, providerName)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	if !ok {
+		return LeaseClaim{}, exit(4, "agent-sandbox lease %q is not claimed by Crabbox", identifier)
+	}
+	return claim, nil
+}
+
+func listAgentSandboxLeaseClaims() ([]LeaseClaim, error) {
+	return listLeaseClaimsWithPrefix(leasePrefix)
+}
+
+func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
+	if claim.IdleTimeoutSeconds <= 0 {
+		return false, "idle timeout disabled"
+	}
+	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
+	if err != nil {
+		return false, "invalid last-used time"
+	}
+	deadline := lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
+	if now.Before(deadline) {
+		return false, "idle timeout not reached"
+	}
+	return true, "idle timeout"
+}
+
+func claimNameFromLocalClaim(claim LeaseClaim) string {
+	if claim.Labels != nil {
+		if value := strings.TrimSpace(claim.Labels[claimLabelClaimName]); value != "" {
+			return value
+		}
+	}
+	return strings.TrimPrefix(claim.LeaseID, leasePrefix)
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func isNotFound(err error) bool {
+	return apierrors.IsNotFound(err) || errors.Is(err, errKubernetesNotFound)
 }
 
 func newLeaseID() string {

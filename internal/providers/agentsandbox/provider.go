@@ -2,6 +2,7 @@ package agentsandbox
 
 import (
 	"flag"
+	"path"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -89,12 +90,13 @@ func validateConfig(cfg core.Config) error {
 	if strings.ContainsAny(values.Container, " \t\r\n/") {
 		return core.Exit(2, "agent-sandbox container %q is invalid", values.Container)
 	}
-	if !strings.HasPrefix(values.Workdir, "/") {
+	cleanWorkdir := path.Clean(values.Workdir)
+	if !strings.HasPrefix(cleanWorkdir, "/") {
 		return core.Exit(2, "agent-sandbox workdir %q must be absolute", values.Workdir)
 	}
-	switch values.Workdir {
+	switch cleanWorkdir {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
-		return core.Exit(2, "agent-sandbox workdir %q is too broad; choose a dedicated subdirectory", values.Workdir)
+		return core.Exit(2, "agent-sandbox workdir %q is too broad; choose a dedicated subdirectory", cleanWorkdir)
 	}
 	if values.SandboxReadyTimeout < 0 {
 		return core.Exit(2, "agent-sandbox sandboxReadyTimeout must be non-negative")

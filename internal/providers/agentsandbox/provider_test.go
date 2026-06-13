@@ -84,6 +84,7 @@ func TestValidateConfigRejectsUnsafeInputs(t *testing.T) {
 		"bad container":            func(cfg *core.Config) { cfg.AgentSandbox.Container = "bad container" },
 		"relative workdir":         func(cfg *core.Config) { cfg.AgentSandbox.Workdir = "workspace" },
 		"broad workdir":            func(cfg *core.Config) { cfg.AgentSandbox.Workdir = "/tmp" },
+		"cleaned broad workdir":    func(cfg *core.Config) { cfg.AgentSandbox.Workdir = "/tmp/.." },
 		"negative sandbox timeout": func(cfg *core.Config) { cfg.AgentSandbox.SandboxReadyTimeout = -time.Second },
 		"negative pod timeout":     func(cfg *core.Config) { cfg.AgentSandbox.PodReadyTimeout = -time.Second },
 		"negative exec timeout":    func(cfg *core.Config) { cfg.AgentSandbox.ExecTimeoutSecs = -1 },

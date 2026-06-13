@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,28 +15,39 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
-var errNotReady = errors.New("not ready")
+var (
+	errNotReady           = errors.New("not ready")
+	errKubernetesNotFound = errors.New("kubernetes resource not found")
+)
 
 type kubernetesClient interface {
 	CheckResource(ctx context.Context, groupVersion, resource string) error
 	Get(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error)
+	Create(ctx context.Context, gvr schema.GroupVersionResource, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
+	Delete(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) error
+	List(ctx context.Context, gvr schema.GroupVersionResource, namespace string, opts metav1.ListOptions) (*unstructured.UnstructuredList, error)
 	CanI(ctx context.Context, rule rbacRule) (bool, error)
 	GetPod(ctx context.Context, namespace, name string) (podState, error)
 	ListPods(ctx context.Context, namespace, selector string) ([]podState, error)
+	Exec(ctx context.Context, req podExecRequest) error
 }
 
 type dynamicKubernetesClient struct {
 	discovery discovery.DiscoveryInterface
 	dynamic   dynamic.Interface
 	core      kubernetes.Interface
+	rest      *rest.Config
 }
 
 func newKubernetesClient(_ context.Context, cfg Config, _ Runtime) (kubernetesClient, error) {
@@ -55,7 +67,7 @@ func newKubernetesClient(_ context.Context, cfg Config, _ Runtime) (kubernetesCl
 	if err != nil {
 		return nil, fmt.Errorf("create core client: %w", err)
 	}
-	return &dynamicKubernetesClient{discovery: discoveryClient, dynamic: dynamicClient, core: coreClient}, nil
+	return &dynamicKubernetesClient{discovery: discoveryClient, dynamic: dynamicClient, core: coreClient, rest: restConfig}, nil
 }
 
 func loadRESTConfig(cfg AgentSandboxConfig) (*rest.Config, error) {
@@ -100,6 +112,29 @@ func (c *dynamicKubernetesClient) Get(ctx context.Context, gvr schema.GroupVersi
 	return obj, nil
 }
 
+func (c *dynamicKubernetesClient) Create(ctx context.Context, gvr schema.GroupVersionResource, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	created, err := c.dynamic.Resource(gvr).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("create %s/%s %s/%s: %w", gvr.Group, gvr.Resource, namespace, obj.GetName(), err)
+	}
+	return created, nil
+}
+
+func (c *dynamicKubernetesClient) Delete(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) error {
+	if err := c.dynamic.Resource(gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("delete %s/%s %s/%s: %w", gvr.Group, gvr.Resource, namespace, name, err)
+	}
+	return nil
+}
+
+func (c *dynamicKubernetesClient) List(ctx context.Context, gvr schema.GroupVersionResource, namespace string, opts metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	list, err := c.dynamic.Resource(gvr).Namespace(namespace).List(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list %s/%s namespace=%s: %w", gvr.Group, gvr.Resource, namespace, err)
+	}
+	return list, nil
+}
+
 func (c *dynamicKubernetesClient) CanI(ctx context.Context, rule rbacRule) (bool, error) {
 	for _, verb := range rule.Verbs {
 		review := &authorizationv1.SelfSubjectAccessReview{
@@ -141,6 +176,45 @@ func (c *dynamicKubernetesClient) ListPods(ctx context.Context, namespace, selec
 		pods = append(pods, podStateFromPod(&pod))
 	}
 	return pods, nil
+}
+
+type podExecRequest struct {
+	Namespace string
+	Pod       string
+	Container string
+	Command   []string
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
+}
+
+func (c *dynamicKubernetesClient) Exec(ctx context.Context, req podExecRequest) error {
+	execReq := c.core.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Namespace(req.Namespace).
+		Name(req.Pod).
+		SubResource("exec")
+	execReq.VersionedParams(&corev1.PodExecOptions{
+		Container: req.Container,
+		Command:   req.Command,
+		Stdin:     req.Stdin != nil,
+		Stdout:    req.Stdout != nil,
+		Stderr:    req.Stderr != nil,
+		TTY:       false,
+	}, runtime.NewParameterCodec(scheme.Scheme))
+	executor, err := remotecommand.NewSPDYExecutor(c.rest, "POST", execReq.URL())
+	if err != nil {
+		return fmt.Errorf("create pod exec executor: %w", err)
+	}
+	if err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:  req.Stdin,
+		Stdout: req.Stdout,
+		Stderr: req.Stderr,
+		Tty:    false,
+	}); err != nil {
+		return fmt.Errorf("exec pod %s/%s: %w", req.Namespace, req.Pod, err)
+	}
+	return nil
 }
 
 func sandboxGVR() schema.GroupVersionResource {

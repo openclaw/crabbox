@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -28,6 +29,11 @@ type StopRequest = core.StopRequest
 type CleanupRequest = core.CleanupRequest
 type LeaseClaim = core.LeaseClaim
 type Repo = core.Repo
+type Server = core.Server
+type ExitError = core.ExitError
+type timingReport = core.TimingReport
+type timingPhase = core.TimingPhase
+type SyncManifest = core.SyncManifest
 
 const (
 	providerName = "agent-sandbox"
@@ -41,6 +47,12 @@ const (
 	sandboxClaimResource = "sandboxclaims"
 	warmPoolResource     = "sandboxwarmpools"
 	podResource          = "pods"
+	targetLinux          = core.TargetLinux
+	networkPublic        = core.NetworkPublic
+	statusViewReady      = "running"
+
+	agentSandboxCleanupTimeout = 15 * time.Second
+	agentSandboxStatusPoll     = 2 * time.Second
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
@@ -83,4 +95,62 @@ func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
-func unusedContext(context.Context) {}
+func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
+	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
+}
+
+func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
+	return core.AllocateClaimLeaseSlug(leaseID, requested)
+}
+
+func resolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProvider(identifier, provider)
+}
+
+func leaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
+	return core.LeaseClaimMatchesIdentifier(claim, identifier)
+}
+
+func listLeaseClaimsWithPrefix(prefix string) ([]LeaseClaim, error) {
+	return core.ListLeaseClaimsWithPrefix(prefix)
+}
+
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
+}
+
+func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
+	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
+}
+
+func shouldUseShell(command []string) bool {
+	return core.ShouldUseShell(command)
+}
+
+func shellScriptFromArgv(command []string) string {
+	return core.ShellScriptFromArgv(command)
+}
+
+func shellQuote(s string) string {
+	return core.ShellQuote(s)
+}
+
+func syncExcludes(root string, cfg Config) ([]string, error) {
+	return core.SyncExcludes(root, cfg)
+}
+
+func syncManifest(root string, excludes, includes []string) (core.SyncManifest, error) {
+	return core.BuildSyncManifestFiltered(root, excludes, includes)
+}
+
+func checkSyncPreflight(manifest core.SyncManifest, cfg Config, force bool, stderr io.Writer) error {
+	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
+}
+
+func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
+}
