@@ -198,6 +198,9 @@ CRABBOX_HOST_ID                    optional; pins a brokered host such as an EC2
 CRABBOX_AWS_MAC_HOST_ID            optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token automation
 CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion
+CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for /v1/workspaces lease provisioning
+CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; currently hetzner only
+CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
 CRABBOX_SESSION_SECRET            required for browser login
@@ -231,6 +234,11 @@ CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
 CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 Mac hosts during orphan sweep
 ```
+
+Workspace leases currently use their hard TTL for provider expiry because the
+adapter does not yet receive a trustworthy activity signal. Workspace TTLs must
+be at least 1,800 seconds so a durable claim and ambiguity-recovery window both
+fit before hard TTL.
 
 ### Artifact backend
 

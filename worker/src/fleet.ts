@@ -1,5 +1,5 @@
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
-import { isAdminRequest } from "./auth";
+import { isAdminRequest, sha256Hex } from "./auth";
 import {
   EC2SpotClient,
   awsLaunchCandidates,
@@ -26,7 +26,13 @@ import {
   type CoordinatorRuntime,
 } from "./coordinator-runtime";
 import { GCPClient } from "./gcp";
-import { HetznerClient } from "./hetzner";
+import {
+  HetznerClient,
+  hetznerProvisioningFailureMayHaveResource,
+  hetznerProvisioningFailureRetryable,
+  sshPublicKeyIdentity,
+  workspaceProviderKeyPrefix,
+} from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
 import { defaultOSImage, normalizeOSImage } from "./os-image";
@@ -129,6 +135,14 @@ const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
+const workspaceReconcileIntervalMs = 10_000;
+const workspaceReconcileMaxIntervalMs = 5 * 60_000;
+const workspaceProvisionClaimMs = 15 * 60_000;
+const workspaceProvisionRecoveryGraceMs = 15 * 60_000;
+const workspaceMinimumTTLSeconds =
+  (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
+const workspaceMaxRecordsPerOwner = 100;
+const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
 
 interface WebVNCTicketRecord {
   ticket: string;
@@ -170,6 +184,38 @@ interface EgressSessionStatus {
   allow: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+interface WorkspaceCreateRequest {
+  id?: string;
+  runtime?: string;
+  profile?: string;
+  ttlSeconds?: number;
+  idleTimeoutSeconds?: number;
+  capabilities?: {
+    desktop?: boolean;
+  };
+}
+
+interface WorkspaceRecord {
+  id: string;
+  leaseID: string;
+  owner: string;
+  org: string;
+  profile: string;
+  provider: Provider;
+  class: string;
+  desktop: boolean;
+  ttlSeconds: number;
+  idleTimeoutSeconds: number;
+  createdAt: string;
+  updatedAt: string;
+  provisionClaim?: string;
+  provisionClaimExpiresAt?: string;
+  reconcileAfter?: string;
+  recoveryMisses?: number;
+  releaseRequestedAt?: string;
+  error?: string;
 }
 
 interface CodeProxyRequest {
@@ -572,6 +618,12 @@ export class FleetCoordinator {
       if (method === "POST" && parts.join("/") === "v1/leases") {
         return await this.createLease(request);
       }
+      if (method === "POST" && parts.join("/") === "v1/workspaces") {
+        return await this.createWorkspace(request);
+      }
+      if (parts[0] === "v1" && parts[1] === "workspaces" && parts[2]) {
+        return await this.workspaceRoute(request, parts[2], parts[3], parts[4]);
+      }
       if (
         parts[0] === "v1" &&
         parts[1] === "leases" &&
@@ -925,6 +977,15 @@ export class FleetCoordinator {
       sendControl(socket, { type: "heartbeat", leaseID, ok: false, error: "not_found" });
       return;
     }
+    if (lease.workspaceID) {
+      sendControl(socket, {
+        type: "heartbeat",
+        leaseID: lease.id,
+        ok: false,
+        error: "workspace_managed_lease",
+      });
+      return;
+    }
     if (lease.cleanupStartedAt) {
       sendControl(socket, {
         type: "heartbeat",
@@ -1048,6 +1109,8 @@ export class FleetCoordinator {
 
   async alarm(): Promise<void> {
     await this.expireLeases();
+    await this.provisionPendingWorkspace();
+    await this.pruneTerminalWorkspaces();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
@@ -1063,7 +1126,11 @@ export class FleetCoordinator {
     return json({ ok: true });
   }
 
-  private async createLease(request: Request): Promise<Response> {
+  private async createLease(
+    request: Request,
+    reservationGuard?: () => Promise<Response | undefined>,
+    workspaceID?: string,
+  ): Promise<Response> {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
@@ -1074,6 +1141,19 @@ export class FleetCoordinator {
     if (azureWindowsARM64Image) defaults.azureWindowsARM64Image = azureWindowsARM64Image;
     if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
     let config = leaseConfig(input, defaults);
+    if (
+      !workspaceID &&
+      config.provider === "hetzner" &&
+      config.providerKey.startsWith(workspaceProviderKeyPrefix)
+    ) {
+      return json(
+        {
+          error: "reserved_provider_key",
+          message: `${workspaceProviderKeyPrefix}* is reserved for workspace provisioning`,
+        },
+        { status: 400 },
+      );
+    }
     if (!isAdminRequest(request) && hasNativeLeaseSource(config)) {
       return json(
         {
@@ -1121,6 +1201,13 @@ export class FleetCoordinator {
       providerHourlyUSD,
     );
     const reservation = await this.state.runExclusive(async () => {
+      const blocked = await reservationGuard?.();
+      if (blocked) {
+        return blocked;
+      }
+      if (!workspaceID && (await this.state.storage.get(workspaceLeaseReservationKey(leaseID)))) {
+        return workspaceManagedLeaseResponse();
+      }
       const leases = await this.leaseRecords();
       if (leases.some((lease) => lease.id === leaseID)) {
         return json(
@@ -1144,6 +1231,7 @@ export class FleetCoordinator {
       let record: LeaseRecord = {
         id: leaseID,
         slug,
+        ...(workspaceID ? { workspaceID } : {}),
         provider: config.provider,
         target: config.target,
         os: config.os,
@@ -1315,6 +1403,47 @@ export class FleetCoordinator {
           },
         }
       : undefined;
+    const provisioningStart = await this.state.runExclusive(async () => {
+      const current = await this.getLease(record.id);
+      if (!current || current.state !== "provisioning") {
+        return { started: false as const, current };
+      }
+      if (current.workspaceID) {
+        const workspace = await this.state.storage.get<WorkspaceRecord>(
+          workspaceKey(current.owner, current.org, current.workspaceID),
+        );
+        if (workspace?.releaseRequestedAt && workspaceOwnsLease(workspace, current)) {
+          if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+            await this.deleteProviderAccess(current.id);
+          }
+          return { started: false as const, current, workspace };
+        }
+      }
+      current.provisioningRequestStartedAt = new Date().toISOString();
+      current.updatedAt = current.provisioningRequestStartedAt;
+      await this.putLease(current);
+      return { started: true as const, current };
+    });
+    if (!provisioningStart.started) {
+      let current = provisioningStart.current;
+      if (provisioningStart.workspace) {
+        current = await this.finalizeAbsentWorkspaceLease(
+          provisioningStart.workspace,
+          provisioningStart.current,
+        );
+      } else {
+        current = await this.removeReleasedLeaseReservation(record);
+      }
+      return json(
+        {
+          error: "lease_state_changed",
+          message: "lease changed state before provider provisioning began",
+          lease: current,
+        },
+        { status: 409 },
+      );
+    }
+    record = provisioningStart.current;
     const provision = () =>
       provider.createServerWithFallback(config, leaseID, slug, owner, provisioning);
     const provisioned =
@@ -1377,6 +1506,15 @@ export class FleetCoordinator {
           record.endedAt = failedAt;
           record.cleanupFailedAt = failedAt;
           record.cleanupError = errorMessage(error);
+          record.provisioningResourceMayExist =
+            config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
+          record.provisioningFailureRetryable =
+            config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
+          if (record.provisioningResourceMayExist || record.provisioningFailureRetryable) {
+            delete record.failureError;
+          } else {
+            record.failureError = record.cleanupError;
+          }
           await this.putLease(record);
           await this.markAWSIngressReconcilePending(record);
           await this.scheduleAlarm();
@@ -1397,6 +1535,7 @@ export class FleetCoordinator {
     const finalizationBase = structuredClone(current);
     record = structuredClone(current);
     record.state = "active";
+    delete record.provisioningRequestStartedAt;
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -1453,6 +1592,870 @@ export class FleetCoordinator {
     }
     record = finalization.record;
     return json({ lease: record }, { status: 201 });
+  }
+
+  private async createWorkspace(request: Request): Promise<Response> {
+    const input = workspaceCreateInput(await readJson<unknown>(request).catch(() => undefined));
+    if (!input) {
+      return json(
+        { error: "invalid_workspace_request", message: "workspace request has invalid fields" },
+        { status: 400 },
+      );
+    }
+    const id = validWorkspaceID(input.id) ? input.id : undefined;
+    if (!id) {
+      return json({ error: "invalid_workspace_id" }, { status: 400 });
+    }
+    if (input.runtime && input.runtime !== "crabbox") {
+      return json(
+        { error: "unsupported_runtime", message: "workspace runtime must be crabbox" },
+        { status: 400 },
+      );
+    }
+    const idempotencyKey = request.headers.get("idempotency-key");
+    if (idempotencyKey && idempotencyKey !== id) {
+      return json({ error: "idempotency_key_mismatch" }, { status: 400 });
+    }
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    const profile = workspaceProfile(input.profile);
+    if (!profile) {
+      return json(
+        { error: "invalid_profile", message: "workspace profile is too long" },
+        { status: 400 },
+      );
+    }
+    const ttlSeconds = workspaceSeconds(input.ttlSeconds, 14_400);
+    const idleTimeoutSeconds = workspaceSeconds(input.idleTimeoutSeconds, 1_800);
+    if (ttlSeconds === undefined || idleTimeoutSeconds === undefined) {
+      return json(
+        { error: "invalid_duration", message: "workspace durations must be whole seconds" },
+        { status: 400 },
+      );
+    }
+    if (ttlSeconds < workspaceMinimumTTLSeconds) {
+      return json(
+        {
+          error: "invalid_duration",
+          message: `workspace ttlSeconds must be at least ${workspaceMinimumTTLSeconds}`,
+        },
+        { status: 400 },
+      );
+    }
+    const desktop = false;
+    const key = workspaceKey(owner, org, id);
+    const existingResponse = await this.state.runExclusive(async () => {
+      const existing = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!existing) {
+        return undefined;
+      }
+      await this.state.storage.put(workspaceLeaseReservationKey(existing.leaseID), true);
+      const conflict = workspaceConflictResponse(
+        existing,
+        profile,
+        desktop,
+        ttlSeconds,
+        idleTimeoutSeconds,
+      );
+      if (conflict) return conflict;
+      const lease = await this.getLease(existing.leaseID);
+      if (workspaceNextReconcileAt(existing, lease) !== undefined) {
+        await this.scheduleAlarm();
+      }
+      return json(workspaceResponse(existing, lease), {
+        status: workspaceHTTPStatus(existing, lease),
+      });
+    });
+    if (existingResponse) {
+      return existingResponse;
+    }
+    if (!this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim()) {
+      return json(
+        {
+          error: "workspace_not_configured",
+          message: "CRABBOX_WORKSPACE_SSH_PUBLIC_KEY is required",
+        },
+        { status: 424 },
+      );
+    }
+    let provider: Provider;
+    try {
+      provider = workspaceProvider(this.env.CRABBOX_WORKSPACE_PROVIDER);
+    } catch (error) {
+      return json(
+        { error: "workspace_not_configured", message: errorMessage(error) },
+        { status: 424 },
+      );
+    }
+    const machineClass = workspaceClass(this.env.CRABBOX_WORKSPACE_CLASS);
+    const reservation = await this.state.runExclusive(async () => {
+      const current = await this.state.storage.get<WorkspaceRecord>(key);
+      if (current) {
+        await this.state.storage.put(workspaceLeaseReservationKey(current.leaseID), true);
+        const conflict = workspaceConflictResponse(
+          current,
+          profile,
+          desktop,
+          ttlSeconds,
+          idleTimeoutSeconds,
+        );
+        return conflict
+          ? { response: conflict }
+          : { record: current, lease: await this.getLease(current.leaseID) };
+      }
+      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
+      const ownerWorkspaceCount = [...workspaces.values()].filter(
+        (candidate) => candidate.owner === owner && candidate.org === org,
+      ).length;
+      if (ownerWorkspaceCount >= workspaceMaxRecordsPerOwner) {
+        return {
+          response: json(
+            {
+              error: "workspace_limit_exceeded",
+              message: `workspace record limit exceeded: ${ownerWorkspaceCount}/${workspaceMaxRecordsPerOwner}`,
+            },
+            { status: 429 },
+          ),
+        };
+      }
+      const leaseID = await this.allocateWorkspaceLeaseID();
+      const nowISO = new Date().toISOString();
+      const record: WorkspaceRecord = {
+        id,
+        leaseID,
+        owner,
+        org,
+        profile,
+        provider,
+        class: machineClass,
+        desktop,
+        ttlSeconds,
+        idleTimeoutSeconds,
+        createdAt: nowISO,
+        updatedAt: nowISO,
+      };
+      await this.state.storage.put(key, record);
+      await this.state.storage.put(workspaceLeaseReservationKey(record.leaseID), true);
+      return { record, lease: undefined };
+    });
+    if ("response" in reservation) {
+      return reservation.response;
+    }
+    if (!reservation.lease && !reservation.record.releaseRequestedAt && !reservation.record.error) {
+      await this.state.runExclusive(() => this.scheduleAlarm());
+    }
+    return json(workspaceResponse(reservation.record, reservation.lease), {
+      status: workspaceHTTPStatus(reservation.record, reservation.lease),
+    });
+  }
+
+  private async allocateWorkspaceLeaseID(): Promise<string> {
+    const leaseID = newLeaseID();
+    if (
+      (await this.getLease(leaseID)) ||
+      (await this.state.storage.get(workspaceLeaseReservationKey(leaseID)))
+    ) {
+      return await this.allocateWorkspaceLeaseID();
+    }
+    return leaseID;
+  }
+
+  private async provisionPendingWorkspace(): Promise<void> {
+    const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
+    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const leasesByID = new Map([...leases.values()].map((lease) => [lease.id, lease]));
+    const now = Date.now();
+    const candidates = [...workspaces.values()]
+      .filter((record) => {
+        const dueAt = workspaceNextReconcileAt(record, leasesByID.get(record.leaseID), now);
+        return dueAt !== undefined && dueAt <= now;
+      })
+      .slice(0, 3);
+    await Promise.all(
+      candidates.map((workspace) =>
+        this.reconcileWorkspace(workspace, leasesByID.get(workspace.leaseID)),
+      ),
+    );
+  }
+
+  private async pruneTerminalWorkspaces(): Promise<void> {
+    const cutoff = Date.now() - workspaceTerminalRetentionMs;
+    const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
+    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const leasesByID = new Map([...leases.values()].map((lease) => [lease.id, lease]));
+    const stale = [...workspaces.entries()].filter(([, workspace]) => {
+      const lease = leasesByID.get(workspace.leaseID);
+      const terminalAt = workspaceTerminalTimestamp(workspace, lease);
+      return terminalAt !== undefined && terminalAt <= cutoff;
+    });
+    if (stale.length === 0) {
+      return;
+    }
+    await this.state.runExclusive(async () => {
+      await Promise.all(
+        stale.map(async ([key, workspace]) => {
+          const current = await this.state.storage.get<WorkspaceRecord>(key);
+          if (!current || current.leaseID !== workspace.leaseID) {
+            return;
+          }
+          const lease = await this.getLease(current.leaseID);
+          const terminalAt = workspaceTerminalTimestamp(current, lease);
+          if (terminalAt === undefined || terminalAt > cutoff) {
+            return;
+          }
+          if (lease && workspaceOwnsLease(current, lease)) {
+            const detachedLease = structuredClone(lease);
+            delete detachedLease.workspaceID;
+            await this.putLease(detachedLease);
+          }
+          await Promise.all([
+            this.state.storage.delete(key),
+            this.state.storage.delete(workspaceLeaseReservationKey(current.leaseID)),
+          ]);
+        }),
+      );
+    });
+  }
+
+  private async reconcileWorkspace(
+    workspace: WorkspaceRecord,
+    initialLease?: LeaseRecord,
+  ): Promise<void> {
+    let lease = initialLease;
+    if (lease && !workspaceOwnsLease(workspace, lease)) {
+      await this.recordWorkspaceError(
+        workspace,
+        "workspace lease reservation conflicts with another lifecycle",
+      );
+      return;
+    }
+    if (!lease && workspaceProvisionDeadline(workspace) <= Date.now()) {
+      if (!workspace.releaseRequestedAt) {
+        await this.recordWorkspaceError(workspace, "workspace provisioning deadline expired");
+      }
+      return;
+    }
+    const claimExpiresAt = Date.parse(workspace.provisionClaimExpiresAt ?? "");
+    if (
+      lease?.state === "provisioning" &&
+      !lease.cloudID &&
+      !lease.provisioningRequestStartedAt &&
+      (!Number.isFinite(claimExpiresAt) || claimExpiresAt <= Date.now())
+    ) {
+      if (workspace.releaseRequestedAt) {
+        await this.finalizeAbsentWorkspaceLease(workspace, lease);
+      } else {
+        await this.retryWorkspaceProvisioning(workspace, lease);
+      }
+      return;
+    }
+    if (lease?.state === "failed" && lease.provisioningResourceMayExist === false) {
+      if (workspace.releaseRequestedAt) {
+        await this.finalizeAbsentWorkspaceLease(workspace, lease);
+      } else if (lease.provisioningFailureRetryable) {
+        await this.retryWorkspaceProvisioning(workspace, lease);
+      } else {
+        await this.recordWorkspaceError(
+          workspace,
+          lease.failureError || lease.cleanupError || "workspace provisioning failed",
+        );
+      }
+      return;
+    }
+    if (
+      lease?.state === "provisioning" ||
+      lease?.state === "failed" ||
+      (lease?.state === "released" && lease.releaseDeletesServer === true && !lease.cloudID)
+    ) {
+      lease = await this.recoverWorkspaceProvisioning(workspace, lease);
+    }
+    if (workspace.releaseRequestedAt) {
+      if (
+        !lease ||
+        lease.state === "expired" ||
+        (lease.state === "released" &&
+          !lease.cleanupStartedAt &&
+          !lease.cleanupError &&
+          lease.releaseDeletesServer === undefined)
+      ) {
+        return;
+      }
+      if (lease.state === "provisioning" && !lease.cloudID) {
+        return;
+      }
+      try {
+        await this.releaseWorkspaceLease(workspace);
+      } catch {
+        // Lease cleanup state carries the provider error and remains retryable.
+      }
+      return;
+    }
+    if (lease?.state === "failed") {
+      const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(
+        workspaceKey(workspace.owner, workspace.org, workspace.id),
+      );
+      if (!lease.failureError && currentWorkspace?.reconcileAfter && !currentWorkspace.error) {
+        return;
+      }
+      await this.recordWorkspaceError(
+        workspace,
+        lease.failureError || lease.cleanupError || "workspace provisioning failed",
+      );
+      return;
+    }
+    if (lease) {
+      return;
+    }
+    const sshPublicKey = this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim();
+    if (!sshPublicKey) {
+      await this.recordWorkspaceError(workspace, "CRABBOX_WORKSPACE_SSH_PUBLIC_KEY is required");
+      return;
+    }
+    let createResponse: Response;
+    const provisionClaim = crypto.randomUUID();
+    try {
+      createResponse = await this.createLease(
+        await workspaceLeaseRequest(workspace, sshPublicKey),
+        async () => {
+          const current = await this.state.storage.get<WorkspaceRecord>(
+            workspaceKey(workspace.owner, workspace.org, workspace.id),
+          );
+          if (
+            !current ||
+            current.leaseID !== workspace.leaseID ||
+            current.releaseRequestedAt ||
+            current.error
+          ) {
+            return json(
+              {
+                error: "workspace_state_changed",
+                message: "workspace changed before lease reservation",
+              },
+              { status: 409 },
+            );
+          }
+          const activeClaimExpiresAt = Date.parse(current.provisionClaimExpiresAt ?? "");
+          if (
+            current.provisionClaim &&
+            Number.isFinite(activeClaimExpiresAt) &&
+            activeClaimExpiresAt > Date.now()
+          ) {
+            return json(
+              {
+                error: "workspace_provisioning_claimed",
+                message: "workspace provisioning is already in progress",
+              },
+              { status: 409 },
+            );
+          }
+          const now = new Date();
+          const hardDeadline = workspaceProvisionDeadline(current);
+          current.provisionClaim = provisionClaim;
+          current.provisionClaimExpiresAt = new Date(
+            Math.min(now.getTime() + workspaceProvisionClaimMs, hardDeadline),
+          ).toISOString();
+          current.updatedAt = now.toISOString();
+          delete current.reconcileAfter;
+          await this.state.storage.put(
+            workspaceKey(workspace.owner, workspace.org, workspace.id),
+            current,
+          );
+          return undefined;
+        },
+        workspace.id,
+      );
+    } catch (error) {
+      const persistedLease = await this.getLease(workspace.leaseID);
+      if (persistedLease && workspaceOwnsLease(workspace, persistedLease)) {
+        await this.deferWorkspaceReconciliation(workspace, true);
+      } else {
+        await this.recordWorkspaceError(workspace, errorMessage(error));
+      }
+      return;
+    }
+    if (!createResponse.ok) {
+      const current = await this.state.storage.get<WorkspaceRecord>(
+        workspaceKey(workspace.owner, workspace.org, workspace.id),
+      );
+      if (current?.releaseRequestedAt) {
+        await this.completeWorkspaceCreate(current, provisionClaim);
+        return;
+      }
+      const persistedLease = await this.getLease(workspace.leaseID);
+      if (!persistedLease || !workspaceOwnsLease(workspace, persistedLease)) {
+        if (await workspaceAdmissionRetryable(createResponse)) {
+          await this.deferWorkspaceReconciliation(workspace, true);
+          return;
+        }
+        await this.recordWorkspaceError(
+          workspace,
+          await workspaceResponseError(
+            createResponse,
+            `lease create HTTP ${createResponse.status}`,
+          ),
+        );
+        return;
+      }
+    }
+    await this.completeWorkspaceCreate(workspace, provisionClaim);
+    const current = await this.state.storage.get<WorkspaceRecord>(
+      workspaceKey(workspace.owner, workspace.org, workspace.id),
+    );
+    if (current?.leaseID === workspace.leaseID && current.releaseRequestedAt) {
+      try {
+        await this.releaseWorkspaceLease(current);
+      } catch {
+        // Lease cleanup state carries the provider error and remains retryable.
+      }
+    }
+  }
+
+  private async recoverWorkspaceProvisioning(
+    workspace: WorkspaceRecord,
+    lease: LeaseRecord,
+  ): Promise<LeaseRecord> {
+    const providerResourceDefinitelyAbsent =
+      lease.state === "failed" && lease.provisioningResourceMayExist === false;
+    const claimExpiresAt = Date.parse(workspace.provisionClaimExpiresAt ?? "");
+    const now = Date.now();
+    const recoveryDeadline = workspaceProvisionRecoveryDeadline(workspace, lease);
+    if (Number.isFinite(claimExpiresAt) && claimExpiresAt > now) {
+      return lease;
+    }
+    const provider = this.provider(workspace.provider, lease.region, lease.providerProject);
+    let server: ProviderMachine | undefined;
+    try {
+      if (lease.cloudID && provider.getServer) {
+        server = await provider.getServer(lease.cloudID);
+      } else if (provider.findServerByLease) {
+        server = await provider.findServerByLease(lease.id);
+      } else {
+        server = (await provider.listCrabboxServers()).find(
+          (machine) => machine.labels?.["lease"] === lease.id,
+        );
+      }
+    } catch (error) {
+      if (!providerResourceNotFound(error)) {
+        await this.recordWorkspaceRecoveryMiss(workspace, Number.POSITIVE_INFINITY);
+        return lease;
+      }
+    }
+    if (server) {
+      const recoveryConfig = leaseConfig({
+        provider: workspace.provider,
+        target: lease.target,
+        profile: lease.profile,
+        class: lease.class,
+        serverType: server.serverType,
+        providerKey: lease.providerKey,
+        desktop: lease.desktop ?? false,
+        browser: lease.browser ?? false,
+        code: lease.code ?? false,
+        ttlSeconds: lease.ttlSeconds,
+        idleTimeoutSeconds: lease.idleTimeoutSeconds ?? lease.ttlSeconds,
+        keep: lease.keep,
+        sshPublicKey:
+          this.env.CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?.trim() || readinessDummySSHPublicKey,
+      });
+      const providerHourlyUSD = await provider
+        .hourlyPriceUSD(server.serverType, recoveryConfig)
+        .catch(() => undefined);
+      const recoveredCost = leaseCost(
+        this.env,
+        workspace.provider,
+        server.serverType,
+        lease.ttlSeconds,
+        providerHourlyUSD,
+      );
+      const recovered = await this.state.runExclusive(async () => {
+        const current = await this.getLease(lease.id);
+        if (
+          !current ||
+          (current.state !== "provisioning" &&
+            current.state !== "failed" &&
+            !(current.state === "released" && current.releaseDeletesServer === true))
+        ) {
+          return current ?? lease;
+        }
+        const recoveredAt = new Date().toISOString();
+        current.cloudID = server.cloudID || String(server.id);
+        current.serverID = server.id;
+        current.serverName = server.name;
+        current.serverType = server.serverType;
+        current.estimatedHourlyUSD = recoveredCost.hourlyUSD;
+        current.maxEstimatedUSD = recoveredCost.maxUSD;
+        if (server.status === "running" && server.host.trim()) {
+          current.state = "active";
+          current.host = server.host;
+        } else {
+          current.state = "provisioning";
+        }
+        if (server.region) {
+          current.region = server.region;
+        }
+        if (server.hostID) {
+          current.hostId = server.hostID;
+        }
+        current.updatedAt = recoveredAt;
+        current.lastTouchedAt = recoveredAt;
+        delete current.failureError;
+        delete current.provisioningResourceMayExist;
+        delete current.provisioningFailureRetryable;
+        delete current.provisioningRequestStartedAt;
+        delete current.endedAt;
+        delete current.releasedAt;
+        clearLeaseCleanupMetadata(current);
+        await this.putLease(current);
+        await this.scheduleAlarm();
+        return current;
+      });
+      if (recovered.state === "active") {
+        await this.completeWorkspaceCreate(workspace, workspace.provisionClaim);
+      } else {
+        await this.deferWorkspaceReconciliation(workspace);
+      }
+      return recovered;
+    }
+    if (!providerResourceDefinitelyAbsent && recoveryDeadline > now) {
+      await this.recordWorkspaceRecoveryMiss(workspace, recoveryDeadline);
+      return lease;
+    }
+    const retryableLease = await this.state.runExclusive(async () => {
+      const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(
+        workspaceKey(workspace.owner, workspace.org, workspace.id),
+      );
+      const current = await this.getLease(lease.id);
+      if (
+        !currentWorkspace ||
+        currentWorkspace.leaseID !== workspace.leaseID ||
+        currentWorkspace.releaseRequestedAt ||
+        !current ||
+        !workspaceOwnsLease(currentWorkspace, current) ||
+        !(
+          current.state === "provisioning" ||
+          (current.state === "failed" && current.provisioningFailureRetryable)
+        )
+      ) {
+        return undefined;
+      }
+      current.state = "failed";
+      current.provisioningResourceMayExist = false;
+      current.provisioningFailureRetryable = true;
+      delete current.provisioningRequestStartedAt;
+      current.updatedAt = new Date().toISOString();
+      await this.putLease(current);
+      return current;
+    });
+    if (retryableLease) {
+      await this.retryWorkspaceProvisioning(workspace, retryableLease);
+      return retryableLease;
+    }
+    return await this.finalizeAbsentWorkspaceLease(workspace, lease);
+  }
+
+  private async workspaceRoute(
+    request: Request,
+    workspaceID: string,
+    action?: string,
+    connection?: string,
+  ): Promise<Response> {
+    if (!validWorkspaceID(workspaceID)) {
+      return notFound();
+    }
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    const key = workspaceKey(owner, org, workspaceID);
+    const method = request.method.toUpperCase();
+    if (method === "GET" && action === undefined) {
+      return await this.state.runExclusive(async () => {
+        const record = await this.state.storage.get<WorkspaceRecord>(key);
+        if (!record) {
+          return notFound();
+        }
+        const lease = await this.getLease(record.leaseID);
+        return json(workspaceResponse(record, lease));
+      });
+    }
+    if (method === "POST" && action === "connections" && connection === "desktop") {
+      const record = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!record) {
+        return notFound();
+      }
+      return json(
+        {
+          error: "desktop_unavailable",
+          message: "workspace desktop handoff is not configured",
+        },
+        { status: 409 },
+      );
+    }
+    if (method === "DELETE" && action === undefined) {
+      const release = await this.state.runExclusive(async () => {
+        const record = await this.state.storage.get<WorkspaceRecord>(key);
+        if (!record) {
+          return { response: notFound() };
+        }
+        const lease = await this.getLease(record.leaseID);
+        if (!record.releaseRequestedAt) {
+          record.releaseRequestedAt = new Date().toISOString();
+          record.updatedAt = record.releaseRequestedAt;
+          delete record.reconcileAfter;
+          await this.state.storage.put(key, record);
+        }
+        await this.scheduleAlarm();
+        return {
+          record,
+          lease,
+          release:
+            Boolean(lease) &&
+            !(
+              !lease?.cloudID &&
+              (lease?.state === "provisioning" ||
+                lease?.state === "failed" ||
+                (lease?.state === "released" && lease.releaseDeletesServer === true))
+            ) &&
+            lease?.state !== "expired" &&
+            (lease?.state !== "released" || lease.releaseDeletesServer !== undefined),
+        };
+      });
+      if ("response" in release) {
+        return release.response;
+      }
+      if (release.release) {
+        try {
+          await this.releaseWorkspaceLease(release.record);
+        } catch {
+          // Lease cleanup state carries the provider error and remains retryable.
+        }
+      }
+      const record = (await this.state.storage.get<WorkspaceRecord>(key)) ?? release.record;
+      const lease = await this.getLease(record.leaseID);
+      return json(workspaceResponse(record, lease));
+    }
+    return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async recordWorkspaceError(workspace: WorkspaceRecord, message: string): Promise<void> {
+    const key = workspaceKey(workspace.owner, workspace.org, workspace.id);
+    await this.state.runExclusive(async () => {
+      const current = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!current || current.leaseID !== workspace.leaseID) {
+        return;
+      }
+      current.error = message.slice(0, 500);
+      delete current.provisionClaim;
+      delete current.provisionClaimExpiresAt;
+      delete current.reconcileAfter;
+      delete current.recoveryMisses;
+      current.updatedAt = new Date().toISOString();
+      await this.state.storage.put(key, current);
+    });
+  }
+
+  private async completeWorkspaceCreate(
+    workspace: WorkspaceRecord,
+    expectedClaim: string | undefined,
+  ): Promise<void> {
+    const key = workspaceKey(workspace.owner, workspace.org, workspace.id);
+    await this.state.runExclusive(async () => {
+      const current = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!current || current.leaseID !== workspace.leaseID) {
+        return;
+      }
+      if (expectedClaim && current.provisionClaim !== expectedClaim) {
+        return;
+      }
+      delete current.error;
+      delete current.provisionClaim;
+      delete current.provisionClaimExpiresAt;
+      delete current.reconcileAfter;
+      delete current.recoveryMisses;
+      current.updatedAt = new Date().toISOString();
+      await this.state.storage.put(key, current);
+    });
+  }
+
+  private async deferWorkspaceReconciliation(
+    workspace: WorkspaceRecord,
+    releaseProvisionClaim = false,
+  ): Promise<void> {
+    const key = workspaceKey(workspace.owner, workspace.org, workspace.id);
+    await this.state.runExclusive(async () => {
+      const current = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!current || current.leaseID !== workspace.leaseID) {
+        return;
+      }
+      const now = new Date();
+      if (releaseProvisionClaim) {
+        delete current.provisionClaim;
+        delete current.provisionClaimExpiresAt;
+      }
+      current.reconcileAfter = new Date(now.getTime() + workspaceReconcileIntervalMs).toISOString();
+      current.updatedAt = now.toISOString();
+      await this.state.storage.put(key, current);
+    });
+  }
+
+  private async recordWorkspaceRecoveryMiss(
+    workspace: WorkspaceRecord,
+    provisioningDeadline: number,
+  ): Promise<void> {
+    const key = workspaceKey(workspace.owner, workspace.org, workspace.id);
+    await this.state.runExclusive(async () => {
+      const current = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!current || current.leaseID !== workspace.leaseID) {
+        return;
+      }
+      const now = new Date();
+      current.recoveryMisses = (current.recoveryMisses ?? 0) + 1;
+      const delay = Math.min(
+        workspaceReconcileIntervalMs * 2 ** Math.min(current.recoveryMisses - 1, 5),
+        workspaceReconcileMaxIntervalMs,
+      );
+      const retryAt = Number.isFinite(provisioningDeadline)
+        ? Math.min(now.getTime() + delay, provisioningDeadline)
+        : now.getTime() + delay;
+      current.reconcileAfter = new Date(retryAt).toISOString();
+      current.updatedAt = now.toISOString();
+      await this.state.storage.put(key, current);
+    });
+  }
+
+  private async retryWorkspaceProvisioning(
+    workspace: WorkspaceRecord,
+    lease: LeaseRecord,
+  ): Promise<void> {
+    const key = workspaceKey(workspace.owner, workspace.org, workspace.id);
+    await this.state.runExclusive(async () => {
+      const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(key);
+      const currentLease = await this.getLease(lease.id);
+      if (
+        !currentWorkspace ||
+        currentWorkspace.leaseID !== workspace.leaseID ||
+        currentWorkspace.releaseRequestedAt ||
+        !currentLease ||
+        !workspaceOwnsLease(currentWorkspace, currentLease) ||
+        !(
+          (currentLease.state === "provisioning" && !currentLease.provisioningRequestStartedAt) ||
+          (currentLease.state === "failed" &&
+            currentLease.provisioningResourceMayExist === false &&
+            currentLease.provisioningFailureRetryable)
+        )
+      ) {
+        return;
+      }
+      const now = new Date();
+      if (workspaceProvisionDeadline(currentWorkspace) <= now.getTime()) {
+        const message = "workspace provisioning deadline expired";
+        currentLease.state = "failed";
+        currentLease.failureError = message;
+        currentLease.provisioningFailureRetryable = false;
+        currentLease.updatedAt = now.toISOString();
+        currentLease.endedAt = currentLease.updatedAt;
+        currentWorkspace.error = message;
+        currentWorkspace.updatedAt = now.toISOString();
+        delete currentWorkspace.reconcileAfter;
+        delete currentWorkspace.provisionClaim;
+        delete currentWorkspace.provisionClaimExpiresAt;
+        await Promise.all([
+          this.putLease(currentLease),
+          this.state.storage.put(key, currentWorkspace),
+        ]);
+        await this.scheduleAlarm();
+        return;
+      }
+      await this.state.storage.delete(leaseKey(currentLease.id));
+      currentWorkspace.recoveryMisses = (currentWorkspace.recoveryMisses ?? 0) + 1;
+      const delay = Math.min(
+        workspaceReconcileIntervalMs * 2 ** Math.min(currentWorkspace.recoveryMisses - 1, 5),
+        workspaceReconcileMaxIntervalMs,
+      );
+      currentWorkspace.reconcileAfter = new Date(now.getTime() + delay).toISOString();
+      currentWorkspace.updatedAt = now.toISOString();
+      delete currentWorkspace.error;
+      delete currentWorkspace.provisionClaim;
+      delete currentWorkspace.provisionClaimExpiresAt;
+      await this.state.storage.put(key, currentWorkspace);
+      await this.scheduleAlarm();
+    });
+  }
+
+  private async finalizeAbsentWorkspaceLease(
+    workspace: WorkspaceRecord,
+    lease: LeaseRecord,
+  ): Promise<LeaseRecord> {
+    const message = "provider resource not found after interrupted workspace provisioning";
+    const failed = await this.state.runExclusive(async () => {
+      const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(
+        workspaceKey(workspace.owner, workspace.org, workspace.id),
+      );
+      const current = await this.getLease(lease.id);
+      if (
+        !current ||
+        (current.state !== "provisioning" &&
+          current.state !== "failed" &&
+          !(current.state === "released" && current.releaseDeletesServer === true))
+      ) {
+        return current ?? lease;
+      }
+      const failedAt = new Date().toISOString();
+      const releaseRequested = Boolean(currentWorkspace?.releaseRequestedAt);
+      current.state = releaseRequested ? "released" : "failed";
+      current.updatedAt = failedAt;
+      current.endedAt = failedAt;
+      current.cloudID = "";
+      current.serverID = 0;
+      current.serverName = "";
+      current.host = "";
+      current.provisioningResourceMayExist = false;
+      current.provisioningFailureRetryable = false;
+      delete current.provisioningRequestStartedAt;
+      if (releaseRequested) {
+        current.releasedAt = failedAt;
+        delete current.releaseDeletesServer;
+        delete current.failureError;
+      } else {
+        current.failureError = message;
+      }
+      clearLeaseCleanupMetadata(current);
+      await this.putLease(current);
+      return current;
+    });
+    if (failed.state === "released") {
+      await this.clearWorkspaceReleaseError(failed);
+    } else {
+      await this.recordWorkspaceError(workspace, message);
+    }
+    return failed;
+  }
+
+  private async clearWorkspaceReleaseError(lease: LeaseRecord): Promise<void> {
+    if (!lease.workspaceID) {
+      return;
+    }
+    const key = workspaceKey(lease.owner, lease.org, lease.workspaceID);
+    const workspace = await this.state.storage.get<WorkspaceRecord>(key);
+    if (
+      !workspace ||
+      !workspaceOwnsLease(workspace, lease) ||
+      !workspace.releaseRequestedAt ||
+      !workspace.error
+    ) {
+      return;
+    }
+    delete workspace.error;
+    workspace.updatedAt = new Date().toISOString();
+    await this.state.storage.put(key, workspace);
+  }
+
+  private async releaseWorkspaceLease(
+    workspace: WorkspaceRecord,
+  ): Promise<LeaseRecord | undefined> {
+    const lease = await this.getLease(workspace.leaseID);
+    if (!lease || !workspaceOwnsLease(workspace, lease)) {
+      return lease;
+    }
+    return await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
   }
 
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
@@ -1514,6 +2517,9 @@ export class FleetCoordinator {
       return json({ error: "host_required" }, { status: 400 });
     }
 
+    if (await this.state.storage.get(workspaceLeaseReservationKey(leaseID))) {
+      return workspaceManagedLeaseResponse();
+    }
     const existing = await this.getLease(leaseID);
     if (
       existing &&
@@ -1633,6 +2639,9 @@ export class FleetCoordinator {
           { error: "forbidden", message: "lease manage access required" },
           { status: 403 },
         );
+      }
+      if (lease.workspaceID) {
+        return workspaceManagedLeaseResponse();
       }
       if (lease.cleanupStartedAt) {
         return json(
@@ -1805,6 +2814,9 @@ export class FleetCoordinator {
     }
     if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
+    }
+    if (lease.workspaceID) {
+      return workspaceManagedLeaseResponse();
     }
     const body = await optionalJson<{ delete?: boolean }>(request);
     const shouldDelete = body.delete ?? !lease.keep;
@@ -5046,9 +6058,21 @@ export class FleetCoordinator {
   private async expireLeases(): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
+      const workspacesByLeaseID = new Map(
+        [...workspaces.values()].map((workspace) => [workspace.leaseID, workspace]),
+      );
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       for (const stored of leases.values()) {
+        const workspace = workspacesByLeaseID.get(stored.id);
+        if (
+          workspace &&
+          workspaceOwnsLease(workspace, stored) &&
+          workspaceProvisioningNeedsRecovery(workspace, stored, now)
+        ) {
+          continue;
+        }
         if (!leaseNeedsCleanup(stored, now)) {
           continue;
         }
@@ -5137,6 +6161,7 @@ export class FleetCoordinator {
             delete current.cleanupStartedAt;
             delete current.cleanupClaimExpiresAt;
             await this.putLease(current);
+            await this.clearWorkspaceReleaseError(current);
             await this.markAWSIngressReconcilePending(current);
           });
         };
@@ -5151,11 +6176,44 @@ export class FleetCoordinator {
 
   private async scheduleAlarm(): Promise<void> {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
     const now = Date.now();
+    const workspacesByLeaseID = new Map(
+      [...workspaces.values()].map((workspace) => [workspace.leaseID, workspace]),
+    );
     const alarmTimes = [...leases.values()]
-      .filter((lease) => leaseIsLive(lease) || leaseNeedsCleanup(lease, now))
+      .filter((lease) => {
+        const workspace = workspacesByLeaseID.get(lease.id);
+        return (
+          !(
+            workspace &&
+            workspaceOwnsLease(workspace, lease) &&
+            workspaceProvisioningNeedsRecovery(workspace, lease, now)
+          ) &&
+          (leaseIsLive(lease) || leaseNeedsCleanup(lease, now))
+        );
+      })
       .map((lease) => nextLeaseAlarmTime(lease))
       .filter((time) => Number.isFinite(time));
+    const leasesByID = new Map([...leases.values()].map((lease) => [lease.id, lease]));
+    const workspaceAlarm = [...workspaces.values()]
+      .map((workspace) =>
+        workspaceNextReconcileAt(workspace, leasesByID.get(workspace.leaseID), now),
+      )
+      .filter((time): time is number => time !== undefined)
+      .toSorted((left, right) => left - right)[0];
+    if (workspaceAlarm !== undefined) {
+      alarmTimes.push(Math.max(now + 1, workspaceAlarm));
+    }
+    const workspaceRetentionAlarm = [...workspaces.values()]
+      .map((workspace) => workspaceTerminalTimestamp(workspace, leasesByID.get(workspace.leaseID)))
+      .filter((time): time is number => time !== undefined)
+      .map((time) => time + workspaceTerminalRetentionMs)
+      .filter((time) => time > now)
+      .toSorted((left, right) => left - right)[0];
+    if (workspaceRetentionAlarm !== undefined) {
+      alarmTimes.push(workspaceRetentionAlarm);
+    }
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
     if (orphanSweepAlarm !== undefined) {
       alarmTimes.push(orphanSweepAlarm);
@@ -6389,11 +7447,42 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     options: { deleteServer: boolean; keep?: boolean },
   ): Promise<LeaseRecord> {
-    const release = () => this.releaseResolvedLeaseOperation(lease, options);
-    return managedLeaseProvider(lease) === "aws" &&
-      (lease.state === "active" || Boolean(lease.cloudID))
+    await this.markWorkspaceReleaseRequested(lease);
+    const current = (await this.getLease(lease.id)) ?? lease;
+    if (
+      current.workspaceID &&
+      !current.cloudID &&
+      (current.state === "provisioning" ||
+        current.state === "failed" ||
+        (current.state === "released" && current.releaseDeletesServer === true))
+    ) {
+      await this.state.runExclusive(() => this.scheduleAlarm());
+      return current;
+    }
+    const release = () => this.releaseResolvedLeaseOperation(current, options);
+    return managedLeaseProvider(current) === "aws" &&
+      (current.state === "active" || Boolean(current.cloudID))
       ? this.withAWSIngressOperationLock(release)
       : release();
+  }
+
+  private async markWorkspaceReleaseRequested(lease: LeaseRecord): Promise<void> {
+    const workspaceID = lease.workspaceID;
+    if (!workspaceID) {
+      return;
+    }
+    await this.state.runExclusive(async () => {
+      const key = workspaceKey(lease.owner, lease.org, workspaceID);
+      const workspace = await this.state.storage.get<WorkspaceRecord>(key);
+      if (!workspace || !workspaceOwnsLease(workspace, lease)) {
+        throw new Error("workspace lease reservation conflicts with another lifecycle");
+      }
+      if (!workspace.releaseRequestedAt) {
+        workspace.releaseRequestedAt = new Date().toISOString();
+        workspace.updatedAt = workspace.releaseRequestedAt;
+        await this.state.storage.put(key, workspace);
+      }
+    });
   }
 
   private async releaseResolvedLeaseOperation(
@@ -6417,6 +7506,7 @@ export class FleetCoordinator {
       if (!shouldDelete) {
         const released = finalizedReleasedLease(current, deleteServer, options.keep);
         await this.putLease(released);
+        await this.clearWorkspaceReleaseError(released);
         await this.markAWSIngressReconcilePending(released);
         await this.scheduleAlarm();
         return { cleanup: false as const, lease: released };
@@ -6472,6 +7562,7 @@ export class FleetCoordinator {
       }
       const released = finalizedReleasedLease(current, true, options.keep);
       await this.putLease(released);
+      await this.clearWorkspaceReleaseError(released);
       await this.markAWSIngressReconcilePending(released);
       await this.scheduleAlarm();
       return released;
@@ -6590,6 +7681,14 @@ function portalReturnLocation(request: Request): string {
 
 function leaseKey(leaseID: string): string {
   return `lease:${leaseID}`;
+}
+
+function workspaceLeaseReservationKey(leaseID: string): string {
+  return `workspace-lease:${leaseID}`;
+}
+
+function workspaceKey(owner: string, org: string, workspaceID: string): string {
+  return `workspace:${encodeURIComponent(org)}:${encodeURIComponent(owner)}:${workspaceID}`;
 }
 
 function providerAccessPrefix(): string {
@@ -6957,6 +8056,364 @@ function newLeaseID(): string {
   return `cbx_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function validWorkspaceID(value: string | undefined): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 63 &&
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(value)
+  );
+}
+
+function workspaceManagedLeaseResponse(): Response {
+  return json(
+    {
+      error: "workspace_managed_lease",
+      message: "workspace leases must be managed through the workspace lifecycle",
+    },
+    { status: 409 },
+  );
+}
+
+function workspaceCreateInput(value: unknown): WorkspaceCreateRequest | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const input = value as Record<string, unknown>;
+  if (input["id"] !== undefined && typeof input["id"] !== "string") return undefined;
+  if (input["runtime"] !== undefined && typeof input["runtime"] !== "string") return undefined;
+  if (input["profile"] !== undefined && typeof input["profile"] !== "string") return undefined;
+  if (input["ttlSeconds"] !== undefined && typeof input["ttlSeconds"] !== "number")
+    return undefined;
+  if (
+    input["idleTimeoutSeconds"] !== undefined &&
+    typeof input["idleTimeoutSeconds"] !== "number"
+  ) {
+    return undefined;
+  }
+  const capabilities = input["capabilities"];
+  if (
+    capabilities !== undefined &&
+    (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities))
+  ) {
+    return undefined;
+  }
+  const desktop = (capabilities as Record<string, unknown> | undefined)?.["desktop"];
+  if (desktop !== undefined && typeof desktop !== "boolean") return undefined;
+  return input as WorkspaceCreateRequest;
+}
+
+function workspaceProvider(value: string | undefined): Provider {
+  const provider = value?.trim() || "hetzner";
+  if (provider !== "hetzner") {
+    throw new Error(`unsupported workspace provider: ${provider}`);
+  }
+  return provider;
+}
+
+function workspaceProfile(value: string | undefined): string | undefined {
+  const profile = value?.trim() || "default";
+  return profile.length <= 120 ? profile : undefined;
+}
+
+function workspaceClass(configured: string | undefined): string {
+  const machineClass = configured?.trim() || "standard";
+  return ["standard", "fast", "large", "beast"].includes(machineClass) ? machineClass : "standard";
+}
+
+function workspaceSeconds(value: number | undefined, fallback: number): number | undefined {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || value < 1) return undefined;
+  return Math.min(value, 86_400);
+}
+
+async function workspaceAdmissionRetryable(response: Response): Promise<boolean> {
+  if (response.status === 429) {
+    const body = (await response
+      .clone()
+      .json()
+      .catch(() => undefined)) as { error?: unknown } | undefined;
+    return body?.error !== "cost_limit_exceeded";
+  }
+  return response.status === 424 || response.status >= 500;
+}
+
+async function workspaceLeaseRequest(
+  workspace: WorkspaceRecord,
+  sshPublicKey: string,
+): Promise<Request> {
+  const remainingMs = workspaceProvisionDeadline(workspace) - Date.now();
+  if (remainingMs < workspaceProvisionRecoveryGraceMs) {
+    throw new Error("workspace provisioning recovery window no longer fits before hard TTL");
+  }
+  const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  const providerKey = `${workspaceProviderKeyPrefix}${(
+    await sha256Hex(sshPublicKeyIdentity(sshPublicKey))
+  ).slice(0, 12)}`;
+  return new Request("https://crabbox.invalid/v1/leases", {
+    method: "POST",
+    headers: workspaceRecordHeaders(workspace),
+    body: JSON.stringify({
+      leaseID: workspace.leaseID,
+      slug: workspace.id,
+      provider: workspace.provider,
+      profile: workspace.profile,
+      class: workspace.class,
+      providerKey,
+      desktop: workspace.desktop,
+      ttlSeconds: remainingSeconds,
+      // The adapter has no activity channel yet, so idle expiry would terminate active workspaces.
+      idleTimeoutSeconds: remainingSeconds,
+      keep: false,
+      sshPublicKey,
+    } satisfies LeaseRequest),
+  });
+}
+
+function workspaceRecordHeaders(workspace: WorkspaceRecord): Headers {
+  return new Headers({
+    "content-type": "application/json",
+    "x-crabbox-owner": workspace.owner,
+    "x-crabbox-org": workspace.org,
+  });
+}
+
+function workspaceHTTPStatus(workspace: WorkspaceRecord, lease?: LeaseRecord): number {
+  return workspaceStatus(workspace, lease) === "provisioning" ? 202 : 200;
+}
+
+function workspaceConflictResponse(
+  workspace: WorkspaceRecord,
+  profile: string,
+  desktop: boolean,
+  ttlSeconds: number,
+  idleTimeoutSeconds: number,
+): Response | undefined {
+  if (
+    workspace.profile === profile &&
+    workspace.desktop === desktop &&
+    workspace.ttlSeconds === ttlSeconds &&
+    workspace.idleTimeoutSeconds === idleTimeoutSeconds
+  ) {
+    return undefined;
+  }
+  return json(
+    {
+      error: "workspace_id_conflict",
+      message: "workspace id already exists with different settings",
+    },
+    { status: 409 },
+  );
+}
+
+function workspaceProvisionDeadline(workspace: WorkspaceRecord): number {
+  return Date.parse(workspace.createdAt) + workspace.ttlSeconds * 1000;
+}
+
+function workspaceProvisionRecoveryDeadline(
+  workspace: WorkspaceRecord,
+  lease?: LeaseRecord,
+): number {
+  const requestStartedAt = Date.parse(lease?.provisioningRequestStartedAt ?? "");
+  const hardDeadline = workspaceProvisionDeadline(workspace);
+  return Math.min(
+    hardDeadline,
+    Number.isFinite(requestStartedAt)
+      ? requestStartedAt + workspaceProvisionRecoveryGraceMs
+      : hardDeadline,
+  );
+}
+
+function workspaceProvisioningNeedsRecovery(
+  workspace: WorkspaceRecord,
+  lease: LeaseRecord,
+  now = Date.now(),
+): boolean {
+  if (lease.cloudID) {
+    return false;
+  }
+  if (
+    lease.state !== "provisioning" &&
+    lease.state !== "failed" &&
+    !(lease.state === "released" && lease.releaseDeletesServer === true)
+  ) {
+    return false;
+  }
+  const deadline =
+    lease.state === "provisioning" || lease.provisioningResourceMayExist === true
+      ? workspaceProvisionRecoveryDeadline(workspace, lease)
+      : workspaceProvisionDeadline(workspace);
+  return now < deadline;
+}
+
+function workspaceNextReconcileAt(
+  workspace: WorkspaceRecord,
+  lease?: LeaseRecord,
+  now = Date.now(),
+): number | undefined {
+  if (lease && !workspaceOwnsLease(workspace, lease)) return workspace.error ? undefined : now;
+  const claimExpiresAt = Date.parse(workspace.provisionClaimExpiresAt ?? "");
+  const deferredUntil = Date.parse(workspace.reconcileAfter ?? "");
+  const provisioningDeadline =
+    lease?.state === "provisioning" || lease?.provisioningResourceMayExist === true
+      ? workspaceProvisionRecoveryDeadline(workspace, lease)
+      : workspaceProvisionDeadline(workspace);
+  if (Number.isFinite(deferredUntil) && deferredUntil > now) {
+    return provisioningDeadline > now
+      ? Math.min(deferredUntil, provisioningDeadline)
+      : deferredUntil;
+  }
+  if (!lease && Number.isFinite(claimExpiresAt) && claimExpiresAt > now) {
+    return claimExpiresAt;
+  }
+  if (
+    lease?.state === "provisioning" ||
+    lease?.state === "failed" ||
+    (lease?.state === "released" && lease.releaseDeletesServer === true && !lease.cloudID)
+  ) {
+    if (Number.isFinite(claimExpiresAt) && claimExpiresAt > now) {
+      return claimExpiresAt;
+    }
+  }
+  if (workspace.releaseRequestedAt) {
+    if (!lease || lease.state === "expired") return undefined;
+    if (lease.cleanupStartedAt) {
+      const claimDeadline = cleanupClaimDeadline(lease);
+      return Number.isFinite(claimDeadline) ? claimDeadline : now + workspaceReconcileIntervalMs;
+    }
+    const retryAt = Date.parse(lease.cleanupRetryAt ?? "");
+    if (Number.isFinite(retryAt) && retryAt > now) return retryAt;
+    if (lease.state === "provisioning") return now;
+    if (
+      lease.state === "released" &&
+      !lease.cleanupError &&
+      lease.releaseDeletesServer === undefined
+    ) {
+      return undefined;
+    }
+    return now;
+  }
+  if (workspace.error) return undefined;
+  if (!lease || lease.state === "failed") return now;
+  if (lease.state === "provisioning") return now;
+  return undefined;
+}
+
+function workspaceStatus(
+  workspace: WorkspaceRecord,
+  lease?: LeaseRecord,
+): "provisioning" | "ready" | "stopping" | "stopped" | "expired" | "failed" {
+  if (lease && !workspaceOwnsLease(workspace, lease)) return "failed";
+  if (workspace.releaseRequestedAt) {
+    if (!lease) return "stopped";
+    if (
+      lease?.state === "released" &&
+      !lease.cleanupStartedAt &&
+      !lease.cleanupError &&
+      lease.releaseDeletesServer === undefined
+    ) {
+      return "stopped";
+    }
+    if (lease?.state === "expired") return "expired";
+    return "stopping";
+  }
+  if (workspace.error && !lease) return "failed";
+  switch (lease?.state) {
+    case "active": {
+      if (Date.parse(lease.expiresAt) <= Date.now()) return "expired";
+      if (lease.cleanupStartedAt || lease.cleanupError) return "failed";
+      return "ready";
+    }
+    case "released":
+      return "stopped";
+    case "expired":
+      return "expired";
+    case "failed":
+      return workspace.error || lease.failureError ? "failed" : "provisioning";
+    default:
+      return "provisioning";
+  }
+}
+
+function workspaceTerminalTimestamp(
+  workspace: WorkspaceRecord,
+  lease?: LeaseRecord,
+): number | undefined {
+  const terminal =
+    (!lease && Boolean(workspace.releaseRequestedAt || workspace.error)) ||
+    lease?.state === "expired" ||
+    (lease?.state === "released" &&
+      !lease.cleanupStartedAt &&
+      !lease.cleanupError &&
+      lease.releaseDeletesServer === undefined) ||
+    (lease?.state === "failed" &&
+      Boolean(workspace.error) &&
+      lease.provisioningResourceMayExist !== true);
+  if (!terminal) {
+    return undefined;
+  }
+  const timestamps = [workspace.updatedAt, lease?.endedAt, lease?.releasedAt, lease?.updatedAt]
+    .map((value) => Date.parse(value ?? ""))
+    .filter(Number.isFinite);
+  return timestamps.length > 0 ? Math.max(...timestamps) : undefined;
+}
+
+function workspaceOwnsLease(workspace: WorkspaceRecord, lease: LeaseRecord): boolean {
+  return (
+    lease.workspaceID === workspace.id &&
+    lease.id === workspace.leaseID &&
+    lease.owner === workspace.owner &&
+    lease.org === workspace.org
+  );
+}
+
+function workspaceResponse(
+  workspace: WorkspaceRecord,
+  lease?: LeaseRecord,
+): Record<string, unknown> {
+  const status = workspaceStatus(workspace, lease);
+  return {
+    id: workspace.id,
+    workspaceId: workspace.id,
+    providerResourceId: workspace.leaseID,
+    status,
+    profile: workspace.profile,
+    capabilities: {
+      terminal: false,
+      takeover: false,
+      vnc: false,
+      desktop: false,
+      logs: false,
+      artifacts: false,
+    },
+    ...(lease?.expiresAt ? { expiresAt: lease.expiresAt } : {}),
+    message:
+      workspace.error ??
+      (lease && !workspaceOwnsLease(workspace, lease)
+        ? "workspace lease reservation conflicts with another lifecycle"
+        : undefined) ??
+      lease?.failureError ??
+      (lease?.state === "failed" ? "workspace provisioning recovery pending" : undefined) ??
+      lease?.cleanupError ??
+      (status === "ready"
+        ? "workspace ready"
+        : status === "failed"
+          ? "workspace provisioning failed"
+          : `workspace ${status}`),
+  };
+}
+
+async function workspaceResponseError(response: Response, fallback: string): Promise<string> {
+  const body = (await response.json().catch(() => undefined)) as
+    | { message?: unknown; error?: unknown }
+    | undefined;
+  for (const value of [body?.message, body?.error]) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return fallback;
+}
+
 function newRunID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
@@ -7121,6 +8578,11 @@ function isProviderImageNotFound(error: unknown): boolean {
     message.includes("aws snapshot not found") ||
     message.includes("http 404")
   );
+}
+
+function providerResourceNotFound(error: unknown): boolean {
+  const message = errorMessage(error);
+  return message.includes("http 404") || isCloudNotFoundError(message);
 }
 
 function checkpointStrategy(value: string | undefined): "image" | "disk-snapshot" | undefined {
@@ -8966,6 +10428,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  findServerByLease?(leaseID: string): Promise<ProviderMachine | undefined>;
   getServer?(id: string): Promise<ProviderMachine>;
   prepareLeaseConfig?(
     config: ReturnType<typeof leaseConfig>,
@@ -9081,7 +10544,7 @@ interface ProviderProvisioningTarget {
   region?: string;
 }
 
-class HetznerProvider implements CloudProvider {
+export class HetznerProvider implements CloudProvider {
   private clientValue?: HetznerClient;
 
   constructor(private readonly env: Env) {}
@@ -9094,6 +10557,11 @@ class HetznerProvider implements CloudProvider {
   async listCrabboxServers(): Promise<ProviderMachine[]> {
     const servers = await this.client.listCrabboxServers();
     return servers.map((server) => this.client.toMachine(server));
+  }
+
+  async findServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
+    const server = await this.client.findServerByLease(leaseID);
+    return server ? this.client.toMachine(server) : undefined;
   }
 
   async createServerWithFallback(
@@ -9121,8 +10589,17 @@ class HetznerProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    await this.deleteServer(String(lease.serverID));
-    if (validCrabboxProviderKey(lease.providerKey)) {
+    try {
+      await this.deleteServer(String(lease.serverID));
+    } catch (error) {
+      if (!providerResourceNotFound(error)) {
+        throw error;
+      }
+    }
+    if (
+      !lease.providerKey.startsWith(workspaceProviderKeyPrefix) &&
+      validCrabboxProviderKey(lease.providerKey)
+    ) {
       await this.deleteSSHKey(lease.providerKey);
     }
   }
