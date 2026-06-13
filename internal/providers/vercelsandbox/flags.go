@@ -144,6 +144,10 @@ func validateVercelSandboxConfig(cfg Config) error {
 	default:
 		return exit(2, "vercel-sandbox networkPolicy must be default, public, private, restricted, or none")
 	}
+	if strings.EqualFold(strings.TrimSpace(cfg.VercelSandbox.NetworkPolicy), "none") &&
+		(len(cfg.VercelSandbox.NetworkAllow) > 0 || len(cfg.VercelSandbox.NetworkDeny) > 0) {
+		return exit(2, "vercel-sandbox networkPolicy none cannot be combined with networkAllow or networkDeny")
+	}
 	for _, entry := range append([]string{}, cfg.VercelSandbox.NetworkAllow...) {
 		if err := validateNetworkEntry(entry); err != nil {
 			return exit(2, "vercel-sandbox networkAllow entry %q is invalid: %v", entry, err)
@@ -163,9 +167,26 @@ func validateVercelSandboxConfig(cfg Config) error {
 			}
 		}
 	}
+	exposedPorts := map[int]struct{}{}
 	for _, port := range cfg.VercelSandbox.Ports {
 		if err := validatePortSpec(port); err != nil {
 			return exit(2, "vercel-sandbox port %q is invalid: %v", port, err)
+		}
+		value := strings.TrimSpace(port)
+		if value == "" {
+			continue
+		}
+		parts := strings.Split(value, "-")
+		start, _ := parsePort(parts[0])
+		end := start
+		if len(parts) == 2 {
+			end, _ = parsePort(parts[1])
+		}
+		for current := start; current <= end; current++ {
+			exposedPorts[current] = struct{}{}
+			if len(exposedPorts) > 15 {
+				return exit(2, "vercel-sandbox supports at most 15 unique exposed ports")
+			}
 		}
 	}
 	return nil

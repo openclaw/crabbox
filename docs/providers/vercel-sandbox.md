@@ -185,8 +185,9 @@ absolute dedicated directory and cannot be `/`, `/tmp`, `/usr`, `/var`,
 `public`, `private`, `restricted`, or `none`; allow and deny entries must be
 valid network entries. Allows accept domains, IP addresses, or CIDRs. Denies
 accept only IP addresses or CIDRs because the Vercel SDK does not support
-domain deny rules. Raw IPs are normalized to host CIDRs. `ports` accepts ports
-or `start-end` ranges.
+domain deny rules. Raw IPs are normalized to host CIDRs. `none` means deny all
+egress and cannot be combined with allow/deny entries. `ports` accepts ports or
+`start-end` ranges, with at most 15 unique exposed ports.
 
 ## Lifecycle
 

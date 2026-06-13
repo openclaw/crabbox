@@ -38,6 +38,9 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := b.bindProviderScope(ctx, api, false); err != nil {
+		return err
+	}
 	leaseID, sandboxID, slug, unlockOperation, err := b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug, true)
 	if err != nil {
 		return err
@@ -74,6 +77,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if err != nil {
 		return RunResult{}, err
 	}
+	if err := b.bindProviderScope(ctx, api, req.ID != ""); err != nil {
+		return RunResult{}, err
+	}
 	leaseID, sandboxID, slug := "", "", ""
 	acquired := false
 	var unlockOperation func()
@@ -90,7 +96,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s runtime=%s\n", leaseID, slug, providerName, sandboxID, vercelSandboxRuntime(b.cfg))
 		acquired = true
 	} else {
-		leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, b.providerScopeBase())
+		leaseID, sandboxID, _, err = b.resolveLeaseID(req.ID, "", false, 0)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -98,7 +104,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err != nil {
 			return RunResult{}, err
 		}
-		leaseID, sandboxID, _, err = resolveLeaseID(leaseID, "", false, 0, b.providerScopeBase())
+		leaseID, sandboxID, _, err = b.resolveLeaseID(leaseID, "", false, 0)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -109,7 +115,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err != nil {
 			return RunResult{}, err
 		}
-		_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, b.providerScopeBase())
+		_, _, slug, err = b.finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -273,6 +279,12 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 	if err != nil {
 		return nil, err
 	}
+	if len(sandboxes) == 0 {
+		return []LeaseView{}, nil
+	}
+	if err := b.bindProviderScope(ctx, api, true); err != nil {
+		return nil, err
+	}
 	views := make([]LeaseView, 0, len(sandboxes))
 	for _, sb := range sandboxes {
 		if len(sb.Metadata) == 0 && strings.HasPrefix(sb.ID, leasePrefix) {
@@ -280,11 +292,14 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 			if err != nil {
 				return nil, err
 			}
-			if claim.LeaseID == "" || claim.Provider != providerName || !claimMatchesScope(claim, b.providerScopeBase()) {
+			if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
 				continue
 			}
 			remote, err := api.GetSandbox(ctx, strings.TrimPrefix(claim.LeaseID, leasePrefix))
 			if err != nil {
+				if isVercelSandboxNotFound(err) {
+					continue
+				}
 				return nil, err
 			}
 			sb = remote
@@ -300,7 +315,7 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 		if claim.LeaseID == "" || claim.Provider != providerName {
 			continue
 		}
-		if err := validateClaimScope(claim, b.providerScopeBase()); err != nil {
+		if err := b.validateClaimScope(claim); err != nil {
 			return nil, err
 		}
 		if err := validateSandboxOwnership(claim, sb); err != nil {
@@ -316,11 +331,14 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0, b.providerScopeBase())
+	if err := b.bindProviderScope(ctx, api, true); err != nil {
+		return StatusView{}, err
+	}
+	leaseID, sandboxID, slug, err := b.resolveLeaseID(req.ID, "", false, 0)
 	if err != nil {
 		return StatusView{}, err
 	}
-	claim, ok, err := resolveVercelSandboxLeaseClaim(leaseID, b.providerScopeBase())
+	claim, ok, err := b.resolveVercelSandboxLeaseClaim(leaseID)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -396,7 +414,10 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, _, _, err := resolveLeaseID(req.ID, "", false, 0, b.providerScopeBase())
+	if err := b.bindProviderScope(ctx, api, true); err != nil {
+		return err
+	}
+	leaseID, _, _, err := b.resolveLeaseID(req.ID, "", false, 0)
 	if err != nil {
 		return err
 	}
@@ -405,7 +426,7 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	defer unlockOperation()
-	leaseID, sandboxID, _, err := resolveLeaseID(leaseID, "", false, 0, b.providerScopeBase())
+	leaseID, sandboxID, _, err := b.resolveLeaseID(leaseID, "", false, 0)
 	if err != nil {
 		return err
 	}
@@ -437,12 +458,24 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	hasProviderClaims := slices.ContainsFunc(claims, func(claim LeaseClaim) bool {
+		return claim.Provider == providerName
+	})
+	if !hasProviderClaims {
+		if !req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=0 claims_removed=0 checked=0\n", providerName)
+		}
+		return nil
+	}
+	if err := b.bindProviderScope(ctx, api, true); err != nil {
+		return err
+	}
 	now := b.now().UTC()
 	checked := 0
 	removed := 0
 	claimsRemoved := 0
 	for _, listed := range claims {
-		if listed.Provider != providerName || !claimMatchesScope(listed, b.providerScopeBase()) {
+		if listed.Provider != providerName || !b.claimMatchesActiveScope(listed) {
 			continue
 		}
 		var removedOne, claimRemovedOne, checkedOne bool
@@ -456,7 +489,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			if err != nil {
 				return err
 			}
-			if claim.LeaseID == "" || claim.Provider != providerName || !claimMatchesScope(claim, b.providerScopeBase()) {
+			if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
 				return nil
 			}
 			checkedOne = true
@@ -617,7 +650,7 @@ func (b *backend) serverFromSandbox(claim LeaseClaim, sb sandboxSummary) Server 
 	}
 }
 
-func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, scopeBase string) (string, string, string, error) {
+func (b *backend) resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return "", "", "", exit(2, "provider=vercel-sandbox requires a Crabbox-created sandbox slug or lease id")
@@ -629,26 +662,26 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 	if claim, err := readLeaseClaim(exactLeaseID); err != nil {
 		return "", "", "", err
 	} else if claim.LeaseID == exactLeaseID && claim.Provider == providerName {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, scopeBase)
+		return b.finishResolvedLease(claim, repoRoot, reclaim, idleTimeout)
 	}
-	claim, ok, err := resolveVercelSandboxLeaseClaim(id, scopeBase)
+	claim, ok, err := b.resolveVercelSandboxLeaseClaim(id)
 	if err != nil {
 		return "", "", "", err
 	}
 	if ok {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, scopeBase)
+		return b.finishResolvedLease(claim, repoRoot, reclaim, idleTimeout)
 	}
 	return "", "", "", exit(4, "vercel-sandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
 }
 
-func resolveVercelSandboxLeaseClaim(identifier, scopeBase string) (LeaseClaim, bool, error) {
+func (b *backend) resolveVercelSandboxLeaseClaim(identifier string) (LeaseClaim, bool, error) {
 	claims, err := listVercelSandboxLeaseClaims()
 	if err != nil {
 		return LeaseClaim{}, false, err
 	}
 	for _, claim := range claims {
 		if claim.Provider == providerName && claim.LeaseID == identifier {
-			if err := validateClaimScope(claim, scopeBase); err != nil {
+			if err := b.validateClaimScope(claim); err != nil {
 				return LeaseClaim{}, false, err
 			}
 			return claim, true, nil
@@ -656,10 +689,14 @@ func resolveVercelSandboxLeaseClaim(identifier, scopeBase string) (LeaseClaim, b
 	}
 	slug := normalizeLeaseSlug(identifier)
 	if slug != "" {
-		for _, claim := range claims {
-			if claim.Provider == providerName && normalizeLeaseSlug(claim.Slug) == slug {
-				if err := validateClaimScope(claim, scopeBase); err != nil {
-					return LeaseClaim{}, false, err
+		for _, legacy := range []bool{false, true} {
+			for _, claim := range claims {
+				if claim.Provider != providerName || normalizeLeaseSlug(claim.Slug) != slug {
+					continue
+				}
+				isLegacy := !claimMatchesScope(claim, b.providerScopeBase())
+				if isLegacy != legacy || !b.claimMatchesActiveScope(claim) {
+					continue
 				}
 				return claim, true, nil
 			}
@@ -668,8 +705,8 @@ func resolveVercelSandboxLeaseClaim(identifier, scopeBase string) (LeaseClaim, b
 	return LeaseClaim{}, false, nil
 }
 
-func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, scopeBase string) (string, string, string, error) {
-	if err := validateClaimScope(claim, scopeBase); err != nil {
+func (b *backend) finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
+	if err := b.validateClaimScope(claim); err != nil {
 		return "", "", "", err
 	}
 	if repoRoot != "" {
@@ -693,20 +730,45 @@ func (b *backend) newClaimScope() (string, error) {
 	return b.providerScopeBase() + "/ownership:" + hex.EncodeToString(token[:]), nil
 }
 
+func (b *backend) bindProviderScope(ctx context.Context, api vercelSandboxClient, readOnly bool) error {
+	previousScopeBase := b.providerScopeBase()
+	scope, err := api.ResolveProjectScope(ctx, readOnly)
+	if err != nil {
+		return err
+	}
+	b.resolvedProject = strings.TrimSpace(scope.ProjectID)
+	b.resolvedTeam = strings.TrimSpace(scope.TeamID)
+	if resolvedScopeBase := b.providerScopeBase(); previousScopeBase != resolvedScopeBase && b.legacyScopeBase == "" {
+		b.legacyScopeBase = previousScopeBase
+	}
+	return nil
+}
+
 func (b *backend) providerScopeBase() string {
+	projectID := blank(strings.TrimSpace(b.resolvedProject), strings.TrimSpace(b.cfg.VercelSandbox.ProjectID))
+	teamID := blank(strings.TrimSpace(b.resolvedTeam), strings.TrimSpace(b.cfg.VercelSandbox.TeamID))
 	parts := []string{
 		"scope:" + blank(strings.TrimSpace(b.cfg.VercelSandbox.Scope), "-"),
-		"team:" + blank(strings.TrimSpace(b.cfg.VercelSandbox.TeamID), "-"),
-		"project:" + blank(strings.TrimSpace(b.cfg.VercelSandbox.ProjectID), "-"),
+		"team:" + blank(teamID, "-"),
+		"project:" + blank(projectID, "-"),
 	}
 	return strings.Join(parts, "/")
 }
 
-func validateClaimScope(claim LeaseClaim, scopeBase string) error {
-	if !claimMatchesScope(claim, scopeBase) {
+func (b *backend) validateClaimScope(claim LeaseClaim) error {
+	if !b.claimMatchesActiveScope(claim) {
 		return exit(4, "vercel-sandbox lease %q belongs to a different project/team/scope; restore the configuration used to create it", claim.LeaseID)
 	}
 	return nil
+}
+
+func (b *backend) claimMatchesActiveScope(claim LeaseClaim) bool {
+	if claimMatchesScope(claim, b.providerScopeBase()) {
+		return true
+	}
+	// Legacy claims are candidates only. Callers verify their remote ownership
+	// tags through the currently authenticated project before use.
+	return b.legacyScopeBase != "" && claimMatchesScope(claim, b.legacyScopeBase)
 }
 
 func claimMatchesScope(claim LeaseClaim, scopeBase string) bool {
@@ -718,7 +780,7 @@ func (b *backend) verifyClaim(ctx context.Context, api vercelSandboxClient, leas
 	if err != nil {
 		return sandboxSummary{}, err
 	}
-	if err := validateClaimScope(claim, b.providerScopeBase()); err != nil {
+	if err := b.validateClaimScope(claim); err != nil {
 		return sandboxSummary{}, err
 	}
 	sb, err := api.GetSandbox(ctx, sandboxID)
@@ -833,7 +895,7 @@ func isReadyState(state string) bool {
 
 func isTerminalState(state string) bool {
 	switch strings.TrimSpace(strings.ToLower(state)) {
-	case "terminated", "stopped", "failed", "error", "killed", "deleted", "destroyed":
+	case "terminated", "stopped", "failed", "error", "aborted", "killed", "deleted", "destroyed":
 		return true
 	default:
 		return false

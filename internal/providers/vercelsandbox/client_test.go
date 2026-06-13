@@ -208,6 +208,54 @@ func TestCheckProjectUsesReadOnlyBridgeScopeValidation(t *testing.T) {
 	}
 }
 
+func TestResolveProjectScopeUsesBridge(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		readOnly bool
+		action   string
+	}{
+		{name: "mutating", action: "resolve-scope"},
+		{name: "read-only", readOnly: true, action: "resolve-scope-read-only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got bridgeRequest
+			client := &bridgeClient{
+				call: func(_ context.Context, req bridgeRequest, out any) error {
+					got = req
+					*(out.(*projectScope)) = projectScope{ProjectID: "prj_123", TeamID: "team_123"}
+					return nil
+				},
+			}
+			scope, err := client.ResolveProjectScope(context.Background(), tc.readOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Action != tc.action || scope.ProjectID != "prj_123" || scope.TeamID != "team_123" {
+				t.Fatalf("request=%#v scope=%#v", got, scope)
+			}
+			if client.cfg.VercelSandbox.ProjectID != "prj_123" || client.cfg.VercelSandbox.TeamID != "team_123" {
+				t.Fatalf("resolved scope was not retained by bridge client: %#v", client.cfg.VercelSandbox)
+			}
+		})
+	}
+}
+
+func TestResolveProjectScopeKeepsOIDCBridgeConfigImplicit(t *testing.T) {
+	t.Setenv("VERCEL_OIDC_TOKEN", "header.payload.signature")
+	client := &bridgeClient{
+		call: func(_ context.Context, _ bridgeRequest, out any) error {
+			*(out.(*projectScope)) = projectScope{ProjectID: "prj_oidc", TeamID: "team_oidc"}
+			return nil
+		},
+	}
+	if _, err := client.ResolveProjectScope(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if client.cfg.VercelSandbox.ProjectID != "" || client.cfg.VercelSandbox.TeamID != "" {
+		t.Fatalf("OIDC scope should remain implicit: %#v", client.cfg.VercelSandbox)
+	}
+}
+
 func TestCheckCLIMissingReportsEnvironmentBlocker(t *testing.T) {
 	client := &bridgeClient{lookup: func(string) (string, error) { return "", os.ErrNotExist }}
 	_, err := client.CheckCLI(context.Background())

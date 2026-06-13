@@ -86,9 +86,14 @@ need_tool() {
 
 inventory_has_slug() {
   local inventory
-  if ! inventory="$("$bin" list --provider vercel-sandbox --json 2>/dev/null)"; then
+  local inventory_stderr
+  inventory_stderr="$(mktemp "${TMPDIR:-/tmp}/crabbox-vercel-inventory.XXXXXX")"
+  if ! inventory="$("$bin" list --provider vercel-sandbox --json 2>"$inventory_stderr")"; then
+    print_debug_detail "list failed: $(<"$inventory_stderr")"
+    rm -f -- "$inventory_stderr"
     return 2
   fi
+  rm -f -- "$inventory_stderr"
   if jq -e --arg slug "$slug" 'any(.[]; ((.slug // .Slug // .labels.slug // .Labels.slug // "") == $slug))' <<<"$inventory" >/dev/null 2>&1; then
     return 0
   fi
@@ -99,9 +104,10 @@ inventory_has_slug() {
 }
 
 stop_and_confirm() {
-  local attempt
-  local inventory_status
-  for attempt in 1 2 3; do
+	local attempt
+	local inventory_status
+	local stop_output
+	for attempt in 1 2 3; do
     if inventory_has_slug; then
       inventory_status=0
     else
@@ -110,7 +116,9 @@ stop_and_confirm() {
     if [[ $inventory_status -eq 1 ]]; then
       return 0
     fi
-    "$bin" stop --provider vercel-sandbox "$slug" >/dev/null 2>&1 || true
+		if ! stop_output="$("$bin" stop --provider vercel-sandbox "$slug" 2>&1)"; then
+			print_debug_detail "stop attempt $attempt failed: $stop_output"
+		fi
     if [[ $attempt -lt 3 ]]; then
       sleep "$cleanup_retry_delay"
     fi

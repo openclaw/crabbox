@@ -51,10 +51,42 @@ func TestBridgeScriptUsesOfficialSnapshotSourceShape(t *testing.T) {
 
 func TestBridgeScriptChecksProjectScopeReadOnly(t *testing.T) {
 	script := vercelSandboxBridgeScript()
-	for _, want := range []string{"case 'check-project':", "sandboxOptions({ sortBy: 'name' }, true)"} {
+	for _, want := range []string{
+		"case 'check-project':",
+		"sandboxOptions({ sortBy: 'name' }, true)",
+		"case 'resolve-scope':",
+		"case 'resolve-scope-read-only':",
+		"resolvedCredentials(true)",
+		"projectId: credentials.projectId, teamId: credentials.teamId",
+	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("bridge script missing %q", want)
 		}
+	}
+}
+
+func TestBridgeScriptProbesDefaultTeamBeforeTeamPagination(t *testing.T) {
+	script := vercelSandboxBridgeScript()
+	probe := strings.Index(script, "probeReadOnlyProject(token, user.defaultTeamId)")
+	paginate := strings.Index(script, "'/v2/teams?limit=20'")
+	if probe < 0 || paginate < 0 || probe > paginate {
+		t.Fatalf("read-only scope resolution does not probe the default team first")
+	}
+	for _, want := range []string{
+		"typeof user.defaultTeamId === 'string'",
+		"typeof team?.id === 'string'",
+		"typeof team?.slug === 'string'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("read-only scope resolution missing validation %q", want)
+		}
+	}
+}
+
+func TestBridgeScriptTreatsNoneAsDenyAll(t *testing.T) {
+	script := vercelSandboxBridgeScript()
+	if !strings.Contains(script, "if (mode === 'none') return 'deny-all'") {
+		t.Fatal("bridge script does not map networkPolicy none to deny-all")
 	}
 }
 
@@ -77,8 +109,10 @@ func TestBridgeScriptUsesOfficialAuthAndResumesMutationPaths(t *testing.T) {
 		"JSON.parse(fs.readFileSync(path.join(current, '.vercel', 'project.json'), 'utf8'))",
 		"projectId: value.projectId, teamId: value.orgId",
 		"fs.mkdtempSync(path.join(os.tmpdir(), 'crabbox-vercel-scope-'))",
-		"project scope cannot be validated read-only",
+		"inferReadOnlyScope",
+		"Vercel read-only project scope lookup failed",
 		"Vercel OIDC tokens are scoped by their claims",
+		"return { token, projectId: claims.project_id, teamId: claims.owner_id }",
 		"cfg.teamId || (projectId ? cfg.scope || '' : '')",
 		"projectId requires teamId or scope",
 		"getSandbox(req.sandboxId, true)",

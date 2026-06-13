@@ -20,11 +20,17 @@ type sandboxSummary struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
+type projectScope struct {
+	ProjectID string `json:"projectId"`
+	TeamID    string `json:"teamId"`
+}
+
 type vercelSandboxClient interface {
 	CheckSDK(ctx context.Context) error
 	CheckCLI(ctx context.Context) (string, error)
 	CheckAuth(ctx context.Context) error
 	CheckProject(ctx context.Context) error
+	ResolveProjectScope(ctx context.Context, readOnly bool) (projectScope, error)
 	ListSandboxes(ctx context.Context) ([]sandboxSummary, error)
 	CreateSandbox(context.Context, createSandboxRequest) (sandboxSummary, error)
 	GetSandbox(context.Context, string) (sandboxSummary, error)
@@ -84,6 +90,25 @@ func (c *bridgeClient) CheckAuth(ctx context.Context) error {
 
 func (c *bridgeClient) CheckProject(ctx context.Context) error {
 	return c.bridgeCall(ctx, bridgeRequest{Action: "check-project"}, nil)
+}
+
+func (c *bridgeClient) ResolveProjectScope(ctx context.Context, readOnly bool) (projectScope, error) {
+	var out projectScope
+	action := "resolve-scope"
+	if readOnly {
+		action = "resolve-scope-read-only"
+	}
+	if err := c.bridgeCall(ctx, bridgeRequest{Action: action}, &out); err != nil {
+		return projectScope{}, err
+	}
+	if strings.TrimSpace(out.ProjectID) == "" || strings.TrimSpace(out.TeamID) == "" {
+		return projectScope{}, errors.New("vercel-sandbox bridge returned incomplete project scope")
+	}
+	if firstEnv("CRABBOX_VERCEL_SANDBOX_OIDC_TOKEN", "VERCEL_OIDC_TOKEN") == "" {
+		c.cfg.VercelSandbox.ProjectID = strings.TrimSpace(out.ProjectID)
+		c.cfg.VercelSandbox.TeamID = strings.TrimSpace(out.TeamID)
+	}
+	return out, nil
 }
 
 func (c *bridgeClient) ListSandboxes(context.Context) ([]sandboxSummary, error) {

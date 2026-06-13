@@ -47,7 +47,7 @@ func TestVercelSandboxFlagsApplyAndValidate(t *testing.T) {
 		"--vercel-sandbox-network-policy", "restricted",
 		"--vercel-sandbox-network-allow", "api.example.com,10.0.0.0/8",
 		"--vercel-sandbox-network-deny", "169.254.169.254/32",
-		"--vercel-sandbox-ports", "3000,8080-8090",
+		"--vercel-sandbox-ports", "3000,8080-8082",
 		"--vercel-sandbox-forget-missing",
 	}
 	if err := fs.Parse(args); err != nil {
@@ -102,9 +102,14 @@ func TestValidateVercelSandboxConfigRejectsInvalidValues(t *testing.T) {
 		{"exec-timeout", func(c *Config) { c.VercelSandbox.ExecTimeoutSecs = -1 }, "non-negative"},
 		{"vcpus", func(c *Config) { c.VercelSandbox.VCPUs = -1 }, "vcpus"},
 		{"network-policy", func(c *Config) { c.VercelSandbox.NetworkPolicy = "mystery" }, "networkPolicy"},
+		{"network-none-with-rules", func(c *Config) {
+			c.VercelSandbox.NetworkPolicy = "none"
+			c.VercelSandbox.NetworkAllow = []string{"api.example.com"}
+		}, "cannot be combined"},
 		{"network-entry", func(c *Config) { c.VercelSandbox.NetworkAllow = []string{"bad_host!"} }, "networkAllow"},
 		{"network-domain-deny", func(c *Config) { c.VercelSandbox.NetworkDeny = []string{"blocked.example.com"} }, "does not support domain deny"},
 		{"port", func(c *Config) { c.VercelSandbox.Ports = []string{"70000"} }, "port"},
+		{"too-many-ports", func(c *Config) { c.VercelSandbox.Ports = []string{"3000-3015"} }, "at most 15"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

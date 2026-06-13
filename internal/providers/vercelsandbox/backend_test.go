@@ -18,6 +18,7 @@ import (
 
 type lifecycleFakeClient struct {
 	sandboxes map[string]sandboxSummary
+	scope     projectScope
 	nextID    int
 	calls     []string
 	uploads   []string
@@ -32,13 +33,22 @@ type lifecycleFakeClient struct {
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
-	return &lifecycleFakeClient{sandboxes: map[string]sandboxSummary{}}
+	return &lifecycleFakeClient{
+		sandboxes: map[string]sandboxSummary{},
+		scope: projectScope{
+			ProjectID: "prj_test",
+			TeamID:    "team_test",
+		},
+	}
 }
 
 func (f *lifecycleFakeClient) CheckSDK(context.Context) error           { return nil }
 func (f *lifecycleFakeClient) CheckCLI(context.Context) (string, error) { return "/bin/sandbox", nil }
 func (f *lifecycleFakeClient) CheckAuth(context.Context) error          { return nil }
 func (f *lifecycleFakeClient) CheckProject(context.Context) error       { return nil }
+func (f *lifecycleFakeClient) ResolveProjectScope(context.Context, bool) (projectScope, error) {
+	return f.scope, nil
+}
 func (f *lifecycleFakeClient) ListSandboxes(context.Context) ([]sandboxSummary, error) {
 	f.calls = append(f.calls, "list")
 	out := make([]sandboxSummary, 0, len(f.sandboxes))
@@ -270,6 +280,94 @@ func TestListHydratesClaimOnlyInventoryBeforeOwnershipFilter(t *testing.T) {
 	}
 }
 
+func TestListSkipsMissingClaimAndReturnsRemainingSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	for _, name := range []string{"first", "second"} {
+		if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: name, Root: "/repo"}, Keep: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leaseIDs := make([]string, 0, len(fake.sandboxes))
+	for id := range fake.sandboxes {
+		leaseIDs = append(leaseIDs, leasePrefix+id)
+	}
+	delete(fake.sandboxes, strings.TrimPrefix(leaseIDs[0], leasePrefix))
+	listingFake := &claimOnlyListFakeClient{
+		lifecycleFakeClient: fake,
+		list: []sandboxSummary{
+			{ID: leaseIDs[0]},
+			{ID: leaseIDs[1]},
+		},
+	}
+	backend.newClient = func(Config, Runtime) (vercelSandboxClient, error) {
+		return listingFake, nil
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Labels["lease"] != leaseIDs[1] {
+		t.Fatalf("views=%#v leaseIDs=%v", views, leaseIDs)
+	}
+}
+
+func TestEmptyListAndCleanupDoNotResolveProjectScope(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	fake.scope = projectScope{}
+	backend := testBackend(fake, io.Discard, io.Discard)
+	if views, err := backend.List(context.Background(), ListRequest{}); err != nil || views == nil || len(views) != 0 {
+		t.Fatalf("views=%#v err=%v", views, err)
+	}
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyScopeClaimRemainsManageableAfterBinding(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	backend.cfg.VercelSandbox.ProjectID = "vercel-sandbox-default-project"
+	backend.cfg.VercelSandbox.TeamID = ""
+	backend.cfg.VercelSandbox.Scope = "example-org"
+	fake.scope = projectScope{ProjectID: "vercel-sandbox-default-project", TeamID: "example-org"}
+	legacyScope := backend.providerScopeBase() + "/ownership:legacy"
+	leaseID := leasePrefix + "legacy"
+	slug := "legacy-box"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, legacyScope, "", "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandboxes["legacy"] = sandboxSummary{
+		ID:    "legacy",
+		State: "running",
+		Metadata: map[string]string{
+			metadataProviderKey: providerName,
+			metadataScopeKey:    legacyScope,
+			metadataClaimKey:    leaseID,
+			metadataSlugKey:     slug,
+		},
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Labels["lease"] != leaseID {
+		t.Fatalf("views=%#v", views)
+	}
+	if err := backend.Stop(context.Background(), StopRequest{ID: slug}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.sandboxes) != 0 {
+		t.Fatalf("legacy sandbox was not deleted: %#v", fake.sandboxes)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("legacy claim was not removed: claim=%#v err=%v", claim, err)
+	}
+}
+
 func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
@@ -411,6 +509,12 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	}
 	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID == "" {
 		t.Fatalf("claim should be retained: claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestAbortedSandboxStateIsTerminal(t *testing.T) {
+	if !isTerminalState("aborted") {
+		t.Fatal("aborted sandbox state should be terminal")
 	}
 }
 

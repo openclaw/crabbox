@@ -13,6 +13,8 @@ type fakeClient struct {
 	cliErr     error
 	authErr    error
 	projectErr error
+	scopeErr   error
+	scope      projectScope
 	listErr    error
 	list       []sandboxSummary
 	calls      []string
@@ -36,6 +38,11 @@ func (f *fakeClient) CheckAuth(context.Context) error {
 func (f *fakeClient) CheckProject(context.Context) error {
 	f.calls = append(f.calls, "project")
 	return f.projectErr
+}
+
+func (f *fakeClient) ResolveProjectScope(context.Context, bool) (projectScope, error) {
+	f.calls = append(f.calls, "scope")
+	return f.scope, f.scopeErr
 }
 
 func (f *fakeClient) ListSandboxes(context.Context) ([]sandboxSummary, error) {

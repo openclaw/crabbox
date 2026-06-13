@@ -72,13 +72,107 @@ function linkedProject(start) {
   }
 }
 
+const defaultProjectName = 'vercel-sandbox-default-project';
+
+function teamQuery(teamId) {
+  if (typeof teamId !== 'string' || teamId.trim() === '') {
+    throw new Error('Vercel read-only scope lookup returned an invalid team identifier');
+  }
+  return teamId.startsWith('team_')
+    ? 'teamId=' + encodeURIComponent(teamId)
+    : 'slug=' + encodeURIComponent(teamId);
+}
+
+async function vercelReadOnlyRequest(token, endpoint) {
+  const response = await fetch('https://api.vercel.com' + endpoint, {
+    headers: { authorization: 'Bearer ' + token },
+  });
+  let body = {};
+  try {
+    body = await response.json();
+  } catch {}
+  return { response, body };
+}
+
+async function probeReadOnlyProject(token, teamId) {
+  const projectResult = await vercelReadOnlyRequest(
+    token,
+    '/v2/projects/' + encodeURIComponent(defaultProjectName) + '?' + teamQuery(teamId),
+  );
+  if (projectResult.response.ok) {
+    return { projectId: defaultProjectName, teamId };
+  }
+  if (![402, 403, 404].includes(projectResult.response.status)) {
+    throw new Error('Vercel read-only project scope lookup failed with status ' + projectResult.response.status);
+  }
+  return null;
+}
+
+async function inferReadOnlyScope(token, requestedTeamId = '') {
+  if (requestedTeamId) {
+    return { projectId: defaultProjectName, teamId: requestedTeamId };
+  }
+  const userResult = await vercelReadOnlyRequest(token, '/v2/user');
+  if (!userResult.response.ok) {
+    throw new Error('Vercel read-only user scope lookup failed with status ' + userResult.response.status);
+  }
+  const user = userResult.body?.user || {};
+  const seen = new Set();
+  if (typeof user.defaultTeamId === 'string' && user.defaultTeamId.trim() !== '') {
+    seen.add(user.defaultTeamId);
+    const scope = await probeReadOnlyProject(token, user.defaultTeamId);
+    if (scope) return scope;
+  }
+  let next = null;
+  do {
+    const endpoint = next === null ? '/v2/teams?limit=20' : '/v2/teams?limit=20&until=' + encodeURIComponent(next);
+    const teamsResult = await vercelReadOnlyRequest(token, endpoint);
+    if (!teamsResult.response.ok) {
+      throw new Error('Vercel read-only team scope lookup failed with status ' + teamsResult.response.status);
+    }
+    const teams = Array.isArray(teamsResult.body?.teams) ? teamsResult.body.teams : [];
+    const eligible = teams.filter((team) =>
+      typeof team?.id === 'string' &&
+      team.id.trim() !== '' &&
+      typeof team?.slug === 'string' &&
+      team?.membership?.role === 'OWNER' &&
+      team?.billing?.plan === 'hobby'
+    );
+    eligible.sort((a, b) => {
+      if (a.slug === user.username) return -1;
+      if (b.slug === user.username) return 1;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+    for (const team of eligible) {
+      if (seen.has(team.id)) continue;
+      seen.add(team.id);
+      const scope = await probeReadOnlyProject(token, team.id);
+      if (scope) return scope;
+    }
+    next = teamsResult.body?.pagination?.next ?? null;
+  } while (next !== null);
+  if (typeof user.username === 'string' && user.username.trim() !== '' && !seen.has(user.username)) {
+    const scope = await probeReadOnlyProject(token, user.username);
+    if (scope) return scope;
+  }
+  throw new Error('Vercel Sandbox project scope cannot be resolved read-only; set projectId with teamId/scope, use OIDC, or link the checkout');
+}
+
 async function resolvedCredentials(readOnly = false) {
   const cfg = req.config || {};
   if (process.env.VERCEL_OIDC_TOKEN) {
     if (cfg.projectId || cfg.teamId || cfg.scope) {
       throw new Error('Vercel OIDC tokens are scoped by their claims; remove explicit projectId, teamId, and scope');
     }
-    return {};
+    const token = process.env.VERCEL_OIDC_TOKEN;
+    let claims;
+    try {
+      claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    } catch {
+      throw new Error('Vercel OIDC token has invalid claims');
+    }
+    if (!claims?.project_id || !claims?.owner_id) throw new Error('Vercel OIDC token is missing project/team claims');
+    return { token, projectId: claims.project_id, teamId: claims.owner_id };
   }
 
   let token = process.env.VERCEL_TOKEN || process.env.VERCEL_AUTH_TOKEN || '';
@@ -111,7 +205,9 @@ async function resolvedCredentials(readOnly = false) {
     throw new Error('Vercel Sandbox projectId requires teamId or scope');
   }
   if (readOnly && (!projectId || !teamId)) {
-    throw new Error('Vercel Sandbox project scope cannot be validated read-only; set projectId with teamId/scope, use OIDC, or link the checkout');
+    const inferred = await inferReadOnlyScope(token, teamId || cfg.scope || '');
+    projectId ||= inferred.projectId;
+    teamId ||= inferred.teamId;
   }
   if (!projectId || !teamId) {
     authMod ||= await import('@vercel/sandbox/dist/auth/index.js');
@@ -167,14 +263,15 @@ function networkPolicy(create, cfg) {
   const mode = String(create.networkPolicy || cfg.networkPolicy || '').trim().toLowerCase();
   const allow = [...(create.networkAllow || []), ...(cfg.networkAllow || [])].map((entry) => String(entry).trim()).filter(Boolean);
   const deny = [...(create.networkDeny || []), ...(cfg.networkDeny || [])].map((entry) => String(entry).trim()).filter(Boolean);
-  if ((mode === '' || mode === 'default' || mode === 'none') && allow.length === 0 && deny.length === 0) return undefined;
+  if (mode === 'none') return 'deny-all';
+  if ((mode === '' || mode === 'default') && allow.length === 0 && deny.length === 0) return undefined;
   const allowDomains = allow.filter((entry) => !subnetCIDR(entry));
   const allowCIDRs = allow.map(subnetCIDR).filter(Boolean);
   const denyCIDRs = deny.map(subnetCIDR).filter(Boolean);
   if (mode === 'public' && denyCIDRs.length === 0) return 'allow-all';
   if ((mode === 'private' || mode === 'restricted') && allowDomains.length === 0 && allowCIDRs.length === 0) return 'deny-all';
   const policy = {};
-  if (mode === 'public' || ((mode === '' || mode === 'default' || mode === 'none') && allowDomains.length === 0 && allowCIDRs.length === 0 && denyCIDRs.length > 0)) {
+  if (mode === 'public' || ((mode === '' || mode === 'default') && allowDomains.length === 0 && allowCIDRs.length === 0 && denyCIDRs.length > 0)) {
     policy.allow = ['*'];
   } else if (allowDomains.length > 0) {
     policy.allow = allowDomains;
@@ -246,6 +343,16 @@ switch (req.action) {
     await Sandbox.list(await sandboxOptions({ sortBy: 'name' }, true));
     process.stdout.write('{}\n');
     break;
+  case 'resolve-scope': {
+    const credentials = await resolvedCredentials();
+    process.stdout.write(JSON.stringify({ projectId: credentials.projectId, teamId: credentials.teamId }) + '\n');
+    break;
+  }
+  case 'resolve-scope-read-only': {
+    const credentials = await resolvedCredentials(true);
+    process.stdout.write(JSON.stringify({ projectId: credentials.projectId, teamId: credentials.teamId }) + '\n');
+    break;
+  }
   case 'create': {
     const create = req.create || {};
     const cfg = req.config || {};

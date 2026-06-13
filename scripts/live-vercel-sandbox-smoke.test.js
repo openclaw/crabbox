@@ -126,6 +126,9 @@ case "$1" in
     printf '{"id":"vsbx_test","slug":"%s","provider":"vercel-sandbox","state":"running"}\\n' "$(cat "${state}")"
     ;;
   list)
+    if [[ "\${FAKE_CRABBOX_LIST_WARNING:-0}" == "1" ]]; then
+      printf 'inventory warning\\n' >&2
+    fi
     if [[ -f "${state}" ]]; then
       printf '[{"provider":"vercel-sandbox","slug":"%s","state":"running"}]\\n' "$(cat "${state}")"
     elif [[ "\${FAKE_CRABBOX_FAIL_EMPTY_LIST:-0}" == "1" ]]; then
@@ -276,6 +279,20 @@ test("runs retained reuse lifecycle and verifies cleanup", () => {
 	assert.match(calls, /^crabbox run --provider vercel-sandbox --id vs-live-.*VERCEL_SANDBOX_STREAM_START/m);
 	assert.match(calls, /^crabbox run --provider vercel-sandbox --id vs-live-.* --no-sync -- /m);
 	assert.match(calls, /^crabbox stop --provider vercel-sandbox vs-live-/m);
+});
+
+test("ignores successful inventory warnings while parsing JSON", () => {
+	const fake = setupFakeTools();
+	const result = runSmoke(fake, {
+		CRABBOX_LIVE: "1",
+		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
+		CRABBOX_VERCEL_SANDBOX_CLEANUP_RETRY_DELAY_SECONDS: "0",
+		FAKE_CRABBOX_LIST_WARNING: "1",
+	});
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /classification=live_vercel_sandbox_smoke_passed/);
+	assert.equal(fs.existsSync(fake.state), false);
 });
 
 test("cleans up a lease left by a failed initial run", () => {

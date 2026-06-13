@@ -67,10 +67,13 @@ func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 }
 
 type backend struct {
-	spec      ProviderSpec
-	cfg       Config
-	rt        Runtime
-	newClient func(Config, Runtime) (vercelSandboxClient, error)
+	spec            ProviderSpec
+	cfg             Config
+	rt              Runtime
+	resolvedProject string
+	resolvedTeam    string
+	legacyScopeBase string
+	newClient       func(Config, Runtime) (vercelSandboxClient, error)
 }
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
