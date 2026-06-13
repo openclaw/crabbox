@@ -203,10 +203,14 @@ function quoteCandidate(
     routeKey: `${provider}:${target}:${serverType}`,
     available: rate?.enabled !== false,
   };
+  if (candidate.available && !providerSupportsTarget(provider, target)) {
+    candidate.available = false;
+    candidate.unavailableReason = "unsupported_target_for_provider";
+  }
   if (candidate.available && maxCredits !== undefined && credits > maxCredits) {
     candidate.available = false;
     candidate.unavailableReason = "above_max_credits";
-  } else if (!candidate.available) {
+  } else if (!candidate.available && !candidate.unavailableReason) {
     candidate.unavailableReason = "disabled_by_rate_card";
   }
   return candidate;
@@ -236,12 +240,16 @@ function quoteWarnings(
 }
 
 function quoteProviders(supported: Provider[], input: MarketplaceQuoteRequest): Provider[] {
-  const requested = input.providers?.length
+  const raw = input.providers?.length
     ? input.providers
     : input.provider && input.provider !== "auto"
       ? [input.provider]
       : supported;
-  const providers = uniqueProviders(requested);
+  // intersect with the deployment allowlist (CRABBOX_MARKETPLACE_ALLOWED_PROVIDERS or default coordinator)
+  // so that explicitly requested providers outside the list are rejected (prevents bypass of routing/billing policy)
+  const supportedSet = new Set(supported);
+  const filtered = raw.filter((p) => supportedSet.has(p as Provider));
+  const providers = uniqueProviders(filtered);
   if (providers.length === 0) {
     throw new MarketplaceInputError(
       "no supported marketplace providers requested",
@@ -269,6 +277,14 @@ function quoteStrategy(strategy: MarketplaceStrategy | undefined): MarketplaceSt
     return strategy;
   }
   throw new MarketplaceInputError(`unsupported strategy ${strategy}`, "invalid_strategy");
+}
+
+function providerSupportsTarget(provider: Provider, target: TargetOS): boolean {
+  if (target === "linux") return true;
+  // Known Linux-only providers per current lease/provider backends (see Hetzner/GCP examples in docs and lease config).
+  // Other providers (aws, azure, etc.) support Windows/macOS in their adapters.
+  const linuxOnly = new Set<Provider>(["hetzner", "gcp"]);
+  return !linuxOnly.has(provider);
 }
 
 function marketplaceProviders(env: Env): Provider[] {
@@ -430,7 +446,9 @@ function positiveInt(value: number | undefined, fallback: number, max: number): 
   if (!Number.isFinite(value) || value === undefined || value <= 0) {
     return fallback;
   }
-  return Math.min(Math.trunc(value), max);
+  // ceil to ensure fractional inputs (e.g. 0.5 from raw JSON) produce positive integer seconds
+  // and never zero-credit quotes; CLI path already produces integers via parseDuration
+  return Math.min(Math.max(1, Math.ceil(value)), max);
 }
 
 function positiveNumber(value: unknown): number | undefined {
