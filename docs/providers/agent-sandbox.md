@@ -85,7 +85,9 @@ crabbox stop --provider agent-sandbox linux-pool-smoke
 crabbox cleanup --provider agent-sandbox --dry-run
 ```
 
-`warmup` always leaves the `SandboxClaim` retained until explicit `stop`.
+`warmup` keeps the sandbox available until explicit `stop` or the configured
+Crabbox TTL expires. At expiry, the controller tears down the sandbox workload
+but retains the `SandboxClaim` as an exact cleanup handle.
 A `run` without `--id` creates a claim and deletes it after the command unless
 `--keep` or `--keep-on-failure` retains it. The provider is Linux-only.
 
@@ -163,8 +165,9 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
    required RBAC verbs. It does not create a claim.
 2. `warmup` or `run` without `--id` creates one `SandboxClaim` named
    `crabbox-<slug>-<lease-hash>` in the configured namespace. The claim points
-   at `agentSandbox.warmPool` and carries Crabbox ownership labels plus
-   annotations for provider scope, workdir, and container. If `kubectl create`
+   at `agentSandbox.warmPool`, sets `spec.lifecycle.shutdownTime` to the
+   Crabbox TTL with `shutdownPolicy: Retain`, and carries Crabbox ownership
+   labels plus annotations for provider scope, workdir, and container. If `kubectl create`
    loses its response after the API server accepted the object, Crabbox fetches
    that exact deterministic name and adopts it only after ownership, scope, and
    Kubernetes UID validation.
@@ -175,6 +178,8 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
    wait immediately with the terminal reason instead of consuming the timeout.
    Every claim lookup must retain the Kubernetes UID returned by creation.
    The live claim must also keep pointing at the configured warm pool.
+   Its shutdown time and retain policy must still match the absolute expiry
+   pinned in the local claim.
    Before sync or command execution, the Sandbox must carry that claim UID and
    be controller-owned by the exact `SandboxClaim`; the pod must be
    controller-owned by that exact Sandbox UID. Crabbox pins both downstream UIDs
@@ -199,6 +204,9 @@ cross-process lock. A concurrent stop or cleanup waits for the active command
 to finish, then re-resolves the local claim before mutating Kubernetes.
 `status --wait` returns immediately when the root `SandboxClaim` disappears,
 while still polling temporary downstream Sandbox or pod readiness gaps.
+Retained claims whose pinned TTL elapsed, or whose controller condition reports
+`ClaimExpired`, return the terminal `expired` state without waiting for missing
+downstream resources.
 
 ## Claim Scope And Cleanup Safety
 
@@ -215,10 +223,14 @@ Before deleting a live `SandboxClaim`, Crabbox verifies:
 - `crabbox.dev/provider-scope=<SHA-256 scope fingerprint>`
 - the current `metadata.uid` matches the UID pinned in the local claim
 - `spec.warmPoolRef.name` matches the warm pool pinned in the local claim
+- `spec.lifecycle.shutdownTime` and `shutdownPolicy: Retain` match the pinned
+  Crabbox TTL expiry
 
 Cleanup performs the same live identity validation before idle checks and
 dry-run output, so a preview cannot claim that a replaced or redirected object
-would be deleted.
+would be deleted. After the pinned TTL, the controller removes the Sandbox,
+pod, and Service while retaining the exact UID-bearing `SandboxClaim`; Crabbox
+then deletes that claim and its local lease through `run`, `stop`, or `cleanup`.
 
 Missing Kubernetes claims are preserved locally by default because a 404 can be
 ambiguous across clusters or accounts. Set `--agent-sandbox-forget-missing` or

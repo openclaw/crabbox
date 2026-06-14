@@ -29,6 +29,7 @@ const (
 	claimLabelWarmPool    = "warm_pool"
 	claimLabelContainer   = "container"
 	claimLabelWorkdir     = "workdir"
+	claimLabelExpiresAt   = "expires_at"
 )
 
 type claimIdentity struct {
@@ -36,6 +37,7 @@ type claimIdentity struct {
 	ProviderScope string
 	UID           string
 	WarmPool      string
+	ExpiresAt     string
 }
 
 var dns1123LabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -123,7 +125,7 @@ func claimLeaseForRepo(cfg Config, leaseID, slug string, repo Repo, reclaim bool
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
 }
 
-func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName string) (LeaseClaim, error) {
+func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName, expiresAt string) (LeaseClaim, error) {
 	if err := claimLeaseForRepo(cfg, leaseID, slug, repo, reclaim); err != nil {
 		return LeaseClaim{}, err
 	}
@@ -131,7 +133,7 @@ func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, 
 	if err != nil {
 		return LeaseClaim{}, err
 	}
-	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName))
+	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName, expiresAt))
 }
 
 func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {
@@ -150,7 +152,7 @@ func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {
 	return err
 }
 
-func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, claimName string) map[string]string {
+func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, claimName, expiresAt string) map[string]string {
 	container := strings.TrimSpace(cfg.AgentSandbox.Container)
 	if container == "" {
 		container = "default"
@@ -159,7 +161,7 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 	if ready.SandboxName == "" || ready.PodName == "" {
 		state = "not-ready"
 	}
-	return map[string]string{
+	labels := map[string]string{
 		"provider":            providerName,
 		"lease":               leaseID,
 		claimLabelClaimName:   claimName,
@@ -173,14 +175,20 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 		"target":              targetLinux,
 		"state":               state,
 	}
+	if expiresAt != "" {
+		labels[claimLabelExpiresAt] = expiresAt
+	}
+	return labels
 }
 
 func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
 	uid := ""
 	warmPool := ""
+	expiresAt := ""
 	if claim.Labels != nil {
 		uid = strings.TrimSpace(claim.Labels[claimLabelClaimUID])
 		warmPool = strings.TrimSpace(claim.Labels[claimLabelWarmPool])
+		expiresAt = strings.TrimSpace(claim.Labels[claimLabelExpiresAt])
 	}
 	if uid == "" {
 		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
@@ -188,7 +196,7 @@ func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
 	if warmPool == "" {
 		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", claim.LeaseID)
 	}
-	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid, WarmPool: warmPool}, nil
+	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid, WarmPool: warmPool, ExpiresAt: expiresAt}, nil
 }
 
 func authorizeClaimScope(cfg Config, claim LeaseClaim) error {
@@ -262,6 +270,9 @@ func listAgentSandboxLeaseClaims() ([]LeaseClaim, error) {
 }
 
 func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
+	if claimTTLExpired(claim, now) {
+		return true, "ttl"
+	}
 	if claim.IdleTimeoutSeconds <= 0 {
 		return false, "idle timeout disabled"
 	}
@@ -274,6 +285,15 @@ func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
 		return false, "idle timeout not reached"
 	}
 	return true, "idle timeout"
+}
+
+func claimTTLExpired(claim LeaseClaim, now time.Time) bool {
+	expiresAt := strings.TrimSpace(claim.Labels[claimLabelExpiresAt])
+	if expiresAt == "" {
+		return false
+	}
+	deadline, err := time.Parse(time.RFC3339, expiresAt)
+	return err == nil && !now.Before(deadline)
 }
 
 func claimNameFromLocalClaim(claim LeaseClaim) string {

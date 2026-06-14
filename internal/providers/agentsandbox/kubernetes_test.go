@@ -605,6 +605,24 @@ func TestSandboxReadinessRejectsDownstreamIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateClaimIdentityRejectsLifecycleChange(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	fake := readyFakeClient(cfg)
+	claim := fake.objects[sandboxClaimResource+"/sandboxes/claim-a"]
+	expiresAt := "2026-06-13T13:30:00Z"
+	claim.Spec["lifecycle"] = map[string]any{"shutdownTime": expiresAt, "shutdownPolicy": "Retain"}
+	identity := fakeClaimIdentity(cfg)
+	identity.ExpiresAt = expiresAt
+	if err := validateClaimIdentity(claim, identity); err != nil {
+		t.Fatal(err)
+	}
+	claim.Spec["lifecycle"].(map[string]any)["shutdownTime"] = "2026-06-13T14:30:00Z"
+	if err := validateClaimIdentity(claim, identity); err == nil || !strings.Contains(err.Error(), "lifecycle changed") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
 	tests := []struct {
 		name      string
