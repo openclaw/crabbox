@@ -171,6 +171,25 @@ func TestConfigureDoctorReturnsLifecycleScaffold(t *testing.T) {
 	}
 }
 
+func TestConfigureDoctorReportsStructuredChecksForInvalidLifecycleConfig(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Firecracker.Network = "tap"
+
+	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("ConfigureDoctor: %v", err)
+	}
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	check := checksByName(result.Checks)["network"]
+	if check.Status != "failed" || !strings.Contains(check.Message, "unsupported") {
+		t.Fatalf("network check=%#v", check)
+	}
+}
+
 func TestDoctorReportsUnsupportedHostAndMissingArtifacts(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

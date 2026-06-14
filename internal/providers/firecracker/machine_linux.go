@@ -85,7 +85,7 @@ func (m *sdkMachine) Start(ctx context.Context) error {
 	if m == nil || m.machine == nil {
 		return fmt.Errorf("firecracker machine is unavailable")
 	}
-	return m.machine.Start(context.WithoutCancel(ctx))
+	return m.machine.Start(ctx)
 }
 
 func (m *sdkMachine) StopVMM() error {

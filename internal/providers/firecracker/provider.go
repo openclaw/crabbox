@@ -46,10 +46,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	backend, err := p.Configure(cfg, rt)
-	if err != nil {
-		return nil, err
-	}
+	backend := newBackend(p.Spec(), cfg, rt)
 	doctor, ok := backend.(core.DoctorBackend)
 	if !ok {
 		return nil, core.Exit(2, "firecracker doctor backend unavailable")
