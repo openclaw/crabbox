@@ -709,22 +709,6 @@ func TestSyncHonorsConfiguredTimeout(t *testing.T) {
 	}
 }
 
-func TestSyncPreflightGuardsFullArchiveCandidate(t *testing.T) {
-	cfg := newTestConfig("")
-	cfg.Sync.FailBytes = 100
-	manifest := SyncManifest{
-		Files:        []string{"large.bin", "small.txt"},
-		Bytes:        1000,
-		Changed:      []string{"small.txt"},
-		ChangedBytes: 1,
-	}
-	var stderr bytes.Buffer
-	err := checkOpenComputerSyncPreflight(manifest, cfg, false, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "sync candidate too large") {
-		t.Fatalf("preflight err=%v stderr=%q, want full candidate rejection", err, stderr.String())
-	}
-}
-
 func TestSyncDeleteDoesNotTouchLiveWorkspaceBeforeUploadSucceeds(t *testing.T) {
 	f := newFakeAPI(t)
 	f.uploadStatus = http.StatusServiceUnavailable

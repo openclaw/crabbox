@@ -1,4 +1,4 @@
-package vercelsandbox
+package codesandbox
 
 import (
 	"context"
@@ -9,16 +9,16 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, api vercelSandboxClient, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
+func (b *codeSandboxBackend) syncWorkspace(ctx context.Context, api codeSandboxAPI, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
 		ForceSyncLarge:      req.ForceSyncLarge,
 		Workdir:             workdir,
-		TempPattern:         "crabbox-vercel-sandbox-sync-*.tgz",
-		RemoteArchiveDir:    "/tmp",
-		RemoteArchivePrefix: "crabbox-vercel-sync-",
-		PhaseName:           "vercel_sandbox_sync",
+		TempPattern:         "crabbox-codesandbox-sync-*.tgz",
+		RemoteArchiveDir:    defaultWorkdir,
+		RemoteArchivePrefix: ".crabbox-codesandbox-sync-",
+		PhaseName:           "codesandbox_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
 		Now:                 b.now,
@@ -32,20 +32,20 @@ func (b *backend) syncWorkspace(ctx context.Context, api vercelSandboxClient, sa
 	})
 }
 
-func (b *backend) execShell(ctx context.Context, api vercelSandboxClient, sandboxID, command string) error {
-	res, err := api.Exec(ctx, sandboxID, execRequest{
-		Command:     "sh -lc " + shellQuote(command),
-		TimeoutSecs: b.execTimeoutSecs(),
-	}, io.Discard, io.Discard)
+func (b *codeSandboxBackend) execShell(ctx context.Context, api codeSandboxAPI, sandboxID, command string) error {
+	res, err := api.RunCommand(ctx, sandboxID, CommandRequest{
+		Command: []string{"bash", "-lc", command},
+		Timeout: b.execTimeoutSecs(),
+	})
 	if err != nil {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return exit(res.ExitCode, "vercel-sandbox exec %q exited %d: %s", command, res.ExitCode, strings.TrimSpace(res.Stderr))
+		return exit(res.ExitCode, "codesandbox exec %q exited %d: %s", command, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
 }
 
-func (b *backend) ensureWorkspace(ctx context.Context, api vercelSandboxClient, sandboxID, workdir string) error {
+func (b *codeSandboxBackend) ensureWorkspace(ctx context.Context, api codeSandboxAPI, sandboxID, workdir string) error {
 	return b.execShell(ctx, api, sandboxID, "mkdir -p "+shellQuote(workdir))
 }

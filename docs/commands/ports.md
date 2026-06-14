@@ -9,6 +9,7 @@ crabbox ports --provider docker-sandbox --id blue-box
 crabbox ports --provider docker-sandbox --id blue-box --publish 3000
 crabbox ports --provider docker-sandbox --id blue-box --unpublish 41000:3000
 crabbox ports --provider docker-sandbox --id blue-box --json
+crabbox ports --provider codesandbox --id web-box --publish 3000 --json
 ```
 
 ## Lease Resolution
@@ -18,6 +19,10 @@ act on Crabbox-owned leases; raw user-created sandboxes are rejected.
 
 For `provider=docker-sandbox`, Crabbox resolves the local `dsbx_...` claim and
 then calls `sbx ports <sandbox-name> ...`.
+
+For `provider=codesandbox`, Crabbox resolves the local `csbx_...` claim,
+verifies the remote CodeSandbox ownership tag, then asks the CodeSandbox SDK
+bridge for open ports or provider-owned host URLs.
 
 ## Flags
 
@@ -44,11 +49,25 @@ Examples:
 - `41000:3000` binds host port `41000` to sandbox port `3000`.
 - `127.0.0.1:41000:3000/tcp4` restricts the published port to IPv4 loopback.
 
+For CodeSandbox, the spec is only the sandbox port number:
+
+```text
+SANDBOX_PORT
+```
+
+`--publish 3000` waits for port `3000` in the sandbox and prints the
+CodeSandbox SDK host URL. With `--json`, CodeSandbox returns objects with
+`port`, `host`, and `url` fields. `--unpublish` is not supported for
+CodeSandbox because the SDK observes ports owned by running processes rather
+than exposing a close-port operation; stop the process inside the sandbox.
+
 ## Provider Support
 
-This command is provider-opt-in. Providers without a native port-publishing
-bridge fail clearly instead of guessing. In this slice, `docker-sandbox` is the
-supported provider.
+This command is provider-opt-in. Providers without a native port-publishing or
+URL bridge fail clearly instead of guessing. Supported providers:
+
+- `docker-sandbox` — native `sbx ports` list, publish, and unpublish.
+- `codesandbox` — SDK open-port listing and host URL publishing.
 
 ## See also
 
@@ -56,3 +75,5 @@ supported provider.
 - [`stop`](stop.md) - remove the lease when you are done.
 - [Docker Sandbox provider](../providers/docker-sandbox.md) - provider-specific
   notes and `sbx` command mapping.
+- [CodeSandbox provider](../providers/codesandbox.md) - provider-specific
+  host URL and preview token notes.

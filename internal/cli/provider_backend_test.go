@@ -1049,6 +1049,10 @@ func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 		{name: "opencomputer alias type", args: []string{"--provider", "open-computer", "--type", "large"}},
 		{name: "opencomputer mixed-case class", args: []string{"--provider", "OpenComputer", "--class", "standard"}},
 		{name: "opencomputer spaced alias type", args: []string{"--provider", " OC ", "--type", "large"}},
+		{name: "codesandbox class", args: []string{"--provider", "codesandbox", "--class", "standard"}},
+		{name: "codesandbox type", args: []string{"--provider", "codesandbox", "--type", "large"}},
+		{name: "codesandbox alias class", args: []string{"--provider", "csb", "--class", "standard"}},
+		{name: "codesandbox alias type", args: []string{"--provider", "code-sandbox", "--type", "large"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := newFlagSet("test", io.Discard)

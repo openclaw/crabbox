@@ -1,10 +1,8 @@
 package superserve
 
 import (
-	"context"
 	"flag"
 	"io"
-	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -31,7 +29,6 @@ type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
 type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
-type SyncManifest = core.SyncManifest
 
 const (
 	providerName   = "superserve"
@@ -92,22 +89,6 @@ func removeLeaseClaim(leaseID string) {
 
 func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
-}
-
-func syncExcludes(root string, cfg Config) ([]string, error) {
-	return core.SyncExcludes(root, cfg)
-}
-
-func syncManifest(root string, excludes, includes []string) (SyncManifest, error) {
-	return core.BuildSyncManifestFiltered(root, excludes, includes)
-}
-
-func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
-	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
-}
-
-func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
-	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }
 
 func shellQuote(value string) string {

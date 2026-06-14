@@ -187,6 +187,36 @@ func TestCloudflareDynamicWorkersRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"codesandbox", "csb", "code-sandbox"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "codesandbox" {
+			t.Fatalf("ProviderFor(%q).Name=%q want codesandbox", name, provider.Name())
+		}
+		if _, ok := provider.(core.DoctorProvider); !ok {
+			t.Fatalf("ProviderFor(%q) does not expose doctor", name)
+		}
+	}
+	spec := mustProvider(t, "codesandbox").Spec()
+	if spec.Family != "codesandbox" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("codesandbox spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("codesandbox targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("codesandbox features=%v missing %s", spec.Features, feature)
+		}
+	}
+	if spec.Features.Has(core.FeatureURLBridge) {
+		t.Fatalf("codesandbox features=%v must not advertise URL bridge without BridgeProvider support", spec.Features)
+	}
+}
+
 func TestIncusRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("incus")
 	if err != nil {
@@ -221,6 +251,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"blacksmith-testbox",
 		"cloudflare",
 		"cloudflare-dynamic-workers",
+		"codesandbox",
 		"daytona",
 		"docker-sandbox",
 		"e2b",

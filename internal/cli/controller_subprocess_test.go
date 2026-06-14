@@ -952,6 +952,7 @@ func TestStopConfirmedAbsentDeregistrationFailureRetainsRouteForRetry(t *testing
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config-home"))
 	configPath := filepath.Join(root, "config.yaml")
 	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR", "")
 	leaseID := "cbx_retry123abc12"
 	slug := "retry-coral"
 	resourceID := "provider/retry"
