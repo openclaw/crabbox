@@ -172,7 +172,7 @@ func TestReleaseDeleteRequiresLocalClaim(t *testing.T) {
 	}
 }
 
-func TestReleaseDeleteRefusesDirtyCodespace(t *testing.T) {
+func TestReleaseDeleteFallsBackToStopForDirtyCodespace(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
 	item := fakeCodespace("cs-dirty", "Available")
@@ -186,12 +186,18 @@ func TestReleaseDeleteRefusesDirtyCodespace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
-	if err == nil || !strings.Contains(err.Error(), "uncommitted or unpushed changes") {
-		t.Fatalf("err=%v", err)
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
 	}
-	if len(fc.deletes) != 0 {
-		t.Fatalf("deleted dirty codespace: %#v", fc.deletes)
+	if strings.Join(fc.stops, ",") != "cs-dirty" || len(fc.deletes) != 0 {
+		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v", ok, err)
+	}
+	if claim.SSHHost != "" || claim.SSHPort != 0 || claim.Labels[labelRelease] != releaseStop || claim.Labels[labelState] != "stopped" {
+		t.Fatalf("claim=%#v", claim)
 	}
 }
 

@@ -330,7 +330,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		}
 		if err == nil {
 			if err := validateDeleteSafe(item); err != nil {
-				return err
+				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
 			}
 		}
 		err = api.deleteCodespace(ctx, name)
@@ -342,6 +342,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		}
 		return removeStoredSSHConfig(leaseID)
 	}
+	return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
+}
+
+func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI, leaseID string, claim LeaseClaim, server Server, name string) error {
 	server.Provider = providerName
 	server.CloudID = name
 	server.Name = name
@@ -353,7 +357,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	server.Labels[labelState] = "stopped"
 	server.Labels[labelRelease] = releaseStop
 	server.Labels[labelCodespaceName] = name
-	_, err = updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, func() error {
+	_, err := updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, func() error {
 		return api.stopCodespace(ctx, name)
 	})
 	return err
