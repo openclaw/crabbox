@@ -120,7 +120,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		Geo:              strings.TrimSpace(b.cfg.GitHubCodespaces.Geo),
 		IdleTimeout:      b.githubIdleTimeout(),
 		RetentionPeriod:  b.cfg.GitHubCodespaces.RetentionPeriod,
-		DisplayName:      leaseProviderName(leaseID, slug),
+		DisplayName:      githubCodespacesDisplayName(leaseID, slug),
 	})
 	if err != nil {
 		return LeaseTarget{}, err
@@ -578,6 +578,31 @@ func (b *backend) repoConfig(repo string) Config {
 	cfg.GitHubCodespaces.WorkRoot = b.effectiveWorkRoot(repo)
 	cfg.WorkRoot = cfg.GitHubCodespaces.WorkRoot
 	return cfg
+}
+
+func githubCodespacesDisplayName(leaseID, slug string) string {
+	const maxDisplayNameLength = 48
+	name := leaseProviderName(leaseID, slug)
+	if len(name) <= maxDisplayNameLength {
+		return name
+	}
+	const prefix = "crabbox-"
+	if !strings.HasPrefix(name, prefix) || len(name) <= len(prefix)+9 {
+		return name[:maxDisplayNameLength]
+	}
+	suffix := name[len(name)-9:]
+	slug = strings.Trim(name[len(prefix):len(name)-len(suffix)], "-")
+	maxSlug := maxDisplayNameLength - len(prefix) - len(suffix)
+	if maxSlug <= 0 {
+		return (prefix + suffix[1:])[:maxDisplayNameLength]
+	}
+	if len(slug) > maxSlug {
+		slug = strings.Trim(slug[:maxSlug], "-")
+	}
+	if slug == "" {
+		slug = "lease"
+	}
+	return prefix + slug + suffix
 }
 
 func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, release string, item codespace, state string) map[string]string {
