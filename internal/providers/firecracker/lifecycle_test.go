@@ -429,6 +429,9 @@ func TestReleaseRetainsArtifactsWhenDeleteOnReleaseDisabled(t *testing.T) {
 	if err := test.backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatalf("ReleaseLease: %v", err)
 	}
+	if *test.cleanupCalls != 1 {
+		t.Fatalf("cleanup calls after release=%d want 1", *test.cleanupCalls)
+	}
 
 	record, err := test.backend.readStateRecord(lease.LeaseID)
 	if err != nil {
@@ -444,6 +447,15 @@ func TestReleaseRetainsArtifactsWhenDeleteOnReleaseDisabled(t *testing.T) {
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName); err != nil || ok {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+	if err := test.backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if *test.cleanupCalls != 1 {
+		t.Fatalf("cleanup calls after retained cleanup=%d want 1", *test.cleanupCalls)
+	}
+	if _, err := os.Stat(filepath.Join(test.stateRoot, firecrackerLeasesDirName, lease.LeaseID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retained state still exists after cleanup: err=%v", err)
 	}
 }
 

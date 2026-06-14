@@ -691,8 +691,10 @@ func (b *backend) releaseStateRecord(ctx context.Context, cfg Config, record lea
 	if err := b.stopRecordedProcess(record); err != nil {
 		return err
 	}
-	if err := b.cleanupNetwork(ctx, record); err != nil {
-		return err
+	if record.PID > 0 {
+		if err := b.cleanupNetwork(ctx, record); err != nil {
+			return err
+		}
 	}
 	if deleteArtifacts {
 		return b.removeStateDir(record)
