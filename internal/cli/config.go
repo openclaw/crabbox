@@ -4175,13 +4175,13 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if trusted && file.AgentSandbox.Context != "" {
 			cfg.AgentSandbox.Context = file.AgentSandbox.Context
 		}
-		if file.AgentSandbox.Namespace != "" {
+		if trusted && file.AgentSandbox.Namespace != "" {
 			cfg.AgentSandbox.Namespace = file.AgentSandbox.Namespace
 		}
-		if file.AgentSandbox.WarmPool != "" {
+		if trusted && file.AgentSandbox.WarmPool != "" {
 			cfg.AgentSandbox.WarmPool = file.AgentSandbox.WarmPool
 		}
-		if file.AgentSandbox.Container != "" {
+		if trusted && file.AgentSandbox.Container != "" {
 			cfg.AgentSandbox.Container = file.AgentSandbox.Container
 		}
 		if file.AgentSandbox.Workdir != "" {

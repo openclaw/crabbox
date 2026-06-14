@@ -108,11 +108,12 @@ agentSandbox:
 ```
 
 Repository-local `.crabbox.yaml` and `crabbox.yaml` files cannot override
-`kubectl`, `kubeconfig`, or `context`. Kubeconfig files may invoke credential
-plugins, so cluster access settings are accepted only from trusted user config,
-environment variables, or explicit flags. The `kubectl` value must be a bare
-executable name resolved through `PATH` or an absolute path; checkout-relative
-paths are rejected.
+`kubectl`, `kubeconfig`, `context`, `namespace`, `warmPool`, or `container`.
+Kubeconfig files may invoke credential plugins, and workload selection can
+redirect forwarded source and environment values to another pod, so these
+settings are accepted only from trusted user config, environment variables, or
+explicit flags. The `kubectl` value must be a bare executable name resolved
+through `PATH` or an absolute path; checkout-relative paths are rejected.
 
 Provider flags:
 
@@ -202,6 +203,11 @@ Missing Kubernetes claims are preserved locally by default because a 404 can be
 ambiguous across clusters or accounts. Set `--agent-sandbox-forget-missing` or
 `CRABBOX_AGENT_SANDBOX_FORGET_MISSING=true` only after confirming the claim is
 gone in the intended cluster.
+
+If readiness fails and Kubernetes also rejects the UID-preconditioned cleanup,
+Crabbox retains a minimal `not-ready` local lease containing the claim name and
+UID. Retry the printed `crabbox stop` command after restoring cluster access;
+successful cleanup removes that recovery lease.
 
 `cleanup` uses Crabbox's local idle-time policy. It deletes due live claims
 after ownership validation, skips missing claims unless `forgetMissing` is

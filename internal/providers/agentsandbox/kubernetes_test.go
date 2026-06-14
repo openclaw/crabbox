@@ -15,21 +15,22 @@ import (
 )
 
 type fakeKubernetesClient struct {
-	resources   map[string]map[string]bool
-	objects     map[string]*kubernetesObject
-	rbac        map[string]bool
-	pods        map[string][]podState
-	gets        []string
-	execs       []podExecRequest
-	execInput   [][]byte
-	execErrs    []error
-	execStarted chan struct{}
-	execRelease chan struct{}
-	getStarted  chan struct{}
-	getRelease  chan struct{}
-	deleteErrs  []error
-	creates     int
-	deletes     int
+	resources     map[string]map[string]bool
+	objects       map[string]*kubernetesObject
+	rbac          map[string]bool
+	pods          map[string][]podState
+	gets          []string
+	execs         []podExecRequest
+	execInput     [][]byte
+	execErrs      []error
+	execStarted   chan struct{}
+	execRelease   chan struct{}
+	getStarted    chan struct{}
+	getRelease    chan struct{}
+	deleteErrs    []error
+	createPending bool
+	creates       int
+	deletes       int
 }
 
 type recordingCommandRunner struct {
@@ -108,7 +109,7 @@ func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namesp
 		created.Metadata.UID = "uid-" + created.Metadata.Name
 	}
 	f.objects[key] = created
-	if ref.Resource == sandboxClaimResource {
+	if ref.Resource == sandboxClaimResource && !f.createPending {
 		sandboxName := obj.Metadata.Name + "-sandbox"
 		podName := obj.Metadata.Name + "-pod"
 		created.Status.Sandbox.Name = sandboxName

@@ -461,6 +461,38 @@ func TestRunExistingLeaseReadinessIsBounded(t *testing.T) {
 	}
 }
 
+func TestWarmupRetainsRecoverableClaimWhenReadinessCleanupFails(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	cfg.AgentSandbox.SandboxReadyTimeout = time.Millisecond
+	fake := readyFakeClient(cfg)
+	fake.createPending = true
+	fake.deleteErrs = []error{errors.New("delete failed")}
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+
+	err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "recoverable"})
+	if err == nil || !strings.Contains(err.Error(), "local lease") || !strings.Contains(err.Error(), "retained") {
+		t.Fatalf("warmup err=%v", err)
+	}
+	claims, listErr := listAgentSandboxLeaseClaims()
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	claim, ok := claimBySlug(claims, "recoverable")
+	if !ok {
+		t.Fatalf("recoverable claim missing: %#v", claims)
+	}
+	if claim.Labels[claimLabelClaimUID] == "" || claim.Labels["state"] != "not-ready" {
+		t.Fatalf("recoverable claim labels=%#v", claim.Labels)
+	}
+	if stopErr := backend.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); stopErr != nil {
+		t.Fatal(stopErr)
+	}
+	if retained, readErr := readLeaseClaim(claim.LeaseID); readErr != nil || retained.LeaseID != "" {
+		t.Fatalf("recovery stop retained claim=%#v err=%v", retained, readErr)
+	}
+}
+
 func TestRunExistingLeaseForgetMissingStillFailsRun(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	cfg.AgentSandbox.ForgetMissing = true

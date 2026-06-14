@@ -155,6 +155,10 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 	if container == "" {
 		container = "default"
 	}
+	state := statusViewReady
+	if ready.SandboxName == "" || ready.PodName == "" {
+		state = "not-ready"
+	}
 	return map[string]string{
 		"provider":            providerName,
 		"lease":               leaseID,
@@ -167,7 +171,7 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 		claimLabelContainer:   container,
 		claimLabelWorkdir:     cfg.AgentSandbox.Workdir,
 		"target":              targetLinux,
-		"state":               statusViewReady,
+		"state":               state,
 	}
 }
 

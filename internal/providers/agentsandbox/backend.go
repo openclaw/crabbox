@@ -51,7 +51,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, claimName, slug, ready, err := b.createClaim(ctx, client, req.RequestedSlug)
+	leaseID, claimName, slug, ready, err := b.createClaim(ctx, client, req.RequestedSlug, req.Repo, req.Reclaim)
 	if err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 	}()
 	if req.ID == "" {
-		leaseID, claimName, slug, ready, err = b.createClaim(ctx, client, req.RequestedSlug)
+		leaseID, claimName, slug, ready, err = b.createClaim(ctx, client, req.RequestedSlug, req.Repo, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -503,7 +503,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requestedSlug string) (string, string, string, sandboxReadiness, error) {
+func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requestedSlug string, repo Repo, reclaim bool) (string, string, string, sandboxReadiness, error) {
 	leaseID := newLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
@@ -535,8 +535,24 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	if err != nil {
 		cleanupCtx, cleanupCancel := b.cleanupContext(ctx)
 		defer cleanupCancel()
-		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, identity.UID)
-		return "", "", "", sandboxReadiness{}, err
+		cleanupErr := client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, identity.UID)
+		if cleanupErr == nil || isNotFound(cleanupErr) {
+			return "", "", "", sandboxReadiness{}, err
+		}
+		pending := sandboxReadiness{ClaimName: claimName, ClaimUID: identity.UID}
+		if persistErr := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimName); persistErr != nil {
+			return "", "", "", sandboxReadiness{}, errors.Join(
+				err,
+				fmt.Errorf("failed to delete agent-sandbox claim %s/%s UID %s after readiness failure: %w", b.cfg.AgentSandbox.Namespace, claimName, identity.UID, cleanupErr),
+				fmt.Errorf("failed to persist recovery lease %s; manual cleanup may be required: %w", leaseID, persistErr),
+			)
+		}
+		stopCommand := agentSandboxRecoveryCommand(b.cfg, "stop")
+		return "", "", "", sandboxReadiness{}, errors.Join(
+			err,
+			fmt.Errorf("failed to delete agent-sandbox claim %s/%s after readiness failure; local lease %s retained for retry with %s %s: %w",
+				b.cfg.AgentSandbox.Namespace, claimName, leaseID, stopCommand, shellQuote(leaseID), cleanupErr),
+		)
 	}
 	return leaseID, claimName, slug, ready, nil
 }

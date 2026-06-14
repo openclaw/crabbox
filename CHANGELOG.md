@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Hardened Agent Sandbox repository-config workload selection and retained UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes.
 - Fixed Cloudflare Dynamic Workers lifecycle reads, compatibility identity, bundle validation, and live-smoke credential isolation.
 - Fixed Windows local-container sync to avoid unusable WSL command shims, support Docker Desktop mount roots, and fall back to native rsync when WSL lacks native SSH tooling. Thanks @brokemac79.
 - Fixed brokered Tailscale cleanup to avoid privileged deletion from client-posted device IDs, preserve connectivity across normal reboots, and fail live preflight on application-level errors.
