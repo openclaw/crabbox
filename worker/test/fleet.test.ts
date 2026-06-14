@@ -11488,6 +11488,45 @@ describe("fleet lease identity and idle", () => {
     expect(body.quote.warnings[0]).toContain("preview quote only");
   });
 
+  it("rejects marketplace quotes with HTTP 409 while the gateway is disabled", async () => {
+    const fleet = testFleet(new MemoryStorage());
+    const response = await fleet.fetch(
+      request("POST", "/v1/marketplace/quotes", {
+        body: { provider: "aws", class: "beast" },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as {
+      error: string;
+      marketplace: { enabled: boolean; features: { payments: boolean } };
+    };
+    expect(body.error).toBe("marketplace_disabled");
+    expect(body.marketplace.enabled).toBe(false);
+    expect(body.marketplace.features.payments).toBe(false);
+  });
+
+  it("returns HTTP 400 with the validation code for malformed quote input", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_MARKETPLACE_ENABLED: "1",
+        CRABBOX_MARKETPLACE_ALLOWED_PROVIDERS: "aws,hetzner",
+      },
+    );
+    const response = await fleet.fetch(
+      request("POST", "/v1/marketplace/quotes", {
+        body: { providers: "aws", class: "beast" },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_providers");
+    expect(body.message).toContain("providers must be an array");
+  });
+
   it("resolves owner-scoped slugs and heartbeat extends idle expiry", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 import { MarketplaceInputError, marketplaceQuote, marketplaceStatus } from "../src/marketplace";
 import type { Env } from "../src/types";
 
+// Capture the MarketplaceInputError thrown by a quote call so assertions stay unconditional.
+function quoteError(env: Env, input: unknown): MarketplaceInputError {
+  let caught: unknown;
+  try {
+    marketplaceQuote(env, input as never);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(MarketplaceInputError);
+  return caught as MarketplaceInputError;
+}
+
 describe("marketplace skeleton", () => {
   it("is disabled by default and keeps payment mutation features off", () => {
     const status = marketplaceStatus({} as Env);
@@ -254,5 +266,51 @@ describe("marketplace skeleton", () => {
         strategy: "fastest" as never,
       }),
     ).toThrow(MarketplaceInputError);
+  });
+
+  it.each([
+    ["provider", { provider: 7 as never }, "invalid_provider"],
+    ["target", { target: 1 as never }, "invalid_target"],
+    ["strategy", { strategy: {} as never }, "invalid_strategy"],
+    ["class", { class: 3 as never }, "invalid_class"],
+    ["serverType", { serverType: false as never }, "invalid_server_type"],
+    ["providers (not array)", { providers: "aws" as never }, "invalid_providers"],
+    ["providers (non-string member)", { providers: ["aws", 9] as never }, "invalid_providers"],
+  ])("rejects non-string %s input with a clear shape error", (_label, input, code) => {
+    const env = { CRABBOX_MARKETPLACE_ENABLED: "1" } as Env;
+    expect(quoteError(env, input).code).toBe(code);
+  });
+
+  it("rejects a quote request that is not an object", () => {
+    const env = { CRABBOX_MARKETPLACE_ENABLED: "1" } as Env;
+    expect(quoteError(env, "nope").code).toBe("invalid_request");
+  });
+
+  it("rejects an explicit provider outside the allowlist without silently dropping it", () => {
+    const env = {
+      CRABBOX_MARKETPLACE_ENABLED: "1",
+      CRABBOX_MARKETPLACE_ALLOWED_PROVIDERS: "aws",
+    } as Env;
+    expect(quoteError(env, { providers: ["aws", "hetzner"], class: "beast" }).code).toBe(
+      "invalid_provider",
+    );
+  });
+
+  it("never enables money-movement features even when the marketplace is enabled", () => {
+    const status = marketplaceStatus({
+      CRABBOX_MARKETPLACE_ENABLED: "1",
+      CRABBOX_MARKETPLACE_BIDDING_ENABLED: "1",
+      CRABBOX_MARKETPLACE_REQUIRE_CREDITS: "1",
+      CRABBOX_MARKETPLACE_PAYMENT_PROVIDER: "stripe",
+      CRABBOX_MARKETPLACE_LEDGER_PROVIDER: "ledger-x",
+    } as Env);
+
+    expect(status.enabled).toBe(true);
+    expect(status.mode).toBe("preview");
+    // configuring a payment/ledger provider name must not flip the actual capture/ledger features on
+    expect(status.features.payments).toBe(false);
+    expect(status.features.creditLedger).toBe(false);
+    expect(status.features.leaseEnforcement).toBe(false);
+    expect(status.settlement.providerSettlement).toBe("external");
   });
 });

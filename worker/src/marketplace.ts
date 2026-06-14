@@ -169,6 +169,21 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
     if (input.serverType !== undefined && typeof input.serverType !== "string") {
       throw new MarketplaceInputError("serverType must be a string", "invalid_server_type");
     }
+    if (input.provider !== undefined && typeof input.provider !== "string") {
+      throw new MarketplaceInputError("provider must be a string", "invalid_provider");
+    }
+    if (input.target !== undefined && typeof input.target !== "string") {
+      throw new MarketplaceInputError("target must be a string", "invalid_target");
+    }
+    if (input.strategy !== undefined && typeof input.strategy !== "string") {
+      throw new MarketplaceInputError("strategy must be a string", "invalid_strategy");
+    }
+    if (input.providers !== undefined && !input.providers.every((p) => typeof p === "string")) {
+      throw new MarketplaceInputError(
+        "providers must be an array of provider names",
+        "invalid_providers",
+      );
+    }
   } else if (input !== undefined) {
     throw new MarketplaceInputError("quote request must be an object", "invalid_request");
   }

@@ -192,3 +192,87 @@ func TestMarketplaceQuoteCommandRendersRoutingPlanLadder(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMarketplaceTTL(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    int64 // seconds; -1 means expect error
+		wantErr bool
+	}{
+		{in: "30m", want: 1800},
+		{in: "1h", want: 3600},
+		{in: "3600s", want: 3600},
+		{in: "3600", want: 3600}, // bare integer seconds
+		{in: " 2h ", want: 7200}, // surrounding whitespace tolerated
+		{in: "", wantErr: true},
+		{in: "0", wantErr: true},
+		{in: "-1h", wantErr: true},
+		{in: "abc", wantErr: true},
+	} {
+		got, err := parseMarketplaceTTL(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("parseMarketplaceTTL(%q) = %v, want error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("parseMarketplaceTTL(%q) unexpected error: %v", tc.in, err)
+		}
+		if int64(got.Seconds()) != tc.want {
+			t.Fatalf("parseMarketplaceTTL(%q) = %ds, want %ds", tc.in, int64(got.Seconds()), tc.want)
+		}
+	}
+}
+
+func TestMarketplaceRoutePercentsSumTo100PerTier(t *testing.T) {
+	// three equal-weight routes: independent rounding of 33.33 would drift; largest-remainder must
+	// hand the residual point to the first member so the tier renders 34/33/33 == 100.
+	plan := []CoordinatorMarketplaceRouteTier{
+		{
+			Priority: 10,
+			Active:   true,
+			Members: []CoordinatorMarketplaceRouteTierMember{
+				{Provider: "aws", RouteKey: "aws:linux:beast", RouteShare: 0.3334},
+				{Provider: "hetzner", RouteKey: "hetzner:linux:beast", RouteShare: 0.3333},
+				{Provider: "gcp", RouteKey: "gcp:linux:beast", RouteShare: 0.3333},
+			},
+		},
+		{
+			Priority: 5,
+			Active:   false,
+			Members: []CoordinatorMarketplaceRouteTierMember{
+				{Provider: "azure", RouteKey: "azure:linux:beast", RouteShare: 1},
+			},
+		},
+	}
+	pct := marketplaceRoutePercents(plan)
+	if pct["aws:linux:beast"] != 34 || pct["hetzner:linux:beast"] != 33 || pct["gcp:linux:beast"] != 33 {
+		t.Fatalf("unexpected percents: %#v", pct)
+	}
+	for _, tier := range plan {
+		sum := 0
+		for _, member := range tier.Members {
+			sum += pct[member.RouteKey]
+		}
+		if sum != 100 {
+			t.Fatalf("tier priority=%d percents sum to %d, want 100 (%#v)", tier.Priority, sum, pct)
+		}
+	}
+}
+
+func TestMarketplaceShareSuffix(t *testing.T) {
+	// with a routing plan present, the suffix uses the integer percents (which total 100 per tier)
+	pct := map[string]int{"aws:linux:beast": 75}
+	if got := marketplaceShareSuffix("aws:linux:beast", 0.75, pct); got != " share=75%" {
+		t.Fatalf("planned share suffix = %q", got)
+	}
+	// no plan entry and a positive raw share -> fall back to rounding the 0..1 value
+	if got := marketplaceShareSuffix("hetzner:linux:beast", 0.25, pct); got != " share=25%" {
+		t.Fatalf("fallback share suffix = %q", got)
+	}
+	// no plan entry and no share -> empty (cheapest/balanced quotes render nothing)
+	if got := marketplaceShareSuffix("gcp:linux:beast", 0, pct); got != "" {
+		t.Fatalf("empty share suffix = %q", got)
+	}
+}
