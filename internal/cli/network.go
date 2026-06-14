@@ -37,8 +37,6 @@ type TailscaleMetadata struct {
 	Error                  string   `json:"error,omitempty"`
 	Version                string   `json:"version,omitempty"`
 	DeviceID               string   `json:"deviceID,omitempty"`
-	CleanupState           string   `json:"cleanupState,omitempty"`
-	CleanupError           string   `json:"cleanupError,omitempty"`
 	ExitNode               string   `json:"exitNode,omitempty"`
 	ExitNodeAllowLANAccess bool     `json:"exitNodeAllowLanAccess,omitempty"`
 }
@@ -295,8 +293,6 @@ func serverTailscaleMetadata(server Server) TailscaleMetadata {
 		Error:                  labels["tailscale_error"],
 		Version:                labels["tailscale_version"],
 		DeviceID:               labels["tailscale_device_id"],
-		CleanupState:           labels["tailscale_cleanup_state"],
-		CleanupError:           labels["tailscale_cleanup_error"],
 		ExitNode:               labels["tailscale_exit_node"],
 		ExitNodeAllowLANAccess: labelBool(labels["tailscale_exit_node_allow_lan_access"]),
 	}
@@ -336,12 +332,6 @@ func applyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
 	}
 	if meta.DeviceID != "" {
 		server.Labels["tailscale_device_id"] = meta.DeviceID
-	}
-	if meta.CleanupState != "" {
-		server.Labels["tailscale_cleanup_state"] = meta.CleanupState
-	}
-	if meta.CleanupError != "" {
-		server.Labels["tailscale_cleanup_error"] = meta.CleanupError
 	}
 	if meta.ExitNode != "" {
 		server.Labels["tailscale_exit_node"] = meta.ExitNode

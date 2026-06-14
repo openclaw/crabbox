@@ -1024,7 +1024,7 @@ func cloudInitOptionalBootstrap(cfg Config) string {
 	}
 	if cfg.Desktop && isWaylandDesktopEnv(cfg.DesktopEnv) {
 		desktopEnv := normalizedDesktopEnv(cfg.DesktopEnv)
-		packages := "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps"
+		packages := "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps util-linux novnc websockify"
 		autostart := `    wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
     foot --title='Crabbox Desktop' >/tmp/crabbox-foot.log 2>&1 &
 `
@@ -1033,7 +1033,7 @@ func cloudInitOptionalBootstrap(cfg Config) string {
 		themeBootstrap := ""
 		themeConfigure := ""
 		if desktopEnv == desktopEnvGnome {
-			packages = "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps"
+			packages = "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps util-linux novnc websockify"
 			autostart = `    wlr-randr --output HEADLESS-1 --custom-mode 1920x1080 >/tmp/crabbox-wlr-randr.log 2>&1 || true
     for _ in $(seq 1 20); do
       [ -S /tmp/.X11-unix/X0 ] && break
@@ -1293,12 +1293,12 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`)
 	} else if cfg.Desktop {
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme
+		parts = append(parts, `    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
     fi
-    x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
+    { head -c 8 /var/lib/crabbox/vnc.password; printf '\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\n\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
     chown crabbox:crabbox /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
@@ -1512,7 +1512,12 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 	loginServerFlag := `${TS_LOGIN_SERVER:+--login-server="$TS_LOGIN_SERVER"}`
 	tailscaleUpScript := `    ` + cloudInitTailscaleInstallBootstrap() + `
     systemctl enable --now tailscaled || service tailscaled start || true
-    ` + cloudInitTailscaleLogoutBootstrap() + `
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable crabbox-tailscale-logout.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/crabbox-tailscale-logout.service
+      systemctl daemon-reload || true
+    fi
+    rm -f /usr/local/bin/crabbox-tailscale-logout
     install -d -m 0750 -o ` + sshUserOwner + ` -g ` + sshUserGroup + ` /var/lib/crabbox
     set +x
     ` + loginServerExport + `TS_AUTHKEY=` + shellQuote(authKey) + `
@@ -1583,34 +1588,6 @@ func cloudInitTailscaleInstallBootstrap() string {
       printf '%s\n' 'WantedBy=multi-user.target'
     } >/etc/systemd/system/tailscaled.service
     systemctl daemon-reload || true`
-}
-
-func cloudInitTailscaleLogoutBootstrap() string {
-	return `{
-      printf '%s\n' '#!/usr/bin/env sh'
-      printf '%s\n' 'if command -v tailscale >/dev/null 2>&1; then'
-      printf '%s\n' '  tailscale logout >/dev/null 2>&1 || true'
-      printf '%s\n' 'fi'
-    } >/usr/local/bin/crabbox-tailscale-logout
-    chmod 0755 /usr/local/bin/crabbox-tailscale-logout
-    if command -v systemctl >/dev/null 2>&1; then
-      {
-        printf '%s\n' '[Unit]'
-        printf '%s\n' 'Description=Crabbox Tailscale logout on shutdown'
-        printf '%s\n' 'DefaultDependencies=no'
-        printf '%s\n' 'Before=shutdown.target reboot.target halt.target'
-        printf '%s\n' ''
-        printf '%s\n' '[Service]'
-        printf '%s\n' 'Type=oneshot'
-        printf '%s\n' 'ExecStart=/usr/local/bin/crabbox-tailscale-logout'
-        printf '%s\n' 'TimeoutStartSec=20'
-        printf '%s\n' ''
-        printf '%s\n' '[Install]'
-        printf '%s\n' 'WantedBy=halt.target reboot.target shutdown.target'
-      } >/etc/systemd/system/crabbox-tailscale-logout.service
-      systemctl daemon-reload || true
-      systemctl enable crabbox-tailscale-logout.service || true
-    fi`
 }
 
 // cloudInitPondHostsBootstrap installs /usr/local/bin/crabbox-pond-hosts and a

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,40 @@ import (
 	"testing"
 	"time"
 )
+
+func TestConfirmedAbsentClaimRemovalRequiresDirectorySyncAndRetriesAfterDeletion(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_123456789abc"
+	if err := claimLeaseForRepoProvider(leaseID, "fast-coral", "external", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("claim directory sync unavailable")
+	err = removeLeaseClaimIfUnchangedAfterWithSync(leaseID, expected, nil, func(string) error { return syncErr })
+	if err == nil || !strings.Contains(err.Error(), syncErr.Error()) {
+		t.Fatalf("claim removal error=%v", err)
+	}
+	if _, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("removed claim exists=%t err=%v", exists, readErr)
+	}
+	var synced string
+	if err := cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID, leaseClaim{}, false, nil, func(dir string) error {
+		synced = filepath.Clean(dir)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if synced != filepath.Clean(filepath.Dir(path)) {
+		t.Fatalf("retry synced %q want %q", synced, filepath.Dir(path))
+	}
+}
 
 func TestClaimLeaseForRepoWritesAndUpdatesClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

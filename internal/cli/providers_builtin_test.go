@@ -25,6 +25,7 @@ func init() {
 	RegisterProvider(testExternalProvider{})
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
+	RegisterProvider(testNvidiaBrevProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
 	RegisterProvider(testMorphProvider{})
@@ -34,6 +35,7 @@ func init() {
 	RegisterProvider(testE2BProvider{})
 	RegisterProvider(testModalProvider{})
 	RegisterProvider(testCloudflareProvider{})
+	RegisterProvider(testCloudflareDynamicWorkersProvider{})
 	RegisterProvider(testAgentSandboxProvider{})
 	RegisterProvider(testSpritesProvider{})
 	RegisterProvider(testLocalContainerProvider{})
@@ -49,6 +51,8 @@ func init() {
 }
 
 type testExternalProvider struct{}
+
+var testExternalResolveHook func(ResolveRequest) (LeaseTarget, error)
 
 func (testExternalProvider) Name() string      { return "external" }
 func (testExternalProvider) Aliases() []string { return nil }
@@ -84,13 +88,27 @@ func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any
 func (p testExternalProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
 	return testExternalSSHBackend{testSSHBackend: testSSHBackend{spec: p.Spec()}, cfg: cfg}, nil
 }
+func (testExternalProvider) ControllerProviderScope(cfg Config) (string, error) {
+	return "test-external:" + strings.TrimSpace(cfg.External.Command), nil
+}
+func (testExternalProvider) SupportsControllerFixedLeaseID(cfg Config) bool {
+	return cfg.External.Capabilities.IdempotentLeaseID
+}
 
 type testExternalSSHBackend struct {
 	testSSHBackend
 	cfg Config
 }
 
+func (b testExternalSSHBackend) CleanupConfirmedAbsentLocalState(_ context.Context, req ConfirmedAbsentLocalCleanupRequest) error {
+	leaseID := firstNonBlank(req.ExpectedProviderIdentity.LeaseID, req.ExpectedProviderIdentity.AttemptLeaseID)
+	return RemoveExternalRoutingIfUnchanged(leaseID, b.cfg.External)
+}
+
 func (b testExternalSSHBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	if testExternalResolveHook != nil {
+		return testExternalResolveHook(req)
+	}
 	return LeaseTarget{LeaseID: req.ID, Server: Server{Name: b.cfg.External.Command}}, nil
 }
 
@@ -856,6 +874,30 @@ func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
+type testNvidiaBrevProvider struct{}
+
+func (testNvidiaBrevProvider) Name() string { return "nvidia-brev" }
+func (testNvidiaBrevProvider) Aliases() []string {
+	return []string{"brev", "nvidia"}
+}
+func (testNvidiaBrevProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "nvidia-brev",
+		Family:      "nvidia-brev",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testNvidiaBrevProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testNvidiaBrevProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testNvidiaBrevProvider) Configure(Config, Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
 type testBlacksmithProvider struct{}
 
 func (testBlacksmithProvider) Name() string { return "blacksmith-testbox" }
@@ -1099,7 +1141,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:                "islo",
 		Kind:                ProviderKindDelegatedRun,
 		Targets:             []TargetSpec{{OS: targetLinux}},
-		Features:            FeatureSet{FeatureSSH, FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume},
+		Features:            FeatureSet{FeatureSSH, FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume, FeatureRunDownloads},
 		Coordinator:         CoordinatorNever,
 		TailscaleEgressOnly: true,
 	}
@@ -1332,6 +1374,71 @@ func (p testCloudflareProvider) ConfigureDoctor(cfg Config, rt Runtime) (DoctorB
 		return nil, err
 	}
 	return backend.(DoctorBackend), nil
+}
+
+type testCloudflareDynamicWorkersProvider struct{}
+
+type testCloudflareDynamicWorkersFlagValues struct {
+	CPUMs       *int
+	Subrequests *int
+	TimeoutSecs *int
+}
+
+func (testCloudflareDynamicWorkersProvider) Name() string { return "cloudflare-dynamic-workers" }
+func (testCloudflareDynamicWorkersProvider) Aliases() []string {
+	return []string{"cf-dynamic", "cfdw"}
+}
+func (testCloudflareDynamicWorkersProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "cloudflare-dynamic-workers",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetWorkerRuntime}},
+		Features:    FeatureSet{FeatureCleanup, FeatureModuleRun, FeatureRunSession},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testCloudflareDynamicWorkersProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return testCloudflareDynamicWorkersFlagValues{
+		CPUMs:       fs.Int("cloudflare-dynamic-workers-cpu-ms", defaults.CloudflareDynamicWorkers.CPUMs, ""),
+		Subrequests: fs.Int("cloudflare-dynamic-workers-subrequests", defaults.CloudflareDynamicWorkers.Subrequests, ""),
+		TimeoutSecs: fs.Int("cloudflare-dynamic-workers-timeout-secs", defaults.CloudflareDynamicWorkers.TimeoutSecs, ""),
+	}
+}
+func (testCloudflareDynamicWorkersProvider) ApplyFlags(
+	cfg *Config,
+	fs *flag.FlagSet,
+	values any,
+) error {
+	v, ok := values.(testCloudflareDynamicWorkersFlagValues)
+	if !ok {
+		return nil
+	}
+	if flagWasSet(fs, "cloudflare-dynamic-workers-cpu-ms") {
+		cfg.CloudflareDynamicWorkers.CPUMs = *v.CPUMs
+	}
+	if flagWasSet(fs, "cloudflare-dynamic-workers-subrequests") {
+		cfg.CloudflareDynamicWorkers.Subrequests = *v.Subrequests
+	}
+	if flagWasSet(fs, "cloudflare-dynamic-workers-timeout-secs") {
+		cfg.CloudflareDynamicWorkers.TimeoutSecs = *v.TimeoutSecs
+	}
+	return nil
+}
+func (p testCloudflareDynamicWorkersProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	if cfg.TargetOS != "" && cfg.TargetOS != targetWorkerRuntime && cfg.TargetOS != targetLinux {
+		return nil, exit(2, "%s supports target=worker-runtime only", p.Name())
+	}
+	return testCloudflareDynamicWorkersBackend{
+		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
+	}, nil
+}
+
+type testCloudflareDynamicWorkersBackend struct {
+	testDelegatedBackend
+}
+
+func (testCloudflareDynamicWorkersBackend) Cleanup(context.Context, CleanupRequest) error {
+	return nil
 }
 
 type testAgentSandboxProvider struct{}
@@ -1894,6 +2001,19 @@ type testDelegatedBackend struct {
 type testIsloBackend struct {
 	testDelegatedBackend
 	stderr io.Writer
+}
+
+func (b testIsloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	result, err := b.testDelegatedBackend.Run(ctx, req)
+	if err != nil || !HasDelegatedRunDownloadRequests(req) {
+		return result, err
+	}
+	result.Artifacts, err = MaterializeDelegatedRunDownloads(ctx, b, req, result.LeaseID, b.stderr)
+	return result, err
+}
+
+func (b testIsloBackend) FetchRunFile(_ context.Context, _ DelegatedRunDownloadRequest) ([]byte, error) {
+	return []byte("islo-test-proof"), nil
 }
 
 func (b testIsloBackend) Pause(_ context.Context, req PauseRequest) error {

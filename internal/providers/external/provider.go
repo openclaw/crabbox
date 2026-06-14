@@ -36,6 +36,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return applyFlags(cfg, fs, values)
 }
 
+func (Provider) ValidateConfig(cfg core.Config) error {
+	return validateConfig(cfg)
+}
+
 func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
 	if cfg.WorkRoot == core.BaseConfig().WorkRoot && cfg.External.WorkRoot != "" {
 		cfg.WorkRoot = cfg.External.WorkRoot
@@ -53,6 +57,33 @@ func (Provider) CommandRoutingArgs(cfg core.Config, leaseID string) []string {
 		}
 	}
 	return []string{"--external-routing-file", path}
+}
+
+func (Provider) ControllerProviderScope(cfg core.Config) (string, error) {
+	return externalControllerScope(cfg)
+}
+
+func (Provider) SupportsControllerFixedLeaseID(cfg core.Config) bool {
+	if !cfg.External.Capabilities.IdempotentLeaseID {
+		return false
+	}
+	if !lifecycleConfigured(cfg.External) {
+		return true
+	}
+	return lifecycleControllerIdentityAttestationConfigured(cfg.External)
+}
+
+func lifecycleControllerIdentityAttestationConfigured(cfg core.ExternalConfig) bool {
+	// Fixed-ID provisioning is safe only when both sides of the lifecycle
+	// return complete command-observed provider identity. Default connection
+	// expansion is useful for interactive use, but is not release attestation.
+	return lifecycleConfigured(cfg) &&
+		cfg.Lifecycle.Acquire.Output == lifecycleOutputJSONLease &&
+		lifecycleOperationConfigured(cfg.Lifecycle.Resolve) &&
+		cfg.Lifecycle.Resolve.Output == lifecycleOutputJSONLease &&
+		lifecycleOperationConfigured(cfg.Lifecycle.List) &&
+		cfg.Lifecycle.List.Output == lifecycleOutputJSONLeaseArray &&
+		lifecycleOperationConsumesRawCloudID(cfg.Lifecycle.Release)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

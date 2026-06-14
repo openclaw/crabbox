@@ -11,11 +11,12 @@ import (
 )
 
 type flagValues struct {
-	Command     *string
-	Args        *stringListFlag
-	ConfigJSON  *string
-	WorkRoot    *string
-	RoutingFile *string
+	Command           *string
+	Args              *stringListFlag
+	ConfigJSON        *string
+	WorkRoot          *string
+	RoutingFile       *string
+	IdempotentLeaseID *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -31,6 +32,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 			defaults.External.RoutingFile,
 			"private external provider routing state file",
 		),
+		IdempotentLeaseID: fs.Bool("external-idempotent-lease-id", defaults.External.Capabilities.IdempotentLeaseID, "adapter guarantees idempotent acquisition for caller-supplied lease IDs"),
 	}
 }
 
@@ -71,6 +73,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "external-work-root") {
 		cfg.External.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
+	}
+	if core.FlagWasSet(fs, "external-idempotent-lease-id") {
+		cfg.External.Capabilities.IdempotentLeaseID = *v.IdempotentLeaseID
 	}
 	return validateConfig(*cfg)
 }
@@ -149,8 +154,19 @@ func validateLifecycleOperation(name string, operation core.ExternalLifecycleOpe
 	if len(operation.Argv) > 0 && len(operation.Steps) > 0 {
 		return core.Exit(2, "external.lifecycle.%s configures both argv and steps", name)
 	}
-	if name != "list" && operation.Output != lifecycleOutputNone {
-		return core.Exit(2, "external.lifecycle.%s.output is only supported for list", name)
+	switch name {
+	case "acquire", "resolve":
+		if operation.Output != lifecycleOutputNone && operation.Output != lifecycleOutputJSONLease {
+			return core.Exit(2, "external.lifecycle.%s.output must be %q when configured", name, lifecycleOutputJSONLease)
+		}
+	case "list":
+		if operation.Output != lifecycleOutputNone && operation.Output != lifecycleOutputJSONNameArray && operation.Output != lifecycleOutputJSONLeaseArray {
+			return core.Exit(2, "external.lifecycle.list.output must be %q or %q", lifecycleOutputJSONNameArray, lifecycleOutputJSONLeaseArray)
+		}
+	default:
+		if operation.Output != lifecycleOutputNone {
+			return core.Exit(2, "external.lifecycle.%s.output is unsupported", name)
+		}
 	}
 	if name != "list" && operation.NamePrefix != "" {
 		return core.Exit(2, "external.lifecycle.%s.namePrefix is only supported for list", name)
@@ -159,7 +175,7 @@ func validateLifecycleOperation(name string, operation core.ExternalLifecycleOpe
 		return core.Exit(2, "external.lifecycle.list.namePrefix requires output %q", lifecycleOutputJSONNameArray)
 	}
 	switch operation.Output {
-	case lifecycleOutputNone, lifecycleOutputJSONNameArray, lifecycleOutputJSONLeaseArray:
+	case lifecycleOutputNone, lifecycleOutputJSONLease, lifecycleOutputJSONNameArray, lifecycleOutputJSONLeaseArray:
 	default:
 		return core.Exit(2, "external.lifecycle.%s.output %q is unsupported", name, operation.Output)
 	}
@@ -167,6 +183,9 @@ func validateLifecycleOperation(name string, operation core.ExternalLifecycleOpe
 		return core.Exit(2, "external.lifecycle.%s.rollbackOnFailure is only supported for acquire", name)
 	}
 	commands := lifecycleOperationCommands(operation)
+	if operation.Output != lifecycleOutputNone && len(commands) == 0 {
+		return core.Exit(2, "external.lifecycle.%s.output requires argv or steps", name)
+	}
 	if operation.RollbackOnFailure && len(commands) < 2 {
 		return core.Exit(2, "external.lifecycle.acquire.rollbackOnFailure requires at least two steps")
 	}

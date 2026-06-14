@@ -180,6 +180,22 @@ auto` resolves to managed.
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
 
+### vercel-sandbox
+
+`--provider vercel-sandbox` creates a Vercel-managed Linux microVM and keeps it
+until explicit `stop`. Warmed sandboxes use `vsbx_...` local claims and can be
+reused by Crabbox slug or lease ID. The provider is delegated-run only: it
+supports archive sync and command execution through the SDK bridge, but not SSH,
+Tailscale, browser, desktop, code-server, or Actions runner hydration.
+
+### cloudflare-dynamic-workers
+
+`--provider cloudflare-dynamic-workers` rejects `warmup`. Dynamic Workers require
+module source before Cloudflare can load or cache them; use `crabbox doctor` for
+loader readiness or `crabbox run --script <file>` to load code. The provider
+does not start a Linux machine and does not support Actions runner registration,
+SSH, desktop, browser, code-server, ports, `--class`, or `--type`.
+
 ### aws — macOS
 
 `--provider aws --target macos --desktop` launches an EC2 Mac instance on an

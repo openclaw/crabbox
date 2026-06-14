@@ -1,5 +1,9 @@
 import { cloudInit } from "./bootstrap";
-import { serverTypeCandidatesForClass, type LeaseConfig } from "./config";
+import {
+  serverTypeCandidatesForClass,
+  workspaceProviderKeyPrefix,
+  type LeaseConfig,
+} from "./config";
 import { leaseProviderLabels } from "./provider-labels";
 import { leaseProviderName } from "./slug";
 import type { Env, HetznerSSHKey, HetznerServer, ProviderMachine } from "./types";
@@ -36,8 +40,6 @@ interface HetznerServerTypePrice {
     gross?: string;
   };
 }
-
-export const workspaceProviderKeyPrefix = "crabbox-workspace-";
 
 export class HetznerProvisioningError extends Error {
   constructor(

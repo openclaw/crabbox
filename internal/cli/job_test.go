@@ -140,6 +140,44 @@ func TestJobRunDryRunPropagatesArchitecture(t *testing.T) {
 	}
 }
 
+func TestJobRunDryRunPropagatesEvidenceOptions(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(`jobs:
+  smoke:
+    command: pnpm test
+    label: nightly smoke
+    artifactGlobs:
+      - reports/**
+    requiredArtifacts:
+      - reports/summary.json
+    downloads:
+      - reports/summary.json=artifacts/summary.json
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"job", "run", "--dry-run", "--id", "blue-lobster", "smoke"}); err != nil {
+		t.Fatalf("job dry-run failed: %v\nstderr=%s", err, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"--label 'nightly smoke'",
+		"--artifact-glob 'reports/**'",
+		"--require-artifact reports/summary.json",
+		"--download reports/summary.json=artifacts/summary.json",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("dry-run output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestJobRunDryRunNoHydratePropagatesToRun(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()

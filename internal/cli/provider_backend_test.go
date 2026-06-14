@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,69 @@ func (r *recordingCommandRunner) Run(_ context.Context, req LocalCommandRequest)
 
 func testRuntimeWithRunner(r CommandRunner) Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: realClock{}, Exec: r}
+}
+
+func TestExecCommandRunnerBoundsCapturedOutputAndStopsChild(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := (execCommandRunner{}).Run(ctx, LocalCommandRequest{
+		Name:                   executable,
+		Args:                   []string{"-test.run=TestExecCommandRunnerOutputLimitHelperProcess", "--"},
+		Env:                    append(os.Environ(), "CRABBOX_TEST_OUTPUT_LIMIT_HELPER=1"),
+		MaxCapturedOutputBytes: 1024,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeded 1024-byte limit") {
+		t.Fatalf("output limit error=%v stdout_bytes=%d stdout=%q stderr=%q", err, len(result.Stdout), result.Stdout, result.Stderr)
+	}
+	if len(result.Stdout) != 1024 {
+		t.Fatalf("captured stdout bytes=%d", len(result.Stdout))
+	}
+	if result.ExitCode != 5 {
+		t.Fatalf("output limit exit code=%d want=5", result.ExitCode)
+	}
+}
+
+func TestExecCommandRunnerOutputLimitHelperProcess(t *testing.T) {
+	mode := os.Getenv("CRABBOX_TEST_OUTPUT_LIMIT_HELPER")
+	if mode == "" {
+		return
+	}
+	if mode == "child" {
+		time.Sleep(time.Hour)
+		return
+	}
+	child := exec.Command(os.Args[0], "-test.run=TestExecCommandRunnerOutputLimitHelperProcess", "--")
+	child.Env = make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "CRABBOX_TEST_OUTPUT_LIMIT_HELPER=") {
+			child.Env = append(child.Env, entry)
+		}
+	}
+	child.Env = append(child.Env, "CRABBOX_TEST_OUTPUT_LIMIT_HELPER=child")
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	if err := child.Start(); err != nil {
+		os.Exit(97)
+	}
+	_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 1<<20))
+	time.Sleep(time.Hour)
+}
+
+func TestControllerCoordinatorRegistrationBindingRejectsAcquisitionDrift(t *testing.T) {
+	t.Setenv(controllerCoordinatorRegistrationExpectedEnv, "1")
+	t.Setenv(controllerCoordinatorRegistrationURLEnv, "https://old-coordinator.example.test/root")
+	matching := Config{BrokerMode: BrokerModeRegistered, Coordinator: "https://old-coordinator.example.test/root/"}
+	if err := validateControllerCoordinatorRegistrationBinding(matching); err != nil {
+		t.Fatalf("canonical matching binding: %v", err)
+	}
+	drifted := Config{BrokerMode: BrokerModeRegistered, Coordinator: "https://new-coordinator.example.test/root"}
+	if err := validateControllerCoordinatorRegistrationBinding(drifted); err == nil || !strings.Contains(err.Error(), "binding changed") {
+		t.Fatalf("binding drift error=%v", err)
+	}
 }
 
 func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
@@ -178,6 +242,7 @@ func TestProviderFlagsOverrideDynamicSessionsConfigWithoutLeaseCreate(t *testing
 }
 
 func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
+	t.Setenv(controllerProviderScopeEnv, "")
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	cfg.Coordinator = "https://coordinator.example"
@@ -280,7 +345,49 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 	}
 }
 
+func TestLoadBackendRejectsChangedControllerProviderScope(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.External.Command = "provider-a"
+	_, scope, _, err := controllerProviderIdentityForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(controllerProviderScopeEnv, scope)
+	if _, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{})); err != nil {
+		t.Fatalf("matching scope rejected: %v", err)
+	}
+	cfg.External.Command = "provider-b"
+	if _, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{})); err == nil || !strings.Contains(err.Error(), "controller routing scope changed") {
+		t.Fatalf("changed scope error=%v", err)
+	}
+}
+
+func TestLoadBackendResetsInferredTargetAfterProviderSwitch(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cloudflare-dynamic-workers"
+	applySingleProviderTargetDefault(&cfg)
+	if cfg.TargetOS != "worker-runtime" {
+		t.Fatalf("initial target=%q, want worker-runtime", cfg.TargetOS)
+	}
+
+	cfg.Provider = "hetzner"
+	cfg.Coordinator = "https://coordinator.example"
+	backend, err := loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load backend after provider switch: %v", err)
+	}
+	coordinator, ok := backend.(*coordinatorLeaseBackend)
+	if !ok {
+		t.Fatalf("backend=%T, want coordinatorLeaseBackend", backend)
+	}
+	if coordinator.cfg.TargetOS != targetLinux {
+		t.Fatalf("coordinator target=%q, want %q", coordinator.cfg.TargetOS, targetLinux)
+	}
+}
+
 func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
+	t.Setenv(controllerProviderScopeEnv, "")
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	cfg.Coordinator = "https://coordinator.example"
@@ -999,6 +1106,36 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	}
 }
 
+func TestRejectDelegatedSyncOptionsAllowsBoundedDownloads(t *testing.T) {
+	spec := ProviderSpec{
+		Name:     "islo",
+		Kind:     ProviderKindDelegatedRun,
+		Features: FeatureSet{FeatureRunDownloads},
+	}
+	req := RunRequest{
+		RequiredArtifactGlobs: []string{"reports/manifest.json"},
+		Downloads:             []string{"reports/manifest.json=manifest.json"},
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
+		t.Fatalf("bounded download provider rejected supported options: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ArtifactGlobs: []string{"reports/**"},
+	}); err == nil {
+		t.Fatal("bounded download provider should reject artifact globs")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		RequiredArtifactGlobs: []string{"reports/*.json"},
+	}); err == nil {
+		t.Fatal("bounded download provider should reject required globs")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		Downloads: []string{"https://example.test/proof=proof.json"},
+	}); err == nil {
+		t.Fatal("bounded download provider should reject URL-shaped paths")
+	}
+}
+
 func TestRejectDelegatedSyncOptionsAllowsProofFeature(t *testing.T) {
 	spec := ProviderSpec{Name: "blacksmith-testbox", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureRunProof}}
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{EmitProof: "/tmp/proof.md"}); err != nil {
@@ -1006,6 +1143,33 @@ func TestRejectDelegatedSyncOptionsAllowsProofFeature(t *testing.T) {
 	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{EmitProof: "/tmp/proof.md"}); err == nil {
 		t.Fatal("plain delegated provider should reject --emit-proof")
+	}
+}
+
+func TestRejectDelegatedSyncOptionsAllowsModuleRunScriptOnly(t *testing.T) {
+	spec := ProviderSpec{Name: "module-runtime-test", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureModuleRun}}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	}); err != nil {
+		t.Fatalf("module-run provider should allow script input: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		Command: []string{"node", "worker.mjs"},
+	}); err == nil {
+		t.Fatal("module-run provider should reject trailing command argv")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ScriptRequested: true,
+		ShellMode:       true,
+	}); err == nil {
+		t.Fatal("module-run provider should reject --shell")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "e2b", Kind: ProviderKindDelegatedRun}, RunRequest{
+		ScriptRequested: true,
+		Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+	}); err == nil {
+		t.Fatal("delegated provider without module-run feature should reject script input")
 	}
 }
 

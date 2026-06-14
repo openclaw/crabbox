@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -85,6 +86,78 @@ describe("NodeCoordinatorRuntime", () => {
       expect.any(Error),
     );
     errorLog.mockRestore();
+  });
+
+  it("accepts ephemeral sockets through the Node websocket runtime", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const socket = Object.assign(new EventEmitter(), {
+      close: vi.fn<(code?: number, reason?: string) => void>(),
+      terminate: vi.fn<() => void>(),
+    });
+    const message = vi.fn<() => Promise<void>>(async () => {});
+
+    runtime.acceptEphemeralWebSocket(socket as unknown as WebSocket, {
+      message,
+      close: vi.fn<(code: number, reason: string) => void>(),
+      error: vi.fn<() => void>(),
+    });
+    socket.emit("message", Buffer.from("terminal"), false);
+
+    await vi.waitFor(() => {
+      expect(message).toHaveBeenCalledWith("terminal");
+    });
+    expect((socket as unknown as { accept?: unknown }).accept).toBeUndefined();
+  });
+
+  it("delegates workspace terminal acceptance to the coordinator runtime", async () => {
+    const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
+    const start = source.indexOf("private async workspaceTerminal");
+    const end = source.indexOf("private async connectWorkspaceTerminal", start);
+    const terminalRoute = source.slice(start, end);
+
+    expect(terminalRoute).toContain(
+      "createWebSocketUpgrade({\n        maxPayload: workspaceTerminalMaxBufferedBytes",
+    );
+    expect(terminalRoute).toContain("return await this.state.runExclusive");
+    expect(terminalRoute.indexOf("trackWorkspaceTerminal")).toBeLessThan(
+      terminalRoute.indexOf("connectWorkspaceTerminal"),
+    );
+    expect(terminalRoute).not.toContain("socket.accept()");
+  });
+
+  it("defaults terminal bootstrap fields for persisted workspaces", async () => {
+    const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
+    const start = source.indexOf("function workspaceTerminalBootstrapCommand");
+    const end = source.indexOf("function shellQuote", start);
+    const bootstrap = source.slice(start, end);
+
+    expect(bootstrap).toContain('workspace.branch?.trim() || "main"');
+    expect(bootstrap).toContain('workspace.command?.trim() || "exec bash -l"');
+    expect(bootstrap).not.toContain("checkout -B");
+    expect(bootstrap).not.toContain("fetch --depth=1");
+  });
+
+  it("bounds terminal input by bytes and queued frame count", async () => {
+    const source = await readFile(new URL("../src/fleet.ts", import.meta.url), "utf8");
+    const start = source.indexOf("private async connectWorkspaceTerminal");
+    const end = source.indexOf("private trackWorkspaceTerminal", start);
+    const terminal = source.slice(start, end);
+
+    expect(terminal).toContain("workspaceTerminalMaxBufferedFrames");
+    expect(source).toContain("workspaceTerminalTransportMemoryBudgetBytes");
+    expect(source).toContain("this.state.ephemeralWebSocketMaxPayloadBytes");
+    expect(terminal).toContain("pending.length + queuedInputFrames");
+    expect(terminal).toContain("queuedInputFrames -= 1");
+    expect(terminal).toContain("if (length === 0) return");
+    expect(terminal).toContain("lastObservedHostKey = fingerprint");
+    expect(terminal).toContain("return expectedHostKey === fingerprint");
+    expect(terminal).toContain('cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"]');
+    expect(terminal).toContain('"hmac-sha2-256-etm@openssh.com"');
+    expect(terminal).toContain('"hmac-sha2-512"');
+    expect(terminal).toContain("workspaceTerminalSSHReadyTimeoutMs");
+    expect(terminal).toContain("for (const port of terminalPorts)");
+    expect(terminal).toContain("await new Promise<void>((resolve) => setTimeout(resolve, 2_000))");
+    expect(terminal).not.toContain("!workspace.sshHostKeySha256");
   });
 
   it("lets code-agent replies bypass the lifecycle queue", async () => {

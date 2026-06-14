@@ -22,6 +22,45 @@ func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
 	RegisterProvider(runEnvProfileTestProvider{})
 	RegisterProvider(runPrepareTestProvider{})
+	RegisterProvider(runModuleRuntimeTestProvider{})
+}
+
+type warmupFailureReleaseBackend struct {
+	releases int
+}
+
+func (b *warmupFailureReleaseBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "warmup-release-test"}
+}
+func (b *warmupFailureReleaseBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b *warmupFailureReleaseBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b *warmupFailureReleaseBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b *warmupFailureReleaseBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	b.releases++
+	return nil
+}
+func (b *warmupFailureReleaseBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	return Server{}, nil
+}
+
+func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing.T) {
+	backend := &warmupFailureReleaseBackend{}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	lease := LeaseTarget{LeaseID: "cbx_abcdef123456"}
+	app.releaseWarmupLeaseAfterFailure(context.Background(), backend, defaultConfig(), lease, true)
+	if backend.releases != 0 {
+		t.Fatalf("controller-owned cleanup released provider directly: %d", backend.releases)
+	}
+	app.releaseWarmupLeaseAfterFailure(context.Background(), backend, defaultConfig(), lease, false)
+	if backend.releases != 1 {
+		t.Fatalf("standalone warmup cleanup releases=%d", backend.releases)
+	}
 }
 
 type windowsEnvHelperTestProvider struct{}
@@ -190,6 +229,70 @@ func (b runPrepareTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest
 }
 func (b runPrepareTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: b.spec.Name}, nil
+}
+
+type runModuleRuntimeTestProvider struct{}
+
+func (runModuleRuntimeTestProvider) Name() string { return "module-runtime-test" }
+func (runModuleRuntimeTestProvider) Aliases() []string {
+	return nil
+}
+func (runModuleRuntimeTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "module-runtime-test",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetWorkerRuntime}},
+		Features:    FeatureSet{FeatureModuleRun},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (runModuleRuntimeTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (runModuleRuntimeTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p runModuleRuntimeTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return runModuleRuntimeTestBackend{spec: p.Spec()}, nil
+}
+
+type runModuleRuntimeTestBackend struct {
+	spec ProviderSpec
+}
+
+var runModuleRuntimeTestRequests []RunRequest
+
+type countingReader struct {
+	data  string
+	reads int
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.data == "" {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func (b runModuleRuntimeTestBackend) Spec() ProviderSpec { return b.spec }
+func (b runModuleRuntimeTestBackend) Warmup(context.Context, WarmupRequest) error {
+	return nil
+}
+func (b runModuleRuntimeTestBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
+	runModuleRuntimeTestRequests = append(runModuleRuntimeTestRequests, req)
+	return RunResult{Provider: b.spec.Name, LeaseID: "mod_test", Slug: "module-runtime-test"}, nil
+}
+func (b runModuleRuntimeTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b runModuleRuntimeTestBackend) Status(context.Context, StatusRequest) (StatusView, error) {
+	return StatusView{}, nil
+}
+func (b runModuleRuntimeTestBackend) Stop(context.Context, StopRequest) error {
+	return nil
 }
 
 func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
@@ -399,10 +502,10 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "daytona capture stderr", provider: "daytona", args: []string{"--capture-stderr", "stderr.bin"}, want: "daytona delegates run execution; --capture-stderr is not supported"},
 		{name: "islo capture on fail", provider: "islo", args: []string{"--capture-on-fail"}, want: "islo delegates run execution; --capture-on-fail is not supported"},
 		{name: "daytona download", provider: "daytona", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "daytona delegates run execution; --download is not supported"},
-		{name: "islo download", provider: "islo", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "islo delegates run execution; --download is not supported"},
+		{name: "islo unsafe download", provider: "islo", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "--download for delegated providers requires a safe relative file path"},
 		{name: "e2b download", provider: "e2b", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "e2b delegates run execution; --download is not supported"},
 		{name: "daytona require artifact", provider: "daytona", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "daytona delegates run execution; --require-artifact is not supported"},
-		{name: "islo require artifact", provider: "islo", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "islo delegates run execution; --require-artifact is not supported"},
+		{name: "islo unsafe require artifact", provider: "islo", args: []string{"--require-artifact", "../manifest.json"}, want: "--require-artifact contains unsupported characters or non-relative path"},
 		{name: "e2b require artifact", provider: "e2b", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "e2b delegates run execution; --require-artifact is not supported"},
 		{name: "e2b lease output", provider: "e2b", args: []string{"--lease-output", "session.json"}, want: "--lease-output is not supported for provider=e2b yet"},
 		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
@@ -425,6 +528,33 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 				t.Fatalf("message=%q want %q", exitErr.Message, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunCommandAcceptsIsloBoundedFileEvidence(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "proof.txt")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "islo",
+		"--no-sync",
+		"--require-artifact", "reports/proof.txt",
+		"--download", "reports/proof.txt=" + local,
+		"--",
+		"true",
+	})
+	if err != nil {
+		t.Fatalf("run err=%v\nstderr=%s", err, stderr.String())
+	}
+	data, err := os.ReadFile(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "islo-test-proof" {
+		t.Fatalf("download=%q", data)
+	}
+	if !strings.Contains(stderr.String(), "required artifact reports/proof.txt matched=1") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
@@ -457,6 +587,137 @@ func TestRunCommandRejectsDelegatedScriptStdinBeforeReading(t *testing.T) {
 	}
 	if !strings.Contains(exitErr.Message, "e2b delegates run execution; --script is not supported") {
 		t.Fatalf("message=%q", exitErr.Message)
+	}
+}
+
+func TestRunCommandPassesScriptToModuleDelegatedProvider(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	script := filepath.Join(t.TempDir(), "worker.mjs")
+	if err := os.WriteFile(script, []byte("export default { fetch() { return new Response('ok') } }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--script", script,
+	})
+	if err != nil {
+		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
+	}
+	if len(runModuleRuntimeTestRequests) != 1 {
+		t.Fatalf("run requests=%#v, want one", runModuleRuntimeTestRequests)
+	}
+	req := runModuleRuntimeTestRequests[0]
+	if !req.ScriptRequested || req.Script == nil {
+		t.Fatalf("script not loaded in request: %#v", req)
+	}
+	if req.Script.Source != script || string(req.Script.Data) != "export default { fetch() { return new Response('ok') } }\n" {
+		t.Fatalf("script=%#v", req.Script)
+	}
+	if len(req.Command) != 0 {
+		t.Fatalf("command=%v, want none", req.Command)
+	}
+}
+
+func TestRunCommandPassesScriptStdinToModuleDelegatedProvider(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  strings.NewReader("export default { fetch() { return new Response('stdin') } }\n"),
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--script-stdin",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
+	}
+	if len(runModuleRuntimeTestRequests) != 1 {
+		t.Fatalf("run requests=%#v, want one", runModuleRuntimeTestRequests)
+	}
+	req := runModuleRuntimeTestRequests[0]
+	if req.Script == nil || req.Script.Source != "stdin" || string(req.Script.Data) != "export default { fetch() { return new Response('stdin') } }\n" {
+		t.Fatalf("script=%#v", req.Script)
+	}
+}
+
+func TestRunCommandRejectsModuleDelegatedTrailingCommand(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--",
+		"node",
+		"worker.mjs",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; trailing shell commands are not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
+	}
+}
+
+func TestRunCommandRejectsModuleDelegatedScriptStdinTrailingCommandBeforeReading(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	stdin := &countingReader{data: "export default {}"}
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  stdin,
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--script-stdin",
+		"--",
+		"echo",
+		"nope",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; trailing shell commands are not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if stdin.reads != 0 {
+		t.Fatalf("stdin was read %d times before delegated option validation", stdin.reads)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
+	}
+}
+
+func TestRunCommandRejectsModuleDelegatedShellBeforeReadingScriptStdin(t *testing.T) {
+	runModuleRuntimeTestRequests = nil
+	stdin := &countingReader{data: "export default {}"}
+	var stdout, stderr bytes.Buffer
+	err := (App{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Stdin:  stdin,
+	}).runCommand(context.Background(), []string{
+		"--provider", "module-runtime-test",
+		"--shell",
+		"--script-stdin",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(exitErr.Message, "module-runtime-test executes module source; --shell is not supported") {
+		t.Fatalf("message=%q", exitErr.Message)
+	}
+	if stdin.reads != 0 {
+		t.Fatalf("stdin was read %d times before delegated option validation", stdin.reads)
+	}
+	if len(runModuleRuntimeTestRequests) != 0 {
+		t.Fatalf("delegated run should not be called: %#v", runModuleRuntimeTestRequests)
 	}
 }
 

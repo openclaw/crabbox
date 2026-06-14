@@ -36,6 +36,13 @@ wandb
   coordinator: never
   aliases: weights-and-biases
 
+module-runtime-example
+  family: module-runtime-example
+  kind: delegated-run
+  targets: worker-runtime
+  features: module-run
+  coordinator: never
+
 hostinger
   family: hostinger
   kind: ssh-lease
@@ -90,12 +97,17 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     itself; there is no SSH lease.
   - `service-control`: Crabbox can inspect or stop a provider-owned service but
     cannot execute arbitrary run commands there.
-- `targets`: supported OS and Windows mode combinations, such as `linux`,
-  `macos`, `windows/normal`, and `windows/wsl2`.
+- `targets`: supported OS, Windows mode, or runtime category combinations, such
+  as `linux`, `macos`, `windows/normal`, `windows/wsl2`, and
+  `worker-runtime`. `worker-runtime` means a hosted module or Worker-isolate
+  runtime, not a Linux shell or SSH-reachable machine.
 - `features`: advertised capability flags. Possible values include `ssh`,
   `crabbox-sync`, `archive-sync`, `cleanup`, `desktop`, `browser`, `code`,
   `tailscale`, `url-bridge`, `workspace-checkpoint`, `workspace-fork`,
-  `workspace-restore`, `provider-snapshot`, `run-proof`, and `run-session`.
+  `workspace-restore`, `provider-snapshot`, `run-proof`, `run-session`, and
+  `module-run`. `module-run` means delegated `crabbox run --script` or
+  `--script-stdin` source-module execution; it does not imply POSIX command
+  argv, archive sync, ports, or SSH access.
 - `coordinator`: whether the provider can route leases through the broker.
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.

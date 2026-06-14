@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -762,13 +763,15 @@ func TestResolvedLeaseClaimUpdatesRejectActiveStateChange(t *testing.T) {
 }
 
 func TestRegisterCoordinatorLeaseBestEffortMapsDirectLease(t *testing.T) {
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
 	var got CoordinatorLeaseRegistration
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"external","lifecycle":"registered","state":"active"}}`))
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"external","lifecycle":"registered","state":"active","runtimeAdapterID":"mac-lab","runtimeAdapterWorkspaceID":"fleet-a-is-123"}}`))
 	}))
 	defer server.Close()
 
@@ -799,8 +802,86 @@ func TestRegisterCoordinatorLeaseBestEffortMapsDirectLease(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
-	if got.Provider != "external" || got.CloudID != "external-box-123" || got.Host != "192.0.2.10" || got.WorkRoot != "/workspace" || !got.Desktop || got.DesktopEnv != "gnome" || len(got.ExposedPorts) != 2 || got.TTLSeconds != 7200 || got.IdleTimeoutSeconds != 1800 {
+	if got.Provider != "external" || got.CloudID != "external-box-123" || got.Host != "192.0.2.10" || got.WorkRoot != "/workspace" || !got.Desktop || got.DesktopEnv != "gnome" || len(got.ExposedPorts) != 2 || got.TTLSeconds != 7200 || got.IdleTimeoutSeconds != 1800 || got.RuntimeAdapterID != "mac-lab" || got.RuntimeWorkspaceID != "fleet-a-is-123" {
 		t.Fatalf("registration=%#v", got)
+	}
+}
+
+func TestAdapterClaimRequiresExactCoordinatorRuntimeBinding(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_adapter123","provider":"aws","lifecycle":"registered","state":"active","runtimeAdapterID":"other-lab","runtimeAdapterWorkspaceID":"fleet-a-is-123"}}`))
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "token"
+	cfg.BrokerMode = BrokerModeRegistered
+	cfg.IdleTimeout = time.Hour
+	leaseID := "cbx_adapter123"
+	leaseServer := Server{
+		Provider: "aws",
+		CloudID:  "i-adapter",
+		Labels:   map[string]string{"provider": "aws", "slug": "adapter", "state": "running"},
+	}
+	var stderr bytes.Buffer
+	err := (App{Stderr: &stderr}).claimLeaseTargetForRepoAndRegister(
+		context.Background(),
+		leaseID,
+		"adapter",
+		cfg,
+		leaseServer,
+		SSHTarget{Host: "192.0.2.42", User: "runner", Port: "22"},
+		"/repo",
+		true,
+	)
+	if err == nil || !strings.Contains(err.Error(), "expected \"mac-lab\"/\"fleet-a-is-123\"") {
+		t.Fatalf("registration error=%v stderr=%q", err, stderr.String())
+	}
+}
+
+func TestControllerClaimWithoutAdapterIDDoesNotRequireCoordinatorBinding(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "")
+	t.Setenv(controllerWorkspaceIDEnv, "local-workspace")
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.IdleTimeout = time.Hour
+	leaseID := "cbx_localadapter123"
+	server := Server{
+		Provider: "aws",
+		CloudID:  "i-local-adapter",
+		Labels:   map[string]string{"provider": "aws", "slug": "local-adapter", "state": "running"},
+	}
+	if err := (App{}).claimLeaseTargetForRepoAndRegister(
+		context.Background(), leaseID, "local-adapter", cfg, server, SSHTarget{}, "/repo", true,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAmbientAdapterIDDoesNotRequireControllerCoordinatorBinding(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "")
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.IdleTimeout = time.Hour
+	leaseID := "cbx_ambientadapter123"
+	server := Server{
+		Provider: "aws",
+		CloudID:  "i-ambient-adapter",
+		Labels:   map[string]string{"provider": "aws", "slug": "ambient-adapter", "state": "running"},
+	}
+	if err := (App{}).claimLeaseTargetForRepoAndRegister(
+		context.Background(), leaseID, "ambient-adapter", cfg, server, SSHTarget{}, "/repo", true,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -833,5 +914,51 @@ func TestReleaseRegisteredCoordinatorLeaseNeverRequestsProviderDeletion(t *testi
 	}
 	if got.Delete {
 		t.Fatal("registered coordinator release requested provider deletion")
+	}
+}
+
+func TestControllerManagedCoordinatorDeregistrationWaitsForConfirmedAbsence(t *testing.T) {
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/release" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"external","lifecycle":"registered","state":"released"}}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	app.releaseRegisteredCoordinatorLeaseBestEffort(context.Background(), cfg, "cbx_123")
+	if requests != 0 {
+		t.Fatalf("controller-owned provider stop deregistered coordinator early: requests=%d", requests)
+	}
+	if err := app.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(context.Background(), cfg, "cbx_123"); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("confirmed absence deregistration requests=%d", requests)
+	}
+}
+
+func TestConfirmedAbsenceCoordinatorDeregistrationTreatsMissingAsClean(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/release" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(context.Background(), cfg, "cbx_123"); err != nil {
+		t.Fatalf("already absent coordinator registration: %v", err)
 	}
 }

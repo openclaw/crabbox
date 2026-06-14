@@ -45,6 +45,7 @@ export function cloudInit(config: LeaseConfig): string {
     .map((port) => `      Port ${port}`)
     .join("\n");
   const readyChecks = optionalReadyChecks(config);
+  const sshHostKeys = optionalSSHHostKeys(config);
   const writeFiles = optionalWriteFiles(config);
   const bootstrap = optionalBootstrap(config);
   return `#cloud-config
@@ -57,12 +58,29 @@ users:
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     ssh_authorized_keys:
       - ${config.sshPublicKey}
+${sshHostKeys}
 write_files:
   - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf
     permissions: '0644'
     content: |
 ${portLines}
       PasswordAuthentication no
+  - path: /etc/systemd/system/crabbox-workspace-ready.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Crabbox workspace per-boot readiness
+      After=cloud-final.service
+      ConditionPathExists=/var/lib/crabbox/bootstrapped
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/crabbox-ready
+      ExecStart=/usr/bin/install -d /run/crabbox
+      ExecStart=/usr/bin/touch /run/crabbox/workspace-ready
+
+      [Install]
+      WantedBy=cloud-final.service
   - path: /usr/local/bin/crabbox-ready
     permissions: '0755'
     content: |
@@ -80,6 +98,7 @@ runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
     export DEBIAN_FRONTEND=noninteractive
+    timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
     cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
     Acquire::Retries "8";
     Acquire::http::Timeout "30";
@@ -96,13 +115,16 @@ runcmd:
       done
     }
     retry apt-get update
-    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
+    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq tmux
     mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
     timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
 ${bootstrap}
+    systemctl daemon-reload
+    systemctl enable crabbox-workspace-ready.service
+    systemctl start --no-block crabbox-workspace-ready.service
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
@@ -372,7 +394,7 @@ Acquire::https::Timeout "30";
 APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git rsync jq
+apt-get install -y --no-install-recommends ca-certificates curl git rsync jq tmux
 if [ -d /proc/sys/fs/binfmt_misc ]; then
   if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
     mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
@@ -641,6 +663,22 @@ function optionalReadyChecks(config: LeaseConfig): string {
     );
   }
   return lines.join("\n");
+}
+
+function optionalSSHHostKeys(config: LeaseConfig): string {
+  if (!config.sshHostPrivateKey || !config.sshHostPublicKey) {
+    return "";
+  }
+  const privateKey = config.sshHostPrivateKey
+    .trimEnd()
+    .split("\n")
+    .map((line) => `    ${line}`)
+    .join("\n");
+  return `ssh_keys:
+  ed25519_private: |
+${privateKey}
+  ed25519_public: ${config.sshHostPublicKey.trim()}
+`;
 }
 
 function optionalWriteFiles(config: LeaseConfig): string {
@@ -1063,8 +1101,8 @@ function optionalBootstrap(config: LeaseConfig): string {
   if (config.desktop && config.desktopEnv !== "xfce") {
     const gnome = config.desktopEnv === "gnome";
     const packages = gnome
-      ? "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps"
-      : "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps";
+      ? "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard dbus-user-session xwayland xdg-desktop-portal-wlr xdg-desktop-portal-gtk gnome-terminal nautilus gsettings-desktop-schemas adwaita-icon-theme fonts-dejavu-core fonts-liberation iproute2 openssl procps util-linux novnc websockify"
+      : "labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps util-linux novnc websockify";
     const desktopEnvExtra = gnome
       ? "    DISPLAY=:0\n    GDK_BACKEND=x11\n    MOZ_ENABLE_WAYLAND=0\n"
       : "";
@@ -1336,12 +1374,12 @@ ${themeConfigure}    systemctl daemon-reload
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`);
   } else if (config.desktop) {
-    parts.push(`    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme
+    parts.push(`    retry apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
     fi
-    x11vnc -storepasswd "$(cat /var/lib/crabbox/vnc.password)" /var/lib/crabbox/vnc.pass >/dev/null
+    { head -c 8 /var/lib/crabbox/vnc.password; printf '\\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\\n\\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
     chown crabbox:crabbox /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
     printf 'CRABBOX_DESKTOP_ENV=xfce\\nDISPLAY=:99\\n' >/var/lib/crabbox/desktop.env
@@ -1456,34 +1494,6 @@ function tailscaleInstallBootstrap(config: LeaseConfig): string {
     systemctl daemon-reload || true`;
 }
 
-function tailscaleLogoutBootstrap(): string {
-  return `{
-      printf '%s\\n' '#!/usr/bin/env sh'
-      printf '%s\\n' 'if command -v tailscale >/dev/null 2>&1; then'
-      printf '%s\\n' '  tailscale logout >/dev/null 2>&1 || true'
-      printf '%s\\n' 'fi'
-    } >/usr/local/bin/crabbox-tailscale-logout
-    chmod 0755 /usr/local/bin/crabbox-tailscale-logout
-    if command -v systemctl >/dev/null 2>&1; then
-      {
-        printf '%s\\n' '[Unit]'
-        printf '%s\\n' 'Description=Crabbox Tailscale logout on shutdown'
-        printf '%s\\n' 'DefaultDependencies=no'
-        printf '%s\\n' 'Before=shutdown.target reboot.target halt.target'
-        printf '%s\\n' ''
-        printf '%s\\n' '[Service]'
-        printf '%s\\n' 'Type=oneshot'
-        printf '%s\\n' 'ExecStart=/usr/local/bin/crabbox-tailscale-logout'
-        printf '%s\\n' 'TimeoutStartSec=20'
-        printf '%s\\n' ''
-        printf '%s\\n' '[Install]'
-        printf '%s\\n' 'WantedBy=halt.target reboot.target shutdown.target'
-      } >/etc/systemd/system/crabbox-tailscale-logout.service
-      systemctl daemon-reload || true
-      systemctl enable crabbox-tailscale-logout.service || true
-    fi`;
-}
-
 function tailscaleBootstrap(config: LeaseConfig): string {
   if (!config.tailscaleAuthKey) {
     return `    echo "tailscale requested but no auth key was injected" >&2
@@ -1503,7 +1513,12 @@ function tailscaleBootstrap(config: LeaseConfig): string {
   }
   return `    ${tailscaleInstallBootstrap(config)}
     systemctl enable --now tailscaled || service tailscaled start || true
-    ${tailscaleLogoutBootstrap()}
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable crabbox-tailscale-logout.service >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/crabbox-tailscale-logout.service
+      systemctl daemon-reload || true
+    fi
+    rm -f /usr/local/bin/crabbox-tailscale-logout
     install -d -m 0750 -o ${shellQuote(sshUser)} -g ${shellQuote(sshUser)} /var/lib/crabbox
     set +x
     TS_AUTHKEY=${shellQuote(config.tailscaleAuthKey)}

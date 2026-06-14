@@ -52,6 +52,8 @@ type CoordinatorLease struct {
 	Slug                 string                `json:"slug,omitempty"`
 	Provider             string                `json:"provider"`
 	Lifecycle            string                `json:"lifecycle,omitempty"`
+	RuntimeAdapterID     string                `json:"runtimeAdapterID,omitempty"`
+	RuntimeWorkspaceID   string                `json:"runtimeAdapterWorkspaceID,omitempty"`
 	TargetOS             string                `json:"target,omitempty"`
 	WindowsMode          string                `json:"windowsMode,omitempty"`
 	Desktop              bool                  `json:"desktop,omitempty"`
@@ -118,6 +120,8 @@ type CoordinatorLeaseRegistration struct {
 	ExposedPorts       []string `json:"exposedPorts,omitempty"`
 	TTLSeconds         int      `json:"ttlSeconds,omitempty"`
 	IdleTimeoutSeconds int      `json:"idleTimeoutSeconds,omitempty"`
+	RuntimeAdapterID   string   `json:"runtimeAdapterID,omitempty"`
+	RuntimeWorkspaceID string   `json:"runtimeAdapterWorkspaceID,omitempty"`
 }
 
 type CoordinatorShareRole string

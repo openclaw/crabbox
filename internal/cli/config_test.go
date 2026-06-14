@@ -114,6 +114,22 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS",
 		"CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE",
 		"CRABBOX_AGENT_SANDBOX_FORGET_MISSING",
+		"CRABBOX_VERCEL_SANDBOX_RUNTIME",
+		"CRABBOX_VERCEL_SANDBOX_WORKDIR",
+		"CRABBOX_VERCEL_SANDBOX_PROJECT_ID",
+		"CRABBOX_VERCEL_SANDBOX_TEAM_ID",
+		"CRABBOX_VERCEL_SANDBOX_SCOPE",
+		"CRABBOX_VERCEL_SANDBOX_VCPUS",
+		"CRABBOX_VERCEL_SANDBOX_TIMEOUT_SECS",
+		"CRABBOX_VERCEL_SANDBOX_EXEC_TIMEOUT_SECS",
+		"CRABBOX_VERCEL_SANDBOX_PERSISTENT",
+		"CRABBOX_VERCEL_SANDBOX_SNAPSHOT",
+		"CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE",
+		"CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY",
+		"CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW",
+		"CRABBOX_VERCEL_SANDBOX_NETWORK_DENY",
+		"CRABBOX_VERCEL_SANDBOX_PORTS",
+		"CRABBOX_VERCEL_SANDBOX_FORGET_MISSING",
 		"CRABBOX_SUPERSERVE_API_KEY",
 		"SUPERSERVE_API_KEY",
 		"CRABBOX_SUPERSERVE_BASE_URL",
@@ -190,6 +206,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI",
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS",
 		"CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG",
+		"CRABBOX_SMOLVM_API_KEY",
+		"SMOLMACHINES_API_KEY",
+		"SMK_API_KEY",
+		"CRABBOX_SMOLVM_BASE_URL",
+		"CRABBOX_SMOLVM_IMAGE",
+		"CRABBOX_SMOLVM_WORKDIR",
+		"CRABBOX_SMOLVM_CPUS",
+		"CRABBOX_SMOLVM_MEMORY_MB",
+		"CRABBOX_SMOLVM_NETWORK",
+		"CRABBOX_SMOLVM_KEEP",
 		"CRABBOX_ASCII_BOX_API_KEY",
 		"ASCII_BOX_API_KEY",
 		"CRABBOX_ASCII_BOX_BASE_URL",
@@ -239,6 +265,16 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_CLOUDFLARE_RUNNER_URL",
 		"CRABBOX_CLOUDFLARE_RUNNER_TOKEN",
 		"CRABBOX_CLOUDFLARE_WORKDIR",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_DATE",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_FLAGS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CACHE_MODE",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_EGRESS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS",
+		"CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS",
 		"CRABBOX_SEMAPHORE_HOST",
 		"SEMAPHORE_HOST",
 		"CRABBOX_SEMAPHORE_TOKEN",
@@ -300,6 +336,18 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_PROJECT_ID",
 		"CRABBOX_RAILWAY_ENVIRONMENT_ID",
 		"RAILWAY_ENVIRONMENT_ID",
+		"CRABBOX_NVIDIA_BREV_CLI",
+		"CRABBOX_NVIDIA_BREV_ORG",
+		"CRABBOX_NVIDIA_BREV_TYPE",
+		"CRABBOX_NVIDIA_BREV_GPU_NAME",
+		"CRABBOX_NVIDIA_BREV_PROVIDER",
+		"CRABBOX_NVIDIA_BREV_MODE",
+		"CRABBOX_NVIDIA_BREV_LAUNCHABLE",
+		"CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT",
+		"CRABBOX_NVIDIA_BREV_RELEASE_ACTION",
+		"CRABBOX_NVIDIA_BREV_TARGET",
+		"CRABBOX_NVIDIA_BREV_USER",
+		"CRABBOX_NVIDIA_BREV_WORK_ROOT",
 		"HOSTINGER_API_TOKEN",
 		"CRABBOX_HOSTINGER_API_TOKEN",
 		"HOSTINGER_API_URL",
@@ -313,8 +361,139 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_HOSTINGER_WORK_ROOT",
 		"CRABBOX_HOSTINGER_ALLOW_PURCHASE",
 		"CRABBOX_HOSTINGER_RELEASE_ACTION",
+		"CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestNvidiaBrevConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.NvidiaBrev.CLI != "brev" ||
+		cfg.NvidiaBrev.GPUName != "A100" ||
+		cfg.NvidiaBrev.Mode != "vm" ||
+		cfg.NvidiaBrev.ReleaseAction != "delete" ||
+		cfg.NvidiaBrev.Target != "container" ||
+		cfg.NvidiaBrev.WorkRoot != "/tmp/crabbox" {
+		t.Fatalf("nvidiaBrev defaults not applied: %#v", cfg.NvidiaBrev)
+	}
+
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "nvidia-brev",
+		NvidiaBrev: &fileNvidiaBrevConfig{
+			CLI:           "/opt/brev",
+			Org:           "example-org",
+			Type:          "gpu",
+			GPUName:       "L40S",
+			Provider:      "aws",
+			Mode:          "vm",
+			Launchable:    "pytorch",
+			StartupScript: "setup.sh",
+			ReleaseAction: "stop",
+			Target:        "host",
+			User:          "ubuntu",
+			WorkRoot:      "/work/brev",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "nvidia-brev" ||
+		cfg.NvidiaBrev.CLI != "/opt/brev" ||
+		cfg.NvidiaBrev.Org != "example-org" ||
+		cfg.NvidiaBrev.Type != "gpu" ||
+		cfg.NvidiaBrev.GPUName != "L40S" ||
+		cfg.NvidiaBrev.Provider != "aws" ||
+		cfg.NvidiaBrev.Mode != "vm" ||
+		cfg.NvidiaBrev.Launchable != "pytorch" ||
+		cfg.NvidiaBrev.StartupScript != "setup.sh" ||
+		cfg.NvidiaBrev.ReleaseAction != "stop" ||
+		cfg.NvidiaBrev.Target != "host" ||
+		cfg.NvidiaBrev.User != "ubuntu" ||
+		cfg.NvidiaBrev.WorkRoot != "/work/brev" {
+		t.Fatalf("file nvidiaBrev config not applied: %#v", cfg.NvidiaBrev)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
+		t.Fatal("file nvidiaBrev release action not marked explicit")
+	}
+	if !IsNvidiaBrevWorkRootExplicit(&cfg) {
+		t.Fatal("file nvidiaBrev work root not marked explicit")
+	}
+
+	t.Setenv("CRABBOX_NVIDIA_BREV_CLI", "/usr/local/bin/brev")
+	t.Setenv("CRABBOX_NVIDIA_BREV_ORG", "env-example-org")
+	t.Setenv("CRABBOX_NVIDIA_BREV_TYPE", "cpu")
+	t.Setenv("CRABBOX_NVIDIA_BREV_GPU_NAME", "A100")
+	t.Setenv("CRABBOX_NVIDIA_BREV_PROVIDER", "gcp")
+	t.Setenv("CRABBOX_NVIDIA_BREV_MODE", "vm")
+	t.Setenv("CRABBOX_NVIDIA_BREV_LAUNCHABLE", "base")
+	t.Setenv("CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT", "env-setup.sh")
+	t.Setenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION", "delete")
+	t.Setenv("CRABBOX_NVIDIA_BREV_TARGET", "container")
+	t.Setenv("CRABBOX_NVIDIA_BREV_USER", "runner")
+	t.Setenv("CRABBOX_NVIDIA_BREV_WORK_ROOT", "/workspace/brev")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NvidiaBrev.CLI != "/usr/local/bin/brev" ||
+		cfg.NvidiaBrev.Org != "env-example-org" ||
+		cfg.NvidiaBrev.Type != "cpu" ||
+		cfg.NvidiaBrev.GPUName != "A100" ||
+		cfg.NvidiaBrev.Provider != "gcp" ||
+		cfg.NvidiaBrev.Mode != "vm" ||
+		cfg.NvidiaBrev.Launchable != "base" ||
+		cfg.NvidiaBrev.StartupScript != "env-setup.sh" ||
+		cfg.NvidiaBrev.ReleaseAction != "delete" ||
+		cfg.NvidiaBrev.Target != "container" ||
+		cfg.NvidiaBrev.User != "runner" ||
+		cfg.NvidiaBrev.WorkRoot != "/workspace/brev" {
+		t.Fatalf("env nvidiaBrev config not applied: %#v", cfg.NvidiaBrev)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
+		t.Fatal("env nvidiaBrev release action not marked explicit")
+	}
+	if !IsNvidiaBrevWorkRootExplicit(&cfg) {
+		t.Fatal("env nvidiaBrev work root not marked explicit")
+	}
+}
+
+func TestNvidiaBrevUntrustedConfigCannotRedirectCLI(t *testing.T) {
+	cfg := baseConfig()
+	cfg.NvidiaBrev.CLI = "/trusted/brev"
+	cfg.NvidiaBrev.StartupScript = "echo trusted"
+	file := fileConfig{NvidiaBrev: &fileNvidiaBrevConfig{
+		CLI:           "./payload",
+		GPUName:       "L40S",
+		StartupScript: "@/etc/passwd",
+	}}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NvidiaBrev.CLI != "/trusted/brev" {
+		t.Fatalf("untrusted CLI override applied: %q", cfg.NvidiaBrev.CLI)
+	}
+	if cfg.NvidiaBrev.GPUName != "L40S" {
+		t.Fatalf("safe untrusted setting not applied: %#v", cfg.NvidiaBrev)
+	}
+	if cfg.NvidiaBrev.StartupScript != "echo trusted" {
+		t.Fatalf("untrusted startup script file applied: %q", cfg.NvidiaBrev.StartupScript)
+	}
+
+	file.NvidiaBrev.StartupScript = "pip install torch"
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NvidiaBrev.StartupScript != "pip install torch" {
+		t.Fatalf("inline untrusted startup script not applied: %q", cfg.NvidiaBrev.StartupScript)
+	}
+}
+
+func TestEffectiveNvidiaBrevWorkRootDoesNotInheritAnotherProviderDefault(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "xcp-ng"
+	cfg.WorkRoot = "/home/vm/crabbox"
+	if got := EffectiveNvidiaBrevWorkRoot(cfg); got != "/tmp/crabbox" {
+		t.Fatalf("effective nvidia-brev work root=%q", got)
 	}
 }
 
@@ -428,10 +607,13 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 		AgentSandbox: &fileAgentSandboxConfig{DeleteOnRelease: &value},
 		Namespace:    &fileNamespaceConfig{DeleteOnRelease: &value},
 		Morph:        &fileMorphConfig{DeleteOnRelease: &value},
+		NvidiaBrev: &fileNvidiaBrevConfig{
+			ReleaseAction: "stop",
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph"} {
+	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(cfg, provider) {
 			t.Fatalf("file release policy not explicit for %s", provider)
 		}
@@ -451,10 +633,11 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	} {
 		t.Setenv(key, "false")
 	}
+	t.Setenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION", "stop")
 	if err := applyEnv(&envCfg); err != nil {
 		t.Fatal(err)
 	}
-	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph"} {
+	for _, provider := range []string{"incus", "kubevirt", "agent-sandbox", "namespace-devbox", "morph", "nvidia-brev"} {
 		if !DeleteOnReleaseExplicit(envCfg, provider) {
 			t.Fatalf("environment release policy not explicit for %s", provider)
 		}
@@ -896,6 +1079,216 @@ func TestDigitalOceanDefaultsDoNotLeakAcrossProviderOverride(t *testing.T) {
 	}
 }
 
+func TestProviderOverrideRecomputesInferredTarget(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "cloudflare-dynamic-workers"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetWorkerRuntime {
+		t.Fatalf("dynamic workers target=%q", cfg.TargetOS)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux {
+		t.Fatalf("hetzner target after override=%q, want linux", cfg.TargetOS)
+	}
+	base := baseConfig()
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(base.SSHFallbackPorts, ",") ||
+		cfg.WorkRoot != base.WorkRoot || cfg.ServerType == cfg.Tart.Image {
+		t.Fatalf("tart defaults leaked after provider override: %#v", cfg)
+	}
+
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS {
+		t.Fatalf("tart target=%q", cfg.TargetOS)
+	}
+
+	cfg.Provider = "cloudflare-dynamic-workers"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetWorkerRuntime {
+		t.Fatalf("dynamic workers target after tart override=%q", cfg.TargetOS)
+	}
+}
+
+func TestProviderFlagOverrideRecomputesTargetBeforeAWSDefaults(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetMacOS {
+		t.Fatalf("tart target=%q", cfg.TargetOS)
+	}
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerLeaseCreateFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--provider", "aws"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "cbx_existing"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux {
+		t.Fatalf("aws target=%q, want linux", cfg.TargetOS)
+	}
+	if cfg.ServerType == "mac2.metal" {
+		t.Fatalf("aws server type retained macOS default: %q", cfg.ServerType)
+	}
+	if cfg.Capacity.Market != "spot" {
+		t.Fatalf("aws market=%q, want spot", cfg.Capacity.Market)
+	}
+}
+
+func TestProviderOverridePreservesExplicitGenericFields(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	cfg.SSHUser = "alice"
+	cfg.explicitSSHUser = "alice"
+	cfg.SSHPort = "2200"
+	cfg.explicitSSHPort = "2200"
+	cfg.SSHFallbackPorts = []string{"2222"}
+	cfg.sshFallbackPortsExplicit = true
+	cfg.explicitSSHFallbackPorts = []string{"2222"}
+	cfg.WorkRoot = "/srv/work"
+	cfg.explicitWorkRoot = "/srv/work"
+	cfg.ServerType = "custom-type"
+	cfg.ServerTypeExplicit = true
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != "2222" ||
+		cfg.WorkRoot != "/srv/work" || cfg.ServerType != "custom-type" {
+		t.Fatalf("explicit generic fields changed after provider override: %#v", cfg)
+	}
+}
+
+func TestProviderOverrideWithExplicitTargetResetsPreviousProviderDefaults(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Provider = "hetzner"
+	cfg.TargetOS = targetLinux
+	cfg.targetExplicit = true
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := baseConfig()
+	if cfg.SSHUser != base.SSHUser || cfg.SSHPort != base.SSHPort ||
+		strings.Join(cfg.SSHFallbackPorts, ",") != strings.Join(base.SSHFallbackPorts, ",") ||
+		cfg.WorkRoot != base.WorkRoot || cfg.ServerType == cfg.Tart.Image {
+		t.Fatalf("tart defaults leaked through explicit target override: %#v", cfg)
+	}
+}
+
+func TestProviderOverrideReappliesExplicitOSImageDefaults(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Provider = "local-container"
+	cfg.OSImage = "ubuntu:24.04"
+	cfg.osImageExplicit = true
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.LocalContainer.Image != "ubuntu:24.04" {
+		t.Fatalf("provider override target=%q image=%q", cfg.TargetOS, cfg.LocalContainer.Image)
+	}
+}
+
+func TestProviderOverrideResetsParallelsTemplateTarget(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = parallelsProvider
+	cfg.Parallels.Template = "windows"
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"windows": {
+			TargetOS:    targetWindows,
+			WindowsMode: windowsModeWSL2,
+		},
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetWindows || !cfg.parallelsTemplateApplied {
+		t.Fatalf("parallels target=%q applied=%t", cfg.TargetOS, cfg.parallelsTemplateApplied)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.parallelsTemplateApplied {
+		t.Fatalf("hetzner target=%q template_applied=%t", cfg.TargetOS, cfg.parallelsTemplateApplied)
+	}
+}
+
+func TestProviderOverrideRestoresExplicitWindowsMode(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = parallelsProvider
+	cfg.WindowsMode = windowsModeNormal
+	cfg.explicitWindowsMode = windowsModeNormal
+	cfg.Parallels.Template = "windows"
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"windows": {
+			TargetOS:    targetWindows,
+			WindowsMode: windowsModeWSL2,
+		},
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WindowsMode != windowsModeWSL2 {
+		t.Fatalf("parallels windows mode=%q", cfg.WindowsMode)
+	}
+
+	cfg.Provider = "hetzner"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("hetzner target=%q windows_mode=%q", cfg.TargetOS, cfg.WindowsMode)
+	}
+}
+
+func TestProviderSelectionDefersDefaultsUntilAfterFlagOverrides(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "tart"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Parallels.Template = "stale"
+	cfg.Parallels.Templates = map[string]ParallelsTemplateConfig{
+		"valid": {TargetOS: targetLinux},
+	}
+
+	if err := prepareProviderSelection(&cfg, parallelsProvider); err != nil {
+		t.Fatalf("provider selection validated stale defaults before flags: %v", err)
+	}
+	cfg.Parallels.Template = "valid"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("provider defaults after flag override: %v", err)
+	}
+}
+
 func TestLinodeConfigFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -1220,6 +1613,200 @@ func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
 	applyEnv(&cfg)
 	if cfg.AsciiBox.APIKey != "override-key" || cfg.AsciiBox.BaseURL != "https://override.example.test" || cfg.AsciiBox.CLIPath != "/opt/box" || cfg.AsciiBox.Workdir != "/home/user/env-project" {
 		t.Fatalf("env asciiBox config not applied: %#v", cfg.AsciiBox)
+	}
+}
+
+func TestCloudflareDynamicWorkersConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.CloudflareDynamicWorkers.CacheMode != "stable" || cfg.CloudflareDynamicWorkers.Egress != "blocked" || cfg.CloudflareDynamicWorkers.TimeoutSecs != 60 {
+		t.Fatalf("dynamic workers defaults not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "cloudflare-dynamic-workers",
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			LoaderURL:          "https://file-loader.example.test",
+			Token:              "file-token",
+			CompatibilityDate:  "2026-06-01",
+			CompatibilityFlags: []string{"nodejs_compat"},
+			CacheMode:          "explicit",
+			Egress:             "intercept",
+			CPUMs:              25,
+			Subrequests:        7,
+			TimeoutSecs:        45,
+			Metadata:           map[string]string{"team": "file"},
+		},
+	})
+	if cfg.Provider != "cloudflare-dynamic-workers" || cfg.CloudflareDynamicWorkers.LoaderURL != "https://file-loader.example.test" || cfg.CloudflareDynamicWorkers.Token != "file-token" {
+		t.Fatalf("file dynamic workers config not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	if cfg.CloudflareDynamicWorkers.Metadata["team"] != "file" || cfg.CloudflareDynamicWorkers.CacheMode != "explicit" || cfg.CloudflareDynamicWorkers.Egress != "intercept" {
+		t.Fatalf("file dynamic workers metadata/cache not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", "https://env-loader.example.test")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN", "env-token")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_DATE", "2026-06-02")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_FLAGS", "nodejs_compat,streams_enable_constructors")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CACHE_MODE", "stable")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_EGRESS", "blocked")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", "50")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", "12")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", "30")
+	applyEnv(&cfg)
+	if cfg.CloudflareDynamicWorkers.LoaderURL != "https://env-loader.example.test" || cfg.CloudflareDynamicWorkers.Token != "env-token" || cfg.CloudflareDynamicWorkers.CompatibilityDate != "2026-06-02" {
+		t.Fatalf("env dynamic workers config not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	if strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ",") != "nodejs_compat,streams_enable_constructors" {
+		t.Fatalf("compatibility flags=%v", cfg.CloudflareDynamicWorkers.CompatibilityFlags)
+	}
+	if cfg.CloudflareDynamicWorkers.CacheMode != "stable" || cfg.CloudflareDynamicWorkers.Egress != "blocked" || cfg.CloudflareDynamicWorkers.CPUMs != 50 || cfg.CloudflareDynamicWorkers.Subrequests != 12 || cfg.CloudflareDynamicWorkers.TimeoutSecs != 30 {
+		t.Fatalf("env dynamic workers limits/cache not applied: %#v", cfg.CloudflareDynamicWorkers)
+	}
+}
+
+func TestCloudflareDynamicWorkersUntrustedConfigCannotReplaceConnectionOrEnableEgress(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CloudflareDynamicWorkers.LoaderURL = "https://trusted-loader.example.test"
+	cfg.CloudflareDynamicWorkers.Token = "trusted-token"
+	cfg.CloudflareDynamicWorkers.Egress = "blocked"
+	cfg.CloudflareDynamicWorkers.CPUMs = 25
+	cfg.CloudflareDynamicWorkers.Subrequests = 7
+	cfg.CloudflareDynamicWorkers.TimeoutSecs = 30
+
+	err := applyFileConfigWithTrust(&cfg, fileConfig{
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			LoaderURL:   "https://untrusted-loader.example.test",
+			Token:       "untrusted-token",
+			Egress:      "intercept",
+			CacheMode:   "one-shot",
+			CPUMs:       100,
+			Subrequests: 20,
+			TimeoutSecs: 90,
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.LoaderURL != "https://trusted-loader.example.test" ||
+		cfg.CloudflareDynamicWorkers.Token != "trusted-token" ||
+		cfg.CloudflareDynamicWorkers.Egress != "blocked" {
+		t.Fatalf("untrusted config changed connection or egress: %#v", cfg.CloudflareDynamicWorkers)
+	}
+	if cfg.CloudflareDynamicWorkers.CacheMode != "one-shot" ||
+		cfg.CloudflareDynamicWorkers.CPUMs != 25 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 7 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 30 {
+		t.Fatalf("untrusted config loosened runtime limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	err = applyFileConfigWithTrust(&cfg, fileConfig{
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			CPUMs:       10,
+			Subrequests: 3,
+			TimeoutSecs: 15,
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("untrusted config did not tighten runtime limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+}
+
+func TestCloudflareDynamicWorkersUntrustedConfigCannotSetUnsetResourceLimits(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CloudflareDynamicWorkers.CPUMs = 0
+	cfg.CloudflareDynamicWorkers.Subrequests = 0
+
+	err := applyFileConfigWithTrust(&cfg, fileConfig{
+		CloudflareDynamicWorkers: &fileCloudflareDynamicWorkersConfig{
+			CPUMs:       300_000,
+			Subrequests: 10_000,
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 0 || cfg.CloudflareDynamicWorkers.Subrequests != 0 {
+		t.Fatalf("untrusted config set unset resource limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+}
+
+func TestCloudflareDynamicWorkersRepositoryCapsApplyAfterEnvironment(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", "50")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", "12")
+	t.Setenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", "30")
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+	if err := os.WriteFile(
+		".crabbox.yaml",
+		[]byte("provider: cloudflare-dynamic-workers\ncloudflareDynamicWorkers:\n  cpuMs: 10\n  subrequests: 3\n  timeoutSecs: 15\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("repository caps did not constrain environment limits: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	fs := newFlagSet("test", io.Discard)
+	values := registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{
+		"--cloudflare-dynamic-workers-cpu-ms", "100",
+		"--cloudflare-dynamic-workers-subrequests", "20",
+		"--cloudflare-dynamic-workers-timeout-secs", "90",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("repository caps did not constrain provider flags: %#v", cfg.CloudflareDynamicWorkers)
+	}
+
+	fs = newFlagSet("test-zero", io.Discard)
+	values = registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{
+		"--cloudflare-dynamic-workers-cpu-ms", "0",
+		"--cloudflare-dynamic-workers-subrequests", "0",
+		"--cloudflare-dynamic-workers-timeout-secs", "0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareDynamicWorkers.CPUMs != 10 ||
+		cfg.CloudflareDynamicWorkers.Subrequests != 3 ||
+		cfg.CloudflareDynamicWorkers.TimeoutSecs != 15 {
+		t.Fatalf("zero provider flags disabled repository caps: %#v", cfg.CloudflareDynamicWorkers)
 	}
 }
 
@@ -1648,6 +2235,28 @@ func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 	}
 }
 
+func TestExternalFixedLeaseIDCapabilityConfigAndEnv(t *testing.T) {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("external:\n  capabilities:\n    idempotentLeaseId: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.External.Capabilities.IdempotentLeaseID {
+		t.Fatal("external fixed lease ID capability was not loaded from YAML")
+	}
+	cfg.External.Capabilities.IdempotentLeaseID = false
+	t.Setenv("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.External.Capabilities.IdempotentLeaseID {
+		t.Fatal("external fixed lease ID capability was not loaded from the environment")
+	}
+}
+
 func TestTartConfigYAMLMissingFieldsNotOverwritten(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -1745,6 +2354,90 @@ func TestSuperserveTrustedConfigCanSetBaseURL(t *testing.T) {
 	}
 	if cfg.Superserve.BaseURL != "https://trusted.example" {
 		t.Fatalf("trusted config base URL=%q", cfg.Superserve.BaseURL)
+	}
+}
+
+func TestVercelSandboxConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
+	cfg := baseConfig()
+	if cfg.VercelSandbox.Runtime != "node24" || cfg.VercelSandbox.Workdir != "/vercel/sandbox/crabbox" || cfg.VercelSandbox.ExecTimeoutSecs != 600 || cfg.VercelSandbox.NetworkPolicy != "default" {
+		t.Fatalf("unexpected vercel-sandbox defaults: %#v", cfg.VercelSandbox)
+	}
+	for _, fieldName := range []string{"Token", "AuthToken", "APIToken", "APIKey", "Secret"} {
+		if _, ok := reflect.TypeOf(VercelSandboxConfig{}).FieldByName(fieldName); ok {
+			t.Fatalf("provider config must not persist %s", fieldName)
+		}
+		if _, ok := reflect.TypeOf(fileVercelSandboxConfig{}).FieldByName(fieldName); ok {
+			t.Fatalf("file config must not accept %s", fieldName)
+		}
+	}
+}
+
+func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	yamlText := strings.Join([]string{
+		"vercelSandbox:",
+		"  runtime: node22",
+		"  workdir: /work/app",
+		"  projectId: prj_123",
+		"  teamId: team_123",
+		"  scope: example-org",
+		"  vcpus: 2",
+		"  timeoutSecs: 120",
+		"  execTimeoutSecs: 60",
+		"  persistent: true",
+		"  snapshot: snap_123",
+		"  snapshotMode: restore",
+		"  networkPolicy: restricted",
+		"  networkAllow: [api.example.com, 10.0.0.0/8]",
+		"  networkDeny: [169.254.169.254/32]",
+		"  ports: [3000, 8080-8090]",
+		"  forgetMissing: true",
+	}, "\n")
+	if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VercelSandbox.Runtime != "node22" || cfg.VercelSandbox.Workdir != "/work/app" || cfg.VercelSandbox.ProjectID != "prj_123" || cfg.VercelSandbox.TeamID != "team_123" || cfg.VercelSandbox.Scope != "example-org" {
+		t.Fatalf("vercel-sandbox YAML scalar config not applied: %#v", cfg.VercelSandbox)
+	}
+	if cfg.VercelSandbox.VCPUs != 2 || cfg.VercelSandbox.TimeoutSecs != 120 || cfg.VercelSandbox.ExecTimeoutSecs != 60 || !cfg.VercelSandbox.Persistent || cfg.VercelSandbox.Snapshot != "snap_123" || cfg.VercelSandbox.SnapshotMode != "restore" || cfg.VercelSandbox.NetworkPolicy != "restricted" || !cfg.VercelSandbox.ForgetMissing {
+		t.Fatalf("vercel-sandbox YAML config not applied: %#v", cfg.VercelSandbox)
+	}
+	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"api.example.com", "10.0.0.0/8"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"169.254.169.254/32"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"3000", "8080-8090"}) {
+		t.Fatalf("vercel-sandbox YAML lists not applied: %#v", cfg.VercelSandbox)
+	}
+
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_RUNTIME", "node24")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_WORKDIR", "/work/env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_PROJECT_ID", "prj_env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_TEAM_ID", "team_env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_SCOPE", "env-org")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_VCPUS", "4")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_TIMEOUT_SECS", "240")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_EXEC_TIMEOUT_SECS", "90")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_PERSISTENT", "false")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT", "snap_env")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE", "checkpoint")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY", "public")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW", "example.com,192.168.0.0/16")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_NETWORK_DENY", "10.0.0.5")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_PORTS", "443,9000-9001")
+	t.Setenv("CRABBOX_VERCEL_SANDBOX_FORGET_MISSING", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VercelSandbox.Runtime != "node24" || cfg.VercelSandbox.Workdir != "/work/env" || cfg.VercelSandbox.ProjectID != "prj_env" || cfg.VercelSandbox.TeamID != "team_env" || cfg.VercelSandbox.Scope != "env-org" {
+		t.Fatalf("vercel-sandbox env scalar config not applied: %#v", cfg.VercelSandbox)
+	}
+	if cfg.VercelSandbox.VCPUs != 4 || cfg.VercelSandbox.TimeoutSecs != 240 || cfg.VercelSandbox.ExecTimeoutSecs != 90 || cfg.VercelSandbox.Persistent || cfg.VercelSandbox.Snapshot != "snap_env" || cfg.VercelSandbox.SnapshotMode != "checkpoint" || cfg.VercelSandbox.NetworkPolicy != "public" || cfg.VercelSandbox.ForgetMissing {
+		t.Fatalf("vercel-sandbox env config not applied: %#v", cfg.VercelSandbox)
+	}
+	if !reflect.DeepEqual(cfg.VercelSandbox.NetworkAllow, []string{"example.com", "192.168.0.0/16"}) || !reflect.DeepEqual(cfg.VercelSandbox.NetworkDeny, []string{"10.0.0.5"}) || !reflect.DeepEqual(cfg.VercelSandbox.Ports, []string{"443", "9000-9001"}) {
+		t.Fatalf("vercel-sandbox env lists not applied: %#v", cfg.VercelSandbox)
 	}
 }
 
@@ -4423,15 +5116,18 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 			Ref:      "main",
 			Fields:   []string{"a=1", "a=1", "b=2"},
 		},
-		Shell:          &enabled,
-		Command:        "pnpm test",
-		NoSync:         &enabled,
-		SyncOnly:       &disabled,
-		Checksum:       &enabled,
-		ForceSyncLarge: &enabled,
-		JUnit:          []string{"junit.xml", "junit.xml"},
-		Downloads:      []string{"out=out", "out=out"},
-		Stop:           "always",
+		Shell:             &enabled,
+		Command:           "pnpm test",
+		NoSync:            &enabled,
+		SyncOnly:          &disabled,
+		Checksum:          &enabled,
+		ForceSyncLarge:    &enabled,
+		JUnit:             []string{"junit.xml", "junit.xml"},
+		Label:             "nightly smoke",
+		ArtifactGlobs:     []string{"reports/**", "reports/**"},
+		RequiredArtifacts: []string{"reports/summary.json", "reports/summary.json"},
+		Downloads:         []string{"out=out", "out=out"},
+		Stop:              "always",
 	})
 	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.Architecture != "arm64" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
 		t.Fatalf("basic job fields not applied: %#v", job)
@@ -4448,7 +5144,7 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 	if job.Actions.Repo != "openclaw/crabbox" || job.Actions.Workflow != ".github/workflows/ci.yml" || job.Actions.Job != "test" || job.Actions.Ref != "main" || len(job.Actions.Fields) != 2 {
 		t.Fatalf("actions not applied: %#v", job.Actions)
 	}
-	if !job.Shell || job.Command != "pnpm test" || !job.NoSync || job.SyncOnly || job.Checksum == nil || !*job.Checksum || !job.ForceSyncLarge || len(job.JUnit) != 1 || len(job.Downloads) != 1 || job.Stop != "always" {
+	if !job.Shell || job.Command != "pnpm test" || !job.NoSync || job.SyncOnly || job.Checksum == nil || !*job.Checksum || !job.ForceSyncLarge || len(job.JUnit) != 1 || job.Label != "nightly smoke" || len(job.ArtifactGlobs) != 1 || len(job.RequiredArtifacts) != 1 || len(job.Downloads) != 1 || job.Stop != "always" {
 		t.Fatalf("command/sync fields not applied: %#v", job)
 	}
 }

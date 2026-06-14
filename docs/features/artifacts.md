@@ -34,9 +34,12 @@ includes required artifacts in the run artifact tarball. Callers can pair
 `--require-artifact` is an existence guard, not manifest validation or a data
 safety scanner. Keep required artifacts bounded and scrubbed, such as manifests,
 summaries, screenshots, or QA reports. Do not use run artifacts for raw datasets,
-secrets, credentials, signed URLs, or unredacted customer rows. Delegated
-providers reject run artifact collection until they grow a bounded artifact
-retrieval capability.
+secrets, credentials, signed URLs, or unredacted customer rows.
+
+Delegated providers reject run artifact collection until they grow an explicit
+bounded artifact capability. Archive-capable adapters may validate and collect
+required artifacts and artifact globs. Download-capable adapters may materialize
+safe relative single-file `--download` outputs capped at 64 KiB.
 
 `--emit-proof <path>` renders proof as a derived artifact after a successful
 run. The proof block uses the selected profile's proof template, the expanded

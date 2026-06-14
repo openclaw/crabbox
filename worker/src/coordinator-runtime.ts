@@ -99,10 +99,15 @@ export interface CoordinatorWebSocketUpgrade {
   response: Response;
 }
 
+export interface CoordinatorWebSocketUpgradeOptions {
+  maxPayload?: number;
+}
+
 export interface CoordinatorRuntime {
   readonly storage: CoordinatorStorage;
+  readonly ephemeralWebSocketMaxPayloadBytes: number;
   runExclusive<T>(callback: () => Promise<T>): Promise<T>;
-  createWebSocketUpgrade(): CoordinatorWebSocketUpgrade;
+  createWebSocketUpgrade(options?: CoordinatorWebSocketUpgradeOptions): CoordinatorWebSocketUpgrade;
   getWebSockets(): Iterable<WebSocket>;
   socketAttachment<T>(socket: WebSocket): T | undefined;
   setSocketAttachment(socket: WebSocket, attachment: unknown): void;
@@ -112,12 +117,14 @@ export interface CoordinatorRuntime {
     tags: string[],
     handlers: CoordinatorSocketHandlers,
   ): void;
+  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void;
   scheduleAlarm(time: number): Promise<void>;
   clearAlarm(): Promise<void>;
 }
 
 export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   readonly storage: CoordinatorStorage;
+  readonly ephemeralWebSocketMaxPayloadBytes = 32 * 1024 * 1024;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private exclusiveTail = Promise.resolve();
 
@@ -139,7 +146,9 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     }
   }
 
-  createWebSocketUpgrade(): CoordinatorWebSocketUpgrade {
+  createWebSocketUpgrade(
+    _options?: CoordinatorWebSocketUpgradeOptions,
+  ): CoordinatorWebSocketUpgrade {
     const pair = new WebSocketPair();
     return {
       socket: pair[1],
@@ -175,6 +184,19 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     socket.accept();
     socket.addEventListener("message", (event) => {
       void this.runSocketOperation(attachment, () => handlers.message(event.data));
+    });
+    socket.addEventListener("close", (event) => {
+      handlers.close(event.code, event.reason);
+    });
+    socket.addEventListener("error", () => {
+      handlers.error();
+    });
+  }
+
+  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void {
+    socket.accept();
+    socket.addEventListener("message", (event) => {
+      void handlers.message(event.data);
     });
     socket.addEventListener("close", (event) => {
       handlers.close(event.code, event.reason);

@@ -77,9 +77,10 @@ direct backend.
 Use `DelegatedRunBackend` when the provider owns execution itself instead of
 exposing a Crabbox-managed SSH target.
 
-Examples: Blacksmith Testbox, E2B, Islo, Modal, Tensorlake, [Upstash Box](https://upstash.com/docs/box/overall/quickstart), and
-Azure Container Apps dynamic sessions, where the provider owns workspace setup
-and command streaming.
+Examples: Blacksmith Testbox, E2B, Islo, Modal, Tensorlake,
+[Upstash Box](https://upstash.com/docs/box/overall/quickstart), Superserve,
+Vercel Sandbox, and Azure Container Apps dynamic sessions, where the provider
+owns workspace setup and command streaming.
 
 The delegated backend owns warmup, command execution, output streaming, and
 stop. Core still owns provider selection, config loading, local claims, friendly
@@ -115,9 +116,17 @@ can declare that feature in `spec` so `--sync-only` and `--force-sync-large`
 are allowed while the rest stay rejected. The helper rejects checksum sync,
 full resync, local stdout/stderr captures, capture-on-fail, downloads, artifact
 globs, uploaded scripts, env helpers, `--stop-after`, fresh PR checkouts, and
-`--emit-proof` (unless the provider declares `FeatureRunProof`). Do not pretend
-a delegated provider is SSH-like unless it has a stable SSH contract. If
-Crabbox cannot run rsync and remote commands itself, use `DelegatedRunBackend`.
+`--emit-proof` (unless the provider declares `FeatureRunProof`) unless another
+explicit feature covers the request. Providers that execute source modules
+instead of shell commands may declare `FeatureModuleRun`; then `--script` and
+`--script-stdin` are accepted as module source input, while trailing shell
+command argv remains rejected. Delegated artifact globs require
+`FeatureRunArtifacts` and `DelegatedRunArtifactBackend`. Delegated single-file
+downloads require `FeatureRunDownloads` and `DelegatedRunDownloadBackend`;
+required artifacts may use either capability, but download-only providers accept
+safe relative file paths instead of globs. Do not pretend a delegated provider
+is SSH-like unless it has a stable SSH contract. If Crabbox cannot run rsync and
+remote commands itself, use `DelegatedRunBackend`.
 
 ### Optional interfaces
 
@@ -222,6 +231,7 @@ internal/providers/semaphore            # Semaphore SSH lease backend
 internal/providers/sprites              # Sprites SSH backend
 internal/providers/exedev               # exe.dev SSH backend
 internal/providers/runpod               # RunPod GPU pod SSH backend
+internal/providers/nvidiabrev           # NVIDIA Brev GPU workspace SSH backend
 internal/providers/railway              # Railway.app delegated backend
 internal/providers/blacksmith           # Blacksmith Testbox delegated backend
 internal/providers/e2b                  # E2B delegated backend
@@ -364,9 +374,12 @@ Pick `Kind` carefully:
 - `ProviderKindSSHLease`: provider returns SSH targets and Crabbox owns sync/run.
 - `ProviderKindDelegatedRun`: provider owns execution and output streaming.
 
-`Targets` should describe what the provider can actually satisfy. Do not list
-`windows`, `macos`, `desktop`, `browser`, or `code` unless the backend supports
-that path end to end.
+`Targets` should describe what the provider can actually satisfy. Use `linux`,
+`macos`, or `windows` only for real operating-system targets. Use
+`worker-runtime` for Worker-isolate or module-runtime providers that execute
+source in a hosted runtime without POSIX shell, SSH, filesystem sync, ports, or
+desktop semantics. Do not list `windows`, `macos`, `desktop`, `browser`, or
+`code` unless the backend supports that path end to end.
 
 Feature flags are concrete capability declarations:
 
@@ -387,6 +400,9 @@ cli.FeatureSnapshot     // "provider-snapshot"
 cli.FeatureCacheVolume  // "cache-volume"
 cli.FeatureRunProof     // "run-proof"
 cli.FeatureRunSession   // "run-session"
+cli.FeatureModuleRun    // "module-run"
+cli.FeatureRunArtifacts // "run-artifacts"
+cli.FeatureRunDownloads // "run-downloads"
 ```
 
 Actions runner hydration is intentionally not a provider feature. It is a core
@@ -412,6 +428,13 @@ Checkpoint-related features are reserved for versioned workspaces:
   for core `crabbox run --emit-proof` rendering.
 - `FeatureRunSession`: delegated proof/session runner that exposes a run session
   handle.
+- `FeatureRunArtifacts`: delegated provider can validate and collect bounded run
+  artifact globs after a successful command, including required artifacts.
+- `FeatureRunDownloads`: delegated provider can materialize bounded single-file
+  downloads and validate safe relative single-file required artifacts after a
+  successful command.
+- `FeatureModuleRun`: delegated provider accepts `--script` or `--script-stdin`
+  as source module input and does not interpret trailing argv as a shell command.
 - `FeatureArchiveSync`: provider syncs the checkout as an uploaded archive rather
   than over rsync.
 - `FeatureURLBridge`: delegated provider can expose a lease's port through the

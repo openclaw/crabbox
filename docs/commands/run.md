@@ -73,20 +73,36 @@ with `--keep` to write a small JSON lease handle for orchestrators.
 
 Most providers connect over SSH and Crabbox owns sync and command transport.
 Delegated providers (for example Blacksmith Testbox, Daytona, Islo, Azure
-Dynamic Sessions, and E2B) own command transport themselves: Crabbox uploads
-the checkout through the provider's APIs, runs the command through the
-provider, and prints `sync=delegated` in the final timing summary. These
+Dynamic Sessions, Cloudflare Dynamic Workers, E2B, Superserve, OpenSandbox, and
+Vercel Sandbox) own command transport themselves: Crabbox sends either checkout
+content or module source through the provider's APIs, runs through the provider,
+and prints `sync=delegated` in the final timing summary where a sync phase exists. These
 providers reject the SSH-run-only features `--capture-stdout`,
-`--capture-stderr`, `--capture-on-fail`, `--download`, `--script`,
-`--script-stdin`, and `--fresh-pr`. Delegated artifact features
-`--artifact-glob` and `--require-artifact` are accepted only by delegated
-adapters that explicitly advertise bounded run artifact retrieval.
+`--capture-stderr`, `--capture-on-fail`, `--script`, `--script-stdin`, and
+`--fresh-pr` unless a delegated adapter advertises the matching capability.
+Module-runtime delegated providers use `--script <file>` or `--script-stdin` as
+source module input and reject trailing `-- <command>` argv because they do not
+provide a Linux shell. Delegated artifact features such as `--artifact-glob`,
+`--require-artifact`, and `--download` are accepted only by delegated adapters
+that explicitly advertise the matching bounded artifact capability.
 `--keep-on-failure` is supported for one-shot delegated runs. See the
 per-provider docs under [providers](../features/providers.md) for how `--id`
 resolves and any extra sync limitations.
 
+Vercel Sandbox forwards non-auth command environment values through the SDK
+bridge request body and strips Vercel provider auth variables from
+`--allow-env` forwarding. Use Crabbox env forwarding for live secrets; raw
+`sandbox --env key=value` places values on argv and is only suitable for manual
+non-secret debugging.
+
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
+
+`--provider cloudflare-dynamic-workers` is a module-runtime provider. It accepts
+Worker module source through `--script` or `--script-stdin`, supports cache and
+egress controls through `--cloudflare-dynamic-workers-*` flags, and rejects
+Linux shell semantics such as trailing command argv, SSH, sync-only, ports,
+Actions hydration, browser, desktop, code-server, `--class`, and `--type`.
 
 `--provider docker-sandbox --docker-sandbox-clone` has one provider-local
 exception to the default one-shot cleanup rule: if Crabbox creates a fresh
@@ -219,7 +235,19 @@ shebang is honored on POSIX targets; scripts without one run through `bash`.
 Native Windows targets run uploaded scripts through Windows PowerShell, and
 `--script-stdin` is treated as a PowerShell script; a non-`.ps1` script path
 gets a `.ps1` extension added before upload. Trailing arguments after `--` are
-passed to the script. This is an SSH-run feature; delegated providers reject it.
+passed to the script. This is an SSH-run feature for OS-backed providers.
+Delegated module-runtime providers that advertise `module-run` accept the same
+script flags as source module input, but they reject trailing command argv and
+`--shell`; they do not imply shell, SSH, rsync, or POSIX filesystem behavior.
+Use `--script <file>` when the runtime needs a filename extension to identify
+the module language. `--script-stdin` is JavaScript module source.
+
+For Cloudflare Dynamic Workers, the script body must be Worker module source,
+for example:
+
+```js
+export default { fetch() { return new Response("ok") } };
+```
 
 ## Live secrets and env forwarding
 

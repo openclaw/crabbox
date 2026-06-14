@@ -32,6 +32,13 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// ControllerProviderContract binds controller lifecycle retries to one opaque
+// provider configuration scope and an explicitly idempotent fixed-ID adapter.
+type ControllerProviderContract interface {
+	ControllerProviderScope(Config) (string, error)
+	SupportsControllerFixedLeaseID(Config) bool
+}
+
 type ProviderRoutingFlagProvider interface {
 	RoutingFlagNames() []string
 }
@@ -115,6 +122,11 @@ type DelegatedRunBackend interface {
 type DelegatedRunArtifactBackend interface {
 	Backend
 	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
+}
+
+type DelegatedRunDownloadBackend interface {
+	Backend
+	FetchRunFile(ctx context.Context, req DelegatedRunDownloadRequest) ([]byte, error)
 }
 
 type PortsRequest struct {
@@ -284,6 +296,10 @@ type JSONListBackend interface {
 	ListJSON(ctx context.Context, req ListRequest) (any, error)
 }
 
+type IdempotentLeaseIDBackend interface {
+	SupportsRequestedLeaseID() bool
+}
+
 type ProviderSpec struct {
 	Name        string
 	Family      string
@@ -336,6 +352,8 @@ const (
 	FeatureRunProof     Feature = "run-proof"
 	FeatureRunSession   Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeatureRunDownloads Feature = "run-downloads"
+	FeatureModuleRun    Feature = "module-run"
 	FeaturePauseResume  Feature = "pause-resume"
 )
 
@@ -379,7 +397,11 @@ type LocalCommandRequest struct {
 	Stdout               io.Writer
 	Stderr               io.Writer
 	DisableOutputCapture bool
-	CancelGracePeriod    time.Duration
+	// MaxCapturedOutputBytes bounds each internally captured output stream.
+	// On overflow the command context is canceled so a continuously emitting
+	// child cannot block forever after the capture buffer fills.
+	MaxCapturedOutputBytes int
+	CancelGracePeriod      time.Duration
 }
 
 type LocalCommandResult struct {
@@ -423,7 +445,13 @@ func CLIDoctorResult(provider string, leases int, runtime string) DoctorResult {
 type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
-	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	commandCtx := ctx
+	var cancel context.CancelFunc
+	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
+		commandCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(commandCtx, req.Name, req.Args...)
 	if req.CancelGracePeriod > 0 {
 		cmd.Cancel = func() error {
 			err := cmd.Process.Signal(os.Interrupt)
@@ -434,11 +462,38 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		}
 		cmd.WaitDelay = req.CancelGracePeriod
 	}
-	cmd.Env = req.Env
+	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
+		// Provider commands are untrusted process trees. Once bounded capture
+		// overflows, terminate descendants too: a grandchild retaining stdout or
+		// stderr would otherwise keep os/exec's pipe drain blocked indefinitely.
+		// A controller child already belongs to a durable outer process group;
+		// nesting a new group here would let provider descendants escape recovery.
+		controllerOwnsTree := os.Getenv(controllerProcessTreeOwnedEnv) == "1"
+		if !controllerOwnsTree {
+			configureDaemonCommand(cmd)
+		}
+		cmd.Cancel = func() error {
+			if cmd.Process == nil {
+				return os.ErrProcessDone
+			}
+			if controllerOwnsTree {
+				return cmd.Process.Kill()
+			}
+			return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+		}
+		cmd.WaitDelay = controllerChildWaitDelay
+	}
+	env := req.Env
+	if env == nil {
+		env = os.Environ()
+	}
+	// Controller acquire acknowledgment and process-tree ownership are parent /
+	// child controls. Provider adapters must never inherit them.
+	cmd.Env = stripControllerAcquireIdentityEnv(env)
 	cmd.Dir = req.Dir
 	cmd.Stdin = req.Stdin
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	stdout := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
+	stderr := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
 	if req.Stdout != nil {
 		if req.DisableOutputCapture {
 			cmd.Stdout = req.Stdout
@@ -467,10 +522,46 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	}
 	err := cmd.Run()
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
+	if stdout.overflow || stderr.overflow {
+		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
+		result.ExitCode = 5
+	}
 	if err == nil {
 		result.ExitCode = 0
 	}
 	return result, err
+}
+
+type commandCaptureBuffer struct {
+	buffer   bytes.Buffer
+	limit    int
+	overflow bool
+	cancel   context.CancelFunc
+}
+
+func (b *commandCaptureBuffer) Write(data []byte) (int, error) {
+	if b.limit <= 0 {
+		return b.buffer.Write(data)
+	}
+	original := len(data)
+	remaining := b.limit - b.buffer.Len()
+	if remaining > 0 {
+		if len(data) > remaining {
+			b.overflow = true
+			data = data[:remaining]
+		}
+		_, _ = b.buffer.Write(data)
+	} else if original > 0 {
+		b.overflow = true
+	}
+	if b.overflow && b.cancel != nil {
+		b.cancel()
+	}
+	return original, nil
+}
+
+func (b *commandCaptureBuffer) String() string {
+	return b.buffer.String()
 }
 
 type LeaseOptions struct {
@@ -498,11 +589,16 @@ type LeaseOptions struct {
 }
 
 type AcquireRequest struct {
-	Repo          Repo
-	Options       LeaseOptions
-	Keep          bool
-	Reclaim       bool
-	RequestedSlug string
+	Repo             Repo
+	Options          LeaseOptions
+	Keep             bool
+	Reclaim          bool
+	RequestedLeaseID string
+	RequestedSlug    string
+	// OnAcquired observes a fully validated raw provider identity before local
+	// routing, readiness, or claim side effects. Returning an error requires the
+	// provider adapter to roll back the acquired resource.
+	OnAcquired func(LeaseTarget) error
 }
 
 type ResolveRequest struct {
@@ -514,11 +610,99 @@ type ResolveRequest struct {
 	StatusOnly  bool
 	ReadyProbe  bool
 	Prepare     bool
+	// NoLocalStateMutations is reserved for controller-owned identity-bound
+	// lookups that must not rewrite claims or provider routing before the
+	// resolved identity has been accepted by the caller.
+	NoLocalStateMutations    bool
+	ExpectedProviderIdentity ProviderIdentityExpectation
 }
 
 type ReleaseLeaseRequest struct {
-	Lease LeaseTarget
-	Force bool
+	Lease                    LeaseTarget
+	Force                    bool
+	ExpectedProviderIdentity ProviderIdentityExpectation
+}
+
+// ConfirmedAbsentLocalCleanupRequest carries the immutable provider identity
+// proven absent by a complete refreshed inventory. Implementations must only
+// remove local sidecars; they must not invoke provider lifecycle operations.
+type ConfirmedAbsentLocalCleanupRequest struct {
+	ExpectedProviderIdentity ProviderIdentityExpectation
+	ProviderScope            string
+}
+
+type ConfirmedAbsentLocalStateCleaner interface {
+	Backend
+	CleanupConfirmedAbsentLocalState(context.Context, ConfirmedAbsentLocalCleanupRequest) error
+}
+
+// ProviderIdentityExpectation is the complete immutable identity known by a
+// lifecycle caller before resolving a resource for destructive release.
+type ProviderIdentityExpectation struct {
+	LeaseID        string
+	AttemptLeaseID string
+	Slug           string
+	ResourceID     string
+}
+
+func (i ProviderIdentityExpectation) empty() bool {
+	return i.LeaseID == "" && i.AttemptLeaseID == "" && i.Slug == "" && i.ResourceID == ""
+}
+
+func ValidateProviderIdentityExpectation(i ProviderIdentityExpectation) error {
+	for _, identity := range []struct {
+		name  string
+		value string
+	}{{"lease ID", i.LeaseID}, {"attempt lease ID", i.AttemptLeaseID}} {
+		name, value := identity.name, identity.value
+		if value != "" && (value != strings.TrimSpace(value) || !validLeaseClaimID(value)) {
+			return exit(2, "invalid expected provider %s", name)
+		}
+	}
+	if i.Slug != "" && (i.Slug != strings.TrimSpace(i.Slug) || normalizeLeaseSlug(i.Slug) != i.Slug) {
+		return exit(2, "invalid expected provider slug")
+	}
+	if i.ResourceID != "" && (i.ResourceID != strings.TrimSpace(i.ResourceID) || !validControllerInventoryIdentity(i.ResourceID)) {
+		return exit(2, "invalid expected provider resource ID")
+	}
+	if i.LeaseID == "" && i.AttemptLeaseID == "" {
+		return exit(2, "expected provider identity requires a lease or attempt lease ID")
+	}
+	return nil
+}
+
+// ValidateLeaseTargetProviderIdentity rejects any resolved release target that
+// does not satisfy every non-empty identity persisted by the controller.
+func ValidateLeaseTargetProviderIdentity(lease LeaseTarget, expected ProviderIdentityExpectation) error {
+	if expected.empty() {
+		return nil
+	}
+	if err := ValidateProviderIdentityExpectation(expected); err != nil {
+		return err
+	}
+	actualLeaseID := lease.LeaseID
+	for _, identity := range []struct {
+		name  string
+		value string
+	}{{"lease ID", expected.LeaseID}, {"attempt lease ID", expected.AttemptLeaseID}} {
+		name, value := identity.name, identity.value
+		if value != "" && actualLeaseID != value {
+			return exit(4, "provider %s mismatch before release: expected %s, found %s", name, value, blank(actualLeaseID, "<empty>"))
+		}
+	}
+	if expected.Slug != "" {
+		actualSlug := serverSlug(lease.Server)
+		if actualSlug != expected.Slug {
+			return exit(4, "provider slug mismatch before release: expected %s, found %s", expected.Slug, blank(actualSlug, "<empty>"))
+		}
+	}
+	if expected.ResourceID != "" {
+		actualResourceID := lease.Server.DisplayID()
+		if actualResourceID != expected.ResourceID {
+			return exit(4, "provider resource ID mismatch before release: expected %s, found %s", expected.ResourceID, blank(actualResourceID, "<empty>"))
+		}
+	}
+	return nil
 }
 
 type TouchRequest struct {
@@ -795,10 +979,17 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	}
 	after, err := ProviderFor(cfg.Provider)
 	if err != nil || after.Name() == before {
+		if err == nil {
+			applyCloudflareDynamicWorkersRepositoryCaps(cfg)
+		}
 		return err
 	}
 	cfg.Provider = after.Name()
-	return after.ApplyFlags(cfg, fs, values[after.Name()])
+	if err := after.ApplyFlags(cfg, fs, values[after.Name()]); err != nil {
+		return err
+	}
+	applyCloudflareDynamicWorkersRepositoryCaps(cfg)
+	return nil
 }
 
 func validateProviderConfig(cfg Config) error {
@@ -889,6 +1080,67 @@ func runtimeForApp(a App) Runtime {
 	return Runtime{Stdout: a.Stdout, Stderr: a.Stderr, Clock: realClock{}, Exec: execCommandRunner{}}
 }
 
+const (
+	controllerProviderScopeEnv                   = "CRABBOX_ADAPTER_PROVIDER_SCOPE"
+	controllerCoordinatorRegistrationExpectedEnv = "CRABBOX_ADAPTER_COORDINATOR_REGISTRATION_EXPECTED"
+	controllerCoordinatorRegistrationURLEnv      = "CRABBOX_ADAPTER_COORDINATOR_REGISTRATION_URL"
+	controllerWorkspaceIDEnv                     = "CRABBOX_ADAPTER_WORKSPACE_ID"
+)
+
+func controllerProviderIdentityForConfig(cfg Config) (string, string, bool, error) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return "", "", false, err
+	}
+	cfg.Provider = provider.Name()
+	contract, ok := provider.(ControllerProviderContract)
+	if !ok {
+		return "", "", false, fmt.Errorf("provider=%s does not expose a controller routing scope", provider.Name())
+	}
+	scope, err := contract.ControllerProviderScope(cfg)
+	if err != nil {
+		return "", "", false, err
+	}
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return "", "", false, fmt.Errorf("provider=%s returned an empty controller routing scope", provider.Name())
+	}
+	return provider.Name(), scope, contract.SupportsControllerFixedLeaseID(cfg), nil
+}
+
+func validateControllerProviderScope(cfg Config) error {
+	expected := strings.TrimSpace(os.Getenv(controllerProviderScopeEnv))
+	if expected == "" {
+		return nil
+	}
+	provider, actual, _, err := controllerProviderIdentityForConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return exit(2, "provider=%s controller routing scope changed; refusing lifecycle operation", provider)
+	}
+	return nil
+}
+
+func validateControllerCoordinatorRegistrationBinding(cfg Config) error {
+	if os.Getenv(controllerCoordinatorRegistrationExpectedEnv) != "1" {
+		return nil
+	}
+	expected := os.Getenv(controllerCoordinatorRegistrationURLEnv)
+	if err := validateControllerCoordinatorRegistrationURL(expected); err != nil {
+		return err
+	}
+	actual, err := coordinatorRegistrationURLForConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return exit(4, "coordinator registration binding changed before provider acquisition")
+	}
+	return nil
+}
+
 func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if rt.Stdout == nil {
 		rt.Stdout = io.Discard
@@ -907,7 +1159,13 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 		return nil, err
 	}
 	cfg.Provider = provider.Name()
-	backend, err := provider.Configure(cfg, rt)
+	if err := validateControllerProviderScope(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateControllerCoordinatorRegistrationBinding(cfg); err != nil {
+		return nil, err
+	}
+	backend, err := configureProviderBackend(provider, &cfg, rt)
 	if err != nil {
 		return nil, err
 	}
@@ -919,6 +1177,12 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 		return &coordinatorLeaseBackend{spec: provider.Spec(), cfg: cfg, direct: ssh, coord: coord, rt: rt}, nil
 	}
 	return backend, nil
+}
+
+func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backend, error) {
+	cfg.Provider = provider.Name()
+	applySingleProviderTargetDefault(cfg)
+	return provider.Configure(*cfg, rt)
 }
 
 func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
@@ -988,6 +1252,7 @@ func featureSetHas(features FeatureSet, feature Feature) bool {
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
 	provider := spec.Name
 	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
+	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)
 	if req.SyncOnly && !archiveSync {
 		return exit(2, "%s delegates sync; --sync-only is not supported", provider)
 	}
@@ -1012,15 +1277,26 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.CaptureOnFail {
 		return exit(2, "%s delegates run execution; --capture-on-fail is not supported", provider)
 	}
-	if len(req.Downloads) > 0 {
+	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
+	runDownloads := featureSetHas(spec.Features, FeatureRunDownloads)
+	if len(req.Downloads) > 0 && !runDownloads {
 		return exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
-	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
 	if len(req.ArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
-	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts {
+	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts && !runDownloads {
 		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
+	}
+	if runDownloads {
+		if err := validateDelegatedDownloads(req.Downloads); err != nil {
+			return err
+		}
+	}
+	if runDownloads && !runArtifacts {
+		if err := validateDelegatedRequiredArtifacts(req.RequiredArtifactGlobs); err != nil {
+			return err
+		}
 	}
 	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
 		return exit(2, "%s delegates run execution; --emit-proof is not supported", provider)
@@ -1028,8 +1304,14 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.StopAfter != "" {
 		return exit(2, "%s delegates run execution; --stop-after is not supported", provider)
 	}
-	if req.Script != nil || req.ScriptRequested {
+	if (req.Script != nil || req.ScriptRequested) && !moduleRun {
 		return exit(2, "%s delegates run execution; --script is not supported", provider)
+	}
+	if moduleRun && len(req.Command) > 0 {
+		return exit(2, "%s executes module source; trailing shell commands are not supported", provider)
+	}
+	if moduleRun && req.ShellMode {
+		return exit(2, "%s executes module source; --shell is not supported", provider)
 	}
 	if !req.FreshPR.Empty() {
 		return exit(2, "%s delegates sync; --fresh-pr is not supported", provider)

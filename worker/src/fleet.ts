@@ -1,7 +1,11 @@
+import { Client as SSHClient, type ClientChannel, utils as sshUtils } from "ssh2";
+
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import { isAdminRequest, sha256Hex } from "./auth";
 import {
   EC2SpotClient,
+  awsConfiguredSecurityGroupID,
+  awsManagedSecurityGroupName,
   awsLaunchCandidates,
   awsProvisioningErrorCategory,
   awsRegionCandidates,
@@ -16,6 +20,7 @@ import {
   azureLocationFor,
   leaseConfig,
   validCIDRs,
+  workspaceProviderKeyPrefix,
   type LeaseConfig,
   type LeaseConfigDefaults,
 } from "./config";
@@ -31,7 +36,6 @@ import {
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
   sshPublicKeyIdentity,
-  workspaceProviderKeyPrefix,
 } from "./hetzner";
 import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
@@ -58,7 +62,6 @@ import {
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import {
   createTailscaleAuthKey,
-  deleteTailscaleDevice,
   renderTailscaleHostname,
   tailscaleAllowed,
   tailscaleDefaultTags,
@@ -143,6 +146,16 @@ const workspaceMinimumTTLSeconds =
   (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
+const workspaceTerminalMaxBufferedBytes = 1024 * 1024;
+const workspaceTerminalMaxBufferedFrames = 1024;
+const workspaceTerminalMaxPerWorkspace = 4;
+const workspaceTerminalMaxPerOwner = 16;
+const workspaceTerminalMaxGlobal = 64;
+const workspaceTerminalTransportMemoryBudgetBytes = 64 * 1024 * 1024;
+const workspaceCommandMaxBootstrapBytes = 3_000;
+const workspaceTerminalSSHReadyTimeoutMs = 2 * 60_000;
+const workspaceSSHHostPrivateKeyHeader = "x-crabbox-workspace-ssh-host-private-key";
+const workspaceSSHHostPublicKeyHeader = "x-crabbox-workspace-ssh-host-public-key";
 
 interface WebVNCTicketRecord {
   ticket: string;
@@ -188,6 +201,9 @@ interface EgressSessionStatus {
 
 interface WorkspaceCreateRequest {
   id?: string;
+  repo?: string;
+  branch?: string;
+  command?: string;
   runtime?: string;
   profile?: string;
   ttlSeconds?: number;
@@ -203,6 +219,9 @@ interface WorkspaceRecord {
   owner: string;
   org: string;
   profile: string;
+  repo: string;
+  branch: string;
+  command: string;
   provider: Provider;
   class: string;
   desktop: boolean;
@@ -210,6 +229,7 @@ interface WorkspaceRecord {
   idleTimeoutSeconds: number;
   createdAt: string;
   updatedAt: string;
+  sshHostKeySha256?: string;
   provisionClaim?: string;
   provisionClaimExpiresAt?: string;
   reconcileAfter?: string;
@@ -489,6 +509,7 @@ export class FleetCoordinator {
   private readonly egressClients = new Map<string, WebSocket>();
   private readonly egressSessions = new Map<string, EgressSessionStatus>();
   private readonly controlSockets = new Map<string, WebSocket>();
+  private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
@@ -620,6 +641,15 @@ export class FleetCoordinator {
       }
       if (method === "POST" && parts.join("/") === "v1/workspaces") {
         return await this.createWorkspace(request);
+      }
+      if (
+        method === "GET" &&
+        parts[0] === "v1" &&
+        parts[1] === "workspaces" &&
+        parts[2] &&
+        parts[3] === "terminal"
+      ) {
+        return await this.workspaceTerminal(request, parts[2]);
       }
       if (parts[0] === "v1" && parts[1] === "workspaces" && parts[2]) {
         return await this.workspaceRoute(request, parts[2], parts[3], parts[4]);
@@ -1141,11 +1171,25 @@ export class FleetCoordinator {
     if (azureWindowsARM64Image) defaults.azureWindowsARM64Image = azureWindowsARM64Image;
     if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
     let config = leaseConfig(input, defaults);
-    if (
-      !workspaceID &&
-      config.provider === "hetzner" &&
-      config.providerKey.startsWith(workspaceProviderKeyPrefix)
-    ) {
+    if (workspaceID) {
+      const hostKeys = workspaceSSHHostKeysFromRequest(request);
+      if (!hostKeys) {
+        return json(
+          {
+            error: "workspace_host_key_missing",
+            message: "workspace SSH host identity is required",
+          },
+          { status: 500 },
+        );
+      }
+      config = {
+        ...config,
+        awsUseStockImage: config.provider === "aws",
+        sshHostPrivateKey: hostKeys.privateKey,
+        sshHostPublicKey: hostKeys.publicKey,
+      };
+    }
+    if (!workspaceID && config.providerKey.startsWith(workspaceProviderKeyPrefix)) {
       return json(
         {
           error: "reserved_provider_key",
@@ -1619,9 +1663,18 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const profile = workspaceProfile(input.profile);
+    const repo = workspaceRepo(input.repo);
+    const branch = workspaceBranch(input.branch);
+    const command = workspaceCommand(input.command);
     if (!profile) {
+      return json({ error: "invalid_profile" }, { status: 400 });
+    }
+    if (repo === undefined || branch === undefined || command === undefined) {
       return json(
-        { error: "invalid_profile", message: "workspace profile is too long" },
+        {
+          error: "invalid_workspace_request",
+          message: "workspace repo, branch, or command is invalid",
+        },
         { status: 400 },
       );
     }
@@ -1653,6 +1706,9 @@ export class FleetCoordinator {
       const conflict = workspaceConflictResponse(
         existing,
         profile,
+        repo,
+        branch,
+        command,
         desktop,
         ttlSeconds,
         idleTimeoutSeconds,
@@ -1662,7 +1718,7 @@ export class FleetCoordinator {
       if (workspaceNextReconcileAt(existing, lease) !== undefined) {
         await this.scheduleAlarm();
       }
-      return json(workspaceResponse(existing, lease), {
+      return json(workspaceResponse(existing, lease, this.env), {
         status: workspaceHTTPStatus(existing, lease),
       });
     });
@@ -1695,6 +1751,9 @@ export class FleetCoordinator {
         const conflict = workspaceConflictResponse(
           current,
           profile,
+          repo,
+          branch,
+          command,
           desktop,
           ttlSeconds,
           idleTimeoutSeconds,
@@ -1726,6 +1785,9 @@ export class FleetCoordinator {
         owner,
         org,
         profile,
+        repo,
+        branch,
+        command,
         provider,
         class: machineClass,
         desktop,
@@ -1744,7 +1806,7 @@ export class FleetCoordinator {
     if (!reservation.lease && !reservation.record.releaseRequestedAt && !reservation.record.error) {
       await this.state.runExclusive(() => this.scheduleAlarm());
     }
-    return json(workspaceResponse(reservation.record, reservation.lease), {
+    return json(workspaceResponse(reservation.record, reservation.lease, this.env), {
       status: workspaceHTTPStatus(reservation.record, reservation.lease),
     });
   }
@@ -1808,10 +1870,12 @@ export class FleetCoordinator {
             delete detachedLease.workspaceID;
             await this.putLease(detachedLease);
           }
-          await Promise.all([
+          this.closeWorkspaceTerminals(key, 1008, "workspace archived");
+          const cleanup = [
             this.state.storage.delete(key),
             this.state.storage.delete(workspaceLeaseReservationKey(current.leaseID)),
-          ]);
+          ];
+          await Promise.all(cleanup);
         }),
       );
     });
@@ -1913,9 +1977,13 @@ export class FleetCoordinator {
     }
     let createResponse: Response;
     const provisionClaim = crypto.randomUUID();
+    const sshHostKeys = sshUtils.generateKeyPairSync("ed25519", {
+      comment: `crabbox-${workspace.id}`,
+    });
+    const sshHostKeySha256 = await workspaceSSHHostKeyFingerprint(sshHostKeys.public);
     try {
       createResponse = await this.createLease(
-        await workspaceLeaseRequest(workspace, sshPublicKey),
+        await workspaceLeaseRequest(workspace, sshPublicKey, sshHostKeys),
         async () => {
           const current = await this.state.storage.get<WorkspaceRecord>(
             workspaceKey(workspace.owner, workspace.org, workspace.id),
@@ -1954,6 +2022,7 @@ export class FleetCoordinator {
           current.provisionClaimExpiresAt = new Date(
             Math.min(now.getTime() + workspaceProvisionClaimMs, hardDeadline),
           ).toISOString();
+          current.sshHostKeySha256 = sshHostKeySha256;
           current.updatedAt = now.toISOString();
           delete current.reconcileAfter;
           await this.state.storage.put(
@@ -2173,7 +2242,7 @@ export class FleetCoordinator {
           return notFound();
         }
         const lease = await this.getLease(record.leaseID);
-        return json(workspaceResponse(record, lease));
+        return json(workspaceResponse(record, lease, this.env));
       });
     }
     if (method === "POST" && action === "connections" && connection === "desktop") {
@@ -2221,6 +2290,7 @@ export class FleetCoordinator {
       if ("response" in release) {
         return release.response;
       }
+      this.closeWorkspaceTerminals(key, 1008, "workspace stopping");
       if (release.release) {
         try {
           await this.releaseWorkspaceLease(release.record);
@@ -2230,9 +2300,401 @@ export class FleetCoordinator {
       }
       const record = (await this.state.storage.get<WorkspaceRecord>(key)) ?? release.record;
       const lease = await this.getLease(record.leaseID);
-      return json(workspaceResponse(record, lease));
+      return json(workspaceResponse(record, lease, this.env));
     }
     return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async workspaceTerminal(request: Request, workspaceID: string): Promise<Response> {
+    if (
+      request.headers.get("upgrade")?.toLowerCase() !== "websocket" ||
+      !validWorkspaceID(workspaceID)
+    ) {
+      return json({ error: "upgrade_required" }, { status: 426 });
+    }
+    if (!workspaceTerminalOriginAllowed(request, this.env)) {
+      return json({ error: "origin_forbidden" }, { status: 403 });
+    }
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    const key = workspaceKey(owner, org, workspaceID);
+    return await this.state.runExclusive(async () => {
+      const workspace = await this.state.storage.get<WorkspaceRecord>(key);
+      if (
+        !workspace ||
+        workspace.id !== workspaceID ||
+        workspace.owner !== owner ||
+        workspace.org !== org
+      ) {
+        return notFound();
+      }
+      const lease = await this.getLease(workspace.leaseID);
+      const unavailable = workspaceTerminalError(workspace, lease, this.env);
+      if (unavailable || !lease) {
+        return json(
+          {
+            error: "terminal_unavailable",
+            message: unavailable ?? "workspace lease is unavailable",
+          },
+          { status: 409 },
+        );
+      }
+      const ownerPrefix = workspaceKey(owner, org, "");
+      let ownerConnections = 0;
+      let globalConnections = 0;
+      for (const [terminalKey, sockets] of this.workspaceTerminals) {
+        globalConnections += sockets.size;
+        if (terminalKey.startsWith(ownerPrefix)) {
+          ownerConnections += sockets.size;
+        }
+      }
+      const transportConnectionLimit = Math.max(
+        1,
+        Math.floor(
+          workspaceTerminalTransportMemoryBudgetBytes /
+            this.state.ephemeralWebSocketMaxPayloadBytes,
+        ),
+      );
+      if (
+        (this.workspaceTerminals.get(key)?.size ?? 0) >=
+          Math.min(workspaceTerminalMaxPerWorkspace, transportConnectionLimit) ||
+        ownerConnections >= Math.min(workspaceTerminalMaxPerOwner, transportConnectionLimit) ||
+        globalConnections >= Math.min(workspaceTerminalMaxGlobal, transportConnectionLimit)
+      ) {
+        return json(
+          {
+            error: "terminal_connection_limit",
+            message: "workspace terminal connection limit reached",
+          },
+          { status: 429, headers: { "retry-after": "5" } },
+        );
+      }
+
+      const upgrade = this.state.createWebSocketUpgrade({
+        maxPayload: workspaceTerminalMaxBufferedBytes,
+      });
+      const socket = upgrade.socket;
+      this.trackWorkspaceTerminal(key, socket);
+      void this.connectWorkspaceTerminal(socket, key, workspace, lease).catch((error) => {
+        closeSocket(socket, 1011, boundedSocketReason(errorMessage(error)));
+      });
+      return upgrade.response;
+    });
+  }
+
+  private async connectWorkspaceTerminal(
+    socket: WebSocket,
+    workspaceKeyValue: string,
+    workspace: WorkspaceRecord,
+    lease: LeaseRecord,
+  ): Promise<void> {
+    const privateKey = this.env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?.trim();
+    const expectedHostKey = workspace.sshHostKeySha256;
+    if (!privateKey || !expectedHostKey || !lease.host) {
+      throw new Error("workspace terminal SSH access is not configured");
+    }
+
+    let client: SSHClient | undefined;
+    let connectingClient: SSHClient | undefined;
+    let channel: ClientChannel | undefined;
+    let cols = 120;
+    let rows = 34;
+    let pendingBytes = 0;
+    let queuedInputBytes = 0;
+    let queuedInputFrames = 0;
+    let queuedOutputBytes = 0;
+    let queuedOutputFrames = 0;
+    let unacknowledgedOutputBytes = 0;
+    let outputPaused = false;
+    let acknowledgeOutput: ((bytes: number) => void) | undefined;
+    const pending: Array<string | Uint8Array> = [];
+    let inputQueue = Promise.resolve();
+    let terminalReady = false;
+    let closed = false;
+    const expiresIn = Math.max(0, Date.parse(lease.expiresAt) - Date.now());
+    const expiryTimer = setTimeout(
+      () => close(1008, "workspace expired"),
+      Math.min(expiresIn, 2_147_483_647),
+    );
+    const close = (code: number, reason: string) => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(expiryTimer);
+      this.untrackWorkspaceTerminal(workspaceKeyValue, socket);
+      channel?.close();
+      connectingClient?.end();
+      client?.end();
+      closeSocket(socket, code, boundedSocketReason(reason));
+    };
+    const writeInput = async (value: string | Uint8Array) => {
+      const length = workspaceTerminalDataLength(value);
+      if (channel && terminalReady) {
+        await writeWorkspaceTerminalChannel(channel, value);
+        return;
+      }
+      pendingBytes += length;
+      if (pendingBytes > workspaceTerminalMaxBufferedBytes) {
+        close(1009, "terminal input buffer exceeded");
+        return;
+      }
+      pending.push(value);
+    };
+    this.state.acceptEphemeralWebSocket(socket, {
+      message: (data) => {
+        if (closed) return;
+        const length = workspaceTerminalDataLength(data);
+        if (length === 0) return;
+        if (
+          pending.length + queuedInputFrames >= workspaceTerminalMaxBufferedFrames ||
+          pendingBytes + queuedInputBytes + length > workspaceTerminalMaxBufferedBytes
+        ) {
+          close(1009, "terminal input buffer exceeded");
+          return;
+        }
+        queuedInputBytes += length;
+        queuedInputFrames += 1;
+        inputQueue = inputQueue
+          .then(async () => {
+            try {
+              const value = await workspaceTerminalMessage(data);
+              if (typeof value === "string") {
+                const size = workspaceTerminalResize(value);
+                if (size) {
+                  cols = size.cols;
+                  rows = size.rows;
+                  channel?.setWindow(rows, cols, rows * 16, cols * 8);
+                  return undefined;
+                }
+                const acknowledgedBytes = workspaceTerminalAcknowledgement(value);
+                if (acknowledgedBytes !== undefined) {
+                  acknowledgeOutput?.(acknowledgedBytes);
+                  return undefined;
+                }
+              }
+              await writeInput(value);
+              return undefined;
+            } finally {
+              queuedInputBytes -= length;
+              queuedInputFrames -= 1;
+            }
+          })
+          .catch((error) => close(1011, errorMessage(error)));
+      },
+      close: () => close(1000, "terminal closed"),
+      error: () => close(1011, "terminal websocket error"),
+    });
+
+    try {
+      const readyDeadline = Date.now() + workspaceTerminalSSHReadyTimeoutMs;
+      const terminalPorts = uniqueNonEmpty([lease.sshPort, ...(lease.sshFallbackPorts ?? [])]);
+      let lastConnectError: unknown = new Error("workspace SSH service is not ready");
+      let lastObservedHostKey = "";
+      connect: while (Date.now() < readyDeadline) {
+        for (const port of terminalPorts) {
+          if (closed) break connect;
+          const candidate = new SSHClient();
+          connectingClient = candidate;
+          try {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- SSH readiness retries are sequential.
+            await new Promise<void>((resolve, reject) => {
+              let settled = false;
+              const settle = (callback: () => void) => {
+                if (settled) return;
+                settled = true;
+                callback();
+              };
+              candidate
+                .once("ready", () => settle(resolve))
+                .once("error", (error) => settle(() => reject(error)))
+                .once("close", () =>
+                  settle(() => reject(new Error("SSH connection closed before ready"))),
+                )
+                .connect({
+                  host: lease.host,
+                  port: Number.parseInt(port || "22", 10) || 22,
+                  username: lease.sshUser || "root",
+                  privateKey,
+                  readyTimeout: 10_000,
+                  keepaliveInterval: 15_000,
+                  keepaliveCountMax: 3,
+                  algorithms: {
+                    serverHostKey: ["ssh-ed25519"],
+                    cipher: ["aes128-ctr", "aes192-ctr", "aes256-ctr"],
+                    hmac: [
+                      "hmac-sha2-256-etm@openssh.com",
+                      "hmac-sha2-512-etm@openssh.com",
+                      "hmac-sha2-256",
+                      "hmac-sha2-512",
+                    ],
+                  },
+                  hostHash: "sha256",
+                  hostVerifier: (fingerprint: string) => {
+                    lastObservedHostKey = fingerprint;
+                    return expectedHostKey === fingerprint;
+                  },
+                });
+            });
+            if (closed) {
+              candidate.end();
+              connectingClient = undefined;
+              break connect;
+            }
+            client = candidate;
+            connectingClient = undefined;
+            lastConnectError = undefined;
+            break connect;
+          } catch (error) {
+            lastConnectError = error;
+            candidate.end();
+            if (connectingClient === candidate) connectingClient = undefined;
+          }
+        }
+        if (!closed && Date.now() < readyDeadline) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- delay before the next SSH sweep.
+          await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+        }
+      }
+      if (lastConnectError || !client) {
+        if (lastObservedHostKey && lastObservedHostKey !== expectedHostKey) {
+          throw new Error(
+            `workspace SSH host key mismatch expected=${expectedHostKey.slice(0, 16)} observed=${lastObservedHostKey.slice(0, 16)}`,
+          );
+        }
+        throw lastConnectError;
+      }
+      if (closed) return;
+      const connectedClient = client;
+
+      channel = await new Promise<ClientChannel>((resolve, reject) => {
+        connectedClient.shell(
+          { term: "xterm-256color", cols, rows, width: cols * 8, height: rows * 16 },
+          (error, opened) => (error ? reject(error) : resolve(opened)),
+        );
+      });
+      const output: Uint8Array[] = [];
+      let outputFlushing = false;
+      const updateOutputBackpressure = () => {
+        const bufferedBytes = queuedOutputBytes + unacknowledgedOutputBytes;
+        if (!outputPaused && bufferedBytes >= workspaceTerminalMaxBufferedBytes / 2) {
+          outputPaused = true;
+          channel?.pause();
+        } else if (outputPaused && bufferedBytes <= workspaceTerminalMaxBufferedBytes / 4) {
+          outputPaused = false;
+          channel?.resume();
+        }
+      };
+      const flushOutput = async () => {
+        if (outputFlushing) return;
+        if (unacknowledgedOutputBytes >= workspaceTerminalMaxBufferedBytes) return;
+        outputFlushing = true;
+        try {
+          const data = output.shift();
+          if (!closed && socket.readyState === WebSocket.OPEN && data) {
+            if (
+              workspaceTerminalSocketBufferedBytes(socket) + data.byteLength >
+              workspaceTerminalMaxBufferedBytes
+            ) {
+              close(1009, "terminal output transport buffer exceeded");
+              return;
+            }
+            queuedOutputBytes -= data.byteLength;
+            queuedOutputFrames -= 1;
+            unacknowledgedOutputBytes += data.byteLength;
+            socket.send(data);
+            if (workspaceTerminalSocketBufferedBytes(socket) > workspaceTerminalMaxBufferedBytes) {
+              close(1009, "terminal output transport buffer exceeded");
+              return;
+            }
+            updateOutputBackpressure();
+          }
+        } catch (error) {
+          close(1011, errorMessage(error));
+        } finally {
+          outputFlushing = false;
+          if (
+            !closed &&
+            output.length > 0 &&
+            unacknowledgedOutputBytes < workspaceTerminalMaxBufferedBytes
+          ) {
+            void flushOutput();
+          }
+        }
+      };
+      acknowledgeOutput = (bytes) => {
+        if (
+          bytes > unacknowledgedOutputBytes ||
+          workspaceTerminalSocketBufferedBytes(socket) > workspaceTerminalMaxBufferedBytes
+        ) {
+          close(1008, "invalid terminal output acknowledgement");
+          return;
+        }
+        unacknowledgedOutputBytes -= bytes;
+        updateOutputBackpressure();
+        void flushOutput();
+      };
+      const sendOutput = (data: Uint8Array) => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        if (
+          queuedOutputFrames >= workspaceTerminalMaxBufferedFrames ||
+          queuedOutputBytes + unacknowledgedOutputBytes + data.byteLength >
+            workspaceTerminalMaxBufferedBytes
+        ) {
+          close(1009, "terminal output buffer exceeded");
+          return;
+        }
+        queuedOutputBytes += data.byteLength;
+        queuedOutputFrames += 1;
+        output.push(data.slice());
+        updateOutputBackpressure();
+        void flushOutput();
+      };
+      channel.on("data", sendOutput);
+      channel.stderr.on("data", sendOutput);
+      channel.once("close", () => close(1000, "terminal process exited"));
+      connectedClient.once("close", () => close(1011, "SSH connection closed"));
+      connectedClient.once("error", (error) => close(1011, errorMessage(error)));
+      await writeWorkspaceTerminalChannel(
+        channel,
+        `${workspaceTerminalBootstrapCommand(workspace, lease)}\n`,
+      );
+      const terminalChannel = channel;
+      const flushPending = async (): Promise<void> => {
+        const value = pending.shift();
+        if (value === undefined) return;
+        pendingBytes -= workspaceTerminalDataLength(value);
+        await writeWorkspaceTerminalChannel(terminalChannel, value);
+        await flushPending();
+      };
+      await flushPending();
+      terminalReady = true;
+    } catch (error) {
+      close(1011, errorMessage(error));
+      throw error;
+    }
+  }
+
+  private trackWorkspaceTerminal(key: string, socket: WebSocket): void {
+    const sockets = this.workspaceTerminals.get(key) ?? new Set<WebSocket>();
+    sockets.add(socket);
+    this.workspaceTerminals.set(key, sockets);
+    socket.addEventListener("close", () => this.untrackWorkspaceTerminal(key, socket));
+  }
+
+  private untrackWorkspaceTerminal(key: string, socket: WebSocket): void {
+    const sockets = this.workspaceTerminals.get(key);
+    sockets?.delete(socket);
+    if (sockets?.size === 0) {
+      this.workspaceTerminals.delete(key);
+    }
+  }
+
+  private closeWorkspaceTerminals(key: string, code: number, reason: string): void {
+    const sockets = this.workspaceTerminals.get(key);
+    if (!sockets) return;
+    this.workspaceTerminals.delete(key);
+    for (const socket of sockets) {
+      closeSocket(socket, code, boundedSocketReason(reason));
+    }
   }
 
   private async recordWorkspaceError(workspace: WorkspaceRecord, message: string): Promise<void> {
@@ -6125,7 +6587,6 @@ export class FleetCoordinator {
         const cleanup = async () => {
           let failure: string | undefined;
           try {
-            await this.cleanupLeaseTailscaleDevice(lease, claim);
             await this.deleteLeaseServer(lease);
           } catch (error) {
             failure = errorMessage(error);
@@ -7251,51 +7712,6 @@ export class FleetCoordinator {
     await this.provider(provider, lease.region, lease.providerProject).releaseLease(lease);
   }
 
-  private async cleanupLeaseTailscaleDevice(lease: LeaseRecord, claim: string): Promise<void> {
-    const metadata = lease.tailscale;
-    if (!metadata?.enabled) {
-      return;
-    }
-    const deviceID = metadata.deviceID?.trim();
-    if (!deviceID) {
-      await this.recordTailscaleCleanupResult(lease.id, claim, "missing_device_id");
-      return;
-    }
-    try {
-      await deleteTailscaleDevice(this.env, deviceID);
-      await this.recordTailscaleCleanupResult(lease.id, claim, "api_delete_succeeded");
-    } catch (error) {
-      await this.recordTailscaleCleanupResult(
-        lease.id,
-        claim,
-        "api_delete_failed",
-        errorMessage(error),
-      );
-    }
-  }
-
-  private async recordTailscaleCleanupResult(
-    leaseID: string,
-    claim: string,
-    cleanupState: NonNullable<TailscaleMetadata["cleanupState"]>,
-    cleanupError?: string,
-  ): Promise<void> {
-    await this.state.runExclusive(async () => {
-      const current = await this.getLease(leaseID);
-      if (!current || current.cleanupStartedAt !== claim || !current.tailscale?.enabled) {
-        return;
-      }
-      current.tailscale = { ...current.tailscale, cleanupState };
-      if (cleanupError) {
-        current.tailscale.cleanupError = cleanupError;
-      } else {
-        delete current.tailscale.cleanupError;
-      }
-      current.updatedAt = new Date().toISOString();
-      await this.putLease(current);
-    });
-  }
-
   private async abortProvisionedLeaseAfterStateChange(
     record: LeaseRecord,
     config: LeaseConfig,
@@ -7355,7 +7771,6 @@ export class FleetCoordinator {
       );
     }
     try {
-      await this.cleanupLeaseTailscaleDevice(preparation.lease, preparation.cleanupStartedAt);
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
       const failure = await this.state.runExclusive(async () => {
@@ -7471,8 +7886,8 @@ export class FleetCoordinator {
     if (!workspaceID) {
       return;
     }
+    const key = workspaceKey(lease.owner, lease.org, workspaceID);
     await this.state.runExclusive(async () => {
-      const key = workspaceKey(lease.owner, lease.org, workspaceID);
       const workspace = await this.state.storage.get<WorkspaceRecord>(key);
       if (!workspace || !workspaceOwnsLease(workspace, lease)) {
         throw new Error("workspace lease reservation conflicts with another lifecycle");
@@ -7483,6 +7898,7 @@ export class FleetCoordinator {
         await this.state.storage.put(key, workspace);
       }
     });
+    this.closeWorkspaceTerminals(key, 1008, "workspace stopping");
   }
 
   private async releaseResolvedLeaseOperation(
@@ -7531,7 +7947,6 @@ export class FleetCoordinator {
       return preparation.lease;
     }
     try {
-      await this.cleanupLeaseTailscaleDevice(preparation.lease, preparation.claim);
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
       await this.state.runExclusive(async () => {
@@ -8080,6 +8495,9 @@ function workspaceCreateInput(value: unknown): WorkspaceCreateRequest | undefine
   }
   const input = value as Record<string, unknown>;
   if (input["id"] !== undefined && typeof input["id"] !== "string") return undefined;
+  if (input["repo"] !== undefined && typeof input["repo"] !== "string") return undefined;
+  if (input["branch"] !== undefined && typeof input["branch"] !== "string") return undefined;
+  if (input["command"] !== undefined && typeof input["command"] !== "string") return undefined;
   if (input["runtime"] !== undefined && typeof input["runtime"] !== "string") return undefined;
   if (input["profile"] !== undefined && typeof input["profile"] !== "string") return undefined;
   if (input["ttlSeconds"] !== undefined && typeof input["ttlSeconds"] !== "number")
@@ -8104,15 +8522,54 @@ function workspaceCreateInput(value: unknown): WorkspaceCreateRequest | undefine
 
 function workspaceProvider(value: string | undefined): Provider {
   const provider = value?.trim() || "hetzner";
-  if (provider !== "hetzner") {
+  if (!["hetzner", "aws", "azure", "gcp"].includes(provider)) {
     throw new Error(`unsupported workspace provider: ${provider}`);
   }
-  return provider;
+  return provider as Provider;
 }
 
 function workspaceProfile(value: string | undefined): string | undefined {
   const profile = value?.trim() || "default";
   return profile.length <= 120 ? profile : undefined;
+}
+
+function workspaceRepo(value: string | undefined): string | undefined {
+  const repo = value?.trim() || "";
+  if (!repo) return repo;
+  const components = repo.split("/");
+  return components.length === 2 &&
+    components.every((component) => component.length <= 100 && /^[a-z0-9_.-]+$/i.test(component))
+    ? repo
+    : undefined;
+}
+
+function workspaceBranch(value: string | undefined): string | undefined {
+  const branch = value?.trim() || "main";
+  const components = branch.split("/");
+  return branch.length <= 255 &&
+    /^[a-z0-9][a-z0-9._/-]*$/i.test(branch) &&
+    components.every(
+      (component) =>
+        component &&
+        !component.startsWith(".") &&
+        !component.endsWith(".") &&
+        !component.toLowerCase().endsWith(".lock"),
+    ) &&
+    !branch.includes("..") &&
+    !branch.includes("@{") &&
+    !branch.includes("//") &&
+    !branch.endsWith("/") &&
+    !branch.endsWith(".")
+    ? branch
+    : undefined;
+}
+
+function workspaceCommand(value: string | undefined): string | undefined {
+  const command = value?.trim() || "exec bash -l";
+  return textEncoder.encode(shellQuote(shellQuote(shellQuote(command)))).byteLength <=
+    workspaceCommandMaxBootstrapBytes && !command.includes("\u0000")
+    ? command
+    : undefined;
 }
 
 function workspaceClass(configured: string | undefined): string {
@@ -8140,6 +8597,7 @@ async function workspaceAdmissionRetryable(response: Response): Promise<boolean>
 async function workspaceLeaseRequest(
   workspace: WorkspaceRecord,
   sshPublicKey: string,
+  sshHostKeys: { private: string; public: string },
 ): Promise<Request> {
   const remainingMs = workspaceProvisionDeadline(workspace) - Date.now();
   if (remainingMs < workspaceProvisionRecoveryGraceMs) {
@@ -8149,9 +8607,12 @@ async function workspaceLeaseRequest(
   const providerKey = `${workspaceProviderKeyPrefix}${(
     await sha256Hex(sshPublicKeyIdentity(sshPublicKey))
   ).slice(0, 12)}`;
+  const headers = workspaceRecordHeaders(workspace);
+  headers.set(workspaceSSHHostPrivateKeyHeader, btoa(sshHostKeys.private));
+  headers.set(workspaceSSHHostPublicKeyHeader, btoa(sshHostKeys.public));
   return new Request("https://crabbox.invalid/v1/leases", {
     method: "POST",
-    headers: workspaceRecordHeaders(workspace),
+    headers,
     body: JSON.stringify({
       leaseID: workspace.leaseID,
       slug: workspace.id,
@@ -8165,6 +8626,7 @@ async function workspaceLeaseRequest(
       idleTimeoutSeconds: remainingSeconds,
       keep: false,
       sshPublicKey,
+      ...(workspace.provider === "aws" ? { awsSSHCIDRs: ["0.0.0.0/0"] } : {}),
     } satisfies LeaseRequest),
   });
 }
@@ -8184,12 +8646,18 @@ function workspaceHTTPStatus(workspace: WorkspaceRecord, lease?: LeaseRecord): n
 function workspaceConflictResponse(
   workspace: WorkspaceRecord,
   profile: string,
+  repo: string,
+  branch: string,
+  command: string,
   desktop: boolean,
   ttlSeconds: number,
   idleTimeoutSeconds: number,
 ): Response | undefined {
   if (
     workspace.profile === profile &&
+    (workspace.repo ?? "") === repo &&
+    (workspace.branch ?? "main") === branch &&
+    (workspace.command ?? "exec bash -l") === command &&
     workspace.desktop === desktop &&
     workspace.ttlSeconds === ttlSeconds &&
     workspace.idleTimeoutSeconds === idleTimeoutSeconds
@@ -8366,11 +8834,220 @@ function workspaceOwnsLease(workspace: WorkspaceRecord, lease: LeaseRecord): boo
   );
 }
 
+function workspaceTerminalError(
+  workspace: WorkspaceRecord,
+  lease: LeaseRecord | undefined,
+  env: Env,
+): string | undefined {
+  if (workspaceStatus(workspace, lease) !== "ready") return "workspace is not ready";
+  if (!lease || !workspaceOwnsLease(workspace, lease)) return "workspace lease is unavailable";
+  if (!lease.host?.trim()) return "workspace SSH host is unavailable";
+  if (!workspace.sshHostKeySha256) return "workspace SSH host identity is unavailable";
+  if (!env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?.trim()) {
+    return "workspace terminal SSH access is not configured";
+  }
+  if (!workspaceTerminalPublicURL(env)) return "workspace public URL is not configured";
+  return undefined;
+}
+
+// Controller-to-controller URL; callers attach with bearer auth through their browser-facing proxy.
+function workspaceTerminalURL(
+  workspace: WorkspaceRecord,
+  lease: LeaseRecord | undefined,
+  env: Env,
+): string | undefined {
+  if (workspaceTerminalError(workspace, lease, env)) return undefined;
+  const publicURL = workspaceTerminalPublicURL(env);
+  if (!publicURL) return undefined;
+  publicURL.protocol = "wss:";
+  publicURL.pathname = `/v1/workspaces/${encodeURIComponent(workspace.id)}/terminal`;
+  publicURL.search = "?flow=ack-v1";
+  publicURL.hash = "";
+  return publicURL.toString();
+}
+
+function workspaceTerminalPublicURL(env: Env): URL | undefined {
+  try {
+    const url = new URL(env.CRABBOX_PUBLIC_URL ?? "");
+    return url.protocol === "https:" ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function workspaceTerminalMessage(
+  value: string | ArrayBuffer | Blob,
+): Promise<string | Uint8Array> {
+  if (typeof value === "string") return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return new Uint8Array(await value.arrayBuffer());
+}
+
+function workspaceTerminalDataLength(value: string | ArrayBuffer | Blob | Uint8Array): number {
+  if (typeof value === "string") {
+    if (value.length > workspaceTerminalMaxBufferedBytes) {
+      return workspaceTerminalMaxBufferedBytes + 1;
+    }
+    return textEncoder.encode(value).byteLength;
+  }
+  if (value instanceof Blob) return value.size;
+  return value.byteLength;
+}
+
+async function writeWorkspaceTerminalChannel(
+  channel: ClientChannel,
+  value: string | Uint8Array,
+): Promise<void> {
+  if (channel.write(value)) return;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      channel.off("drain", drained);
+      channel.off("close", closed);
+    };
+    const drained = () => {
+      cleanup();
+      resolve();
+    };
+    const closed = () => {
+      cleanup();
+      reject(new Error("SSH terminal channel closed during backpressure"));
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("SSH terminal channel backpressure timed out"));
+    }, 10_000);
+    channel.once("drain", drained);
+    channel.once("close", closed);
+  });
+}
+
+function workspaceTerminalResize(value: string): { cols: number; rows: number } | undefined {
+  if (!value.startsWith("{") || value.length > 200) return undefined;
+  try {
+    const input = JSON.parse(value) as Record<string, unknown>;
+    const cols = input["cols"];
+    const rows = input["rows"];
+    if (
+      input["type"] !== "resize" ||
+      !Number.isInteger(cols) ||
+      !Number.isInteger(rows) ||
+      Number(cols) < 2 ||
+      Number(cols) > 500 ||
+      Number(rows) < 1 ||
+      Number(rows) > 200
+    ) {
+      return undefined;
+    }
+    return { cols: Number(cols), rows: Number(rows) };
+  } catch {
+    return undefined;
+  }
+}
+
+function workspaceTerminalAcknowledgement(value: string): number | undefined {
+  if (!value.startsWith("{") || value.length > 100) return undefined;
+  try {
+    const input = JSON.parse(value) as Record<string, unknown>;
+    const bytes = input["bytes"];
+    return input["type"] === "ack" &&
+      Number.isInteger(bytes) &&
+      Number(bytes) > 0 &&
+      Number(bytes) <= workspaceTerminalMaxBufferedBytes
+      ? Number(bytes)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function workspaceTerminalOriginAllowed(request: Request, env: Env): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  const publicURL = env.CRABBOX_PUBLIC_URL?.trim();
+  if (!publicURL) return false;
+  try {
+    return new URL(origin).origin === new URL(publicURL).origin;
+  } catch {
+    return false;
+  }
+}
+
+function workspaceTerminalSocketBufferedBytes(socket: WebSocket): number {
+  const value = (socket as WebSocket & { bufferedAmount?: unknown }).bufferedAmount;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function workspaceTerminalBootstrapCommand(workspace: WorkspaceRecord, lease: LeaseRecord): string {
+  const workRoot = lease.workRoot?.trim() || "/workspace";
+  const workspaceParent = `${workRoot.replace(/\/+$/u, "")}/workspaces`;
+  const workspaceRoot = `${workspaceParent}/${workspace.id}`;
+  const branch = workspace.branch?.trim() || "main";
+  const command = workspace.command?.trim() || "exec bash -l";
+  const setup = ["set -e", "umask 077", `mkdir -p ${shellQuote(workspaceParent)}`];
+  if (workspace.repo) {
+    const repoURL = `https://github.com/${workspace.repo}.git`;
+    const cloneTemplate = `${workspaceRoot}.clone.XXXXXX`;
+    setup.push(
+      `if ! git -C ${shellQuote(workspaceRoot)} rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then`,
+      `  clone_root=$(mktemp -d ${shellQuote(cloneTemplate)})`,
+      `  if ! git clone --depth=1 --branch ${shellQuote(branch)} ${shellQuote(repoURL)} "$clone_root"; then`,
+      '    rm -rf "$clone_root"',
+      "    exit 1",
+      "  fi",
+      `  rm -rf ${shellQuote(workspaceRoot)}`,
+      `  mv "$clone_root" ${shellQuote(workspaceRoot)}`,
+      "fi",
+    );
+  } else {
+    setup.push(`mkdir -p ${shellQuote(workspaceRoot)}`);
+  }
+  setup.push(`cd ${shellQuote(workspaceRoot)}`, `exec bash -lc ${shellQuote(command)}`);
+  const runner = `bash -lc ${shellQuote(setup.join("\n"))}`;
+  const session = `crabbox-workspace-${workspace.id}`.slice(0, 80);
+  return [
+    "if systemctl cat crabbox-workspace-ready.service >/dev/null 2>&1; then",
+    "  timeout 20m bash -c 'until test -f /run/crabbox/workspace-ready; do sleep 2; done' || exit $?",
+    "else",
+    "  timeout 2m bash -c 'until crabbox-ready >/dev/null 2>&1; do sleep 2; done' || exit $?",
+    "fi",
+    "if command -v tmux >/dev/null 2>&1; then",
+    `  exec tmux new-session -A -s ${shellQuote(session)} ${shellQuote(runner)}`,
+    "else",
+    `  exec ${runner}`,
+    "fi",
+  ].join("\n");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export function boundedSocketReason(value: string): string {
+  let safe = "";
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    safe += code < 0x20 || code === 0x7f ? " " : character;
+  }
+  const normalized = safe.replace(/\s+/gu, " ").trim() || "terminal error";
+  let bounded = "";
+  let bytes = 0;
+  for (const character of normalized) {
+    const size = textEncoder.encode(character).byteLength;
+    if (bytes + size > 120) break;
+    bounded += character;
+    bytes += size;
+  }
+  return bounded || "terminal error";
+}
+
 function workspaceResponse(
   workspace: WorkspaceRecord,
   lease?: LeaseRecord,
+  env?: Env,
 ): Record<string, unknown> {
   const status = workspaceStatus(workspace, lease);
+  const terminalUrl = env ? workspaceTerminalURL(workspace, lease, env) : undefined;
   return {
     id: workspace.id,
     workspaceId: workspace.id,
@@ -8378,13 +9055,14 @@ function workspaceResponse(
     status,
     profile: workspace.profile,
     capabilities: {
-      terminal: false,
+      terminal: Boolean(terminalUrl),
       takeover: false,
       vnc: false,
       desktop: false,
       logs: false,
       artifacts: false,
     },
+    ...(terminalUrl ? { attachUrl: terminalUrl } : {}),
     ...(lease?.expiresAt ? { expiresAt: lease.expiresAt } : {}),
     message:
       workspace.error ??
@@ -8801,7 +9479,6 @@ function mergeTailscaleMetadata(
   const error = nonSecretString(input.error) || current?.error;
   const version = nonSecretString(input.version) || current?.version;
   const deviceID = nonSecretString(input.deviceID) || current?.deviceID;
-  const cleanupError = nonSecretString(input.cleanupError) || current?.cleanupError;
   const exitNode = nonSecretString(input.exitNode) || current?.exitNode;
   if (hostname) {
     merged.hostname = hostname;
@@ -8821,18 +9498,6 @@ function mergeTailscaleMetadata(
   if (deviceID) {
     merged.deviceID = deviceID;
   }
-  if (
-    input.cleanupState === "missing_device_id" ||
-    input.cleanupState === "api_delete_succeeded" ||
-    input.cleanupState === "api_delete_failed"
-  ) {
-    merged.cleanupState = input.cleanupState;
-  } else if (current?.cleanupState) {
-    merged.cleanupState = current.cleanupState;
-  }
-  if (cleanupError) {
-    merged.cleanupError = cleanupError;
-  }
   if (exitNode) {
     merged.exitNode = exitNode;
     merged.exitNodeAllowLanAccess =
@@ -8840,9 +9505,6 @@ function mergeTailscaleMetadata(
   }
   if (merged.state !== "failed") {
     delete merged.error;
-  }
-  if (merged.cleanupState !== "api_delete_failed") {
-    delete merged.cleanupError;
   }
   return merged;
 }
@@ -9263,7 +9925,37 @@ function closeSocket(socket: WebSocket | undefined, code: number, reason: string
   ) {
     return;
   }
-  socket.close(code, reason);
+  try {
+    socket.close(code, boundedSocketReason(reason));
+  } catch {
+    try {
+      socket.close(1011, "socket close failed");
+    } catch {
+      // The socket implementation rejected both close attempts.
+    }
+  }
+}
+
+function workspaceSSHHostKeysFromRequest(
+  request: Request,
+): { privateKey: string; publicKey: string } | undefined {
+  try {
+    const privateKey = atob(request.headers.get(workspaceSSHHostPrivateKeyHeader) ?? "");
+    const publicKey = atob(request.headers.get(workspaceSSHHostPublicKeyHeader) ?? "");
+    return privateKey && publicKey ? { privateKey, publicKey } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function workspaceSSHHostKeyFingerprint(publicKey: string): Promise<string> {
+  const [type, encoded] = publicKey.trim().split(/\s+/u, 3);
+  if (type !== "ssh-ed25519" || !encoded) {
+    throw new Error("workspace SSH host public key is invalid");
+  }
+  const raw = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+  const digest = await crypto.subtle.digest("SHA-256", raw);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function requestSourceCIDRs(request: Request): string[] {
@@ -10212,6 +10904,7 @@ function awsIngressReconcileTargetKey(lease: LeaseRecord): string {
   return [
     lease.region ?? "",
     lease.network?.awsSecurityGroupID ?? "",
+    lease.network?.awsSecurityGroupName ?? "",
     lease.network?.awsSubnetID ?? "",
     lease.sshPort,
     ...(lease.sshFallbackPorts ?? []).toSorted(),
@@ -10224,15 +10917,26 @@ function awsIngressAccessTargetKey(
   ports: string[],
   env: Env,
 ): string {
+  const workspaceManaged = lease.providerKey.startsWith(workspaceProviderKeyPrefix);
   const securityGroupID =
-    lease.network?.awsSecurityGroupID || env.CRABBOX_AWS_SECURITY_GROUP_ID || "";
+    lease.network?.awsSecurityGroupID ||
+    (workspaceManaged ? "" : env.CRABBOX_AWS_SECURITY_GROUP_ID || "");
   const subnetID = lease.network?.awsSubnetID || env.CRABBOX_AWS_SUBNET_ID || "";
-  const group = securityGroupID ? `sg:${securityGroupID}` : `auto:${subnetID}`;
+  const securityGroupName = lease.network?.awsSecurityGroupName;
+  const group = securityGroupID
+    ? `sg:${securityGroupID}`
+    : securityGroupName
+      ? `managed:${subnetID}:${securityGroupName}`
+      : `auto:${subnetID}`;
   return [region, group, ...ports.toSorted()].join("\u0000");
 }
 
 function awsIngressGroupMetadataUnknown(lease: LeaseRecord, env: Env): boolean {
-  return !lease.network?.awsSecurityGroupID && !env.CRABBOX_AWS_SECURITY_GROUP_ID;
+  return (
+    !lease.network?.awsSecurityGroupID &&
+    !lease.network?.awsSecurityGroupName &&
+    (lease.providerKey.startsWith(workspaceProviderKeyPrefix) || !env.CRABBOX_AWS_SECURITY_GROUP_ID)
+  );
 }
 
 function awsIngressPortScopeKey(region: string, port: string): string {
@@ -10906,7 +11610,12 @@ export class AWSProvider implements CloudProvider {
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
-    if (config.awsAMI || config.awsSnapshot) {
+    if (
+      config.awsAMI ||
+      config.awsSnapshot ||
+      config.awsUseStockImage ||
+      config.providerKey.startsWith(workspaceProviderKeyPrefix)
+    ) {
       return config;
     }
     if (config.target === "macos") {
@@ -10932,11 +11641,14 @@ export class AWSProvider implements CloudProvider {
       sourceCIDRs,
       sourceCIDRs.length > 0 || globalCIDRs.length > 0,
     );
+    const configuredSecurityGroupID = awsConfiguredSecurityGroupID(config, this.env);
     const nextLease: LeaseRecord = {
       ...nextLeaseWithSources,
       network: {
         ...nextLeaseWithSources.network,
-        ...(config.awsSGID ? { awsSecurityGroupID: config.awsSGID } : {}),
+        ...(configuredSecurityGroupID
+          ? { awsSecurityGroupID: configuredSecurityGroupID }
+          : { awsSecurityGroupName: awsManagedSecurityGroupName(config) }),
         ...(config.awsSubnetID ? { awsSubnetID: config.awsSubnetID } : {}),
       },
     };

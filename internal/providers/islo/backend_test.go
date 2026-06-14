@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -583,6 +585,179 @@ func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning: islo stop failed for crabbox-repo-abcdef: context deadline exceeded") {
 		t.Fatalf("stderr=%q, want cleanup timeout warning", stderr.String())
+	}
+}
+
+func TestIsloRunRetrievesRequiredArtifactAndDownloadBeforeStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	local := filepath.Join(dir, "manifest.json")
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		retrieveFiles: map[string][]byte{
+			"reports/manifest.json": []byte(`{"status":"success"}`),
+		},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	var stderr bytes.Buffer
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	result, err := backend.Run(t.Context(), RunRequest{
+		Repo:                  Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:                true,
+		Command:               []string{"true"},
+		RequiredArtifactGlobs: []string{"reports/manifest.json"},
+		Downloads:             []string{"reports/manifest.json=" + local},
+	})
+	if err != nil {
+		t.Fatalf("Run err: %v\nstderr=%s", err, stderr.String())
+	}
+	if result.ExitCode != 0 || len(result.Artifacts) != 1 || result.Artifacts[0].Kind != "delegated-download" {
+		t.Fatalf("result=%#v", result)
+	}
+	if data, err := os.ReadFile(local); err != nil || string(data) != `{"status":"success"}` {
+		t.Fatalf("download data=%q err=%v", data, err)
+	}
+	if !client.commandContains("test \"$resolved\" = \"$expected\"") ||
+		!client.commandContains("test \"$opened\" = \"$resolved\"") {
+		t.Fatalf("retrieval did not enforce canonical workspace containment: %#v", client.prepareCommands)
+	}
+	if client.deleteCalls != 1 {
+		t.Fatalf("delete calls=%d, want one after retrieval", client.deleteCalls)
+	}
+}
+
+func TestIsloFetchRunFileUsesWorkloadUser(t *testing.T) {
+	client := &fakeIsloSyncClient{
+		retrieveFiles: map[string][]byte{"reports/proof.txt": []byte("ok")},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	data, err := backend.fetchRunFileAs(t.Context(), core.DelegatedRunDownloadRequest{
+		LeaseID:    "isb_crabbox-repo-abcdef",
+		RemotePath: "reports/proof.txt",
+		MaxBytes:   core.DelegatedRunDownloadMaxBytes,
+	}, isloWorkloadUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "ok" {
+		t.Fatalf("data=%q", data)
+	}
+	req := client.execRequests[len(client.execRequests)-1]
+	if req.GetUser() == nil || *req.GetUser() != isloWorkloadUser {
+		t.Fatalf("retrieval user=%v want %q", req.GetUser(), isloWorkloadUser)
+	}
+	if got := req.GetCommand(); len(got) < 8 || got[0] != "timeout" || got[2] != "15s" || got[4] != "--noprofile" || got[5] != "--norc" {
+		t.Fatalf("retrieval command=%#v, want bounded timeout", got)
+	}
+}
+
+func TestIsloFetchRunFileHonorsContextDeadline(t *testing.T) {
+	client := &fakeIsloSyncClient{blockArtifactRead: true}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := backend.fetchRunFileAs(ctx, core.DelegatedRunDownloadRequest{
+		LeaseID:    "isb_crabbox-repo-abcdef",
+		RemotePath: "reports/proof.txt",
+		MaxBytes:   core.DelegatedRunDownloadMaxBytes,
+	}, "")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("artifact read took %s, want bounded cancellation", elapsed)
+	}
+}
+
+func TestIsloRunPreservesLocalDownloadExitCode(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(parent, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeIsloSyncClient{
+		createName:    "crabbox-repo-abcdef",
+		retrieveFiles: map[string][]byte{"reports/proof.txt": []byte("ok")},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	result, err := backend.Run(t.Context(), RunRequest{
+		Repo:      Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:    true,
+		Command:   []string{"true"},
+		Downloads: []string{"reports/proof.txt=" + filepath.Join(parent, "proof.txt")},
+	})
+	if err == nil {
+		t.Fatal("expected local download failure")
+	}
+	if result.ExitCode != 2 {
+		t.Fatalf("exit=%d, want 2: %v", result.ExitCode, err)
+	}
+}
+
+func TestIsloRunRejectsOversizedRequiredArtifact(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		retrieveFiles: map[string][]byte{
+			"reports/manifest.json": bytes.Repeat([]byte("x"), core.DelegatedRunDownloadMaxBytes+1),
+		},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	result, err := backend.Run(t.Context(), RunRequest{
+		Repo:                  Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:                true,
+		Command:               []string{"true"},
+		RequiredArtifactGlobs: []string{"reports/manifest.json"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "delegated artifact reports/manifest.json") {
+		t.Fatalf("err=%v, want delegated artifact failure", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("exit=%d, want 7", result.ExitCode)
+	}
+}
+
+func TestBoundedRunFileBufferRecordsOverflow(t *testing.T) {
+	var buf boundedRunFileBuffer
+	buf.max = 4
+	if n, err := buf.Write([]byte("abcdef")); err != nil || n != 6 {
+		t.Fatalf("write n=%d err=%v", n, err)
+	}
+	if !buf.exceeded || buf.String() != "abcd" {
+		t.Fatalf("buffer=%q exceeded=%t", buf.String(), buf.exceeded)
+	}
+}
+
+func TestIsloCommandForErrorRedactsArchiveChunk(t *testing.T) {
+	command := "printf %s 'sensitive-base64' >> '/tmp/archive.tgz.b64'"
+	if got := isloCommandForError(command); got != "append archive chunk" {
+		t.Fatalf("got=%q", got)
 	}
 }
 
@@ -1397,6 +1572,8 @@ type fakeIsloSyncClient struct {
 	execCodes                []int
 	execOut                  string
 	execOuts                 []string
+	retrieveFiles            map[string][]byte
+	blockArtifactRead        bool
 	execErrOnCommand         error
 	execErrOnCommandContains string
 	execErrOnCommandSkip     int
@@ -1503,6 +1680,25 @@ func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosd
 		f.execDeadline, _ = ctx.Deadline()
 	}
 	f.prepareCommands = append(f.prepareCommands, command)
+	if strings.Contains(command, "head -c") && strings.Contains(command, "base64") {
+		if f.blockArtifactRead {
+			<-ctx.Done()
+			return 1, ctx.Err()
+		}
+		for path, data := range f.retrieveFiles {
+			if !strings.Contains(command, path) {
+				continue
+			}
+			if len(data) > core.DelegatedRunDownloadMaxBytes {
+				data = data[:core.DelegatedRunDownloadMaxBytes+1]
+			}
+			if stdout != nil {
+				_, _ = io.WriteString(stdout, base64.StdEncoding.EncodeToString(data))
+			}
+			return 0, nil
+		}
+		return 1, nil
+	}
 	output := f.execOut
 	if callIndex < len(f.execOuts) {
 		output = f.execOuts[callIndex]

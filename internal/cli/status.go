@@ -135,7 +135,7 @@ func statusWaitTerminalError(id string, state statusView) error {
 
 func statusTerminalState(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "expired", "failed", "released", "stopped", "stopped_with_code", "terminated":
+	case "deleting", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated":
 		return true
 	default:
 		return false
@@ -292,7 +292,15 @@ func (a App) resolveSSHTargetWithRequestConfig(ctx context.Context, cfg *Config,
 	}
 	req.Options = leaseOptionsFromConfig(*cfg)
 	req.Options.ProviderScope = providerClaimScope(backend.Spec().Name, *cfg)
-	lease, err := resolveSSHLeaseTarget(ctx, sshBackend, req)
+	var lease LeaseTarget
+	if req.NoLocalStateMutations {
+		lease, err = sshBackend.Resolve(ctx, req)
+		if err == nil {
+			err = ValidateLeaseTargetProviderIdentity(lease, req.ExpectedProviderIdentity)
+		}
+	} else {
+		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, req)
+	}
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}

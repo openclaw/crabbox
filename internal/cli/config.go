@@ -19,9 +19,11 @@ type Config struct {
 	Profile                       string
 	Provider                      string
 	providerExplicit              bool
+	providerDefaultsApplied       string
 	TargetOS                      string
 	targetExplicit                bool
 	targetFlagExplicit            bool
+	inferredTargetProvider        string
 	Architecture                  string
 	architectureExplicit          bool
 	OSImage                       string
@@ -113,6 +115,8 @@ type Config struct {
 	SSHPort                       string
 	explicitSSHPort               string
 	SSHFallbackPorts              []string
+	sshFallbackPortsExplicit      bool
+	explicitSSHFallbackPorts      []string
 	ProviderKey                   string
 	WorkRoot                      string
 	explicitWorkRoot              string
@@ -136,6 +140,8 @@ type Config struct {
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
 	Runpod                        RunpodConfig
+	NvidiaBrev                    NvidiaBrevConfig
+	nvidiaBrevWorkRootExplicit    bool
 	Hostinger                     HostingerConfig
 	hostingerUserExplicit         bool
 	hostingerWorkRootExplicit     bool
@@ -147,6 +153,7 @@ type Config struct {
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
 	OpenSandbox                   OpenSandboxConfig
+	VercelSandbox                 VercelSandboxConfig
 	Superserve                    SuperserveConfig
 	DockerSandbox                 DockerSandboxConfig
 	AnthropicSRT                  AnthropicSRTConfig
@@ -155,6 +162,7 @@ type Config struct {
 	Smolvm                        SmolvmConfig
 	AsciiBox                      AsciiBoxConfig
 	Cloudflare                    CloudflareConfig
+	CloudflareDynamicWorkers      CloudflareDynamicWorkersConfig
 	Semaphore                     SemaphoreConfig
 	Sprites                       SpritesConfig
 	LocalContainer                LocalContainerConfig
@@ -285,11 +293,16 @@ type ExternalConfig struct {
 	Command       string
 	Args          []string
 	Config        map[string]any
+	Capabilities  ExternalCapabilitiesConfig
 	Lifecycle     ExternalLifecycleConfig
 	Connection    ExternalConnectionConfig
 	WorkRoot      string
 	RoutingFile   string
 	routingLoaded bool
+}
+
+type ExternalCapabilitiesConfig struct {
+	IdempotentLeaseID bool `yaml:"idempotentLeaseId,omitempty" json:"idempotentLeaseId,omitempty"`
 }
 
 type ExternalLifecycleConfig struct {
@@ -445,6 +458,24 @@ type RunpodConfig struct {
 	WorkRoot   string
 }
 
+// NvidiaBrevConfig is intentionally non-secret. Authentication stays in the
+// NVIDIA Brev CLI's own credential store and is never accepted as Crabbox
+// config or argv.
+type NvidiaBrevConfig struct {
+	CLI           string
+	Org           string
+	Type          string
+	GPUName       string
+	Provider      string
+	Mode          string
+	Launchable    string
+	StartupScript string
+	ReleaseAction string
+	Target        string
+	User          string
+	WorkRoot      string
+}
+
 type HostingerConfig struct {
 	APIToken        string
 	APIURL          string
@@ -554,6 +585,29 @@ type OpenSandboxConfig struct {
 	ForgetMissing   bool
 }
 
+// VercelSandboxConfig configures the delegated Vercel Sandbox provider. Token
+// fields are intentionally absent: SDK and CLI credentials are resolved from
+// environment/auth stores at runtime and are never persisted in Crabbox config
+// or passed on argv.
+type VercelSandboxConfig struct {
+	Runtime         string
+	Workdir         string
+	ProjectID       string
+	TeamID          string
+	Scope           string
+	VCPUs           float64
+	TimeoutSecs     int
+	ExecTimeoutSecs int
+	Persistent      bool
+	Snapshot        string
+	SnapshotMode    string
+	NetworkPolicy   string
+	NetworkAllow    []string
+	NetworkDeny     []string
+	Ports           []string
+	ForgetMissing   bool
+}
+
 // SuperserveConfig configures the delegated Superserve provider. The API key is
 // intentionally absent: it is read at runtime from
 // CRABBOX_SUPERSERVE_API_KEY / SUPERSERVE_API_KEY and sent only in request
@@ -627,6 +681,27 @@ type CloudflareConfig struct {
 	APIURL  string
 	Token   string
 	Workdir string
+}
+
+const DefaultCloudflareDynamicWorkersCompatibilityDate = "2026-06-12"
+
+type CloudflareDynamicWorkersConfig struct {
+	LoaderURL                      string
+	Token                          string
+	CompatibilityDate              string
+	CompatibilityFlags             []string
+	CacheMode                      string
+	Egress                         string
+	CPUMs                          int
+	Subrequests                    int
+	TimeoutSecs                    int
+	Metadata                       map[string]string
+	repositoryCPUMsCap             int
+	repositoryCPUMsCapActive       bool
+	repositorySubrequestsCap       int
+	repositorySubrequestsCapActive bool
+	repositoryTimeoutSecsCap       int
+	repositoryTimeoutSecsCapActive bool
 }
 
 type ProxmoxConfig struct {
@@ -1018,32 +1093,35 @@ type ProofTemplateConfig struct {
 }
 
 type JobConfig struct {
-	Provider       string
-	Target         string
-	WindowsMode    string
-	Profile        string
-	Class          string
-	Architecture   string
-	ServerType     string
-	Market         string
-	TTL            time.Duration
-	IdleTimeout    time.Duration
-	Desktop        *bool
-	DesktopEnv     string
-	Browser        *bool
-	Code           *bool
-	Network        string
-	Hydrate        JobHydrateConfig
-	Actions        JobActionsConfig
-	Shell          bool
-	Command        string
-	NoSync         bool
-	SyncOnly       bool
-	Checksum       *bool
-	ForceSyncLarge bool
-	JUnit          []string
-	Downloads      []string
-	Stop           string
+	Provider          string
+	Target            string
+	WindowsMode       string
+	Profile           string
+	Class             string
+	Architecture      string
+	ServerType        string
+	Market            string
+	TTL               time.Duration
+	IdleTimeout       time.Duration
+	Desktop           *bool
+	DesktopEnv        string
+	Browser           *bool
+	Code              *bool
+	Network           string
+	Hydrate           JobHydrateConfig
+	Actions           JobActionsConfig
+	Shell             bool
+	Command           string
+	NoSync            bool
+	SyncOnly          bool
+	Checksum          *bool
+	ForceSyncLarge    bool
+	JUnit             []string
+	Label             string
+	ArtifactGlobs     []string
+	RequiredArtifacts []string
+	Downloads         []string
+	Stop              string
 }
 
 type JobHydrateConfig struct {
@@ -1100,6 +1178,7 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
 	}
+	applyCloudflareDynamicWorkersRepositoryCaps(&cfg)
 	if coordinator = strings.TrimSpace(coordinator); coordinator != "" {
 		cfg.Coordinator = coordinator
 	}
@@ -1162,7 +1241,21 @@ func canonicalizeConfigProvider(cfg *Config) {
 	}
 }
 
+func prepareProviderSelection(cfg *Config, provider string) error {
+	cfg.Provider = strings.TrimSpace(provider)
+	prepareProviderDefaults(cfg)
+	return nil
+}
+
+func finalizeProviderSelection(cfg *Config) error {
+	if err := routeConfiguredProvider(cfg); err != nil {
+		return err
+	}
+	return applyProviderConfigDefaults(cfg)
+}
+
 func applyProviderConfigDefaults(cfg *Config) error {
+	prepareProviderDefaults(cfg)
 	if normalized, err := normalizeArchitecture(cfg.Architecture); err != nil {
 		return err
 	} else {
@@ -1173,6 +1266,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	} else {
 		cfg.OSImage = normalized
 	}
+	applySingleProviderTargetDefault(cfg)
 	applyOSImageProviderDefaults(cfg, false)
 	if cfg.Provider == "digitalocean" {
 		if cfg.DigitalOcean.Region == "" {
@@ -1405,6 +1499,107 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	return nil
 }
 
+func applySingleProviderTargetDefault(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return
+	}
+	providerName := provider.Name()
+	if IsTargetExplicit(cfg) {
+		cfg.inferredTargetProvider = ""
+		return
+	}
+	if cfg.inferredTargetProvider != "" && cfg.inferredTargetProvider != providerName {
+		cfg.TargetOS = targetLinux
+		cfg.inferredTargetProvider = ""
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+	}
+	if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
+		return
+	}
+	spec := provider.Spec()
+	if len(spec.Targets) != 1 {
+		return
+	}
+	target := spec.Targets[0]
+	if strings.TrimSpace(target.OS) == "" {
+		return
+	}
+	cfg.TargetOS = strings.TrimSpace(target.OS)
+	cfg.inferredTargetProvider = providerName
+	if cfg.TargetOS == targetWindows {
+		if strings.TrimSpace(target.WindowsMode) != "" {
+			cfg.WindowsMode = strings.TrimSpace(target.WindowsMode)
+		}
+	} else if cfg.explicitWindowsMode == "" {
+		cfg.WindowsMode = windowsModeNormal
+	}
+}
+
+func prepareProviderDefaults(cfg *Config) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return
+	}
+	providerName := provider.Name()
+	if cfg.providerDefaultsApplied != "" && cfg.providerDefaultsApplied != providerName {
+		if cfg.providerDefaultsApplied == parallelsProvider {
+			cfg.parallelsTemplateApplied = false
+		}
+		resetProviderDerivedDefaults(cfg)
+		if !IsTargetExplicit(cfg) && cfg.inferredTargetProvider != "" {
+			cfg.TargetOS = targetLinux
+			cfg.inferredTargetProvider = ""
+			if cfg.explicitWindowsMode != "" {
+				cfg.WindowsMode = cfg.explicitWindowsMode
+			} else {
+				cfg.WindowsMode = windowsModeNormal
+			}
+		}
+	}
+	cfg.providerDefaultsApplied = providerName
+}
+
+func resetProviderDerivedDefaults(cfg *Config) {
+	base := baseConfig()
+	if cfg.explicitSSHUser != "" {
+		cfg.SSHUser = cfg.explicitSSHUser
+	} else {
+		cfg.SSHUser = base.SSHUser
+	}
+	if cfg.explicitSSHPort != "" {
+		cfg.SSHPort = cfg.explicitSSHPort
+	} else {
+		cfg.SSHPort = base.SSHPort
+	}
+	if !cfg.sshFallbackPortsExplicit {
+		cfg.SSHFallbackPorts = append([]string(nil), base.SSHFallbackPorts...)
+	} else {
+		cfg.SSHFallbackPorts = append([]string(nil), cfg.explicitSSHFallbackPorts...)
+	}
+	if cfg.explicitWorkRoot != "" {
+		cfg.WorkRoot = cfg.explicitWorkRoot
+	} else {
+		cfg.WorkRoot = base.WorkRoot
+	}
+	if !cfg.locationExplicit {
+		cfg.Location = base.Location
+	}
+	if !cfg.imageExplicit {
+		cfg.Image = base.Image
+	}
+	if !cfg.ServerTypeExplicit {
+		cfg.ServerType = base.ServerType
+	}
+}
+
 func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if normalizeTargetOS(cfg.TargetOS) != targetLinux {
 		return
@@ -1609,6 +1804,26 @@ func MarkHostingerWorkRootExplicit(cfg *Config) {
 	cfg.hostingerWorkRootExplicit = true
 }
 
+func IsNvidiaBrevWorkRootExplicit(cfg *Config) bool {
+	return cfg.nvidiaBrevWorkRootExplicit
+}
+
+func MarkNvidiaBrevWorkRootExplicit(cfg *Config) {
+	cfg.nvidiaBrevWorkRootExplicit = true
+}
+
+func EffectiveNvidiaBrevWorkRoot(cfg Config) string {
+	workRoot := cfg.NvidiaBrev.WorkRoot
+	providerDefault := workRoot == "" || workRoot == "/tmp/crabbox"
+	if !IsNvidiaBrevWorkRootExplicit(&cfg) && providerDefault && cfg.explicitWorkRoot != "" {
+		return cfg.explicitWorkRoot
+	}
+	if workRoot == "" {
+		return "/tmp/crabbox"
+	}
+	return workRoot
+}
+
 func DeleteOnReleaseExplicit(cfg Config, provider string) bool {
 	return cfg.deleteOnReleaseExplicit[normalizeProviderName(provider)]
 }
@@ -1795,6 +2010,14 @@ func baseConfig() Config {
 			Image:      "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04",
 			DiskGB:     20,
 		},
+		NvidiaBrev: NvidiaBrevConfig{
+			CLI:           "brev",
+			GPUName:       "A100",
+			Mode:          "vm",
+			ReleaseAction: "delete",
+			Target:        "container",
+			WorkRoot:      "/tmp/crabbox",
+		},
 		Hostinger: HostingerConfig{
 			APIURL:         "https://developers.hostinger.com",
 			HostnamePrefix: "crabbox",
@@ -1845,6 +2068,12 @@ func baseConfig() Config {
 			PlatformOS:      "linux",
 			PlatformArch:    "amd64",
 		},
+		VercelSandbox: VercelSandboxConfig{
+			Runtime:         "node24",
+			Workdir:         "/vercel/sandbox/crabbox",
+			ExecTimeoutSecs: 600,
+			NetworkPolicy:   "default",
+		},
 		Superserve: SuperserveConfig{
 			BaseURL:         "https://api.superserve.ai",
 			Template:        "superserve/base",
@@ -1885,6 +2114,13 @@ func baseConfig() Config {
 		},
 		Cloudflare: CloudflareConfig{
 			Workdir: "/workspace/crabbox",
+		},
+		CloudflareDynamicWorkers: CloudflareDynamicWorkersConfig{
+			CompatibilityDate: DefaultCloudflareDynamicWorkersCompatibilityDate,
+			CacheMode:         "stable",
+			Egress:            "blocked",
+			TimeoutSecs:       60,
+			Metadata:          map[string]string{},
 		},
 		Proxmox: ProxmoxConfig{
 			User:      "crabbox",
@@ -1981,91 +2217,94 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
-	Profile              string                             `yaml:"profile,omitempty"`
-	Provider             string                             `yaml:"provider,omitempty"`
-	Target               string                             `yaml:"target,omitempty"`
-	TargetOS             string                             `yaml:"targetOS,omitempty"`
-	Architecture         string                             `yaml:"architecture,omitempty"`
-	OSImage              string                             `yaml:"os,omitempty"`
-	Windows              *fileWindowsConfig                 `yaml:"windows,omitempty"`
-	Desktop              *bool                              `yaml:"desktop,omitempty"`
-	DesktopEnv           string                             `yaml:"desktopEnv,omitempty"`
-	Browser              *bool                              `yaml:"browser,omitempty"`
-	Code                 *bool                              `yaml:"code,omitempty"`
-	Network              string                             `yaml:"network,omitempty"`
-	Class                string                             `yaml:"class,omitempty"`
-	ServerType           string                             `yaml:"serverType,omitempty"`
-	Coordinator          string                             `yaml:"coordinator,omitempty"`
-	CoordinatorToken     string                             `yaml:"coordinatorToken,omitempty"`
-	HostID               string                             `yaml:"hostId,omitempty"`
-	Broker               *fileBrokerConfig                  `yaml:"broker,omitempty"`
-	Hetzner              *fileHetznerConfig                 `yaml:"hetzner,omitempty"`
-	DigitalOcean         *fileDigitalOceanConfig            `yaml:"digitalocean,omitempty"`
-	Linode               *fileLinodeConfig                  `yaml:"linode,omitempty"`
-	AWS                  *fileAWSConfig                     `yaml:"aws,omitempty"`
-	Azure                *fileAzureConfig                   `yaml:"azure,omitempty"`
-	AzureDynamicSessions *fileAzureDynamicSessionsConfig    `yaml:"azureDynamicSessions,omitempty"`
-	GCP                  *fileGCPConfig                     `yaml:"gcp,omitempty"`
-	Incus                *fileIncusConfig                   `yaml:"incus,omitempty"`
-	Proxmox              *fileProxmoxConfig                 `yaml:"proxmox,omitempty"`
-	XCPNg                *fileXCPNgConfig                   `yaml:"xcpNg,omitempty"`
-	Parallels            *fileParallelsConfig               `yaml:"parallels,omitempty"`
-	SSH                  *fileSSHConfig                     `yaml:"ssh,omitempty"`
-	Sync                 *fileSyncConfig                    `yaml:"sync,omitempty"`
-	Run                  *fileRunConfig                     `yaml:"run,omitempty"`
-	Env                  *fileEnvConfig                     `yaml:"env,omitempty"`
-	Capacity             *fileCapacityConfig                `yaml:"capacity,omitempty"`
-	Actions              *fileActionsConfig                 `yaml:"actions,omitempty"`
-	Blacksmith           *fileBlacksmithConfig              `yaml:"blacksmith,omitempty"`
-	KubeVirt             *fileKubeVirtConfig                `yaml:"kubevirt,omitempty"`
-	AgentSandbox         *fileAgentSandboxConfig            `yaml:"agentSandbox,omitempty"`
-	External             *fileExternalConfig                `yaml:"external,omitempty"`
-	Namespace            *fileNamespaceConfig               `yaml:"namespace,omitempty"`
-	NamespaceInstance    *fileNamespaceInstanceConfig       `yaml:"namespaceInstance,omitempty"`
-	Morph                *fileMorphConfig                   `yaml:"morph,omitempty"`
-	Daytona              *fileDaytonaConfig                 `yaml:"daytona,omitempty"`
-	E2B                  *fileE2BConfig                     `yaml:"e2b,omitempty"`
-	ExeDev               *fileExeDevConfig                  `yaml:"exeDev,omitempty"`
-	Railway              *fileRailwayConfig                 `yaml:"railway,omitempty"`
-	Runpod               *fileRunpodConfig                  `yaml:"runpod,omitempty"`
-	Hostinger            *fileHostingerConfig               `yaml:"hostinger,omitempty"`
-	Wandb                *fileWandbConfig                   `yaml:"wandb,omitempty"`
-	Islo                 *fileIsloConfig                    `yaml:"islo,omitempty"`
-	Freestyle            *fileFreestyleConfig               `yaml:"freestyle,omitempty"`
-	Tenki                *fileTenkiConfig                   `yaml:"tenki,omitempty"`
-	Tensorlake           *fileTensorlakeConfig              `yaml:"tensorlake,omitempty"`
-	OpenComputer         *fileOpenComputerConfig            `yaml:"openComputer,omitempty"`
-	OpenSandbox          *fileOpenSandboxConfig             `yaml:"openSandbox,omitempty"`
-	Superserve           *fileSuperserveConfig              `yaml:"superserve,omitempty"`
-	DockerSandbox        *fileDockerSandboxConfig           `yaml:"dockerSandbox,omitempty"`
-	AnthropicSRT         *fileAnthropicSRTConfig            `yaml:"anthropicSandboxRuntime,omitempty"`
-	Modal                *fileModalConfig                   `yaml:"modal,omitempty"`
-	UpstashBox           *fileUpstashBoxConfig              `yaml:"upstashBox,omitempty"`
-	Smolvm               *fileSmolvmConfig                  `yaml:"smolvm,omitempty"`
-	AsciiBox             *fileAsciiBoxConfig                `yaml:"asciiBox,omitempty"`
-	Cloudflare           *fileCloudflareConfig              `yaml:"cloudflare,omitempty"`
-	Semaphore            *fileSemaphoreConfig               `yaml:"semaphore,omitempty"`
-	Sprites              *fileSpritesConfig                 `yaml:"sprites,omitempty"`
-	LocalContainer       *fileLocalContainerConfig          `yaml:"localContainer,omitempty"`
-	AppleContainer       *fileAppleContainerConfig          `yaml:"appleContainer,omitempty"`
-	AppleVZ              *fileAppleVZConfig                 `yaml:"appleVZ,omitempty"`
-	MXC                  *fileMXCConfig                     `yaml:"mxc,omitempty"`
-	Multipass            *fileMultipassConfig               `yaml:"multipass,omitempty"`
-	Tart                 *fileTartConfig                    `yaml:"tart,omitempty"`
-	HyperV               *fileHyperVConfig                  `yaml:"hyperv,omitempty"`
-	WindowsSandbox       *fileWindowsSandboxConfig          `yaml:"windowsSandbox,omitempty"`
-	Tailscale            *fileTailscaleConfig               `yaml:"tailscale,omitempty"`
-	Static               *fileStaticConfig                  `yaml:"static,omitempty"`
-	Results              *fileResultsConfig                 `yaml:"results,omitempty"`
-	Cache                *fileCacheConfig                   `yaml:"cache,omitempty"`
-	Lease                *fileLeaseConfig                   `yaml:"lease,omitempty"`
-	Profiles             map[string]fileProfileConfig       `yaml:"profiles,omitempty"`
-	Presets              map[string]filePresetConfig        `yaml:"presets,omitempty"`
-	ProofTemplates       map[string]fileProofTemplateConfig `yaml:"proofTemplates,omitempty"`
-	Jobs                 map[string]fileJobConfig           `yaml:"jobs,omitempty"`
-	TTL                  string                             `yaml:"ttl,omitempty"`
-	IdleTimeout          string                             `yaml:"idleTimeout,omitempty"`
-	WorkRoot             string                             `yaml:"workRoot,omitempty"`
+	Profile                  string                              `yaml:"profile,omitempty"`
+	Provider                 string                              `yaml:"provider,omitempty"`
+	Target                   string                              `yaml:"target,omitempty"`
+	TargetOS                 string                              `yaml:"targetOS,omitempty"`
+	Architecture             string                              `yaml:"architecture,omitempty"`
+	OSImage                  string                              `yaml:"os,omitempty"`
+	Windows                  *fileWindowsConfig                  `yaml:"windows,omitempty"`
+	Desktop                  *bool                               `yaml:"desktop,omitempty"`
+	DesktopEnv               string                              `yaml:"desktopEnv,omitempty"`
+	Browser                  *bool                               `yaml:"browser,omitempty"`
+	Code                     *bool                               `yaml:"code,omitempty"`
+	Network                  string                              `yaml:"network,omitempty"`
+	Class                    string                              `yaml:"class,omitempty"`
+	ServerType               string                              `yaml:"serverType,omitempty"`
+	Coordinator              string                              `yaml:"coordinator,omitempty"`
+	CoordinatorToken         string                              `yaml:"coordinatorToken,omitempty"`
+	HostID                   string                              `yaml:"hostId,omitempty"`
+	Broker                   *fileBrokerConfig                   `yaml:"broker,omitempty"`
+	Hetzner                  *fileHetznerConfig                  `yaml:"hetzner,omitempty"`
+	DigitalOcean             *fileDigitalOceanConfig             `yaml:"digitalocean,omitempty"`
+	Linode                   *fileLinodeConfig                   `yaml:"linode,omitempty"`
+	AWS                      *fileAWSConfig                      `yaml:"aws,omitempty"`
+	Azure                    *fileAzureConfig                    `yaml:"azure,omitempty"`
+	AzureDynamicSessions     *fileAzureDynamicSessionsConfig     `yaml:"azureDynamicSessions,omitempty"`
+	GCP                      *fileGCPConfig                      `yaml:"gcp,omitempty"`
+	Incus                    *fileIncusConfig                    `yaml:"incus,omitempty"`
+	Proxmox                  *fileProxmoxConfig                  `yaml:"proxmox,omitempty"`
+	XCPNg                    *fileXCPNgConfig                    `yaml:"xcpNg,omitempty"`
+	Parallels                *fileParallelsConfig                `yaml:"parallels,omitempty"`
+	SSH                      *fileSSHConfig                      `yaml:"ssh,omitempty"`
+	Sync                     *fileSyncConfig                     `yaml:"sync,omitempty"`
+	Run                      *fileRunConfig                      `yaml:"run,omitempty"`
+	Env                      *fileEnvConfig                      `yaml:"env,omitempty"`
+	Capacity                 *fileCapacityConfig                 `yaml:"capacity,omitempty"`
+	Actions                  *fileActionsConfig                  `yaml:"actions,omitempty"`
+	Blacksmith               *fileBlacksmithConfig               `yaml:"blacksmith,omitempty"`
+	KubeVirt                 *fileKubeVirtConfig                 `yaml:"kubevirt,omitempty"`
+	AgentSandbox             *fileAgentSandboxConfig             `yaml:"agentSandbox,omitempty"`
+	External                 *fileExternalConfig                 `yaml:"external,omitempty"`
+	Namespace                *fileNamespaceConfig                `yaml:"namespace,omitempty"`
+	NamespaceInstance        *fileNamespaceInstanceConfig        `yaml:"namespaceInstance,omitempty"`
+	Morph                    *fileMorphConfig                    `yaml:"morph,omitempty"`
+	Daytona                  *fileDaytonaConfig                  `yaml:"daytona,omitempty"`
+	E2B                      *fileE2BConfig                      `yaml:"e2b,omitempty"`
+	ExeDev                   *fileExeDevConfig                   `yaml:"exeDev,omitempty"`
+	Railway                  *fileRailwayConfig                  `yaml:"railway,omitempty"`
+	Runpod                   *fileRunpodConfig                   `yaml:"runpod,omitempty"`
+	NvidiaBrev               *fileNvidiaBrevConfig               `yaml:"nvidiaBrev,omitempty"`
+	Hostinger                *fileHostingerConfig                `yaml:"hostinger,omitempty"`
+	Wandb                    *fileWandbConfig                    `yaml:"wandb,omitempty"`
+	Islo                     *fileIsloConfig                     `yaml:"islo,omitempty"`
+	Freestyle                *fileFreestyleConfig                `yaml:"freestyle,omitempty"`
+	Tenki                    *fileTenkiConfig                    `yaml:"tenki,omitempty"`
+	Tensorlake               *fileTensorlakeConfig               `yaml:"tensorlake,omitempty"`
+	OpenComputer             *fileOpenComputerConfig             `yaml:"openComputer,omitempty"`
+	OpenSandbox              *fileOpenSandboxConfig              `yaml:"openSandbox,omitempty"`
+	VercelSandbox            *fileVercelSandboxConfig            `yaml:"vercelSandbox,omitempty"`
+	Superserve               *fileSuperserveConfig               `yaml:"superserve,omitempty"`
+	DockerSandbox            *fileDockerSandboxConfig            `yaml:"dockerSandbox,omitempty"`
+	AnthropicSRT             *fileAnthropicSRTConfig             `yaml:"anthropicSandboxRuntime,omitempty"`
+	Modal                    *fileModalConfig                    `yaml:"modal,omitempty"`
+	UpstashBox               *fileUpstashBoxConfig               `yaml:"upstashBox,omitempty"`
+	Smolvm                   *fileSmolvmConfig                   `yaml:"smolvm,omitempty"`
+	AsciiBox                 *fileAsciiBoxConfig                 `yaml:"asciiBox,omitempty"`
+	Cloudflare               *fileCloudflareConfig               `yaml:"cloudflare,omitempty"`
+	CloudflareDynamicWorkers *fileCloudflareDynamicWorkersConfig `yaml:"cloudflareDynamicWorkers,omitempty"`
+	Semaphore                *fileSemaphoreConfig                `yaml:"semaphore,omitempty"`
+	Sprites                  *fileSpritesConfig                  `yaml:"sprites,omitempty"`
+	LocalContainer           *fileLocalContainerConfig           `yaml:"localContainer,omitempty"`
+	AppleContainer           *fileAppleContainerConfig           `yaml:"appleContainer,omitempty"`
+	AppleVZ                  *fileAppleVZConfig                  `yaml:"appleVZ,omitempty"`
+	MXC                      *fileMXCConfig                      `yaml:"mxc,omitempty"`
+	Multipass                *fileMultipassConfig                `yaml:"multipass,omitempty"`
+	Tart                     *fileTartConfig                     `yaml:"tart,omitempty"`
+	HyperV                   *fileHyperVConfig                   `yaml:"hyperv,omitempty"`
+	WindowsSandbox           *fileWindowsSandboxConfig           `yaml:"windowsSandbox,omitempty"`
+	Tailscale                *fileTailscaleConfig                `yaml:"tailscale,omitempty"`
+	Static                   *fileStaticConfig                   `yaml:"static,omitempty"`
+	Results                  *fileResultsConfig                  `yaml:"results,omitempty"`
+	Cache                    *fileCacheConfig                    `yaml:"cache,omitempty"`
+	Lease                    *fileLeaseConfig                    `yaml:"lease,omitempty"`
+	Profiles                 map[string]fileProfileConfig        `yaml:"profiles,omitempty"`
+	Presets                  map[string]filePresetConfig         `yaml:"presets,omitempty"`
+	ProofTemplates           map[string]fileProofTemplateConfig  `yaml:"proofTemplates,omitempty"`
+	Jobs                     map[string]fileJobConfig            `yaml:"jobs,omitempty"`
+	TTL                      string                              `yaml:"ttl,omitempty"`
+	IdleTimeout              string                              `yaml:"idleTimeout,omitempty"`
+	WorkRoot                 string                              `yaml:"workRoot,omitempty"`
 }
 
 type fileWindowsConfig struct {
@@ -2337,13 +2576,14 @@ type fileAgentSandboxConfig struct {
 }
 
 type fileExternalConfig struct {
-	Command     string                    `yaml:"command,omitempty"`
-	Args        []string                  `yaml:"args,omitempty"`
-	Config      map[string]any            `yaml:"config,omitempty"`
-	Lifecycle   *ExternalLifecycleConfig  `yaml:"lifecycle,omitempty"`
-	Connection  *ExternalConnectionConfig `yaml:"connection,omitempty"`
-	WorkRoot    string                    `yaml:"workRoot,omitempty"`
-	RoutingFile string                    `yaml:"routingFile,omitempty"`
+	Command      string                      `yaml:"command,omitempty"`
+	Args         []string                    `yaml:"args,omitempty"`
+	Config       map[string]any              `yaml:"config,omitempty"`
+	Capabilities *ExternalCapabilitiesConfig `yaml:"capabilities,omitempty"`
+	Lifecycle    *ExternalLifecycleConfig    `yaml:"lifecycle,omitempty"`
+	Connection   *ExternalConnectionConfig   `yaml:"connection,omitempty"`
+	WorkRoot     string                      `yaml:"workRoot,omitempty"`
+	RoutingFile  string                      `yaml:"routingFile,omitempty"`
 }
 
 type fileNamespaceConfig struct {
@@ -2441,6 +2681,21 @@ type fileRunpodConfig struct {
 	WorkRoot   string `yaml:"workRoot,omitempty"`
 }
 
+type fileNvidiaBrevConfig struct {
+	CLI           string `yaml:"cli,omitempty"`
+	Org           string `yaml:"org,omitempty"`
+	Type          string `yaml:"type,omitempty"`
+	GPUName       string `yaml:"gpuName,omitempty"`
+	Provider      string `yaml:"provider,omitempty"`
+	Mode          string `yaml:"mode,omitempty"`
+	Launchable    string `yaml:"launchable,omitempty"`
+	StartupScript string `yaml:"startupScript,omitempty"`
+	ReleaseAction string `yaml:"releaseAction,omitempty"`
+	Target        string `yaml:"target,omitempty"`
+	User          string `yaml:"user,omitempty"`
+	WorkRoot      string `yaml:"workRoot,omitempty"`
+}
+
 type fileHostingerConfig struct {
 	APIToken        string `yaml:"apiToken,omitempty"`
 	APIURL          string `yaml:"apiUrl,omitempty"`
@@ -2524,6 +2779,25 @@ type fileOpenSandboxConfig struct {
 	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
 }
 
+type fileVercelSandboxConfig struct {
+	Runtime         *string   `yaml:"runtime,omitempty"`
+	Workdir         *string   `yaml:"workdir,omitempty"`
+	ProjectID       *string   `yaml:"projectId,omitempty"`
+	TeamID          *string   `yaml:"teamId,omitempty"`
+	Scope           *string   `yaml:"scope,omitempty"`
+	VCPUs           *float64  `yaml:"vcpus,omitempty"`
+	TimeoutSecs     *int      `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int      `yaml:"execTimeoutSecs,omitempty"`
+	Persistent      *bool     `yaml:"persistent,omitempty"`
+	Snapshot        *string   `yaml:"snapshot,omitempty"`
+	SnapshotMode    *string   `yaml:"snapshotMode,omitempty"`
+	NetworkPolicy   *string   `yaml:"networkPolicy,omitempty"`
+	NetworkAllow    *[]string `yaml:"networkAllow,omitempty"`
+	NetworkDeny     *[]string `yaml:"networkDeny,omitempty"`
+	Ports           *[]string `yaml:"ports,omitempty"`
+	ForgetMissing   *bool     `yaml:"forgetMissing,omitempty"`
+}
+
 type fileSuperserveConfig struct {
 	BaseURL         string   `yaml:"baseUrl,omitempty"`
 	Template        *string  `yaml:"template,omitempty"`
@@ -2592,6 +2866,20 @@ type fileCloudflareConfig struct {
 	Workdir string `yaml:"workdir,omitempty"`
 }
 
+type fileCloudflareDynamicWorkersConfig struct {
+	LoaderURL          string            `yaml:"loaderUrl,omitempty"`
+	URL                string            `yaml:"url,omitempty"`
+	Token              string            `yaml:"token,omitempty"`
+	CompatibilityDate  string            `yaml:"compatibilityDate,omitempty"`
+	CompatibilityFlags []string          `yaml:"compatibilityFlags,omitempty"`
+	CacheMode          string            `yaml:"cacheMode,omitempty"`
+	Egress             string            `yaml:"egress,omitempty"`
+	CPUMs              int               `yaml:"cpuMs,omitempty"`
+	Subrequests        int               `yaml:"subrequests,omitempty"`
+	TimeoutSecs        int               `yaml:"timeoutSecs,omitempty"`
+	Metadata           map[string]string `yaml:"metadata,omitempty"`
+}
+
 func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig) {
 	if file == nil {
 		return
@@ -2605,6 +2893,116 @@ func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig) {
 	if file.Workdir != "" {
 		cfg.Cloudflare.Workdir = file.Workdir
 	}
+}
+
+func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDynamicWorkersConfig, trusted bool) {
+	if file == nil {
+		return
+	}
+	if trusted {
+		if file.LoaderURL != "" {
+			cfg.CloudflareDynamicWorkers.LoaderURL = file.LoaderURL
+		}
+		if file.URL != "" {
+			cfg.CloudflareDynamicWorkers.LoaderURL = file.URL
+		}
+		if file.Token != "" {
+			cfg.CloudflareDynamicWorkers.Token = file.Token
+		}
+	}
+	if file.CompatibilityDate != "" {
+		cfg.CloudflareDynamicWorkers.CompatibilityDate = file.CompatibilityDate
+	}
+	if len(file.CompatibilityFlags) > 0 {
+		cfg.CloudflareDynamicWorkers.CompatibilityFlags = append([]string(nil), file.CompatibilityFlags...)
+	}
+	if file.CacheMode != "" {
+		cfg.CloudflareDynamicWorkers.CacheMode = file.CacheMode
+	}
+	if file.Egress != "" && (trusted || strings.EqualFold(strings.TrimSpace(file.Egress), "blocked")) {
+		cfg.CloudflareDynamicWorkers.Egress = file.Egress
+	}
+	if trusted {
+		if file.CPUMs > 0 {
+			cfg.CloudflareDynamicWorkers.CPUMs = file.CPUMs
+		}
+		if file.Subrequests > 0 {
+			cfg.CloudflareDynamicWorkers.Subrequests = file.Subrequests
+		}
+		if file.TimeoutSecs > 0 {
+			cfg.CloudflareDynamicWorkers.TimeoutSecs = file.TimeoutSecs
+		}
+	} else {
+		cfg.CloudflareDynamicWorkers.repositoryCPUMsCap = positiveMinimum(
+			cfg.CloudflareDynamicWorkers.repositoryCPUMsCap,
+			file.CPUMs,
+		)
+		cfg.CloudflareDynamicWorkers.repositorySubrequestsCap = positiveMinimum(
+			cfg.CloudflareDynamicWorkers.repositorySubrequestsCap,
+			file.Subrequests,
+		)
+		cfg.CloudflareDynamicWorkers.repositoryTimeoutSecsCap = positiveMinimum(
+			cfg.CloudflareDynamicWorkers.repositoryTimeoutSecsCap,
+			file.TimeoutSecs,
+		)
+		applyCloudflareDynamicWorkersRepositoryCaps(cfg)
+	}
+	if len(file.Metadata) > 0 {
+		cfg.CloudflareDynamicWorkers.Metadata = map[string]string{}
+		for key, value := range file.Metadata {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				cfg.CloudflareDynamicWorkers.Metadata[key] = value
+			}
+		}
+	}
+}
+
+func applyCloudflareDynamicWorkersRepositoryCaps(cfg *Config) {
+	dynamicWorkers := &cfg.CloudflareDynamicWorkers
+	if dynamicWorkers.repositoryCPUMsCap > 0 &&
+		(dynamicWorkers.CPUMs > 0 || dynamicWorkers.repositoryCPUMsCapActive) {
+		if dynamicWorkers.CPUMs <= 0 {
+			dynamicWorkers.CPUMs = dynamicWorkers.repositoryCPUMsCap
+		} else {
+			dynamicWorkers.CPUMs = min(dynamicWorkers.CPUMs, dynamicWorkers.repositoryCPUMsCap)
+		}
+		dynamicWorkers.repositoryCPUMsCapActive = true
+	}
+	if dynamicWorkers.repositorySubrequestsCap > 0 &&
+		(dynamicWorkers.Subrequests > 0 || dynamicWorkers.repositorySubrequestsCapActive) {
+		if dynamicWorkers.Subrequests <= 0 {
+			dynamicWorkers.Subrequests = dynamicWorkers.repositorySubrequestsCap
+		} else {
+			dynamicWorkers.Subrequests = min(
+				dynamicWorkers.Subrequests,
+				dynamicWorkers.repositorySubrequestsCap,
+			)
+		}
+		dynamicWorkers.repositorySubrequestsCapActive = true
+	}
+	if dynamicWorkers.repositoryTimeoutSecsCap > 0 &&
+		(dynamicWorkers.TimeoutSecs > 0 || dynamicWorkers.repositoryTimeoutSecsCapActive) {
+		if dynamicWorkers.TimeoutSecs <= 0 {
+			dynamicWorkers.TimeoutSecs = dynamicWorkers.repositoryTimeoutSecsCap
+		} else {
+			dynamicWorkers.TimeoutSecs = min(
+				dynamicWorkers.TimeoutSecs,
+				dynamicWorkers.repositoryTimeoutSecsCap,
+			)
+		}
+		dynamicWorkers.repositoryTimeoutSecsCapActive = true
+	}
+}
+
+func positiveMinimum(current, candidate int) int {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 {
+		return candidate
+	}
+	return min(current, candidate)
 }
 
 type fileSemaphoreConfig struct {
@@ -2862,35 +3260,38 @@ type fileLeaseConfig struct {
 }
 
 type fileJobConfig struct {
-	Provider       string                `yaml:"provider,omitempty"`
-	Target         string                `yaml:"target,omitempty"`
-	TargetOS       string                `yaml:"targetOS,omitempty"`
-	Windows        *fileWindowsConfig    `yaml:"windows,omitempty"`
-	Profile        string                `yaml:"profile,omitempty"`
-	Class          string                `yaml:"class,omitempty"`
-	Architecture   string                `yaml:"architecture,omitempty"`
-	ServerType     string                `yaml:"serverType,omitempty"`
-	Type           string                `yaml:"type,omitempty"`
-	Capacity       *fileCapacityConfig   `yaml:"capacity,omitempty"`
-	Market         string                `yaml:"market,omitempty"`
-	TTL            string                `yaml:"ttl,omitempty"`
-	IdleTimeout    string                `yaml:"idleTimeout,omitempty"`
-	Desktop        *bool                 `yaml:"desktop,omitempty"`
-	DesktopEnv     string                `yaml:"desktopEnv,omitempty"`
-	Browser        *bool                 `yaml:"browser,omitempty"`
-	Code           *bool                 `yaml:"code,omitempty"`
-	Network        string                `yaml:"network,omitempty"`
-	Hydrate        *fileJobHydrateConfig `yaml:"hydrate,omitempty"`
-	Actions        *fileJobActionsConfig `yaml:"actions,omitempty"`
-	Shell          *bool                 `yaml:"shell,omitempty"`
-	Command        string                `yaml:"command,omitempty"`
-	NoSync         *bool                 `yaml:"noSync,omitempty"`
-	SyncOnly       *bool                 `yaml:"syncOnly,omitempty"`
-	Checksum       *bool                 `yaml:"checksum,omitempty"`
-	ForceSyncLarge *bool                 `yaml:"forceSyncLarge,omitempty"`
-	JUnit          []string              `yaml:"junit,omitempty"`
-	Downloads      []string              `yaml:"downloads,omitempty"`
-	Stop           string                `yaml:"stop,omitempty"`
+	Provider          string                `yaml:"provider,omitempty"`
+	Target            string                `yaml:"target,omitempty"`
+	TargetOS          string                `yaml:"targetOS,omitempty"`
+	Windows           *fileWindowsConfig    `yaml:"windows,omitempty"`
+	Profile           string                `yaml:"profile,omitempty"`
+	Class             string                `yaml:"class,omitempty"`
+	Architecture      string                `yaml:"architecture,omitempty"`
+	ServerType        string                `yaml:"serverType,omitempty"`
+	Type              string                `yaml:"type,omitempty"`
+	Capacity          *fileCapacityConfig   `yaml:"capacity,omitempty"`
+	Market            string                `yaml:"market,omitempty"`
+	TTL               string                `yaml:"ttl,omitempty"`
+	IdleTimeout       string                `yaml:"idleTimeout,omitempty"`
+	Desktop           *bool                 `yaml:"desktop,omitempty"`
+	DesktopEnv        string                `yaml:"desktopEnv,omitempty"`
+	Browser           *bool                 `yaml:"browser,omitempty"`
+	Code              *bool                 `yaml:"code,omitempty"`
+	Network           string                `yaml:"network,omitempty"`
+	Hydrate           *fileJobHydrateConfig `yaml:"hydrate,omitempty"`
+	Actions           *fileJobActionsConfig `yaml:"actions,omitempty"`
+	Shell             *bool                 `yaml:"shell,omitempty"`
+	Command           string                `yaml:"command,omitempty"`
+	NoSync            *bool                 `yaml:"noSync,omitempty"`
+	SyncOnly          *bool                 `yaml:"syncOnly,omitempty"`
+	Checksum          *bool                 `yaml:"checksum,omitempty"`
+	ForceSyncLarge    *bool                 `yaml:"forceSyncLarge,omitempty"`
+	JUnit             []string              `yaml:"junit,omitempty"`
+	Label             string                `yaml:"label,omitempty"`
+	ArtifactGlobs     []string              `yaml:"artifactGlobs,omitempty"`
+	RequiredArtifacts []string              `yaml:"requiredArtifacts,omitempty"`
+	Downloads         []string              `yaml:"downloads,omitempty"`
+	Stop              string                `yaml:"stop,omitempty"`
 }
 
 type fileJobHydrateConfig struct {
@@ -3516,6 +3917,8 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.SSH.FallbackPorts != nil {
 			cfg.SSHFallbackPorts = normalizeList(*file.SSH.FallbackPorts)
+			cfg.sshFallbackPortsExplicit = true
+			cfg.explicitSSHFallbackPorts = append([]string(nil), cfg.SSHFallbackPorts...)
 		}
 	}
 	if file.WorkRoot != "" {
@@ -3727,6 +4130,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.External.Config != nil {
 			cfg.External.Config = file.External.Config
 		}
+		if file.External.Capabilities != nil {
+			cfg.External.Capabilities = *file.External.Capabilities
+		}
 		if file.External.Lifecycle != nil {
 			cfg.External.Lifecycle = *file.External.Lifecycle
 		}
@@ -3922,6 +4328,47 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Runpod.WorkRoot != "" {
 			cfg.Runpod.WorkRoot = file.Runpod.WorkRoot
+		}
+	}
+	if file.NvidiaBrev != nil {
+		if trusted && file.NvidiaBrev.CLI != "" {
+			cfg.NvidiaBrev.CLI = file.NvidiaBrev.CLI
+		}
+		if file.NvidiaBrev.Org != "" {
+			cfg.NvidiaBrev.Org = file.NvidiaBrev.Org
+		}
+		if file.NvidiaBrev.Type != "" {
+			cfg.NvidiaBrev.Type = file.NvidiaBrev.Type
+		}
+		if file.NvidiaBrev.GPUName != "" {
+			cfg.NvidiaBrev.GPUName = file.NvidiaBrev.GPUName
+		}
+		if file.NvidiaBrev.Provider != "" {
+			cfg.NvidiaBrev.Provider = file.NvidiaBrev.Provider
+		}
+		if file.NvidiaBrev.Mode != "" {
+			cfg.NvidiaBrev.Mode = file.NvidiaBrev.Mode
+		}
+		if file.NvidiaBrev.Launchable != "" {
+			cfg.NvidiaBrev.Launchable = file.NvidiaBrev.Launchable
+		}
+		if file.NvidiaBrev.StartupScript != "" &&
+			(trusted || !strings.HasPrefix(strings.TrimSpace(file.NvidiaBrev.StartupScript), "@")) {
+			cfg.NvidiaBrev.StartupScript = file.NvidiaBrev.StartupScript
+		}
+		if file.NvidiaBrev.ReleaseAction != "" {
+			cfg.NvidiaBrev.ReleaseAction = file.NvidiaBrev.ReleaseAction
+			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+		}
+		if file.NvidiaBrev.Target != "" {
+			cfg.NvidiaBrev.Target = file.NvidiaBrev.Target
+		}
+		if file.NvidiaBrev.User != "" {
+			cfg.NvidiaBrev.User = file.NvidiaBrev.User
+		}
+		if file.NvidiaBrev.WorkRoot != "" {
+			cfg.NvidiaBrev.WorkRoot = file.NvidiaBrev.WorkRoot
+			MarkNvidiaBrevWorkRootExplicit(cfg)
 		}
 	}
 	if file.Hostinger != nil {
@@ -4147,6 +4594,62 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.OpenSandbox.UseServerProxy = *file.OpenSandbox.UseServerProxy
 		}
 	}
+	if file.VercelSandbox != nil {
+		if file.VercelSandbox.Runtime != nil {
+			cfg.VercelSandbox.Runtime = *file.VercelSandbox.Runtime
+		}
+		if file.VercelSandbox.Workdir != nil {
+			cfg.VercelSandbox.Workdir = *file.VercelSandbox.Workdir
+		}
+		if file.VercelSandbox.ProjectID != nil {
+			cfg.VercelSandbox.ProjectID = *file.VercelSandbox.ProjectID
+		}
+		if file.VercelSandbox.TeamID != nil {
+			cfg.VercelSandbox.TeamID = *file.VercelSandbox.TeamID
+		}
+		if file.VercelSandbox.Scope != nil {
+			cfg.VercelSandbox.Scope = *file.VercelSandbox.Scope
+		}
+		if file.VercelSandbox.VCPUs != nil {
+			cfg.VercelSandbox.VCPUs = *file.VercelSandbox.VCPUs
+		}
+		if file.VercelSandbox.TimeoutSecs != nil {
+			if *file.VercelSandbox.TimeoutSecs < 0 {
+				return exit(2, "vercel-sandbox timeoutSecs must be non-negative")
+			}
+			cfg.VercelSandbox.TimeoutSecs = *file.VercelSandbox.TimeoutSecs
+		}
+		if file.VercelSandbox.ExecTimeoutSecs != nil {
+			if *file.VercelSandbox.ExecTimeoutSecs < 0 {
+				return exit(2, "vercel-sandbox execTimeoutSecs must be non-negative")
+			}
+			cfg.VercelSandbox.ExecTimeoutSecs = *file.VercelSandbox.ExecTimeoutSecs
+		}
+		if file.VercelSandbox.Persistent != nil {
+			cfg.VercelSandbox.Persistent = *file.VercelSandbox.Persistent
+		}
+		if file.VercelSandbox.Snapshot != nil {
+			cfg.VercelSandbox.Snapshot = *file.VercelSandbox.Snapshot
+		}
+		if file.VercelSandbox.SnapshotMode != nil {
+			cfg.VercelSandbox.SnapshotMode = *file.VercelSandbox.SnapshotMode
+		}
+		if file.VercelSandbox.NetworkPolicy != nil {
+			cfg.VercelSandbox.NetworkPolicy = *file.VercelSandbox.NetworkPolicy
+		}
+		if file.VercelSandbox.NetworkAllow != nil {
+			cfg.VercelSandbox.NetworkAllow = normalizeList(*file.VercelSandbox.NetworkAllow)
+		}
+		if file.VercelSandbox.NetworkDeny != nil {
+			cfg.VercelSandbox.NetworkDeny = normalizeList(*file.VercelSandbox.NetworkDeny)
+		}
+		if file.VercelSandbox.Ports != nil {
+			cfg.VercelSandbox.Ports = normalizeList(*file.VercelSandbox.Ports)
+		}
+		if file.VercelSandbox.ForgetMissing != nil {
+			cfg.VercelSandbox.ForgetMissing = *file.VercelSandbox.ForgetMissing
+		}
+	}
 	if file.Superserve != nil {
 		if trusted && strings.TrimSpace(file.Superserve.BaseURL) != "" {
 			cfg.Superserve.BaseURL = file.Superserve.BaseURL
@@ -4294,6 +4797,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	applyCloudflareFileConfig(cfg, file.Cloudflare)
+	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
 	if file.Semaphore != nil {
 		if file.Semaphore.Host != "" {
 			cfg.Semaphore.Host = file.Semaphore.Host
@@ -4915,6 +5419,15 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 	if len(file.JUnit) > 0 {
 		job.JUnit = appendUniqueStrings(nil, file.JUnit...)
 	}
+	if file.Label != "" {
+		job.Label = file.Label
+	}
+	if len(file.ArtifactGlobs) > 0 {
+		job.ArtifactGlobs = appendUniqueStrings(nil, file.ArtifactGlobs...)
+	}
+	if len(file.RequiredArtifacts) > 0 {
+		job.RequiredArtifacts = appendUniqueStrings(nil, file.RequiredArtifacts...)
+	}
 	if len(file.Downloads) > 0 {
 		job.Downloads = appendUniqueStrings(nil, file.Downloads...)
 	}
@@ -5233,6 +5746,8 @@ func applyEnv(cfg *Config) error {
 	}
 	if ports, ok := getenvList("CRABBOX_SSH_FALLBACK_PORTS"); ok {
 		cfg.SSHFallbackPorts = ports
+		cfg.sshFallbackPortsExplicit = true
+		cfg.explicitSSHFallbackPorts = append([]string(nil), ports...)
 	}
 	cfg.ProviderKey = getenv("CRABBOX_HETZNER_SSH_KEY", cfg.ProviderKey)
 	if workRoot := os.Getenv("CRABBOX_WORK_ROOT"); workRoot != "" {
@@ -5305,6 +5820,9 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.External.WorkRoot = getenv("CRABBOX_EXTERNAL_WORK_ROOT", cfg.External.WorkRoot)
 	cfg.External.RoutingFile = getenv("CRABBOX_EXTERNAL_ROUTING_FILE", cfg.External.RoutingFile)
+	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
+		cfg.External.Capabilities.IdempotentLeaseID = value
+	}
 	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)
 	cfg.Namespace.Size = getenv("CRABBOX_NAMESPACE_SIZE", cfg.Namespace.Size)
 	cfg.Namespace.Repository = getenv("CRABBOX_NAMESPACE_REPOSITORY", cfg.Namespace.Repository)
@@ -5385,6 +5903,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Runpod.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.Runpod.DiskGB)
 	cfg.Runpod.User = getenv("CRABBOX_RUNPOD_USER", cfg.Runpod.User)
 	cfg.Runpod.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.Runpod.WorkRoot)
+	cfg.NvidiaBrev.CLI = getenv("CRABBOX_NVIDIA_BREV_CLI", cfg.NvidiaBrev.CLI)
+	cfg.NvidiaBrev.Org = getenv("CRABBOX_NVIDIA_BREV_ORG", cfg.NvidiaBrev.Org)
+	cfg.NvidiaBrev.Type = getenv("CRABBOX_NVIDIA_BREV_TYPE", cfg.NvidiaBrev.Type)
+	cfg.NvidiaBrev.GPUName = getenv("CRABBOX_NVIDIA_BREV_GPU_NAME", cfg.NvidiaBrev.GPUName)
+	cfg.NvidiaBrev.Provider = getenv("CRABBOX_NVIDIA_BREV_PROVIDER", cfg.NvidiaBrev.Provider)
+	cfg.NvidiaBrev.Mode = getenv("CRABBOX_NVIDIA_BREV_MODE", cfg.NvidiaBrev.Mode)
+	cfg.NvidiaBrev.Launchable = getenv("CRABBOX_NVIDIA_BREV_LAUNCHABLE", cfg.NvidiaBrev.Launchable)
+	cfg.NvidiaBrev.StartupScript = getenv("CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT", cfg.NvidiaBrev.StartupScript)
+	if value := os.Getenv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION"); value != "" {
+		cfg.NvidiaBrev.ReleaseAction = value
+		MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+	}
+	cfg.NvidiaBrev.Target = getenv("CRABBOX_NVIDIA_BREV_TARGET", cfg.NvidiaBrev.Target)
+	cfg.NvidiaBrev.User = getenv("CRABBOX_NVIDIA_BREV_USER", cfg.NvidiaBrev.User)
+	if value := os.Getenv("CRABBOX_NVIDIA_BREV_WORK_ROOT"); value != "" {
+		cfg.NvidiaBrev.WorkRoot = value
+		MarkNvidiaBrevWorkRootExplicit(cfg)
+	}
 	cfg.Hostinger.APIToken = getenv("CRABBOX_HOSTINGER_API_TOKEN", getenv("HOSTINGER_API_TOKEN", cfg.Hostinger.APIToken))
 	cfg.Hostinger.APIURL = getenv("CRABBOX_HOSTINGER_API_URL", getenv("HOSTINGER_API_URL", cfg.Hostinger.APIURL))
 	cfg.Hostinger.ItemID = getenv("CRABBOX_HOSTINGER_ITEM_ID", cfg.Hostinger.ItemID)
@@ -5484,6 +6020,38 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
 		cfg.OpenSandbox.UseServerProxy = v
 	}
+	cfg.VercelSandbox.Runtime = getenv("CRABBOX_VERCEL_SANDBOX_RUNTIME", cfg.VercelSandbox.Runtime)
+	cfg.VercelSandbox.Workdir = getenv("CRABBOX_VERCEL_SANDBOX_WORKDIR", cfg.VercelSandbox.Workdir)
+	cfg.VercelSandbox.ProjectID = getenv("CRABBOX_VERCEL_SANDBOX_PROJECT_ID", cfg.VercelSandbox.ProjectID)
+	cfg.VercelSandbox.TeamID = getenv("CRABBOX_VERCEL_SANDBOX_TEAM_ID", cfg.VercelSandbox.TeamID)
+	cfg.VercelSandbox.Scope = getenv("CRABBOX_VERCEL_SANDBOX_SCOPE", cfg.VercelSandbox.Scope)
+	cfg.VercelSandbox.VCPUs = getenvFloat("CRABBOX_VERCEL_SANDBOX_VCPUS", cfg.VercelSandbox.VCPUs)
+	cfg.VercelSandbox.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_VERCEL_SANDBOX_TIMEOUT_SECS", cfg.VercelSandbox.TimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.VercelSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_VERCEL_SANDBOX_EXEC_TIMEOUT_SECS", cfg.VercelSandbox.ExecTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	if v, ok := getenvBool("CRABBOX_VERCEL_SANDBOX_PERSISTENT"); ok {
+		cfg.VercelSandbox.Persistent = v
+	}
+	cfg.VercelSandbox.Snapshot = getenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT", cfg.VercelSandbox.Snapshot)
+	cfg.VercelSandbox.SnapshotMode = getenv("CRABBOX_VERCEL_SANDBOX_SNAPSHOT_MODE", cfg.VercelSandbox.SnapshotMode)
+	cfg.VercelSandbox.NetworkPolicy = getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_POLICY", cfg.VercelSandbox.NetworkPolicy)
+	if allow := os.Getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_ALLOW"); allow != "" {
+		cfg.VercelSandbox.NetworkAllow = splitCommaList(allow)
+	}
+	if deny := os.Getenv("CRABBOX_VERCEL_SANDBOX_NETWORK_DENY"); deny != "" {
+		cfg.VercelSandbox.NetworkDeny = splitCommaList(deny)
+	}
+	if ports := os.Getenv("CRABBOX_VERCEL_SANDBOX_PORTS"); ports != "" {
+		cfg.VercelSandbox.Ports = splitCommaList(ports)
+	}
+	if v, ok := getenvBool("CRABBOX_VERCEL_SANDBOX_FORGET_MISSING"); ok {
+		cfg.VercelSandbox.ForgetMissing = v
+	}
 	cfg.Superserve.BaseURL = getenv("CRABBOX_SUPERSERVE_BASE_URL", getenv("SUPERSERVE_BASE_URL", cfg.Superserve.BaseURL))
 	cfg.Superserve.Template = getenv("CRABBOX_SUPERSERVE_TEMPLATE", cfg.Superserve.Template)
 	cfg.Superserve.Snapshot = getenv("CRABBOX_SUPERSERVE_SNAPSHOT", cfg.Superserve.Snapshot)
@@ -5563,6 +6131,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Cloudflare.APIURL = getenv("CRABBOX_CLOUDFLARE_RUNNER_URL", cfg.Cloudflare.APIURL)
 	cfg.Cloudflare.Token = getenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", cfg.Cloudflare.Token)
 	cfg.Cloudflare.Workdir = getenv("CRABBOX_CLOUDFLARE_WORKDIR", cfg.Cloudflare.Workdir)
+	cfg.CloudflareDynamicWorkers.LoaderURL = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL", cfg.CloudflareDynamicWorkers.LoaderURL))
+	cfg.CloudflareDynamicWorkers.Token = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN", cfg.CloudflareDynamicWorkers.Token)
+	cfg.CloudflareDynamicWorkers.CompatibilityDate = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_DATE", cfg.CloudflareDynamicWorkers.CompatibilityDate)
+	if flags, ok := getenvList("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_COMPATIBILITY_FLAGS"); ok {
+		cfg.CloudflareDynamicWorkers.CompatibilityFlags = flags
+	}
+	cfg.CloudflareDynamicWorkers.CacheMode = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CACHE_MODE", cfg.CloudflareDynamicWorkers.CacheMode)
+	cfg.CloudflareDynamicWorkers.Egress = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_EGRESS", cfg.CloudflareDynamicWorkers.Egress)
+	cfg.CloudflareDynamicWorkers.CPUMs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", cfg.CloudflareDynamicWorkers.CPUMs)
+	cfg.CloudflareDynamicWorkers.Subrequests = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", cfg.CloudflareDynamicWorkers.Subrequests)
+	cfg.CloudflareDynamicWorkers.TimeoutSecs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", cfg.CloudflareDynamicWorkers.TimeoutSecs)
 	cfg.Semaphore.Host = getenv("CRABBOX_SEMAPHORE_HOST", getenv("SEMAPHORE_HOST", cfg.Semaphore.Host))
 	cfg.Semaphore.Token = getenv("CRABBOX_SEMAPHORE_TOKEN", getenv("SEMAPHORE_API_TOKEN", cfg.Semaphore.Token))
 	cfg.Semaphore.Project = getenv("CRABBOX_SEMAPHORE_PROJECT", getenv("SEMAPHORE_PROJECT", cfg.Semaphore.Project))
@@ -6066,6 +6645,9 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	}
 	if template.TargetOS != "" {
 		cfg.TargetOS = normalizeTargetOS(template.TargetOS)
+		if !IsTargetExplicit(cfg) {
+			cfg.inferredTargetProvider = parallelsProvider
+		}
 	}
 	if template.WindowsMode != "" {
 		cfg.WindowsMode = template.WindowsMode

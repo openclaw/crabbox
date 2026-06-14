@@ -70,6 +70,7 @@ export interface Env {
   CRABBOX_WORKSPACE_PROVIDER?: string;
   CRABBOX_WORKSPACE_CLASS?: string;
   CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?: string;
+  CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?: string;
   CRABBOX_DEFAULT_ORG?: string;
   CRABBOX_ACCESS_TEAM_DOMAIN?: string;
   CRABBOX_ACCESS_AUD?: string;
@@ -420,6 +421,7 @@ export interface LeaseNetworkState {
   sshSourceCIDRs?: string[];
   sshSourceCIDRsComplete?: boolean;
   awsSecurityGroupID?: string;
+  awsSecurityGroupName?: string;
   awsSubnetID?: string;
 }
 
@@ -442,8 +444,6 @@ export interface TailscaleMetadata {
   error?: string;
   version?: string;
   deviceID?: string;
-  cleanupState?: "missing_device_id" | "api_delete_succeeded" | "api_delete_failed";
-  cleanupError?: string;
   exitNode?: string;
   exitNodeAllowLanAccess?: boolean;
 }

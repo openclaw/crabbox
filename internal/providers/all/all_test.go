@@ -60,6 +60,21 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"nvidia-brev", "brev", "nvidia"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "nvidia-brev" {
+			t.Fatalf("ProviderFor(%q).Name=%q want nvidia-brev", name, provider.Name())
+		}
+		if _, ok := provider.(core.DoctorProvider); !ok {
+			t.Fatalf("ProviderFor(%q) does not expose doctor", name)
+		}
+	}
+}
+
 func TestAgentSandboxRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("agent-sandbox")
 	if err != nil {
@@ -123,6 +138,31 @@ func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestVercelSandboxRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("vercel-sandbox")
+	if err != nil {
+		t.Fatalf("ProviderFor(vercel-sandbox): %v", err)
+	}
+	if provider.Name() != "vercel-sandbox" {
+		t.Fatalf("ProviderFor(vercel-sandbox).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Family != "vercel" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("vercel-sandbox spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("vercel-sandbox targets=%#v", spec.Targets)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("vercel-sandbox features=%v", spec.Features)
+	}
+	for _, alias := range []string{"vercel", "vsb", "sandbox"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "vercel-sandbox" {
+			t.Fatalf("%q alias unexpectedly resolves to vercel-sandbox", alias)
+		}
+	}
+}
+
 func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
 		provider, err := core.ProviderFor(name)
@@ -136,6 +176,36 @@ func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	spec := mustProvider(t, "anthropic-sandbox-runtime").Spec()
 	if spec.Family != "anthropic-sandbox-runtime" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Features) != 0 {
 		t.Fatalf("anthropic-sandbox-runtime spec=%#v", spec)
+	}
+}
+
+func TestCloudflareDynamicWorkersRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"cloudflare-dynamic-workers", "cf-dynamic", "cfdw"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "cloudflare-dynamic-workers" {
+			t.Fatalf("ProviderFor(%q).Name=%q", name, provider.Name())
+		}
+	}
+	if provider := mustProvider(t, "cloudflare"); provider.Name() != "cloudflare" {
+		t.Fatalf("cloudflare resolved to %q; dynamic workers must not replace Cloudflare Containers", provider.Name())
+	}
+	if provider := mustProvider(t, "cf"); provider.Name() != "cloudflare" {
+		t.Fatalf("cf alias resolved to %q; dynamic workers must not steal it", provider.Name())
+	}
+	spec := mustProvider(t, "cloudflare-dynamic-workers").Spec()
+	if spec.Family != "cloudflare" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("cloudflare-dynamic-workers spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetWorkerRuntime {
+		t.Fatalf("cloudflare-dynamic-workers targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureCleanup, core.FeatureModuleRun, core.FeatureRunSession} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("cloudflare-dynamic-workers features=%v missing %s", spec.Features, feature)
+		}
 	}
 }
 
@@ -173,6 +243,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"azure-dynamic-sessions",
 		"blacksmith-testbox",
 		"cloudflare",
+		"cloudflare-dynamic-workers",
 		"daytona",
 		"docker-sandbox",
 		"e2b",
@@ -191,6 +262,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"mxc",
 		"namespace-devbox",
 		"namespace-instance",
+		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",
 		"parallels",
@@ -207,6 +279,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"tenki",
 		"tensorlake",
 		"upstash-box",
+		"vercel-sandbox",
 		"wandb",
 		"windows-sandbox",
 		"xcp-ng",

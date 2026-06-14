@@ -199,7 +199,8 @@ CRABBOX_AWS_MAC_HOST_ID            optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token automation
 CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion
 CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for /v1/workspaces lease provisioning
-CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; currently hetzner only
+CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for /v1/workspaces terminal attachment
+CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
@@ -235,10 +236,23 @@ CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 Mac hosts during orphan sweep
 ```
 
+AWS workspace bridges use a dedicated `crabbox-workspaces` security group, separate
+from ordinary runner ingress. Workers TCP egress has no published allowlist, so
+that group accepts key-only SSH from `0.0.0.0/0`; workspace keys are deployment
+specific, host keys are pinned, and leases expire automatically.
+
 Workspace leases currently use their hard TTL for provider expiry because the
 adapter does not yet receive a trustworthy activity signal. Workspace TTLs must
 be at least 1,800 seconds so a durable claim and ambiguity-recovery window both
 fit before hard TTL.
+
+The workspace SSH public and private keys must be a matching dedicated key
+pair. The coordinator installs the public key on provisioned workspaces and
+uses the private key only for authenticated terminal attachment. Each workspace
+also receives a coordinator-generated SSH host identity whose fingerprint is
+persisted before provisioning, so first attachment does not rely on TOFU.
+The versioned workspace `attachUrl` is a bearer-authenticated server-to-server
+endpoint for control planes such as Crabfleet, not a browser portal URL.
 
 ### Artifact backend
 
