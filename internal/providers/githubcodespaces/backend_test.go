@@ -59,7 +59,7 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
-	if claim.CloudID != "cs-1" || claim.SSHHost != "cs.cs-1.main" || claim.Labels[labelEnvironmentID] != "env-cs-1" {
+	if claim.CloudID != "cs-1" || claim.SSHHost != "cs.cs-1.main" || claim.Labels[labelEnvironmentID] != "env-cs-1" || claim.Labels["work_root"] != "/workspaces/my-app" {
 		t.Fatalf("claim=%#v", claim)
 	}
 	if fg.configFor != "cs-1" {
@@ -343,6 +343,17 @@ func TestEffectiveWorkRootHonorsExplicitGenericWorkRoot(t *testing.T) {
 
 	if got := b.effectiveWorkRoot("example-org/my-app"); got != "/custom/workspace" {
 		t.Fatalf("work root=%q", got)
+	}
+}
+
+func TestLabelsCarryEffectiveWorkRoot(t *testing.T) {
+	fc := newFakeCodespacesClient()
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+
+	labels := b.labelsFor("cbx_123456789abc", "work-box", "example-org/my-app", "alice", false, releaseDelete, fakeCodespace("cs-1", "Available"), "ready")
+	if labels["work_root"] != "/workspaces/my-app" {
+		t.Fatalf("work_root=%q", labels["work_root"])
 	}
 }
 

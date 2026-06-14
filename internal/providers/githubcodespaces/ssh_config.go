@@ -108,7 +108,7 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 	}
 	if proxy != "" {
 		target.SSHConfigProxy = true
-		target.ProxyCommand = proxy
+		target.ProxyCommand = rewriteProxyCommandGHPath(proxy, cfg.GitHubCodespaces.GHPath)
 	}
 	return target, nil
 }
@@ -177,6 +177,18 @@ func proxyCommandReferencesCodespace(command, name string) bool {
 		}
 	}
 	return false
+}
+
+func rewriteProxyCommandGHPath(command, ghPath string) string {
+	ghPath = strings.TrimSpace(ghPath)
+	if ghPath == "" || ghPath == defaultGHPath {
+		return command
+	}
+	fields := splitSSHConfigFields(command)
+	if len(fields) == 0 || fields[0] != defaultGHPath {
+		return command
+	}
+	return shellQuote(ghPath) + " " + strings.Join(fields[1:], " ")
 }
 
 func validatePrivateSSHConfigFile(path string) error {
