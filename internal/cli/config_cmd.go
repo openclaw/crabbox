@@ -235,6 +235,21 @@ func configShowView(cfg Config) map[string]any {
 			"firewall": cfg.Linode.FirewallID,
 			"sshCIDRs": cfg.Linode.SSHCIDRs,
 		},
+		"githubCodespaces": map[string]any{
+			"apiUrl":           redactedConfigURL(cfg.GitHubCodespaces.APIURL),
+			"ghPath":           cfg.GitHubCodespaces.GHPath,
+			"auth":             "gh",
+			"repo":             cfg.GitHubCodespaces.Repo,
+			"ref":              cfg.GitHubCodespaces.Ref,
+			"machine":          cfg.GitHubCodespaces.Machine,
+			"devcontainerPath": cfg.GitHubCodespaces.DevcontainerPath,
+			"workingDirectory": cfg.GitHubCodespaces.WorkingDirectory,
+			"geo":              cfg.GitHubCodespaces.Geo,
+			"idleTimeout":      cfg.GitHubCodespaces.IdleTimeout.String(),
+			"retentionPeriod":  cfg.GitHubCodespaces.RetentionPeriod.String(),
+			"deleteOnRelease":  cfg.GitHubCodespaces.DeleteOnRelease,
+			"workRoot":         cfg.GitHubCodespaces.WorkRoot,
+		},
 		"lambda": map[string]any{
 			"region":           cfg.Lambda.Region,
 			"type":             cfg.Lambda.Type,
@@ -759,6 +774,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "vultr region=%s os=%s image=%s snapshot=%s firewall_group=%s vpc_ids=%s ssh_cidrs=%s user_scheme=%s\n", cfg.Vultr.Region, blank(cfg.Vultr.OS, "-"), blank(cfg.Vultr.Image, "-"), blank(cfg.Vultr.Snapshot, "-"), blank(cfg.Vultr.FirewallGroup, "-"), blank(strings.Join(cfg.Vultr.VPCIDs, ","), "-"), blank(strings.Join(cfg.Vultr.SSHCIDRs, ","), "-"), blank(cfg.Vultr.UserScheme, "-"))
 	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
+	fmt.Fprintf(w, "github_codespaces api_url=%s gh_path=%s repo=%s ref=%s machine=%s devcontainer_path=%s working_directory=%s geo=%s idle_timeout=%s retention_period=%s delete_on_release=%t work_root=%s auth=gh\n", blank(redactedConfigURL(cfg.GitHubCodespaces.APIURL), "-"), blank(cfg.GitHubCodespaces.GHPath, "-"), blank(cfg.GitHubCodespaces.Repo, "-"), blank(cfg.GitHubCodespaces.Ref, "-"), blank(cfg.GitHubCodespaces.Machine, "-"), blank(cfg.GitHubCodespaces.DevcontainerPath, "-"), blank(cfg.GitHubCodespaces.WorkingDirectory, "-"), blank(cfg.GitHubCodespaces.Geo, "-"), cfg.GitHubCodespaces.IdleTimeout, cfg.GitHubCodespaces.RetentionPeriod, cfg.GitHubCodespaces.DeleteOnRelease, blank(cfg.GitHubCodespaces.WorkRoot, "-"))
 	fmt.Fprintf(w, "lambda region=%s type=%s image=%s image_family=%s firewall_ruleset=%s ssh_cidrs=%s filesystems=%s mounts=%d auth=%s\n", cfg.Lambda.Region, cfg.Lambda.Type, blank(cfg.Lambda.Image, "-"), blank(cfg.Lambda.ImageFamily, "-"), blank(cfg.Lambda.FirewallRuleset, "-"), blank(strings.Join(cfg.Lambda.SSHCIDRs, ","), "-"), blank(strings.Join(cfg.Lambda.FilesystemNames, ","), "-"), len(cfg.Lambda.FilesystemMounts), lambdaAuthState())
 	fmt.Fprintf(w, "vast api_url=%s instance_type=%s gpu_name=%s gpu_count=%d image=%s template_id=%s runtype=%s disk_gb=%d max_dph_total=%.4g min_reliability=%.4g order=%s user=%s work_root=%s release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Vast.APIURL), "-"), blank(cfg.Vast.InstanceType, "-"), blank(cfg.Vast.GPUName, "-"), cfg.Vast.GPUCount, blank(cfg.Vast.Image, "-"), blank(cfg.Vast.TemplateID, "-"), blank(cfg.Vast.Runtype, "-"), cfg.Vast.DiskGB, cfg.Vast.MaxDphTotal, cfg.Vast.MinReliability, blank(cfg.Vast.Order, "-"), blank(cfg.Vast.User, "-"), blank(cfg.Vast.WorkRoot, "-"), blank(cfg.Vast.ReleaseAction, "-"), tokenState(cfg.Vast.APIKey))
 	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth=cli\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
