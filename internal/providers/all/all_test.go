@@ -413,6 +413,33 @@ func TestVultrRegistersAsBuiltInProvider(t *testing.T) {
 	}
 }
 
+func TestFirecrackerRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("firecracker")
+	if err != nil {
+		t.Fatalf("ProviderFor(firecracker): %v", err)
+	}
+	if provider.Name() != "firecracker" {
+		t.Fatalf("ProviderFor(firecracker).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Family != "firecracker" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("firecracker spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("firecracker targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("firecracker features=%v missing %s", spec.Features, feature)
+		}
+	}
+	for _, alias := range []string{"fc", "firecracker-vm"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "firecracker" {
+			t.Fatalf("%q alias unexpectedly resolves to firecracker", alias)
+		}
+	}
+}
+
 func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
 	for _, name := range []string{"apple-vz", "applevz"} {
 		provider, err := core.ProviderFor(name)
@@ -1114,6 +1141,7 @@ func allBuiltInProviderNames() []string {
 		"exe-dev",
 		"external",
 		"fastapi-cloud",
+		"firecracker",
 		"freestyle",
 		"gcp",
 		"hetzner",

@@ -307,6 +307,20 @@
     "caveat": "Cannot execute arbitrary Crabbox run commands or stop apps",
     "docs": "fastapi-cloud.md"
   },
+  "firecracker": {
+    "status": "built-in",
+    "category": "self-hosted-virtualization",
+    "substrate": "Firecracker microVM",
+    "location": "self-hosted",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox contract",
+    "cleanup": "placeholder only in PLAN-01",
+    "bestFit": "Linux KVM host with prepared Firecracker kernel and rootfs",
+    "caveat": "PLAN-01 ships config and doctor only; lifecycle requires Linux, /dev/kvm, and CNI setup",
+    "docs": "firecracker.md"
+  },
   "freestyle": {
     "status": "built-in",
     "category": "delegated-sandbox",

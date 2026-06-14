@@ -2940,6 +2940,136 @@ func TestLoadConfigIncusSpecificUserAndWorkRootOverrideTopLevel(t *testing.T) {
 	}
 }
 
+func TestFirecrackerConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Firecracker.Binary != "firecracker" || cfg.Firecracker.Kernel != "/var/lib/crabbox/firecracker/vmlinux" || cfg.Firecracker.RootFS != "/var/lib/crabbox/firecracker/rootfs.ext4" {
+		t.Fatalf("firecracker path defaults not applied: %#v", cfg.Firecracker)
+	}
+	if cfg.Firecracker.User != "crabbox" || cfg.Firecracker.WorkRoot != "/work/crabbox" || cfg.Firecracker.CPUs != 4 || cfg.Firecracker.MemoryMiB != 4096 || cfg.Firecracker.DiskMiB != 16384 {
+		t.Fatalf("firecracker sizing defaults not applied: %#v", cfg.Firecracker)
+	}
+	if cfg.Firecracker.Network != "cni" || cfg.Firecracker.CNINetwork != "crabbox-firecracker" || cfg.Firecracker.CNIConfDir != "/etc/cni/conf.d" || cfg.Firecracker.CNIBinDir != "/opt/cni/bin" || cfg.Firecracker.LaunchTimeout != 2*time.Minute || !cfg.Firecracker.DeleteOnRelease {
+		t.Fatalf("firecracker runtime defaults not applied: %#v", cfg.Firecracker)
+	}
+
+	deleteOnRelease := false
+	cpus := 6
+	memoryMiB := 8192
+	diskMiB := 24576
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "firecracker",
+		Firecracker: &fileFirecrackerConfig{
+			Binary:          "/opt/bin/firecracker",
+			Jailer:          "/opt/bin/jailer",
+			Kernel:          "/var/lib/firecracker/vmlinux.custom",
+			RootFS:          "/var/lib/firecracker/rootfs.custom.ext4",
+			User:            "runner",
+			WorkRoot:        "/workspace/firecracker",
+			CPUs:            &cpus,
+			MemoryMiB:       &memoryMiB,
+			DiskMiB:         &diskMiB,
+			Network:         "cni",
+			CNINetwork:      "lab-firecracker",
+			CNIConfDir:      "/etc/cni/lab",
+			CNIBinDir:       "/opt/cni/lab",
+			LaunchTimeout:   "7m",
+			DeleteOnRelease: &deleteOnRelease,
+		},
+	})
+	if cfg.Provider != "firecracker" || cfg.Firecracker.Binary != "/opt/bin/firecracker" || cfg.Firecracker.Jailer != "/opt/bin/jailer" || cfg.Firecracker.Kernel != "/var/lib/firecracker/vmlinux.custom" || cfg.Firecracker.RootFS != "/var/lib/firecracker/rootfs.custom.ext4" {
+		t.Fatalf("file firecracker paths not applied: %#v", cfg.Firecracker)
+	}
+	if cfg.Firecracker.User != "runner" || cfg.Firecracker.WorkRoot != "/workspace/firecracker" || cfg.Firecracker.CPUs != 6 || cfg.Firecracker.MemoryMiB != 8192 || cfg.Firecracker.DiskMiB != 24576 {
+		t.Fatalf("file firecracker identity/sizing not applied: %#v", cfg.Firecracker)
+	}
+	if cfg.Firecracker.CNINetwork != "lab-firecracker" || cfg.Firecracker.CNIConfDir != "/etc/cni/lab" || cfg.Firecracker.CNIBinDir != "/opt/cni/lab" || cfg.Firecracker.LaunchTimeout != 7*time.Minute || cfg.Firecracker.DeleteOnRelease {
+		t.Fatalf("file firecracker runtime not applied: %#v", cfg.Firecracker)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "firecracker") {
+		t.Fatal("file firecracker deleteOnRelease should mark explicit state")
+	}
+
+	t.Setenv("CRABBOX_FIRECRACKER_BINARY", "/usr/local/bin/firecracker")
+	t.Setenv("CRABBOX_FIRECRACKER_JAILER", "/usr/local/bin/jailer")
+	t.Setenv("CRABBOX_FIRECRACKER_KERNEL", "/srv/firecracker/vmlinux")
+	t.Setenv("CRABBOX_FIRECRACKER_ROOTFS", "/srv/firecracker/rootfs.ext4")
+	t.Setenv("CRABBOX_FIRECRACKER_USER", "env-user")
+	t.Setenv("CRABBOX_FIRECRACKER_WORK_ROOT", "/env/firecracker")
+	t.Setenv("CRABBOX_FIRECRACKER_CPUS", "8")
+	t.Setenv("CRABBOX_FIRECRACKER_MEMORY_MIB", "12288")
+	t.Setenv("CRABBOX_FIRECRACKER_DISK_MIB", "32768")
+	t.Setenv("CRABBOX_FIRECRACKER_NETWORK", "cni")
+	t.Setenv("CRABBOX_FIRECRACKER_CNI_NETWORK", "env-firecracker")
+	t.Setenv("CRABBOX_FIRECRACKER_CNI_CONF_DIR", "/env/etc/cni/conf.d")
+	t.Setenv("CRABBOX_FIRECRACKER_CNI_BIN_DIR", "/env/opt/cni/bin")
+	t.Setenv("CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT", "11m")
+	t.Setenv("CRABBOX_FIRECRACKER_DELETE_ON_RELEASE", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Firecracker.Binary != "/usr/local/bin/firecracker" || cfg.Firecracker.Jailer != "/usr/local/bin/jailer" || cfg.Firecracker.Kernel != "/srv/firecracker/vmlinux" || cfg.Firecracker.RootFS != "/srv/firecracker/rootfs.ext4" {
+		t.Fatalf("env firecracker paths not applied: %#v", cfg.Firecracker)
+	}
+	if cfg.Firecracker.User != "env-user" || cfg.Firecracker.WorkRoot != "/env/firecracker" || cfg.Firecracker.CPUs != 8 || cfg.Firecracker.MemoryMiB != 12288 || cfg.Firecracker.DiskMiB != 32768 {
+		t.Fatalf("env firecracker identity/sizing not applied: %#v", cfg.Firecracker)
+	}
+	if cfg.Firecracker.CNINetwork != "env-firecracker" || cfg.Firecracker.CNIConfDir != "/env/etc/cni/conf.d" || cfg.Firecracker.CNIBinDir != "/env/opt/cni/bin" || cfg.Firecracker.LaunchTimeout != 11*time.Minute || !cfg.Firecracker.DeleteOnRelease {
+		t.Fatalf("env firecracker runtime not applied: %#v", cfg.Firecracker)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "firecracker") {
+		t.Fatal("env firecracker deleteOnRelease should remain explicit")
+	}
+}
+
+func TestLoadConfigFirecrackerPreservesExplicitTopLevelSSHUserAndWorkRoot(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: firecracker\nssh:\n  user: alice\nworkRoot: /tmp/custom\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "alice" {
+		t.Fatalf("SSHUser=%q want alice", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/tmp/custom" {
+		t.Fatalf("WorkRoot=%q want /tmp/custom", cfg.WorkRoot)
+	}
+}
+
+func TestLoadConfigFirecrackerSpecificUserAndWorkRootOverrideTopLevel(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", cfgPath)
+	body := "provider: firecracker\nssh:\n  user: alice\nworkRoot: /tmp/custom\nfirecracker:\n  user: runner\n  workRoot: /workspace/firecracker\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.SSHUser != "runner" {
+		t.Fatalf("SSHUser=%q want runner", cfg.SSHUser)
+	}
+	if cfg.WorkRoot != "/workspace/firecracker" {
+		t.Fatalf("WorkRoot=%q want /workspace/firecracker", cfg.WorkRoot)
+	}
+}
+
 func TestTartConfigYAMLExplicitZeroPreserved(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
@@ -6058,6 +6188,12 @@ func TestConfigServerTypeHelperBranches(t *testing.T) {
 	}
 	if got := proxmoxServerTypeForConfig(Config{Proxmox: ProxmoxConfig{TemplateID: 9000}}); got != "template-9000" {
 		t.Fatalf("proxmox template=%q", got)
+	}
+	if got := firecrackerServerTypeForConfig(Config{}); got != "microvm" {
+		t.Fatalf("firecracker default=%q", got)
+	}
+	if got := serverTypeForProviderClass("firecracker", "beast"); got != "microvm" {
+		t.Fatalf("firecracker provider class helper=%q", got)
 	}
 	for _, tc := range []struct {
 		class string

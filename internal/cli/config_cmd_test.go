@@ -73,6 +73,63 @@ func TestConfigShowIncludesAgentSandboxRoute(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "firecracker"
+	cfg.Firecracker.Binary = "/opt/bin/firecracker"
+	cfg.Firecracker.Jailer = "/opt/bin/jailer"
+	cfg.Firecracker.Kernel = "/var/lib/firecracker/vmlinux"
+	cfg.Firecracker.RootFS = "/var/lib/firecracker/rootfs.ext4"
+	cfg.Firecracker.User = "runner"
+	cfg.Firecracker.WorkRoot = "/workspace/firecracker"
+	cfg.Firecracker.CPUs = 6
+	cfg.Firecracker.MemoryMiB = 12288
+	cfg.Firecracker.DiskMiB = 32768
+	cfg.Firecracker.Network = "cni"
+	cfg.Firecracker.CNINetwork = "lab-firecracker"
+	cfg.Firecracker.CNIConfDir = "/etc/cni/lab"
+	cfg.Firecracker.CNIBinDir = "/opt/cni/lab"
+	cfg.Firecracker.LaunchTimeout = 3 * time.Minute
+	cfg.Firecracker.DeleteOnRelease = false
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	view := configShowView(cfg)
+	firecracker, ok := view["firecracker"].(map[string]any)
+	if !ok || firecracker["binary"] != "/opt/bin/firecracker" || firecracker["jailer"] != "/opt/bin/jailer" ||
+		firecracker["kernel"] != "/var/lib/firecracker/vmlinux" || firecracker["rootfs"] != "/var/lib/firecracker/rootfs.ext4" ||
+		firecracker["workRoot"] != "/workspace/firecracker" || firecracker["cpus"] != 6 ||
+		firecracker["memoryMiB"] != 12288 || firecracker["diskMiB"] != 32768 ||
+		firecracker["cniNetwork"] != "lab-firecracker" || firecracker["launchTimeout"] != "3m0s" ||
+		firecracker["deleteOnRelease"] != false {
+		t.Fatalf("firecracker view=%#v", firecracker)
+	}
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	for _, want := range []string{
+		"firecracker binary=/opt/bin/firecracker",
+		"jailer=/opt/bin/jailer",
+		"kernel=/var/lib/firecracker/vmlinux",
+		"rootfs=/var/lib/firecracker/rootfs.ext4",
+		"user=runner",
+		"work_root=/workspace/firecracker",
+		"cpus=6",
+		"memory_mib=12288",
+		"disk_mib=32768",
+		"network=cni",
+		"cni_network=lab-firecracker",
+		"cni_conf_dir=/etc/cni/lab",
+		"cni_bin_dir=/opt/cni/lab",
+		"launch_timeout=3m0s",
+		"delete_on_release=false",
+	} {
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("config show missing %q: %q", want, text.String())
+		}
+	}
+}
+
 func TestConfigSetBrokerRegisteredMode(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
