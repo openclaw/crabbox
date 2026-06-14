@@ -1140,7 +1140,7 @@ func (testIsloProvider) Spec() ProviderSpec {
 		Name:                "islo",
 		Kind:                ProviderKindDelegatedRun,
 		Targets:             []TargetSpec{{OS: targetLinux}},
-		Features:            FeatureSet{FeatureSSH, FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume},
+		Features:            FeatureSet{FeatureSSH, FeatureURLBridge, FeatureRunSession, FeatureTailscale, FeaturePauseResume, FeatureRunDownloads},
 		Coordinator:         CoordinatorNever,
 		TailscaleEgressOnly: true,
 	}
@@ -1927,6 +1927,19 @@ type testDelegatedBackend struct {
 type testIsloBackend struct {
 	testDelegatedBackend
 	stderr io.Writer
+}
+
+func (b testIsloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	result, err := b.testDelegatedBackend.Run(ctx, req)
+	if err != nil || !HasDelegatedRunDownloadRequests(req) {
+		return result, err
+	}
+	result.Artifacts, err = MaterializeDelegatedRunDownloads(ctx, b, req, result.LeaseID, b.stderr)
+	return result, err
+}
+
+func (b testIsloBackend) FetchRunFile(_ context.Context, _ DelegatedRunDownloadRequest) ([]byte, error) {
+	return []byte("islo-test-proof"), nil
 }
 
 func (b testIsloBackend) Pause(_ context.Context, req PauseRequest) error {

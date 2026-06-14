@@ -1106,6 +1106,36 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	}
 }
 
+func TestRejectDelegatedSyncOptionsAllowsBoundedDownloads(t *testing.T) {
+	spec := ProviderSpec{
+		Name:     "islo",
+		Kind:     ProviderKindDelegatedRun,
+		Features: FeatureSet{FeatureRunDownloads},
+	}
+	req := RunRequest{
+		RequiredArtifactGlobs: []string{"reports/manifest.json"},
+		Downloads:             []string{"reports/manifest.json=manifest.json"},
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, req); err != nil {
+		t.Fatalf("bounded download provider rejected supported options: %v", err)
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		ArtifactGlobs: []string{"reports/**"},
+	}); err == nil {
+		t.Fatal("bounded download provider should reject artifact globs")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		RequiredArtifactGlobs: []string{"reports/*.json"},
+	}); err == nil {
+		t.Fatal("bounded download provider should reject required globs")
+	}
+	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{
+		Downloads: []string{"https://example.test/proof=proof.json"},
+	}); err == nil {
+		t.Fatal("bounded download provider should reject URL-shaped paths")
+	}
+}
+
 func TestRejectDelegatedSyncOptionsAllowsProofFeature(t *testing.T) {
 	spec := ProviderSpec{Name: "blacksmith-testbox", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureRunProof}}
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{EmitProof: "/tmp/proof.md"}); err != nil {

@@ -502,10 +502,10 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "daytona capture stderr", provider: "daytona", args: []string{"--capture-stderr", "stderr.bin"}, want: "daytona delegates run execution; --capture-stderr is not supported"},
 		{name: "islo capture on fail", provider: "islo", args: []string{"--capture-on-fail"}, want: "islo delegates run execution; --capture-on-fail is not supported"},
 		{name: "daytona download", provider: "daytona", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "daytona delegates run execution; --download is not supported"},
-		{name: "islo download", provider: "islo", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "islo delegates run execution; --download is not supported"},
+		{name: "islo unsafe download", provider: "islo", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "--download for delegated providers requires a safe relative file path"},
 		{name: "e2b download", provider: "e2b", args: []string{"--download", "/tmp/proof=proof.bin"}, want: "e2b delegates run execution; --download is not supported"},
 		{name: "daytona require artifact", provider: "daytona", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "daytona delegates run execution; --require-artifact is not supported"},
-		{name: "islo require artifact", provider: "islo", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "islo delegates run execution; --require-artifact is not supported"},
+		{name: "islo unsafe require artifact", provider: "islo", args: []string{"--require-artifact", "../manifest.json"}, want: "--require-artifact contains unsupported characters or non-relative path"},
 		{name: "e2b require artifact", provider: "e2b", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "e2b delegates run execution; --require-artifact is not supported"},
 		{name: "e2b lease output", provider: "e2b", args: []string{"--lease-output", "session.json"}, want: "--lease-output is not supported for provider=e2b yet"},
 		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
@@ -528,6 +528,33 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 				t.Fatalf("message=%q want %q", exitErr.Message, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunCommandAcceptsIsloBoundedFileEvidence(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "proof.txt")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "islo",
+		"--no-sync",
+		"--require-artifact", "reports/proof.txt",
+		"--download", "reports/proof.txt=" + local,
+		"--",
+		"true",
+	})
+	if err != nil {
+		t.Fatalf("run err=%v\nstderr=%s", err, stderr.String())
+	}
+	data, err := os.ReadFile(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "islo-test-proof" {
+		t.Fatalf("download=%q", data)
+	}
+	if !strings.Contains(stderr.String(), "required artifact reports/proof.txt matched=1") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
