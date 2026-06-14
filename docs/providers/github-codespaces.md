@@ -89,7 +89,7 @@ Config keys under `githubCodespaces:`:
 | --- | --- | --- |
 | `apiUrl` | `https://api.github.com` | Trusted config only; useful for GitHub Enterprise-style API routing when supported by the environment. |
 | `ghPath` | `gh` | Trusted config only; local GitHub CLI executable. |
-| `repo` | inferred from the GitHub remote when possible | Repository in `owner/name` form. Required when no GitHub remote can be inferred. |
+| `repo` | inferred from the GitHub remote when possible | Repository in `owner/name` form. Trusted config, environment, or CLI flag only; repo-local config cannot redirect Codespaces creation. Required when no GitHub remote can be inferred. |
 | `ref` | empty | Git ref for new Codespaces. Empty uses GitHub's default behavior. |
 | `machine` | `basicLinux32gb` | GitHub Codespaces machine slug. `--type` is an alias for this value. |
 | `devcontainerPath` | empty | Optional devcontainer path for creation. |

@@ -4420,7 +4420,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if trusted && file.GitHubCodespaces.GHPath != "" {
 			cfg.GitHubCodespaces.GHPath = expandUserPath(file.GitHubCodespaces.GHPath)
 		}
-		if file.GitHubCodespaces.Repo != "" {
+		if trusted && file.GitHubCodespaces.Repo != "" {
 			cfg.GitHubCodespaces.Repo = file.GitHubCodespaces.Repo
 		}
 		if file.GitHubCodespaces.Ref != "" {
