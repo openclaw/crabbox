@@ -61,6 +61,10 @@ func TestNewAgentProfileGated(t *testing.T) {
 	if ap.Command() != "scripts/agent-loop.sh" {
 		t.Fatalf("command = %q", ap.Command())
 	}
+	// The boundary exposes the underlying station profile it admitted.
+	if got := ap.Profile(); got.Name != profile.Name || got.Command != profile.Command {
+		t.Fatalf("Profile() = %+v, want %+v", got, profile)
+	}
 
 	// A non-agent profile is rejected even with the phase on.
 	nonAgent := profile
