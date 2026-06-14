@@ -100,6 +100,8 @@ contract:
   `git`, `rsync`, `tar`, `curl`, and `python3`.
 - The kernel, rootfs, architecture, and CNI networking model are compatible
   with each other.
+- The configured kernel accepts the default Crabbox command line, which mounts
+  the first Firecracker drive as a writable `root=/dev/vda` root filesystem.
 
 Current `doctor` checks do **not** validate guest-side tools or boot behavior.
 They validate the host-side contract and configured file paths before lifecycle

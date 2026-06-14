@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	firecrackerDefaultKernelArgs = "ro console=ttyS0 noapic reboot=k panic=1 pci=off nomodules"
+	firecrackerDefaultKernelArgs = "root=/dev/vda rw console=ttyS0 noapic reboot=k panic=1 pci=off nomodules"
 	firecrackerGuestInterface    = "eth0"
 	firecrackerHostInterface     = "veth0"
 	firecrackerStopTimeout       = 15 * time.Second
