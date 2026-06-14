@@ -108,7 +108,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	release := releaseDelete
-	if req.Keep || !githubCodespacesDeleteOnRelease(LeaseTarget{}, cfg) {
+	if !githubCodespacesDeleteOnRelease(LeaseTarget{}, cfg) {
 		release = releaseStop
 	}
 	created, err := api.createCodespace(ctx, createCodespaceRequest{

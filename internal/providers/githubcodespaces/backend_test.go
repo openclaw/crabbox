@@ -67,6 +67,36 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 	}
 }
 
+func TestAcquireKeepDoesNotOverrideDeleteOnReleasePolicy(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.getSeq["cs-1"] = []codespace{
+		fakeCodespace("cs-1", "Provisioning"),
+		fakeCodespace("cs-1", "Available"),
+	}
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+
+	lease, err := b.Acquire(context.Background(), AcquireRequest{
+		Repo:          Repo{Root: t.TempDir(), Name: "my-app"},
+		Keep:          true,
+		RequestedSlug: "warm-box",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels["keep"] != "true" || lease.Server.Labels[labelRelease] != releaseDelete {
+		t.Fatalf("labels=%#v", lease.Server.Labels)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(lease.LeaseID, providerName)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v", ok, err)
+	}
+	if claim.Labels["keep"] != "true" || claim.Labels[labelRelease] != releaseDelete {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
 func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
