@@ -149,14 +149,28 @@ func TestAliasDoesNotCollideWithLocalContainer(t *testing.T) {
 
 func TestApplyDefaults(t *testing.T) {
 	cfg := core.BaseConfig()
+	wantImage := cfg.AppleContainer.Image
 	cfg.Provider = providerName
 	cfg.AppleContainer = core.AppleContainerConfig{}
 	applyDefaults(&cfg)
-	if cfg.AppleContainer.CLIPath != "container" || cfg.AppleContainer.Image != "debian:bookworm" || cfg.AppleContainer.User != "crabbox" || cfg.AppleContainer.WorkRoot != "/work/crabbox" {
+	if cfg.AppleContainer.CLIPath != "container" || cfg.AppleContainer.Image != wantImage || cfg.AppleContainer.User != "crabbox" || cfg.AppleContainer.WorkRoot != "/work/crabbox" {
 		t.Fatalf("defaults not applied: %#v", cfg.AppleContainer)
 	}
 	if cfg.SSHUser != "crabbox" || cfg.SSHPort != sshPort || cfg.WorkRoot != "/work/crabbox" {
 		t.Fatalf("derived ssh fields wrong: user=%s port=%s work=%s", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsPreservesExplicitImage(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AppleContainer.Image = "example-org/custom:tag"
+	applyDefaults(&cfg)
+	if cfg.AppleContainer.Image != "example-org/custom:tag" {
+		t.Fatalf("explicit image was overwritten: %q", cfg.AppleContainer.Image)
+	}
+	if cfg.ServerType != "example-org/custom:tag" {
+		t.Fatalf("server type=%q want explicit image", cfg.ServerType)
 	}
 }
 

@@ -86,7 +86,9 @@ appleContainer:
 
 Defaults applied when unset: `cliPath=container`, `image=` the Crabbox OS image
 default (follows `--os`; currently `ubuntu:26.04`), `user=crabbox`,
-`workRoot=/work/crabbox`, SSH port `22`.
+`workRoot=/work/crabbox`, SSH port `22`. If provider code is constructed
+directly without the normal config layer, an empty `appleContainer.image` falls
+back to the same Crabbox OS image default.
 
 Provider flags:
 
@@ -153,9 +155,10 @@ variable consumed by the bootstrap script.
 - `cache.volumes` are supported for rebuildable dependency caches. They are
   local to the Mac user account and are not shared with other machines.
 - The default image (the Crabbox OS image, currently `ubuntu:26.04`) bootstraps
-  packages on first start. Use a prebuilt image with SSH/Git/rsync packages when
-  startup time matters, or when the container has no network egress to install
-  them.
+  packages on first start. The bootstrap expects a Debian/Ubuntu-compatible
+  image with `apt-get`; use a prebuilt image with SSH/Git/rsync packages when
+  startup time matters, when you choose another compatible base, or when the
+  container has no network egress to install them.
 - If Apple's default container DNS setup does not inherit a working resolver,
   Crabbox passes detected host resolvers through `--dns` by default. Pass an
   explicit resolver through `--apple-container-extra-run-args '--dns <resolver>'`
