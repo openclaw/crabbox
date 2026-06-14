@@ -3022,6 +3022,71 @@ func TestFirecrackerConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestFirecrackerUntrustedConfigCannotRedirectHostExecutionPaths(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Firecracker.Binary = "/trusted/firecracker"
+	cfg.Firecracker.Jailer = "/trusted/jailer"
+	cfg.Firecracker.Kernel = "/trusted/vmlinux"
+	cfg.Firecracker.RootFS = "/trusted/rootfs.ext4"
+	cfg.Firecracker.Network = "cni"
+	cfg.Firecracker.CNINetwork = "trusted-firecracker"
+	cfg.Firecracker.CNIConfDir = "/trusted/cni/conf.d"
+	cfg.Firecracker.CNIBinDir = "/trusted/cni/bin"
+
+	cpus := 8
+	memoryMiB := 12288
+	diskMiB := 32768
+	deleteOnRelease := false
+	file := fileConfig{
+		Provider: "firecracker",
+		Firecracker: &fileFirecrackerConfig{
+			Binary:          "./repo/firecracker",
+			Jailer:          "./repo/jailer",
+			Kernel:          "./repo/vmlinux",
+			RootFS:          "./repo/rootfs.ext4",
+			User:            "runner",
+			WorkRoot:        "/workspace/firecracker",
+			CPUs:            &cpus,
+			MemoryMiB:       &memoryMiB,
+			DiskMiB:         &diskMiB,
+			Network:         "repo-cni-mode",
+			CNINetwork:      "repo-firecracker",
+			CNIConfDir:      "./repo/cni/conf.d",
+			CNIBinDir:       "./repo/cni/bin",
+			LaunchTimeout:   "9m",
+			DeleteOnRelease: &deleteOnRelease,
+		},
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "firecracker" {
+		t.Fatalf("provider=%q want firecracker", cfg.Provider)
+	}
+	if cfg.Firecracker.Binary != "/trusted/firecracker" ||
+		cfg.Firecracker.Jailer != "/trusted/jailer" ||
+		cfg.Firecracker.Kernel != "/trusted/vmlinux" ||
+		cfg.Firecracker.RootFS != "/trusted/rootfs.ext4" ||
+		cfg.Firecracker.Network != "cni" ||
+		cfg.Firecracker.CNINetwork != "trusted-firecracker" ||
+		cfg.Firecracker.CNIConfDir != "/trusted/cni/conf.d" ||
+		cfg.Firecracker.CNIBinDir != "/trusted/cni/bin" {
+		t.Fatalf("untrusted firecracker host execution path override applied: %#v", cfg.Firecracker)
+	}
+	if cfg.Firecracker.User != "runner" ||
+		cfg.Firecracker.WorkRoot != "/workspace/firecracker" ||
+		cfg.Firecracker.CPUs != cpus ||
+		cfg.Firecracker.MemoryMiB != memoryMiB ||
+		cfg.Firecracker.DiskMiB != diskMiB ||
+		cfg.Firecracker.LaunchTimeout != 9*time.Minute ||
+		cfg.Firecracker.DeleteOnRelease {
+		t.Fatalf("safe untrusted firecracker settings not applied: %#v", cfg.Firecracker)
+	}
+	if !DeleteOnReleaseExplicit(cfg, "firecracker") {
+		t.Fatal("untrusted firecracker deleteOnRelease should mark explicit state")
+	}
+}
+
 func TestLoadConfigFirecrackerPreservesExplicitTopLevelSSHUserAndWorkRoot(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

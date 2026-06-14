@@ -149,9 +149,15 @@ Defaults:
 For this provider Crabbox also normalizes `serverType` to `microvm`, `ssh.port`
 to `22`, and clears SSH fallback ports.
 
-`launchTimeout` bounds microVM startup, and `deleteOnRelease` controls whether
-Crabbox removes the copied rootfs, cloud-init drive, socket, logs, and local
-network artifacts during release.
+Host execution paths (`binary`, `jailer`, `kernel`, `rootfs`, `cniNetwork`,
+`cniConfDir`, and `cniBinDir`) are honored only from trusted user config, env,
+or flags. Repo-local `.crabbox.yaml` can still set non-executable sizing and
+guest identity fields, but it cannot redirect local host executables, guest
+images, or CNI plugin inputs.
+
+`launchTimeout` bounds both Firecracker startup and SSH readiness. When
+`deleteOnRelease=true`, release and cleanup remove Crabbox's local microVM
+artifacts after stopping the VMM.
 
 ## Environment overrides
 

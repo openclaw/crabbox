@@ -4661,16 +4661,16 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.Firecracker != nil {
-		if file.Firecracker.Binary != "" {
+		if trusted && file.Firecracker.Binary != "" {
 			cfg.Firecracker.Binary = expandUserPath(file.Firecracker.Binary)
 		}
-		if file.Firecracker.Jailer != "" {
+		if trusted && file.Firecracker.Jailer != "" {
 			cfg.Firecracker.Jailer = expandUserPath(file.Firecracker.Jailer)
 		}
-		if file.Firecracker.Kernel != "" {
+		if trusted && file.Firecracker.Kernel != "" {
 			cfg.Firecracker.Kernel = expandUserPath(file.Firecracker.Kernel)
 		}
-		if file.Firecracker.RootFS != "" {
+		if trusted && file.Firecracker.RootFS != "" {
 			cfg.Firecracker.RootFS = expandUserPath(file.Firecracker.RootFS)
 		}
 		if file.Firecracker.User != "" {
@@ -4688,16 +4688,16 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Firecracker.DiskMiB != nil {
 			cfg.Firecracker.DiskMiB = *file.Firecracker.DiskMiB
 		}
-		if file.Firecracker.Network != "" {
+		if trusted && file.Firecracker.Network != "" {
 			cfg.Firecracker.Network = file.Firecracker.Network
 		}
-		if file.Firecracker.CNINetwork != "" {
+		if trusted && file.Firecracker.CNINetwork != "" {
 			cfg.Firecracker.CNINetwork = file.Firecracker.CNINetwork
 		}
-		if file.Firecracker.CNIConfDir != "" {
+		if trusted && file.Firecracker.CNIConfDir != "" {
 			cfg.Firecracker.CNIConfDir = expandUserPath(file.Firecracker.CNIConfDir)
 		}
-		if file.Firecracker.CNIBinDir != "" {
+		if trusted && file.Firecracker.CNIBinDir != "" {
 			cfg.Firecracker.CNIBinDir = expandUserPath(file.Firecracker.CNIBinDir)
 		}
 		if file.Firecracker.LaunchTimeout != "" {
