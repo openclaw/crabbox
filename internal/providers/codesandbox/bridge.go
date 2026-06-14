@@ -14,6 +14,7 @@ import (
 const (
 	codeSandboxBridgeOutputLimit     = 1 << 20
 	codeSandboxRunCommandOutputLimit = 64 << 20
+	codeSandboxBridgeCacheDirEnv     = "CRABBOX_CODESANDBOX_BRIDGE_CACHE_DIR"
 )
 
 type BridgeRequest struct {
@@ -75,13 +76,17 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	if err != nil {
 		return BridgeResponse{}, err
 	}
+	spec := bridgeSDKSpecFor(b.cfg)
+	if err := b.ensureBridgeSDK(ctx, dir, spec); err != nil {
+		return BridgeResponse{}, err
+	}
 	ctx, cancel := withBridgeTimeout(ctx, b.cfg, req)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	result, runErr := b.rt.Exec.Run(ctx, LocalCommandRequest{
 		Name:                   bridgeCommand(b.cfg),
 		Args:                   []string{"--input-type=module", "-e", codeSandboxBridgeScript},
-		Env:                    bridgeEnv(b.cfg, token),
+		Env:                    bridgeEnv(b.cfg, token, spec.ImportSpec),
 		Dir:                    dir,
 		Stdin:                  bytes.NewReader(payload),
 		Stdout:                 &stdout,
@@ -123,6 +128,38 @@ func withBridgeTimeout(ctx context.Context, cfg CodeSandboxConfig, req BridgeReq
 	return context.WithTimeout(ctx, timeout)
 }
 
+func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridgeSDKSpec) error {
+	if !spec.Install {
+		return nil
+	}
+	if bridgeSDKInstalled(dir, spec) {
+		return nil
+	}
+	if err := writeBridgePackageJSON(dir); err != nil {
+		return err
+	}
+	setupCtx, cancel := context.WithTimeout(ctx, operationTimeout(b.cfg))
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	result, runErr := b.rt.Exec.Run(setupCtx, LocalCommandRequest{
+		Name:                   "npm",
+		Args:                   []string{"install", "--no-audit", "--no-fund", "--loglevel=error", spec.InstallSpec},
+		Env:                    bridgeSetupEnv(),
+		Dir:                    dir,
+		Stdout:                 &stdout,
+		Stderr:                 &stderr,
+		MaxCapturedOutputBytes: codeSandboxBridgeOutputLimit,
+		CancelGracePeriod:      2 * time.Second,
+	})
+	if runErr != nil || result.ExitCode != 0 {
+		return bridgeSetupError(result.ExitCode, stdout.String(), stderr.String(), runErr)
+	}
+	if err := os.WriteFile(bridgeSDKMarkerPath(dir), []byte(spec.InstallSpec+"\n"+spec.ImportSpec+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write codesandbox bridge SDK marker: %w", err)
+	}
+	return nil
+}
+
 func bridgeOutputLimit(req BridgeRequest) int {
 	if req.Operation == "run_command" {
 		return codeSandboxRunCommandOutputLimit
@@ -130,7 +167,7 @@ func bridgeOutputLimit(req BridgeRequest) int {
 	return codeSandboxBridgeOutputLimit
 }
 
-func bridgeEnv(cfg CodeSandboxConfig, token string) []string {
+func bridgeEnv(cfg CodeSandboxConfig, token, importSpec string) []string {
 	env := make([]string, 0, 8)
 	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SYSTEMROOT", "COMSPEC", "PATHEXT"} {
 		if value := os.Getenv(key); value != "" {
@@ -138,10 +175,27 @@ func bridgeEnv(cfg CodeSandboxConfig, token string) []string {
 		}
 	}
 	env = upsertEnv(env, codesandboxFallbackAPIKeyEnv, token)
-	return upsertEnv(env, "CRABBOX_CODESANDBOX_SDK_PACKAGE", sdkPackage(cfg))
+	env = upsertEnv(env, "CRABBOX_CODESANDBOX_SDK_PACKAGE", sdkPackage(cfg))
+	return upsertEnv(env, "CRABBOX_CODESANDBOX_SDK_IMPORT", importSpec)
+}
+
+func bridgeSetupEnv() []string {
+	env := make([]string, 0, 8)
+	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SYSTEMROOT", "COMSPEC", "PATHEXT"} {
+		if value := os.Getenv(key); value != "" {
+			env = upsertEnv(env, key, value)
+		}
+	}
+	return env
 }
 
 func bridgeWorkingDir() (string, error) {
+	if dir := strings.TrimSpace(os.Getenv(codeSandboxBridgeCacheDirEnv)); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("create codesandbox bridge working directory: %w", err)
+		}
+		return dir, nil
+	}
 	base, err := os.UserCacheDir()
 	if err != nil || strings.TrimSpace(base) == "" {
 		base = os.TempDir()
@@ -153,6 +207,80 @@ func bridgeWorkingDir() (string, error) {
 	return dir, nil
 }
 
+type bridgeSDKSpec struct {
+	InstallSpec string
+	ImportSpec  string
+	Install     bool
+}
+
+func bridgeSDKSpecFor(cfg CodeSandboxConfig) bridgeSDKSpec {
+	installSpec := sdkPackage(cfg)
+	importSpec, ok := npmPackageName(installSpec)
+	if !ok {
+		return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: installSpec}
+	}
+	return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: importSpec, Install: true}
+}
+
+func npmPackageName(spec string) (string, bool) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" || strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") ||
+		strings.Contains(spec, ":") {
+		return "", false
+	}
+	if strings.HasPrefix(spec, "@") {
+		scopeEnd := strings.Index(spec, "/")
+		if scopeEnd <= 1 || scopeEnd == len(spec)-1 {
+			return "", false
+		}
+		rest := spec[scopeEnd+1:]
+		nameEnd := len(rest)
+		if idx := strings.Index(rest, "@"); idx >= 0 {
+			nameEnd = idx
+		}
+		if slash := strings.Index(rest[:nameEnd], "/"); slash >= 0 {
+			nameEnd = slash
+		}
+		if nameEnd == 0 {
+			return "", false
+		}
+		return spec[:scopeEnd+1+nameEnd], true
+	}
+	nameEnd := len(spec)
+	if idx := strings.Index(spec, "@"); idx >= 0 {
+		nameEnd = idx
+	}
+	if slash := strings.Index(spec[:nameEnd], "/"); slash >= 0 {
+		nameEnd = slash
+	}
+	if nameEnd == 0 {
+		return "", false
+	}
+	return spec[:nameEnd], true
+}
+
+func bridgeSDKInstalled(dir string, spec bridgeSDKSpec) bool {
+	marker, err := os.ReadFile(bridgeSDKMarkerPath(dir))
+	if err != nil || string(marker) != spec.InstallSpec+"\n"+spec.ImportSpec+"\n" {
+		return false
+	}
+	packagePath := filepath.Join(dir, "node_modules", filepath.FromSlash(spec.ImportSpec), "package.json")
+	_, err = os.Stat(packagePath)
+	return err == nil
+}
+
+func writeBridgePackageJSON(dir string) error {
+	const data = `{"private":true,"type":"module"}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(data), 0o600); err != nil {
+		return fmt.Errorf("write codesandbox bridge package.json: %w", err)
+	}
+	return nil
+}
+
+func bridgeSDKMarkerPath(dir string) string {
+	return filepath.Join(dir, ".crabbox-codesandbox-sdk")
+}
+
 func upsertEnv(env []string, key, value string) []string {
 	prefix := key + "="
 	for i, entry := range env {
@@ -162,6 +290,23 @@ func upsertEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+func bridgeSetupError(exitCode int, stdout, stderr string, err error) error {
+	message := strings.TrimSpace(stderr)
+	if message == "" {
+		message = strings.TrimSpace(stdout)
+	}
+	if message == "" && err != nil {
+		message = err.Error()
+	}
+	if message == "" {
+		message = "no output"
+	}
+	if err != nil {
+		return fmt.Errorf("codesandbox bridge SDK setup failed exit=%d: %s: %w", exitCode, message, err)
+	}
+	return fmt.Errorf("codesandbox bridge SDK setup failed exit=%d: %s", exitCode, message)
 }
 
 func bridgeCommandError(exitCode int, stdout, stderr, token string, err error) error {
@@ -354,7 +499,7 @@ try {
   if (!token) {
     fail("auth_missing", "missing CodeSandbox API key");
   } else {
-    const pkg = process.env.CRABBOX_CODESANDBOX_SDK_PACKAGE || "@codesandbox/sdk";
+    const pkg = process.env.CRABBOX_CODESANDBOX_SDK_IMPORT || process.env.CRABBOX_CODESANDBOX_SDK_PACKAGE || "@codesandbox/sdk";
     const { CodeSandbox } = await import(pkg);
     const sdk = new CodeSandbox(token);
     if (req.operation === "list_sandboxes") {

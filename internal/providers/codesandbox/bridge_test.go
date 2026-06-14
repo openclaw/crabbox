@@ -16,6 +16,7 @@ import (
 )
 
 func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
+	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret")
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
@@ -29,6 +30,9 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 		}
 		if !envContains(req.Env, "CRABBOX_CODESANDBOX_SDK_PACKAGE=@codesandbox/sdk") {
 			t.Fatalf("bridge env missing SDK package")
+		}
+		if !envContains(req.Env, "CRABBOX_CODESANDBOX_SDK_IMPORT=@codesandbox/sdk") {
+			t.Fatalf("bridge env missing SDK import")
 		}
 		if envContains(req.Env, "AWS_SECRET_ACCESS_KEY=ambient-secret") {
 			t.Fatalf("bridge env inherited unrelated ambient secret: %#v", req.Env)
@@ -54,6 +58,14 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 	if len(resp.Sandboxes) != 1 || resp.Sandboxes[0].ID != "csb_1" || resp.TotalCount != 1 {
 		t.Fatalf("response=%#v", resp)
 	}
+	setup := runner.onlySetupCall(t)
+	if !reflect.DeepEqual(setup.Args, []string{"install", "--no-audit", "--no-fund", "--loglevel=error", "@codesandbox/sdk"}) {
+		t.Fatalf("setup args=%#v", setup.Args)
+	}
+	if envContains(setup.Env, codesandboxFallbackAPIKeyEnv+"="+secret) ||
+		envContains(setup.Env, "AWS_SECRET_ACCESS_KEY=ambient-secret") {
+		t.Fatalf("setup env leaked secret material: %#v", setup.Env)
+	}
 	call := runner.onlyCall(t)
 	if call.Name != "node" {
 		t.Fatalf("command=%q", call.Name)
@@ -64,6 +76,7 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 }
 
 func TestSDKBridgeRunCommandUsesCommandTimeoutAndLargerCaptureLimit(t *testing.T) {
+	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":0}}`)
@@ -84,16 +97,17 @@ func TestSDKBridgeRunCommandUsesCommandTimeoutAndLargerCaptureLimit(t *testing.T
 	if call.MaxCapturedOutputBytes != codeSandboxRunCommandOutputLimit {
 		t.Fatalf("run command capture limit=%d, want %d", call.MaxCapturedOutputBytes, codeSandboxRunCommandOutputLimit)
 	}
-	if len(runner.deadlines) != 1 {
-		t.Fatalf("deadlines=%d want 1", len(runner.deadlines))
+	if len(runner.deadlines) != 2 {
+		t.Fatalf("deadlines=%d want 2", len(runner.deadlines))
 	}
-	remaining := time.Until(runner.deadlines[0])
+	remaining := time.Until(runner.deadlines[1])
 	if remaining < 3500*time.Second {
 		t.Fatalf("run command bridge deadline too short: %s", remaining)
 	}
 }
 
 func TestSDKBridgeRedactsTokenFromCommandFailures(t *testing.T) {
+	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stderr, "denied "+secret)
@@ -110,6 +124,7 @@ func TestSDKBridgeRedactsTokenFromCommandFailures(t *testing.T) {
 }
 
 func TestSDKBridgeRedactsTokenFromBridgeErrorResponse(t *testing.T) {
+	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `{"ok":false,"error":{"code":"auth_denied","message":"bad `+secret+`"}}`)
@@ -173,9 +188,13 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 		!strings.Contains(codeSandboxBridgeScript, "await files.writeFile(targetPath, buffer)") {
 		t.Fatalf("bridge script must convert workspace absolute file paths before SDK writes")
 	}
+	if !strings.Contains(codeSandboxBridgeScript, "process.env.CRABBOX_CODESANDBOX_SDK_IMPORT") {
+		t.Fatalf("bridge script must import the resolved SDK package name from the trusted cache package")
+	}
 }
 
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {
+	setBridgeTestCacheDir(t)
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `not-json`)
 		return LocalCommandResult{ExitCode: 0}, nil
@@ -188,6 +207,7 @@ func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {
 }
 
 func TestCodeSandboxClientListsThroughBridge(t *testing.T) {
+	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandboxes":[{"id":"csb_1"}],"totalCount":7}`)
@@ -209,6 +229,7 @@ func TestCodeSandboxClientListsThroughBridge(t *testing.T) {
 }
 
 func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
+	setBridgeTestCacheDir(t)
 	seen := []BridgeRequest{}
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		var payload BridgeRequest
@@ -320,6 +341,9 @@ func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest
 	if deadline, ok := ctx.Deadline(); ok {
 		r.deadlines = append(r.deadlines, deadline)
 	}
+	if req.Name == "npm" {
+		return LocalCommandResult{ExitCode: 0}, nil
+	}
 	if r.fn != nil {
 		return r.fn(req)
 	}
@@ -328,10 +352,40 @@ func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest
 
 func (r *recordingBridgeRunner) onlyCall(t *testing.T) LocalCommandRequest {
 	t.Helper()
-	if len(r.calls) != 1 {
-		t.Fatalf("calls=%d want 1", len(r.calls))
+	calls := r.bridgeCalls()
+	if len(calls) != 1 {
+		t.Fatalf("bridge calls=%d want 1 (all calls=%d)", len(calls), len(r.calls))
 	}
-	return r.calls[0]
+	return calls[0]
+}
+
+func (r *recordingBridgeRunner) onlySetupCall(t *testing.T) LocalCommandRequest {
+	t.Helper()
+	calls := r.setupCalls()
+	if len(calls) != 1 {
+		t.Fatalf("setup calls=%d want 1 (all calls=%d)", len(calls), len(r.calls))
+	}
+	return calls[0]
+}
+
+func (r *recordingBridgeRunner) bridgeCalls() []LocalCommandRequest {
+	var calls []LocalCommandRequest
+	for _, call := range r.calls {
+		if call.Stdin != nil {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+func (r *recordingBridgeRunner) setupCalls() []LocalCommandRequest {
+	var calls []LocalCommandRequest
+	for _, call := range r.calls {
+		if call.Name == "npm" {
+			calls = append(calls, call)
+		}
+	}
+	return calls
 }
 
 func readRequestBody(req LocalCommandRequest) string {
@@ -349,6 +403,11 @@ func envContains(env []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func setBridgeTestCacheDir(t *testing.T) {
+	t.Helper()
+	t.Setenv(codeSandboxBridgeCacheDirEnv, t.TempDir())
 }
 
 var _ core.CommandRunner = (*recordingBridgeRunner)(nil)

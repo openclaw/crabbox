@@ -27,7 +27,7 @@ browser provisioning, code-server, or Actions runner hydration.
   `CRABBOX_CODESANDBOX_API_KEY` or `CSB_API_KEY`.
 - Node.js on `PATH`, or another Node-compatible command configured with
   `--codesandbox-bridge-command`.
-- The `@codesandbox/sdk` package resolvable by the bridge command.
+- `npm` on `PATH` so Crabbox can prepare its trusted local SDK bridge cache.
 
 Load the API key from a prompt or secret manager so it never appears in shell
 history:
@@ -175,8 +175,10 @@ limit, auth, or service failures are classified without printing token values.
 
 ## Gotchas
 
-- The bridge command imports `@codesandbox/sdk`; install it where the selected
-  Node command can resolve it, or set `CRABBOX_CODESANDBOX_SDK_PACKAGE`.
+- The bridge command runs from a Crabbox-managed cache directory, not the
+  repository. Crabbox installs `@codesandbox/sdk` there on first use; set
+  `CRABBOX_CODESANDBOX_SDK_PACKAGE` or `--codesandbox-sdk-package` to a trusted
+  npm package spec such as `@codesandbox/sdk@2.4.2` when pinning the bridge SDK.
 - `doctor` is non-mutating. It only checks env auth and a bounded sandbox list.
 - `operationTimeoutSecs` applies to each SDK bridge call. Increase it for slow
   creates, resumes, or port waits.
