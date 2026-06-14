@@ -6,11 +6,11 @@ Read this when:
 - configuring a Kubernetes-backed Agent Sandbox warm pool;
 - changing `internal/providers/agentsandbox`.
 
-Agent Sandbox is a delegated-run provider. Crabbox talks directly to the
-Kubernetes API, creates a `SandboxClaim` from a configured `SandboxWarmPool`,
-waits for the resulting `Sandbox` and pod to become ready, archive-syncs the
-local repository through Kubernetes exec and `tar`, runs the command in the
-sandbox pod, and deletes the claim on release by default.
+Agent Sandbox is a delegated-run provider. Crabbox invokes `kubectl` against
+the configured cluster, creates a `SandboxClaim` from a configured
+`SandboxWarmPool`, waits for the resulting `Sandbox` and pod to become ready,
+archive-syncs the local repository through `kubectl exec` and `tar`, runs the
+command in the sandbox pod, and deletes the claim on release by default.
 
 There is no Crabbox SSH lease. Kubernetes and Agent Sandbox own the runtime,
 sandbox pod, and command transport. Crabbox owns local config, repo claims,
@@ -30,8 +30,10 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
 
 ## Prerequisites
 
-- A Kubernetes kubeconfig or in-cluster config that can reach the target
-  cluster.
+- `kubectl` installed and compatible with the target cluster.
+- A Kubernetes kubeconfig that can reach the target cluster. Standard
+  `KUBECONFIG` and default kubeconfig resolution apply when
+  `agentSandbox.kubeconfig` is empty.
 - A non-empty Kubernetes context. Crabbox requires the context so local claims
   cannot drift when the kubeconfig current context changes.
 - A namespace containing Agent Sandbox resources.
@@ -49,6 +51,23 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
 - A sandbox image that provides `/bin/sh`, `bash`, `tar`, and a writable
   workdir. Crabbox uses `/bin/sh` for transport scripts and `bash -lc` for
   user shell-mode and auto-shell commands.
+
+## Supported Agent Sandbox Version
+
+Crabbox currently targets the Agent Sandbox `v0.5.0rc1` prerelease API:
+
+- `agents.x-k8s.io/v1beta1`
+- `extensions.agents.x-k8s.io/v1beta1`
+
+This is intentional because `v0.5.0` is expected to promote the same beta API
+soon. Crabbox does not carry `v1alpha1` compatibility. Until stable `v0.5.0`
+ships, pin the controller and CRDs to `v0.5.0rc1` or a newer release that still
+serves these `v1beta1` resources.
+
+Official project and release references:
+
+- https://github.com/kubernetes-sigs/agent-sandbox
+- https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v0.5.0rc1
 
 ## Commands
 
@@ -74,7 +93,8 @@ A `run` without `--id` creates a claim and deletes it after the command unless
 provider: agent-sandbox
 target: linux
 agentSandbox:
-  kubeconfig: ~/.kube/config       # empty = KUBECONFIG/default/in-cluster
+  kubectl: kubectl                 # trusted user config only; binary name or absolute path
+  kubeconfig: ~/.kube/config       # empty = KUBECONFIG/default kubeconfig
   context: agent-cluster           # required
   namespace: sandboxes             # default: default
   warmPool: linux-pool             # required SandboxWarmPool name
@@ -87,9 +107,16 @@ agentSandbox:
   forgetMissing: false
 ```
 
+Repository-local `.crabbox.yaml` and `crabbox.yaml` files cannot override the
+`kubectl` executable. Set a custom executable in the trusted user config, with
+`CRABBOX_AGENT_SANDBOX_KUBECTL`, or with `--agent-sandbox-kubectl`. The value
+must be a bare executable name resolved through `PATH` or an absolute path;
+checkout-relative paths are rejected.
+
 Provider flags:
 
 ```text
+--agent-sandbox-kubectl
 --agent-sandbox-kubeconfig
 --agent-sandbox-context
 --agent-sandbox-namespace
@@ -106,6 +133,7 @@ Provider flags:
 Environment overrides use the `CRABBOX_AGENT_SANDBOX_*` prefix:
 
 ```text
+CRABBOX_AGENT_SANDBOX_KUBECTL
 CRABBOX_AGENT_SANDBOX_KUBECONFIG
 CRABBOX_AGENT_SANDBOX_CONTEXT
 CRABBOX_AGENT_SANDBOX_NAMESPACE
@@ -125,9 +153,9 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 
 ## Lifecycle
 
-1. `doctor` loads Kubernetes config, verifies the Agent Sandbox CRDs, verifies
-   the configured warm pool, and checks the required RBAC verbs. It does not
-   create a claim.
+1. `doctor` uses `kubectl` discovery, verifies the exact `v1beta1` Agent
+   Sandbox resources, verifies the configured warm pool, and checks the
+   required RBAC verbs. It does not create a claim.
 2. `warmup` or `run` without `--id` creates one `SandboxClaim` named
    `crabbox-<slug>-<lease-hash>` in the configured namespace. The claim points
    at `agentSandbox.warmPool` and carries Crabbox ownership labels plus
@@ -137,7 +165,7 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
    sandbox pod annotation or selector and waits for the pod Ready condition.
 4. Unless `--no-sync` is set, Crabbox builds a portable archive from the local
    Git file manifest and extracts it into the configured workdir with
-   Kubernetes `pods/exec`. With `sync.delete: true`, extraction happens in a
+   `kubectl exec`. With `sync.delete: true`, extraction happens in a
    sibling staging directory and replaces the workdir only after upload and
    extraction succeed.
 5. The command runs through Kubernetes exec in the sandbox pod. Forwarded
@@ -152,13 +180,14 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 Local claim IDs use the `asbx_` prefix. The provider scope includes the
 kubeconfig identity, context, namespace, warm pool, and container. Reusing,
 listing, status-checking, stopping, or cleaning up a retained claim only
-matches claims from the same scope.
+matches claims from the same scope. Kubernetes stores only a SHA-256
+fingerprint of that scope, not the local kubeconfig path.
 
 Before deleting a live `SandboxClaim`, Crabbox verifies:
 
-- `crabbox.openclaw.dev/provider=agent-sandbox`
-- `crabbox.openclaw.dev/lease-id=<local lease id>`
-- `crabbox.openclaw.dev/provider-scope=<local scope>`
+- `crabbox.dev/provider=agent-sandbox`
+- `crabbox.dev/lease-id=<local lease id>`
+- `crabbox.dev/provider-scope=<SHA-256 scope fingerprint>`
 
 Missing Kubernetes claims are preserved locally by default because a 404 can be
 ambiguous across clusters or accounts. Set `--agent-sandbox-forget-missing` or
@@ -186,14 +215,20 @@ enabled, and reports every skipped or removed claim.
 
 - `--actions-runner` and Tailscale options are rejected because the provider is
   delegated-run only.
+- `kubectl` is a runtime prerequisite, but Crabbox does not embed the
+  Kubernetes Go client libraries. This keeps the CLI dependency and binary
+  cost bounded and uses the operator's normal kubeconfig and auth plugins.
+- Isolation strength is determined by the Agent Sandbox installation and
+  `SandboxTemplate`: runtime class, gVisor or Kata configuration, service
+  account, network policy, volumes, and node isolation remain cluster-operator
+  responsibilities. A plain pod is not automatically a strong security
+  boundary.
 - `--checksum` and SSH/rsync-specific behavior do not apply to the pod-exec
   archive path.
 - `--no-sync` creates the workdir but does not apply `sync.delete`; retained
   workspaces keep whatever was already present.
 - The default container is Kubernetes' default container for the pod. Set
   `agentSandbox.container` when the sandbox pod has multiple containers.
-- `podReadyTimeout` is part of config today, while readiness polling uses the
-  sandbox readiness timeout around the claim/sandbox/pod resolution path.
 - Kubernetes errors may include cluster resource names. Do not paste live
   errors into public issues without a redaction pass.
 
@@ -206,6 +241,7 @@ The guarded live smoke is opt-in and creates one short-lived Crabbox-owned
 CRABBOX_LIVE=1 \
 CRABBOX_LIVE_COORDINATOR=0 \
 CRABBOX_LIVE_PROVIDERS=agent-sandbox \
+CRABBOX_AGENT_SANDBOX_KUBECTL=kubectl \
 CRABBOX_AGENT_SANDBOX_KUBECONFIG=~/.kube/config \
 CRABBOX_AGENT_SANDBOX_CONTEXT=agent-cluster \
 CRABBOX_AGENT_SANDBOX_NAMESPACE=sandboxes \
@@ -243,3 +279,4 @@ scripts/live-smoke.sh
 - [Provider backends](../provider-backends.md)
 - [Provider authoring](../features/provider-authoring.md)
 - [Provider decision matrix](README.md)
+- [kubectl reference](https://kubernetes.io/docs/reference/kubectl/)

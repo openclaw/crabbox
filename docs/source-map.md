@@ -92,7 +92,7 @@ SSH-lease providers:
 Delegated-run providers (no SSH lease):
 
 - Cloudflare Containers: `internal/providers/cloudflare`, with the Worker runtime in `worker/src/cloudflare-container-runner.ts`
-- Agent Sandbox delegated Kubernetes claims and pod exec:
+- Agent Sandbox delegated Kubernetes claims and `kubectl exec`:
   `internal/providers/agentsandbox`, live smoke `scripts/live-agent-sandbox-smoke.sh`
 - Docker Sandbox, E2B, Islo, Modal, OpenComputer, Anthropic Sandbox Runtime, Tensorlake, Upstash, Blacksmith, W&B:
   `internal/providers/dockersandbox`,

@@ -24,7 +24,7 @@
     "lifecycle": "Agent Sandbox SandboxClaim",
     "cleanup": "owned SandboxClaim delete",
     "bestFit": "Kubernetes-hosted delegated Linux execution",
-    "caveat": "Requires Agent Sandbox CRDs, warm pool, kubeconfig context, and RBAC",
+    "caveat": "Requires kubectl, Agent Sandbox v0.5.0rc1 v1beta1 CRDs, a warm pool, explicit context, and RBAC",
     "docs": "agent-sandbox.md"
   },
   "apple-container": {
