@@ -51,7 +51,7 @@ func TestDoctorMissingTokenDoesNotCallHTTP(t *testing.T) {
 	b := &backend{
 		spec: Provider{}.Spec(),
 		cfg:  core.Config{Provider: providerName},
-		clientFactory: func(core.Runtime) (*Client, error) {
+		clientFactory: func(core.Runtime) (lambdaAPI, error) {
 			called = true
 			return nil, errors.New("should not be called")
 		},

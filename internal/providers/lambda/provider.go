@@ -1,9 +1,12 @@
 package lambda
 
 import (
+	"context"
 	"flag"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -43,18 +46,24 @@ func (Provider) ServerTypeForClass(class string) string {
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newClient}, nil
+	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newLambdaAPIClient}, nil
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newClient}, nil
+	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newLambdaAPIClient}, nil
 }
 
 type backend struct {
+	shared.DirectSSHBackend
 	spec          core.ProviderSpec
 	cfg           core.Config
 	rt            core.Runtime
-	clientFactory func(core.Runtime) (*Client, error)
+	clientFactory func(core.Runtime) (lambdaAPI, error)
+	waitSSH       func(context.Context, *core.SSHTarget, string, time.Duration) error
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
+
+func newLambdaAPIClient(rt core.Runtime) (lambdaAPI, error) {
+	return newClient(rt)
+}

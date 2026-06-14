@@ -74,6 +74,7 @@ func TestLaunchRequestShape(t *testing.T) {
 	req := LaunchInstanceRequest{
 		RegionName:          "us-west-1",
 		InstanceTypeName:    "gpu_1x_a10",
+		Quantity:            1,
 		SSHKeyNames:         []string{"crabbox-cbx_123"},
 		ImageFamily:         "lambda-stack-24-04",
 		UserData:            "cloud-config",
@@ -86,7 +87,7 @@ func TestLaunchRequestShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"region_name", "instance_type_name", "ssh_key_names", "image_family", "user_data", "firewall_ruleset_name", "file_system_names", "file_system_mounts"} {
+	for _, key := range []string{"region_name", "instance_type_name", "quantity", "ssh_key_names", "image_family", "user_data", "firewall_ruleset_name", "file_system_names", "file_system_mounts"} {
 		if !strings.Contains(string(data), `"`+key+`"`) {
 			t.Fatalf("request missing %s: %s", key, data)
 		}

@@ -29,14 +29,15 @@ type Image struct {
 }
 
 type Instance struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Region      Region   `json:"region,omitempty"`
-	Type        string   `json:"instance_type_name,omitempty"`
-	Hostname    string   `json:"hostname,omitempty"`
-	IP          string   `json:"ip,omitempty"`
-	SSHKeyNames []string `json:"ssh_key_names,omitempty"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name,omitempty"`
+	Status      string            `json:"status,omitempty"`
+	Region      Region            `json:"region,omitempty"`
+	Type        string            `json:"instance_type_name,omitempty"`
+	Hostname    string            `json:"hostname,omitempty"`
+	IP          string            `json:"ip,omitempty"`
+	SSHKeyNames []string          `json:"ssh_key_names,omitempty"`
+	Tags        map[string]string `json:"tags,omitempty"`
 }
 
 type SSHKey struct {
@@ -60,6 +61,7 @@ type FirewallRuleset struct {
 type LaunchInstanceRequest struct {
 	RegionName          string                   `json:"region_name"`
 	InstanceTypeName    string                   `json:"instance_type_name"`
+	Quantity            int                      `json:"quantity"`
 	SSHKeyNames         []string                 `json:"ssh_key_names"`
 	Name                string                   `json:"name,omitempty"`
 	ImageID             string                   `json:"image_id,omitempty"`
@@ -69,6 +71,10 @@ type LaunchInstanceRequest struct {
 	FirewallRulesetName string                   `json:"firewall_ruleset_name,omitempty"`
 	FileSystemNames     []string                 `json:"file_system_names,omitempty"`
 	FileSystemMounts    []FilesystemMountRequest `json:"file_system_mounts,omitempty"`
+}
+
+type LaunchInstanceResponse struct {
+	InstanceIDs []string `json:"instance_ids"`
 }
 
 type FilesystemMountRequest struct {

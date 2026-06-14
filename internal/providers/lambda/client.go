@@ -191,10 +191,30 @@ func (c *Client) GetInstance(ctx context.Context, id string) (Instance, error) {
 	return out, err
 }
 
+func (c *Client) LaunchInstance(ctx context.Context, req LaunchInstanceRequest) (LaunchInstanceResponse, error) {
+	var out LaunchInstanceResponse
+	err := c.do(ctx, http.MethodPost, "/instance-operations/launch", req, &out)
+	return out, err
+}
+
+func (c *Client) TerminateInstances(ctx context.Context, ids []string) error {
+	return c.do(ctx, http.MethodPost, "/instance-operations/terminate", TerminateInstanceRequest{InstanceIDs: ids}, nil)
+}
+
 func (c *Client) ListSSHKeys(ctx context.Context) ([]SSHKey, error) {
 	var out []SSHKey
 	err := c.do(ctx, http.MethodGet, "/ssh-keys", nil, &out)
 	return out, err
+}
+
+func (c *Client) AddSSHKey(ctx context.Context, req AddSSHKeyRequest) (SSHKey, error) {
+	var out SSHKey
+	err := c.do(ctx, http.MethodPost, "/ssh-keys", req, &out)
+	return out, err
+}
+
+func (c *Client) DeleteSSHKey(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/ssh-keys/"+id, nil, nil)
 }
 
 func (c *Client) ListFilesystems(ctx context.Context) ([]Filesystem, error) {
