@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -52,6 +53,36 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(call.Args[:2], []string{"--input-type=module", "-e"}) {
 		t.Fatalf("args=%#v", call.Args)
+	}
+}
+
+func TestSDKBridgeRunCommandUsesCommandTimeoutAndLargerCaptureLimit(t *testing.T) {
+	secret := "csb-secret-value"
+	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":0}}`)
+		return LocalCommandResult{ExitCode: 0}, nil
+	}}
+	cfg := newTestConfig().CodeSandbox
+	cfg.OperationTimeoutSecs = 30
+	bridge := NewSDKBridge(cfg, Runtime{Exec: runner})
+	if _, err := bridge.RoundTrip(context.Background(), secret, BridgeRequest{
+		Operation: "run_command",
+		SandboxID: "sb_1",
+		Command:   []string{"sleep", "60"},
+		Timeout:   3600,
+	}); err != nil {
+		t.Fatalf("RoundTrip err=%v", err)
+	}
+	call := runner.onlyCall(t)
+	if call.MaxCapturedOutputBytes != codeSandboxRunCommandOutputLimit {
+		t.Fatalf("run command capture limit=%d, want %d", call.MaxCapturedOutputBytes, codeSandboxRunCommandOutputLimit)
+	}
+	if len(runner.deadlines) != 1 {
+		t.Fatalf("deadlines=%d want 1", len(runner.deadlines))
+	}
+	remaining := time.Until(runner.deadlines[0])
+	if remaining < 3500*time.Second {
+		t.Fatalf("run command bridge deadline too short: %s", remaining)
 	}
 }
 
@@ -240,12 +271,16 @@ func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 }
 
 type recordingBridgeRunner struct {
-	calls []LocalCommandRequest
-	fn    func(LocalCommandRequest) (LocalCommandResult, error)
+	calls     []LocalCommandRequest
+	deadlines []time.Time
+	fn        func(LocalCommandRequest) (LocalCommandResult, error)
 }
 
-func (r *recordingBridgeRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
+	if deadline, ok := ctx.Deadline(); ok {
+		r.deadlines = append(r.deadlines, deadline)
+	}
 	if r.fn != nil {
 		return r.fn(req)
 	}

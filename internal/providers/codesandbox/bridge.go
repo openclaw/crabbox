@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+const (
+	codeSandboxBridgeOutputLimit     = 1 << 20
+	codeSandboxRunCommandOutputLimit = 64 << 20
+)
+
 type BridgeRequest struct {
 	Operation              string            `json:"operation"`
 	Limit                  int               `json:"limit,omitempty"`
@@ -65,7 +70,7 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	if err != nil {
 		return BridgeResponse{}, err
 	}
-	ctx, cancel := withOperationTimeout(ctx, b.cfg)
+	ctx, cancel := withBridgeTimeout(ctx, b.cfg, req)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	result, runErr := b.rt.Exec.Run(ctx, LocalCommandRequest{
@@ -75,7 +80,7 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 		Stdin:                  bytes.NewReader(payload),
 		Stdout:                 &stdout,
 		Stderr:                 &stderr,
-		MaxCapturedOutputBytes: 1 << 20,
+		MaxCapturedOutputBytes: bridgeOutputLimit(req),
 		CancelGracePeriod:      2 * time.Second,
 	})
 	if runErr != nil {
@@ -99,6 +104,24 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 		return BridgeResponse{}, fmt.Errorf("codesandbox bridge %s: %s", blank(resp.Error.Code, "error"), redactToken(resp.Error.Message, token))
 	}
 	return resp, nil
+}
+
+func withBridgeTimeout(ctx context.Context, cfg CodeSandboxConfig, req BridgeRequest) (context.Context, context.CancelFunc) {
+	timeout := operationTimeout(cfg)
+	if req.Operation == "run_command" && req.Timeout > 0 {
+		commandTimeout := time.Duration(req.Timeout+10) * time.Second
+		if commandTimeout > timeout {
+			timeout = commandTimeout
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func bridgeOutputLimit(req BridgeRequest) int {
+	if req.Operation == "run_command" {
+		return codeSandboxRunCommandOutputLimit
+	}
+	return codeSandboxBridgeOutputLimit
 }
 
 func bridgeEnv(cfg CodeSandboxConfig, token string) []string {
