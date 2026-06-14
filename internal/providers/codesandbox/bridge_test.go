@@ -87,6 +87,18 @@ func TestSDKBridgeRedactsTokenFromBridgeErrorResponse(t *testing.T) {
 	}
 }
 
+func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
+	if !strings.Contains(codeSandboxBridgeScript, "await ports.getAll()") {
+		t.Fatalf("bridge script must await CodeSandbox ports.getAll() before Array.from")
+	}
+	if strings.Contains(codeSandboxBridgeScript, "Array.from(await ports.getAll()).find") {
+		t.Fatalf("bridge script must not synthesize publish success from a one-shot ports.getAll() lookup")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "expiresAt: new Date") {
+		t.Fatalf("bridge script must create CodeSandbox host tokens with an expiry")
+	}
+}
+
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `not-json`)
@@ -133,6 +145,10 @@ func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 			_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandbox":{"id":"sb_1","state":"running","tags":["crabbox"]}}`)
 		case "get_sandbox":
 			_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandbox":{"id":"sb_1","state":"running"}}`)
+		case "hibernate_sandbox":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true}`)
+		case "resume_sandbox":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandbox":{"id":"sb_1","state":"running"}}`)
 		case "run_command":
 			_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":4,"stdout":"out\n","stderr":"err\n"}}`)
 		case "write_file":
@@ -142,6 +158,10 @@ func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 			_, _ = io.WriteString(req.Stdout, `{"ok":true}`)
 		case "delete_sandbox":
 			_, _ = io.WriteString(req.Stdout, `{"ok":true}`)
+		case "list_ports":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true,"ports":[{"port":3000,"host":"https://sb_1-3000.csb.app"}]}`)
+		case "get_port_url":
+			_, _ = io.WriteString(req.Stdout, `{"ok":true,"port":{"port":5173,"host":"https://sb_1-5173.csb.app"}}`)
 		default:
 			t.Fatalf("unexpected operation %q", payload.Operation)
 		}
@@ -160,6 +180,12 @@ func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 	if _, err := client.GetSandbox(context.Background(), "sb_1"); err != nil {
 		t.Fatalf("GetSandbox err=%v", err)
 	}
+	if err := client.HibernateSandbox(context.Background(), "sb_1"); err != nil {
+		t.Fatalf("HibernateSandbox err=%v", err)
+	}
+	if _, err := client.ResumeSandbox(context.Background(), "sb_1"); err != nil {
+		t.Fatalf("ResumeSandbox err=%v", err)
+	}
 	got, err := client.RunCommand(context.Background(), "sb_1", CommandRequest{
 		Command: []string{"bash", "-lc", "echo ok"},
 		Cwd:     "/project/workspace/app",
@@ -177,16 +203,33 @@ func TestCodeSandboxClientLifecycleOperationsUseBridgePayloads(t *testing.T) {
 	if err := client.DeleteSandbox(context.Background(), "sb_1"); err != nil {
 		t.Fatalf("DeleteSandbox err=%v", err)
 	}
+	ports, err := client.ListPorts(context.Background(), "sb_1")
+	if err != nil {
+		t.Fatalf("ListPorts err=%v", err)
+	}
+	if len(ports) != 1 || ports[0].Port != 3000 {
+		t.Fatalf("ports=%#v", ports)
+	}
+	port, err := client.WaitForPortURL(context.Background(), "sb_1", 5173)
+	if err != nil {
+		t.Fatalf("WaitForPortURL err=%v", err)
+	}
+	if port.Host != "https://sb_1-5173.csb.app" {
+		t.Fatalf("port=%#v", port)
+	}
 	ops := make([]string, 0, len(seen))
 	for _, req := range seen {
 		ops = append(ops, req.Operation)
 	}
-	wantOps := []string{"create_sandbox", "get_sandbox", "run_command", "write_file", "delete_sandbox"}
+	wantOps := []string{"create_sandbox", "get_sandbox", "hibernate_sandbox", "resume_sandbox", "run_command", "write_file", "delete_sandbox", "list_ports", "get_port_url"}
 	if !reflect.DeepEqual(ops, wantOps) {
 		t.Fatalf("ops=%v want %v", ops, wantOps)
 	}
-	if seen[2].Env["SECRET_TOKEN"] != "value" || seen[2].Cwd != "/project/workspace/app" {
-		t.Fatalf("run payload=%#v", seen[2])
+	if seen[4].Env["SECRET_TOKEN"] != "value" || seen[4].Cwd != "/project/workspace/app" {
+		t.Fatalf("run payload=%#v", seen[4])
+	}
+	if seen[8].Port != 5173 {
+		t.Fatalf("port payload=%#v", seen[8])
 	}
 }
 

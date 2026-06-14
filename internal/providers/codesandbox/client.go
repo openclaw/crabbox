@@ -48,13 +48,23 @@ type CommandResult struct {
 	Stderr   string `json:"stderr,omitempty"`
 }
 
+type PortInfo struct {
+	Port int    `json:"port"`
+	Host string `json:"host"`
+	URL  string `json:"url,omitempty"`
+}
+
 type codeSandboxAPI interface {
 	ListSandboxes(ctx context.Context, req ListSandboxesRequest) (ListSandboxesResult, error)
 	CreateSandbox(ctx context.Context, req CreateSandboxRequest) (SandboxSummary, error)
 	GetSandbox(ctx context.Context, id string) (SandboxSummary, error)
 	DeleteSandbox(ctx context.Context, id string) error
+	HibernateSandbox(ctx context.Context, id string) error
+	ResumeSandbox(ctx context.Context, id string) (SandboxSummary, error)
 	RunCommand(ctx context.Context, sandboxID string, req CommandRequest) (CommandResult, error)
 	UploadFile(ctx context.Context, sandboxID, remotePath string, r io.Reader) error
+	ListPorts(ctx context.Context, sandboxID string) ([]PortInfo, error)
+	WaitForPortURL(ctx context.Context, sandboxID string, port int) (PortInfo, error)
 }
 
 type codeSandboxClient struct {
@@ -123,6 +133,19 @@ func (c *codeSandboxClient) DeleteSandbox(ctx context.Context, id string) error 
 	return err
 }
 
+func (c *codeSandboxClient) HibernateSandbox(ctx context.Context, id string) error {
+	_, err := c.bridge.RoundTrip(ctx, c.token, BridgeRequest{Operation: "hibernate_sandbox", SandboxID: id})
+	return err
+}
+
+func (c *codeSandboxClient) ResumeSandbox(ctx context.Context, id string) (SandboxSummary, error) {
+	resp, err := c.bridge.RoundTrip(ctx, c.token, BridgeRequest{Operation: "resume_sandbox", SandboxID: id})
+	if err != nil {
+		return SandboxSummary{}, err
+	}
+	return resp.Sandbox, nil
+}
+
 func (c *codeSandboxClient) RunCommand(ctx context.Context, sandboxID string, req CommandRequest) (CommandResult, error) {
 	resp, err := c.bridge.RoundTrip(ctx, c.token, BridgeRequest{
 		Operation: "run_command",
@@ -151,6 +174,26 @@ func (c *codeSandboxClient) UploadFile(ctx context.Context, sandboxID, remotePat
 		Encoding:      "base64",
 	})
 	return err
+}
+
+func (c *codeSandboxClient) ListPorts(ctx context.Context, sandboxID string) ([]PortInfo, error) {
+	resp, err := c.bridge.RoundTrip(ctx, c.token, BridgeRequest{Operation: "list_ports", SandboxID: sandboxID})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Ports, nil
+}
+
+func (c *codeSandboxClient) WaitForPortURL(ctx context.Context, sandboxID string, port int) (PortInfo, error) {
+	resp, err := c.bridge.RoundTrip(ctx, c.token, BridgeRequest{
+		Operation: "get_port_url",
+		SandboxID: sandboxID,
+		Port:      port,
+	})
+	if err != nil {
+		return PortInfo{}, err
+	}
+	return resp.Port, nil
 }
 
 type missingAuthError struct{}

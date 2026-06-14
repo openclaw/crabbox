@@ -2,10 +2,12 @@ package codesandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -332,6 +334,115 @@ func (b *codeSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 	return nil
 }
 
+func (b *codeSandboxBackend) Pause(ctx context.Context, req PauseRequest) error {
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	leaseID, sandboxID, _, claim, err := resolveLeaseID(req.ID)
+	if err != nil {
+		return err
+	}
+	sb, err := api.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+		return err
+	}
+	if err := api.HibernateSandbox(ctx, sandboxID); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stderr, "paused lease=%s sandbox=%s\n", leaseID, sandboxID)
+	return nil
+}
+
+func (b *codeSandboxBackend) Resume(ctx context.Context, req ResumeRequest) error {
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	leaseID, sandboxID, _, claim, err := resolveLeaseID(req.ID)
+	if err != nil {
+		return err
+	}
+	sb, err := api.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+		return err
+	}
+	resumed, err := api.ResumeSandbox(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if err := validateCodeSandboxSandboxOwnership(claim, resumed); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stderr, "resumed lease=%s sandbox=%s\n", leaseID, sandboxID)
+	return nil
+}
+
+func (b *codeSandboxBackend) Ports(ctx context.Context, req PortsRequest) (string, error) {
+	if len(req.Unpublish) > 0 {
+		return "", exit(2, "provider=codesandbox does not support ports --unpublish; stop the process inside the sandbox instead")
+	}
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return "", err
+	}
+	_, sandboxID, _, claim, err := resolveLeaseID(req.ID)
+	if err != nil {
+		return "", err
+	}
+	sb, err := api.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return "", err
+	}
+	if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+		return "", err
+	}
+	ports := make([]PortInfo, 0, len(req.Publish))
+	if len(req.Publish) == 0 {
+		ports, err = api.ListPorts(ctx, sandboxID)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		for _, spec := range req.Publish {
+			port, err := parseCodeSandboxPortSpec(spec)
+			if err != nil {
+				return "", err
+			}
+			info, err := api.WaitForPortURL(ctx, sandboxID, port)
+			if err != nil {
+				return "", err
+			}
+			ports = append(ports, info)
+		}
+	}
+	if req.JSON {
+		data, err := json.Marshal(ports)
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	lines := make([]string, 0, len(ports))
+	for _, port := range ports {
+		host := strings.TrimSpace(port.Host)
+		if host == "" {
+			host = strings.TrimSpace(port.URL)
+		}
+		if host == "" {
+			host = "-"
+		}
+		lines = append(lines, fmt.Sprintf("%d %s", port.Port, host))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
 func (b *codeSandboxBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
 	token, source, ok := authFromEnv()
 	if !ok {
@@ -429,5 +540,23 @@ var _ interface {
 	List(context.Context, ListRequest) ([]LeaseView, error)
 	Status(context.Context, StatusRequest) (StatusView, error)
 	Stop(context.Context, StopRequest) error
+	Pause(context.Context, PauseRequest) error
+	Resume(context.Context, ResumeRequest) error
+	Ports(context.Context, PortsRequest) (string, error)
 	Doctor(context.Context, DoctorRequest) (DoctorResult, error)
 } = (*codeSandboxBackend)(nil)
+
+func parseCodeSandboxPortSpec(spec string) (int, error) {
+	value := strings.TrimSpace(spec)
+	if value == "" {
+		return 0, exit(2, "codesandbox port spec must not be empty")
+	}
+	if strings.ContainsAny(value, ":/") {
+		return 0, exit(2, "codesandbox ports only support a sandbox port number, got %q", spec)
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, exit(2, "codesandbox port must be an integer between 1 and 65535, got %q", spec)
+	}
+	return port, nil
+}

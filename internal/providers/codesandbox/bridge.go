@@ -29,6 +29,7 @@ type BridgeRequest struct {
 	Path                   string            `json:"path,omitempty"`
 	ContentBase64          string            `json:"contentBase64,omitempty"`
 	Encoding               string            `json:"encoding,omitempty"`
+	Port                   int               `json:"port,omitempty"`
 }
 
 type BridgeResponse struct {
@@ -37,6 +38,8 @@ type BridgeResponse struct {
 	Sandboxes  []SandboxSummary `json:"sandboxes,omitempty"`
 	TotalCount int              `json:"totalCount,omitempty"`
 	Command    CommandResult    `json:"command,omitempty"`
+	Port       PortInfo         `json:"port,omitempty"`
+	Ports      []PortInfo       `json:"ports,omitempty"`
 	Error      *BridgeError     `json:"error,omitempty"`
 }
 
@@ -169,6 +172,17 @@ async function openSandbox(sdk, id) {
   const sandboxes = sdk.sandboxes || sdk;
   return await callAny(sandboxes, ["get", "connect", "open", "resume"], id);
 }
+async function resumeSandbox(sdk, id) {
+  const sandboxes = sdk.sandboxes || sdk;
+  return await callAny(sandboxes, ["resume"], id);
+}
+async function connectSandbox(sdk, id) {
+  const sandbox = await resumeSandbox(sdk, id);
+  if (sandbox && typeof sandbox.connect === "function") {
+    return { sandbox, client: await sandbox.connect() };
+  }
+  return { sandbox, client: sandbox };
+}
 async function createSandbox(sdk) {
   const sandboxes = sdk.sandboxes || sdk;
   const options = {};
@@ -224,6 +238,47 @@ async function writeFile(sandbox) {
   }
   await callAny(files, ["writeTextFile", "createFile"], req.path, buffer);
 }
+function normalizePort(portInfo, fallbackPort, fallbackURL) {
+  const port = Number((portInfo && (portInfo.port ?? portInfo.targetPort ?? portInfo.containerPort)) || fallbackPort || 0);
+  const host = String((portInfo && (portInfo.host ?? portInfo.url ?? portInfo.href)) || fallbackURL || "");
+  return { port, host, url: host };
+}
+async function getHostURL(sdk, client, sandboxID, port) {
+  if (sdk.hosts && typeof sdk.hosts.createToken === "function" && typeof sdk.hosts.getUrl === "function") {
+    const hostToken = await sdk.hosts.createToken(sandboxID, {
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000)
+    });
+    return String(sdk.hosts.getUrl(hostToken, port) || "");
+  }
+  if (client && client.hosts && typeof client.hosts.getUrl === "function") {
+    return String(client.hosts.getUrl(port) || "");
+  }
+  throw new Error("CodeSandbox SDK does not expose hosts.getUrl");
+}
+async function listPorts(sdk) {
+  const { client } = await connectSandbox(sdk, req.sandboxId);
+  const ports = client && client.ports;
+  if (!ports || typeof ports.getAll !== "function") {
+    throw new Error("CodeSandbox SDK does not expose ports.getAll");
+  }
+  return Array.from(await ports.getAll()).map((portInfo) => normalizePort(portInfo));
+}
+async function waitForPortURL(sdk) {
+  const port = Number(req.port || 0);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("port must be an integer between 1 and 65535");
+  }
+  const { client } = await connectSandbox(sdk, req.sandboxId);
+  const ports = client && client.ports;
+  let portInfo = {};
+  if (ports && typeof ports.waitForPort === "function") {
+    portInfo = await ports.waitForPort(port);
+  } else {
+    throw new Error("CodeSandbox SDK does not expose ports.waitForPort");
+  }
+  const url = await getHostURL(sdk, client, req.sandboxId, port);
+  return normalizePort(portInfo, port, url);
+}
 try {
   const token = process.env.CSB_API_KEY || process.env.CRABBOX_CODESANDBOX_API_KEY || "";
   if (!token) {
@@ -246,6 +301,12 @@ try {
     } else if (req.operation === "delete_sandbox") {
       await callAny(sdk.sandboxes || sdk, ["delete", "deleteSandbox"], req.sandboxId);
       emit({ ok: true });
+    } else if (req.operation === "hibernate_sandbox") {
+      await callAny(sdk.sandboxes || sdk, ["hibernate"], req.sandboxId);
+      emit({ ok: true });
+    } else if (req.operation === "resume_sandbox") {
+      const sandbox = await resumeSandbox(sdk, req.sandboxId);
+      emit({ ok: true, sandbox: normalizeSandbox(sandbox) });
     } else if (req.operation === "run_command") {
       const sandbox = await openSandbox(sdk, req.sandboxId);
       const command = await runCommand(sandbox);
@@ -254,6 +315,12 @@ try {
       const sandbox = await openSandbox(sdk, req.sandboxId);
       await writeFile(sandbox);
       emit({ ok: true });
+    } else if (req.operation === "list_ports") {
+      const ports = await listPorts(sdk);
+      emit({ ok: true, ports });
+    } else if (req.operation === "get_port_url") {
+      const port = await waitForPortURL(sdk);
+      emit({ ok: true, port });
     } else {
       fail("unsupported_operation", "unsupported bridge operation: " + String(req.operation || ""));
     }
