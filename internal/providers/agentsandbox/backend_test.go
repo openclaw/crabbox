@@ -51,6 +51,65 @@ func TestWarmupCreatesClaimAndPersistsLocalLease(t *testing.T) {
 	}
 }
 
+func TestWarmupReconcilesAmbiguousCreateResults(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		createErr      error
+		emptyCreateUID bool
+	}{
+		{name: "accepted then transport failed", createErr: errors.New("create response lost")},
+		{name: "accepted with empty response UID", emptyCreateUID: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			fake := readyFakeClient(cfg)
+			fake.emptyCreateUID = tc.emptyCreateUID
+			if tc.createErr != nil {
+				fake.createErrs = []error{tc.createErr}
+				fake.getErrs = []error{errKubernetesNotFound, errors.New("transient read failure"), nil}
+			}
+			backend := testBackend(cfg, fake, nil, nil)
+
+			if err := backend.Warmup(context.Background(), WarmupRequest{Repo: testGitRepo(t), RequestedSlug: "ambiguous-create"}); err != nil {
+				t.Fatal(err)
+			}
+			claims, err := listAgentSandboxLeaseClaims()
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, ok := claimBySlug(claims, "ambiguous-create")
+			if !ok || claim.Labels[claimLabelClaimUID] == "" {
+				t.Fatalf("claim=%#v claims=%#v", claim, claims)
+			}
+			if fake.creates != 1 {
+				t.Fatalf("creates=%d want=1", fake.creates)
+			}
+			if !strings.Contains(backend.rt.Stderr.(*bytes.Buffer).String(), "reconciled agent-sandbox claim=") {
+				t.Fatalf("missing reconciliation warning: %s", backend.rt.Stderr)
+			}
+		})
+	}
+}
+
+func TestWarmupReturnsDefinitiveCreateFailureWithoutReconciliation(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	fake.createErrs = []error{&kubernetesCreateError{err: errors.New("forbidden"), ambiguous: false}}
+	backend := testBackend(cfg, fake, nil, nil)
+
+	start := time.Now()
+	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testGitRepo(t), RequestedSlug: "rejected-create"})
+	if err == nil || !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("warmup err=%v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("definitive create failure entered reconciliation: %s", elapsed)
+	}
+	if len(fake.gets) != 0 {
+		t.Fatalf("definitive create failure performed reconciliation GETs: %#v", fake.gets)
+	}
+}
+
 func TestListReportsPendingClaimAsNotReady(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)
@@ -887,6 +946,26 @@ func TestStatusMissingClaimDoesNotWaitAsNotReady(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("status waited despite missing claim: %s", elapsed)
+	}
+}
+
+func TestStatusWaitReturnsWhenClaimDisappearsDuringPolling(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "status-disappears"}); err != nil {
+		t.Fatal(err)
+	}
+	fake.getErrs = []error{nil, errKubernetesNotFound}
+
+	start := time.Now()
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-disappears", Wait: true, WaitTimeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "missing in Kubernetes") {
+		t.Fatalf("status err=%v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("status waited after root claim disappeared: %s", elapsed)
 	}
 }
 

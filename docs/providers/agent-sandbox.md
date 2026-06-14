@@ -161,7 +161,10 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 2. `warmup` or `run` without `--id` creates one `SandboxClaim` named
    `crabbox-<slug>-<lease-hash>` in the configured namespace. The claim points
    at `agentSandbox.warmPool` and carries Crabbox ownership labels plus
-   annotations for provider scope, workdir, and container.
+   annotations for provider scope, workdir, and container. If `kubectl create`
+   loses its response after the API server accepted the object, Crabbox fetches
+   that exact deterministic name and adopts it only after ownership, scope, and
+   Kubernetes UID validation.
 3. Crabbox waits for `SandboxClaim.status.sandbox.name`, fetches the matching
    `Sandbox`, waits for its Ready condition, then resolves the pod from the
    sandbox pod annotation or selector and waits for the pod Ready condition.
@@ -183,6 +186,8 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 Retained-claim `run`, `stop`, and `cleanup` operations share a per-lease
 cross-process lock. A concurrent stop or cleanup waits for the active command
 to finish, then re-resolves the local claim before mutating Kubernetes.
+`status --wait` returns immediately when the root `SandboxClaim` disappears,
+while still polling temporary downstream Sandbox or pod readiness gaps.
 
 ## Claim Scope And Cleanup Safety
 

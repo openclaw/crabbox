@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- Hardened Agent Sandbox repository-config workload selection and retained UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes.
+- Hardened Agent Sandbox repository-config workload selection, ambiguous-create reconciliation, terminal status waits, retained activity bookkeeping, local claim removal reporting, and UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes.
 - Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.
 - Hardened runtime-adapter relays with end-to-end absolute deadlines, durable generation-scoped dispatch fences retained across ambiguous connector failures, atomic owner-only legacy cleanup, rejection of unfenced proxy deletes, per-owner in-flight quotas, post-cancellation accounting, response-delivery grace, connector-matched request validation, restart-safe TTL-first live-bridge revocation, retry-safe upstream rejection handling, generation-fenced confirmed-absence acknowledgments, and cleanup-fenced workspace bindings.
 - Fixed Cloudflare Dynamic Workers lifecycle reads, compatibility identity, bundle validation, and live-smoke credential isolation.

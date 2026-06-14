@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	errNotReady           = errors.New("not ready")
-	errKubernetesNotFound = errors.New("kubernetes object not found")
+	errNotReady             = errors.New("not ready")
+	errKubernetesNotFound   = errors.New("kubernetes object not found")
+	errSandboxClaimNotFound = fmt.Errorf("SandboxClaim not found: %w", errKubernetesNotFound)
 )
 
 const (
@@ -96,6 +97,28 @@ type kubectlKubernetesClient struct {
 	runner   CommandRunner
 	kubectl  string
 	baseArgs []string
+}
+
+type kubernetesCreateError struct {
+	err       error
+	ambiguous bool
+}
+
+func (e *kubernetesCreateError) Error() string {
+	return e.err.Error()
+}
+
+func (e *kubernetesCreateError) Unwrap() error {
+	return e.err
+}
+
+func createMayHaveSucceeded(err error) bool {
+	var createErr *kubernetesCreateError
+	if errors.As(err, &createErr) {
+		return createErr.ambiguous
+	}
+	// Other client implementations do not expose transport classification.
+	return true
 }
 
 func newKubernetesClient(ctx context.Context, cfg Config, rt Runtime) (kubernetesClient, error) {
@@ -198,7 +221,10 @@ func (c *kubectlKubernetesClient) Create(
 ) (*kubernetesObject, error) {
 	manifest, err := json.Marshal(object)
 	if err != nil {
-		return nil, fmt.Errorf("encode %s/%s: %w", ref.qualifiedResource(), object.Metadata.Name, err)
+		return nil, &kubernetesCreateError{
+			err:       fmt.Errorf("encode %s/%s: %w", ref.qualifiedResource(), object.Metadata.Name, err),
+			ambiguous: false,
+		}
 	}
 
 	result, err := c.run(
@@ -207,14 +233,49 @@ func (c *kubectlKubernetesClient) Create(
 		"create", "--namespace", namespace, "-f", "-", "-o", "json",
 	)
 	if err != nil {
-		return nil, c.commandError("create "+ref.qualifiedResource()+"/"+object.Metadata.Name, result, err)
+		return nil, &kubernetesCreateError{
+			err:       c.commandError("create "+ref.qualifiedResource()+"/"+object.Metadata.Name, result, err),
+			ambiguous: kubectlCreateMayHaveSucceeded(result, err),
+		}
 	}
 
 	var created kubernetesObject
 	if err := json.Unmarshal([]byte(result.Stdout), &created); err != nil {
-		return nil, fmt.Errorf("decode created %s/%s: %w", ref.qualifiedResource(), object.Metadata.Name, err)
+		return nil, &kubernetesCreateError{
+			err:       fmt.Errorf("decode created %s/%s: %w", ref.qualifiedResource(), object.Metadata.Name, err),
+			ambiguous: true,
+		}
 	}
 	return &created, nil
+}
+
+func kubectlCreateMayHaveSucceeded(result LocalCommandResult, err error) bool {
+	detail := strings.ToLower(strings.Join([]string{result.Stderr, result.Stdout, err.Error()}, "\n"))
+	if strings.Contains(detail, "alreadyexists") || strings.Contains(detail, "already exists") {
+		return true
+	}
+	for _, marker := range []string{
+		"error from server (forbidden)",
+		"error from server (unauthorized)",
+		"error from server (invalid)",
+		"error from server (badrequest)",
+		"error from server (notfound)",
+		"error validating",
+		"unable to recognize",
+		"no matches for kind",
+		"doesn't have a resource type",
+		"executable file not found",
+		"no such file or directory",
+		"no such host",
+		"connection refused",
+		"certificate",
+		"x509:",
+	} {
+		if strings.Contains(detail, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *kubectlKubernetesClient) Delete(
@@ -621,6 +682,9 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 		if err == nil {
 			return ready, nil
 		}
+		if errors.Is(err, errSandboxClaimNotFound) {
+			return sandboxResourceReadiness{}, err
+		}
 		lastErr = err
 		select {
 		case <-ctx.Done():
@@ -658,7 +722,7 @@ func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, 
 	claim, err := client.Get(ctx, sandboxClaimGVR(), namespace, claimName)
 	if err != nil {
 		if isNotFound(err) {
-			return sandboxResourceReadiness{}, fmt.Errorf("SandboxClaim %s/%s: %w", namespace, claimName, errKubernetesNotFound)
+			return sandboxResourceReadiness{}, fmt.Errorf("SandboxClaim %s/%s: %w", namespace, claimName, errSandboxClaimNotFound)
 		}
 		return sandboxResourceReadiness{}, err
 	}

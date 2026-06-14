@@ -364,6 +364,14 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			view.Labels["pod_ip"] = ready.PodIP
 			return view, nil
 		}
+		if errors.Is(readyErr, errSandboxClaimNotFound) {
+			view.State = "missing-or-inaccessible"
+			view.Labels["reason"] = readyErr.Error()
+			if req.Wait {
+				return StatusView{}, exit(4, "agent-sandbox claim %s is missing in Kubernetes", claimName)
+			}
+			return view, nil
+		}
 		if !errors.Is(readyErr, errNotReady) && !isNotFound(readyErr) {
 			return StatusView{}, readyErr
 		}
@@ -543,13 +551,21 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		},
 	}
 	created, err := client.Create(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, obj)
-	if err != nil {
+	if err != nil && !createMayHaveSucceeded(err) {
 		return "", "", "", sandboxReadiness{}, nil, err
 	}
-	identity := claimIdentity{LeaseID: leaseID, ProviderScope: claimScope(b.cfg), UID: strings.TrimSpace(created.Metadata.UID)}
-	if identity.UID == "" {
-		return "", "", "", sandboxReadiness{}, nil, exit(4, "created agent-sandbox claim %s has no Kubernetes UID", claimResourceName)
+	if err != nil || created == nil || strings.TrimSpace(created.Metadata.UID) == "" {
+		cause := err
+		if cause == nil {
+			cause = exit(4, "created agent-sandbox claim %s has no Kubernetes UID", claimResourceName)
+		}
+		created, err = b.reconcileCreatedClaim(ctx, client, leaseID, claimResourceName, cause)
+		if err != nil {
+			return "", "", "", sandboxReadiness{}, nil, err
+		}
+		fmt.Fprintf(b.rt.Stderr, "warning: reconciled agent-sandbox claim=%s after ambiguous create result\n", claimResourceName)
 	}
+	identity := claimIdentity{LeaseID: leaseID, ProviderScope: claimScope(b.cfg), UID: strings.TrimSpace(created.Metadata.UID)}
 	pending := sandboxReadiness{ClaimName: claimResourceName, ClaimUID: identity.UID}
 	if err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimResourceName); err != nil {
 		return "", "", "", sandboxReadiness{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
@@ -565,6 +581,40 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	}
 	createdSuccessfully = true
 	return leaseID, claimResourceName, slug, ready, unlockOperation, nil
+}
+
+func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesClient, leaseID, claimName string, cause error) (*kubernetesObject, error) {
+	reconcileCtx, cancel := b.cleanupContext(ctx)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		live, err := client.Get(reconcileCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+		if err == nil {
+			identity := claimIdentity{
+				LeaseID:       leaseID,
+				ProviderScope: claimScope(b.cfg),
+				UID:           strings.TrimSpace(live.Metadata.UID),
+			}
+			if identity.UID == "" {
+				return nil, errors.Join(cause, exit(4, "reconciled agent-sandbox claim %s has no Kubernetes UID", claimName))
+			}
+			if err := validateClaimIdentity(live, identity); err != nil {
+				return nil, errors.Join(cause, fmt.Errorf("refuse ambiguous agent-sandbox claim recovery: %w", err))
+			}
+			return live, nil
+		}
+		lastErr = err
+		select {
+		case <-reconcileCtx.Done():
+			if isNotFound(lastErr) {
+				return nil, cause
+			}
+			return nil, errors.Join(cause, fmt.Errorf("reconcile agent-sandbox claim %s/%s after ambiguous create: %w", b.cfg.AgentSandbox.Namespace, claimName, lastErr))
+		case <-ticker.C:
+		}
+	}
 }
 
 func (b *backend) rollbackCreatedClaim(

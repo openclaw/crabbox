@@ -15,26 +15,28 @@ import (
 )
 
 type fakeKubernetesClient struct {
-	resources     map[string]map[string]bool
-	objects       map[string]*kubernetesObject
-	rbac          map[string]bool
-	pods          map[string][]podState
-	gets          []string
-	execs         []podExecRequest
-	execInput     [][]byte
-	execErrs      []error
-	execStarted   chan struct{}
-	execRelease   chan struct{}
-	execDelays    []time.Duration
-	getStarted    chan struct{}
-	getRelease    chan struct{}
-	getErrs       []error
-	deleteErrs    []error
-	createPending bool
-	createStarted chan struct{}
-	createRelease chan struct{}
-	creates       int
-	deletes       int
+	resources      map[string]map[string]bool
+	objects        map[string]*kubernetesObject
+	rbac           map[string]bool
+	pods           map[string][]podState
+	gets           []string
+	execs          []podExecRequest
+	execInput      [][]byte
+	execErrs       []error
+	execStarted    chan struct{}
+	execRelease    chan struct{}
+	execDelays     []time.Duration
+	getStarted     chan struct{}
+	getRelease     chan struct{}
+	getErrs        []error
+	deleteErrs     []error
+	createErrs     []error
+	emptyCreateUID bool
+	createPending  bool
+	createStarted  chan struct{}
+	createRelease  chan struct{}
+	creates        int
+	deletes        int
 }
 
 type recordingCommandRunner struct {
@@ -143,7 +145,18 @@ func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namesp
 		}
 		f.pods[namespace+"/claim="+obj.Metadata.Name] = []podState{{Name: podName, Phase: "Running", PodIP: "10.0.0.11", Ready: true}}
 	}
-	return cloneKubernetesObject(created), nil
+	if len(f.createErrs) > 0 {
+		err := f.createErrs[0]
+		f.createErrs = f.createErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	response := cloneKubernetesObject(created)
+	if f.emptyCreateUID {
+		response.Metadata.UID = ""
+	}
+	return response, nil
 }
 
 func (f *fakeKubernetesClient) Delete(_ context.Context, ref resourceRef, namespace, name, uid string) error {
@@ -532,6 +545,45 @@ func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) 
 	}
 	if len(runner.inputs) != 1 || !bytes.Contains(runner.inputs[0], []byte(`"warmPoolRef":{"name":"linux-pool"}`)) {
 		t.Fatalf("create stdin=%q", runner.inputs)
+	}
+}
+
+func TestKubectlCreateFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		result    LocalCommandResult
+		err       error
+		ambiguous bool
+	}{
+		{
+			name:      "forbidden",
+			result:    LocalCommandResult{Stderr: `Error from server (Forbidden): sandboxclaims is forbidden`},
+			err:       errors.New("exit status 1"),
+			ambiguous: false,
+		},
+		{
+			name:      "missing kubectl",
+			err:       errors.New(`exec: "kubectl": executable file not found in $PATH`),
+			ambiguous: false,
+		},
+		{
+			name:      "already exists",
+			result:    LocalCommandResult{Stderr: `Error from server (AlreadyExists): sandboxclaims already exists`},
+			err:       errors.New("exit status 1"),
+			ambiguous: true,
+		},
+		{
+			name:      "transport interruption",
+			result:    LocalCommandResult{Stderr: "unexpected EOF"},
+			err:       errors.New("exit status 1"),
+			ambiguous: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kubectlCreateMayHaveSucceeded(tc.result, tc.err); got != tc.ambiguous {
+				t.Fatalf("ambiguous=%v want=%v", got, tc.ambiguous)
+			}
+		})
 	}
 }
 
