@@ -87,6 +87,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	cfg := b.repoConfig(repo)
 	if _, err := api.listMachines(ctx, repo, b.cfg.GitHubCodespaces.Ref); err != nil {
 		return LeaseTarget{}, err
 	}
@@ -107,7 +108,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	release := releaseDelete
-	if req.Keep || !githubCodespacesDeleteOnRelease(LeaseTarget{}, b.cfg) {
+	if req.Keep || !githubCodespacesDeleteOnRelease(LeaseTarget{}, cfg) {
 		release = releaseStop
 	}
 	created, err := api.createCodespace(ctx, createCodespaceRequest{
@@ -133,7 +134,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, b.cfg, server, SSHTarget{}, repoRoot, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, repoRoot, cfg.IdleTimeout, req.Reclaim); err != nil {
 		if !req.Keep {
 			_ = api.deleteCodespace(context.Background(), created.Name)
 			_ = removeStoredSSHConfig(leaseID)
@@ -238,12 +239,18 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			return LeaseTarget{}, err
 		}
 		server = b.mergeLiveServer(server, item)
-		server.Labels = touchDirectLeaseLabels(server.Labels, b.cfg, "ready", b.now().UTC())
 	}
 	if codespaceTerminal(item.State) {
 		return LeaseTarget{}, exit(5, "github-codespaces codespace %s entered terminal state=%s", item.Name, item.State)
 	}
-	target, err := b.sshTarget(ctx, gh, leaseID, item.Name, firstNonEmpty(server.Labels[labelRepository], item.Repository.FullName), !req.NoLocalStateMutations)
+	repo := firstNonEmpty(server.Labels[labelRepository], item.Repository.FullName)
+	cfg := b.repoConfig(repo)
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
+	server.Labels["work_root"] = cfg.WorkRoot
+	server.Labels = touchDirectLeaseLabels(server.Labels, cfg, "ready", b.now().UTC())
+	target, err := b.sshTarget(ctx, gh, leaseID, item.Name, repo, !req.NoLocalStateMutations)
 	if err != nil {
 		return LeaseTarget{}, b.sshPrerequisiteError(err)
 	}
@@ -514,8 +521,7 @@ func (b *backend) sshTarget(ctx context.Context, gh githubCLI, leaseID, codespac
 		}
 	}
 	cfg := b.cfg
-	cfg.GitHubCodespaces.WorkRoot = b.effectiveWorkRoot(repo)
-	cfg.WorkRoot = cfg.GitHubCodespaces.WorkRoot
+	cfg = b.repoConfig(repo)
 	return selectSSHTarget(cfg, data, codespaceName)
 }
 
@@ -567,8 +573,16 @@ func (b *backend) effectiveWorkRoot(repo string) string {
 	return workRoot
 }
 
+func (b *backend) repoConfig(repo string) Config {
+	cfg := b.cfg
+	cfg.GitHubCodespaces.WorkRoot = b.effectiveWorkRoot(repo)
+	cfg.WorkRoot = cfg.GitHubCodespaces.WorkRoot
+	return cfg
+}
+
 func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, release string, item codespace, state string) map[string]string {
-	labels := directLeaseLabels(b.cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
+	cfg := b.repoConfig(repo)
+	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
 	labels[labelState] = state
 	labels[labelRelease] = release
 	labels[labelCodespaceName] = item.Name
@@ -577,6 +591,7 @@ func (b *backend) labelsFor(leaseID, slug, repo, login string, keep bool, releas
 	labels[labelRef] = strings.TrimSpace(b.cfg.GitHubCodespaces.Ref)
 	labels[labelMachine] = firstNonEmpty(item.Machine.Name, b.cfg.GitHubCodespaces.Machine)
 	labels[labelLogin] = strings.TrimSpace(login)
+	labels["work_root"] = cfg.WorkRoot
 	return labels
 }
 
