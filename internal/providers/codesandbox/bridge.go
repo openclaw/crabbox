@@ -238,6 +238,15 @@ function commandLineFromRequest(command, cwd, env) {
   parts.push(...command.map(shellQuote));
   return parts.join(" ");
 }
+function workspaceFilePath(path) {
+  const value = String(path || "");
+  if (value === "/project/workspace") return ".";
+  if (value.startsWith("/project/workspace/")) return value.slice("/project/workspace/".length);
+  if (value.startsWith("/")) {
+    throw new Error("CodeSandbox SDK file path must be under /project/workspace");
+  }
+  return value;
+}
 async function runCommand(sandbox) {
   const command = Array.isArray(req.command) ? req.command.map((v) => String(v ?? "")) : [];
   if (!command.length || command[0] === "") throw new Error("missing command");
@@ -265,16 +274,17 @@ async function runCommand(sandbox) {
 }
 async function writeFile(sandbox) {
   const files = sandbox.filesystem || sandbox.fs || sandbox.files || sandbox;
+  const targetPath = workspaceFilePath(req.path);
   const buffer = Buffer.from(String(req.contentBase64 || ""), "base64");
   if (files && typeof files.writeFile === "function") {
-    await files.writeFile(req.path, buffer);
+    await files.writeFile(targetPath, buffer);
     return;
   }
   if (files && typeof files.write === "function") {
-    await files.write(req.path, buffer);
+    await files.write(targetPath, buffer);
     return;
   }
-  await callAny(files, ["writeTextFile", "createFile"], req.path, buffer);
+  await callAny(files, ["writeTextFile", "createFile"], targetPath, buffer);
 }
 function normalizePort(portInfo, fallbackPort, fallbackURL) {
   const port = Number((portInfo && (portInfo.port ?? portInfo.targetPort ?? portInfo.containerPort)) || fallbackPort || 0);

@@ -161,6 +161,11 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 	if !strings.Contains(codeSandboxBridgeScript, "return await callAny(sandboxes, [\"get\"], id);") {
 		t.Fatalf("read-only openSandbox must use SDK get only")
 	}
+	if !strings.Contains(codeSandboxBridgeScript, "function workspaceFilePath(path)") ||
+		!strings.Contains(codeSandboxBridgeScript, "value.slice(\"/project/workspace/\".length)") ||
+		!strings.Contains(codeSandboxBridgeScript, "await files.writeFile(targetPath, buffer)") {
+		t.Fatalf("bridge script must convert workspace absolute file paths before SDK writes")
+	}
 }
 
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {

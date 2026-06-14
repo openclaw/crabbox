@@ -317,7 +317,7 @@ func TestRunSyncOnlyUploadsArchiveAndExtracts(t *testing.T) {
 	if !result.SyncDelegated || !strings.Contains(stdout.String(), "synced /project/workspace/my-app") {
 		t.Fatalf("result=%#v stdout=%q", result, stdout.String())
 	}
-	if len(fake.uploads) != 1 || !strings.HasPrefix(fake.uploads[0].Path, ".crabbox-codesandbox-sync-") || strings.HasPrefix(fake.uploads[0].Path, "/") || len(fake.uploads[0].Data) == 0 {
+	if len(fake.uploads) != 1 || !strings.HasPrefix(fake.uploads[0].Path, "/project/workspace/.crabbox-codesandbox-sync-") || len(fake.uploads[0].Data) == 0 {
 		t.Fatalf("uploads=%#v", fake.uploads)
 	}
 	if !fake.hasCommandContaining("tar -xzf") || !fake.hasCommandContaining("/project/workspace/.crabbox-codesandbox-sync-") || !fake.hasCommandContaining("/project/workspace/my-app") {
