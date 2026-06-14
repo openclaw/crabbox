@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- Hardened Agent Sandbox repository-config workload and workdir selection, absolute kubeconfig handling, downstream Sandbox/pod ownership validation, ambiguous-create reconciliation, terminal status detection, retained activity bookkeeping, local claim removal reporting, and UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes; thanks @coygeek.
+- Hardened Agent Sandbox repository-config workload and workdir selection, absolute and multi-file kubeconfig handling, warm-pool and downstream Sandbox/pod ownership validation, ambiguous-create reconciliation, terminal status detection, retained activity bookkeeping, local claim removal reporting, and UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes; thanks @coygeek.
 - Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.
 - Hardened runtime-adapter relays with end-to-end absolute deadlines, durable generation-scoped dispatch fences retained across ambiguous connector failures, atomic owner-only legacy cleanup, rejection of unfenced proxy deletes, per-owner in-flight quotas, post-cancellation accounting, response-delivery grace, connector-matched request validation, restart-safe TTL-first live-bridge revocation, retry-safe upstream rejection handling, generation-fenced confirmed-absence acknowledgments, and cleanup-fenced workspace bindings.
 - Fixed Cloudflare Dynamic Workers lifecycle reads, compatibility identity, bundle validation, and live-smoke credential isolation.

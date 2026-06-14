@@ -174,6 +174,7 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
    A `Finished=True` Sandbox or a pod in `Succeeded`/`Failed` phase stops the
    wait immediately with the terminal reason instead of consuming the timeout.
    Every claim lookup must retain the Kubernetes UID returned by creation.
+   The live claim must also keep pointing at the configured warm pool.
    Before sync or command execution, the Sandbox must carry that claim UID and
    be controller-owned by the exact `SandboxClaim`; the pod must be
    controller-owned by that exact Sandbox UID. Crabbox pins both downstream UIDs
@@ -213,6 +214,7 @@ Before deleting a live `SandboxClaim`, Crabbox verifies:
 - `crabbox.dev/lease-id=<local lease id>`
 - `crabbox.dev/provider-scope=<SHA-256 scope fingerprint>`
 - the current `metadata.uid` matches the UID pinned in the local claim
+- `spec.warmPoolRef.name` matches the warm pool pinned in the local claim
 
 Missing Kubernetes claims are preserved locally by default because a 404 can be
 ambiguous across clusters or accounts. Set `--agent-sandbox-forget-missing` or

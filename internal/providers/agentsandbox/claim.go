@@ -35,6 +35,7 @@ type claimIdentity struct {
 	LeaseID       string
 	ProviderScope string
 	UID           string
+	WarmPool      string
 }
 
 var dns1123LabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -177,13 +178,18 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 
 func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
 	uid := ""
+	warmPool := ""
 	if claim.Labels != nil {
 		uid = strings.TrimSpace(claim.Labels[claimLabelClaimUID])
+		warmPool = strings.TrimSpace(claim.Labels[claimLabelWarmPool])
 	}
 	if uid == "" {
 		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
 	}
-	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid}, nil
+	if warmPool == "" {
+		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", claim.LeaseID)
+	}
+	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid, WarmPool: warmPool}, nil
 }
 
 func authorizeClaimScope(cfg Config, claim LeaseClaim) error {

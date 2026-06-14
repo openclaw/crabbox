@@ -95,12 +95,15 @@ test("Agent Sandbox smoke supports a relative binary and stops only the created 
   const fakeCrabbox = path.join(bin, "crabbox");
   const crabboxLog = path.join(dir, "crabbox.log");
   const kubeconfig = path.join(dir, "kubeconfig");
+  const secondKubeconfig = path.join(dir, "kubeconfig-extra");
   fs.mkdirSync(bin);
   fs.writeFileSync(kubeconfig, "apiVersion: v1\nkind: Config\n", "utf8");
+  fs.writeFileSync(secondKubeconfig, "apiVersion: v1\nkind: Config\n", "utf8");
   writeExecutable(
     fakeCrabbox,
     `#!/usr/bin/env bash
 set -euo pipefail
+printf 'KUBECONFIG=%s\\n' "\${KUBECONFIG:-}" >>"${crabboxLog}"
 printf '%s\\n' "$*" >>"${crabboxLog}"
 case "$1" in
   doctor)
@@ -134,7 +137,8 @@ esac
       CRABBOX_BIN: path.relative(repoRoot, fakeCrabbox),
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "agent-sandbox",
-      CRABBOX_AGENT_SANDBOX_KUBECONFIG: kubeconfig,
+      CRABBOX_AGENT_SANDBOX_KUBECONFIG: "",
+      KUBECONFIG: `${kubeconfig}${path.delimiter}${secondKubeconfig}`,
       CRABBOX_AGENT_SANDBOX_CONTEXT: "agent-context",
       CRABBOX_AGENT_SANDBOX_NAMESPACE: "sandboxes",
       CRABBOX_AGENT_SANDBOX_WARM_POOL: "linux-pool",
@@ -147,8 +151,15 @@ esac
   assert.match(result.stdout, /^live_agent_sandbox_smoke_passed$/m);
 
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
+  const inheritedKubeconfig = `${kubeconfig}${path.delimiter}${secondKubeconfig}`;
+  assert.match(
+    crabboxCalls,
+    new RegExp(`KUBECONFIG=${inheritedKubeconfig.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+  );
   assert.match(crabboxCalls, /doctor --provider agent-sandbox/);
   assert.doesNotMatch(crabboxCalls, /--agent-sandbox-kubectl/);
+  assert.match(crabboxCalls, /--agent-sandbox-kubeconfig  --agent-sandbox-context/);
+  assert.equal(crabboxCalls.includes(`--agent-sandbox-kubeconfig ${inheritedKubeconfig}`), false);
   assert.match(crabboxCalls, /run --provider agent-sandbox/);
   assert.match(crabboxCalls, /--slug agent-sandbox-smoke-test/);
   assert.match(crabboxCalls, /status --provider agent-sandbox .* --id asbx_123456789abc/);

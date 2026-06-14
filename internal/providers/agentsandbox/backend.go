@@ -575,7 +575,12 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: reconciled agent-sandbox claim=%s after ambiguous create result\n", claimResourceName)
 	}
-	identity := claimIdentity{LeaseID: leaseID, ProviderScope: claimScope(b.cfg), UID: strings.TrimSpace(created.Metadata.UID)}
+	identity := claimIdentity{
+		LeaseID:       leaseID,
+		ProviderScope: claimScope(b.cfg),
+		UID:           strings.TrimSpace(created.Metadata.UID),
+		WarmPool:      b.cfg.AgentSandbox.WarmPool,
+	}
 	pending := sandboxReadiness{ClaimName: claimResourceName, ClaimUID: identity.UID}
 	if err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimResourceName); err != nil {
 		return "", "", "", sandboxReadiness{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
@@ -606,6 +611,7 @@ func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesCl
 				LeaseID:       leaseID,
 				ProviderScope: claimScope(b.cfg),
 				UID:           strings.TrimSpace(live.Metadata.UID),
+				WarmPool:      b.cfg.AgentSandbox.WarmPool,
 			}
 			if identity.UID == "" {
 				return nil, errors.Join(cause, exit(4, "reconciled agent-sandbox claim %s has no Kubernetes UID", claimName))
@@ -719,15 +725,33 @@ func validateClaimOwnership(obj *kubernetesObject, leaseID, providerScope string
 
 func validateClaimIdentity(obj *kubernetesObject, identity claimIdentity) error {
 	if obj == nil {
-		return exit(4, "agent-sandbox claim identity is missing")
+		return resourceIdentityError{err: exit(4, "agent-sandbox claim identity is missing")}
 	}
 	if identity.UID == "" {
-		return exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", identity.LeaseID)
+		return resourceIdentityError{err: exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", identity.LeaseID)}
+	}
+	if identity.WarmPool == "" {
+		return resourceIdentityError{err: exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", identity.LeaseID)}
 	}
 	if got := strings.TrimSpace(obj.Metadata.UID); got != identity.UID {
-		return exit(4, "agent-sandbox SandboxClaim %s UID changed from %s to %s", obj.Metadata.Name, identity.UID, blank(got, "<empty>"))
+		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s UID changed from %s to %s", obj.Metadata.Name, identity.UID, blank(got, "<empty>"))}
 	}
-	return validateClaimOwnership(obj, identity.LeaseID, identity.ProviderScope)
+	if got := sandboxClaimWarmPool(obj); got != identity.WarmPool {
+		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s warm pool changed from %s to %s", obj.Metadata.Name, identity.WarmPool, blank(got, "<empty>"))}
+	}
+	if err := validateClaimOwnership(obj, identity.LeaseID, identity.ProviderScope); err != nil {
+		return resourceIdentityError{err: err}
+	}
+	return nil
+}
+
+func sandboxClaimWarmPool(obj *kubernetesObject) string {
+	if obj == nil {
+		return ""
+	}
+	ref, _ := obj.Spec["warmPoolRef"].(map[string]any)
+	name, _ := ref["name"].(string)
+	return strings.TrimSpace(name)
 }
 
 func (b *backend) missingClaimRunError(claim LeaseClaim) error {

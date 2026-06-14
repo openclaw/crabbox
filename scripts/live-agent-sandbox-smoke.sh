@@ -153,6 +153,7 @@ fi
 
 kubectl="$(trusted_config_value CRABBOX_AGENT_SANDBOX_KUBECTL agentSandbox.kubectl || true)"
 kubeconfig="$(trusted_config_value CRABBOX_AGENT_SANDBOX_KUBECONFIG agentSandbox.kubeconfig || true)"
+kubeconfig_inherited=0
 context="$(trusted_config_value CRABBOX_AGENT_SANDBOX_CONTEXT agentSandbox.context || true)"
 namespace="$(trusted_config_value CRABBOX_AGENT_SANDBOX_NAMESPACE agentSandbox.namespace || true)"
 warm_pool="$(trusted_config_value CRABBOX_AGENT_SANDBOX_WARM_POOL agentSandbox.warmPool || true)"
@@ -162,12 +163,12 @@ namespace="${namespace:-default}"
 workdir="${workdir:-/workspace/crabbox}"
 
 if [[ -z "$kubeconfig" && -n "${KUBECONFIG:-}" ]]; then
-  kubeconfig="$KUBECONFIG"
+  kubeconfig_inherited=1
 fi
-if [[ -z "$kubeconfig" && -r "$HOME/.kube/config" ]]; then
+if [[ -z "$kubeconfig" && $kubeconfig_inherited -eq 0 && -r "$HOME/.kube/config" ]]; then
   kubeconfig="$HOME/.kube/config"
 fi
-if [[ -z "$kubeconfig" ]]; then
+if [[ -z "$kubeconfig" && $kubeconfig_inherited -eq 0 ]]; then
   classify_and_exit environment_blocked "reason=missing_kubeconfig missing=CRABBOX_AGENT_SANDBOX_KUBECONFIG_or_KUBECONFIG_or_readable_default_kubeconfig"
 fi
 if [[ -z "$context" ]]; then
@@ -201,7 +202,13 @@ provider_args=(--provider agent-sandbox)
 if [[ -n "$kubectl" ]]; then
   provider_args+=(--agent-sandbox-kubectl "$kubectl")
 fi
-provider_args+=(--agent-sandbox-kubeconfig "$kubeconfig" --agent-sandbox-context "$context" --agent-sandbox-namespace "$namespace" --agent-sandbox-warm-pool "$warm_pool" --agent-sandbox-workdir "$workdir")
+if [[ -n "$kubeconfig" ]]; then
+  provider_args+=(--agent-sandbox-kubeconfig "$kubeconfig")
+elif [[ $kubeconfig_inherited -eq 1 ]]; then
+  # Clear trusted config while leaving the inherited list for kubectl.
+  provider_args+=(--agent-sandbox-kubeconfig "")
+fi
+provider_args+=(--agent-sandbox-context "$context" --agent-sandbox-namespace "$namespace" --agent-sandbox-warm-pool "$warm_pool" --agent-sandbox-workdir "$workdir")
 if [[ -n "$container" ]]; then
   provider_args+=(--agent-sandbox-container "$container")
 fi

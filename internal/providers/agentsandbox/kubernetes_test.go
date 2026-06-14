@@ -542,6 +542,13 @@ func TestSandboxReadinessRejectsDownstreamIdentityMismatch(t *testing.T) {
 		wantError string
 	}{
 		{
+			name: "claim warm pool",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxClaimResource+"/sandboxes/claim-a"].Spec["warmPoolRef"].(map[string]any)["name"] = "other-pool"
+			},
+			wantError: "warm pool changed",
+		},
+		{
 			name: "sandbox claim UID label",
 			mutate: func(fake *fakeKubernetesClient) {
 				fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Metadata.Labels[agentSandboxClaimUIDLabel] = "uid-other"
@@ -604,6 +611,13 @@ func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
 		mutate    func(*fakeKubernetesClient)
 		wantError string
 	}{
+		{
+			name: "claim warm pool redirection",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxClaimResource+"/sandboxes/claim-a"].Spec["warmPoolRef"].(map[string]any)["name"] = "other-pool"
+			},
+			wantError: "warm pool changed",
+		},
 		{
 			name: "sandbox replacement",
 			mutate: func(fake *fakeKubernetesClient) {
@@ -997,7 +1011,7 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 		UID:         identity.UID,
 		Labels:      claimLabels(identity.LeaseID, "test"),
 		Annotations: claimAnnotations(cfg),
-	}}
+	}, Spec: map[string]any{"warmPoolRef": map[string]any{"name": cfg.AgentSandbox.WarmPool}}}
 	claim.Status.Sandbox.Name = "sandbox-a"
 	sandboxUID := "uid-sandbox-a"
 	sandbox := &kubernetesObject{
@@ -1055,7 +1069,7 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 }
 
 func fakeClaimIdentity(cfg Config) claimIdentity {
-	return claimIdentity{LeaseID: "asbx_test", ProviderScope: claimScope(cfg), UID: "uid-claim-a"}
+	return claimIdentity{LeaseID: "asbx_test", ProviderScope: claimScope(cfg), UID: "uid-claim-a", WarmPool: cfg.AgentSandbox.WarmPool}
 }
 
 func TestMain(m *testing.M) {
