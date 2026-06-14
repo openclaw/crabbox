@@ -199,7 +199,7 @@ func (c client) deleteCodespace(ctx context.Context, name string) error {
 	if name == "" {
 		return exit(2, "github-codespaces codespace name is required")
 	}
-	return c.do(ctx, http.MethodDelete, "/user/codespaces/"+url.PathEscape(name), nil, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/user/codespaces/"+url.PathEscape(name), nil, nil, map[int]bool{http.StatusNotModified: true})
 }
 
 func (c client) listMachines(ctx context.Context, repo, ref string) ([]codespaceMachine, error) {

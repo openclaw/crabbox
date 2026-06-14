@@ -107,6 +107,8 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 		case r.Method == http.MethodDelete && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1":
 			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodDelete && r.URL.RequestURI() == "/api/v3/user/codespaces/space-2":
+			w.WriteHeader(http.StatusNotModified)
 		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/repos/example-org/my-app/codespaces/machines?ref=main":
 			_, _ = w.Write([]byte(`{"machines":[{"name":"standardLinux32gb","display_name":"Standard"}]}`))
 		default:
@@ -135,6 +137,9 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 	if err := c.deleteCodespace(context.Background(), "space-1"); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.deleteCodespace(context.Background(), "space-2"); err != nil {
+		t.Fatal(err)
+	}
 	machines, err := c.listMachines(context.Background(), "example-org/my-app", "main")
 	if err != nil || len(machines) != 1 || machines[0].Name != "standardLinux32gb" {
 		t.Fatalf("machines=%#v err=%v", machines, err)
@@ -147,6 +152,7 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 		"POST /api/v3/user/codespaces/space-2/start",
 		"POST /api/v3/user/codespaces/space-1/stop",
 		"DELETE /api/v3/user/codespaces/space-1",
+		"DELETE /api/v3/user/codespaces/space-2",
 		"GET /api/v3/repos/example-org/my-app/codespaces/machines?ref=main",
 	}, "\n")
 	if got := strings.Join(calls, "\n"); got != want {
