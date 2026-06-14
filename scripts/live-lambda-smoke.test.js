@@ -330,7 +330,7 @@ case "$1" in
     printf 'attempt\\n' >>"${stopAttempts}"
     attempts="$(wc -l <"${stopAttempts}" | tr -d ' ')"
     if [[ "$attempts" -lt 4 ]]; then
-      printf 'lease/lambda not found: %s\\n' "$4" >&2
+      printf 'lease/lambda instance not found: %s\\n' "$4" >&2
       exit 4
     fi
     ;;
@@ -476,7 +476,7 @@ case "$1" in
     exit 37
     ;;
   stop)
-    printf 'lease/lambda not found: %s\\n' "$4" >&2
+    printf 'lease/lambda instance not found: %s\\n' "$4" >&2
     exit 4
     ;;
   *)

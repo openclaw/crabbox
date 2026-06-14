@@ -238,6 +238,11 @@ print(json.dumps(sorted(keys, key=lambda key: (key["name"], str(key["id"]))), se
 '
 }
 
+is_lambda_not_found_output() {
+  local output="$1"
+  [[ "$output" == *"lease/lambda not found:"* || "$output" == *"lease/lambda instance not found:"* ]]
+}
+
 local_testbox_key_snapshot() {
   local roots=(
     "${XDG_CONFIG_HOME:-$HOME/.config}/crabbox/testboxes"
@@ -278,7 +283,7 @@ cleanup() {
       fi
       local lower_cleanup_output
       lower_cleanup_output="$(printf '%s' "$cleanup_output" | tr '[:upper:]' '[:lower:]')"
-      if [ "$cleanup_status" -ne 4 ] || [[ "$lower_cleanup_output" != *"lease/lambda not found:"* ]]; then
+      if [ "$cleanup_status" -ne 4 ] || ! is_lambda_not_found_output "$lower_cleanup_output"; then
         if [ "$attempt" -lt "$cleanup_attempts" ]; then
           sleep "$cleanup_poll_seconds"
         fi
