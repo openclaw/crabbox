@@ -58,13 +58,12 @@ func (f *fakeLambdaAPI) LaunchInstance(_ context.Context, req LaunchInstanceRequ
 	}
 	item := Instance{
 		ID:          id,
-		Name:        req.Name,
+		Name:        id,
 		Status:      "active",
 		Region:      Region{Name: req.RegionName},
 		Type:        req.InstanceTypeName,
 		IP:          "203.0.113.25",
 		SSHKeyNames: append([]string(nil), req.SSHKeyNames...),
-		Tags:        req.Tags,
 	}
 	f.instances = append(f.instances, item)
 	f.nextInstanceID++
@@ -197,16 +196,6 @@ func TestAcquireCreatesKeyLaunchesPollsAndClaimsLease(t *testing.T) {
 	}
 	if req.FirewallRulesetName != "default" || len(req.FileSystemNames) != 1 || len(req.FileSystemMounts) != 1 {
 		t.Fatalf("launch optional resources=%#v", req)
-	}
-	if req.Tags["provider"] != providerName || req.Tags["lease"] != lease.LeaseID || req.Tags["slug"] != "my-app" || req.Tags["tailscale"] != "true" ||
-		req.Tags[lambdaKeyIDLabel] != "key-700" || req.Tags[lambdaKeyNameLabel] != api.addKeyRequests[0].Name || req.Tags[lambdaKeyOwnedLabel] != "true" {
-		t.Fatalf("tags=%v", req.Tags)
-	}
-	if req.Tags["expires_at"] == "" || req.Tags["ttl_secs"] == "" {
-		t.Fatalf("provider launch tags should carry orphan cleanup timing: %v", req.Tags)
-	}
-	if req.Tags["last_touched_at"] != "" || req.Tags["idle_timeout_secs"] != "" {
-		t.Fatalf("provider launch tags should not carry mutable touch timing: %v", req.Tags)
 	}
 	claim, ok, err := core.ResolveLeaseClaimForProvider("my-app", providerName)
 	if err != nil || !ok || claim.CloudID != "i-100" || claim.Labels[lambdaKeyOwnedLabel] != "true" || claim.Labels[lambdaKeyIDLabel] != "key-700" {
@@ -406,6 +395,46 @@ func TestReleaseMissingInstanceStillDeletesOwnedKeyAndClaim(t *testing.T) {
 	}
 }
 
+func TestListResolveAndReleaseUseLocalClaimForUntaggedLambdaInstance(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	leaseID := "cbx_abcdef123459"
+	slug := "untagged"
+	labels := lambdaLabelsWithKey(leaseTags(b.cfg, leaseID, slug, "ready", false, time.Now()), lambdaSSHKeyIdentity{ID: "key-untagged", Name: providerKeyForLease(leaseID), Created: true})
+	api.instances = []Instance{{ID: "i-untagged", Name: "untagged", Status: "active", IP: "203.0.113.61", Type: defaultType}}
+	server := core.Server{Provider: providerName, CloudID: "i-untagged", Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.cfg, server, core.SSHTarget{}, t.TempDir(), 0, false); err != nil {
+		t.Fatal(err)
+	}
+	views, err := b.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].CloudID != "i-untagged" || views[0].Labels["lease"] != leaseID {
+		t.Fatalf("views=%#v", views)
+	}
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: slug, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Server.CloudID != "i-untagged" || target.SSH.Host != "203.0.113.61" || target.Server.Labels["slug"] != slug {
+		t.Fatalf("target=%#v", target)
+	}
+	releaseTarget, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "i-untagged", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: releaseTarget}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 1 || api.terminatedIDs[0][0] != "i-untagged" || len(api.deletedKeyIDs) != 1 || api.deletedKeyIDs[0] != "key-untagged" {
+		t.Fatalf("terminated=%v deletedKeyIDs=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
 func TestReleaseFromClaimOnlyCloudIDTerminatesSafely(t *testing.T) {
 	api := &fakeLambdaAPI{}
 	b := newTestBackend(t, api)
@@ -560,6 +589,37 @@ func TestFailedRollbackRecoveryClaimKeepsInstanceIDForRetry(t *testing.T) {
 	}
 	if len(api.terminatedIDs) < 2 || api.terminatedIDs[len(api.terminatedIDs)-1][0] != "i-100" {
 		t.Fatalf("terminated=%v", api.terminatedIDs)
+	}
+}
+
+func TestAmbiguousKeyCreateRecoveryDeletesOwnedKeyByName(t *testing.T) {
+	api := &fakeLambdaAPI{addKeyErr: &APIError{Status: 500, Code: "provider/upstream", Message: "server error"}}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "key-api-ambiguous"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("key-api-ambiguous", providerName)
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[lambdaRecoveryKeyLabel] != "ambiguous-key-create" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	api.addKeyErr = nil
+	api.sshKeys = append(api.sshKeys, SSHKey{ID: "key-late", Name: claim.Labels[lambdaKeyNameLabel]})
+	target, err := b.releaseTargetFromClaim("key-api-ambiguous")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 0 {
+		t.Fatalf("terminated=%v", api.terminatedIDs)
+	}
+	if len(api.deletedKeyIDs) != 1 || api.deletedKeyIDs[0] != "key-late" {
+		t.Fatalf("deletedKeyIDs=%v", api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("key-api-ambiguous", providerName); err != nil || ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
 	}
 }
 

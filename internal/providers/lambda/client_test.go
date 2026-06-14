@@ -102,7 +102,6 @@ func TestLaunchRequestShape(t *testing.T) {
 		SSHKeyNames:         []string{"crabbox-cbx_123"},
 		ImageFamily:         "lambda-stack-24-04",
 		UserData:            "cloud-config",
-		Tags:                map[string]string{"Crabbox": "true"},
 		FirewallRulesetName: "crabbox",
 		FileSystemNames:     []string{"cache"},
 		FileSystemMounts:    []FilesystemMountRequest{{Name: "cache", MountPath: "/mnt/cache"}},
@@ -114,6 +113,15 @@ func TestLaunchRequestShape(t *testing.T) {
 	for _, key := range []string{"region_name", "instance_type_name", "quantity", "ssh_key_names", "image_family", "user_data", "firewall_ruleset_name", "file_system_names", "file_system_mounts"} {
 		if !strings.Contains(string(data), `"`+key+`"`) {
 			t.Fatalf("request missing %s: %s", key, data)
+		}
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"name", "tags"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("request should not include unsupported %s: %s", key, data)
 		}
 	}
 }

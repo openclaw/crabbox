@@ -63,11 +63,9 @@ type LaunchInstanceRequest struct {
 	InstanceTypeName    string                   `json:"instance_type_name"`
 	Quantity            int                      `json:"quantity"`
 	SSHKeyNames         []string                 `json:"ssh_key_names"`
-	Name                string                   `json:"name,omitempty"`
 	ImageID             string                   `json:"image_id,omitempty"`
 	ImageFamily         string                   `json:"image_family,omitempty"`
 	UserData            string                   `json:"user_data,omitempty"`
-	Tags                map[string]string        `json:"tags,omitempty"`
 	FirewallRulesetName string                   `json:"firewall_ruleset_name,omitempty"`
 	FileSystemNames     []string                 `json:"file_system_names,omitempty"`
 	FileSystemMounts    []FilesystemMountRequest `json:"file_system_mounts,omitempty"`

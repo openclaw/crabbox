@@ -8,8 +8,8 @@ Read this when you are:
 
 Lambda is a Linux-only **SSH lease** provider for Lambda Cloud on-demand
 instances. Crabbox creates a Lambda instance, injects a per-lease SSH key and
-cloud-init user data, writes Crabbox ownership metadata as Lambda tags, waits
-for SSH/bootstrap readiness, and then uses the normal Crabbox SSH
+cloud-init user data, records Crabbox ownership metadata in the local lease
+claim, waits for SSH/bootstrap readiness, and then uses the normal Crabbox SSH
 sync/run/stop/cleanup path.
 
 Lambda is **direct-only** in this release. It does not run through the
@@ -115,13 +115,14 @@ classed doctor output rather than hidden behind generic errors.
 2. Ensure a Lambda SSH key exists for the lease.
 3. Launch one Lambda instance with `region`, `type`, `image` or `imageFamily`,
    cloud-init `user_data`, optional existing `firewallRuleset`, optional
-   existing filesystems, and Crabbox tags.
+   existing filesystems, and `quantity=1`.
 4. Wait for an instance id, public IP address, and Crabbox SSH bootstrap
    readiness.
 5. Claim the lease locally with Lambda instance and SSH-key metadata.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Terminate the Lambda instance and owned Lambda SSH key on `stop`; `cleanup`
-   deletes only resources with a complete Crabbox Lambda ownership tag set.
+   deletes resources backed by a complete local Crabbox Lambda claim, and can
+   also reclaim complete Crabbox-tagged Lambda instances.
 
 If SSH-key creation, instance launch, or post-launch readiness becomes
 indeterminate, Crabbox records a local recovery claim with enough metadata to
@@ -132,7 +133,7 @@ instance can still be reconciled.
 
 ## Ownership And Cleanup
 
-Crabbox encodes owned Lambda leases with flat Lambda tags such as:
+Crabbox encodes owned Lambda leases in local claims with flat labels such as:
 
 ```text
 crabbox=true
@@ -146,12 +147,14 @@ ttl_secs=<seconds>
 ```
 
 Release and cleanup require a complete ownership predicate: Crabbox marker,
-provider marker, lease id, slug, and Linux target. Lambda instances with
-partial, foreign, or malformed Crabbox-like tags are skipped or refused.
+provider marker, lease id, slug, and Linux target. Lambda instances backed only
+by partial, foreign, or malformed Crabbox-like metadata are skipped or refused.
 
-Lambda has no safe tag-update path in this phase. Provider tags keep launch-time
-expiry metadata so provider-only orphan cleanup can eventually reclaim billable
-instances, while local Crabbox claims carry fresh touch and idle-timeout state.
+Lambda has no safe tag-update path in this phase, and the launch path does not
+depend on provider-side tag persistence. Local Crabbox claims carry fresh touch
+and idle-timeout state. Complete Crabbox-tagged Lambda instances are still
+understood by `list`, `stop`, and `cleanup` for compatibility with manually
+seeded or future provider metadata.
 Direct mode has no coordinator alarm. Use:
 
 ```sh
@@ -209,7 +212,7 @@ classification=cleanup_failed
 
 External blockers such as missing credentials, inactive billing, quota, or
 capacity are reported as classified blocked outcomes. If cleanup fails, use the
-reported slug and Crabbox tags to inspect the instance with
+reported slug and local Crabbox claim to inspect the instance with
 `crabbox list --provider lambda --json` or the Lambda console. The smoke script
 redacts `LAMBDA_API_KEY`, user data, private key material, and Jupyter token/URL
 fields from diagnostic output.
@@ -220,7 +223,8 @@ fields from diagnostic output.
 - **Tailscale**: yes through the standard Linux cloud-init path when a direct
   Tailscale auth key is configured.
 - **Desktop / browser / code**: not advertised in this phase.
-- **Cleanup**: yes, tag-owned Lambda instances and owned Lambda SSH keys only.
+- **Cleanup**: yes, local-claim-owned or complete-tag-owned Lambda instances and
+  owned Lambda SSH keys only.
 - **Coordinator**: never; direct CLI only.
 
 ## Gotchas
