@@ -88,10 +88,6 @@ func readLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return core.ReadLeaseClaim(leaseID)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 	return core.WriteTimingJSON(w, report)
 }

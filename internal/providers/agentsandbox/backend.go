@@ -10,10 +10,11 @@ import (
 )
 
 type backend struct {
-	spec      ProviderSpec
-	cfg       Config
-	rt        Runtime
-	newClient func(context.Context, Config, Runtime) (kubernetesClient, error)
+	spec        ProviderSpec
+	cfg         Config
+	rt          Runtime
+	newClient   func(context.Context, Config, Runtime) (kubernetesClient, error)
+	removeClaim func(string, LeaseClaim) error
 }
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
@@ -186,12 +187,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, ready, req, workdir)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
-			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}, err
+			result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
+			return result, b.refreshRetainedFailureActivity(claim, leaseID, shouldStop, err)
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.execShell(ctx, client, ready, "mkdir -p "+shellQuote(workdir)); err != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
-		return RunResult{}, err
+		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
+		return result, b.refreshRetainedFailureActivity(claim, leaseID, shouldStop, err)
 	}
 	if req.SyncOnly {
 		result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
@@ -238,6 +241,17 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		pendingTiming = &timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, CommandMs: commandDuration.Milliseconds(), TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)}
 	}
 	return result, commandErr
+}
+
+func (b *backend) refreshRetainedFailureActivity(claim LeaseClaim, leaseID string, shouldStop bool, cause error) error {
+	if shouldStop || claim.LeaseID == "" {
+		return cause
+	}
+	if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
+		return errors.Join(cause, fmt.Errorf("refresh agent-sandbox lease activity: %w", err))
+	}
+	return cause
 }
 
 func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
@@ -602,8 +616,7 @@ func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient,
 		if isNotFound(err) {
 			if forgetMissing && b.cfg.AgentSandbox.ForgetMissing {
 				fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing agent-sandbox claim=%s after explicit request\n", claimName)
-				removeLeaseClaim(leaseID)
-				return nil
+				return b.removeLocalClaim(leaseID, claim)
 			}
 			if claim.LeaseID != "" {
 				return retainMissingClaim(b.cfg, claim)
@@ -623,7 +636,9 @@ func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient,
 	if err := client.Delete(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, identity.UID); err != nil && !isNotFound(err) {
 		return err
 	}
-	removeLeaseClaim(leaseID)
+	if err := b.removeLocalClaim(leaseID, claim); err != nil {
+		return fmt.Errorf("agent-sandbox claim %s/%s deleted but local lease %s removal failed: %w", b.cfg.AgentSandbox.Namespace, claimName, leaseID, err)
+	}
 	return nil
 }
 
@@ -657,10 +672,22 @@ func validateClaimIdentity(obj *kubernetesObject, identity claimIdentity) error 
 
 func (b *backend) missingClaimRunError(claim LeaseClaim) error {
 	if b.cfg.AgentSandbox.ForgetMissing {
-		removeLeaseClaim(claim.LeaseID)
+		if err := b.removeLocalClaim(claim.LeaseID, claim); err != nil {
+			return errors.Join(
+				exit(4, "agent-sandbox claim %s is missing in Kubernetes; command not run", claim.LeaseID),
+				fmt.Errorf("remove local agent-sandbox lease %s: %w", claim.LeaseID, err),
+			)
+		}
 		return exit(4, "agent-sandbox claim %s is missing in Kubernetes; local claim forgotten, command not run", claim.LeaseID)
 	}
 	return retainMissingClaim(b.cfg, claim)
+}
+
+func (b *backend) removeLocalClaim(leaseID string, claim LeaseClaim) error {
+	if b.removeClaim != nil {
+		return b.removeClaim(leaseID, claim)
+	}
+	return removeLeaseClaimIfUnchanged(leaseID, claim)
 }
 
 func (b *backend) client(ctx context.Context) (kubernetesClient, error) {

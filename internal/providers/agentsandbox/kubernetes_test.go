@@ -401,13 +401,23 @@ func TestResolveSandboxPodRequiresControllerIdentity(t *testing.T) {
 
 func TestRetainMissingClaimRequiresExplicitForget(t *testing.T) {
 	cfg := core.BaseConfig()
+	temp := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", temp)
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
 	claim := LeaseClaim{LeaseID: "asbx_missing"}
 	if err := retainMissingClaim(cfg, claim); err == nil {
 		t.Fatal("missing claim was forgotten without explicit setting")
 	}
+	if err := claimLeaseForRepo(cfg, claim.LeaseID, "missing", Repo{Root: t.TempDir()}, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg.AgentSandbox.ForgetMissing = true
-	temp := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", temp)
 	if err := retainMissingClaim(cfg, claim); err != nil {
 		t.Fatal(err)
 	}

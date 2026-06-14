@@ -240,6 +240,41 @@ func TestRunKeepOnFailureRefreshesLeaseActivity(t *testing.T) {
 	}
 }
 
+func TestRunKeepOnFailureRefreshesLeaseActivityAfterSetupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		noSync bool
+	}{
+		{name: "sync"},
+		{name: "no-sync", noSync: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			fake := readyFakeClient(cfg)
+			fake.execDelays = []time.Duration{1100 * time.Millisecond}
+			fake.execErrs = []error{errors.New("setup failed")}
+			backend := testBackend(cfg, fake, nil, nil)
+
+			result, err := backend.Run(context.Background(), RunRequest{
+				Repo:          testGitRepo(t),
+				KeepOnFailure: true,
+				NoSync:        tc.noSync,
+				Command:       []string{"true"},
+			})
+			if err == nil || !strings.Contains(err.Error(), "setup failed") {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			claim, resolveErr := resolveLocalClaim(result.LeaseID)
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			if claim.LastUsedAt == claim.ClaimedAt {
+				t.Fatalf("retained setup-failure lease activity was not refreshed: %#v", claim)
+			}
+		})
+	}
+}
+
 func TestRunFailsWhenDefaultOneShotCleanupFails(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)
@@ -256,6 +291,41 @@ func TestRunFailsWhenDefaultOneShotCleanupFails(t *testing.T) {
 	}
 	if got := backend.rt.Stderr.(*bytes.Buffer).String(); !strings.Contains(got, `"exitCode":1`) {
 		t.Fatalf("timing JSON did not report cleanup failure: %s", got)
+	}
+}
+
+func TestStopReportsLocalClaimRemovalFailureAfterRemoteDelete(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "remove-fails"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "remove-fails")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	backend.removeClaim = func(string, LeaseClaim) error {
+		return errors.New("local remove failed")
+	}
+
+	err = backend.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	if err == nil || !strings.Contains(err.Error(), "local remove failed") {
+		t.Fatalf("stop err=%v", err)
+	}
+	if fake.deletes != 1 {
+		t.Fatalf("remote deletes=%d want=1", fake.deletes)
+	}
+	if strings.Contains(backend.rt.Stderr.(*bytes.Buffer).String(), "released lease=") {
+		t.Fatalf("stop reported release despite local removal failure: %s", backend.rt.Stderr)
+	}
+	if current, readErr := readLeaseClaim(claim.LeaseID); readErr != nil || current.LeaseID == "" {
+		t.Fatalf("local claim not retained after removal failure: claim=%#v err=%v", current, readErr)
 	}
 }
 

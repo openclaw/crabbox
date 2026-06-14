@@ -205,7 +205,9 @@ func authorizeAgentSandboxRepoClaim(claim LeaseClaim, repoRoot string, reclaim b
 
 func retainMissingClaim(cfg Config, claim LeaseClaim) error {
 	if cfg.AgentSandbox.ForgetMissing {
-		removeLeaseClaim(claim.LeaseID)
+		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			return fmt.Errorf("remove forgotten agent-sandbox lease %s: %w", claim.LeaseID, err)
+		}
 		return nil
 	}
 	return fmt.Errorf("agent-sandbox claim %s is missing in Kubernetes; local claim retained because forgetMissing=false", claim.LeaseID)
