@@ -80,9 +80,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	if _, err := archive.Seek(0, 0); err != nil {
 		return nil, 0, exit(6, "rewind sync archive: %v", err)
 	}
-	if err := client.Exec(syncCtx, podExecRequest{
-		Namespace: b.cfg.AgentSandbox.Namespace,
-		Pod:       ready.PodName,
+	if err := b.execPod(syncCtx, client, ready, podExecRequest{
 		Container: b.cfg.AgentSandbox.Container,
 		Command:   []string{"tar", "-xzf", "-", "-C", extractDir},
 		Stdin:     archive,

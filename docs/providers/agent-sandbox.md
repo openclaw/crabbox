@@ -108,7 +108,8 @@ agentSandbox:
 ```
 
 Repository-local `.crabbox.yaml` and `crabbox.yaml` files cannot override
-`kubectl`, `kubeconfig`, `context`, `namespace`, `warmPool`, or `container`.
+`kubectl`, `kubeconfig`, `context`, `namespace`, `warmPool`, `container`, or
+`workdir`.
 Kubeconfig files may invoke credential plugins, and workload selection can
 redirect forwarded source and environment values to another pod, so these
 settings are accepted only from trusted user config, environment variables, or
@@ -168,8 +169,13 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 3. Crabbox waits for `SandboxClaim.status.sandbox.name`, fetches the matching
    `Sandbox`, waits for its Ready condition, then resolves the pod from the
    sandbox pod annotation or selector and waits for the pod Ready condition.
-   Every claim lookup must retain the Kubernetes UID returned by creation, so a
-   deleted and recreated claim cannot redirect sync or command execution.
+   Every claim lookup must retain the Kubernetes UID returned by creation.
+   Before sync or command execution, the Sandbox must carry that claim UID and
+   be controller-owned by the exact `SandboxClaim`; the pod must be
+   controller-owned by that exact Sandbox UID. Crabbox pins both downstream UIDs
+   and revalidates the full chain immediately before each pod exec, rejecting
+   observed deletion, recreation, or redirection before sending source or
+   forwarded values.
 4. Unless `--no-sync` is set, Crabbox builds a portable archive from the local
    Git file manifest and extracts it into the configured workdir with
    `kubectl exec`. With `sync.delete: true`, extraction happens in a

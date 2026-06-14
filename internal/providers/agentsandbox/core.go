@@ -58,6 +58,7 @@ const (
 
 	agentSandboxCleanupTimeout = 15 * time.Second
 	agentSandboxStatusPoll     = 2 * time.Second
+	agentSandboxClaimUIDLabel  = "agents.x-k8s.io/claim-uid"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {

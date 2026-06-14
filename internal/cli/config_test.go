@@ -760,6 +760,7 @@ func TestAgentSandboxUntrustedConfigCannotRedirectClusterWorkload(t *testing.T) 
 	cfg.AgentSandbox.Namespace = "trusted-namespace"
 	cfg.AgentSandbox.WarmPool = "trusted-pool"
 	cfg.AgentSandbox.Container = "trusted-container"
+	cfg.AgentSandbox.Workdir = "/trusted/workspace"
 	if err := applyFileConfigWithTrust(&cfg, fileConfig{
 		AgentSandbox: &fileAgentSandboxConfig{
 			Kubectl:    "./payload",
@@ -778,11 +779,9 @@ func TestAgentSandboxUntrustedConfigCannotRedirectClusterWorkload(t *testing.T) 
 		cfg.AgentSandbox.Context != "trusted-context" ||
 		cfg.AgentSandbox.Namespace != "trusted-namespace" ||
 		cfg.AgentSandbox.WarmPool != "trusted-pool" ||
-		cfg.AgentSandbox.Container != "trusted-container" {
+		cfg.AgentSandbox.Container != "trusted-container" ||
+		cfg.AgentSandbox.Workdir != "/trusted/workspace" {
 		t.Fatalf("untrusted cluster workload override applied: %#v", cfg.AgentSandbox)
-	}
-	if cfg.AgentSandbox.Workdir != "/workspace/repo" {
-		t.Fatalf("safe untrusted setting not applied: %#v", cfg.AgentSandbox)
 	}
 }
 

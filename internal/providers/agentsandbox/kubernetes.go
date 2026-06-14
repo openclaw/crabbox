@@ -40,11 +40,32 @@ func (r resourceRef) qualifiedResource() string {
 }
 
 type objectMeta struct {
-	Name        string            `json:"name,omitempty"`
-	Namespace   string            `json:"namespace,omitempty"`
-	UID         string            `json:"uid,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
+	Name            string            `json:"name,omitempty"`
+	Namespace       string            `json:"namespace,omitempty"`
+	UID             string            `json:"uid,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
+	OwnerReferences []ownerReference  `json:"ownerReferences,omitempty"`
+}
+
+type ownerReference struct {
+	APIVersion string `json:"apiVersion,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Name       string `json:"name,omitempty"`
+	UID        string `json:"uid,omitempty"`
+	Controller bool   `json:"controller,omitempty"`
+}
+
+type resourceIdentityError struct {
+	err error
+}
+
+func (e resourceIdentityError) Error() string {
+	return e.err.Error()
+}
+
+func (e resourceIdentityError) Unwrap() error {
+	return e.err
 }
 
 type conditionState struct {
@@ -543,10 +564,13 @@ func (b *tailBuffer) String() string {
 
 func podStateFromObject(object kubernetesObject) podState {
 	state := podState{
-		Name:       object.Metadata.Name,
-		Phase:      object.Status.Phase,
-		PodIP:      object.Status.PodIP,
-		Conditions: append([]conditionState(nil), object.Status.Conditions...),
+		Name:            object.Metadata.Name,
+		UID:             object.Metadata.UID,
+		Labels:          cloneStringMap(object.Metadata.Labels),
+		OwnerReferences: append([]ownerReference(nil), object.Metadata.OwnerReferences...),
+		Phase:           object.Status.Phase,
+		PodIP:           object.Status.PodIP,
+		Conditions:      append([]conditionState(nil), object.Status.Conditions...),
 	}
 	for _, condition := range state.Conditions {
 		if condition.Type == "Ready" && condition.Status == "True" {
@@ -558,11 +582,14 @@ func podStateFromObject(object kubernetesObject) podState {
 }
 
 type podState struct {
-	Name       string
-	Phase      string
-	PodIP      string
-	Ready      bool
-	Conditions []conditionState
+	Name            string
+	UID             string
+	Labels          map[string]string
+	OwnerReferences []ownerReference
+	Phase           string
+	PodIP           string
+	Ready           bool
+	Conditions      []conditionState
 }
 
 func sandboxGVR() resourceRef {
@@ -581,8 +608,11 @@ type sandboxReadiness struct {
 	ClaimName   string
 	ClaimUID    string
 	SandboxName string
+	SandboxUID  string
 	PodName     string
+	PodUID      string
 	PodIP       string
+	identity    claimIdentity
 }
 
 type sandboxResourceReadiness struct {
@@ -639,11 +669,11 @@ func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, names
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	pod, err := waitForSandboxPodReadiness(ctx, client, namespace, resource.Sandbox, poll)
+	pod, err := waitForSandboxPodReadiness(ctx, client, namespace, resource.Sandbox, identity, poll)
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	return sandboxReadiness{ClaimName: resource.ClaimName, ClaimUID: identity.UID, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+	return newSandboxReadiness(resource, pod, identity), nil
 }
 
 func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, sandboxTimeout, podTimeout, poll time.Duration) (sandboxReadiness, error) {
@@ -662,12 +692,12 @@ func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesC
 	if podTimeout > 0 {
 		podCtx, podCancel = context.WithTimeout(ctx, podTimeout)
 	}
-	pod, err := waitForSandboxPodReadiness(podCtx, client, namespace, resource.Sandbox, poll)
+	pod, err := waitForSandboxPodReadiness(podCtx, client, namespace, resource.Sandbox, identity, poll)
 	podCancel()
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	return sandboxReadiness{ClaimName: resource.ClaimName, ClaimUID: identity.UID, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+	return newSandboxReadiness(resource, pod, identity), nil
 }
 
 func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, poll time.Duration) (sandboxResourceReadiness, error) {
@@ -685,6 +715,9 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 		if errors.Is(err, errSandboxClaimNotFound) {
 			return sandboxResourceReadiness{}, err
 		}
+		if isResourceIdentityError(err) {
+			return sandboxResourceReadiness{}, err
+		}
 		lastErr = err
 		select {
 		case <-ctx.Done():
@@ -694,7 +727,7 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 	}
 }
 
-func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace string, sandbox *kubernetesObject, poll time.Duration) (podState, error) {
+func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace string, sandbox *kubernetesObject, identity claimIdentity, poll time.Duration) (podState, error) {
 	if poll <= 0 {
 		poll = time.Second
 	}
@@ -703,11 +736,19 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 	var lastErr error
 	for {
 		pod, err := resolveSandboxPod(ctx, client, namespace, sandbox)
+		if err == nil {
+			if err := validatePodSandboxBinding(pod, sandbox, identity); err != nil {
+				return podState{}, err
+			}
+		}
 		if err == nil && pod.Ready {
 			return pod, nil
 		}
 		if err == nil {
 			err = fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
+		}
+		if isResourceIdentityError(err) {
+			return podState{}, err
 		}
 		lastErr = err
 		select {
@@ -737,6 +778,9 @@ func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, 
 	if err != nil {
 		return sandboxResourceReadiness{}, err
 	}
+	if err := validateSandboxClaimBinding(sandbox, claimName, identity); err != nil {
+		return sandboxResourceReadiness{}, err
+	}
 	if err := sandboxReady(sandbox); err != nil {
 		return sandboxResourceReadiness{}, err
 	}
@@ -752,10 +796,110 @@ func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespac
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
+	if err := validatePodSandboxBinding(pod, resource.Sandbox, identity); err != nil {
+		return sandboxReadiness{}, err
+	}
 	if !pod.Ready {
 		return sandboxReadiness{}, fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
 	}
-	return sandboxReadiness{ClaimName: resource.ClaimName, ClaimUID: identity.UID, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+	return newSandboxReadiness(resource, pod, identity), nil
+}
+
+func newSandboxReadiness(resource sandboxResourceReadiness, pod podState, identity claimIdentity) sandboxReadiness {
+	return sandboxReadiness{
+		ClaimName:   resource.ClaimName,
+		ClaimUID:    identity.UID,
+		SandboxName: resource.SandboxName,
+		SandboxUID:  resource.Sandbox.Metadata.UID,
+		PodName:     pod.Name,
+		PodUID:      pod.UID,
+		PodIP:       pod.PodIP,
+		identity:    identity,
+	}
+}
+
+func revalidateSandboxReadiness(ctx context.Context, client kubernetesClient, namespace string, expected sandboxReadiness) error {
+	current, err := sandboxReadinessOnce(ctx, client, namespace, expected.ClaimName, expected.identity)
+	if err != nil {
+		return err
+	}
+	if current.SandboxName != expected.SandboxName || current.SandboxUID != expected.SandboxUID {
+		return resourceIdentityError{err: exit(
+			4,
+			"agent-sandbox Sandbox identity changed from %s UID %s to %s UID %s",
+			expected.SandboxName,
+			expected.SandboxUID,
+			current.SandboxName,
+			current.SandboxUID,
+		)}
+	}
+	if current.PodName != expected.PodName || current.PodUID != expected.PodUID {
+		return resourceIdentityError{err: exit(
+			4,
+			"agent-sandbox pod identity changed from %s UID %s to %s UID %s",
+			expected.PodName,
+			expected.PodUID,
+			current.PodName,
+			current.PodUID,
+		)}
+	}
+	return nil
+}
+
+func validateSandboxClaimBinding(sandbox *kubernetesObject, claimName string, identity claimIdentity) error {
+	if sandbox == nil {
+		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox identity is missing")}
+	}
+	if got := strings.TrimSpace(sandbox.Metadata.Labels[agentSandboxClaimUIDLabel]); got != identity.UID {
+		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s claim UID label changed from %s to %s", sandbox.Metadata.Name, identity.UID, blank(got, "<empty>"))}
+	}
+	ref, ok := controllerOwnerReference(sandbox.Metadata.OwnerReferences)
+	if !ok ||
+		ref.APIVersion != agentSandboxExtensionsGroupVersion ||
+		ref.Kind != "SandboxClaim" ||
+		ref.Name != claimName ||
+		ref.UID != identity.UID {
+		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s is not controller-owned by SandboxClaim %s UID %s", sandbox.Metadata.Name, claimName, identity.UID)}
+	}
+	if strings.TrimSpace(sandbox.Metadata.UID) == "" {
+		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox %s has no Kubernetes UID", sandbox.Metadata.Name)}
+	}
+	return nil
+}
+
+func validatePodSandboxBinding(pod podState, sandbox *kubernetesObject, identity claimIdentity) error {
+	if sandbox == nil {
+		return resourceIdentityError{err: exit(4, "agent-sandbox Sandbox identity is missing")}
+	}
+	if got := strings.TrimSpace(pod.Labels[agentSandboxClaimUIDLabel]); got != "" && got != identity.UID {
+		return resourceIdentityError{err: exit(4, "agent-sandbox pod %s claim UID label changed from %s to %s", pod.Name, identity.UID, got)}
+	}
+	if strings.TrimSpace(pod.UID) == "" {
+		return resourceIdentityError{err: exit(4, "agent-sandbox pod %s has no Kubernetes UID", pod.Name)}
+	}
+	ref, ok := controllerOwnerReference(pod.OwnerReferences)
+	if !ok ||
+		ref.APIVersion != agentSandboxCoreGroupVersion ||
+		ref.Kind != "Sandbox" ||
+		ref.Name != sandbox.Metadata.Name ||
+		ref.UID != sandbox.Metadata.UID {
+		return resourceIdentityError{err: exit(4, "agent-sandbox pod %s is not controller-owned by Sandbox %s UID %s", pod.Name, sandbox.Metadata.Name, sandbox.Metadata.UID)}
+	}
+	return nil
+}
+
+func isResourceIdentityError(err error) bool {
+	var target resourceIdentityError
+	return errors.As(err, &target)
+}
+
+func controllerOwnerReference(refs []ownerReference) (ownerReference, bool) {
+	for _, ref := range refs {
+		if ref.Controller {
+			return ref, true
+		}
+	}
+	return ownerReference{}, false
 }
 
 func podConditionSummary(conditions []conditionState) string {

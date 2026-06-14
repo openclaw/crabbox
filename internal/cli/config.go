@@ -4228,7 +4228,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if trusted && file.AgentSandbox.Container != "" {
 			cfg.AgentSandbox.Container = file.AgentSandbox.Container
 		}
-		if file.AgentSandbox.Workdir != "" {
+		if trusted && file.AgentSandbox.Workdir != "" {
 			cfg.AgentSandbox.Workdir = file.AgentSandbox.Workdir
 		}
 		if file.AgentSandbox.SandboxReadyTimeout != "" {

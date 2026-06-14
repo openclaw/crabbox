@@ -29,6 +29,7 @@ type fakeKubernetesClient struct {
 	getStarted     chan struct{}
 	getRelease     chan struct{}
 	getErrs        []error
+	podListErrs    []error
 	deleteErrs     []error
 	createErrs     []error
 	emptyCreateUID bool
@@ -130,10 +131,22 @@ func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namesp
 	f.objects[key] = created
 	if ref.Resource == sandboxClaimResource && !f.createPending {
 		sandboxName := obj.Metadata.Name + "-sandbox"
+		sandboxUID := "uid-" + sandboxName
 		podName := obj.Metadata.Name + "-pod"
 		created.Status.Sandbox.Name = sandboxName
 		sandbox := &kubernetesObject{
-			Metadata: objectMeta{Name: sandboxName},
+			Metadata: objectMeta{
+				Name:   sandboxName,
+				UID:    sandboxUID,
+				Labels: map[string]string{agentSandboxClaimUIDLabel: created.Metadata.UID},
+				OwnerReferences: []ownerReference{{
+					APIVersion: agentSandboxExtensionsGroupVersion,
+					Kind:       "SandboxClaim",
+					Name:       created.Metadata.Name,
+					UID:        created.Metadata.UID,
+					Controller: true,
+				}},
+			},
 			Status: objectStatus{
 				Selector:   "claim=" + obj.Metadata.Name,
 				Conditions: []conditionState{{Type: "Ready", Status: "True"}},
@@ -143,7 +156,21 @@ func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namesp
 		if f.pods == nil {
 			f.pods = map[string][]podState{}
 		}
-		f.pods[namespace+"/claim="+obj.Metadata.Name] = []podState{{Name: podName, Phase: "Running", PodIP: "10.0.0.11", Ready: true}}
+		f.pods[namespace+"/claim="+obj.Metadata.Name] = []podState{{
+			Name:   podName,
+			UID:    "uid-" + podName,
+			Labels: map[string]string{agentSandboxClaimUIDLabel: created.Metadata.UID},
+			OwnerReferences: []ownerReference{{
+				APIVersion: agentSandboxCoreGroupVersion,
+				Kind:       "Sandbox",
+				Name:       sandboxName,
+				UID:        sandboxUID,
+				Controller: true,
+			}},
+			Phase: "Running",
+			PodIP: "10.0.0.11",
+			Ready: true,
+		}}
 	}
 	if len(f.createErrs) > 0 {
 		err := f.createErrs[0]
@@ -198,6 +225,13 @@ func cloneKubernetesObject(object *kubernetesObject) *kubernetesObject {
 }
 
 func (f *fakeKubernetesClient) ListPods(_ context.Context, namespace, selector string) ([]podState, error) {
+	if len(f.podListErrs) > 0 {
+		err := f.podListErrs[0]
+		f.podListErrs = f.podListErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	return f.pods[namespace+"/"+selector], nil
 }
 
@@ -391,10 +425,147 @@ func TestSandboxReadinessPreservesDiagnostics(t *testing.T) {
 	cfg.AgentSandbox.Namespace = "sandboxes"
 	cfg.AgentSandbox.WarmPool = "linux-pool"
 	fake := readyFakeClient(cfg)
-	fake.pods["sandboxes/app=agent-sandbox"] = []podState{{Name: "pod-a", Phase: "Running", Ready: false, Conditions: []conditionState{{Type: "Ready", Status: "False", Reason: "ContainersNotReady"}}}}
+	pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+	pod.Ready = false
+	pod.Conditions = []conditionState{{Type: "Ready", Status: "False", Reason: "ContainersNotReady"}}
+	fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
 	_, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg))
 	if err == nil || !strings.Contains(err.Error(), "ContainersNotReady") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestWaitForSandboxReadinessRetriesTransientKubernetesErrors(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	fake := readyFakeClient(cfg)
+	fake.getErrs = []error{errors.New("temporary API read failure")}
+	fake.podListErrs = []error{errors.New("temporary pod list failure")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ready, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.SandboxName != "sandbox-a" || ready.PodName != "pod-a" {
+		t.Fatalf("ready=%#v", ready)
+	}
+}
+
+func TestSandboxReadinessRejectsDownstreamIdentityMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*fakeKubernetesClient)
+		wantError string
+	}{
+		{
+			name: "sandbox claim UID label",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Metadata.Labels[agentSandboxClaimUIDLabel] = "uid-other"
+			},
+			wantError: "claim UID label changed",
+		},
+		{
+			name: "sandbox owner UID",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Metadata.OwnerReferences[0].UID = "uid-other"
+			},
+			wantError: "not controller-owned by SandboxClaim",
+		},
+		{
+			name: "pod owner UID",
+			mutate: func(fake *fakeKubernetesClient) {
+				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+				pod.OwnerReferences[0].UID = "uid-other"
+				pod.Phase = "Pending"
+				pod.Ready = false
+				fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+			},
+			wantError: "not controller-owned by Sandbox",
+		},
+		{
+			name: "pod claim UID label",
+			mutate: func(fake *fakeKubernetesClient) {
+				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+				pod.Labels[agentSandboxClaimUIDLabel] = "uid-other"
+				fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+			},
+			wantError: "claim UID label changed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.AgentSandbox.Context = "agent-context"
+			cfg.AgentSandbox.Namespace = "sandboxes"
+			cfg.AgentSandbox.WarmPool = "linux-pool"
+			fake := readyFakeClient(cfg)
+			tt.mutate(fake)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			_, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("err=%v want substring %q", err, tt.wantError)
+			}
+			if strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("identity mismatch was retried: %v", err)
+			}
+		})
+	}
+}
+
+func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*fakeKubernetesClient)
+		wantError string
+	}{
+		{
+			name: "sandbox replacement",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Metadata.UID = "uid-replacement"
+			},
+			wantError: "not controller-owned by Sandbox",
+		},
+		{
+			name: "pod replacement",
+			mutate: func(fake *fakeKubernetesClient) {
+				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+				pod.UID = "uid-replacement"
+				fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+			},
+			wantError: "pod identity changed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.AgentSandbox.Context = "agent-context"
+			cfg.AgentSandbox.Namespace = "sandboxes"
+			cfg.AgentSandbox.WarmPool = "linux-pool"
+			fake := readyFakeClient(cfg)
+			ready, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &backend{cfg: cfg}
+			if err := backend.execPod(context.Background(), fake, ready, podExecRequest{Command: []string{"true"}}); err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(fake)
+			err = backend.execPod(context.Background(), fake, ready, podExecRequest{Command: []string{"true"}})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("err=%v want substring %q", err, tt.wantError)
+			}
+			if len(fake.execs) != 1 {
+				t.Fatalf("replacement reached exec: %#v", fake.execs)
+			}
+		})
 	}
 }
 
@@ -748,8 +919,20 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 		Annotations: claimAnnotations(cfg),
 	}}
 	claim.Status.Sandbox.Name = "sandbox-a"
+	sandboxUID := "uid-sandbox-a"
 	sandbox := &kubernetesObject{
-		Metadata: objectMeta{Name: "sandbox-a"},
+		Metadata: objectMeta{
+			Name:   "sandbox-a",
+			UID:    sandboxUID,
+			Labels: map[string]string{agentSandboxClaimUIDLabel: identity.UID},
+			OwnerReferences: []ownerReference{{
+				APIVersion: agentSandboxExtensionsGroupVersion,
+				Kind:       "SandboxClaim",
+				Name:       claim.Metadata.Name,
+				UID:        identity.UID,
+				Controller: true,
+			}},
+		},
 		Status: objectStatus{
 			Selector:   "app=agent-sandbox",
 			Conditions: []conditionState{{Type: "Ready", Status: "True"}},
@@ -768,7 +951,21 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 		},
 		rbac: map[string]bool{},
 		pods: map[string][]podState{
-			"sandboxes/app=agent-sandbox": {{Name: "pod-a", Phase: "Running", PodIP: "10.0.0.10", Ready: true}},
+			"sandboxes/app=agent-sandbox": {{
+				Name:   "pod-a",
+				UID:    "uid-pod-a",
+				Labels: map[string]string{agentSandboxClaimUIDLabel: identity.UID},
+				OwnerReferences: []ownerReference{{
+					APIVersion: agentSandboxCoreGroupVersion,
+					Kind:       "Sandbox",
+					Name:       sandbox.Metadata.Name,
+					UID:        sandboxUID,
+					Controller: true,
+				}},
+				Phase: "Running",
+				PodIP: "10.0.0.10",
+				Ready: true,
+			}},
 		},
 	}
 	for _, rule := range doctorRBACRules(cfg.AgentSandbox.Namespace) {

@@ -605,7 +605,11 @@ func TestRunExistingLeaseReadinessIsBounded(t *testing.T) {
 		t.Fatalf("claims=%#v", claims)
 	}
 	claimName := claim.Labels[claimLabelClaimName]
-	fake.pods[cfg.AgentSandbox.Namespace+"/claim="+claimName] = []podState{{Name: claimName + "-pod", Phase: "Pending", Ready: false}}
+	podKey := cfg.AgentSandbox.Namespace + "/claim=" + claimName
+	pod := fake.pods[podKey][0]
+	pod.Phase = "Pending"
+	pod.Ready = false
+	fake.pods[podKey] = []podState{pod}
 	start := time.Now()
 	_, err = backend.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
 	if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
