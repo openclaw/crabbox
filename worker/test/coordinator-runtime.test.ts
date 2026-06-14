@@ -6,9 +6,11 @@ import {
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
+  type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { FleetCoordinator } from "../src/fleet";
 import { githubAuthRoute } from "../src/oauth";
+import { runtimeAdapterRelayFrameLimit } from "../src/runtime-adapter-relay";
 import type { Env } from "../src/types";
 
 afterEach(() => {
@@ -43,6 +45,9 @@ class MemoryRuntime implements CoordinatorRuntime {
   readonly storage = new MemoryStorage();
   readonly ephemeralWebSocketMaxPayloadBytes = 1024 * 1024;
   alarmTime?: number;
+  upgradeOptions?: CoordinatorWebSocketUpgradeOptions;
+  acceptedTags?: string[];
+  acceptedAttachment?: unknown;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private exclusiveTail: Promise<void> = Promise.resolve();
 
@@ -60,8 +65,20 @@ class MemoryRuntime implements CoordinatorRuntime {
     }
   }
 
-  createWebSocketUpgrade(): never {
-    throw new Error("websocket upgrade not configured");
+  createWebSocketUpgrade(options?: CoordinatorWebSocketUpgradeOptions): {
+    socket: WebSocket;
+    response: Response;
+  } {
+    this.upgradeOptions = options;
+    return {
+      socket: {
+        readyState: WebSocket.OPEN,
+        send: () => undefined,
+        close: () => undefined,
+        serializeAttachment: () => undefined,
+      } as unknown as WebSocket,
+      response: new Response(null),
+    };
   }
 
   getWebSockets(): Iterable<WebSocket> {
@@ -79,10 +96,12 @@ class MemoryRuntime implements CoordinatorRuntime {
   acceptWebSocket(
     socket: WebSocket,
     attachment: unknown,
-    _tags: string[],
+    tags: string[],
     _handlers: CoordinatorSocketHandlers,
   ): void {
     this.attachments.set(socket, attachment);
+    this.acceptedTags = tags;
+    this.acceptedAttachment = attachment;
   }
 
   acceptEphemeralWebSocket(_socket: WebSocket, _handlers: CoordinatorSocketHandlers): void {}
@@ -97,6 +116,40 @@ class MemoryRuntime implements CoordinatorRuntime {
 }
 
 describe("coordinator runtimes", () => {
+  it("applies the protocol frame limit to runtime adapter upgrades", async () => {
+    const runtime = new MemoryRuntime();
+    const coordinator = new FleetCoordinator(runtime, {
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env);
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const ticketResponse = await coordinator.fetch(
+      new Request("https://coordinator.test/v1/adapters/example-adapter/ticket", {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ desktopTimeoutMs: 180_000 }),
+      }),
+    );
+    const { ticket } = (await ticketResponse.json()) as { ticket: string };
+
+    const response = await coordinator.fetch(
+      new Request("https://coordinator.test/v1/adapters/example-adapter/agent", {
+        headers: {
+          ...headers,
+          upgrade: "websocket",
+          authorization: `Bearer ${ticket}`,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(runtime.upgradeOptions).toEqual({ maxPayload: runtimeAdapterRelayFrameLimit });
+    expect(runtime.acceptedTags).toEqual(["adapter:example-adapter", "runtime-adapter-agent"]);
+    expect(runtime.acceptedAttachment).toMatchObject({ desktopTimeoutMs: 180_000 });
+  });
+
   it("keeps provider-backed portal requests outside the lifecycle queue", () => {
     for (const [method, path] of [
       ["GET", "/portal"],
@@ -107,6 +160,8 @@ describe("coordinator runtimes", () => {
       ["POST", "/v1/workspaces"],
       ["GET", "/v1/workspaces/fleet-is-101"],
       ["DELETE", "/v1/workspaces/fleet-is-101"],
+      ["GET", "/v1/adapters/applied-alice"],
+      ["POST", "/v1/adapters/applied-alice/proxy/v1/workspaces"],
     ]) {
       expect(
         coordinatorRequestQueue(new Request(`https://coordinator.test${path}`, { method })),
@@ -123,6 +178,13 @@ describe("coordinator runtimes", () => {
     expect(
       coordinatorRequestQueue(
         new Request("https://coordinator.test/v1/auth/github/start", { method: "POST" }),
+      ),
+    ).toBe("lifecycle");
+    expect(
+      coordinatorRequestQueue(
+        new Request("https://coordinator.test/v1/adapters/applied-alice/ticket", {
+          method: "POST",
+        }),
       ),
     ).toBe("lifecycle");
   });

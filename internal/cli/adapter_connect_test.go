@@ -15,6 +15,8 @@ import (
 	"nhooyr.io/websocket"
 )
 
+const adapterRelayTestDeadlineMS int64 = 4_102_444_800_000
+
 func TestAdapterRelayForwardsOnlyAllowedLocalRequestData(t *testing.T) {
 	body := " {\n  \"id\": \"fleet-a-is-101\"\n}\n"
 	var gotMethod, gotPath, gotBody, gotAuthorization, gotIdempotency, gotCookie, gotAccess string
@@ -39,10 +41,11 @@ func TestAdapterRelayForwardsOnlyAllowedLocalRequestData(t *testing.T) {
 		client:         local.Client(),
 	}
 	response := relay.handle(context.Background(), adapterRelayRequest{
-		Type:   "request",
-		ID:     "req-1",
-		Method: http.MethodPost,
-		Path:   "/v1/workspaces",
+		Type:       "request",
+		ID:         "req-1",
+		Method:     http.MethodPost,
+		Path:       "/v1/workspaces",
+		DeadlineMS: adapterRelayTestDeadlineMS,
 		Headers: map[string]string{
 			"Authorization":           "Bearer remote-secret",
 			"Cookie":                  "session=remote-secret",
@@ -111,31 +114,88 @@ func TestAdapterRelayRejectsBodiesAndResponsesOver64KiB(t *testing.T) {
 
 	tooLarge := strings.Repeat("x", adapterRelayMaxBodyBytes+1)
 	response := relay.handle(context.Background(), adapterRelayRequest{
-		Type: "request", ID: "req-large", Method: http.MethodPost, Path: "/v1/workspaces", Body: &tooLarge,
+		Type: "request", ID: "req-large", Method: http.MethodPost, Path: "/v1/workspaces", DeadlineMS: adapterRelayTestDeadlineMS, Body: &tooLarge,
 	})
 	if response.Status != http.StatusBadRequest || calls.Load() != 0 || !strings.Contains(response.Body, "body exceeds 64 KiB") {
 		t.Fatalf("oversized request response=%#v calls=%d", response, calls.Load())
 	}
 
 	response = relay.handle(context.Background(), adapterRelayRequest{
-		Type: "request", ID: "req-response-large", Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101",
+		Type: "request", ID: "req-response-large", Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101", DeadlineMS: adapterRelayTestDeadlineMS,
 	})
 	if response.Status != http.StatusBadGateway || calls.Load() != 1 || !strings.Contains(response.Body, "response exceeds 64 KiB") {
 		t.Fatalf("oversized local response=%#v calls=%d", response, calls.Load())
 	}
 }
 
+func TestAdapterRelayRejectsExpiredRequestBeforeLocalDispatch(t *testing.T) {
+	var calls atomic.Int32
+	local := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer local.Close()
+	relay := adapterRelay{
+		localBaseURL:   local.URL,
+		loadLocalToken: func() (string, error) { return "local-secret", nil },
+		client:         local.Client(),
+	}
+	request := adapterRelayRequest{
+		Type: "request", ID: "request-expired", Method: http.MethodPost, Path: "/v1/workspaces", DeadlineMS: time.Now().Add(-time.Second).UnixMilli(),
+	}
+	response := relay.handle(context.Background(), request)
+	if response.Status != http.StatusGatewayTimeout || calls.Load() != 0 || !strings.Contains(response.Body, "adapter_timeout") {
+		t.Fatalf("expired response=%#v calls=%d", response, calls.Load())
+	}
+	request.ID = "request-missing-deadline"
+	request.DeadlineMS = 0
+	if err := validateAdapterRelayRequest(request); err == nil || !strings.Contains(err.Error(), "deadlineMs") {
+		t.Fatalf("missing deadline validation error=%v", err)
+	}
+}
+
+func TestAdapterRelayUsesEarlierCoordinatorDeadlineForLocalRequest(t *testing.T) {
+	deadlineMS := time.Now().Add(2 * time.Second).UnixMilli()
+	var gotDeadline time.Time
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var ok bool
+		gotDeadline, ok = request.Context().Deadline()
+		if !ok {
+			t.Fatal("local adapter request has no deadline")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    request,
+		}, nil
+	})}
+	relay := adapterRelay{
+		localBaseURL:   "http://adapter.local",
+		loadLocalToken: func() (string, error) { return "local-secret", nil },
+		client:         client,
+	}
+	response := relay.handle(context.Background(), adapterRelayRequest{
+		Type: "request", ID: "request-deadline", Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101", DeadlineMS: deadlineMS,
+	})
+	if response.Status != http.StatusOK {
+		t.Fatalf("response=%#v", response)
+	}
+	if gotDeadline.UnixMilli() != deadlineMS {
+		t.Fatalf("local deadline=%s want Unix ms %d", gotDeadline, deadlineMS)
+	}
+}
+
 func TestAdapterRelayRejectsRemoteBodyOnDelete(t *testing.T) {
 	body := `{}`
 	err := validateAdapterRelayRequest(adapterRelayRequest{
-		Type: "request", ID: "req-delete", Method: http.MethodDelete, Path: "/v1/workspaces/fleet-a-is-101", Body: &body,
+		Type: "request", ID: "req-delete", Method: http.MethodDelete, Path: "/v1/workspaces/fleet-a-is-101", DeadlineMS: adapterRelayTestDeadlineMS, Body: &body,
 	})
 	if err == nil || !strings.Contains(err.Error(), "body is not allowed") {
 		t.Fatalf("delete body validation error=%v", err)
 	}
 	empty := ""
 	if err := validateAdapterRelayRequest(adapterRelayRequest{
-		Type: "request", ID: "req-delete-empty", Method: http.MethodDelete, Path: "/v1/workspaces/fleet-a-is-101", Body: &empty,
+		Type: "request", ID: "req-delete-empty", Method: http.MethodDelete, Path: "/v1/workspaces/fleet-a-is-101", DeadlineMS: adapterRelayTestDeadlineMS, Body: &empty,
 	}); err != nil {
 		t.Fatalf("explicit empty delete body rejected: %v", err)
 	}
@@ -154,7 +214,7 @@ func TestAdapterRelayReloadsLocalTokenForEveryRequest(t *testing.T) {
 		loadLocalToken: func() (string, error) { return token, nil },
 		client:         local.Client(),
 	}
-	request := adapterRelayRequest{Type: "request", ID: "request-1", Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101"}
+	request := adapterRelayRequest{Type: "request", ID: "request-1", Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101", DeadlineMS: adapterRelayTestDeadlineMS}
 	if response := relay.handle(context.Background(), request); response.Status != http.StatusOK {
 		t.Fatalf("first response=%#v", response)
 	}
@@ -181,7 +241,7 @@ func TestAdapterRelayDoesNotCallLocalServiceWhenTokenReloadFails(t *testing.T) {
 		client:         local.Client(),
 	}
 	response := relay.handle(context.Background(), adapterRelayRequest{
-		Type: "request", ID: "request-1", Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101",
+		Type: "request", ID: "request-1", Method: http.MethodGet, Path: "/v1/workspaces/fleet-a-is-101", DeadlineMS: adapterRelayTestDeadlineMS,
 	})
 	if response.Status != http.StatusBadGateway || calls.Load() != 0 || !strings.Contains(response.Body, "adapter_auth_unavailable") {
 		t.Fatalf("response=%#v calls=%d", response, calls.Load())
@@ -252,8 +312,8 @@ func TestAdapterRelayServesDeleteWhileDesktopRequestIsInFlight(t *testing.T) {
 			}
 			defer release()
 			requests := []string{
-				`{"type":"request","id":"desktop","method":"POST","path":"/v1/workspaces/fleet-a-is-101/connections/desktop"}`,
-				`{"type":"request","id":"delete","method":"DELETE","path":"/v1/workspaces/fleet-a-is-101"}`,
+				`{"type":"request","id":"desktop","method":"POST","path":"/v1/workspaces/fleet-a-is-101/connections/desktop","deadlineMs":4102444800000}`,
+				`{"type":"request","id":"delete","method":"DELETE","path":"/v1/workspaces/fleet-a-is-101","deadlineMs":4102444800000}`,
 			}
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(requests[0])); err != nil {
 				serverErr <- err
@@ -346,6 +406,14 @@ func TestConnectAdapterRelayUsesTicketHeaderAndRelaysResponse(t *testing.T) {
 			if r.Header.Get("CF-Access-Client-Id") != "access-client" || r.Header.Get("CF-Access-Client-Secret") != "access-secret" || r.Header.Get("cf-access-token") != "access-token" {
 				t.Errorf("ticket request missing Access credentials: %#v", r.Header)
 			}
+			var ticketRequest struct {
+				DesktopTimeoutMS int64 `json:"desktopTimeoutMs"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&ticketRequest); err != nil {
+				t.Errorf("decode ticket request: %v", err)
+			} else if ticketRequest.DesktopTimeoutMS != 155_000 {
+				t.Errorf("ticket desktop timeout=%d want=155000", ticketRequest.DesktopTimeoutMS)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"ticket":"adapter-ticket","adapterID":"mac-lab"}`)
 		case "/v1/adapters/mac-lab/agent":
@@ -364,7 +432,7 @@ func TestConnectAdapterRelayUsesTicketHeaderAndRelaysResponse(t *testing.T) {
 				return
 			}
 			defer conn.Close(websocket.StatusNormalClosure, "test complete")
-			request := `{"type":"request","id":"request-1","method":"GET","path":"/v1/workspaces/fleet-a-is-101","headers":{"authorization":"Bearer remote-token"}}`
+			request := `{"type":"request","id":"request-1","method":"GET","path":"/v1/workspaces/fleet-a-is-101","deadlineMs":4102444800000,"headers":{"authorization":"Bearer remote-token"}}`
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(request)); err != nil {
 				t.Errorf("write adapter request: %v", err)
 				return

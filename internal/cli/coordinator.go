@@ -48,80 +48,82 @@ func (e CoordinatorHTTPError) Error() string {
 }
 
 type CoordinatorLease struct {
-	ID                   string                `json:"id"`
-	Slug                 string                `json:"slug,omitempty"`
-	Provider             string                `json:"provider"`
-	Lifecycle            string                `json:"lifecycle,omitempty"`
-	RuntimeAdapterID     string                `json:"runtimeAdapterID,omitempty"`
-	RuntimeWorkspaceID   string                `json:"runtimeAdapterWorkspaceID,omitempty"`
-	TargetOS             string                `json:"target,omitempty"`
-	WindowsMode          string                `json:"windowsMode,omitempty"`
-	Desktop              bool                  `json:"desktop,omitempty"`
-	DesktopEnv           string                `json:"desktopEnv,omitempty"`
-	Browser              bool                  `json:"browser,omitempty"`
-	Code                 bool                  `json:"code,omitempty"`
-	Tailscale            *TailscaleMetadata    `json:"tailscale,omitempty"`
-	Region               string                `json:"region,omitempty"`
-	Owner                string                `json:"owner"`
-	Org                  string                `json:"org"`
-	Share                *CoordinatorShare     `json:"share,omitempty"`
-	Profile              string                `json:"profile"`
-	Class                string                `json:"class"`
-	Pond                 string                `json:"pond,omitempty"`
-	ExposedPorts         []string              `json:"exposedPorts,omitempty"`
-	ServerType           string                `json:"serverType"`
-	RequestedServerType  string                `json:"requestedServerType,omitempty"`
-	HostID               string                `json:"hostId,omitempty"`
-	HostIDCompat         string                `json:"hostID,omitempty"`
-	Market               string                `json:"market,omitempty"`
-	ProvisioningAttempts []ProvisioningAttempt `json:"provisioningAttempts,omitempty"`
-	CapacityHints        []CapacityHint        `json:"capacityHints,omitempty"`
-	ServerID             int64                 `json:"serverID"`
-	CloudID              string                `json:"cloudID"`
-	ServerName           string                `json:"serverName"`
-	Host                 string                `json:"host"`
-	SSHUser              string                `json:"sshUser"`
-	SSHPort              string                `json:"sshPort"`
-	SSHFallbackPorts     []string              `json:"sshFallbackPorts,omitempty"`
-	WorkRoot             string                `json:"workRoot"`
-	Keep                 bool                  `json:"keep"`
-	State                string                `json:"state"`
-	TTLSeconds           int                   `json:"ttlSeconds,omitempty"`
-	IdleTimeoutSeconds   int                   `json:"idleTimeoutSeconds,omitempty"`
-	CreatedAt            string                `json:"createdAt,omitempty"`
-	UpdatedAt            string                `json:"updatedAt,omitempty"`
-	LastTouchedAt        string                `json:"lastTouchedAt,omitempty"`
-	ExpiresAt            string                `json:"expiresAt"`
-	Telemetry            *LeaseTelemetry       `json:"telemetry,omitempty"`
-	TelemetryHistory     []*LeaseTelemetry     `json:"telemetryHistory,omitempty"`
+	ID                    string                `json:"id"`
+	Slug                  string                `json:"slug,omitempty"`
+	Provider              string                `json:"provider"`
+	Lifecycle             string                `json:"lifecycle,omitempty"`
+	RuntimeAdapterID      string                `json:"runtimeAdapterID,omitempty"`
+	RuntimeWorkspaceID    string                `json:"runtimeAdapterWorkspaceID,omitempty"`
+	RuntimeRegistrationID string                `json:"runtimeAdapterRegistrationID,omitempty"`
+	TargetOS              string                `json:"target,omitempty"`
+	WindowsMode           string                `json:"windowsMode,omitempty"`
+	Desktop               bool                  `json:"desktop,omitempty"`
+	DesktopEnv            string                `json:"desktopEnv,omitempty"`
+	Browser               bool                  `json:"browser,omitempty"`
+	Code                  bool                  `json:"code,omitempty"`
+	Tailscale             *TailscaleMetadata    `json:"tailscale,omitempty"`
+	Region                string                `json:"region,omitempty"`
+	Owner                 string                `json:"owner"`
+	Org                   string                `json:"org"`
+	Share                 *CoordinatorShare     `json:"share,omitempty"`
+	Profile               string                `json:"profile"`
+	Class                 string                `json:"class"`
+	Pond                  string                `json:"pond,omitempty"`
+	ExposedPorts          []string              `json:"exposedPorts,omitempty"`
+	ServerType            string                `json:"serverType"`
+	RequestedServerType   string                `json:"requestedServerType,omitempty"`
+	HostID                string                `json:"hostId,omitempty"`
+	HostIDCompat          string                `json:"hostID,omitempty"`
+	Market                string                `json:"market,omitempty"`
+	ProvisioningAttempts  []ProvisioningAttempt `json:"provisioningAttempts,omitempty"`
+	CapacityHints         []CapacityHint        `json:"capacityHints,omitempty"`
+	ServerID              int64                 `json:"serverID"`
+	CloudID               string                `json:"cloudID"`
+	ServerName            string                `json:"serverName"`
+	Host                  string                `json:"host"`
+	SSHUser               string                `json:"sshUser"`
+	SSHPort               string                `json:"sshPort"`
+	SSHFallbackPorts      []string              `json:"sshFallbackPorts,omitempty"`
+	WorkRoot              string                `json:"workRoot"`
+	Keep                  bool                  `json:"keep"`
+	State                 string                `json:"state"`
+	TTLSeconds            int                   `json:"ttlSeconds,omitempty"`
+	IdleTimeoutSeconds    int                   `json:"idleTimeoutSeconds,omitempty"`
+	CreatedAt             string                `json:"createdAt,omitempty"`
+	UpdatedAt             string                `json:"updatedAt,omitempty"`
+	LastTouchedAt         string                `json:"lastTouchedAt,omitempty"`
+	ExpiresAt             string                `json:"expiresAt"`
+	Telemetry             *LeaseTelemetry       `json:"telemetry,omitempty"`
+	TelemetryHistory      []*LeaseTelemetry     `json:"telemetryHistory,omitempty"`
 }
 
 type CoordinatorLeaseRegistration struct {
-	Slug               string   `json:"slug,omitempty"`
-	Provider           string   `json:"provider"`
-	TargetOS           string   `json:"target"`
-	WindowsMode        string   `json:"windowsMode,omitempty"`
-	Desktop            bool     `json:"desktop,omitempty"`
-	DesktopEnv         string   `json:"desktopEnv,omitempty"`
-	Browser            bool     `json:"browser,omitempty"`
-	Code               bool     `json:"code,omitempty"`
-	CloudID            string   `json:"cloudID,omitempty"`
-	ServerID           int64    `json:"serverID,omitempty"`
-	ServerName         string   `json:"serverName,omitempty"`
-	ServerType         string   `json:"serverType,omitempty"`
-	Host               string   `json:"host"`
-	SSHUser            string   `json:"sshUser,omitempty"`
-	SSHPort            string   `json:"sshPort,omitempty"`
-	SSHFallbackPorts   []string `json:"sshFallbackPorts,omitempty"`
-	WorkRoot           string   `json:"workRoot,omitempty"`
-	Profile            string   `json:"profile,omitempty"`
-	Class              string   `json:"class,omitempty"`
-	Pond               string   `json:"pond,omitempty"`
-	ExposedPorts       []string `json:"exposedPorts,omitempty"`
-	TTLSeconds         int      `json:"ttlSeconds,omitempty"`
-	IdleTimeoutSeconds int      `json:"idleTimeoutSeconds,omitempty"`
-	RuntimeAdapterID   string   `json:"runtimeAdapterID,omitempty"`
-	RuntimeWorkspaceID string   `json:"runtimeAdapterWorkspaceID,omitempty"`
+	Slug                  string   `json:"slug,omitempty"`
+	Provider              string   `json:"provider"`
+	TargetOS              string   `json:"target"`
+	WindowsMode           string   `json:"windowsMode,omitempty"`
+	Desktop               bool     `json:"desktop,omitempty"`
+	DesktopEnv            string   `json:"desktopEnv,omitempty"`
+	Browser               bool     `json:"browser,omitempty"`
+	Code                  bool     `json:"code,omitempty"`
+	CloudID               string   `json:"cloudID,omitempty"`
+	ServerID              int64    `json:"serverID,omitempty"`
+	ServerName            string   `json:"serverName,omitempty"`
+	ServerType            string   `json:"serverType,omitempty"`
+	Host                  string   `json:"host"`
+	SSHUser               string   `json:"sshUser,omitempty"`
+	SSHPort               string   `json:"sshPort,omitempty"`
+	SSHFallbackPorts      []string `json:"sshFallbackPorts,omitempty"`
+	WorkRoot              string   `json:"workRoot,omitempty"`
+	Profile               string   `json:"profile,omitempty"`
+	Class                 string   `json:"class,omitempty"`
+	Pond                  string   `json:"pond,omitempty"`
+	ExposedPorts          []string `json:"exposedPorts,omitempty"`
+	TTLSeconds            int      `json:"ttlSeconds,omitempty"`
+	IdleTimeoutSeconds    int      `json:"idleTimeoutSeconds,omitempty"`
+	RuntimeAdapterID      string   `json:"runtimeAdapterID,omitempty"`
+	RuntimeWorkspaceID    string   `json:"runtimeAdapterWorkspaceID,omitempty"`
+	RuntimeRegistrationID string   `json:"runtimeAdapterRegistrationID,omitempty"`
 }
 
 type CoordinatorShareRole string
@@ -863,6 +865,35 @@ func (c *CoordinatorClient) ReleaseLease(ctx context.Context, id string, deleteS
 		Lease CoordinatorLease `json:"lease"`
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/release", map[string]any{"delete": deleteServer}, &res)
+	return res.Lease, err
+}
+
+func (c *CoordinatorClient) CompleteRuntimeAdapterDelete(ctx context.Context, id, adapterID, workspaceID, registrationID string) (CoordinatorLease, error) {
+	var res struct {
+		Lease CoordinatorLease `json:"lease"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/release", map[string]any{
+		"runtimeAdapterDeleteCompletion": map[string]string{
+			"adapterID":      adapterID,
+			"workspaceID":    workspaceID,
+			"registrationID": registrationID,
+			"status":         "absent",
+		},
+	}, &res)
+	return res.Lease, err
+}
+
+func (c *CoordinatorClient) CompleteLegacyRuntimeAdapterDelete(ctx context.Context, id, adapterID, workspaceID string) (CoordinatorLease, error) {
+	var res struct {
+		Lease CoordinatorLease `json:"lease"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/release", map[string]any{
+		"runtimeAdapterLegacyDeleteCompletion": map[string]string{
+			"adapterID":   adapterID,
+			"workspaceID": workspaceID,
+			"status":      "absent",
+		},
+	}, &res)
 	return res.Lease, err
 }
 

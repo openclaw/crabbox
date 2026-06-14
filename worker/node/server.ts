@@ -17,6 +17,7 @@ import {
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeRequestAbortSignal,
   readNodeRequestBody,
   requestSourceIP,
   requestBodyLimit,
@@ -50,9 +51,10 @@ const server = createServer((request, response) => {
 });
 
 async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const cancellation = nodeRequestAbortSignal(request, response);
   try {
     const requestContext = nodeRequestContext(request);
-    const requestMetadata = webRequestFromNode(request, requestContext);
+    const requestMetadata = webRequestFromNode(request, requestContext, cancellation.signal);
     const authContext = { trustedProxy: requestContext.trustedProxy };
     if (new URL(requestMetadata.url).pathname === "/v1/ready") {
       let result: Response;
@@ -105,6 +107,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     }
     console.error("coordinator request failed", error);
     await writeResponse(response, Response.json({ error: "internal_error" }, { status: 500 }));
+  } finally {
+    cancellation.dispose();
   }
 }
 
@@ -210,7 +214,11 @@ function nodeRequestContext(request: IncomingMessage): NodeRequestContext {
   };
 }
 
-function webRequestFromNode(request: IncomingMessage, context: NodeRequestContext): Request {
+function webRequestFromNode(
+  request: IncomingMessage,
+  context: NodeRequestContext,
+  signal?: AbortSignal,
+): Request {
   const protocol = context.trustedProxy
     ? firstHeader(request.headers["x-forwarded-proto"]) || "http"
     : "http";
@@ -230,7 +238,7 @@ function webRequestFromNode(request: IncomingMessage, context: NodeRequestContex
   headers.delete("cf-connecting-ip");
   if (context.sourceIP) headers.set("cf-connecting-ip", context.sourceIP);
   const method = request.method || "GET";
-  return new Request(url, { method, headers });
+  return new Request(url, { method, headers, ...(signal ? { signal } : {}) });
 }
 
 async function requestWithNodeBody(

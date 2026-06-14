@@ -85,6 +85,8 @@ export interface PortalAdminLeaseSummary {
   slug?: string;
   provider: string;
   lifecycle?: LeaseRecord["lifecycle"];
+  runtimeAdapterID?: string;
+  runtimeAdapterWorkspaceID?: string;
   state: LeaseRecord["state"];
   target: string;
   owner: string;
@@ -411,7 +413,11 @@ function adminLeaseRow(
   const canEject =
     lease.state === "active" || lease.state === "provisioning" || lease.state === "failed";
   const releaseLabel =
-    lease.lifecycle === "registered" ? "Remove registration" : "Emergency release";
+    lease.lifecycle === "registered" && lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID
+      ? "Delete workspace"
+      : lease.lifecycle === "registered"
+        ? "Remove registration"
+        : "Emergency release";
   const releaseConfirmation = leaseReleaseConfirmation(lease);
   return `<tr data-filter-tags="${escapeHTML([stateGroup, lease.state, lease.provider, lease.owner, lease.org, lease.target, lease.serverType].join(" "))}">
     <td><a class="lease-link" href="/portal/leases/${encodeURIComponent(lease.id)}"><strong>${escapeHTML(lease.slug || lease.id)}</strong><small>${escapeHTML(lease.id)}</small></a></td>
@@ -553,7 +559,7 @@ export function portalLeaseDetail(
           </div>
           <dl class="meta-grid">
             ${metaHTMLRow("provider", providerBadge(lease.provider))}
-            ${metaRow("lifecycle", registered ? "client managed" : "coordinator managed")}
+            ${metaRow("lifecycle", registered ? (lease.runtimeAdapterID ? "runtime adapter managed" : "client managed") : "coordinator managed")}
             ${metaHTMLRow("target", targetBadge(target, lease.windowsMode))}
             ${metaRow("class", lease.class)}
             ${metaRow("host", lease.host || "pending")}
@@ -566,7 +572,7 @@ export function portalLeaseDetail(
           ${
             active && options.canManage
               ? `<form method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release" class="stop-form" data-confirm="${escapeHTML(leaseReleaseConfirmation(lease))}">
-                  <button class="button ${registered ? "secondary" : "danger"}" type="submit">${registered ? "remove registration" : "stop lease"}</button>
+                  <button class="button ${registered && !lease.runtimeAdapterID ? "secondary" : "danger"}" type="submit">${registered ? (lease.runtimeAdapterID ? "delete workspace" : "remove registration") : "stop lease"}</button>
                 </form>`
               : ""
           }
@@ -1966,10 +1972,15 @@ function leaseRow(
 
 function leaseReleaseAction(lease: LeaseRecord): string {
   const registered = lease.lifecycle === "registered";
+  const adapterManaged = Boolean(lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID);
   const label = lease.slug || lease.id;
-  const actionLabel = registered ? `Remove ${label} registration` : `Stop ${label}`;
+  const actionLabel = registered
+    ? adapterManaged
+      ? `Delete ${label} workspace`
+      : `Remove ${label} registration`
+    : `Stop ${label}`;
   return `<form class="lease-release-form" method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release?return=%2Fportal" data-confirm="${escapeHTML(leaseReleaseConfirmation(lease))}">
-    <button class="access-icon lease-release" data-release-kind="${registered ? "registered" : "managed"}" type="submit" title="${escapeHTML(actionLabel)}" aria-label="${escapeHTML(actionLabel)}">${registered ? ejectIcon : powerIcon}</button>
+    <button class="access-icon lease-release" data-release-kind="${registered ? (adapterManaged ? "adapter" : "registered") : "managed"}" type="submit" title="${escapeHTML(actionLabel)}" aria-label="${escapeHTML(actionLabel)}">${registered && !adapterManaged ? ejectIcon : powerIcon}</button>
   </form>`;
 }
 
@@ -1977,11 +1988,16 @@ function leaseReleaseConfirmation(lease: {
   id: string;
   slug?: string;
   lifecycle?: LeaseRecord["lifecycle"];
+  runtimeAdapterID?: string;
+  runtimeAdapterWorkspaceID?: string;
 }): string {
   const label = lease.slug || lease.id;
-  return lease.lifecycle === "registered"
-    ? `Remove ${label} from Crabbox? The external machine will keep running. Use crabbox stop locally to shut it down.`
-    : `Stop ${label}? This deletes the backing machine.`;
+  if (lease.lifecycle !== "registered") {
+    return `Stop ${label}? This deletes the backing machine.`;
+  }
+  return lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID
+    ? `Delete ${label}? This permanently deletes the external workspace through its runtime adapter.`
+    : `Remove ${label} from Crabbox? The external machine will keep running. Use crabbox stop locally to shut it down.`;
 }
 
 function portalRowFilterGroupTags(groups: Record<string, string | string[] | undefined>): string {
@@ -3110,7 +3126,7 @@ function html(
     .access-icon:hover { border-color:var(--hover-line); background:var(--hover); }
     .lease-release-form { display:flex; justify-content:flex-end; }
     .lease-release { color:var(--muted); cursor:pointer; }
-    .lease-release[data-release-kind="managed"] { color:var(--bad); }
+    .lease-release[data-release-kind="managed"], .lease-release[data-release-kind="adapter"] { color:var(--bad); }
     .lease-release:hover,.lease-release:focus-visible { border-color:color-mix(in srgb, var(--bad) 45%, var(--line)); background:color-mix(in srgb, var(--bad) 12%, transparent); }
     .lease-release:disabled { opacity:0.5; cursor:wait; }
     .table-panel { min-height:0; display:grid; grid-template-rows:auto auto minmax(0,1fr) auto; overflow:hidden; }
