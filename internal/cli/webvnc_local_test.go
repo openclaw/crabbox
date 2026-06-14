@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -91,6 +92,207 @@ func TestReserveLocalWebVNCBrowserPortUsesKernelAssignedPort(t *testing.T) {
 	}
 	if got := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port); got != port {
 		t.Fatalf("listener port=%q reservation port=%q", got, port)
+	}
+}
+
+func TestForceRFBVNCAuthenticationFiltersServerPreference(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	browser, bridgeBrowser := net.Pipe()
+	server, bridgeServer := net.Pipe()
+	defer browser.Close()
+	defer bridgeBrowser.Close()
+	defer server.Close()
+	defer bridgeServer.Close()
+
+	negotiation := make(chan error, 1)
+	go func() {
+		negotiation <- forceRFBVNCAuthentication(ctx, bridgeBrowser, bridgeServer)
+	}()
+	serverResult := make(chan error, 1)
+	go func() {
+		if _, err := server.Write([]byte("RFB 003.889\n")); err != nil {
+			serverResult <- err
+			return
+		}
+		version := make([]byte, 12)
+		if _, err := io.ReadFull(server, version); err != nil {
+			serverResult <- err
+			return
+		}
+		if string(version) != "RFB 003.008\n" {
+			serverResult <- fmt.Errorf("browser version=%q", version)
+			return
+		}
+		if _, err := server.Write([]byte{2, rfbSecurityARD, localWebVNCSecurityTypePassword}); err != nil {
+			serverResult <- err
+			return
+		}
+		selected := []byte{0}
+		if _, err := io.ReadFull(server, selected); err != nil {
+			serverResult <- err
+			return
+		}
+		if selected[0] != localWebVNCSecurityTypePassword {
+			serverResult <- fmt.Errorf("selected security type=%d", selected[0])
+			return
+		}
+		serverResult <- nil
+	}()
+
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(browser, version); err != nil {
+		t.Fatal(err)
+	}
+	if string(version) != "RFB 003.889\n" {
+		t.Fatalf("server version=%q", version)
+	}
+	if _, err := browser.Write([]byte("RFB 003.008\n")); err != nil {
+		t.Fatal(err)
+	}
+	filtered := make([]byte, 2)
+	if _, err := io.ReadFull(browser, filtered); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(filtered, []byte{1, localWebVNCSecurityTypePassword}) {
+		t.Fatalf("filtered security types=%v", filtered)
+	}
+	if _, err := browser.Write([]byte{localWebVNCSecurityTypePassword}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-negotiation; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateRFBServerVersionSupportsNoVNCAliases(t *testing.T) {
+	for _, version := range []string{
+		"RFB 003.889\n",
+		"RFB 004.000\n",
+		"RFB 004.001\n",
+		"RFB 005.000\n",
+	} {
+		t.Run(version[4:11], func(t *testing.T) {
+			if err := validateRFBServerVersion([]byte(version)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if err := validateRFBServerVersion([]byte("RFB 006.000\n")); err == nil {
+		t.Fatal("unsupported server version was accepted")
+	}
+}
+
+func TestForceRFBVNCAuthenticationStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	browser, bridgeBrowser := net.Pipe()
+	server, bridgeServer := net.Pipe()
+	defer browser.Close()
+	defer bridgeBrowser.Close()
+	defer server.Close()
+	defer bridgeServer.Close()
+	result := make(chan error, 1)
+	go func() {
+		result <- forceRFBVNCAuthentication(ctx, bridgeBrowser, bridgeServer)
+	}()
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("canceled authentication negotiation returned no error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authentication negotiation did not stop after cancellation")
+	}
+}
+
+func TestForceRFBVNCAuthenticationStopsAtDeadlineWhenBrowserStallsAfterServerVersion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	browser, bridgeBrowser := net.Pipe()
+	server, bridgeServer := net.Pipe()
+	defer browser.Close()
+	defer bridgeBrowser.Close()
+	defer server.Close()
+	defer bridgeServer.Close()
+	result := make(chan error, 1)
+	go func() {
+		result <- forceRFBVNCAuthentication(ctx, bridgeBrowser, bridgeServer)
+	}()
+
+	if _, err := server.Write([]byte("RFB 003.889\n")); err != nil {
+		t.Fatal(err)
+	}
+	version := make([]byte, 12)
+	if _, err := io.ReadFull(browser, version); err != nil {
+		t.Fatal(err)
+	}
+	if string(version) != "RFB 003.889\n" {
+		t.Fatalf("server version=%q", version)
+	}
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("expired authentication negotiation returned no error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authentication negotiation did not reach its deadline while browser version was stalled")
+	}
+}
+
+func TestForceRFBVNCAuthenticationStopsWhenBrowserStallsAfterSecurityOffer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	browser, bridgeBrowser := net.Pipe()
+	server, bridgeServer := net.Pipe()
+	defer browser.Close()
+	defer bridgeBrowser.Close()
+	defer server.Close()
+	defer bridgeServer.Close()
+	result := make(chan error, 1)
+	go func() {
+		result <- forceRFBVNCAuthentication(ctx, bridgeBrowser, bridgeServer)
+	}()
+
+	if _, err := server.Write([]byte("RFB 003.889\n")); err != nil {
+		t.Fatal(err)
+	}
+	serverVersion := make([]byte, 12)
+	if _, err := io.ReadFull(browser, serverVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := browser.Write([]byte("RFB 003.008\n")); err != nil {
+		t.Fatal(err)
+	}
+	browserVersion := make([]byte, 12)
+	if _, err := io.ReadFull(server, browserVersion); err != nil {
+		t.Fatal(err)
+	}
+	if string(browserVersion) != "RFB 003.008\n" {
+		t.Fatalf("browser version=%q", browserVersion)
+	}
+	if _, err := server.Write([]byte{2, rfbSecurityARD, localWebVNCSecurityTypePassword}); err != nil {
+		t.Fatal(err)
+	}
+	filtered := make([]byte, 2)
+	if _, err := io.ReadFull(browser, filtered); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(filtered, []byte{1, localWebVNCSecurityTypePassword}) {
+		t.Fatalf("filtered security types=%v", filtered)
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("canceled authentication negotiation returned no error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authentication negotiation did not stop while browser selection was stalled")
 	}
 }
 
@@ -194,6 +396,11 @@ func TestWebVNCLocalRejectsUnsafeInputBeforeReadingPassword(t *testing.T) {
 			name: "missing stdin flag",
 			args: []string{"--vnc-host", "127.0.0.1", "--vnc-port", "5900", "--username", "admin"},
 			want: "requires --password-stdin",
+		},
+		{
+			name: "invalid security type",
+			args: []string{"--vnc-host", "127.0.0.1", "--vnc-port", "5900", "--username", "admin", "--password-stdin", "--security-type", "ard"},
+			want: "--security-type must be auto or vnc",
 		},
 	}
 	for _, tt := range tests {
@@ -371,6 +578,7 @@ func TestServeLocalWebVNCBridgeRelaysWithoutExposingCredentials(t *testing.T) {
 			listener,
 			webPort,
 			rfbCredentials{Username: "admin", Password: "super-secret"},
+			false,
 			false,
 			dial,
 			nil,

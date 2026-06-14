@@ -147,7 +147,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  crabbox webvnc --id <lease-id-or-slug> [--open]")
-		fmt.Fprintln(fs.Output(), "  crabbox webvnc local --vnc-host 127.0.0.1 --vnc-port <port> --username <user> --password-stdin [--open]")
+		fmt.Fprintln(fs.Output(), "  crabbox webvnc local --vnc-host 127.0.0.1 --vnc-port <port> --username <user> --password-stdin [--security-type auto|vnc] [--local-port <port>] [--open]")
 		fmt.Fprintln(fs.Output(), "  crabbox webvnc status --id <lease-id-or-slug>")
 		fmt.Fprintln(fs.Output(), "  crabbox webvnc reset --id <lease-id-or-slug> [--open]")
 		fmt.Fprintln(fs.Output(), "  crabbox webvnc daemon start|status|stop --id <lease-id-or-slug>")
