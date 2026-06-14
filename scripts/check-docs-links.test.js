@@ -18,6 +18,16 @@ test("docs link checker accepts GitHub duplicate heading anchors", (t) => {
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("docs link checker avoids collisions with suffixed headings", (t) => {
+  const dir = newDocsFixture(t);
+  writeFile(path.join(dir, "README.md"), "[suffixed setup](docs/guide.md#setup-1-1)\n");
+  writeFile(path.join(dir, "docs", "guide.md"), "# Setup\n\n# Setup\n\n# Setup-1\n");
+
+  const result = runChecker(dir);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("docs link checker rejects missing duplicate heading anchors", (t) => {
   const dir = newDocsFixture(t);
   writeFile(path.join(dir, "README.md"), "[third setup](docs/guide.md#setup-2)\n");

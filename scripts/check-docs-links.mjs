@@ -51,7 +51,6 @@ function walk(dir) {
 
 function headingAnchors(markdown) {
   const anchors = new Set();
-  const seen = new Map();
   for (const rawLine of markdown.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     let hashes = 0;
@@ -65,9 +64,13 @@ function headingAnchors(markdown) {
     if (!base) {
       continue;
     }
-    const count = seen.get(base) || 0;
-    seen.set(base, count + 1);
-    anchors.add(count === 0 ? base : `${base}-${count}`);
+    let anchor = base;
+    let suffix = 0;
+    while (anchors.has(anchor)) {
+      suffix += 1;
+      anchor = `${base}-${suffix}`;
+    }
+    anchors.add(anchor);
   }
   return anchors;
 }
