@@ -265,6 +265,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",
+		"ovh",
 		"parallels",
 		"proxmox",
 		"railway",
