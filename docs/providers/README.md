@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 66 providers (38 SSH lease, 26 delegated run, 2 service control).
+Current built-in surface: 67 providers (39 SSH lease, 26 delegated run, 2 service control).
 
 Access terms:
 
@@ -72,6 +72,7 @@ Access terms:
 | Provider | Status / category | Execution / access | Targets / substrate | Location / GPU | Lifecycle / cleanup | Best fit | Main caveat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | [agent-sandbox](agent-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Kubernetes Agent Sandbox warm pool | `self-hosted`; GPU: unknown | Agent Sandbox SandboxClaim; owned SandboxClaim delete | Kubernetes-hosted delegated Linux execution | Requires kubectl, Agent Sandbox v0.5.0rc1 v1beta1 CRDs, a warm pool, explicit context, and RBAC |
+| [agx](agx.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; AGX microVM | `provider-managed`; GPU: no | AGX control-plane instance; agx instance delete | Fast Linux microVM over the AGX SSH workspace gateway | Early access (ships Summer 2026); control-plane API is provisional and SSH transport depends on the AGX gateway |
 | [anthropic-sandbox-runtime](anthropic-sandbox-runtime.md) (`srt`) | built-in; `delegated-run` · local-sandbox | No SSH; `provider-owned` · direct only; features: none | `linux`, `macos`; Anthropic Sandbox Runtime process sandbox | `local`; GPU: no | local runtime; one-shot process exit | Local policy-constrained command execution | No persistent lease, remote box, or SSH access |
 | [apple-container](apple-container.md) (`apple`, `applecontainer`) | built-in; `ssh-lease` · local-runtime | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `cache-volume` | `linux`; Apple container runtime | `local`; GPU: no | Crabbox; container delete | Local Linux containers on Apple silicon | Requires Apple's container CLI and macOS |
 | [apple-machine](apple-machine.md) (`applemachine`) | built-in; `delegated-run` · local-vm | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Apple container machine | `local`; GPU: no | Apple runtime; machine delete | Local delegated Linux machine execution | Delegated execution, not a normal SSH lease |

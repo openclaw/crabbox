@@ -193,6 +193,7 @@ type Config struct {
 	CloudflareDynamicWorkers      CloudflareDynamicWorkersConfig
 	Semaphore                     SemaphoreConfig
 	Sprites                       SpritesConfig
+	AGX                           AGXConfig
 	LocalContainer                LocalContainerConfig
 	localContainerRuntimeExplicit bool
 	localContainerImageExplicit   bool
@@ -1010,6 +1011,20 @@ type SpritesConfig struct {
 	Token    string
 	APIURL   string
 	WorkRoot string
+}
+
+// AGXConfig configures the AGX provider. AGX (https://www.agx.so) exposes
+// fast-booting microVM sandboxes over plain SSH through a workspace gateway
+// (ssh <user>+<instance>@<workspace>). Token is read from the environment only
+// and is never persisted to config files or placed on argv.
+type AGXConfig struct {
+	Token     string
+	APIURL    string
+	Workspace string
+	User      string
+	WorkRoot  string
+	Region    string
+	Image     string
 }
 
 type LocalContainerConfig struct {
@@ -2676,6 +2691,12 @@ func baseConfig() Config {
 			APIURL:   "https://api.sprites.dev",
 			WorkRoot: "/home/sprite/crabbox",
 		},
+		AGX: AGXConfig{
+			APIURL:    "https://api.agx.so",
+			Workspace: "workspace.agx.so",
+			User:      "root",
+			WorkRoot:  "/root/crabbox",
+		},
 		LocalContainer: LocalContainerConfig{
 			Runtime: "docker",
 			Image:   containerImage,
@@ -2833,6 +2854,7 @@ type fileConfig struct {
 	CloudflareDynamicWorkers *fileCloudflareDynamicWorkersConfig `yaml:"cloudflareDynamicWorkers,omitempty"`
 	Semaphore                *fileSemaphoreConfig                `yaml:"semaphore,omitempty"`
 	Sprites                  *fileSpritesConfig                  `yaml:"sprites,omitempty"`
+	AGX                      *fileAGXConfig                      `yaml:"agx,omitempty"`
 	LocalContainer           *fileLocalContainerConfig           `yaml:"localContainer,omitempty"`
 	AppleContainer           *fileAppleContainerConfig           `yaml:"appleContainer,omitempty"`
 	AppleVZ                  *fileAppleVZConfig                  `yaml:"appleVZ,omitempty"`
@@ -3735,6 +3757,15 @@ type fileSemaphoreConfig struct {
 type fileSpritesConfig struct {
 	APIURL   string `yaml:"apiUrl,omitempty"`
 	WorkRoot string `yaml:"workRoot,omitempty"`
+}
+
+type fileAGXConfig struct {
+	APIURL    string `yaml:"apiUrl,omitempty"`
+	Workspace string `yaml:"workspace,omitempty"`
+	User      string `yaml:"user,omitempty"`
+	WorkRoot  string `yaml:"workRoot,omitempty"`
+	Region    string `yaml:"region,omitempty"`
+	Image     string `yaml:"image,omitempty"`
 }
 
 type fileLocalContainerConfig struct {
@@ -5948,6 +5979,26 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Sprites.WorkRoot = file.Sprites.WorkRoot
 		}
 	}
+	if file.AGX != nil {
+		if file.AGX.APIURL != "" {
+			cfg.AGX.APIURL = file.AGX.APIURL
+		}
+		if file.AGX.Workspace != "" {
+			cfg.AGX.Workspace = file.AGX.Workspace
+		}
+		if file.AGX.User != "" {
+			cfg.AGX.User = file.AGX.User
+		}
+		if file.AGX.WorkRoot != "" {
+			cfg.AGX.WorkRoot = file.AGX.WorkRoot
+		}
+		if file.AGX.Region != "" {
+			cfg.AGX.Region = file.AGX.Region
+		}
+		if file.AGX.Image != "" {
+			cfg.AGX.Image = file.AGX.Image
+		}
+	}
 	if file.LocalContainer != nil {
 		if file.LocalContainer.Runtime != "" {
 			cfg.LocalContainer.Runtime = file.LocalContainer.Runtime
@@ -7610,6 +7661,13 @@ func applyEnv(cfg *Config) error {
 		cfg.credentialProvenance.spritesAPIURL = credentialSourceEnvironment
 	}
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
+	cfg.AGX.Token = getenv("CRABBOX_AGX_API_KEY", getenv("AGX_API_KEY", getenv("AGX_TOKEN", cfg.AGX.Token)))
+	cfg.AGX.APIURL = getenv("CRABBOX_AGX_API_URL", getenv("AGX_API_URL", cfg.AGX.APIURL))
+	cfg.AGX.Workspace = getenv("CRABBOX_AGX_WORKSPACE", getenv("AGX_WORKSPACE", cfg.AGX.Workspace))
+	cfg.AGX.User = getenv("CRABBOX_AGX_USER", getenv("AGX_USER", cfg.AGX.User))
+	cfg.AGX.WorkRoot = getenv("CRABBOX_AGX_WORK_ROOT", cfg.AGX.WorkRoot)
+	cfg.AGX.Region = getenv("CRABBOX_AGX_REGION", getenv("AGX_REGION", cfg.AGX.Region))
+	cfg.AGX.Image = getenv("CRABBOX_AGX_IMAGE", getenv("AGX_IMAGE", cfg.AGX.Image))
 	if runtimeName := os.Getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME"); runtimeName != "" {
 		cfg.LocalContainer.Runtime = runtimeName
 		cfg.localContainerRuntimeExplicit = true

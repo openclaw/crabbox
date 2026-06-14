@@ -13,6 +13,20 @@
     "caveat": "No persistent lease, remote box, or SSH access",
     "docs": "anthropic-sandbox-runtime.md"
   },
+  "agx": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "AGX microVM",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "AGX control-plane instance",
+    "cleanup": "agx instance delete",
+    "bestFit": "Fast Linux microVM over the AGX SSH workspace gateway",
+    "caveat": "Early access (ships Summer 2026); control-plane API is provisional and SSH transport depends on the AGX gateway",
+    "docs": "agx.md"
+  },
   "agent-sandbox": {
     "status": "built-in",
     "category": "delegated-sandbox",
