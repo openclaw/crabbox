@@ -116,6 +116,31 @@ func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestVercelSandboxRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("vercel-sandbox")
+	if err != nil {
+		t.Fatalf("ProviderFor(vercel-sandbox): %v", err)
+	}
+	if provider.Name() != "vercel-sandbox" {
+		t.Fatalf("ProviderFor(vercel-sandbox).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Family != "vercel" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("vercel-sandbox spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("vercel-sandbox targets=%#v", spec.Targets)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("vercel-sandbox features=%v", spec.Features)
+	}
+	for _, alias := range []string{"vercel", "vsb", "sandbox"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "vercel-sandbox" {
+			t.Fatalf("%q alias unexpectedly resolves to vercel-sandbox", alias)
+		}
+	}
+}
+
 func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
 		provider, err := core.ProviderFor(name)
@@ -260,6 +285,7 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"tenki",
 		"tensorlake",
 		"upstash-box",
+		"vercel-sandbox",
 		"wandb",
 		"windows-sandbox",
 		"xcp-ng",

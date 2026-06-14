@@ -180,6 +180,14 @@ auto` resolves to managed.
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
 
+### vercel-sandbox
+
+`--provider vercel-sandbox` creates a Vercel-managed Linux microVM and keeps it
+until explicit `stop`. Warmed sandboxes use `vsbx_...` local claims and can be
+reused by Crabbox slug or lease ID. The provider is delegated-run only: it
+supports archive sync and command execution through the SDK bridge, but not SSH,
+Tailscale, browser, desktop, code-server, or Actions runner hydration.
+
 ### cloudflare-dynamic-workers
 
 `--provider cloudflare-dynamic-workers` rejects `warmup`. Dynamic Workers require

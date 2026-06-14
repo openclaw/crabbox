@@ -1,8 +1,10 @@
 package islo
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -47,6 +49,8 @@ const (
 	isloAdminUser    = "root"
 	isloWorkloadUser = "islo"
 )
+
+const isloRunFileReadTimeout = 20 * time.Second
 
 type isloFlagValues struct {
 	BaseURL        *string
@@ -267,11 +271,23 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	commandDuration := b.now().Sub(commandStart)
 	result.ExitCode = exitCode
 	result.Command = commandDuration
+	var artifactErr error
+	if runErr == nil && result.ExitCode == 0 && core.HasDelegatedRunDownloadRequests(req) {
+		downloadBackend := isloRunDownloadBackend{isloBackend: b, user: workloadUser}
+		result.Artifacts, artifactErr = core.MaterializeDelegatedRunDownloads(ctx, downloadBackend, req, leaseID, b.rt.Stderr)
+		if artifactErr != nil {
+			result.ExitCode = 7
+			var exitErr ExitError
+			if core.AsExitError(artifactErr, &exitErr) && exitErr.Code != 0 {
+				result.ExitCode = exitErr.Code
+			}
+		}
+	}
 	result.Total = b.now().Sub(started)
 	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	} else {
-		fmt.Fprintf(b.rt.Stderr, "islo run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
+		fmt.Fprintf(b.rt.Stderr, "islo run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
@@ -283,11 +299,17 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			SyncSkipped:   req.NoSync,
 			CommandMs:     result.Command.Milliseconds(),
 			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
+			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
+			Artifacts:     result.Artifacts,
 		}); err != nil {
 			return result, err
 		}
+	}
+	if artifactErr != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		result.Session.Kept = !shouldStop
+		return result, artifactErr
 	}
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
@@ -300,6 +322,101 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("islo run exited %d", exitCode)}
 	}
 	return result, nil
+}
+
+type isloRunDownloadBackend struct {
+	*isloBackend
+	user string
+}
+
+func (b isloRunDownloadBackend) FetchRunFile(ctx context.Context, req core.DelegatedRunDownloadRequest) ([]byte, error) {
+	return b.isloBackend.fetchRunFileAs(ctx, req, b.user)
+}
+
+func (b *isloBackend) FetchRunFile(ctx context.Context, req core.DelegatedRunDownloadRequest) ([]byte, error) {
+	return b.fetchRunFileAs(ctx, req, "")
+}
+
+func (b *isloBackend) fetchRunFileAs(ctx context.Context, req core.DelegatedRunDownloadRequest, user string) ([]byte, error) {
+	client, err := newIsloClient(b.cfg, b.rt)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimPrefix(strings.TrimSpace(req.LeaseID), isloLeasePrefix)
+	if name == "" || name == req.LeaseID {
+		return nil, fmt.Errorf("islo sandbox name is required")
+	}
+	workspace, err := isloWorkspacePath(b.cfg)
+	if err != nil {
+		return nil, err
+	}
+	maxBytes := req.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = core.DelegatedRunDownloadMaxBytes
+	}
+	script := strings.Join([]string{
+		"set -euo pipefail",
+		"cd " + shellQuote(workspace),
+		"remote=" + shellQuote(req.RemotePath),
+		"workspace_real=$(realpath -e -- " + shellQuote(workspace) + ")",
+		"resolved=$(realpath -e -- \"$remote\")",
+		"expected=\"$workspace_real/$remote\"",
+		"test \"$resolved\" = \"$expected\"",
+		"test -f \"$resolved\"",
+		"exec 3< \"$resolved\"",
+		"opened=$(readlink -f -- /proc/$$/fd/3)",
+		"test \"$opened\" = \"$resolved\"",
+		"test -f /proc/$$/fd/3",
+		"head -c " + fmt.Sprint(maxBytes+1) + " <&3 | base64",
+	}, "\n")
+	stdout := &boundedRunFileBuffer{max: base64.StdEncoding.EncodedLen(maxBytes+1) + 4096}
+	execReq := &gosdk.ExecRequest{Command: []string{"timeout", "--kill-after=1s", "15s", "bash", "--noprofile", "--norc", "-c", script}}
+	if user != "" {
+		execReq.User = stringValue(user)
+	}
+	readCtx, cancel := context.WithTimeout(ctx, isloRunFileReadTimeout)
+	defer cancel()
+	code, err := client.ExecStream(readCtx, name, execReq, stdout, b.rt.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("islo retrieve artifact %s: %w", req.RemotePath, err)
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("islo retrieve artifact %s exited %d", req.RemotePath, code)
+	}
+	if stdout.exceeded {
+		return nil, fmt.Errorf("islo retrieve artifact %s exceeds encoded output bound", req.RemotePath)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(stdout.String()), ""))
+	if err != nil {
+		return nil, fmt.Errorf("islo retrieve artifact %s: decode base64: %w", req.RemotePath, err)
+	}
+	if len(data) > maxBytes {
+		return nil, fmt.Errorf("islo retrieve artifact %s exceeds %d bytes", req.RemotePath, maxBytes)
+	}
+	return data, nil
+}
+
+type boundedRunFileBuffer struct {
+	buf      bytes.Buffer
+	max      int
+	exceeded bool
+}
+
+func (b *boundedRunFileBuffer) Write(p []byte) (int, error) {
+	if b.max <= 0 || b.buf.Len()+len(p) <= b.max {
+		_, _ = b.buf.Write(p)
+		return len(p), nil
+	}
+	remaining := b.max - b.buf.Len()
+	if remaining > 0 {
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	b.exceeded = true
+	return len(p), nil
+}
+
+func (b *boundedRunFileBuffer) String() string {
+	return b.buf.String()
 }
 
 func isloWorkloadEnv(env map[string]string, tailnetReady bool) map[string]string {

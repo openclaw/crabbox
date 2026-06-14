@@ -28,7 +28,8 @@ Belongs in a Crabbox job:
 - lease TTL, idle timeout, and stop policy;
 - whether to run Actions hydration and how long to wait for it;
 - the remote command and whether it runs through a shell;
-- command-adjacent options such as JUnit paths, downloads, and sync flags.
+- command-adjacent options such as labels, JUnit paths, required artifacts,
+  artifact globs, downloads, and sync flags.
 
 Belongs in the repository command or workflow:
 
@@ -188,6 +189,11 @@ checksum: false
 forceSyncLarge: false
 junit:
   - reports/junit.xml
+label: nightly smoke
+artifactGlobs:
+  - reports/**
+requiredArtifacts:
+  - reports/summary.json
 downloads:
   - out/report.json=artifacts/report.json
 stop: auto
@@ -195,7 +201,8 @@ stop: auto
 
 With `shell: true` the command is passed to a remote shell verbatim (so `&&`,
 pipes, and environment assignments work). Without it, the command is split on
-whitespace and executed directly. Each `downloads` entry is a
+whitespace and executed directly. `artifactGlobs` and `requiredArtifacts`
+forward to the matching repeatable `run` flags. Each `downloads` entry is a
 `remote=local` pair pulled back after the run.
 
 ## Related

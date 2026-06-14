@@ -629,6 +629,20 @@
     "caveat": "Requires both control-plane and data-plane access",
     "docs": "superserve.md"
   },
+  "vercel-sandbox": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Vercel Sandbox microVM",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "no",
+    "lifecycle": "Vercel Sandbox",
+    "cleanup": "sandbox delete",
+    "bestFit": "Hosted delegated Linux microVM execution",
+    "caveat": "Requires SDK bridge support and Vercel Sandbox auth",
+    "docs": "vercel-sandbox.md"
+  },
   "tart": {
     "status": "built-in",
     "category": "local-vm",
