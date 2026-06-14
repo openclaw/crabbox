@@ -203,6 +203,11 @@ list, and cleanup.
   cloud-init, discovers the IP and bootstraps through the QEMU guest agent, then
   uses normal Crabbox SSH sync/run/release. Configure with `CRABBOX_PROXMOX_*` /
   the `proxmox` config section.
+- **firecracker** — currently exposes the self-hosted Linux KVM provider
+  contract and a read-only doctor surface. It validates the host OS,
+  `/dev/kvm`, the configured Firecracker binary, kernel/rootfs files, and CNI
+  directories without starting a microVM. Configure with
+  `CRABBOX_FIRECRACKER_*` / the `firecracker` config section.
 - **parallels** — creates a linked clone from a configured source VM and optional
   snapshot, starts it, discovers the guest IP through `prlctl`, then uses normal
   SSH sync/run/release. Supports Linux, macOS, and Windows guests that already

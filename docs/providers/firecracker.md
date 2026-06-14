@@ -1,12 +1,280 @@
 # Firecracker
 
-`firecracker` is the direct Firecracker SSH lease provider surface for Linux KVM hosts.
+Read this when you:
 
-Current PLAN-01 scope:
+- choose `provider: firecracker`;
+- stage a self-hosted Linux KVM host plus guest assets for Firecracker-backed
+  Crabbox runs;
+- need the `firecracker.*` config keys, `CRABBOX_FIRECRACKER_*` env overrides,
+  or `--firecracker-*` flags;
+- want the current read-only doctor contract and guarded readiness smoke.
 
-- provider registration and metadata
-- `crabbox config show` support for `firecracker.*` settings
-- flags and environment overrides for the Firecracker contract
-- read-only `crabbox doctor --provider firecracker` host readiness checks
+`provider: firecracker` is the direct self-hosted Firecracker SSH-lease surface
+for Linux KVM hosts. In this worktree the public contract stops at provider
+registration, config/default rendering, and read-only `doctor` checks.
+`warmup`, `run`, `ssh`, `stop`, and `cleanup` are not implemented yet, so this
+page focuses on staging host prerequisites and validating readiness without
+mutating any microVM resources.
 
-Lifecycle commands such as warmup, run, ssh, stop, and cleanup remain pending until the next Firecracker implementation plan.
+## Current contract
+
+- Provider id: `firecracker`
+- Aliases: none
+- Kind: `ssh-lease`
+- Targets: Linux only
+- Coordinator support: never
+- Declared features: `ssh`, `crabbox-sync`, `cleanup`
+- Default server type: `microvm`
+- Default SSH port: `22`
+- Supported network mode: `cni` only
+
+## When to use it
+
+Use Firecracker when you want a direct Linux microVM path on infrastructure you
+control and you are comfortable preparing the host, kernel, rootfs, and CNI
+pieces yourself. It is the self-hosted counterpart to delegated Firecracker
+surfaces such as [E2B](e2b.md) and [Tensorlake](tensorlake.md).
+
+Choose a different provider when another ownership model fits better:
+
+- [Local Container](local-container.md) for the fastest local Linux smoke path;
+- [Multipass](multipass.md) for a Canonical-managed local Ubuntu VM;
+- [Incus](incus.md) when you already have an Incus control plane;
+- [Proxmox](proxmox.md) or [XCP-ng](xcp-ng.md) when you want template-clone VM
+  lifecycle instead of raw microVM assembly;
+- [E2B](e2b.md) or [Tensorlake](tensorlake.md) when the hosted provider should
+  own the Firecracker lifecycle end to end.
+
+## Current lifecycle status
+
+Already usable surfaces:
+
+```sh
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+./bin/crabbox providers --json
+CRABBOX_PROVIDER=firecracker ./bin/crabbox config show --json
+./bin/crabbox doctor --provider firecracker --json
+```
+
+Unsupported today:
+
+```sh
+./bin/crabbox warmup --provider firecracker
+# provider=firecracker acquire is not implemented yet; PLAN-01 only ships the provider contract and read-only doctor checks
+```
+
+The same limitation applies to `run`, `ssh`, `stop`, and `cleanup`: the CLI
+accepts the provider contract and exposes its config/doctor surface, but does
+not yet start, resolve, or delete Firecracker microVMs.
+
+## Host requirements
+
+Before this provider can become ready, stage a host that meets all of these
+requirements:
+
+- Linux host. `doctor` fails on macOS and Windows because this provider expects
+  a Linux KVM environment.
+- `/dev/kvm` must exist and be usable by the account running Crabbox.
+- The configured Firecracker binary must exist on `PATH` or at
+  `firecracker.binary`.
+- `firecracker.jailer` is optional, but when set it must resolve to an
+  executable file.
+- `firecracker.kernel` and `firecracker.rootfs` must point to real files.
+- `firecracker.network` must remain `cni`, and `firecracker.cniNetwork`,
+  `firecracker.cniConfDir`, and `firecracker.cniBinDir` must resolve to a real
+  CNI setup on the host.
+- Size the host so the requested `firecracker.cpus`, `firecracker.memoryMiB`,
+  and `firecracker.diskMiB` are realistic for the guest you plan to boot.
+
+This provider rejects non-Linux targets and Tailscale-managed networking.
+
+## Guest image contract
+
+The future lifecycle path expects the configured kernel and rootfs pair to boot
+an SSH-ready Linux guest that matches the rest of Crabbox's Linux SSH-lease
+contract:
+
+- SSH listens on port `22`.
+- The configured `firecracker.user` can log in with the per-lease Crabbox SSH
+  key.
+- `firecracker.workRoot` is an absolute writable guest path.
+- The guest image includes the normal Linux sync/run prerequisites such as
+  `git`, `rsync`, `tar`, `curl`, and `python3`.
+- The kernel, rootfs, architecture, and CNI networking model are compatible
+  with each other.
+
+Current `doctor` checks do **not** validate guest-side tools or boot behavior
+yet. They only validate the host-side contract and configured file paths.
+
+## Configuration
+
+```yaml
+provider: firecracker
+target: linux
+firecracker:
+  binary: firecracker
+  # Optional when you do not use jailer mode.
+  jailer: /usr/local/bin/jailer
+  kernel: /var/lib/crabbox/firecracker/vmlinux
+  rootfs: /var/lib/crabbox/firecracker/rootfs.ext4
+  user: crabbox
+  workRoot: /work/crabbox
+  cpus: 4
+  memoryMiB: 4096
+  diskMiB: 16384
+  network: cni
+  cniNetwork: crabbox-firecracker
+  cniConfDir: /etc/cni/conf.d
+  cniBinDir: /opt/cni/bin
+  launchTimeout: 2m
+  deleteOnRelease: true
+```
+
+Defaults:
+
+- `binary=firecracker`
+- `kernel=/var/lib/crabbox/firecracker/vmlinux`
+- `rootfs=/var/lib/crabbox/firecracker/rootfs.ext4`
+- `user=crabbox`
+- `workRoot=/work/crabbox`
+- `cpus=4`
+- `memoryMiB=4096`
+- `diskMiB=16384`
+- `network=cni`
+- `cniNetwork=crabbox-firecracker`
+- `cniConfDir=/etc/cni/conf.d`
+- `cniBinDir=/opt/cni/bin`
+- `launchTimeout=2m`
+- `deleteOnRelease=true`
+
+For this provider Crabbox also normalizes `serverType` to `microvm`, `ssh.port`
+to `22`, and clears SSH fallback ports.
+
+`launchTimeout` and `deleteOnRelease` are already part of the public config
+surface, but they do not mutate anything in this worktree because lifecycle
+commands exit before acquiring a lease.
+
+## Environment overrides
+
+```text
+CRABBOX_FIRECRACKER_BINARY
+CRABBOX_FIRECRACKER_JAILER
+CRABBOX_FIRECRACKER_KERNEL
+CRABBOX_FIRECRACKER_ROOTFS
+CRABBOX_FIRECRACKER_USER
+CRABBOX_FIRECRACKER_WORK_ROOT
+CRABBOX_FIRECRACKER_CPUS
+CRABBOX_FIRECRACKER_MEMORY_MIB
+CRABBOX_FIRECRACKER_DISK_MIB
+CRABBOX_FIRECRACKER_NETWORK
+CRABBOX_FIRECRACKER_CNI_NETWORK
+CRABBOX_FIRECRACKER_CNI_CONF_DIR
+CRABBOX_FIRECRACKER_CNI_BIN_DIR
+CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT
+CRABBOX_FIRECRACKER_DELETE_ON_RELEASE
+```
+
+## Flags
+
+```text
+--firecracker-binary
+--firecracker-jailer
+--firecracker-kernel
+--firecracker-rootfs
+--firecracker-user
+--firecracker-work-root
+--firecracker-cpus
+--firecracker-memory-mib
+--firecracker-disk-mib
+--firecracker-network
+--firecracker-cni-network
+--firecracker-cni-conf-dir
+--firecracker-cni-bin-dir
+--firecracker-launch-timeout
+--firecracker-delete-on-release
+```
+
+`--class` and `--type` are intentionally rejected for `provider=firecracker`.
+Use explicit Firecracker sizing plus explicit kernel/rootfs assets instead.
+
+## Doctor contract
+
+`crabbox doctor --provider firecracker` is read-only. It never creates,
+starts, stops, or deletes a microVM. The provider-specific checks are stable:
+
+| Check | Meaning |
+| --- | --- |
+| `host` | The current host must be Linux. |
+| `kvm` | `/dev/kvm` exists and is not a directory. |
+| `binary` | `firecracker.binary` resolves to an executable. |
+| `jailer` | Optional `firecracker.jailer`; `skip` when unset. |
+| `kernel` | `firecracker.kernel` exists and is a file. |
+| `rootfs` | `firecracker.rootfs` exists and is a file. |
+| `network` | `firecracker.network=cni`, `firecracker.cniNetwork` is set, and the CNI config/bin directories exist. |
+
+Provider checks include `mutation=false` in their details. Missing host assets
+such as the Linux KVM surface, Firecracker binary, kernel, rootfs, or CNI
+directories fail with `class=environment_blocked`. Blank or structurally wrong
+config values such as an empty `firecracker.cniNetwork` fail with
+`class=configuration_incomplete`.
+
+## Guarded readiness smoke
+
+The repo includes a Firecracker-specific readiness helper:
+
+```sh
+go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh --dry-run
+CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh
+```
+
+The script is read-only in this worktree. It validates the JSON shape from
+`crabbox doctor --provider firecracker --json`, then classifies the result as:
+
+- `classification=readiness_passed` when all Firecracker readiness checks are
+  green;
+- `classification=environment_blocked` when the host, `/dev/kvm`, Firecracker
+  assets, or CNI prerequisites are unavailable;
+- `classification=validation_failed` when the smoke harness cannot validate the
+  expected doctor JSON contract.
+
+On macOS, Windows, or Linux hosts that are missing KVM or Firecracker assets,
+`environment_blocked` is the honest expected result. The helper does not fake a
+successful live proof while lifecycle is still pending.
+
+## Limits
+
+- Linux target only
+- direct CLI only, no coordinator path
+- `firecracker.network=cni` only
+- no Tailscale-managed networking
+- no lifecycle mutation yet (`warmup`, `run`, `ssh`, `stop`, `cleanup`)
+- no provider-native snapshot, fork, or restore flow in this worktree
+
+## Troubleshooting
+
+- `host=<os> requires a Linux KVM host`: run the provider on a Linux machine,
+  not on macOS or Windows.
+- `/dev/kvm unavailable`: KVM is missing, hidden, or inaccessible to the
+  current user.
+- `firecracker.binary unavailable`: install Firecracker or point
+  `firecracker.binary` at the correct executable path.
+- `firecracker.kernel unavailable` / `firecracker.rootfs unavailable`: fix the
+  configured image paths or stage the missing files.
+- `network=cni ... firecracker.cniConfDir ... firecracker.cniBinDir ...`:
+  install or point Crabbox at the correct CNI config and plugin directories.
+- `--class is not supported for provider=firecracker`: use
+  `--firecracker-cpus`, `--firecracker-memory-mib`, and
+  `--firecracker-disk-mib`.
+- `--type is not supported for provider=firecracker`: use explicit
+  `--firecracker-kernel` and `--firecracker-rootfs` instead.
+- `provider=firecracker acquire is not implemented yet`: the provider contract
+  is present, but lifecycle work has not landed in this worktree.
+
+## Related docs
+
+- [Provider reference](README.md)
+- [providers](../commands/providers.md)
+- [doctor](../commands/doctor.md)
+- [Provider backends](../provider-backends.md)
+- [Provider feature overview](../features/providers.md)

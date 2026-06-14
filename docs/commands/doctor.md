@@ -68,6 +68,11 @@ Provider readiness validates the selected provider without creating a lease.
   inventory plus priced VPS catalog entries, payment methods, templates, and
   data centers, then reports `purchase=explicit release=stop`; it does not
   purchase, start, stop, delete, or cancel a VPS.
+  Firecracker validates the local Linux KVM contract instead of starting a
+  microVM: host OS, `/dev/kvm`, the configured Firecracker binary and optional
+  jailer, kernel/rootfs paths, and CNI directories. Unsupported hosts or
+  missing assets fail with provider-specific checks such as `host`, `kvm`,
+  `binary`, `kernel`, `rootfs`, and `network`, all marked `mutation=false`.
 - Delegated providers run their own direct readiness check where available; for
   example Cloudflare Containers validate the configured runner URL and bearer
   token against the runner readiness API. Cloudflare Dynamic Workers validate

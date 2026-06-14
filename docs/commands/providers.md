@@ -327,9 +327,9 @@ The `aliases` line appears only when the provider declares alternate names. A
 dash (`-`) means the field has no entries (for example, a provider that
 advertises no features).
 
-Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
-`coordinator: never`, `targets: linux`, and features including `ssh`,
-`crabbox-sync`, and `cleanup`.
+Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
+`xcp-ng` report `coordinator: never`, `targets: linux`, and features including
+`ssh`, `crabbox-sync`, and `cleanup`.
 
 `--json` returns one object per provider:
 

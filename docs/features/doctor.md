@@ -121,6 +121,11 @@ provider timeout. Examples:
   proof of runner readiness.
 - Blacksmith Testbox reports runtime as provider-hydrated because GitHub Actions
   hydration is owned by Testbox.
+- Firecracker validates the local Linux KVM contract instead of starting a
+  microVM: host OS, `/dev/kvm`, the configured Firecracker binary and optional
+  jailer, kernel/rootfs paths, and CNI directories. The provider checks report
+  `mutation=false` and fail with explicit check names such as `host`, `kvm`,
+  `binary`, `kernel`, `rootfs`, and `network`.
 - XCP-ng opens a XAPI session, resolves configured placement resources
   (template, storage repository, network, and host), lists Crabbox-managed
   leases, and reports `mutation=false`; incomplete `xcpNg.*` config fails

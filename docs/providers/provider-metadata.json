@@ -315,10 +315,10 @@
     "ssh": "crabbox-managed",
     "sync": "crabbox-sync",
     "gpu": "no",
-    "lifecycle": "Crabbox contract",
-    "cleanup": "placeholder only in PLAN-01",
-    "bestFit": "Linux KVM host with prepared Firecracker kernel and rootfs",
-    "caveat": "PLAN-01 ships config and doctor only; lifecycle requires Linux, /dev/kvm, and CNI setup",
+    "lifecycle": "read-only readiness",
+    "cleanup": "lifecycle pending",
+    "bestFit": "Self-hosted Linux KVM host with prepared Firecracker kernel, rootfs, and CNI",
+    "caveat": "Current worktree ships config, flags, and doctor only; warmup/run/ssh/stop/cleanup are not implemented yet",
     "docs": "firecracker.md"
   },
   "freestyle": {

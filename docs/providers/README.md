@@ -93,7 +93,7 @@ Access terms:
 | [exe-dev](exe-dev.md) (`exe`, `exedev`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; exe.dev managed VM | `provider-managed`; GPU: unknown | exe.dev; provider lifecycle | Fast managed Linux VM exposed over SSH | Public SSH only; provider CLI owns auth |
 | [external](external.md) (`exec-provider`) | built-in; `ssh-lease` · external-provider | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; Configured executable contract | `byo`; GPU: unknown | external executable; contract-defined | Private or organization-specific provider integration | Safety and semantics depend on the configured executable |
 | [fastapi-cloud](fastapi-cloud.md) (`fastapicloud`, `fastapi`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: none | `linux`; FastAPI Cloud app | `cloud`; GPU: unknown | FastAPI Cloud; not exposed | Inspecting FastAPI Cloud app deployment readiness | Cannot execute arbitrary Crabbox run commands or stop apps |
-| [firecracker](firecracker.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Firecracker microVM | `self-hosted`; GPU: no | Crabbox contract; placeholder only in PLAN-01 | Linux KVM host with prepared Firecracker kernel and rootfs | PLAN-01 ships config and doctor only; lifecycle requires Linux, /dev/kvm, and CNI setup |
+| [firecracker](firecracker.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Firecracker microVM | `self-hosted`; GPU: no | read-only readiness; lifecycle pending | Self-hosted Linux KVM host with prepared Firecracker kernel, rootfs, and CNI | Current worktree ships config, flags, and doctor only; warmup/run/ssh/stop/cleanup are not implemented yet |
 | [freestyle](freestyle.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Freestyle VM | `provider-managed`; GPU: unknown | Freestyle; provider VM cleanup | Hosted delegated Linux VM execution | No Crabbox-managed SSH path |
 | [gcp](gcp.md) (`google`, `google-cloud`) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Google Compute Engine VM | `cloud`; GPU: optional | Crabbox or coordinator; instance and firewall cleanup | Linux compute with broad machine selection | Project, IAM, quota, and firewall setup required |
 | [hetzner](hetzner.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`; Hetzner Cloud server | `cloud`; GPU: no | Crabbox or coordinator; server delete | Cost-effective high-CPU Linux VM | Linux-only and capacity varies by location |
@@ -145,6 +145,7 @@ Access terms:
   (`provider: azure`) and the delegated `azure-dynamic-sessions` provider
   (Azure Container Apps dynamic sessions). They share the `azure` family but are
   distinct adapters.
+<<<<<<< HEAD
 - The Cloudflare family ships three delegated backends: `cloudflare` for
   Cloudflare Containers and Linux commands, `cloudflare-dynamic-workers` for
   Worker-runtime module execution, and `cloudflare-sandbox` for Cloudflare
@@ -152,6 +153,15 @@ Access terms:
   with separate runner configs and token env vars.
 - Tensorlake is Crabbox's Firecracker-backed delegated provider; Crabbox does
   not provision raw Firecracker instances directly.
+=======
+- The Cloudflare family ships two delegated backends: `cloudflare` for
+  Cloudflare Containers and Linux commands, and `cloudflare-dynamic-workers` for
+  Worker-runtime module execution. They are separate providers with separate
+  runner configs and token env vars.
+- Tensorlake is Crabbox's Firecracker-backed delegated provider. The separate
+  `firecracker` provider is the self-hosted Linux KVM surface; in this worktree
+  it currently stops at config rendering and read-only doctor checks.
+>>>>>>> 364ab66f (docs(firecracker): document readiness and smoke helper)
 - Docker Sandbox is a delegated-run provider driven by the standalone `sbx`
   CLI. It has no aliases, so `docker`, `container`, and `local-docker` remain
   Local Container aliases.
