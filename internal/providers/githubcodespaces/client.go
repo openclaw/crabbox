@@ -176,7 +176,14 @@ func (c client) startCodespace(ctx context.Context, name string) (codespace, err
 	if name == "" {
 		return codespace{}, exit(2, "github-codespaces codespace name is required")
 	}
-	return c.doJSON(ctx, http.MethodPost, "/user/codespaces/"+url.PathEscape(name)+"/start", nil)
+	var out codespace
+	if err := c.do(ctx, http.MethodPost, "/user/codespaces/"+url.PathEscape(name)+"/start", nil, &out, map[int]bool{http.StatusNotModified: true}); err != nil {
+		return codespace{}, err
+	}
+	if out.Name == "" {
+		out.Name = name
+	}
+	return out, nil
 }
 
 func (c client) stopCodespace(ctx context.Context, name string) error {
