@@ -101,6 +101,8 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 			_, _ = w.Write([]byte(`{"name":"space-1","state":"Available","repository":"example-org/my-app","machine":"standardLinux32gb"}`))
 		case r.Method == http.MethodPost && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1/start":
 			_, _ = w.Write([]byte(`{"name":"space-1","state":"Starting","repository":"example-org/my-app","machine":"standardLinux32gb"}`))
+		case r.Method == http.MethodPost && r.URL.RequestURI() == "/api/v3/user/codespaces/space-2/start":
+			w.WriteHeader(http.StatusNotModified)
 		case r.Method == http.MethodPost && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1/stop":
 			w.WriteHeader(http.StatusAccepted)
 		case r.Method == http.MethodDelete && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1":
@@ -124,6 +126,9 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 	if got, err := c.startCodespace(context.Background(), "space-1"); err != nil || got.State != "Starting" {
 		t.Fatalf("start=%#v err=%v", got, err)
 	}
+	if got, err := c.startCodespace(context.Background(), "space-2"); err != nil || got.Name != "space-2" {
+		t.Fatalf("start no-op=%#v err=%v", got, err)
+	}
 	if err := c.stopCodespace(context.Background(), "space-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +144,7 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 		"GET /api/v3/user/codespaces?per_page=100&page=2",
 		"GET /api/v3/user/codespaces/space-1",
 		"POST /api/v3/user/codespaces/space-1/start",
+		"POST /api/v3/user/codespaces/space-2/start",
 		"POST /api/v3/user/codespaces/space-1/stop",
 		"DELETE /api/v3/user/codespaces/space-1",
 		"GET /api/v3/repos/example-org/my-app/codespaces/machines?ref=main",
