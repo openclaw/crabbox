@@ -143,6 +143,133 @@ func TestWarmupReturnsDefinitiveCreateFailureWithoutReconciliation(t *testing.T)
 	}
 }
 
+func TestAmbiguousCreateRecoveryAdoptsExactClaimUID(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	leaseID := "asbx_ambiguous_recovery"
+	slug := "ambiguous-recovery"
+	resourceName := claimName(leaseID, slug)
+	recoveryNonce := strings.Repeat("a", 64)
+
+	err := backend.recoverAmbiguousCreateFailure(
+		leaseID,
+		slug,
+		repo,
+		false,
+		resourceName,
+		"",
+		recoveryNonce,
+		ambiguousClaimRecoveryUnknownError{err: errors.New("create response lost")},
+	)
+	if err == nil || !strings.Contains(err.Error(), "local lease "+leaseID+" retained") {
+		t.Fatalf("recovery err=%v", err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Labels[claimLabelClaimUID] != "" || claim.Labels[claimLabelClaimUIDPending] != "true" {
+		t.Fatalf("recovery labels=%#v", claim.Labels)
+	}
+	created, err := fake.Create(context.Background(), sandboxClaimGVR(), cfg.AgentSandbox.Namespace, &kubernetesObject{
+		APIVersion: agentSandboxExtensionsGroupVersion,
+		Kind:       "SandboxClaim",
+		Metadata: objectMeta{
+			Name:        resourceName,
+			Namespace:   cfg.AgentSandbox.Namespace,
+			Labels:      claimLabels(leaseID, slug),
+			Annotations: claimAnnotationsWithRecoveryNonce(cfg, recoveryNonce),
+		},
+		Spec: map[string]any{"warmPoolRef": map[string]any{"name": cfg.AgentSandbox.WarmPool}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.deletes != 1 {
+		t.Fatalf("deletes=%d want=1", fake.deletes)
+	}
+	if deletedUID := strings.TrimSpace(created.Metadata.UID); deletedUID == "" {
+		t.Fatal("fake claim has no UID")
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("recovery lease not removed: claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestAmbiguousCreateRecoveryRefusesNonceMismatch(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	leaseID := "asbx_ambiguous_mismatch"
+	slug := "ambiguous-mismatch"
+	resourceName := claimName(leaseID, slug)
+	recoveryNonce := strings.Repeat("b", 64)
+
+	_ = backend.recoverAmbiguousCreateFailure(
+		leaseID,
+		slug,
+		repo,
+		false,
+		resourceName,
+		"",
+		recoveryNonce,
+		ambiguousClaimRecoveryUnknownError{err: errors.New("create response lost")},
+	)
+	_, err := fake.Create(context.Background(), sandboxClaimGVR(), cfg.AgentSandbox.Namespace, &kubernetesObject{
+		APIVersion: agentSandboxExtensionsGroupVersion,
+		Kind:       "SandboxClaim",
+		Metadata: objectMeta{
+			Name:        resourceName,
+			Namespace:   cfg.AgentSandbox.Namespace,
+			Labels:      claimLabels(leaseID, slug),
+			Annotations: claimAnnotationsWithRecoveryNonce(cfg, recoveryNonce),
+		},
+		Spec: map[string]any{"warmPoolRef": map[string]any{"name": cfg.AgentSandbox.WarmPool}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+resourceName]
+	live.Metadata.Annotations[annotationRecovery] = strings.Repeat("d", 64)
+
+	err = backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "recovery nonce changed") {
+		t.Fatalf("stop err=%v", err)
+	}
+	if fake.deletes != 0 {
+		t.Fatalf("deletes=%d want=0", fake.deletes)
+	}
+	claim, readErr := readLeaseClaim(leaseID)
+	if readErr != nil || claim.LeaseID == "" || claim.Labels[claimLabelClaimUIDPending] != "true" {
+		t.Fatalf("recovery lease not retained: claim=%#v err=%v", claim, readErr)
+	}
+}
+
+func TestAmbiguousCreateDefinitiveFailureDoesNotPersistRecovery(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	leaseID := "asbx_ambiguous_absent"
+	slug := "ambiguous-absent"
+
+	cause := errors.New("claim remained absent after ambiguous create")
+	err := backend.recoverAmbiguousCreateFailure(leaseID, slug, repo, false, claimName(leaseID, slug), "", strings.Repeat("c", 64), cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("recovery err=%v want cause=%v", err, cause)
+	}
+	if claim, readErr := readLeaseClaim(leaseID); readErr != nil || claim.LeaseID != "" {
+		t.Fatalf("definitive failure persisted claim=%#v err=%v", claim, readErr)
+	}
+}
+
 func TestListReportsPendingClaimAsNotReady(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)
@@ -646,6 +773,56 @@ func TestStopRejectsReplacedClaimUID(t *testing.T) {
 	}
 	if fake.deletes != 0 {
 		t.Fatalf("replacement claim was deleted: deletes=%d", fake.deletes)
+	}
+}
+
+func TestStopLegacyClaimValidatesCurrentProviderScope(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	leaseID := "asbx_legacy_scope"
+	slug := "legacy-scope"
+	resourceName := claimName(leaseID, slug)
+	uid := "uid-legacy-scope"
+
+	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, "", cfg.Pond, repo.Root, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := claimMetadataLabels(cfg, leaseID, sandboxReadiness{ClaimName: resourceName, ClaimUID: uid}, resourceName, "", "")
+	if _, err := updateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
+		t.Fatal(err)
+	}
+	_, err = fake.Create(context.Background(), sandboxClaimGVR(), cfg.AgentSandbox.Namespace, &kubernetesObject{
+		APIVersion: agentSandboxExtensionsGroupVersion,
+		Kind:       "SandboxClaim",
+		Metadata: objectMeta{
+			Name:      resourceName,
+			Namespace: cfg.AgentSandbox.Namespace,
+			UID:       uid,
+			Labels:    claimLabels(leaseID, slug),
+			Annotations: map[string]string{
+				annotationScope:     scopeFingerprint("different-scope"),
+				annotationWorkdir:   cfg.AgentSandbox.Workdir,
+				annotationContainer: "default",
+			},
+		},
+		Spec: map[string]any{"warmPoolRef": map[string]any{"name": cfg.AgentSandbox.WarmPool}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "different Crabbox scope") {
+		t.Fatalf("legacy scope stop err=%v", err)
+	}
+	if fake.deletes != 0 {
+		t.Fatalf("scope-mismatched claim was deleted: deletes=%d", fake.deletes)
 	}
 }
 

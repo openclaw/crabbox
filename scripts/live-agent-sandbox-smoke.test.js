@@ -110,8 +110,12 @@ case "$1" in
     printf 'agent-sandbox ready\\n'
     ;;
   run)
-    printf 'leased asbx_123456789abc slug=agent-sandbox-smoke-test-collision provider=agent-sandbox claim=crabbox-agent-sandbox-smoke-test-collision sandbox=sandbox-a pod=pod-a\\n' >&2
-    printf 'AGENT_SANDBOX_SMOKE_OK\\n'
+    if [[ "$*" == *"--slug agent-sandbox-smoke-test"* ]]; then
+      printf 'leased asbx_123456789abc slug=agent-sandbox-smoke-test-collision provider=agent-sandbox claim=crabbox-agent-sandbox-smoke-test-collision sandbox=sandbox-a pod=pod-a\\n' >&2
+      printf 'AGENT_SANDBOX_SMOKE_OK\\n'
+    elif [[ "$*" != *"--no-sync"* ]]; then
+      printf 'AGENT_SANDBOX_REPLACE_OK\\n'
+    fi
     ;;
   status)
     printf 'ready\\n'
@@ -162,6 +166,8 @@ esac
   assert.equal(crabboxCalls.includes(`--agent-sandbox-kubeconfig ${inheritedKubeconfig}`), false);
   assert.match(crabboxCalls, /run --provider agent-sandbox/);
   assert.match(crabboxCalls, /--slug agent-sandbox-smoke-test/);
+  assert.match(crabboxCalls, /run --provider agent-sandbox .* --id asbx_123456789abc --no-sync/);
+  assert.match(crabboxCalls, /run --provider agent-sandbox .* --id asbx_123456789abc --allow-env CRABBOX_AGENT_SANDBOX_SMOKE_VALUE/);
   assert.match(crabboxCalls, /status --provider agent-sandbox .* --id asbx_123456789abc/);
   assert.match(crabboxCalls, /stop --provider agent-sandbox .* asbx_123456789abc/);
   assert.doesNotMatch(crabboxCalls, /stop --provider agent-sandbox .* agent-sandbox-smoke-test$/m);

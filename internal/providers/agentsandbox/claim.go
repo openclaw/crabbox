@@ -1,6 +1,7 @@
 package agentsandbox
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -20,9 +21,12 @@ const (
 	annotationScope     = "crabbox.dev/provider-scope"
 	annotationWorkdir   = "crabbox.dev/workdir"
 	annotationContainer = "crabbox.dev/container"
+	annotationRecovery  = "crabbox.dev/recovery-nonce"
 
 	claimLabelClaimName       = "claim"
 	claimLabelClaimUID        = "claim_uid"
+	claimLabelClaimUIDPending = "claim_uid_pending"
+	claimLabelRecoveryNonce   = "claim_recovery_nonce"
 	claimLabelSandboxName     = "sandbox"
 	claimLabelPodName         = "pod"
 	claimLabelNamespace       = "namespace"
@@ -98,15 +102,23 @@ func claimLabels(leaseID, slug string) map[string]string {
 }
 
 func claimAnnotations(cfg Config) map[string]string {
+	return claimAnnotationsWithRecoveryNonce(cfg, "")
+}
+
+func claimAnnotationsWithRecoveryNonce(cfg Config, recoveryNonce string) map[string]string {
 	container := strings.TrimSpace(cfg.AgentSandbox.Container)
 	if container == "" {
 		container = "default"
 	}
-	return map[string]string{
+	annotations := map[string]string{
 		annotationScope:     scopeFingerprint(claimScope(cfg)),
 		annotationWorkdir:   cfg.AgentSandbox.Workdir,
 		annotationContainer: container,
 	}
+	if recoveryNonce != "" {
+		annotations[annotationRecovery] = recoveryNonce
+	}
+	return annotations
 }
 
 func scopeFingerprint(scope string) string {
@@ -127,7 +139,7 @@ func claimLeaseForRepo(cfg Config, leaseID, slug string, repo Repo, reclaim bool
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
 }
 
-func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName, expiresAt string) (LeaseClaim, error) {
+func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) (LeaseClaim, error) {
 	if err := claimLeaseForRepo(cfg, leaseID, slug, repo, reclaim); err != nil {
 		return LeaseClaim{}, err
 	}
@@ -135,7 +147,7 @@ func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, 
 	if err != nil {
 		return LeaseClaim{}, err
 	}
-	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName, expiresAt))
+	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName, expiresAt, recoveryNonce))
 }
 
 func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {
@@ -154,7 +166,7 @@ func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {
 	return err
 }
 
-func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, claimName, expiresAt string) map[string]string {
+func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) map[string]string {
 	container := strings.TrimSpace(ready.Container)
 	if container == "" {
 		container = strings.TrimSpace(cfg.AgentSandbox.Container)
@@ -175,6 +187,7 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 		"lease":                   leaseID,
 		claimLabelClaimName:       claimName,
 		claimLabelClaimUID:        ready.ClaimUID,
+		claimLabelClaimUIDPending: fmt.Sprintf("%t", strings.TrimSpace(ready.ClaimUID) == ""),
 		claimLabelSandboxName:     ready.SandboxName,
 		claimLabelPodName:         ready.PodName,
 		claimLabelNamespace:       cfg.AgentSandbox.Namespace,
@@ -187,6 +200,9 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 	}
 	if expiresAt != "" {
 		labels[claimLabelExpiresAt] = expiresAt
+	}
+	if recoveryNonce != "" {
+		labels[claimLabelRecoveryNonce] = recoveryNonce
 	}
 	return labels
 }
@@ -203,19 +219,25 @@ func claimReadinessLabels(labels map[string]string, ready sandboxReadiness) map[
 
 func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
 	uid := ""
+	if claim.Labels != nil {
+		uid = strings.TrimSpace(claim.Labels[claimLabelClaimUID])
+	}
+	if uid == "" {
+		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
+	}
+	return claimIdentityFromLocalClaimWithUID(claim, uid)
+}
+
+func claimIdentityFromLocalClaimWithUID(claim LeaseClaim, uid string) (claimIdentity, error) {
 	warmPool := ""
 	expiresAt := ""
 	container := ""
 	containerPinned := false
 	if claim.Labels != nil {
-		uid = strings.TrimSpace(claim.Labels[claimLabelClaimUID])
 		warmPool = strings.TrimSpace(claim.Labels[claimLabelWarmPool])
 		expiresAt = strings.TrimSpace(claim.Labels[claimLabelExpiresAt])
 		container = strings.TrimSpace(claim.Labels[claimLabelContainer])
 		containerPinned = strings.EqualFold(strings.TrimSpace(claim.Labels[claimLabelContainerPinned]), "true")
-	}
-	if uid == "" {
-		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
 	}
 	if warmPool == "" {
 		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", claim.LeaseID)
@@ -338,6 +360,14 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func newClaimRecoveryNonce() (string, error) {
+	var value [32]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate agent-sandbox recovery nonce: %w", err)
+	}
+	return hex.EncodeToString(value[:]), nil
 }
 
 func isNotFound(err error) bool {

@@ -21,11 +21,23 @@ type claimTTLExpiryError struct {
 	err error
 }
 
+type ambiguousClaimRecoveryUnknownError struct {
+	err error
+}
+
 func (e claimTTLExpiryError) Error() string {
 	return e.err.Error()
 }
 
 func (e claimTTLExpiryError) Unwrap() error {
+	return e.err
+}
+
+func (e ambiguousClaimRecoveryUnknownError) Error() string {
+	return e.err.Error()
+}
+
+func (e ambiguousClaimRecoveryUnknownError) Unwrap() error {
 	return e.err
 }
 
@@ -133,13 +145,6 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return RunResult{}, err
 		}
 		leaseID, slug, claimName = claim.LeaseID, claim.Slug, claimNameFromLocalClaim(claim)
-		if expired, expiryErr := b.releaseExpiredRunClaim(ctx, client, claim, claimName); expired {
-			return RunResult{}, expiryErr
-		}
-		identity, err := claimIdentityFromLocalClaim(claim)
-		if err != nil {
-			return RunResult{}, err
-		}
 		liveClaim, err := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 		if err != nil {
 			if isNotFound(err) {
@@ -147,8 +152,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			}
 			return RunResult{}, err
 		}
-		if err := validateClaimIdentity(liveClaim, identity); err != nil {
+		var identity claimIdentity
+		claim, identity, err = b.claimIdentityForLiveClaim(claim, liveClaim, true)
+		if err != nil {
 			return RunResult{}, err
+		}
+		if expired, expiryErr := b.releaseExpiredRunClaim(ctx, client, claim, claimName); expired {
+			return RunResult{}, expiryErr
 		}
 		ready, err = b.waitForClaimReadiness(ctx, client, claimName, identity)
 		if err != nil {
@@ -330,17 +340,14 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 		if claim.Provider != providerName || claim.ProviderScope != claimScope(b.cfg) {
 			continue
 		}
-		identity, err := claimIdentityFromLocalClaim(claim)
-		if err != nil {
-			return nil, err
-		}
 		claimName := claimNameFromLocalClaim(claim)
 		ready := sandboxReadiness{}
 		state := statusViewReady
 		stateReason := ""
 		liveClaim, stateErr := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 		if stateErr == nil {
-			if err := validateClaimIdentity(liveClaim, identity); err != nil {
+			_, identity, err := b.claimIdentityForLiveClaim(claim, liveClaim, false)
+			if err != nil {
 				return nil, err
 			}
 			if expired, reason := sandboxClaimExpired(claim, liveClaim, b.now().UTC()); expired {
@@ -395,10 +402,6 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err := authorizeClaimScope(b.cfg, claim); err != nil {
 		return StatusView{}, err
 	}
-	identity, err := claimIdentityFromLocalClaim(claim)
-	if err != nil {
-		return StatusView{}, err
-	}
 	waitTimeout := req.WaitTimeout
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
@@ -431,7 +434,8 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			}
 			return StatusView{}, err
 		}
-		if err := validateClaimIdentity(liveClaim, identity); err != nil {
+		_, identity, err := b.claimIdentityForLiveClaim(claim, liveClaim, false)
+		if err != nil {
 			return StatusView{}, err
 		}
 		if expired, reason := sandboxClaimExpired(claim, liveClaim, b.now().UTC()); expired {
@@ -567,11 +571,8 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				claimRemovedOne = true
 				return nil
 			}
-			identity, err := claimIdentityFromLocalClaim(claim)
+			claim, _, err = b.claimIdentityForLiveClaim(claim, liveClaim, !req.DryRun)
 			if err != nil {
-				return err
-			}
-			if err := validateClaimIdentity(liveClaim, identity); err != nil {
 				return err
 			}
 			due, reason := claimCleanupDue(claim, now)
@@ -637,6 +638,10 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		}
 	}()
 	claimResourceName := claimName(leaseID, slug)
+	recoveryNonce, err := newClaimRecoveryNonce()
+	if err != nil {
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, err
+	}
 	expiresAt := ""
 	if b.cfg.TTL > 0 {
 		deadline := b.now().UTC().Add(b.cfg.TTL)
@@ -661,7 +666,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 			Name:        claimResourceName,
 			Namespace:   b.cfg.AgentSandbox.Namespace,
 			Labels:      claimLabels(leaseID, slug),
-			Annotations: claimAnnotations(b.cfg),
+			Annotations: claimAnnotationsWithRecoveryNonce(b.cfg, recoveryNonce),
 		},
 		Spec: spec,
 	}
@@ -674,9 +679,11 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		if cause == nil {
 			cause = exit(4, "created agent-sandbox claim %s has no Kubernetes UID", claimResourceName)
 		}
-		created, err = b.reconcileCreatedClaim(ctx, client, leaseID, claimResourceName, expiresAt, cause)
+		created, err = b.reconcileCreatedClaim(ctx, client, leaseID, claimResourceName, expiresAt, recoveryNonce, cause)
 		if err != nil {
-			return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, err
+			return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.recoverAmbiguousCreateFailure(
+				leaseID, slug, repo, reclaim, claimResourceName, expiresAt, recoveryNonce, err,
+			)
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: reconciled agent-sandbox claim=%s after ambiguous create result\n", claimResourceName)
 	}
@@ -689,23 +696,23 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		Container:     strings.TrimSpace(b.cfg.AgentSandbox.Container),
 	}
 	pending := sandboxReadiness{ClaimName: claimResourceName, ClaimUID: identity.UID}
-	pendingClaim, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimResourceName, expiresAt)
+	pendingClaim, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimResourceName, expiresAt, recoveryNonce)
 	if err != nil {
-		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, err)
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, err)
 	}
 	unlockSlug()
 	unlockSlug = nil
 	ready, err := b.waitForClaimReadiness(ctx, client, claimResourceName, identity)
 	if err != nil {
-		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, err)
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, err)
 	}
 	if claimTTLExpired(pendingClaim, b.now().UTC()) {
 		cause := exit(4, "agent-sandbox claim %s reached its TTL expiry before becoming ready", leaseID)
-		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, cause)
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, cause)
 	}
-	persistedClaim, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, ready, claimResourceName, expiresAt)
+	persistedClaim, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, ready, claimResourceName, expiresAt, recoveryNonce)
 	if err != nil {
-		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, err)
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, expiresAt, recoveryNonce, err)
 	}
 	createdSuccessfully = true
 	return leaseID, claimResourceName, slug, ready, persistedClaim, unlockOperation, nil
@@ -744,7 +751,7 @@ func (b *backend) waitForClaimReadiness(ctx context.Context, client kubernetesCl
 	return ready, err
 }
 
-func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesClient, leaseID, claimName, expiresAt string, cause error) (*kubernetesObject, error) {
+func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesClient, leaseID, claimName, expiresAt, recoveryNonce string, cause error) (*kubernetesObject, error) {
 	reconcileCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -767,6 +774,9 @@ func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesCl
 			if err := validateClaimIdentity(live, identity); err != nil {
 				return nil, errors.Join(cause, fmt.Errorf("refuse ambiguous agent-sandbox claim recovery: %w", err))
 			}
+			if err := validateClaimRecoveryNonce(live, recoveryNonce); err != nil {
+				return nil, errors.Join(cause, fmt.Errorf("refuse ambiguous agent-sandbox claim recovery: %w", err))
+			}
 			return live, nil
 		}
 		lastErr = err
@@ -775,7 +785,10 @@ func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesCl
 			if isNotFound(lastErr) {
 				return nil, cause
 			}
-			return nil, errors.Join(cause, fmt.Errorf("reconcile agent-sandbox claim %s/%s after ambiguous create: %w", b.cfg.AgentSandbox.Namespace, claimName, lastErr))
+			return nil, ambiguousClaimRecoveryUnknownError{err: errors.Join(
+				cause,
+				fmt.Errorf("reconcile agent-sandbox claim %s/%s after ambiguous create: %w", b.cfg.AgentSandbox.Namespace, claimName, lastErr),
+			)}
 		case <-ticker.C:
 		}
 	}
@@ -789,6 +802,7 @@ func (b *backend) rollbackCreatedClaim(
 	claimName string,
 	pending sandboxReadiness,
 	expiresAt string,
+	recoveryNonce string,
 	cause error,
 ) error {
 	cleanupCtx, cleanupCancel := b.cleanupContext(context.Background())
@@ -806,7 +820,7 @@ func (b *backend) rollbackCreatedClaim(
 		}
 		return cause
 	}
-	if _, persistErr := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimName, expiresAt); persistErr != nil {
+	if _, persistErr := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimName, expiresAt, recoveryNonce); persistErr != nil {
 		return errors.Join(
 			cause,
 			fmt.Errorf("failed to delete agent-sandbox claim %s/%s UID %s during rollback: %w", b.cfg.AgentSandbox.Namespace, claimName, pending.ClaimUID, cleanupErr),
@@ -821,11 +835,109 @@ func (b *backend) rollbackCreatedClaim(
 	)
 }
 
-func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient, claim LeaseClaim, leaseID, claimName string, forgetMissing bool) error {
-	identity, err := claimIdentityFromLocalClaim(claim)
-	if err != nil {
-		return err
+func (b *backend) persistAmbiguousClaimRecovery(
+	leaseID, slug string,
+	repo Repo,
+	reclaim bool,
+	claimName, expiresAt, recoveryNonce string,
+	cause error,
+) error {
+	pending := sandboxReadiness{ClaimName: claimName}
+	if _, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimName, expiresAt, recoveryNonce); err != nil {
+		return errors.Join(
+			cause,
+			fmt.Errorf("failed to persist recovery lease %s for ambiguous agent-sandbox claim %s/%s; manual cleanup may be required: %w",
+				leaseID, b.cfg.AgentSandbox.Namespace, claimName, err),
+		)
 	}
+	stopCommand := agentSandboxRecoveryCommand(b.cfg, "stop")
+	return errors.Join(
+		cause,
+		fmt.Errorf("ambiguous agent-sandbox claim %s/%s may exist; local lease %s retained for exact-identity recovery with %s %s",
+			b.cfg.AgentSandbox.Namespace, claimName, leaseID, stopCommand, shellQuote(leaseID)),
+	)
+}
+
+func (b *backend) recoverAmbiguousCreateFailure(
+	leaseID, slug string,
+	repo Repo,
+	reclaim bool,
+	claimName, expiresAt, recoveryNonce string,
+	cause error,
+) error {
+	var unresolved ambiguousClaimRecoveryUnknownError
+	if !errors.As(cause, &unresolved) {
+		return cause
+	}
+	return b.persistAmbiguousClaimRecovery(leaseID, slug, repo, reclaim, claimName, expiresAt, recoveryNonce, cause)
+}
+
+func (b *backend) claimIdentityForLiveClaim(claim LeaseClaim, live *kubernetesObject, persist bool) (LeaseClaim, claimIdentity, error) {
+	if uid := strings.TrimSpace(claim.Labels[claimLabelClaimUID]); uid != "" {
+		identity, err := claimIdentityFromLocalClaim(claim)
+		if err != nil {
+			return LeaseClaim{}, claimIdentity{}, err
+		}
+		if identity.ProviderScope == "" {
+			identity.ProviderScope = claimScope(b.cfg)
+		}
+		if err := validateClaimIdentity(live, identity); err != nil {
+			return LeaseClaim{}, claimIdentity{}, err
+		}
+		if err := validateClaimRecoveryNonce(live, strings.TrimSpace(claim.Labels[claimLabelRecoveryNonce])); err != nil {
+			return LeaseClaim{}, claimIdentity{}, err
+		}
+		return claim, identity, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(claim.Labels[claimLabelClaimUIDPending]), "true") {
+		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
+	}
+	recoveryNonce := strings.TrimSpace(claim.Labels[claimLabelRecoveryNonce])
+	if recoveryNonce == "" {
+		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox recovery lease %s has no pinned recovery nonce", claim.LeaseID)
+	}
+	expectedName := claimName(claim.LeaseID, claim.Slug)
+	if got := strings.TrimSpace(claimNameFromLocalClaim(claim)); got != expectedName {
+		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox recovery lease %s claim name changed from %s to %s", claim.LeaseID, expectedName, blank(got, "<empty>"))
+	}
+	if live == nil || strings.TrimSpace(live.Metadata.Name) != expectedName {
+		got := "<empty>"
+		if live != nil {
+			got = blank(strings.TrimSpace(live.Metadata.Name), "<empty>")
+		}
+		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox recovery lease %s expected claim %s, got %s", claim.LeaseID, expectedName, got)
+	}
+	uid := strings.TrimSpace(live.Metadata.UID)
+	if uid == "" {
+		return LeaseClaim{}, claimIdentity{}, exit(4, "agent-sandbox recovery claim %s has no Kubernetes UID", expectedName)
+	}
+	identity, err := claimIdentityFromLocalClaimWithUID(claim, uid)
+	if err != nil {
+		return LeaseClaim{}, claimIdentity{}, err
+	}
+	if identity.ProviderScope == "" {
+		identity.ProviderScope = claimScope(b.cfg)
+	}
+	if err := validateClaimIdentity(live, identity); err != nil {
+		return LeaseClaim{}, claimIdentity{}, fmt.Errorf("refuse ambiguous agent-sandbox claim recovery: %w", err)
+	}
+	if err := validateClaimRecoveryNonce(live, recoveryNonce); err != nil {
+		return LeaseClaim{}, claimIdentity{}, fmt.Errorf("refuse ambiguous agent-sandbox claim recovery: %w", err)
+	}
+	if !persist {
+		return claim, identity, nil
+	}
+	labels := cloneStringMap(claim.Labels)
+	labels[claimLabelClaimUID] = uid
+	labels[claimLabelClaimUIDPending] = "false"
+	updated, err := updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+	if err != nil {
+		return LeaseClaim{}, claimIdentity{}, fmt.Errorf("pin recovered agent-sandbox claim %s UID: %w", expectedName, err)
+	}
+	return updated, identity, nil
+}
+
+func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient, claim LeaseClaim, leaseID, claimName string, forgetMissing bool) error {
 	live, err := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 	if err != nil {
 		if isNotFound(err) {
@@ -839,15 +951,11 @@ func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient,
 		}
 		return err
 	}
-	providerScope := claim.ProviderScope
-	if providerScope == "" {
-		providerScope = claimScope(b.cfg)
-	}
-	identity.LeaseID = leaseID
-	identity.ProviderScope = providerScope
-	if err := validateClaimIdentity(live, identity); err != nil {
+	claim, identity, err := b.claimIdentityForLiveClaim(claim, live, true)
+	if err != nil {
 		return err
 	}
+	identity.LeaseID = leaseID
 	if err := client.Delete(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, identity.UID); err != nil && !isNotFound(err) {
 		return err
 	}
@@ -896,6 +1004,24 @@ func validateClaimIdentity(obj *kubernetesObject, identity claimIdentity) error 
 	}
 	if err := validateClaimOwnership(obj, identity.LeaseID, identity.ProviderScope); err != nil {
 		return resourceIdentityError{err: err}
+	}
+	return nil
+}
+
+func validateClaimRecoveryNonce(obj *kubernetesObject, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	got := ""
+	if obj != nil {
+		got = strings.TrimSpace(obj.Metadata.Annotations[annotationRecovery])
+	}
+	if got != expected {
+		name := "<missing>"
+		if obj != nil {
+			name = blank(strings.TrimSpace(obj.Metadata.Name), "<missing>")
+		}
+		return resourceIdentityError{err: exit(4, "agent-sandbox SandboxClaim %s recovery nonce changed", name)}
 	}
 	return nil
 }

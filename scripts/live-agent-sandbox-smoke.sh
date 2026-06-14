@@ -187,6 +187,7 @@ smoke_root="$(mktemp -d "${TMPDIR:-/tmp}/crabbox-agent-sandbox-smoke.XXXXXX")"
 smoke_repo="$smoke_root/repo"
 export XDG_STATE_HOME="$smoke_root/state"
 export CRABBOX_AGENT_SANDBOX_SMOKE_VALUE="forwarded-ok"
+export CRABBOX_SYNC_DELETE=true
 
 mkdir -p "$smoke_repo"
 cd "$smoke_repo"
@@ -254,6 +255,19 @@ if ! grep -q 'AGENT_SANDBOX_SMOKE_OK' <<<"$run_output"; then
 fi
 if [[ -z "$created_slug" ]]; then
   classify_and_exit diagnostic_only "run succeeded but created claim identifier was missing"
+fi
+
+"$bin" run "${provider_args[@]}" --id "$created_slug" --no-sync -- \
+  /bin/sh -lc 'printf stale > stale-remote.txt' >/dev/null
+printf 'v2\n' >proof.txt
+git add proof.txt
+git commit -qm "test: update Agent Sandbox smoke fixture"
+if ! replace_output="$("$bin" run "${provider_args[@]}" --id "$created_slug" --allow-env CRABBOX_AGENT_SANDBOX_SMOKE_VALUE -- \
+  /bin/sh -lc 'test "$(cat proof.txt)" = v2 && test "$CRABBOX_AGENT_SANDBOX_SMOKE_VALUE" = forwarded-ok && test ! -e stale-remote.txt && printf AGENT_SANDBOX_REPLACE_OK' 2>&1)"; then
+  classify_and_exit diagnostic_only "$replace_output"
+fi
+if ! grep -q 'AGENT_SANDBOX_REPLACE_OK' <<<"$replace_output"; then
+  classify_and_exit diagnostic_only "retained run succeeded but replacement-sync marker was missing"
 fi
 
 "$bin" status "${provider_args[@]}" --id "$created_slug" --wait --wait-timeout "${CRABBOX_AGENT_SANDBOX_SMOKE_WAIT_TIMEOUT:-90s}" >/dev/null
