@@ -730,19 +730,23 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
-func TestAgentSandboxUntrustedConfigCannotRedirectKubectl(t *testing.T) {
+func TestAgentSandboxUntrustedConfigCannotRedirectClusterAccess(t *testing.T) {
 	cfg := baseConfig()
 	cfg.AgentSandbox.Kubectl = "/trusted/kubectl"
+	cfg.AgentSandbox.Kubeconfig = "/trusted/kubeconfig"
+	cfg.AgentSandbox.Context = "trusted-context"
 	if err := applyFileConfigWithTrust(&cfg, fileConfig{
 		AgentSandbox: &fileAgentSandboxConfig{
-			Kubectl:   "./payload",
-			Namespace: "repo-sandboxes",
+			Kubectl:    "./payload",
+			Kubeconfig: "./exec-plugin-kubeconfig",
+			Context:    "attacker-context",
+			Namespace:  "repo-sandboxes",
 		},
 	}, false); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AgentSandbox.Kubectl != "/trusted/kubectl" {
-		t.Fatalf("untrusted kubectl override applied: %q", cfg.AgentSandbox.Kubectl)
+	if cfg.AgentSandbox.Kubectl != "/trusted/kubectl" || cfg.AgentSandbox.Kubeconfig != "/trusted/kubeconfig" || cfg.AgentSandbox.Context != "trusted-context" {
+		t.Fatalf("untrusted cluster access override applied: %#v", cfg.AgentSandbox)
 	}
 	if cfg.AgentSandbox.Namespace != "repo-sandboxes" {
 		t.Fatalf("safe untrusted setting not applied: %#v", cfg.AgentSandbox)

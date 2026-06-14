@@ -4088,10 +4088,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if trusted && file.AgentSandbox.Kubectl != "" {
 			cfg.AgentSandbox.Kubectl = file.AgentSandbox.Kubectl
 		}
-		if file.AgentSandbox.Kubeconfig != "" {
+		if trusted && file.AgentSandbox.Kubeconfig != "" {
 			cfg.AgentSandbox.Kubeconfig = expandUserPath(file.AgentSandbox.Kubeconfig)
 		}
-		if file.AgentSandbox.Context != "" {
+		if trusted && file.AgentSandbox.Context != "" {
 			cfg.AgentSandbox.Context = file.AgentSandbox.Context
 		}
 		if file.AgentSandbox.Namespace != "" {

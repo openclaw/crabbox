@@ -55,6 +55,14 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
+	unlockOperation, err := lockAgentSandboxLeaseOperation(ctx, leaseID)
+	if err != nil {
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		defer cancel()
+		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+		return err
+	}
+	defer unlockOperation()
 	if err := writeClaimLease(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, claimName); err != nil {
 		cleanupCtx, cancel := b.cleanupContext(ctx)
 		defer cancel()
@@ -88,9 +96,22 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	claim := LeaseClaim{}
 	acquired := false
 	shouldStop := false
+	var unlockOperation func()
+	defer func() {
+		if unlockOperation != nil {
+			unlockOperation()
+		}
+	}()
 	if req.ID == "" {
 		leaseID, claimName, slug, ready, err = b.createClaim(ctx, client, req.RequestedSlug)
 		if err != nil {
+			return RunResult{}, err
+		}
+		unlockOperation, err = lockAgentSandboxLeaseOperation(ctx, leaseID)
+		if err != nil {
+			cleanupCtx, cancel := b.cleanupContext(ctx)
+			defer cancel()
+			_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 			return RunResult{}, err
 		}
 		if err := writeClaimLease(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, claimName); err != nil {
@@ -104,6 +125,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		acquired = true
 	} else {
 		claim, err = resolveLocalClaim(req.ID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		unlockOperation, err = lockAgentSandboxLeaseOperation(ctx, claim.LeaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		claim, err = resolveLocalClaim(claim.LeaseID)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -172,12 +201,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if !req.NoSync {
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, ready, req, workdir)
 		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+			handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
 			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.execShell(ctx, client, ready, "mkdir -p "+shellQuote(workdir)); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
 		return RunResult{}, err
 	}
 	if req.SyncOnly {
@@ -204,10 +233,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	fmt.Fprintf(b.rt.Stderr, "agent-sandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	var commandErr error
 	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
 		commandErr = runErr
 	} else if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
 		commandErr = exit(exitCode, "agent-sandbox run exited %d", exitCode)
 	}
 	if !shouldStop && commandErr == nil {
@@ -351,6 +380,15 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	unlockOperation, err := lockAgentSandboxLeaseOperation(ctx, claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	defer unlockOperation()
+	claim, err = resolveLocalClaim(claim.LeaseID)
+	if err != nil {
+		return err
+	}
 	if err := authorizeClaimScope(b.cfg, claim); err != nil {
 		return err
 	}
@@ -373,46 +411,74 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	}
 	now := b.now().UTC()
 	checked, removed, claimsRemoved := 0, 0, 0
-	for _, claim := range claims {
-		if claim.Provider != providerName || claim.ProviderScope != claimScope(b.cfg) {
+	for _, listedClaim := range claims {
+		if listedClaim.Provider != providerName || listedClaim.ProviderScope != claimScope(b.cfg) {
 			continue
 		}
-		checked++
-		claimName := claimNameFromLocalClaim(claim)
-		_, getErr := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
-		if getErr != nil {
-			if !isNotFound(getErr) {
-				return getErr
-			}
-			if !b.cfg.AgentSandbox.ForgetMissing {
-				fmt.Fprintf(b.rt.Stderr, "skip claim=%s lease=%s reason=missing-or-inaccessible; set agentSandbox forgetMissing to remove the local claim\n", claimName, claim.LeaseID)
-				continue
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, blank(claim.Slug, "-"))
-				continue
-			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		var checkedOne, removedOne, claimRemovedOne bool
+		err := func() error {
+			unlockOperation, err := lockAgentSandboxLeaseOperation(ctx, listedClaim.LeaseID)
+			if err != nil {
 				return err
 			}
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, blank(claim.Slug, "-"))
-			claimsRemoved++
-			continue
-		}
-		due, reason := claimCleanupDue(claim, now)
-		if !due {
-			fmt.Fprintf(b.rt.Stderr, "skip claim=%s lease=%s reason=%s\n", claimName, claim.LeaseID, reason)
-			continue
-		}
-		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would delete claim=%s lease=%s reason=%s\n", claimName, claim.LeaseID, reason)
-			continue
-		}
-		if err := b.deleteOwnedClaim(ctx, client, claim, claim.LeaseID, claimName, false); err != nil {
+			defer unlockOperation()
+			claim, err := readLeaseClaim(listedClaim.LeaseID)
+			if err != nil {
+				return err
+			}
+			if claim.LeaseID == "" || claim.Provider != providerName || claim.ProviderScope != claimScope(b.cfg) {
+				return nil
+			}
+			checkedOne = true
+			claimName := claimNameFromLocalClaim(claim)
+			_, getErr := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+			if getErr != nil {
+				if !isNotFound(getErr) {
+					return getErr
+				}
+				if !b.cfg.AgentSandbox.ForgetMissing {
+					fmt.Fprintf(b.rt.Stderr, "skip claim=%s lease=%s reason=missing-or-inaccessible; set agentSandbox forgetMissing to remove the local claim\n", claimName, claim.LeaseID)
+					return nil
+				}
+				if req.DryRun {
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, blank(claim.Slug, "-"))
+					return nil
+				}
+				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+					return err
+				}
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, blank(claim.Slug, "-"))
+				claimRemovedOne = true
+				return nil
+			}
+			due, reason := claimCleanupDue(claim, now)
+			if !due {
+				fmt.Fprintf(b.rt.Stderr, "skip claim=%s lease=%s reason=%s\n", claimName, claim.LeaseID, reason)
+				return nil
+			}
+			if req.DryRun {
+				fmt.Fprintf(b.rt.Stdout, "would delete claim=%s lease=%s reason=%s\n", claimName, claim.LeaseID, reason)
+				return nil
+			}
+			if err := b.deleteOwnedClaim(ctx, client, claim, claim.LeaseID, claimName, false); err != nil {
+				return err
+			}
+			fmt.Fprintf(b.rt.Stdout, "delete claim=%s lease=%s reason=%s\n", claimName, claim.LeaseID, reason)
+			removedOne = true
+			return nil
+		}()
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(b.rt.Stdout, "delete claim=%s lease=%s reason=%s\n", claimName, claim.LeaseID, reason)
-		removed++
+		if checkedOne {
+			checked++
+		}
+		if removedOne {
+			removed++
+		}
+		if claimRemovedOne {
+			claimsRemoved++
+		}
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
@@ -553,10 +619,10 @@ func (b *backend) doctorChecks(ctx context.Context, client kubernetesClient) ([]
 
 func doctorRBACRules(namespace string) []rbacRule {
 	return []rbacRule{
-		{Group: "extensions.agents.x-k8s.io", Resource: sandboxClaimResource, Namespace: namespace, Verbs: []string{"get", "list", "watch", "create", "delete"}},
+		{Group: "extensions.agents.x-k8s.io", Resource: sandboxClaimResource, Namespace: namespace, Verbs: []string{"get", "create", "delete"}},
 		{Group: "extensions.agents.x-k8s.io", Resource: warmPoolResource, Namespace: namespace, Verbs: []string{"get"}},
-		{Group: "agents.x-k8s.io", Resource: sandboxResource, Namespace: namespace, Verbs: []string{"get", "list", "watch"}},
-		{Group: "", Resource: podResource, Namespace: namespace, Verbs: []string{"get", "list", "watch"}},
+		{Group: "agents.x-k8s.io", Resource: sandboxResource, Namespace: namespace, Verbs: []string{"get"}},
+		{Group: "", Resource: podResource, Namespace: namespace, Verbs: []string{"get", "list"}},
 		{Group: "", Resource: podResource, Subresource: "exec", Namespace: namespace, Verbs: []string{"create"}},
 	}
 }

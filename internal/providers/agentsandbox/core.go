@@ -3,8 +3,10 @@ package agentsandbox
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -94,8 +96,50 @@ func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
+func handleDelegatedRunFailure(w io.Writer, cfg Config, req RunRequest, leaseID, slug string, acquired bool, shouldStop *bool) {
+	if !req.KeepOnFailure {
+		return
+	}
+	if acquired && !req.Keep && shouldStop != nil {
+		*shouldStop = false
+	}
+	id := slug
+	if id == "" {
+		id = leaseID
+	}
+	fmt.Fprintf(w, "keep-on-failure: kept lease=%s slug=%s expires=idle/ttl idle_timeout=%s ttl=%s\n", leaseID, blank(slug, "-"), cfg.IdleTimeout, cfg.TTL)
+	fmt.Fprintf(w, "rerun: %s --id %s -- <command>\n", agentSandboxRecoveryCommand(cfg, "run"), shellQuote(id))
+	fmt.Fprintf(w, "stop: %s %s\n", agentSandboxRecoveryCommand(cfg, "stop"), shellQuote(id))
+}
+
+func agentSandboxRecoveryCommand(cfg Config, command string) string {
+	args := []string{
+		"crabbox", command,
+		"--provider", providerName,
+		"--agent-sandbox-kubectl", cfg.AgentSandbox.Kubectl,
+	}
+	if cfg.AgentSandbox.Kubeconfig != "" {
+		args = append(args, "--agent-sandbox-kubeconfig", cfg.AgentSandbox.Kubeconfig)
+	}
+	args = append(args,
+		"--agent-sandbox-context", cfg.AgentSandbox.Context,
+		"--agent-sandbox-namespace", cfg.AgentSandbox.Namespace,
+		"--agent-sandbox-warm-pool", cfg.AgentSandbox.WarmPool,
+	)
+	if cfg.AgentSandbox.Container != "" {
+		args = append(args, "--agent-sandbox-container", cfg.AgentSandbox.Container)
+	}
+	args = append(args, "--agent-sandbox-workdir", cfg.AgentSandbox.Workdir)
+	words := make([]string, 0, len(args)+1)
+	if cfg.AgentSandbox.Kubeconfig == "" {
+		if kubeconfig := strings.TrimSpace(os.Getenv("KUBECONFIG")); kubeconfig != "" {
+			words = append(words, "KUBECONFIG="+shellQuote(kubeconfig))
+		}
+	}
+	for _, arg := range args {
+		words = append(words, shellQuote(arg))
+	}
+	return strings.Join(words, " ")
 }
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {

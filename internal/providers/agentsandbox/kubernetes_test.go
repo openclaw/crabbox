@@ -15,17 +15,19 @@ import (
 )
 
 type fakeKubernetesClient struct {
-	resources  map[string]map[string]bool
-	objects    map[string]*kubernetesObject
-	rbac       map[string]bool
-	pods       map[string][]podState
-	gets       []string
-	execs      []podExecRequest
-	execInput  [][]byte
-	execErrs   []error
-	deleteErrs []error
-	creates    int
-	deletes    int
+	resources   map[string]map[string]bool
+	objects     map[string]*kubernetesObject
+	rbac        map[string]bool
+	pods        map[string][]podState
+	gets        []string
+	execs       []podExecRequest
+	execInput   [][]byte
+	execErrs    []error
+	execStarted chan struct{}
+	execRelease chan struct{}
+	deleteErrs  []error
+	creates     int
+	deletes     int
 }
 
 type recordingCommandRunner struct {
@@ -157,6 +159,15 @@ func (f *fakeKubernetesClient) Exec(_ context.Context, req podExecRequest) error
 		err := f.execErrs[0]
 		f.execErrs = f.execErrs[1:]
 		return err
+	}
+	if len(req.Command) >= 2 && req.Command[0] == "sh" && req.Command[1] == "-s" && f.execStarted != nil {
+		select {
+		case f.execStarted <- struct{}{}:
+		default:
+		}
+		if f.execRelease != nil {
+			<-f.execRelease
+		}
 	}
 	return nil
 }
@@ -380,6 +391,24 @@ func TestDoctorRBACRulesSplitPodExecSubresource(t *testing.T) {
 		if rule.Resource == "pods/exec" {
 			t.Fatalf("pods/exec must be represented as resource pods plus subresource exec: %#v", rule)
 		}
+	}
+}
+
+func TestDoctorRBACRulesMatchRuntimeOperations(t *testing.T) {
+	rules := doctorRBACRules("sandboxes")
+	got := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		got = append(got, rule.String())
+	}
+	want := []string{
+		"get,create,delete extensions.agents.x-k8s.io/sandboxclaims namespace=sandboxes",
+		"get extensions.agents.x-k8s.io/sandboxwarmpools namespace=sandboxes",
+		"get agents.x-k8s.io/sandboxes namespace=sandboxes",
+		"get,list core/pods namespace=sandboxes",
+		"create core/pods/exec namespace=sandboxes",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("rules:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

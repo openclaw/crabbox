@@ -139,6 +139,46 @@ func TestRunMapsRemoteExitStatus(t *testing.T) {
 	}
 }
 
+func TestRunKeepOnFailureHintsPreserveProviderRoute(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	cfg.AgentSandbox.Kubectl = "/opt/bin/kubectl"
+	cfg.AgentSandbox.Kubeconfig = "/tmp/cluster config"
+	cfg.AgentSandbox.Context = "agent context"
+	cfg.AgentSandbox.Namespace = "sandbox-ns"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	cfg.AgentSandbox.Container = "worker"
+	cfg.AgentSandbox.Workdir = "/workspace/my app"
+	fake := readyFakeClient(cfg)
+	fake.execErrs = []error{nil, testExitError{code: 42}}
+	backend := testBackend(cfg, fake, nil, nil)
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:          testGitRepo(t),
+		KeepOnFailure: true,
+		NoSync:        true,
+		Command:       []string{"false"},
+	})
+	if err == nil || result.ExitCode != 42 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	output := backend.rt.Stderr.(*bytes.Buffer).String()
+	for _, want := range []string{
+		"rerun:",
+		"stop:",
+		"'--agent-sandbox-kubectl' '/opt/bin/kubectl'",
+		"'--agent-sandbox-kubeconfig' '/tmp/cluster config'",
+		"'--agent-sandbox-context' 'agent context'",
+		"'--agent-sandbox-namespace' 'sandbox-ns'",
+		"'--agent-sandbox-warm-pool' 'linux-pool'",
+		"'--agent-sandbox-container' 'worker'",
+		"'--agent-sandbox-workdir' '/workspace/my app'",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunFailsWhenDefaultOneShotCleanupFails(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)
@@ -277,6 +317,14 @@ type testExitError struct {
 	code int
 }
 
+type fixedClock struct {
+	now time.Time
+}
+
+func (c fixedClock) Now() time.Time {
+	return c.now
+}
+
 func (e testExitError) Error() string {
 	return "remote exited"
 }
@@ -344,6 +392,120 @@ func TestRunExistingLeaseForgetMissingStillFailsRun(t *testing.T) {
 	}
 	if len(fake.execs) != 0 {
 		t.Fatalf("command executed despite missing claim: %#v", fake.execs)
+	}
+}
+
+func TestStopSerializesWithActiveLeaseRun(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "active")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	fake.execStarted = make(chan struct{}, 1)
+	fake.execRelease = make(chan struct{})
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := backend.Run(context.Background(), RunRequest{
+			ID: claim.LeaseID, Repo: repo, Keep: true, NoSync: true, Command: []string{"true"},
+		})
+		runDone <- err
+	}()
+	select {
+	case <-fake.execStarted:
+	case <-time.After(time.Second):
+		t.Fatal("run did not reach user command")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- backend.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	}()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("stop completed while run held operation lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(fake.execRelease)
+	if err := <-runDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+	if fake.deletes != 1 {
+		t.Fatalf("deletes=%d want=1", fake.deletes)
+	}
+}
+
+func TestCleanupSerializesWithLeaseReuse(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	backend.rt.Clock = fixedClock{now: time.Now().Add(2 * time.Hour)}
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "idle"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "idle")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	unlock, err := lockAgentSandboxLeaseOperation(context.Background(), claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupDone := make(chan error, 1)
+	go func() {
+		cleanupDone <- backend.Cleanup(context.Background(), CleanupRequest{})
+	}()
+	select {
+	case err := <-cleanupDone:
+		unlock()
+		t.Fatalf("cleanup completed while lease lock was held: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	if err := <-cleanupDone; err != nil {
+		t.Fatal(err)
+	}
+	if fake.deletes != 1 {
+		t.Fatalf("deletes=%d want=1", fake.deletes)
+	}
+}
+
+func TestAgentSandboxOperationLockHonorsContextCancellation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	unlock, err := lockAgentSandboxLeaseOperation(context.Background(), leasePrefix+"lock-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := lockAgentSandboxLeaseOperation(ctx, leasePrefix+"lock-test"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("cancellation took %s", elapsed)
 	}
 }
 

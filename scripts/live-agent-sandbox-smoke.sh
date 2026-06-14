@@ -125,6 +125,21 @@ first_config_value() {
   printf '%s' "$fallback"
 }
 
+trusted_config_value() {
+  local env_name="$1"
+  local yaml_path="$2"
+  local value="${!env_name:-}"
+  if [[ -n "$value" ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  if [[ -n "${CRABBOX_CONFIG:-}" ]] && value="$(config_value "$yaml_path")"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  return 1
+}
+
 if [[ "${CRABBOX_LIVE:-}" != "1" ]]; then
   classify_and_exit environment_blocked "reason=CRABBOX_LIVE_not_enabled missing=CRABBOX_LIVE=1"
 fi
@@ -133,12 +148,9 @@ if [[ "$providers" != *",agent-sandbox,"* ]]; then
   classify_and_exit environment_blocked "reason=provider_not_selected missing=CRABBOX_LIVE_PROVIDERS=agent-sandbox"
 fi
 
-kubectl="${CRABBOX_AGENT_SANDBOX_KUBECTL:-}"
-if [[ -z "$kubectl" && -n "${CRABBOX_CONFIG:-}" ]]; then
-  kubectl="$(config_value agentSandbox.kubectl || true)"
-fi
-kubeconfig="$(first_config_value CRABBOX_AGENT_SANDBOX_KUBECONFIG agentSandbox.kubeconfig)"
-context="$(first_config_value CRABBOX_AGENT_SANDBOX_CONTEXT agentSandbox.context)"
+kubectl="$(trusted_config_value CRABBOX_AGENT_SANDBOX_KUBECTL agentSandbox.kubectl || true)"
+kubeconfig="$(trusted_config_value CRABBOX_AGENT_SANDBOX_KUBECONFIG agentSandbox.kubeconfig || true)"
+context="$(trusted_config_value CRABBOX_AGENT_SANDBOX_CONTEXT agentSandbox.context || true)"
 namespace="$(first_config_value CRABBOX_AGENT_SANDBOX_NAMESPACE agentSandbox.namespace default)"
 warm_pool="$(first_config_value CRABBOX_AGENT_SANDBOX_WARM_POOL agentSandbox.warmPool)"
 container="$(first_config_value CRABBOX_AGENT_SANDBOX_CONTAINER agentSandbox.container)"

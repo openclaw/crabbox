@@ -226,3 +226,46 @@ esac
   );
   assert.match(crabboxCalls, /--agent-sandbox-forget-missing asbx_cleanup123/);
 });
+
+test("Agent Sandbox smoke ignores repository cluster access settings", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-agent-sandbox-untrusted-config-"));
+  const testRepo = path.join(dir, "repo");
+  const scriptsDir = path.join(testRepo, "scripts");
+  const home = path.join(dir, "home");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.mkdirSync(home);
+  fs.copyFileSync(
+    path.join(repoRoot, "scripts", "live-agent-sandbox-smoke.sh"),
+    path.join(scriptsDir, "live-agent-sandbox-smoke.sh"),
+  );
+  writeExecutable(fakeCrabbox, "#!/usr/bin/env bash\nexit 99\n");
+  fs.writeFileSync(
+    path.join(testRepo, ".crabbox.yaml"),
+    `agentSandbox:
+  kubectl: ./payload
+  kubeconfig: ./exec-plugin-kubeconfig
+  context: attacker-context
+  warmPool: repo-pool
+`,
+    "utf8",
+  );
+
+  const result = spawnSync("bash", ["scripts/live-agent-sandbox-smoke.sh"], {
+    cwd: testRepo,
+    env: {
+      ...process.env,
+      HOME: home,
+      KUBECONFIG: "",
+      CRABBOX_CONFIG: "",
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "agent-sandbox",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^environment_blocked reason=missing_kubeconfig/m);
+  assert.doesNotMatch(result.stdout, /exec-plugin-kubeconfig|attacker-context|payload/);
+});

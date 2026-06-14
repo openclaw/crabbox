@@ -43,10 +43,10 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
   - `extensions.agents.x-k8s.io/v1beta1` `sandboxwarmpools`
 - A `SandboxWarmPool` in the configured namespace.
 - RBAC allowing:
-  - `get`, `list`, `watch`, `create`, and `delete` on `sandboxclaims`
+  - `get`, `create`, and `delete` on `sandboxclaims`
   - `get` on `sandboxwarmpools`
-  - `get`, `list`, and `watch` on `sandboxes`
-  - `get`, `list`, and `watch` on pods
+  - `get` on `sandboxes`
+  - `get` and `list` on pods
   - `create` on `pods/exec`
 - A sandbox image that provides `/bin/sh`, `bash`, `tar`, and a writable
   workdir. Crabbox uses `/bin/sh` for transport scripts and `bash -lc` for
@@ -107,11 +107,12 @@ agentSandbox:
   forgetMissing: false
 ```
 
-Repository-local `.crabbox.yaml` and `crabbox.yaml` files cannot override the
-`kubectl` executable. Set a custom executable in the trusted user config, with
-`CRABBOX_AGENT_SANDBOX_KUBECTL`, or with `--agent-sandbox-kubectl`. The value
-must be a bare executable name resolved through `PATH` or an absolute path;
-checkout-relative paths are rejected.
+Repository-local `.crabbox.yaml` and `crabbox.yaml` files cannot override
+`kubectl`, `kubeconfig`, or `context`. Kubeconfig files may invoke credential
+plugins, so cluster access settings are accepted only from trusted user config,
+environment variables, or explicit flags. The `kubectl` value must be a bare
+executable name resolved through `PATH` or an absolute path; checkout-relative
+paths are rejected.
 
 Provider flags:
 
@@ -174,6 +175,10 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 6. On release, Crabbox deletes only the owned `SandboxClaim` whose labels and
    provider-scope annotation match the local claim. The Agent Sandbox
    controller owns the resulting sandbox and pod teardown.
+
+Retained-claim `run`, `stop`, and `cleanup` operations share a per-lease
+cross-process lock. A concurrent stop or cleanup waits for the active command
+to finish, then re-resolves the local claim before mutating Kubernetes.
 
 ## Claim Scope And Cleanup Safety
 
