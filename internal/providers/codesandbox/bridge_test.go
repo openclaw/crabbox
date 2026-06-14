@@ -140,6 +140,17 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 	if !strings.Contains(codeSandboxBridgeScript, "const { client } = await connectSandbox(sdk, req.sandboxId);\n      await writeFile(client);") {
 		t.Fatalf("bridge script must write files through the connected CodeSandbox client")
 	}
+	if strings.Contains(codeSandboxBridgeScript, "commands.run(command[0]") {
+		t.Fatalf("bridge script must use the documented commands.run(command string) SDK signature")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "result = await commands.run(commandLine);") {
+		t.Fatalf("bridge script must pass one command string to CodeSandbox commands.run")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "options.id = req.templateId") ||
+		!strings.Contains(codeSandboxBridgeScript, "options.hibernationTimeoutSeconds") ||
+		!strings.Contains(codeSandboxBridgeScript, "options.automaticWakeupConfig") {
+		t.Fatalf("bridge script must use documented CodeSandbox create option names")
+	}
 }
 
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {

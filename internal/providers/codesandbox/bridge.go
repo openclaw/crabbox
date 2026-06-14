@@ -211,35 +211,47 @@ async function createSandbox(sdk) {
   const options = {};
   if (req.title) options.title = req.title;
   if (Array.isArray(req.tags) && req.tags.length) options.tags = req.tags;
-  if (req.templateId) options.template = req.templateId;
-  if (req.templateId) options.templateId = req.templateId;
+  if (req.templateId) options.id = req.templateId;
   if (req.privacy) options.privacy = req.privacy;
   if (req.vmTier) options.vmTier = req.vmTier;
-  if (req.hibernationTimeoutSecs) options.hibernateAfterSeconds = Number(req.hibernationTimeoutSecs);
-  options.automaticWakeup = {
+  if (req.hibernationTimeoutSecs) options.hibernationTimeoutSeconds = Number(req.hibernationTimeoutSecs);
+  options.automaticWakeupConfig = {
     http: !!req.automaticWakeupHttp,
     websocket: !!req.automaticWakeupWebSocket
   };
   return await callAny(sandboxes, ["create", "createSandbox"], options);
+}
+function shellQuote(value) {
+  const text = String(value ?? "");
+  if (text === "") return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(text)) return text;
+  return "'" + text.replace(/'/g, "'\\''") + "'";
+}
+function commandLineFromRequest(command, cwd, env) {
+  const assignments = Object.entries(env || {})
+    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+    .map(([key, value]) => key + "=" + shellQuote(value));
+  const parts = ["cd", shellQuote(cwd), "&&"];
+  if (assignments.length) {
+    parts.push("env", ...assignments);
+  }
+  parts.push(...command.map(shellQuote));
+  return parts.join(" ");
 }
 async function runCommand(sandbox) {
   const command = Array.isArray(req.command) ? req.command.map((v) => String(v ?? "")) : [];
   if (!command.length || command[0] === "") throw new Error("missing command");
   const cwd = req.cwd || "/project/workspace";
   const env = req.env || {};
-  const timeout = Number(req.timeout || 0) || undefined;
   const commands = sandbox.commands || sandbox.command || sandbox;
+  const commandLine = commandLineFromRequest(command, cwd, env);
   let result;
   if (commands && typeof commands.run === "function") {
-    result = await commands.run(command[0], command.slice(1), { cwd, env, timeout });
+    result = await commands.run(commandLine);
   } else {
     result = await callAny(commands, ["exec", "runCommand"], {
-      command: command[0],
-      cmd: command[0],
-      args: command.slice(1),
-      cwd,
-      env,
-      timeout
+      command: commandLine,
+      cmd: commandLine
     });
   }
   return {
