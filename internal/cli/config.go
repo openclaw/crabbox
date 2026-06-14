@@ -1078,32 +1078,35 @@ type ProofTemplateConfig struct {
 }
 
 type JobConfig struct {
-	Provider       string
-	Target         string
-	WindowsMode    string
-	Profile        string
-	Class          string
-	Architecture   string
-	ServerType     string
-	Market         string
-	TTL            time.Duration
-	IdleTimeout    time.Duration
-	Desktop        *bool
-	DesktopEnv     string
-	Browser        *bool
-	Code           *bool
-	Network        string
-	Hydrate        JobHydrateConfig
-	Actions        JobActionsConfig
-	Shell          bool
-	Command        string
-	NoSync         bool
-	SyncOnly       bool
-	Checksum       *bool
-	ForceSyncLarge bool
-	JUnit          []string
-	Downloads      []string
-	Stop           string
+	Provider          string
+	Target            string
+	WindowsMode       string
+	Profile           string
+	Class             string
+	Architecture      string
+	ServerType        string
+	Market            string
+	TTL               time.Duration
+	IdleTimeout       time.Duration
+	Desktop           *bool
+	DesktopEnv        string
+	Browser           *bool
+	Code              *bool
+	Network           string
+	Hydrate           JobHydrateConfig
+	Actions           JobActionsConfig
+	Shell             bool
+	Command           string
+	NoSync            bool
+	SyncOnly          bool
+	Checksum          *bool
+	ForceSyncLarge    bool
+	JUnit             []string
+	Label             string
+	ArtifactGlobs     []string
+	RequiredArtifacts []string
+	Downloads         []string
+	Stop              string
 }
 
 type JobHydrateConfig struct {
@@ -3219,35 +3222,38 @@ type fileLeaseConfig struct {
 }
 
 type fileJobConfig struct {
-	Provider       string                `yaml:"provider,omitempty"`
-	Target         string                `yaml:"target,omitempty"`
-	TargetOS       string                `yaml:"targetOS,omitempty"`
-	Windows        *fileWindowsConfig    `yaml:"windows,omitempty"`
-	Profile        string                `yaml:"profile,omitempty"`
-	Class          string                `yaml:"class,omitempty"`
-	Architecture   string                `yaml:"architecture,omitempty"`
-	ServerType     string                `yaml:"serverType,omitempty"`
-	Type           string                `yaml:"type,omitempty"`
-	Capacity       *fileCapacityConfig   `yaml:"capacity,omitempty"`
-	Market         string                `yaml:"market,omitempty"`
-	TTL            string                `yaml:"ttl,omitempty"`
-	IdleTimeout    string                `yaml:"idleTimeout,omitempty"`
-	Desktop        *bool                 `yaml:"desktop,omitempty"`
-	DesktopEnv     string                `yaml:"desktopEnv,omitempty"`
-	Browser        *bool                 `yaml:"browser,omitempty"`
-	Code           *bool                 `yaml:"code,omitempty"`
-	Network        string                `yaml:"network,omitempty"`
-	Hydrate        *fileJobHydrateConfig `yaml:"hydrate,omitempty"`
-	Actions        *fileJobActionsConfig `yaml:"actions,omitempty"`
-	Shell          *bool                 `yaml:"shell,omitempty"`
-	Command        string                `yaml:"command,omitempty"`
-	NoSync         *bool                 `yaml:"noSync,omitempty"`
-	SyncOnly       *bool                 `yaml:"syncOnly,omitempty"`
-	Checksum       *bool                 `yaml:"checksum,omitempty"`
-	ForceSyncLarge *bool                 `yaml:"forceSyncLarge,omitempty"`
-	JUnit          []string              `yaml:"junit,omitempty"`
-	Downloads      []string              `yaml:"downloads,omitempty"`
-	Stop           string                `yaml:"stop,omitempty"`
+	Provider          string                `yaml:"provider,omitempty"`
+	Target            string                `yaml:"target,omitempty"`
+	TargetOS          string                `yaml:"targetOS,omitempty"`
+	Windows           *fileWindowsConfig    `yaml:"windows,omitempty"`
+	Profile           string                `yaml:"profile,omitempty"`
+	Class             string                `yaml:"class,omitempty"`
+	Architecture      string                `yaml:"architecture,omitempty"`
+	ServerType        string                `yaml:"serverType,omitempty"`
+	Type              string                `yaml:"type,omitempty"`
+	Capacity          *fileCapacityConfig   `yaml:"capacity,omitempty"`
+	Market            string                `yaml:"market,omitempty"`
+	TTL               string                `yaml:"ttl,omitempty"`
+	IdleTimeout       string                `yaml:"idleTimeout,omitempty"`
+	Desktop           *bool                 `yaml:"desktop,omitempty"`
+	DesktopEnv        string                `yaml:"desktopEnv,omitempty"`
+	Browser           *bool                 `yaml:"browser,omitempty"`
+	Code              *bool                 `yaml:"code,omitempty"`
+	Network           string                `yaml:"network,omitempty"`
+	Hydrate           *fileJobHydrateConfig `yaml:"hydrate,omitempty"`
+	Actions           *fileJobActionsConfig `yaml:"actions,omitempty"`
+	Shell             *bool                 `yaml:"shell,omitempty"`
+	Command           string                `yaml:"command,omitempty"`
+	NoSync            *bool                 `yaml:"noSync,omitempty"`
+	SyncOnly          *bool                 `yaml:"syncOnly,omitempty"`
+	Checksum          *bool                 `yaml:"checksum,omitempty"`
+	ForceSyncLarge    *bool                 `yaml:"forceSyncLarge,omitempty"`
+	JUnit             []string              `yaml:"junit,omitempty"`
+	Label             string                `yaml:"label,omitempty"`
+	ArtifactGlobs     []string              `yaml:"artifactGlobs,omitempty"`
+	RequiredArtifacts []string              `yaml:"requiredArtifacts,omitempty"`
+	Downloads         []string              `yaml:"downloads,omitempty"`
+	Stop              string                `yaml:"stop,omitempty"`
 }
 
 type fileJobHydrateConfig struct {
@@ -5335,6 +5341,15 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 	}
 	if len(file.JUnit) > 0 {
 		job.JUnit = appendUniqueStrings(nil, file.JUnit...)
+	}
+	if file.Label != "" {
+		job.Label = file.Label
+	}
+	if len(file.ArtifactGlobs) > 0 {
+		job.ArtifactGlobs = appendUniqueStrings(nil, file.ArtifactGlobs...)
+	}
+	if len(file.RequiredArtifacts) > 0 {
+		job.RequiredArtifacts = appendUniqueStrings(nil, file.RequiredArtifacts...)
 	}
 	if len(file.Downloads) > 0 {
 		job.Downloads = appendUniqueStrings(nil, file.Downloads...)

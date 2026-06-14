@@ -295,6 +295,15 @@ func jobRunArgs(cfg Config, job JobConfig, leaseID string, noHydrate bool) []str
 	if len(job.JUnit) > 0 {
 		args = append(args, "--junit", strings.Join(job.JUnit, ","))
 	}
+	if strings.TrimSpace(job.Label) != "" {
+		args = append(args, "--label", strings.TrimSpace(job.Label))
+	}
+	for _, glob := range job.ArtifactGlobs {
+		args = append(args, "--artifact-glob", glob)
+	}
+	for _, glob := range job.RequiredArtifacts {
+		args = append(args, "--require-artifact", glob)
+	}
 	for _, download := range job.Downloads {
 		args = append(args, "--download", download)
 	}

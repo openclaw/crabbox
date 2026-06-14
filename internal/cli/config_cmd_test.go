@@ -359,7 +359,7 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", configPath)
-	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke:\n    architecture: arm64\n    hydrate:\n      actions: true\n      githubRunner: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke:\n    architecture: arm64\n    label: nightly smoke\n    artifactGlobs:\n      - reports/**\n    requiredArtifacts:\n      - reports/summary.json\n    hydrate:\n      actions: true\n      githubRunner: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -370,8 +370,11 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	}
 	var got struct {
 		Jobs map[string]struct {
-			Architecture string `json:"architecture"`
-			Hydrate      struct {
+			Architecture      string   `json:"architecture"`
+			Label             string   `json:"label"`
+			ArtifactGlobs     []string `json:"artifactGlobs"`
+			RequiredArtifacts []string `json:"requiredArtifacts"`
+			Hydrate           struct {
 				GitHubRunner bool `json:"githubRunner"`
 			} `json:"hydrate"`
 		} `json:"jobs"`
@@ -384,6 +387,9 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	}
 	if got.Jobs["smoke"].Architecture != "arm64" {
 		t.Fatalf("json jobs.smoke.architecture=%q in %s", got.Jobs["smoke"].Architecture, stdout.String())
+	}
+	if got.Jobs["smoke"].Label != "nightly smoke" || len(got.Jobs["smoke"].ArtifactGlobs) != 1 || len(got.Jobs["smoke"].RequiredArtifacts) != 1 {
+		t.Fatalf("json job evidence fields missing in %s", stdout.String())
 	}
 }
 

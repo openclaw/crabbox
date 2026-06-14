@@ -22,7 +22,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:              "islo",
 		Kind:                core.ProviderKindDelegatedRun,
 		Targets:             []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:            core.FeatureSet{core.FeatureSSH, core.FeatureURLBridge, core.FeatureRunSession, core.FeatureTailscale, core.FeaturePauseResume},
+		Features:            core.FeatureSet{core.FeatureSSH, core.FeatureURLBridge, core.FeatureRunSession, core.FeatureTailscale, core.FeaturePauseResume, core.FeatureRunDownloads},
 		Coordinator:         core.CoordinatorNever,
 		TailscaleEgressOnly: true,
 	}

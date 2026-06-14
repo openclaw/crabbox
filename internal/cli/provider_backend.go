@@ -124,6 +124,11 @@ type DelegatedRunArtifactBackend interface {
 	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
 }
 
+type DelegatedRunDownloadBackend interface {
+	Backend
+	FetchRunFile(ctx context.Context, req DelegatedRunDownloadRequest) ([]byte, error)
+}
+
 type PortsRequest struct {
 	Options   LeaseOptions
 	ID        string
@@ -347,6 +352,7 @@ const (
 	FeatureRunProof     Feature = "run-proof"
 	FeatureRunSession   Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeatureRunDownloads Feature = "run-downloads"
 	FeatureModuleRun    Feature = "module-run"
 	FeaturePauseResume  Feature = "pause-resume"
 )
@@ -1271,15 +1277,26 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.CaptureOnFail {
 		return exit(2, "%s delegates run execution; --capture-on-fail is not supported", provider)
 	}
-	if len(req.Downloads) > 0 {
+	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
+	runDownloads := featureSetHas(spec.Features, FeatureRunDownloads)
+	if len(req.Downloads) > 0 && !runDownloads {
 		return exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
-	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
 	if len(req.ArtifactGlobs) > 0 && !runArtifacts {
 		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
-	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts {
+	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts && !runDownloads {
 		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
+	}
+	if runDownloads {
+		if err := validateDelegatedDownloads(req.Downloads); err != nil {
+			return err
+		}
+	}
+	if runDownloads && !runArtifacts {
+		if err := validateDelegatedRequiredArtifacts(req.RequiredArtifactGlobs); err != nil {
+			return err
+		}
 	}
 	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
 		return exit(2, "%s delegates run execution; --emit-proof is not supported", provider)

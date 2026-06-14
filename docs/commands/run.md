@@ -78,13 +78,13 @@ Vercel Sandbox) own command transport themselves: Crabbox sends either checkout
 content or module source through the provider's APIs, runs through the provider,
 and prints `sync=delegated` in the final timing summary where a sync phase exists. These
 providers reject the SSH-run-only features `--capture-stdout`,
-`--capture-stderr`, `--capture-on-fail`, `--download`, `--script`,
-`--script-stdin`, and `--fresh-pr` unless a delegated adapter advertises the
-`module-run` feature. Module-runtime delegated providers use `--script <file>`
-or `--script-stdin` as source module input and reject trailing `-- <command>`
-argv because they do not provide a Linux shell. Delegated artifact features
-`--artifact-glob` and `--require-artifact` are accepted only by delegated
-adapters that explicitly advertise bounded run artifact retrieval.
+`--capture-stderr`, `--capture-on-fail`, `--script`, `--script-stdin`, and
+`--fresh-pr` unless a delegated adapter advertises the matching capability.
+Module-runtime delegated providers use `--script <file>` or `--script-stdin` as
+source module input and reject trailing `-- <command>` argv because they do not
+provide a Linux shell. Delegated artifact features such as `--artifact-glob`,
+`--require-artifact`, and `--download` are accepted only by delegated adapters
+that explicitly advertise the matching bounded artifact capability.
 `--keep-on-failure` is supported for one-shot delegated runs. See the
 per-provider docs under [providers](../features/providers.md) for how `--id`
 resolves and any extra sync limitations.

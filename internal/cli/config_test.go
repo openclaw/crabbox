@@ -5005,15 +5005,18 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 			Ref:      "main",
 			Fields:   []string{"a=1", "a=1", "b=2"},
 		},
-		Shell:          &enabled,
-		Command:        "pnpm test",
-		NoSync:         &enabled,
-		SyncOnly:       &disabled,
-		Checksum:       &enabled,
-		ForceSyncLarge: &enabled,
-		JUnit:          []string{"junit.xml", "junit.xml"},
-		Downloads:      []string{"out=out", "out=out"},
-		Stop:           "always",
+		Shell:             &enabled,
+		Command:           "pnpm test",
+		NoSync:            &enabled,
+		SyncOnly:          &disabled,
+		Checksum:          &enabled,
+		ForceSyncLarge:    &enabled,
+		JUnit:             []string{"junit.xml", "junit.xml"},
+		Label:             "nightly smoke",
+		ArtifactGlobs:     []string{"reports/**", "reports/**"},
+		RequiredArtifacts: []string{"reports/summary.json", "reports/summary.json"},
+		Downloads:         []string{"out=out", "out=out"},
+		Stop:              "always",
 	})
 	if job.Provider != "aws" || job.Target != targetLinux || job.WindowsMode != windowsModeWSL2 || job.Profile != "ci" || job.Class != "large" || job.Architecture != "arm64" || job.ServerType != "m8i.large" || job.Market != "on-demand" {
 		t.Fatalf("basic job fields not applied: %#v", job)
@@ -5030,7 +5033,7 @@ func TestApplyFileJobConfigCoversJobOptions(t *testing.T) {
 	if job.Actions.Repo != "openclaw/crabbox" || job.Actions.Workflow != ".github/workflows/ci.yml" || job.Actions.Job != "test" || job.Actions.Ref != "main" || len(job.Actions.Fields) != 2 {
 		t.Fatalf("actions not applied: %#v", job.Actions)
 	}
-	if !job.Shell || job.Command != "pnpm test" || !job.NoSync || job.SyncOnly || job.Checksum == nil || !*job.Checksum || !job.ForceSyncLarge || len(job.JUnit) != 1 || len(job.Downloads) != 1 || job.Stop != "always" {
+	if !job.Shell || job.Command != "pnpm test" || !job.NoSync || job.SyncOnly || job.Checksum == nil || !*job.Checksum || !job.ForceSyncLarge || len(job.JUnit) != 1 || job.Label != "nightly smoke" || len(job.ArtifactGlobs) != 1 || len(job.RequiredArtifacts) != 1 || len(job.Downloads) != 1 || job.Stop != "always" {
 		t.Fatalf("command/sync fields not applied: %#v", job)
 	}
 }

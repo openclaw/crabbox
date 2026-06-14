@@ -122,7 +122,8 @@ Actions hydration:
 
 Command and sync:
 
-- `shell`, `command`, `noSync`, `syncOnly`, `checksum`, `forceSyncLarge`, `junit`, `downloads`.
+- `shell`, `command`, `noSync`, `syncOnly`, `checksum`, `forceSyncLarge`,
+  `junit`, `label`, `artifactGlobs`, `requiredArtifacts`, `downloads`.
 - `stop`: `auto`, `always`, `success`, `failure`, or `never`.
 
 ### Command execution
