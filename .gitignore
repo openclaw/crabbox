@@ -11,6 +11,9 @@ node_modules/
 *.test
 coverage.out
 /crabbox
+__pycache__/
+*.pyc
+.pytest_cache/
 .gomu_history.json
 mutation-report.*
 reports/mutation/

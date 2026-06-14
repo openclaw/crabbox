@@ -167,3 +167,14 @@ optional proxy settings before returning the Crabbox external-provider lease.
 python3 -m py_compile examples/slurm-external-provider/slurm-cbx.py
 bash -n examples/slurm-external-provider/runner-unprivileged-sshd.sh
 ```
+
+## Tests
+
+`test_slurm_cbx.py` covers the adapter without a real cluster by faking
+`sbatch`, `squeue`, `sacct`, and `scancel`. It exercises `doctor`, the
+acquire/resolve/release happy path, idempotent re-acquire, lease-id parsing,
+endpoint-timeout cancellation, `list` filtering, and `cleanup`:
+
+```sh
+python3 -m pytest examples/slurm-external-provider/ -q
+```

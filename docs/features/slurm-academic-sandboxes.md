@@ -224,6 +224,7 @@ cluster smoke:
 ```sh
 python3 -m py_compile examples/slurm-external-provider/slurm-cbx.py
 bash -n examples/slurm-external-provider/runner-unprivileged-sshd.sh
+python3 -m pytest examples/slurm-external-provider/ -q
 ```
 
 ## Future Built-In Provider Criteria
