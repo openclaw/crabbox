@@ -164,6 +164,8 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 3. Crabbox waits for `SandboxClaim.status.sandbox.name`, fetches the matching
    `Sandbox`, waits for its Ready condition, then resolves the pod from the
    sandbox pod annotation or selector and waits for the pod Ready condition.
+   Every claim lookup must retain the Kubernetes UID returned by creation, so a
+   deleted and recreated claim cannot redirect sync or command execution.
 4. Unless `--no-sync` is set, Crabbox builds a portable archive from the local
    Git file manifest and extracts it into the configured workdir with
    `kubectl exec`. With `sync.delete: true`, extraction happens in a
@@ -173,8 +175,9 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
    environment values are exported inside the streamed shell script, not placed
    on the local command line.
 6. On release, Crabbox deletes only the owned `SandboxClaim` whose labels and
-   provider-scope annotation match the local claim. The Agent Sandbox
-   controller owns the resulting sandbox and pod teardown.
+   provider-scope annotation and immutable Kubernetes UID match the local
+   claim. Deletion sends that UID as an API-server precondition. The Agent
+   Sandbox controller owns the resulting sandbox and pod teardown.
 
 Retained-claim `run`, `stop`, and `cleanup` operations share a per-lease
 cross-process lock. A concurrent stop or cleanup waits for the active command
@@ -193,6 +196,7 @@ Before deleting a live `SandboxClaim`, Crabbox verifies:
 - `crabbox.dev/provider=agent-sandbox`
 - `crabbox.dev/lease-id=<local lease id>`
 - `crabbox.dev/provider-scope=<SHA-256 scope fingerprint>`
+- the current `metadata.uid` matches the UID pinned in the local claim
 
 Missing Kubernetes claims are preserved locally by default because a 404 can be
 ambiguous across clusters or accounts. Set `--agent-sandbox-forget-missing` or

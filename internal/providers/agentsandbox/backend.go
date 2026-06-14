@@ -59,14 +59,14 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		cleanupCtx, cancel := b.cleanupContext(ctx)
 		defer cancel()
-		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, ready.ClaimUID)
 		return err
 	}
 	defer unlockOperation()
 	if err := writeClaimLease(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, claimName); err != nil {
 		cleanupCtx, cancel := b.cleanupContext(ctx)
 		defer cancel()
-		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, ready.ClaimUID)
 		return err
 	}
 	total := b.now().Sub(started)
@@ -111,13 +111,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err != nil {
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
-			_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+			_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, ready.ClaimUID)
 			return RunResult{}, err
 		}
 		if err := writeClaimLease(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, claimName); err != nil {
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
-			_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+			_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, ready.ClaimUID)
 			return RunResult{}, err
 		}
 		claim, _ = readLeaseClaim(leaseID)
@@ -139,6 +139,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err := authorizeClaimScope(b.cfg, claim); err != nil {
 			return RunResult{}, err
 		}
+		identity, err := claimIdentityFromLocalClaim(claim)
+		if err != nil {
+			return RunResult{}, err
+		}
 		if err := claimLeaseForRepo(b.cfg, claim.LeaseID, claim.Slug, req.Repo, req.Reclaim); err != nil {
 			return RunResult{}, err
 		}
@@ -158,10 +162,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			}
 			return RunResult{}, err
 		}
-		if err := validateClaimOwnership(liveClaim, claim.LeaseID, claim.ProviderScope); err != nil {
+		if err := validateClaimIdentity(liveClaim, identity); err != nil {
 			return RunResult{}, err
 		}
-		ready, err = waitForSandboxReadinessWithTimeouts(ctx, client, b.cfg.AgentSandbox.Namespace, claimName, readinessTimeout(b.cfg), podReadinessTimeout(b.cfg), time.Second)
+		ready, err = waitForSandboxReadinessWithTimeouts(ctx, client, b.cfg.AgentSandbox.Namespace, claimName, identity, readinessTimeout(b.cfg), podReadinessTimeout(b.cfg), time.Second)
 		if err != nil {
 			if isNotFound(err) {
 				return RunResult{}, b.missingClaimRunError(claim)
@@ -266,12 +270,18 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 		if claim.Provider != providerName || claim.ProviderScope != claimScope(b.cfg) {
 			continue
 		}
+		identity, err := claimIdentityFromLocalClaim(claim)
+		if err != nil {
+			return nil, err
+		}
 		claimName := claimNameFromLocalClaim(claim)
-		ready, err := sandboxReadinessOnce(ctx, client, b.cfg.AgentSandbox.Namespace, claimName)
+		ready, err := sandboxReadinessOnce(ctx, client, b.cfg.AgentSandbox.Namespace, claimName, identity)
 		state := statusViewReady
 		if err != nil {
-			if isNotFound(err) || errors.Is(err, errNotReady) {
+			if isNotFound(err) {
 				state = "missing-or-inaccessible"
+			} else if errors.Is(err, errNotReady) {
+				state = "not-ready"
 			} else {
 				return nil, err
 			}
@@ -306,6 +316,10 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err := authorizeClaimScope(b.cfg, claim); err != nil {
 		return StatusView{}, err
 	}
+	identity, err := claimIdentityFromLocalClaim(claim)
+	if err != nil {
+		return StatusView{}, err
+	}
 	waitTimeout := req.WaitTimeout
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
@@ -337,11 +351,11 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		}
 		return StatusView{}, err
 	}
-	if err := validateClaimOwnership(liveClaim, claim.LeaseID, claim.ProviderScope); err != nil {
+	if err := validateClaimIdentity(liveClaim, identity); err != nil {
 		return StatusView{}, err
 	}
 	for {
-		ready, readyErr := sandboxReadinessOnce(pollCtx, client, b.cfg.AgentSandbox.Namespace, claimName)
+		ready, readyErr := sandboxReadinessOnce(pollCtx, client, b.cfg.AgentSandbox.Namespace, claimName, identity)
 		view := baseView
 		view.Labels = cloneStringMap(baseView.Labels)
 		if readyErr == nil {
@@ -506,20 +520,29 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 			"warmPoolRef": map[string]any{"name": b.cfg.AgentSandbox.WarmPool},
 		},
 	}
-	if _, err := client.Create(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, obj); err != nil {
+	created, err := client.Create(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, obj)
+	if err != nil {
 		return "", "", "", sandboxReadiness{}, err
 	}
-	ready, err := waitForSandboxReadinessWithTimeouts(ctx, client, b.cfg.AgentSandbox.Namespace, claimName, readinessTimeout(b.cfg), podReadinessTimeout(b.cfg), time.Second)
+	identity := claimIdentity{LeaseID: leaseID, ProviderScope: claimScope(b.cfg), UID: strings.TrimSpace(created.Metadata.UID)}
+	if identity.UID == "" {
+		return "", "", "", sandboxReadiness{}, exit(4, "created agent-sandbox claim %s has no Kubernetes UID", claimName)
+	}
+	ready, err := waitForSandboxReadinessWithTimeouts(ctx, client, b.cfg.AgentSandbox.Namespace, claimName, identity, readinessTimeout(b.cfg), podReadinessTimeout(b.cfg), time.Second)
 	if err != nil {
 		cleanupCtx, cleanupCancel := b.cleanupContext(ctx)
 		defer cleanupCancel()
-		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+		_ = client.Delete(cleanupCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, identity.UID)
 		return "", "", "", sandboxReadiness{}, err
 	}
 	return leaseID, claimName, slug, ready, nil
 }
 
 func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient, claim LeaseClaim, leaseID, claimName string, forgetMissing bool) error {
+	identity, err := claimIdentityFromLocalClaim(claim)
+	if err != nil {
+		return err
+	}
 	live, err := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 	if err != nil {
 		if isNotFound(err) {
@@ -538,10 +561,12 @@ func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient,
 	if providerScope == "" {
 		providerScope = claimScope(b.cfg)
 	}
-	if err := validateClaimOwnership(live, leaseID, providerScope); err != nil {
+	identity.LeaseID = leaseID
+	identity.ProviderScope = providerScope
+	if err := validateClaimIdentity(live, identity); err != nil {
 		return err
 	}
-	if err := client.Delete(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName); err != nil && !isNotFound(err) {
+	if err := client.Delete(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, identity.UID); err != nil && !isNotFound(err) {
 		return err
 	}
 	removeLeaseClaim(leaseID)
@@ -561,6 +586,19 @@ func validateClaimOwnership(obj *kubernetesObject, leaseID, providerScope string
 		return exit(4, "agent-sandbox SandboxClaim %s belongs to a different Crabbox scope", obj.Metadata.Name)
 	}
 	return nil
+}
+
+func validateClaimIdentity(obj *kubernetesObject, identity claimIdentity) error {
+	if obj == nil {
+		return exit(4, "agent-sandbox claim identity is missing")
+	}
+	if identity.UID == "" {
+		return exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", identity.LeaseID)
+	}
+	if got := strings.TrimSpace(obj.Metadata.UID); got != identity.UID {
+		return exit(4, "agent-sandbox SandboxClaim %s UID changed from %s to %s", obj.Metadata.Name, identity.UID, blank(got, "<empty>"))
+	}
+	return validateClaimOwnership(obj, identity.LeaseID, identity.ProviderScope)
 }
 
 func (b *backend) missingClaimRunError(claim LeaseClaim) error {

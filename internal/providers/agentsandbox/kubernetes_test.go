@@ -89,6 +89,9 @@ func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namesp
 	}
 	f.creates++
 	created := cloneKubernetesObject(obj)
+	if created.Metadata.UID == "" {
+		created.Metadata.UID = "uid-" + created.Metadata.Name
+	}
 	f.objects[key] = created
 	if ref.Resource == sandboxClaimResource {
 		sandboxName := obj.Metadata.Name + "-sandbox"
@@ -110,7 +113,7 @@ func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namesp
 	return cloneKubernetesObject(created), nil
 }
 
-func (f *fakeKubernetesClient) Delete(_ context.Context, ref resourceRef, namespace, name string) error {
+func (f *fakeKubernetesClient) Delete(_ context.Context, ref resourceRef, namespace, name, uid string) error {
 	if len(f.deleteErrs) > 0 {
 		err := f.deleteErrs[0]
 		f.deleteErrs = f.deleteErrs[1:]
@@ -119,6 +122,9 @@ func (f *fakeKubernetesClient) Delete(_ context.Context, ref resourceRef, namesp
 	key := ref.Resource + "/" + namespace + "/" + name
 	if f.objects[key] == nil {
 		return errKubernetesNotFound
+	}
+	if f.objects[key].Metadata.UID != uid {
+		return errors.New("Kubernetes UID precondition failed")
 	}
 	f.deletes++
 	delete(f.objects, key)
@@ -319,7 +325,7 @@ func TestSandboxReadinessResolvesClaimSandboxAndPod(t *testing.T) {
 	cfg.AgentSandbox.Namespace = "sandboxes"
 	cfg.AgentSandbox.WarmPool = "linux-pool"
 	fake := readyFakeClient(cfg)
-	ready, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a")
+	ready, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +341,7 @@ func TestSandboxReadinessPreservesDiagnostics(t *testing.T) {
 	cfg.AgentSandbox.WarmPool = "linux-pool"
 	fake := readyFakeClient(cfg)
 	fake.pods["sandboxes/app=agent-sandbox"] = []podState{{Name: "pod-a", Phase: "Running", Ready: false, Conditions: []conditionState{{Type: "Ready", Status: "False", Reason: "ContainersNotReady"}}}}
-	_, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a")
+	_, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg))
 	if err == nil || !strings.Contains(err.Error(), "ContainersNotReady") {
 		t.Fatalf("err=%v", err)
 	}
@@ -421,7 +427,7 @@ func TestWaitForSandboxReadinessTimesOut(t *testing.T) {
 	delete(fake.objects, sandboxClaimResource+"/sandboxes/claim-a")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
-	_, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", time.Millisecond)
+	_, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "claim-a") {
 		t.Fatalf("err=%v", err)
 	}
@@ -504,19 +510,37 @@ func TestKubectlExecStreamsStdinWithoutPuttingItOnArgv(t *testing.T) {
 	}
 }
 
-func TestKubectlClientUsesVersionedResourcesAndAsyncDelete(t *testing.T) {
-	runner := &recordingCommandRunner{}
+func TestKubectlClientUsesUIDPreconditionForAsyncDelete(t *testing.T) {
+	runner := &recordingCommandRunner{results: []LocalCommandResult{{Stdout: `{"kind":"Status","status":"Success"}`}}}
 	client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
-	if err := client.Delete(context.Background(), sandboxClaimGVR(), "sandboxes", "claim-a"); err != nil {
+	if err := client.Delete(context.Background(), sandboxClaimGVR(), "sandboxes", "claim-a", "uid-claim-a"); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.requests) != 1 {
 		t.Fatalf("requests=%d", len(runner.requests))
 	}
 	got := strings.Join(runner.requests[0].Args, " ")
-	want := "delete sandboxclaims.v1beta1.extensions.agents.x-k8s.io claim-a --namespace sandboxes --ignore-not-found=true --wait=false"
+	want := "delete --raw /apis/extensions.agents.x-k8s.io/v1beta1/namespaces/sandboxes/sandboxclaims/claim-a -f -"
 	if got != want {
 		t.Fatalf("delete args=%q want=%q", got, want)
+	}
+	if len(runner.inputs) != 1 || !bytes.Contains(runner.inputs[0], []byte(`"uid":"uid-claim-a"`)) {
+		t.Fatalf("delete options=%q", runner.inputs)
+	}
+}
+
+func TestSandboxReadinessRejectsReplacedClaimUID(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	fake := readyFakeClient(cfg)
+	identity := fakeClaimIdentity(cfg)
+	fake.objects[sandboxClaimResource+"/sandboxes/claim-a"].Metadata.UID = "uid-replacement"
+
+	_, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a", identity)
+	if err == nil || !strings.Contains(err.Error(), "UID changed") {
+		t.Fatalf("replacement claim accepted: %v", err)
 	}
 }
 
@@ -616,7 +640,13 @@ func TestKubectlExecOnlyMapsProvenRemoteExitStatus(t *testing.T) {
 }
 
 func readyFakeClient(cfg Config) *fakeKubernetesClient {
-	claim := &kubernetesObject{Metadata: objectMeta{Name: "claim-a"}}
+	identity := fakeClaimIdentity(cfg)
+	claim := &kubernetesObject{Metadata: objectMeta{
+		Name:        "claim-a",
+		UID:         identity.UID,
+		Labels:      claimLabels(identity.LeaseID, "test"),
+		Annotations: claimAnnotations(cfg),
+	}}
 	claim.Status.Sandbox.Name = "sandbox-a"
 	sandbox := &kubernetesObject{
 		Metadata: objectMeta{Name: "sandbox-a"},
@@ -645,6 +675,10 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 		fake.rbac[rule.String()] = true
 	}
 	return fake
+}
+
+func fakeClaimIdentity(cfg Config) claimIdentity {
+	return claimIdentity{LeaseID: "asbx_test", ProviderScope: claimScope(cfg), UID: "uid-claim-a"}
 }
 
 func TestMain(m *testing.M) {

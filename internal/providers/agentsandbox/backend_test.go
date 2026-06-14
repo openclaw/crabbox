@@ -45,9 +45,44 @@ func TestWarmupCreatesClaimAndPersistsLocalLease(t *testing.T) {
 	if claim.Provider != providerName || claim.Slug != "feature-branch" || claim.ProviderScope != claimScope(cfg) {
 		t.Fatalf("claim=%#v", claim)
 	}
-	if !strings.HasPrefix(claim.Labels[claimLabelClaimName], "crabbox-feature-branch-") || claim.Labels[claimLabelPodName] == "" {
+	if !strings.HasPrefix(claim.Labels[claimLabelClaimName], "crabbox-feature-branch-") || claim.Labels[claimLabelClaimUID] == "" || claim.Labels[claimLabelPodName] == "" {
 		t.Fatalf("claim labels=%#v", claim.Labels)
 	}
+}
+
+func TestListReportsPendingClaimAsNotReady(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "pending")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	sandboxName := claim.Labels[claimLabelSandboxName]
+	sandbox := fake.objects[sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName]
+	sandbox.Status.Conditions = []conditionState{{Type: "Ready", Status: "False", Reason: "Starting"}}
+
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range views {
+		if view.Labels["slug"] == "pending" {
+			if view.Status != "not-ready" && view.Labels["state"] != "not-ready" {
+				t.Fatalf("pending claim view=%#v", view)
+			}
+			return
+		}
+	}
+	t.Fatalf("pending claim absent from views=%#v", views)
 }
 
 func TestListDisplayedClaimIDResolvesForStatus(t *testing.T) {
@@ -310,6 +345,34 @@ func TestRunExistingLeaseValidatesLiveClaimOwnership(t *testing.T) {
 	}
 	if len(fake.execs) != 0 {
 		t.Fatalf("command executed despite ownership mismatch: %#v", fake.execs)
+	}
+}
+
+func TestStopRejectsReplacedClaimUID(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "replace"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "replace")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	claimName := claim.Labels[claimLabelClaimName]
+	fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName].Metadata.UID = "uid-replacement"
+
+	err = backend.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	if err == nil || !strings.Contains(err.Error(), "UID changed") {
+		t.Fatalf("replacement claim stop err=%v", err)
+	}
+	if fake.deletes != 0 {
+		t.Fatalf("replacement claim was deleted: deletes=%d", fake.deletes)
 	}
 }
 

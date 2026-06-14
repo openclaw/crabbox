@@ -22,6 +22,7 @@ const (
 	annotationContainer = "crabbox.dev/container"
 
 	claimLabelClaimName   = "claim"
+	claimLabelClaimUID    = "claim_uid"
 	claimLabelSandboxName = "sandbox"
 	claimLabelPodName     = "pod"
 	claimLabelNamespace   = "namespace"
@@ -29,6 +30,12 @@ const (
 	claimLabelContainer   = "container"
 	claimLabelWorkdir     = "workdir"
 )
+
+type claimIdentity struct {
+	LeaseID       string
+	ProviderScope string
+	UID           string
+}
 
 var dns1123LabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
 
@@ -152,6 +159,7 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 		"provider":            providerName,
 		"lease":               leaseID,
 		claimLabelClaimName:   claimName,
+		claimLabelClaimUID:    ready.ClaimUID,
 		claimLabelSandboxName: ready.SandboxName,
 		claimLabelPodName:     ready.PodName,
 		claimLabelNamespace:   cfg.AgentSandbox.Namespace,
@@ -161,6 +169,17 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 		"target":              targetLinux,
 		"state":               statusViewReady,
 	}
+}
+
+func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
+	uid := ""
+	if claim.Labels != nil {
+		uid = strings.TrimSpace(claim.Labels[claimLabelClaimUID])
+	}
+	if uid == "" {
+		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
+	}
+	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid}, nil
 }
 
 func authorizeClaimScope(cfg Config, claim LeaseClaim) error {

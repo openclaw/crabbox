@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,6 +41,7 @@ func (r resourceRef) qualifiedResource() string {
 type objectMeta struct {
 	Name        string            `json:"name,omitempty"`
 	Namespace   string            `json:"namespace,omitempty"`
+	UID         string            `json:"uid,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
@@ -83,7 +85,7 @@ type kubernetesClient interface {
 	CheckResource(ctx context.Context, groupVersion, resource string) error
 	Get(ctx context.Context, ref resourceRef, namespace, name string) (*kubernetesObject, error)
 	Create(ctx context.Context, ref resourceRef, namespace string, object *kubernetesObject) (*kubernetesObject, error)
-	Delete(ctx context.Context, ref resourceRef, namespace, name string) error
+	Delete(ctx context.Context, ref resourceRef, namespace, name, uid string) error
 	CanI(ctx context.Context, rule rbacRule) (bool, error)
 	GetPod(ctx context.Context, namespace, name string) (podState, error)
 	ListPods(ctx context.Context, namespace, selector string) ([]podState, error)
@@ -218,20 +220,51 @@ func (c *kubectlKubernetesClient) Create(
 func (c *kubectlKubernetesClient) Delete(
 	ctx context.Context,
 	ref resourceRef,
-	namespace, name string,
+	namespace, name, uid string,
 ) error {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return fmt.Errorf("delete %s/%s requires a Kubernetes UID precondition", ref.qualifiedResource(), name)
+	}
+	options, err := json.Marshal(map[string]any{
+		"apiVersion": "v1",
+		"kind":       "DeleteOptions",
+		"preconditions": map[string]string{
+			"uid": uid,
+		},
+		"propagationPolicy": "Background",
+	})
+	if err != nil {
+		return fmt.Errorf("encode delete options for %s/%s: %w", ref.qualifiedResource(), name, err)
+	}
 	result, err := c.run(
 		ctx,
-		LocalCommandRequest{},
-		"delete", ref.qualifiedResource(), name,
-		"--namespace", namespace,
-		"--ignore-not-found=true",
-		"--wait=false",
+		LocalCommandRequest{Stdin: bytes.NewReader(options)},
+		"delete", "--raw", resourceURL(ref, namespace, name), "-f", "-",
 	)
 	if err != nil {
+		if kubectlNotFound(result) {
+			return fmt.Errorf("%s/%s: %w", ref.qualifiedResource(), name, errKubernetesNotFound)
+		}
 		return c.commandError("delete "+ref.qualifiedResource()+"/"+name, result, err)
 	}
 	return nil
+}
+
+func resourceURL(ref resourceRef, namespace, name string) string {
+	group, version, found := strings.Cut(ref.GroupVersion, "/")
+	prefix := "/api/" + url.PathEscape(ref.GroupVersion)
+	if found && group != "" {
+		prefix = "/apis/" + url.PathEscape(group) + "/" + url.PathEscape(version)
+	}
+	return prefix + "/namespaces/" + url.PathEscape(namespace) + "/" + url.PathEscape(ref.Resource) + "/" + url.PathEscape(name)
+}
+
+func kubectlNotFound(result LocalCommandResult) bool {
+	detail := strings.ToLower(result.Stderr + "\n" + result.Stdout)
+	return strings.Contains(detail, "(notfound)") ||
+		strings.Contains(detail, "\"code\":404") ||
+		strings.Contains(detail, "\"reason\":\"notfound\"")
 }
 
 func (c *kubectlKubernetesClient) CanI(ctx context.Context, rule rbacRule) (bool, error) {
@@ -485,6 +518,7 @@ func warmPoolGVR() resourceRef {
 
 type sandboxReadiness struct {
 	ClaimName   string
+	ClaimUID    string
 	SandboxName string
 	PodName     string
 	PodIP       string
@@ -539,8 +573,8 @@ func resolveSandboxPod(
 	return podState{}, fmt.Errorf("%w: Sandbox %s has no pod annotation or selector", errNotReady, sandbox.Metadata.Name)
 }
 
-func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, poll time.Duration) (sandboxReadiness, error) {
-	resource, err := waitForSandboxResourceReadiness(ctx, client, namespace, claimName, poll)
+func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, poll time.Duration) (sandboxReadiness, error) {
+	resource, err := waitForSandboxResourceReadiness(ctx, client, namespace, claimName, identity, poll)
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
@@ -548,16 +582,16 @@ func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, names
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	return sandboxReadiness{ClaimName: resource.ClaimName, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+	return sandboxReadiness{ClaimName: resource.ClaimName, ClaimUID: identity.UID, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
 }
 
-func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesClient, namespace, claimName string, sandboxTimeout, podTimeout, poll time.Duration) (sandboxReadiness, error) {
+func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, sandboxTimeout, podTimeout, poll time.Duration) (sandboxReadiness, error) {
 	sandboxCtx := ctx
 	sandboxCancel := func() {}
 	if sandboxTimeout > 0 {
 		sandboxCtx, sandboxCancel = context.WithTimeout(ctx, sandboxTimeout)
 	}
-	resource, err := waitForSandboxResourceReadiness(sandboxCtx, client, namespace, claimName, poll)
+	resource, err := waitForSandboxResourceReadiness(sandboxCtx, client, namespace, claimName, identity, poll)
 	sandboxCancel()
 	if err != nil {
 		return sandboxReadiness{}, err
@@ -572,10 +606,10 @@ func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesC
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	return sandboxReadiness{ClaimName: resource.ClaimName, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+	return sandboxReadiness{ClaimName: resource.ClaimName, ClaimUID: identity.UID, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
 }
 
-func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, poll time.Duration) (sandboxResourceReadiness, error) {
+func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, poll time.Duration) (sandboxResourceReadiness, error) {
 	if poll <= 0 {
 		poll = time.Second
 	}
@@ -583,7 +617,7 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		ready, err := sandboxResourceReadinessOnce(ctx, client, namespace, claimName)
+		ready, err := sandboxResourceReadinessOnce(ctx, client, namespace, claimName, identity)
 		if err == nil {
 			return ready, nil
 		}
@@ -620,12 +654,15 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 	}
 }
 
-func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string) (sandboxResourceReadiness, error) {
+func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity) (sandboxResourceReadiness, error) {
 	claim, err := client.Get(ctx, sandboxClaimGVR(), namespace, claimName)
 	if err != nil {
 		if isNotFound(err) {
-			return sandboxResourceReadiness{}, fmt.Errorf("%w: SandboxClaim %s/%s not found", errNotReady, namespace, claimName)
+			return sandboxResourceReadiness{}, fmt.Errorf("SandboxClaim %s/%s: %w", namespace, claimName, errKubernetesNotFound)
 		}
+		return sandboxResourceReadiness{}, err
+	}
+	if err := validateClaimIdentity(claim, identity); err != nil {
 		return sandboxResourceReadiness{}, err
 	}
 	sandboxName, err := claimSandboxName(claim)
@@ -642,8 +679,8 @@ func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, 
 	return sandboxResourceReadiness{ClaimName: claimName, SandboxName: sandboxName, Sandbox: sandbox}, nil
 }
 
-func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string) (sandboxReadiness, error) {
-	resource, err := sandboxResourceReadinessOnce(ctx, client, namespace, claimName)
+func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity) (sandboxReadiness, error) {
+	resource, err := sandboxResourceReadinessOnce(ctx, client, namespace, claimName, identity)
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
@@ -654,7 +691,7 @@ func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespac
 	if !pod.Ready {
 		return sandboxReadiness{}, fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
 	}
-	return sandboxReadiness{ClaimName: resource.ClaimName, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
+	return sandboxReadiness{ClaimName: resource.ClaimName, ClaimUID: identity.UID, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
 }
 
 func podConditionSummary(conditions []conditionState) string {
