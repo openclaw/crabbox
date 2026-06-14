@@ -1,0 +1,243 @@
+package githubcodespaces
+
+import (
+	"bufio"
+	"os"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+type sshConfigEntry struct {
+	Aliases        []string
+	HostName       string
+	Port           string
+	User           string
+	IdentityFile   string
+	KnownHostsFile string
+	ProxyCommand   string
+}
+
+func parseSSHConfig(data string) ([]sshConfigEntry, error) {
+	var entries []sshConfigEntry
+	var current *sshConfigEntry
+	scanner := bufio.NewScanner(strings.NewReader(data))
+	for scanner.Scan() {
+		line := stripSSHConfigComment(scanner.Text())
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		key, value := splitSSHConfigDirective(line)
+		if key == "" {
+			continue
+		}
+		if strings.EqualFold(key, "Host") {
+			aliases := splitSSHConfigFields(value)
+			if len(aliases) == 0 {
+				current = nil
+				continue
+			}
+			entries = append(entries, sshConfigEntry{Aliases: aliases})
+			current = &entries[len(entries)-1]
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		switch strings.ToLower(key) {
+		case "hostname":
+			current.HostName = unquoteSSHConfigValue(value)
+		case "port":
+			current.Port = unquoteSSHConfigValue(value)
+		case "user":
+			current.User = unquoteSSHConfigValue(value)
+		case "identityfile":
+			current.IdentityFile = unquoteSSHConfigValue(value)
+		case "userknownhostsfile":
+			current.KnownHostsFile = unquoteSSHConfigValue(value)
+		case "proxycommand":
+			current.ProxyCommand = strings.TrimSpace(value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
+	entry, err := selectSSHConfigEntry(data, alias)
+	if err != nil {
+		return SSHTarget{}, err
+	}
+	user := firstNonEmpty(entry.User, cfg.SSHUser)
+	if user == "" {
+		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing User", alias)
+	}
+	if !validSSHUser(user) {
+		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q has invalid User %q", alias, user)
+	}
+	if strings.TrimSpace(entry.IdentityFile) == "" {
+		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing IdentityFile", alias)
+	}
+	host := strings.TrimSpace(entry.HostName)
+	proxy := strings.TrimSpace(entry.ProxyCommand)
+	if host == "" && proxy == "" {
+		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing HostName or ProxyCommand", alias)
+	}
+	if host == "" {
+		host = alias
+	}
+	port := strings.TrimSpace(entry.Port)
+	if port == "" {
+		port = defaultSSHPort
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q has invalid Port %q", alias, port)
+	}
+	target := SSHTarget{
+		User:           user,
+		Host:           host,
+		Key:            entry.IdentityFile,
+		KnownHostsFile: entry.KnownHostsFile,
+		Port:           port,
+		TargetOS:       targetLinux,
+		ReadyCheck:     githubCodespacesReadyCheck(cfg),
+		NetworkKind:    networkPublic,
+	}
+	if proxy != "" {
+		target.SSHConfigProxy = true
+		target.ProxyCommand = proxy
+	}
+	return target, nil
+}
+
+func selectSSHConfigEntry(data, alias string) (sshConfigEntry, error) {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return sshConfigEntry{}, exit(2, "github-codespaces SSH config host alias is required")
+	}
+	entries, err := parseSSHConfig(data)
+	if err != nil {
+		return sshConfigEntry{}, err
+	}
+	var matches []sshConfigEntry
+	for _, entry := range entries {
+		for _, candidate := range entry.Aliases {
+			if candidate == alias {
+				matches = append(matches, entry)
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return sshConfigEntry{}, exit(4, "github-codespaces SSH config entry not found for host %q", alias)
+	}
+	if len(matches) > 1 {
+		return sshConfigEntry{}, exit(2, "github-codespaces SSH config entry for host %q is ambiguous", alias)
+	}
+	return matches[0], nil
+}
+
+func validatePrivateSSHConfigFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return exit(2, "github-codespaces SSH config path %q is a directory", path)
+	}
+	mode := info.Mode().Perm()
+	if mode != defaultSSHConfigFileMode {
+		return exit(2, "github-codespaces SSH config path %q must have mode 0600, got %04o", path, mode)
+	}
+	return nil
+}
+
+func githubCodespacesReadyCheck(cfg Config) string {
+	workRoot := strings.TrimSpace(cfg.GitHubCodespaces.WorkRoot)
+	if workRoot == "" {
+		workRoot = strings.TrimSpace(cfg.WorkRoot)
+	}
+	if workRoot == "" {
+		workRoot = defaultWorkRoot
+	}
+	return "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && test -d " + shellQuote(workRoot)
+}
+
+func stripSSHConfigComment(line string) string {
+	var quoted byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quoted != 0 {
+			if c == quoted {
+				quoted = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quoted = c
+			continue
+		}
+		if c == '#' {
+			return line[:i]
+		}
+	}
+	return line
+}
+
+func splitSSHConfigDirective(line string) (string, string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", ""
+	}
+	for i, r := range line {
+		if r == ' ' || r == '\t' {
+			return strings.TrimSpace(line[:i]), strings.TrimSpace(line[i:])
+		}
+	}
+	return line, ""
+}
+
+func splitSSHConfigFields(value string) []string {
+	var out []string
+	for _, field := range strings.Fields(value) {
+		field = unquoteSSHConfigValue(field)
+		if field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
+func unquoteSSHConfigValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+			return value[1 : len(value)-1]
+		}
+	}
+	return value
+}
+
+func validSSHUser(user string) bool {
+	if user == "" || strings.HasPrefix(user, "-") || strings.Contains(user, "@") {
+		return false
+	}
+	return strings.IndexFunc(user, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) == -1
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
