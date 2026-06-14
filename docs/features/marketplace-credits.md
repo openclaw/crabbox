@@ -185,6 +185,8 @@ Initial strategies:
 
 - `cheapest`: lowest retail credits to the customer.
 - `balanced`: prefer routes with enough margin while still minimizing credits.
+- `weighted`: within the winning priority tier, load-balance by routing-group
+  `weight` and surface a per-candidate `routeShare` (0..1) previewing the split.
 - `provider-default`: preserve configured provider order.
 
 Later routing inputs can include:
@@ -292,8 +294,11 @@ Example:
 }
 ```
 
-Higher `priority` values are ranked first. `weight` is surfaced in quotes for a
-future load-balancer across providers with the same priority.
+Higher `priority` values are ranked first. `weight` drives the `weighted`
+strategy: the broker load-balances across providers sharing the winning priority
+and returns a per-candidate `routeShare` (0..1) previewing the traffic split.
+The split is a preview projection only; it routes no traffic and moves no
+credits.
 
 ## Product Decisions Still Required
 
@@ -322,7 +327,8 @@ Before real payment code lands, maintainers need explicit decisions for:
 3. Payment MVP: customer checkout and webhooks with idempotent credit purchases.
 4. Enforcement MVP: credit authorization before brokered lease provisioning.
 5. Routing groups MVP: active members, priority failover, weighted same-priority
-   load balancing, and route audit events.
+   load balancing (preview `routeShare` split shipped; live routing and route
+   audit events still pending).
 6. Smart routing MVP: route selection from quote into lease creation.
 7. Settlement reports: provider cost attribution and margin dashboards.
 8. Delegated providers: extend the marketplace contract beyond coordinator-owned

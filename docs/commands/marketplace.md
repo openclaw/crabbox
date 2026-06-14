@@ -36,7 +36,7 @@ central customer identity, credit balance, or provider routing policy to query.
 --target <os>                target OS (default linux)
 --ttl <duration>             quote duration, e.g. 30m, 1h, or 3600s
 --max-credits <amount>       mark routes above this credit ceiling unavailable
---strategy <name>            cheapest, balanced, or provider-default
+--strategy <name>            cheapest, balanced, weighted, or provider-default
 --json                       print raw broker response
 ```
 
@@ -52,7 +52,8 @@ The intended product shape is OpenRouter-like for sandbox capacity:
 - Users request intent such as `provider=auto`, `class=beast`, `target=linux`,
   `ttl=1h`, and optionally a credit ceiling.
 - The broker ranks compatible provider candidates by routing policy such as
-  cheapest, balanced margin/cost, or provider-default order.
+  cheapest, balanced margin/cost, weighted same-priority load balancing, or
+  provider-default order.
 - Direct-provider mode remains available and is not forced through payment.
 
 The current skeleton intentionally stops before real money movement:
@@ -96,10 +97,12 @@ number, interpreted as retail hourly credits, or an object:
 }
 ```
 
-`priority` and `weight` are routing-policy skeleton fields. Higher-priority
-candidates are ranked first for failover-style routing. `weight` is returned in
-quotes so a later load-balancing implementation can split traffic among
-candidates with the same priority.
+`priority` and `weight` are routing-policy fields. Higher-priority candidates
+are ranked first for failover-style routing. `weight` drives the `weighted`
+strategy: within a single priority tier the broker load-balances by weight and
+returns a `routeShare` (0..1) per candidate previewing how traffic would split
+(e.g. weights `3` and `1` preview `share=75%` and `share=25%`). This is a
+preview projection only; no traffic is routed and no credits move.
 
 ## Related Docs
 

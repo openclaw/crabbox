@@ -104,3 +104,45 @@ func TestMarketplaceQuoteCommandSendsSmartRoutingIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestMarketplaceQuoteCommandRendersWeightedRouteShare(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	var body CoordinatorMarketplaceQuoteRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/marketplace/quotes" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"quote":{"id":"mq_w","mode":"preview","currency":"USD","creditUnit":"usd","strategy":"weighted","ttlSeconds":3600,"selected":{"provider":"aws","target":"linux","class":"beast","serverType":"beast","priority":10,"weight":3,"ttlSeconds":3600,"costHourlyUSD":2,"retailHourlyUSD":4,"estimatedCostUSD":2,"credits":4,"marginUSD":2,"routeKey":"aws:linux:beast","available":true,"routeShare":0.75},"candidates":[{"provider":"aws","target":"linux","class":"beast","serverType":"beast","priority":10,"weight":3,"ttlSeconds":3600,"costHourlyUSD":2,"retailHourlyUSD":4,"estimatedCostUSD":2,"credits":4,"marginUSD":2,"routeKey":"aws:linux:beast","available":true,"routeShare":0.75},{"provider":"hetzner","target":"linux","class":"beast","serverType":"beast","priority":10,"weight":1,"ttlSeconds":3600,"costHourlyUSD":1,"retailHourlyUSD":2,"estimatedCostUSD":1,"credits":2,"marginUSD":1,"routeKey":"hetzner:linux:beast","available":true,"routeShare":0.25}],"warnings":["preview quote only"]},"marketplace":{"enabled":true,"mode":"preview","currency":"USD","creditUnit":"usd","requireCreditsForLeases":false,"supportedProviders":["aws","hetzner"],"features":{"quotes":true,"bidding":true,"payments":false,"creditLedger":false,"leaseEnforcement":false},"settlement":{"paymentProvider":"none","ledgerProvider":"none","providerSettlement":"external"},"decisionsRequired":["choose ledger"]}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	err := app.Run(context.Background(), []string{
+		"marketplace", "quote", "--class", "beast", "--strategy", "weighted",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.Strategy != "weighted" {
+		t.Fatalf("strategy=%q", body.Strategy)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"strategy=weighted",
+		"selected provider=aws route=aws:linux:beast priority=10 weight=3.00 credits=$4.00",
+		"share=75%",
+		"share=25%",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}

@@ -696,6 +696,7 @@ type CoordinatorMarketplaceQuoteCandidate struct {
 	RouteKey          string  `json:"routeKey"`
 	Available         bool    `json:"available"`
 	UnavailableReason string  `json:"unavailableReason,omitempty"`
+	RouteShare        float64 `json:"routeShare,omitempty"`
 }
 
 type CoordinatorID string
