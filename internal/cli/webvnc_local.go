@@ -97,7 +97,7 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 	}
 	defer webListener.Close()
 
-	password, err := readLocalWebVNCPassword(a.input())
+	password, err := readLocalWebVNCPassword(bridgeCtx, a.input())
 	if err != nil {
 		return err
 	}
@@ -159,11 +159,31 @@ func validateLocalWebVNCUsername(username string) error {
 	return nil
 }
 
-func readLocalWebVNCPassword(input io.Reader) (string, error) {
+func readLocalWebVNCPassword(ctx context.Context, input io.Reader) (string, error) {
 	if input == nil {
 		return "", exit(2, "read VNC password from stdin: stdin is unavailable")
 	}
-	data, err := io.ReadAll(io.LimitReader(input, maxLocalWebVNCPasswordBytes+1))
+	if err := context.Cause(ctx); err != nil {
+		return "", err
+	}
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	result := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(input, maxLocalWebVNCPasswordBytes+1))
+		result <- readResult{data: data, err: err}
+	}()
+
+	var data []byte
+	var err error
+	select {
+	case <-ctx.Done():
+		return "", context.Cause(ctx)
+	case read := <-result:
+		data, err = read.data, read.err
+	}
 	if err != nil {
 		return "", exit(2, "read VNC password from stdin: %v", err)
 	}

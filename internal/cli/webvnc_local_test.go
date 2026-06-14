@@ -39,7 +39,7 @@ func TestReadLocalWebVNCPassword(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := readLocalWebVNCPassword(strings.NewReader(tt.input))
+			got, err := readLocalWebVNCPassword(context.Background(), strings.NewReader(tt.input))
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("password=%q, want error", got)
@@ -51,6 +51,43 @@ func TestReadLocalWebVNCPassword(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadLocalWebVNCPasswordStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	input := newBlockingReader()
+	defer close(input.release)
+	result := make(chan error, 1)
+	go func() {
+		_, err := readLocalWebVNCPassword(ctx, input)
+		result <- err
+	}()
+	<-input.started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("password read error=%v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("password read did not stop after cancellation")
+	}
+}
+
+type blockingReader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingReader() *blockingReader {
+	return &blockingReader{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *blockingReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	return 0, io.EOF
 }
 
 func TestExactLocalWebVNCListenerOwnerPID(t *testing.T) {
