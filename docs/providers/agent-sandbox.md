@@ -50,7 +50,7 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
   - `get` on `sandboxes`
   - `get` and `list` on pods
   - `create` on `pods/exec`
-- A sandbox image that provides `/bin/sh`, `bash`, `tar`, and a writable
+- A sandbox image that provides `/bin/sh`, `bash`, `tar`, `cp`, and a writable
   workdir. Crabbox uses `/bin/sh` for transport scripts and `bash -lc` for
   user shell-mode and auto-shell commands.
 
@@ -185,12 +185,15 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
    controller-owned by that exact Sandbox UID. Crabbox pins both downstream UIDs
    and revalidates the full chain immediately before each pod exec, rejecting
    observed deletion, recreation, or redirection before sending source or
-   forwarded values.
+   forwarded values. When `agentSandbox.container` is empty, Crabbox resolves
+   the pod's default container once, pins its name in the local lease, and
+   always passes that exact container to `kubectl exec`.
 4. Unless `--no-sync` is set, Crabbox builds a portable archive from the local
    Git file manifest and extracts it into the configured workdir with
    `kubectl exec`. With `sync.delete: true`, extraction happens in a
-   sibling staging directory and replaces the workdir only after upload and
-   extraction succeed.
+   sibling staging directory and replaces the contents of the workdir only
+   after upload and extraction succeed, without renaming the workdir itself.
+   This remains valid when the workdir is a mounted volume.
 5. The command runs through Kubernetes exec in the sandbox pod. Forwarded
    environment values are exported inside the streamed shell script, not placed
    on the local command line.

@@ -157,9 +157,10 @@ func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namesp
 			f.pods = map[string][]podState{}
 		}
 		f.pods[namespace+"/claim="+obj.Metadata.Name] = []podState{{
-			Name:   podName,
-			UID:    "uid-" + podName,
-			Labels: map[string]string{agentSandboxClaimUIDLabel: created.Metadata.UID},
+			Name:       podName,
+			UID:        "uid-" + podName,
+			Labels:     map[string]string{agentSandboxClaimUIDLabel: created.Metadata.UID},
+			Containers: []string{testPodContainer(obj.Metadata.Annotations[annotationContainer])},
 			OwnerReferences: []ownerReference{{
 				APIVersion: agentSandboxCoreGroupVersion,
 				Kind:       "Sandbox",
@@ -372,6 +373,48 @@ func TestClaimScopeDistinguishesImplicitAndExplicitDefaultContainer(t *testing.T
 	}
 }
 
+func TestClaimIdentityMigratesLegacyImplicitContainerSentinel(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	claim := LeaseClaim{
+		LeaseID:       "asbx_legacy",
+		ProviderScope: claimScope(cfg),
+		Labels: map[string]string{
+			claimLabelClaimUID:  "uid-legacy",
+			claimLabelWarmPool:  "linux-pool",
+			claimLabelContainer: "default",
+		},
+	}
+	identity, err := claimIdentityFromLocalClaim(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Container != "" {
+		t.Fatalf("legacy implicit container=%q", identity.Container)
+	}
+	claim.Labels[claimLabelContainerPinned] = "true"
+	identity, err = claimIdentityFromLocalClaim(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Container != "default" {
+		t.Fatalf("pinned container=%q", identity.Container)
+	}
+	cfg.AgentSandbox.Container = "pending"
+	claim.ProviderScope = claimScope(cfg)
+	delete(claim.Labels, claimLabelContainerPinned)
+	claim.Labels[claimLabelContainer] = "pending"
+	identity, err = claimIdentityFromLocalClaim(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Container != "pending" {
+		t.Fatalf("explicit pending container=%q", identity.Container)
+	}
+}
+
 func TestAuthorizeClaimScopeFailsClosed(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.AgentSandbox.Context = "agent-context"
@@ -414,8 +457,35 @@ func TestSandboxReadinessResolvesClaimSandboxAndPod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ready.SandboxName != "sandbox-a" || ready.PodName != "pod-a" || ready.PodIP != "10.0.0.10" {
+	if ready.SandboxName != "sandbox-a" || ready.PodName != "pod-a" || ready.PodIP != "10.0.0.10" || ready.Container != "default" {
 		t.Fatalf("ready=%#v", ready)
+	}
+}
+
+func TestPodStateCapturesContainerSelectionInputs(t *testing.T) {
+	object := kubernetesObject{
+		Metadata: objectMeta{
+			Name:        "pod-a",
+			Annotations: map[string]string{"kubectl.kubernetes.io/default-container": "worker"},
+		},
+		Spec: map[string]any{
+			"containers": []any{
+				map[string]any{"name": "sidecar"},
+			},
+			"initContainers":      []any{map[string]any{"name": "worker"}},
+			"ephemeralContainers": []any{map[string]any{"name": "debugger"}},
+		},
+	}
+	pod := podStateFromObject(object)
+	if got := pod.Annotations["kubectl.kubernetes.io/default-container"]; got != "worker" {
+		t.Fatalf("default container annotation=%q", got)
+	}
+	if got := strings.Join(pod.Containers, ","); got != "sidecar,worker,debugger" {
+		t.Fatalf("containers=%q", got)
+	}
+	container, err := resolvePodContainer(pod, "")
+	if err != nil || container != "worker" {
+		t.Fatalf("container=%q err=%v", container, err)
 	}
 }
 
@@ -626,6 +696,7 @@ func TestValidateClaimIdentityRejectsLifecycleChange(t *testing.T) {
 func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
 	tests := []struct {
 		name      string
+		prepare   func(*fakeKubernetesClient)
 		mutate    func(*fakeKubernetesClient)
 		wantError string
 	}{
@@ -652,6 +723,21 @@ func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
 			},
 			wantError: "pod identity changed",
 		},
+		{
+			name: "implicit container redirection",
+			prepare: func(fake *fakeKubernetesClient) {
+				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+				pod.Containers = []string{"default", "sidecar"}
+				pod.Annotations = map[string]string{"kubectl.kubernetes.io/default-container": "default"}
+				fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+			},
+			mutate: func(fake *fakeKubernetesClient) {
+				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+				pod.Annotations["kubectl.kubernetes.io/default-container"] = "sidecar"
+				fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+			},
+			wantError: "container changed",
+		},
 	}
 
 	for _, tt := range tests {
@@ -661,6 +747,9 @@ func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
 			cfg.AgentSandbox.Namespace = "sandboxes"
 			cfg.AgentSandbox.WarmPool = "linux-pool"
 			fake := readyFakeClient(cfg)
+			if tt.prepare != nil {
+				tt.prepare(fake)
+			}
 			ready, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg))
 			if err != nil {
 				t.Fatal(err)
@@ -668,6 +757,9 @@ func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
 			backend := &backend{cfg: cfg}
 			if err := backend.execPod(context.Background(), fake, ready, podExecRequest{Command: []string{"true"}}); err != nil {
 				t.Fatal(err)
+			}
+			if fake.execs[0].Container != ready.Container || ready.Container == "" {
+				t.Fatalf("exec container=%q ready=%#v", fake.execs[0].Container, ready)
 			}
 			tt.mutate(fake)
 			err = backend.execPod(context.Background(), fake, ready, podExecRequest{Command: []string{"true"}})
@@ -678,6 +770,33 @@ func TestExecPodRevalidatesPinnedDownstreamUIDs(t *testing.T) {
 				t.Fatalf("replacement reached exec: %#v", fake.execs)
 			}
 		})
+	}
+}
+
+func TestExplicitContainerIgnoresDefaultContainerAnnotation(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	cfg.AgentSandbox.Container = "worker"
+	fake := readyFakeClient(cfg)
+	pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+	pod.Containers = []string{"worker", "sidecar"}
+	pod.Annotations = map[string]string{"kubectl.kubernetes.io/default-container": "sidecar"}
+	fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+	ready, err := sandboxReadinessOnce(context.Background(), fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Container != "worker" {
+		t.Fatalf("ready=%#v", ready)
+	}
+	backend := &backend{cfg: cfg}
+	if err := backend.execPod(context.Background(), fake, ready, podExecRequest{Command: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.execs[0].Container; got != "worker" {
+		t.Fatalf("exec container=%q", got)
 	}
 }
 
@@ -1064,9 +1183,10 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 		rbac: map[string]bool{},
 		pods: map[string][]podState{
 			"sandboxes/app=agent-sandbox": {{
-				Name:   "pod-a",
-				UID:    "uid-pod-a",
-				Labels: map[string]string{agentSandboxClaimUIDLabel: identity.UID},
+				Name:       "pod-a",
+				UID:        "uid-pod-a",
+				Labels:     map[string]string{agentSandboxClaimUIDLabel: identity.UID},
+				Containers: []string{testPodContainer(cfg.AgentSandbox.Container)},
 				OwnerReferences: []ownerReference{{
 					APIVersion: agentSandboxCoreGroupVersion,
 					Kind:       "Sandbox",
@@ -1087,7 +1207,14 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 }
 
 func fakeClaimIdentity(cfg Config) claimIdentity {
-	return claimIdentity{LeaseID: "asbx_test", ProviderScope: claimScope(cfg), UID: "uid-claim-a", WarmPool: cfg.AgentSandbox.WarmPool}
+	return claimIdentity{LeaseID: "asbx_test", ProviderScope: claimScope(cfg), UID: "uid-claim-a", WarmPool: cfg.AgentSandbox.WarmPool, Container: strings.TrimSpace(cfg.AgentSandbox.Container)}
+}
+
+func testPodContainer(configured string) string {
+	if configured = strings.TrimSpace(configured); configured != "" && configured != "default" {
+		return configured
+	}
+	return "default"
 }
 
 func TestMain(m *testing.M) {

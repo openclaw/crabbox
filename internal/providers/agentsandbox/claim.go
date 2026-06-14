@@ -21,15 +21,16 @@ const (
 	annotationWorkdir   = "crabbox.dev/workdir"
 	annotationContainer = "crabbox.dev/container"
 
-	claimLabelClaimName   = "claim"
-	claimLabelClaimUID    = "claim_uid"
-	claimLabelSandboxName = "sandbox"
-	claimLabelPodName     = "pod"
-	claimLabelNamespace   = "namespace"
-	claimLabelWarmPool    = "warm_pool"
-	claimLabelContainer   = "container"
-	claimLabelWorkdir     = "workdir"
-	claimLabelExpiresAt   = "expires_at"
+	claimLabelClaimName       = "claim"
+	claimLabelClaimUID        = "claim_uid"
+	claimLabelSandboxName     = "sandbox"
+	claimLabelPodName         = "pod"
+	claimLabelNamespace       = "namespace"
+	claimLabelWarmPool        = "warm_pool"
+	claimLabelContainer       = "container"
+	claimLabelContainerPinned = "container_pinned"
+	claimLabelWorkdir         = "workdir"
+	claimLabelExpiresAt       = "expires_at"
 )
 
 type claimIdentity struct {
@@ -38,6 +39,7 @@ type claimIdentity struct {
 	UID           string
 	WarmPool      string
 	ExpiresAt     string
+	Container     string
 }
 
 var dns1123LabelPattern = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -153,27 +155,35 @@ func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {
 }
 
 func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, claimName, expiresAt string) map[string]string {
-	container := strings.TrimSpace(cfg.AgentSandbox.Container)
+	container := strings.TrimSpace(ready.Container)
 	if container == "" {
-		container = "default"
+		container = strings.TrimSpace(cfg.AgentSandbox.Container)
+	}
+	if container == "" {
+		container = "pending"
+	}
+	containerPinned := "false"
+	if ready.Container != "" {
+		containerPinned = "true"
 	}
 	state := statusViewReady
 	if ready.SandboxName == "" || ready.PodName == "" {
 		state = "not-ready"
 	}
 	labels := map[string]string{
-		"provider":            providerName,
-		"lease":               leaseID,
-		claimLabelClaimName:   claimName,
-		claimLabelClaimUID:    ready.ClaimUID,
-		claimLabelSandboxName: ready.SandboxName,
-		claimLabelPodName:     ready.PodName,
-		claimLabelNamespace:   cfg.AgentSandbox.Namespace,
-		claimLabelWarmPool:    cfg.AgentSandbox.WarmPool,
-		claimLabelContainer:   container,
-		claimLabelWorkdir:     cfg.AgentSandbox.Workdir,
-		"target":              targetLinux,
-		"state":               state,
+		"provider":                providerName,
+		"lease":                   leaseID,
+		claimLabelClaimName:       claimName,
+		claimLabelClaimUID:        ready.ClaimUID,
+		claimLabelSandboxName:     ready.SandboxName,
+		claimLabelPodName:         ready.PodName,
+		claimLabelNamespace:       cfg.AgentSandbox.Namespace,
+		claimLabelWarmPool:        cfg.AgentSandbox.WarmPool,
+		claimLabelContainer:       container,
+		claimLabelContainerPinned: containerPinned,
+		claimLabelWorkdir:         cfg.AgentSandbox.Workdir,
+		"target":                  targetLinux,
+		"state":                   state,
 	}
 	if expiresAt != "" {
 		labels[claimLabelExpiresAt] = expiresAt
@@ -181,14 +191,28 @@ func claimMetadataLabels(cfg Config, leaseID string, ready sandboxReadiness, cla
 	return labels
 }
 
+func claimReadinessLabels(labels map[string]string, ready sandboxReadiness) map[string]string {
+	updated := cloneStringMap(labels)
+	updated[claimLabelSandboxName] = ready.SandboxName
+	updated[claimLabelPodName] = ready.PodName
+	updated[claimLabelContainer] = ready.Container
+	updated[claimLabelContainerPinned] = "true"
+	updated["state"] = statusViewReady
+	return updated
+}
+
 func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
 	uid := ""
 	warmPool := ""
 	expiresAt := ""
+	container := ""
+	containerPinned := false
 	if claim.Labels != nil {
 		uid = strings.TrimSpace(claim.Labels[claimLabelClaimUID])
 		warmPool = strings.TrimSpace(claim.Labels[claimLabelWarmPool])
 		expiresAt = strings.TrimSpace(claim.Labels[claimLabelExpiresAt])
+		container = strings.TrimSpace(claim.Labels[claimLabelContainer])
+		containerPinned = strings.EqualFold(strings.TrimSpace(claim.Labels[claimLabelContainerPinned]), "true")
 	}
 	if uid == "" {
 		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned Kubernetes claim UID", claim.LeaseID)
@@ -196,7 +220,10 @@ func claimIdentityFromLocalClaim(claim LeaseClaim) (claimIdentity, error) {
 	if warmPool == "" {
 		return claimIdentity{}, exit(4, "agent-sandbox lease %s has no pinned SandboxWarmPool", claim.LeaseID)
 	}
-	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid, WarmPool: warmPool, ExpiresAt: expiresAt}, nil
+	if !containerPinned && strings.Contains(claim.ProviderScope, "containerMode:implicit|") {
+		container = ""
+	}
+	return claimIdentity{LeaseID: claim.LeaseID, ProviderScope: claim.ProviderScope, UID: uid, WarmPool: warmPool, ExpiresAt: expiresAt, Container: container}, nil
 }
 
 func authorizeClaimScope(cfg Config, claim LeaseClaim) error {

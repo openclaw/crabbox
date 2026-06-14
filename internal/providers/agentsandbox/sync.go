@@ -81,11 +81,10 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 		return nil, 0, exit(6, "rewind sync archive: %v", err)
 	}
 	if err := b.execPod(syncCtx, client, ready, podExecRequest{
-		Container: b.cfg.AgentSandbox.Container,
-		Command:   []string{"tar", "-xzf", "-", "-C", extractDir},
-		Stdin:     archive,
-		Stdout:    b.rt.Stdout,
-		Stderr:    b.rt.Stderr,
+		Command: []string{"tar", "-xzf", "-", "-C", extractDir},
+		Stdin:   archive,
+		Stdout:  b.rt.Stdout,
+		Stderr:  b.rt.Stderr,
 	}); err != nil {
 		if code, ok := remoteExitStatus(err); ok {
 			return nil, 0, exit(code, "agent-sandbox tar extract exited %d", code)
@@ -130,20 +129,45 @@ func checkAgentSandboxSyncPreflight(manifest SyncManifest, cfg Config, force boo
 }
 
 func (b *backend) replaceWorkspace(ctx context.Context, client kubernetesClient, ready sandboxReadiness, stagingDir, workdir string) error {
-	backupDir := stagingDir + ".previous"
-	command := "rm -rf " + shellQuote(backupDir) +
-		" && if [ -e " + shellQuote(workdir) + " ]; then mv " + shellQuote(workdir) + " " + shellQuote(backupDir) + "; fi" +
-		" && if mv " + shellQuote(stagingDir) + " " + shellQuote(workdir) +
-		"; then exit 0" +
-		"; else rc=$?; if [ -e " + shellQuote(backupDir) + " ]; then mv " + shellQuote(backupDir) + " " + shellQuote(workdir) +
-		"; fi; exit \"$rc\"; fi"
-	if err := b.execShell(ctx, client, ready, command); err != nil {
+	command := agentSandboxMountReplaceCommand(stagingDir, workdir)
+	if err := b.execShell(ctx, client, ready, "bash -lc "+shellQuote(command)); err != nil {
 		return err
 	}
-	if err := b.execShell(ctx, client, ready, "rm -rf "+shellQuote(backupDir)); err != nil {
-		fmt.Fprintf(b.rt.Stderr, "warning: agent-sandbox previous workspace cleanup failed path=%s: %v\n", backupDir, err)
+	backupDir := agentSandboxBackupDir(stagingDir, workdir)
+	cleanupCtx, cleanupCancel := b.cleanupContext(ctx)
+	defer cleanupCancel()
+	if err := b.execShell(cleanupCtx, client, ready, "rm -rf "+shellQuote(backupDir)+" "+shellQuote(stagingDir)); err != nil {
+		return fmt.Errorf("agent-sandbox replaced workspace but could not remove backup %s: %w", backupDir, err)
 	}
 	return nil
+}
+
+func agentSandboxMountReplaceCommand(stagingDir, workdir string) string {
+	backupDir := agentSandboxBackupDir(stagingDir, workdir)
+	workdirGlob := shellQuote(workdir) + "/*"
+	backupGlob := shellQuote(backupDir) + "/*"
+	stagingGlob := shellQuote(stagingDir) + "/*"
+	rollback := "rollback() { original_rc=$?; trap - EXIT HUP INT TERM; rollback_rc=0; " +
+		"if [ \"$copy_started\" -eq 1 ]; then for entry in " + workdirGlob + "; do " +
+		"if [ \"$entry\" != " + shellQuote(backupDir) + " ]; then rm -rf -- \"$entry\" || rollback_rc=$?; fi; done; fi; " +
+		"if [ \"$rollback_rc\" -eq 0 ]; then for entry in " + backupGlob + "; do " +
+		"mv -- \"$entry\" " + shellQuote(workdir+"/") + " || { rollback_rc=$?; break; }; done; fi; " +
+		"if [ \"$rollback_rc\" -eq 0 ]; then rmdir " + shellQuote(backupDir) + " || rollback_rc=$?; fi; " +
+		"if [ \"$rollback_rc\" -ne 0 ]; then exit \"$rollback_rc\"; fi; exit \"$original_rc\"; }"
+	return "shopt -s dotglob nullglob; copy_started=0; " + rollback +
+		"; mkdir -p " + shellQuote(workdir) +
+		" && rm -rf " + shellQuote(backupDir) +
+		" && mkdir -p " + shellQuote(backupDir) +
+		" && trap rollback EXIT HUP INT TERM" +
+		" && for entry in " + workdirGlob + "; do " +
+		"if [ \"$entry\" != " + shellQuote(backupDir) + " ]; then mv -- \"$entry\" " + shellQuote(backupDir+"/") + " || exit 1; fi; done" +
+		" && copy_started=1" +
+		" && for entry in " + stagingGlob + "; do cp -a -- \"$entry\" " + shellQuote(workdir+"/") + " || exit 1; done" +
+		" && trap - EXIT HUP INT TERM"
+}
+
+func agentSandboxBackupDir(stagingDir, workdir string) string {
+	return path.Join(workdir, path.Base(stagingDir)+".previous")
 }
 
 func randomSuffix() string {

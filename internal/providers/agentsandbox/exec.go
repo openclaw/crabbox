@@ -35,10 +35,9 @@ func (b *backend) execShell(ctx context.Context, client kubernetesClient, ready 
 	execCtx, cancel := b.execContext(ctx)
 	defer cancel()
 	if err := b.execPod(execCtx, client, ready, podExecRequest{
-		Container: strings.TrimSpace(b.cfg.AgentSandbox.Container),
-		Command:   []string{"sh", "-lc", command},
-		Stdout:    b.rt.Stdout,
-		Stderr:    b.rt.Stderr,
+		Command: []string{"sh", "-lc", command},
+		Stdout:  b.rt.Stdout,
+		Stderr:  b.rt.Stderr,
 	}); err != nil {
 		if code, ok := remoteExitStatus(err); ok {
 			return exit(code, "agent-sandbox exec %q exited %d", command, code)
@@ -60,11 +59,10 @@ func (b *backend) runCommand(ctx context.Context, client kubernetesClient, ready
 	execCtx, cancel := b.execContext(ctx)
 	defer cancel()
 	err = b.execPod(execCtx, client, ready, podExecRequest{
-		Container: strings.TrimSpace(b.cfg.AgentSandbox.Container),
-		Command:   []string{"sh", "-s"},
-		Stdin:     strings.NewReader(script),
-		Stdout:    b.rt.Stdout,
-		Stderr:    b.rt.Stderr,
+		Command: []string{"sh", "-s"},
+		Stdin:   strings.NewReader(script),
+		Stdout:  b.rt.Stdout,
+		Stderr:  b.rt.Stderr,
 	})
 	if err == nil {
 		return 0, nil
@@ -81,6 +79,7 @@ func (b *backend) execPod(ctx context.Context, client kubernetesClient, ready sa
 	}
 	req.Namespace = b.cfg.AgentSandbox.Namespace
 	req.Pod = ready.PodName
+	req.Container = ready.Container
 	return client.Exec(ctx, req)
 }
 

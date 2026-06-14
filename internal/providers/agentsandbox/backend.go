@@ -170,7 +170,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err != nil {
 			return RunResult{}, err
 		}
-		claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claim.Labels)
+		claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claimReadinessLabels(claim.Labels, ready))
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -686,6 +686,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		UID:           strings.TrimSpace(created.Metadata.UID),
 		WarmPool:      b.cfg.AgentSandbox.WarmPool,
 		ExpiresAt:     expiresAt,
+		Container:     strings.TrimSpace(b.cfg.AgentSandbox.Container),
 	}
 	pending := sandboxReadiness{ClaimName: claimResourceName, ClaimUID: identity.UID}
 	pendingClaim, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimResourceName, expiresAt)
@@ -758,6 +759,7 @@ func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesCl
 				UID:           strings.TrimSpace(live.Metadata.UID),
 				WarmPool:      b.cfg.AgentSandbox.WarmPool,
 				ExpiresAt:     expiresAt,
+				Container:     strings.TrimSpace(b.cfg.AgentSandbox.Container),
 			}
 			if identity.UID == "" {
 				return nil, errors.Join(cause, exit(4, "reconciled agent-sandbox claim %s has no Kubernetes UID", claimName))

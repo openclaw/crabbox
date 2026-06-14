@@ -604,10 +604,22 @@ func podStateFromObject(object kubernetesObject) podState {
 		Name:            object.Metadata.Name,
 		UID:             object.Metadata.UID,
 		Labels:          cloneStringMap(object.Metadata.Labels),
+		Annotations:     cloneStringMap(object.Metadata.Annotations),
 		OwnerReferences: append([]ownerReference(nil), object.Metadata.OwnerReferences...),
 		Phase:           object.Status.Phase,
 		PodIP:           object.Status.PodIP,
 		Conditions:      append([]conditionState(nil), object.Status.Conditions...),
+	}
+	for _, field := range []string{"containers", "initContainers", "ephemeralContainers"} {
+		if containers, ok := object.Spec[field].([]any); ok {
+			for _, item := range containers {
+				container, _ := item.(map[string]any)
+				name, _ := container["name"].(string)
+				if name = strings.TrimSpace(name); name != "" {
+					state.Containers = append(state.Containers, name)
+				}
+			}
+		}
 	}
 	for _, condition := range state.Conditions {
 		if condition.Type == "Ready" && condition.Status == "True" {
@@ -622,7 +634,9 @@ type podState struct {
 	Name            string
 	UID             string
 	Labels          map[string]string
+	Annotations     map[string]string
 	OwnerReferences []ownerReference
+	Containers      []string
 	Phase           string
 	PodIP           string
 	Ready           bool
@@ -649,6 +663,7 @@ type sandboxReadiness struct {
 	PodName     string
 	PodUID      string
 	PodIP       string
+	Container   string
 	identity    claimIdentity
 }
 
@@ -721,7 +736,11 @@ func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, names
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	return newSandboxReadiness(resource, pod, identity), nil
+	container, err := resolvePodContainer(pod, identity.Container)
+	if err != nil {
+		return sandboxReadiness{}, err
+	}
+	return newSandboxReadiness(resource, pod, identity, container), nil
 }
 
 func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, sandboxTimeout, podTimeout, poll time.Duration) (sandboxReadiness, error) {
@@ -745,7 +764,11 @@ func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesC
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	return newSandboxReadiness(resource, pod, identity), nil
+	container, err := resolvePodContainer(pod, identity.Container)
+	if err != nil {
+		return sandboxReadiness{}, err
+	}
+	return newSandboxReadiness(resource, pod, identity, container), nil
 }
 
 func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, poll time.Duration) (sandboxResourceReadiness, error) {
@@ -868,7 +891,11 @@ func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespac
 	if err := podReady(pod); err != nil {
 		return sandboxReadiness{}, err
 	}
-	return newSandboxReadiness(resource, pod, identity), nil
+	container, err := resolvePodContainer(pod, identity.Container)
+	if err != nil {
+		return sandboxReadiness{}, err
+	}
+	return newSandboxReadiness(resource, pod, identity, container), nil
 }
 
 func podReady(pod podState) error {
@@ -888,7 +915,26 @@ func podReady(pod podState) error {
 	return fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
 }
 
-func newSandboxReadiness(resource sandboxResourceReadiness, pod podState, identity claimIdentity) sandboxReadiness {
+func resolvePodContainer(pod podState, pinned string) (string, error) {
+	selected := strings.TrimSpace(pinned)
+	if selected == "" {
+		selected = strings.TrimSpace(pod.Annotations["kubectl.kubernetes.io/default-container"])
+	}
+	if selected == "" && len(pod.Containers) > 0 {
+		selected = pod.Containers[0]
+	}
+	if selected == "" {
+		return "", resourceIdentityError{err: exit(4, "agent-sandbox pod %s has no selectable container", pod.Name)}
+	}
+	for _, container := range pod.Containers {
+		if container == selected {
+			return selected, nil
+		}
+	}
+	return "", resourceIdentityError{err: exit(4, "agent-sandbox pod %s does not contain pinned container %s", pod.Name, selected)}
+}
+
+func newSandboxReadiness(resource sandboxResourceReadiness, pod podState, identity claimIdentity, container string) sandboxReadiness {
 	return sandboxReadiness{
 		ClaimName:   resource.ClaimName,
 		ClaimUID:    identity.UID,
@@ -897,6 +943,7 @@ func newSandboxReadiness(resource sandboxResourceReadiness, pod podState, identi
 		PodName:     pod.Name,
 		PodUID:      pod.UID,
 		PodIP:       pod.PodIP,
+		Container:   container,
 		identity:    identity,
 	}
 }
@@ -924,6 +971,14 @@ func revalidateSandboxReadiness(ctx context.Context, client kubernetesClient, na
 			expected.PodUID,
 			current.PodName,
 			current.PodUID,
+		)}
+	}
+	if current.Container != expected.Container {
+		return resourceIdentityError{err: exit(
+			4,
+			"agent-sandbox pod container changed from %s to %s",
+			expected.Container,
+			current.Container,
 		)}
 	}
 	return nil
