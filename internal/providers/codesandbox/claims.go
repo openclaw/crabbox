@@ -139,7 +139,10 @@ func validateCodeSandboxSandboxOwnership(claim LeaseClaim, sb SandboxSummary) er
 			break
 		}
 	}
-	if remoteScope != "" && remoteScope != claim.ProviderScope {
+	if remoteScope == "" {
+		return exit(4, "codesandbox sandbox %q is missing its Crabbox ownership tag", sb.ID)
+	}
+	if remoteScope != claim.ProviderScope {
 		return exit(4, "codesandbox sandbox %q ownership tag does not match its local claim", sb.ID)
 	}
 	return nil

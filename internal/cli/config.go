@@ -4548,10 +4548,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.CodeSandbox.AutomaticWakeupWebSocket != nil {
 			cfg.CodeSandbox.AutomaticWakeupWebSocket = *file.CodeSandbox.AutomaticWakeupWebSocket
 		}
-		if file.CodeSandbox.BridgeCommand != nil {
+		if trusted && file.CodeSandbox.BridgeCommand != nil {
 			cfg.CodeSandbox.BridgeCommand = *file.CodeSandbox.BridgeCommand
 		}
-		if file.CodeSandbox.SDKPackage != nil {
+		if trusted && file.CodeSandbox.SDKPackage != nil {
 			cfg.CodeSandbox.SDKPackage = *file.CodeSandbox.SDKPackage
 		}
 		if file.CodeSandbox.DoctorListLimit != nil {

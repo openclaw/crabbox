@@ -73,6 +73,25 @@ func TestStopRejectsOwnershipMismatchBeforeDelete(t *testing.T) {
 	}
 }
 
+func TestStopRejectsMissingOwnershipTagBeforeDelete(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	backend, _, _ := newFakeBackend(t, fake)
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Tags = []string{codeSandboxClaimTag}
+
+	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "missing its Crabbox ownership tag") {
+		t.Fatalf("Stop err=%v, want missing ownership tag rejection", err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%v, want no delete", fake.deleted)
+	}
+}
+
 func TestPauseResumeUseSDKLifecycleAndKeepClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeCodeSandboxAPI()

@@ -200,8 +200,8 @@ async function createSandbox(sdk) {
   return await callAny(sandboxes, ["create", "createSandbox"], options);
 }
 async function runCommand(sandbox) {
-  const command = Array.isArray(req.command) ? req.command.filter((v) => String(v || "") !== "") : [];
-  if (!command.length) throw new Error("missing command");
+  const command = Array.isArray(req.command) ? req.command.map((v) => String(v ?? "")) : [];
+  if (!command.length || command[0] === "") throw new Error("missing command");
   const cwd = req.cwd || "/project/workspace";
   const env = req.env || {};
   const timeout = Number(req.timeout || 0) || undefined;

@@ -97,6 +97,12 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 	if !strings.Contains(codeSandboxBridgeScript, "expiresAt: new Date") {
 		t.Fatalf("bridge script must create CodeSandbox host tokens with an expiry")
 	}
+	if strings.Contains(codeSandboxBridgeScript, "req.command.filter") {
+		t.Fatalf("bridge script must preserve empty command arguments after the executable")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "command.map((v) => String(v ?? \"\"))") {
+		t.Fatalf("bridge script must normalize command arguments without dropping empty strings")
+	}
 }
 
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {

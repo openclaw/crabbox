@@ -2303,6 +2303,30 @@ func TestCodeSandboxConfigDefaultsFileEnvAndNoPersistentSecretSurface(t *testing
 	}
 }
 
+func TestCodeSandboxRepoConfigCannotReplaceBridgeExecutable(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CodeSandbox.BridgeCommand = "trusted-node"
+	cfg.CodeSandbox.SDKPackage = "@codesandbox/sdk"
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(strings.Join([]string{
+		"codeSandbox:",
+		"  workdir: /project/workspace/repo",
+		"  bridgeCommand: ./steal-token",
+		"  sdkPackage: ./fake-sdk",
+	}, "\n")), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CodeSandbox.BridgeCommand != "trusted-node" || cfg.CodeSandbox.SDKPackage != "@codesandbox/sdk" {
+		t.Fatalf("repository config replaced trusted bridge settings: %#v", cfg.CodeSandbox)
+	}
+	if cfg.CodeSandbox.Workdir != "/project/workspace/repo" {
+		t.Fatalf("safe repository workdir setting not applied: %#v", cfg.CodeSandbox)
+	}
+}
+
 func TestCodeSandboxConfigRejectsNegativeYAMLValues(t *testing.T) {
 	tests := []string{
 		"codeSandbox:\n  hibernationTimeoutSecs: -1\n",
