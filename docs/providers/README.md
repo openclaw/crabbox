@@ -145,23 +145,14 @@ Access terms:
   (`provider: azure`) and the delegated `azure-dynamic-sessions` provider
   (Azure Container Apps dynamic sessions). They share the `azure` family but are
   distinct adapters.
-<<<<<<< HEAD
 - The Cloudflare family ships three delegated backends: `cloudflare` for
   Cloudflare Containers and Linux commands, `cloudflare-dynamic-workers` for
   Worker-runtime module execution, and `cloudflare-sandbox` for Cloudflare
   Sandbox bridge-backed Linux command execution. They are separate providers
   with separate runner configs and token env vars.
-- Tensorlake is Crabbox's Firecracker-backed delegated provider; Crabbox does
-  not provision raw Firecracker instances directly.
-=======
-- The Cloudflare family ships two delegated backends: `cloudflare` for
-  Cloudflare Containers and Linux commands, and `cloudflare-dynamic-workers` for
-  Worker-runtime module execution. They are separate providers with separate
-  runner configs and token env vars.
 - Tensorlake is Crabbox's Firecracker-backed delegated provider. The separate
   `firecracker` provider is the self-hosted Linux KVM surface; in this worktree
   it currently stops at config rendering and read-only doctor checks.
->>>>>>> 364ab66f (docs(firecracker): document readiness and smoke helper)
 - Docker Sandbox is a delegated-run provider driven by the standalone `sbx`
   CLI. It has no aliases, so `docker`, `container`, and `local-docker` remain
   Local Container aliases.

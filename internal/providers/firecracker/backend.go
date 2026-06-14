@@ -2,13 +2,18 @@ package firecracker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type Config = core.Config
@@ -26,7 +31,9 @@ type ReleaseLeaseRequest = core.ReleaseLeaseRequest
 type TouchRequest = core.TouchRequest
 type CleanupRequest = core.CleanupRequest
 type LeaseTarget = core.LeaseTarget
+type LeaseClaim = core.LeaseClaim
 type Server = core.Server
+type SSHTarget = core.SSHTarget
 
 const (
 	providerName           = "firecracker"
@@ -39,17 +46,34 @@ var (
 	firecrackerHostGOOS = runtime.GOOS
 	firecrackerLookPath = exec.LookPath
 	firecrackerStat     = os.Stat
+	ensureTestboxKey    = core.EnsureTestboxKeyForConfig
+	removeTestboxKey    = core.RemoveStoredTestboxKey
 )
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec           ProviderSpec
+	cfg            Config
+	rt             Runtime
+	stateRoot      func() (string, error)
+	machines       machineFactory
+	processes      processManager
+	waitForSSH     func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	cleanupNetwork func(context.Context, leaseStateRecord) error
 }
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	applyDefaults(&cfg)
-	return &backend{spec: spec, cfg: cfg, rt: rt}
+	b := &backend{
+		spec:           spec,
+		cfg:            cfg,
+		rt:             rt,
+		machines:       sdkMachineFactory{LogWriter: rt.Stderr},
+		processes:      localProcessManager{},
+		waitForSSH:     core.WaitForSSHReady,
+		cleanupNetwork: cleanupFirecrackerNetwork,
+	}
+	b.stateRoot = b.firecrackerStateRoot
+	return b
 }
 
 func applyDefaults(cfg *Config) {
@@ -128,31 +152,307 @@ func validateConfig(cfg Config) error {
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
-func (b *backend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
-	return LeaseTarget{}, unsupportedLifecycle("acquire")
+func (b *backend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	core.UseStoredTestboxKey(&target.SSH, leaseID)
+	return nil
 }
 
-func (b *backend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
-	return LeaseTarget{}, unsupportedLifecycle("resolve")
+func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.rt, req.Keep, func() (LeaseTarget, error) {
+		return b.acquireOnce(ctx, req)
+	})
 }
 
-func (b *backend) List(context.Context, ListRequest) ([]LeaseView, error) {
-	return nil, unsupportedLifecycle("list")
+func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	cfg := b.configForRun()
+	if err := requireLifecycleHost(); err != nil {
+		return LeaseTarget{}, err
+	}
+	if jailer := strings.TrimSpace(cfg.Firecracker.Jailer); jailer != "" {
+		return LeaseTarget{}, exit(2, "provider=firecracker does not support firecracker.jailer yet")
+	}
+
+	servers, err := b.listServers(cfg)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	leaseID := core.NewLeaseID()
+	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	name := core.LeaseProviderName(leaseID, slug)
+	now := b.currentTime().UTC()
+	paths, err := b.ensureLeaseDir(leaseID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+
+	keyPath, publicKey, err := ensureTestboxKey(cfg, leaseID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	cleanupKey := true
+	defer func() {
+		if cleanupKey {
+			removeTestboxKey(leaseID)
+		}
+	}()
+	cfg.SSHKey = keyPath
+	payload, err := buildCloudInitPayload(cfg, leaseID, slug, publicKey)
+	if err != nil {
+		_ = b.removeStateDir(leaseStateRecord{LeaseID: leaseID})
+		return LeaseTarget{}, err
+	}
+
+	if err := prepareWritableRootFS(cfg.Firecracker.RootFS, paths.RootFS, cfg.Firecracker.DiskMiB); err != nil {
+		_ = b.removeStateDir(leaseStateRecord{LeaseID: leaseID})
+		return LeaseTarget{}, err
+	}
+	if err := writeCloudInitDrive(paths.CloudInit, payload); err != nil {
+		_ = b.removeStateDir(leaseStateRecord{LeaseID: leaseID})
+		return LeaseTarget{}, err
+	}
+
+	labels := core.TouchDirectLeaseLabels(core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, now), cfg, "provisioning", now)
+	labels["instance"] = name
+	labels["vmid"] = name
+	labels["ssh_user"] = cfg.Firecracker.User
+	labels["ssh_port"] = cfg.SSHPort
+	labels["work_root"] = cfg.Firecracker.WorkRoot
+	labels["network"] = firecrackerNetworkCNI
+	labels["cni_network"] = cfg.Firecracker.CNINetwork
+
+	record := leaseStateRecord{
+		LeaseID:         leaseID,
+		Slug:            slug,
+		Name:            name,
+		VMID:            name,
+		StateDir:        paths.Dir,
+		SocketPath:      paths.Socket,
+		LogPath:         paths.Log,
+		RootFSPath:      paths.RootFS,
+		CloudInitPath:   paths.CloudInit,
+		NetNSPath:       paths.NetNS,
+		CNICacheDir:     paths.CNICache,
+		SSHUser:         cfg.Firecracker.User,
+		SSHPort:         cfg.SSHPort,
+		BinaryPath:      cfg.Firecracker.Binary,
+		KernelPath:      cfg.Firecracker.Kernel,
+		SourceRootFS:    cfg.Firecracker.RootFS,
+		CNINetwork:      cfg.Firecracker.CNINetwork,
+		CNIConfDir:      cfg.Firecracker.CNIConfDir,
+		CNIBinDir:       cfg.Firecracker.CNIBinDir,
+		DeleteOnRelease: cfg.Firecracker.DeleteOnRelease,
+		Labels:          cloneLabels(labels),
+		CreatedAt:       now.Format(time.RFC3339Nano),
+		UpdatedAt:       now.Format(time.RFC3339Nano),
+	}
+	if err := b.writeStateRecord(record); err != nil {
+		_ = b.removeStateDir(record)
+		return LeaseTarget{}, err
+	}
+
+	vm, err := b.machines.New(ctx, machineLaunchConfig{
+		BinaryPath:    cfg.Firecracker.Binary,
+		SocketPath:    record.SocketPath,
+		LogPath:       record.LogPath,
+		KernelPath:    cfg.Firecracker.Kernel,
+		KernelArgs:    firecrackerDefaultKernelArgs,
+		RootFSPath:    record.RootFSPath,
+		CloudInitPath: record.CloudInitPath,
+		VMID:          record.VMID,
+		NetNSPath:     record.NetNSPath,
+		CNINetwork:    record.CNINetwork,
+		CNIConfDir:    record.CNIConfDir,
+		CNIBinDir:     record.CNIBinDir,
+		CNICacheDir:   record.CNICacheDir,
+		CPUs:          cfg.Firecracker.CPUs,
+		MemoryMiB:     cfg.Firecracker.MemoryMiB,
+	})
+	if err != nil {
+		_ = b.removeStateDir(record)
+		return LeaseTarget{}, err
+	}
+	rollback := func(cause error) error {
+		return b.rollbackAcquire(record, vm, cause)
+	}
+
+	if err := vm.Start(context.WithoutCancel(ctx)); err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+
+	identity, err := b.processes.Capture(vm.PID())
+	if err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+	record.PID = identity.PID
+	record.ProcessStarted = identity.Started
+	record.BootID = identity.BootID
+	record.Labels = core.TouchDirectLeaseLabels(record.Labels, cfg, "running", b.currentTime().UTC())
+	record.UpdatedAt = b.currentTime().UTC().Format(time.RFC3339Nano)
+	if err := b.writeStateRecord(record); err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+
+	guestIP := vm.GuestIP()
+	if strings.TrimSpace(guestIP) == "" {
+		return LeaseTarget{}, rollback(exit(5, "firecracker lease %s did not report a guest IP from CNI", leaseID))
+	}
+	record.GuestIP = guestIP
+	target, err := b.targetFromRecord(cfg, record)
+	if err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+	if err := b.waitForSSH(ctx, &target, b.rt.Stderr, "bootstrap", cfg.Firecracker.LaunchTimeout); err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+
+	record.Labels = core.TouchDirectLeaseLabels(record.Labels, cfg, "ready", b.currentTime().UTC())
+	record.UpdatedAt = b.currentTime().UTC().Format(time.RFC3339Nano)
+	if err := b.writeStateRecord(record); err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+	server := b.serverFromRecord(cfg, record, true)
+	if err := b.claimLeaseTarget(cfg, leaseID, slug, req.Repo.Root, req.Reclaim, server, target); err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+
+	cleanupKey = false
+	fmt.Fprintf(b.rt.Stderr, "provisioned provider=%s lease=%s vmid=%s ip=%s\n", providerName, leaseID, name, guestIP)
+	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
-	return unsupportedLifecycle("release")
+func (b *backend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	cfg := b.configForRun()
+	record, found, err := b.recordByIdentifier(cfg, req.ID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !found {
+		claim, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		if !ok {
+			return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+		}
+		if req.ReleaseOnly {
+			return LeaseTarget{Server: serverFromClaim(cfg, claim), LeaseID: claim.LeaseID}, nil
+		}
+		return LeaseTarget{}, exit(4, "firecracker lease %q has a stale local claim but no local state; run `crabbox cleanup --provider firecracker`", req.ID)
+	}
+
+	running := b.processes.Matches(record.processIdentity())
+	server := b.serverFromRecord(cfg, record, running)
+	if req.ReleaseOnly {
+		return LeaseTarget{Server: server, LeaseID: record.LeaseID}, nil
+	}
+	if !running {
+		if req.StatusOnly {
+			return LeaseTarget{Server: server, LeaseID: record.LeaseID}, nil
+		}
+		return LeaseTarget{}, exit(5, "firecracker lease %s is not running; use `crabbox stop --provider firecracker %s` or `crabbox cleanup --provider firecracker`", blankIfEmpty(record.Name), req.ID)
+	}
+	if strings.TrimSpace(record.GuestIP) == "" && req.StatusOnly {
+		return LeaseTarget{Server: server, LeaseID: record.LeaseID}, nil
+	}
+	target, err := b.targetFromRecord(cfg, record)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	lease := LeaseTarget{Server: server, SSH: target, LeaseID: record.LeaseID}
+	if req.Repo.Root != "" {
+		if err := b.claimLeaseTarget(cfg, record.LeaseID, record.Slug, req.Repo.Root, req.Reclaim, server, target); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	return lease, nil
 }
 
-func (b *backend) Cleanup(context.Context, CleanupRequest) error {
-	return unsupportedLifecycle("cleanup")
+func (b *backend) List(_ context.Context, _ ListRequest) ([]LeaseView, error) {
+	cfg := b.configForRun()
+	records, err := b.listStateRecords()
+	if err != nil {
+		return nil, err
+	}
+	views := make([]LeaseView, 0, len(records))
+	for _, record := range records {
+		views = append(views, b.serverFromRecord(cfg, record, b.processes.Matches(record.processIdentity())))
+	}
+	return views, nil
 }
 
-func unsupportedLifecycle(operation string) error {
-	return core.Exit(2, "provider=firecracker %s is not implemented yet; PLAN-01 only ships the provider contract and read-only doctor checks", operation)
+func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	cfg := b.configForRun()
+	record, found, err := b.releaseRecordForLease(cfg, req.Lease)
+	if err != nil {
+		return err
+	}
+	leaseID := firstNonBlank(req.Lease.LeaseID, req.Lease.Server.Labels["lease"])
+	if !found {
+		if strings.TrimSpace(leaseID) != "" {
+			core.RemoveLeaseClaim(leaseID)
+			removeTestboxKey(leaseID)
+			return nil
+		}
+		return exit(2, "provider=%s release requires a lease id or firecracker instance name", providerName)
+	}
+	if err := b.releaseStateRecord(ctx, cfg, record, record.DeleteOnRelease); err != nil {
+		return err
+	}
+	core.RemoveLeaseClaim(record.LeaseID)
+	removeTestboxKey(record.LeaseID)
+	return nil
+}
+
+func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+	cfg := b.configForRun()
+	records, err := b.listStateRecords()
+	if err != nil {
+		return err
+	}
+	claims, err := firecrackerClaims()
+	if err != nil {
+		return err
+	}
+	stateLeaseIDs := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		stateLeaseIDs[record.LeaseID] = struct{}{}
+		server := b.serverFromRecord(cfg, record, b.processes.Matches(record.processIdentity()))
+		shouldDelete, reason := b.shouldCleanupRecord(server, record)
+		if !shouldDelete {
+			fmt.Fprintf(b.rt.Stderr, "skip firecracker lease=%s vmid=%s reason=%s\n", record.LeaseID, blankIfEmpty(record.VMID), reason)
+			continue
+		}
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would remove firecracker lease=%s vmid=%s reason=%s\n", record.LeaseID, blankIfEmpty(record.VMID), reason)
+			continue
+		}
+		fmt.Fprintf(b.rt.Stdout, "remove firecracker lease=%s vmid=%s reason=%s\n", record.LeaseID, blankIfEmpty(record.VMID), reason)
+		if err := b.releaseStateRecord(ctx, cfg, record, true); err != nil {
+			return err
+		}
+		core.RemoveLeaseClaim(record.LeaseID)
+		removeTestboxKey(record.LeaseID)
+	}
+	for leaseID, claim := range claims {
+		if _, ok := stateLeaseIDs[leaseID]; ok {
+			continue
+		}
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would remove firecracker claim lease=%s slug=%s reason=missing_state\n", leaseID, blankIfEmpty(claim.Slug))
+			continue
+		}
+		fmt.Fprintf(b.rt.Stdout, "remove firecracker claim lease=%s slug=%s reason=missing_state\n", leaseID, blankIfEmpty(claim.Slug))
+		core.RemoveLeaseClaim(leaseID)
+		removeTestboxKey(leaseID)
+	}
+	return nil
 }
 
 func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	cfg := b.configForRun()
 	server := req.Lease.Server
 	if server.Provider == "" {
 		server.Provider = providerName
@@ -165,7 +465,26 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 		state = "touched"
 	}
 	server.Status = state
-	server.Labels["state"] = state
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, state, b.currentTime().UTC())
+
+	leaseID := firstNonBlank(req.Lease.LeaseID, server.Labels["lease"])
+	if strings.TrimSpace(leaseID) == "" {
+		return server, nil
+	}
+
+	record, err := b.readStateRecord(leaseID)
+	if err == nil {
+		record.Labels = cloneLabels(server.Labels)
+		record.UpdatedAt = b.currentTime().UTC().Format(time.RFC3339Nano)
+		if writeErr := b.writeStateRecord(record); writeErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: touch firecracker state=%s lease=%s: %v\n", state, leaseID, writeErr)
+		}
+	}
+	if claim, ok, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr == nil && ok {
+		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, server.Labels); updateErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: touch firecracker claim=%s state=%s: %v\n", leaseID, state, updateErr)
+		}
+	}
 	return server, nil
 }
 
@@ -187,6 +506,253 @@ func (b *backend) Doctor(_ context.Context, _ DoctorRequest) (DoctorResult, erro
 		Message:  summarizeDoctorChecks(checks),
 		Checks:   checks,
 	}, nil
+}
+
+func (b *backend) configForRun() Config {
+	cfg := b.cfg
+	applyDefaults(&cfg)
+	return cfg
+}
+
+func (b *backend) currentTime() time.Time {
+	if b.rt.Clock != nil {
+		return b.rt.Clock.Now()
+	}
+	return time.Now()
+}
+
+func (b *backend) claimLeaseTarget(cfg Config, leaseID, slug, repoRoot string, reclaim bool, server Server, target SSHTarget) error {
+	if strings.TrimSpace(repoRoot) == "" {
+		return core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, target, cfg.IdleTimeout)
+	}
+	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, cfg.IdleTimeout, reclaim)
+}
+
+func (b *backend) listServers(cfg Config) ([]Server, error) {
+	records, err := b.listStateRecords()
+	if err != nil {
+		return nil, err
+	}
+	servers := make([]Server, 0, len(records))
+	for _, record := range records {
+		servers = append(servers, b.serverFromRecord(cfg, record, b.processes.Matches(record.processIdentity())))
+	}
+	return servers, nil
+}
+
+func (b *backend) recordByIdentifier(cfg Config, identifier string) (leaseStateRecord, bool, error) {
+	records, err := b.listStateRecords()
+	if err != nil {
+		return leaseStateRecord{}, false, err
+	}
+	servers := make([]Server, 0, len(records))
+	byLeaseID := make(map[string]leaseStateRecord, len(records))
+	byName := make(map[string]leaseStateRecord, len(records))
+	for _, record := range records {
+		servers = append(servers, b.serverFromRecord(cfg, record, b.processes.Matches(record.processIdentity())))
+		byLeaseID[record.LeaseID] = record
+		byName[record.Name] = record
+	}
+	server, leaseID, err := core.FindServerByAlias(servers, identifier)
+	if err != nil {
+		return leaseStateRecord{}, false, err
+	}
+	if strings.TrimSpace(leaseID) != "" {
+		record, ok := byLeaseID[leaseID]
+		return record, ok, nil
+	}
+	if strings.TrimSpace(server.Name) != "" {
+		record, ok := byName[server.Name]
+		return record, ok, nil
+	}
+	return leaseStateRecord{}, false, nil
+}
+
+func (b *backend) targetFromRecord(cfg Config, record leaseStateRecord) (SSHTarget, error) {
+	if strings.TrimSpace(record.GuestIP) == "" {
+		return SSHTarget{}, exit(5, "firecracker lease %s has no guest IP", record.LeaseID)
+	}
+	cfg.SSHUser = firstNonBlank(record.SSHUser, cfg.SSHUser)
+	cfg.SSHPort = firstNonBlank(record.SSHPort, cfg.SSHPort)
+	target := core.SSHTargetFromConfig(cfg, record.GuestIP)
+	core.UseStoredTestboxKey(&target, record.LeaseID)
+	return target, nil
+}
+
+func (b *backend) serverFromRecord(cfg Config, record leaseStateRecord, running bool) Server {
+	labels := cloneLabels(record.Labels)
+	status := strings.TrimSpace(labels["state"])
+	if status == "" {
+		status = "ready"
+	}
+	if !running && status != "released" && status != "failed" && status != "expired" {
+		status = "stopped"
+		labels["state"] = status
+	}
+	server := Server{
+		CloudID:  firstNonBlank(record.VMID, record.Name, record.LeaseID),
+		Provider: providerName,
+		Name:     firstNonBlank(record.Name, record.VMID, record.LeaseID),
+		Status:   status,
+		Labels:   labels,
+	}
+	server.PublicNet.IPv4.IP = record.GuestIP
+	server.ServerType.Name = firstNonBlank(labels["server_type"], firecrackerServerTypeForConfig(cfg))
+	return server
+}
+
+func serverFromClaim(cfg Config, claim LeaseClaim) Server {
+	labels := cloneLabels(claim.Labels)
+	name := firstNonBlank(labels["instance"], core.LeaseProviderName(claim.LeaseID, claim.Slug))
+	server := Server{
+		CloudID:  name,
+		Provider: providerName,
+		Name:     name,
+		Status:   firstNonBlank(labels["state"], "unknown"),
+		Labels:   labels,
+	}
+	server.PublicNet.IPv4.IP = claim.SSHHost
+	server.ServerType.Name = firstNonBlank(labels["server_type"], firecrackerServerTypeForConfig(cfg))
+	return server
+}
+
+func (b *backend) rollbackAcquire(record leaseStateRecord, vm machine, cause error) error {
+	var cleanupErr error
+	if vm != nil {
+		if err := vm.StopVMM(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop firecracker lease %s: %w", record.LeaseID, err))
+		}
+	}
+	if record.PID > 0 && cleanupErr != nil {
+		cleanupErr = errors.Join(cleanupErr, b.stopRecordedProcess(record))
+	}
+	if cleanupErr != nil || record.PID == 0 {
+		cleanupErr = errors.Join(cleanupErr, b.cleanupNetwork(context.Background(), record))
+	}
+	cleanupErr = errors.Join(cleanupErr, b.removeStateDir(record))
+	core.RemoveLeaseClaim(record.LeaseID)
+	return errors.Join(cause, cleanupErr)
+}
+
+func (b *backend) stopRecordedProcess(record leaseStateRecord) error {
+	identity := record.processIdentity()
+	if !b.processes.Matches(identity) {
+		return nil
+	}
+	if err := b.processes.Signal(identity, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("stop firecracker process %d: %w", identity.PID, err)
+	}
+	if err := waitForProcessExit(b.processes, identity, firecrackerStopTimeout); err != nil {
+		if killErr := b.processes.Signal(identity, syscall.SIGKILL); killErr != nil {
+			return errors.Join(err, fmt.Errorf("force kill firecracker process %d: %w", identity.PID, killErr))
+		}
+		if killWaitErr := waitForProcessExit(b.processes, identity, firecrackerKillTimeout); killWaitErr != nil {
+			return errors.Join(err, killWaitErr)
+		}
+	}
+	return nil
+}
+
+func (b *backend) releaseStateRecord(ctx context.Context, cfg Config, record leaseStateRecord, deleteArtifacts bool) error {
+	if err := b.stopRecordedProcess(record); err != nil {
+		return err
+	}
+	if err := b.cleanupNetwork(ctx, record); err != nil {
+		return err
+	}
+	if deleteArtifacts {
+		return b.removeStateDir(record)
+	}
+	record.PID = 0
+	record.ProcessStarted = ""
+	record.BootID = ""
+	record.Labels = core.TouchDirectLeaseLabels(record.Labels, cfg, "released", b.currentTime().UTC())
+	record.UpdatedAt = b.currentTime().UTC().Format(time.RFC3339Nano)
+	if err := b.writeStateRecord(record); err != nil {
+		return err
+	}
+	if err := removeIfExists(record.SocketPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *backend) releaseRecordForLease(cfg Config, lease LeaseTarget) (leaseStateRecord, bool, error) {
+	identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"], lease.Server.Name, lease.Server.CloudID)
+	if strings.TrimSpace(identifier) == "" {
+		return leaseStateRecord{}, false, nil
+	}
+	return b.recordByIdentifier(cfg, identifier)
+}
+
+func (b *backend) shouldCleanupRecord(server Server, record leaseStateRecord) (bool, string) {
+	if strings.EqualFold(server.Labels["keep"], "true") {
+		return false, "keep=true"
+	}
+	if !b.processes.Matches(record.processIdentity()) {
+		return true, "process_exited"
+	}
+	return core.ShouldCleanupServer(server, b.currentTime().UTC())
+}
+
+func firecrackerClaims() (map[string]LeaseClaim, error) {
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]LeaseClaim)
+	for _, claim := range claims {
+		if claim.Provider != providerName {
+			continue
+		}
+		out[claim.LeaseID] = claim
+	}
+	return out, nil
+}
+
+func (record leaseStateRecord) processIdentity() processIdentity {
+	return processIdentity{PID: record.PID, Started: record.ProcessStarted, BootID: record.BootID}
+}
+
+func requireLifecycleHost() error {
+	if firecrackerHostGOOS != "linux" {
+		return exit(2, "provider=firecracker requires a Linux KVM host, got host=%s", firecrackerHostGOOS)
+	}
+	return nil
+}
+
+func exit(code int, format string, args ...any) core.ExitError {
+	return core.Exit(code, format, args...)
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	if labels == nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(labels))
+	for key, value := range labels {
+		out[key] = value
+	}
+	return out
+}
+
+func removeIfExists(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return exit(2, "remove firecracker artifact %s: %v", path, err)
+	}
+	return nil
 }
 
 func doctorHostCheck() DoctorCheck {
