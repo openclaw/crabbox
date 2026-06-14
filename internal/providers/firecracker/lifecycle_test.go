@@ -399,6 +399,12 @@ func TestAcquireRollbackRemovesStateOnSSHFailure(t *testing.T) {
 	if test.factory.machine.stopped != 1 {
 		t.Fatalf("fake machine stop count=%d want 1", test.factory.machine.stopped)
 	}
+	if len(test.processes.signals) != 1 || test.processes.signals[0] != syscall.SIGTERM {
+		t.Fatalf("signals=%v want SIGTERM", test.processes.signals)
+	}
+	if test.processes.alive[4242] {
+		t.Fatal("recorded Firecracker process still alive after rollback")
+	}
 	if *test.cleanupCalls != 1 {
 		t.Fatalf("cleanup calls=%d want 1", *test.cleanupCalls)
 	}

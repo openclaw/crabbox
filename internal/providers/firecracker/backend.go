@@ -659,7 +659,7 @@ func (b *backend) rollbackAcquire(record leaseStateRecord, vm machine, cause err
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop firecracker lease %s: %w", record.LeaseID, err))
 		}
 	}
-	if record.PID > 0 && cleanupErr != nil {
+	if record.PID > 0 {
 		cleanupErr = errors.Join(cleanupErr, b.stopRecordedProcess(record))
 	}
 	cleanupErr = errors.Join(cleanupErr, b.cleanupNetwork(context.Background(), record))
