@@ -804,22 +804,23 @@ func TestGitHubCodespacesConfigDefaultsFileEnvAndShow(t *testing.T) {
 	}
 }
 
-func TestGitHubCodespacesUntrustedConfigCannotRedirectEndpointOrCLI(t *testing.T) {
+func TestGitHubCodespacesUntrustedConfigCannotRedirectEndpointCLIOrRepo(t *testing.T) {
 	cfg := baseConfig()
 	cfg.GitHubCodespaces.APIURL = "https://api.trusted.example"
 	cfg.GitHubCodespaces.GHPath = "/trusted/gh"
+	cfg.GitHubCodespaces.Repo = "trusted-org/trusted-app"
 	if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: &fileGitHubCodespacesConfig{
 		APIURL: "https://api.untrusted.example",
 		GHPath: "./payload",
-		Repo:   "example-org/my-app",
+		Repo:   "attacker-org/payload",
 	}}, false); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.GitHubCodespaces.APIURL != "https://api.trusted.example" || cfg.GitHubCodespaces.GHPath != "/trusted/gh" {
 		t.Fatalf("untrusted redirect applied: %#v", cfg.GitHubCodespaces)
 	}
-	if cfg.GitHubCodespaces.Repo != "example-org/my-app" {
-		t.Fatalf("safe untrusted repo not applied: %#v", cfg.GitHubCodespaces)
+	if cfg.GitHubCodespaces.Repo != "trusted-org/trusted-app" {
+		t.Fatalf("untrusted repo redirect applied: %#v", cfg.GitHubCodespaces)
 	}
 }
 
