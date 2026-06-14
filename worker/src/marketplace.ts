@@ -7,7 +7,7 @@ import {
 } from "./types";
 import { leaseCost } from "./usage";
 
-export type MarketplaceStrategy = "cheapest" | "balanced" | "provider-default";
+export type MarketplaceStrategy = "cheapest" | "balanced" | "weighted" | "provider-default";
 
 export interface MarketplaceStatus {
   enabled: boolean;
@@ -58,6 +58,10 @@ export interface MarketplaceQuoteCandidate {
   routeKey: string;
   available: boolean;
   unavailableReason?: string;
+  // fraction of traffic (0..1) this candidate would receive under weighted load balancing
+  // among available candidates sharing the winning priority tier; only set for the "weighted"
+  // strategy. Preview-only: no traffic is actually routed.
+  routeShare?: number;
 }
 
 export interface MarketplaceQuote {
@@ -136,7 +140,10 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
   // basic shape validation for untyped JSON input (readJson only casts)
   if (input && typeof input === "object") {
     if (input.providers !== undefined && !Array.isArray(input.providers)) {
-      throw new MarketplaceInputError("providers must be an array of provider names", "invalid_providers");
+      throw new MarketplaceInputError(
+        "providers must be an array of provider names",
+        "invalid_providers",
+      );
     }
     if (input.class !== undefined && typeof input.class !== "string") {
       throw new MarketplaceInputError("class must be a string", "invalid_class");
@@ -151,7 +158,10 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
   let ttlSeconds: number;
   if (input.ttlSeconds !== undefined) {
     if (!Number.isFinite(input.ttlSeconds) || input.ttlSeconds <= 0) {
-      throw new MarketplaceInputError("ttlSeconds must be a positive number of seconds", "invalid_ttl");
+      throw new MarketplaceInputError(
+        "ttlSeconds must be a positive number of seconds",
+        "invalid_ttl",
+      );
     }
     ttlSeconds = positiveInt(input.ttlSeconds, 3600, 30 * 24 * 60 * 60);
   } else {
@@ -172,7 +182,10 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
     )
     .toSorted((left, right) => candidateRank(left, right, strategy));
   const selected = candidates.find((candidate) => candidate.available);
-  const warnings = quoteWarnings(input, status, selected);
+  if (strategy === "weighted") {
+    applyRouteShares(candidates, selected);
+  }
+  const warnings = quoteWarnings(input, status, selected, strategy, candidates);
   const quote: MarketplaceQuote = {
     id: marketplaceQuoteID(providers, className, serverType, ttlSeconds),
     mode: "preview",
@@ -250,6 +263,8 @@ function quoteWarnings(
   input: MarketplaceQuoteRequest,
   status: MarketplaceStatus,
   selected: MarketplaceQuoteCandidate | undefined,
+  strategy: MarketplaceStrategy,
+  candidates: MarketplaceQuoteCandidate[],
 ): string[] {
   const warnings = [
     "preview quote only; no payment is captured, no credits are reserved, and no provider is provisioned",
@@ -263,10 +278,46 @@ function quoteWarnings(
   if (!selected) {
     warnings.push("no candidate fits the requested credit ceiling");
   }
+  if (strategy === "weighted" && selected) {
+    const tier = candidates.filter(
+      (candidate) => candidate.available && candidate.priority === selected.priority,
+    ).length;
+    if (tier > 1) {
+      warnings.push(
+        `weighted strategy previews the load-balancing split across ${tier} same-priority candidates; no traffic is routed in preview mode`,
+      );
+    }
+  }
   if (status.requireCreditsForLeases) {
     warnings.push("credit enforcement is configured but not wired into lease creation yet");
   }
   return warnings;
+}
+
+// Compute the weighted load-balancing split (routeShare) across available candidates that share the
+// winning priority tier, mirroring AI-gateway weighted routing among equivalent providers. This is a
+// preview-only projection: it documents how weights would distribute traffic, but routes nothing.
+function applyRouteShares(
+  candidates: MarketplaceQuoteCandidate[],
+  selected: MarketplaceQuoteCandidate | undefined,
+): void {
+  if (!selected) {
+    return;
+  }
+  const tier = candidates.filter(
+    (candidate) => candidate.available && candidate.priority === selected.priority,
+  );
+  const totalWeight = tier.reduce(
+    (sum, candidate) => sum + (candidate.weight > 0 ? candidate.weight : 0),
+    0,
+  );
+  if (totalWeight <= 0) {
+    return;
+  }
+  for (const candidate of tier) {
+    const weight = candidate.weight > 0 ? candidate.weight : 0;
+    candidate.routeShare = roundShare(weight / totalWeight);
+  }
 }
 
 function quoteProviders(supported: Provider[], input: MarketplaceQuoteRequest): Provider[] {
@@ -311,7 +362,12 @@ function quoteStrategy(strategy: MarketplaceStrategy | undefined): MarketplaceSt
   if (strategy === undefined) {
     return "cheapest";
   }
-  if (strategy === "cheapest" || strategy === "balanced" || strategy === "provider-default") {
+  if (
+    strategy === "cheapest" ||
+    strategy === "balanced" ||
+    strategy === "weighted" ||
+    strategy === "provider-default"
+  ) {
     return strategy;
   }
   throw new MarketplaceInputError(`unsupported strategy ${strategy}`, "invalid_strategy");
@@ -448,6 +504,15 @@ function candidateRank(
   if (strategy === "balanced") {
     return right.marginUSD - left.marginUSD || left.credits - right.credits;
   }
+  if (strategy === "weighted") {
+    // within a priority tier, prefer the heavier route (it absorbs the larger traffic share),
+    // then fall back to cheapest for a stable, deterministic ordering
+    return (
+      right.weight - left.weight ||
+      left.credits - right.credits ||
+      left.provider.localeCompare(right.provider)
+    );
+  }
   return left.credits - right.credits || left.provider.localeCompare(right.provider);
 }
 
@@ -501,4 +566,8 @@ function nonEmpty(value: string | undefined): string {
 
 function roundUSD(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function roundShare(value: number): number {
+  return Math.round((value + Number.EPSILON) * 10000) / 10000;
 }

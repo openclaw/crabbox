@@ -39,7 +39,7 @@ func (a App) marketplaceQuote(ctx context.Context, args []string) error {
 	target := fs.String("target", "linux", "target OS")
 	ttl := fs.String("ttl", "1h", "quote TTL, e.g. 30m, 1h, or 3600s")
 	maxCredits := fs.Float64("max-credits", 0, "maximum credits to spend")
-	strategy := fs.String("strategy", "cheapest", "cheapest, balanced, or provider-default")
+	strategy := fs.String("strategy", "cheapest", "cheapest, balanced, weighted, or provider-default")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -120,7 +120,7 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 		quote.ID, quote.Mode, quote.Strategy, formatDurationSeconds(int64(quote.TTLSeconds)))
 	if quote.Selected != nil {
 		candidate := *quote.Selected
-		fmt.Fprintf(out, "selected provider=%s route=%s priority=%d weight=%.2f credits=$%.2f retail=$%.2f/h provider_cost=$%.2f/h margin=$%.2f\n",
+		fmt.Fprintf(out, "selected provider=%s route=%s priority=%d weight=%.2f credits=$%.2f retail=$%.2f/h provider_cost=$%.2f/h margin=$%.2f%s\n",
 			candidate.Provider,
 			candidate.RouteKey,
 			candidate.Priority,
@@ -128,7 +128,8 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 			candidate.Credits,
 			candidate.RetailHourlyUSD,
 			candidate.CostHourlyUSD,
-			candidate.MarginUSD)
+			candidate.MarginUSD,
+			marketplaceRouteShareSuffix(candidate.RouteShare))
 	} else {
 		fmt.Fprintln(out, "selected none")
 	}
@@ -142,7 +143,7 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 					status += ":" + candidate.UnavailableReason
 				}
 			}
-			fmt.Fprintf(out, "  %-8s priority=%-3d weight=%-6.2f credits=$%-8.2f retail=$%-8.2f/h provider_cost=$%-8.2f/h route=%-28s %s\n",
+			fmt.Fprintf(out, "  %-8s priority=%-3d weight=%-6.2f credits=$%-8.2f retail=$%-8.2f/h provider_cost=$%-8.2f/h route=%-28s %s%s\n",
 				candidate.Provider,
 				candidate.Priority,
 				candidate.Weight,
@@ -150,7 +151,8 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 				candidate.RetailHourlyUSD,
 				candidate.CostHourlyUSD,
 				candidate.RouteKey,
-				status)
+				status,
+				marketplaceRouteShareSuffix(candidate.RouteShare))
 		}
 	}
 	printMarketplaceWarnings(out, quote.Warnings)
@@ -219,4 +221,13 @@ func onOff(value bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// marketplaceRouteShareSuffix renders the weighted load-balancing share (e.g. " share=75%") for the
+// weighted strategy; it stays empty for strategies that do not project a traffic split.
+func marketplaceRouteShareSuffix(share float64) string {
+	if share <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" share=%.0f%%", share*100)
 }
