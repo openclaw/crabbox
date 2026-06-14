@@ -199,6 +199,12 @@ func TestReleaseDeleteFallsBackToStopForDirtyCodespace(t *testing.T) {
 	if claim.SSHHost != "" || claim.SSHPort != 0 || claim.Labels[labelRelease] != releaseStop || claim.Labels[labelState] != "stopped" {
 		t.Fatalf("claim=%#v", claim)
 	}
+	if !b.RetainLeaseClaimAfterRelease(LeaseTarget{LeaseID: leaseID, Server: server}) {
+		t.Fatal("dirty release fallback should retain local claim")
+	}
+	if got := b.ReleaseLeaseMessage(LeaseTarget{LeaseID: leaseID, Server: server}); !strings.Contains(got, "retained=true") {
+		t.Fatalf("message=%q", got)
+	}
 }
 
 func TestReleaseRetainedStopsAndClearsEndpoint(t *testing.T) {
