@@ -20,13 +20,15 @@ type fakeMachine struct {
 	pid      int
 	guestIP  string
 	startErr error
+	startCtx context.Context
 	stopErr  error
 	started  int
 	stopped  int
 }
 
-func (m *fakeMachine) Start(context.Context) error {
+func (m *fakeMachine) Start(ctx context.Context) error {
 	m.started++
+	m.startCtx = ctx
 	return m.startErr
 }
 
@@ -287,6 +289,27 @@ func TestAcquireResolveListAndReleaseLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("key path still exists: err=%v", err)
+	}
+}
+
+func TestAcquirePassesLaunchTimeoutToMachineStart(t *testing.T) {
+	cfg := lifecycleConfig(t)
+	cfg.Firecracker.LaunchTimeout = 3 * time.Second
+	test := newLifecycleTestBackend(t, cfg)
+
+	if _, err := test.backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: test.repoRoot}}); err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if test.factory.machine.startCtx == nil {
+		t.Fatal("machine start context was not recorded")
+	}
+	deadline, ok := test.factory.machine.startCtx.Deadline()
+	if !ok {
+		t.Fatal("machine start context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > cfg.Firecracker.LaunchTimeout {
+		t.Fatalf("machine start deadline remaining=%s want within %s", remaining, cfg.Firecracker.LaunchTimeout)
 	}
 }
 
