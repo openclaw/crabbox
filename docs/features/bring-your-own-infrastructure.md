@@ -126,7 +126,9 @@ Academic Slurm clusters usually fit this protocol path: the adapter submits an
 `sbatch` job, waits for the allocation to publish a host/port/key or proxy
 route, returns that as the external SSH target, and uses `scancel` on release.
 See [Slurm academic sandboxes](slurm-academic-sandboxes.md) for the full
-product and security contract.
+product and security contract, and
+[examples/slurm-external-provider](../../examples/slurm-external-provider/README.md)
+for a reference external adapter.
 
 ## Persisted routing
 
@@ -332,6 +334,7 @@ sweep cannot select a live registered direct resource.
 
 - [External Provider](../providers/external.md)
 - [Slurm academic sandboxes](slurm-academic-sandboxes.md)
+- [Reference Slurm external provider](../../examples/slurm-external-provider/README.md)
 - [KubeVirt Provider](../providers/kubevirt.md)
 - [Coordinator](coordinator.md)
 - [Portable Coordinator](portable-coordinator.md)

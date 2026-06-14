@@ -8,6 +8,13 @@ Read this when:
   future built-in `provider: slurm`;
 - you need the product contract before writing a Slurm adapter.
 
+Slurm is different from Crabbox's cloud and sandbox providers. It does not hand
+out a new VM identity with a ready SSH contract; it schedules work onto an
+existing cluster allocation for a bounded wall-clock period. A Crabbox Slurm
+integration therefore needs an adapter layer that turns a scheduled allocation
+into the lease shape Crabbox expects: host, port, user, key or proxy, readiness
+check, status, and release.
+
 Crabbox does not currently ship a built-in Slurm provider. The first supported
 offer should be a site-local external provider adapter that submits a Slurm job,
 waits for a reachable SSH endpoint inside the allocation, and then lets Crabbox
@@ -75,6 +82,14 @@ not core provider code. The adapter owns Slurm-specific behavior:
 job may still sit pending before resources are allocated. Prefer `warmup` for
 interactive or agent workflows so queue time is paid before the first command.
 
+The repository includes a reference adapter and sample unprivileged `sshd`
+runner under
+[examples/slurm-external-provider](../../examples/slurm-external-provider/README.md).
+It is a starting point for campus pilots, not a universal production runner.
+Sites should replace the sample runner when policy requires a gateway,
+Open OnDemand-style connection script, Apptainer/Singularity wrapper,
+Pyxis/Enroot integration, or a managed SSH service.
+
 ## Configuration Sketch
 
 The concrete adapter name is site-owned. A generic repo or user config should
@@ -85,10 +100,13 @@ provider: external
 target: linux
 
 external:
-  command: slurm-cbx
+  command: python3
   args:
+    - /opt/crabbox-slurm/slurm-cbx.py
     - --state-dir
     - /home/example-user/.crabbox/slurm
+    - --runner-script
+    - /opt/crabbox-slurm/runner-unprivileged-sshd.sh
   capabilities:
     idempotentLeaseId: true
   config:
@@ -100,6 +118,9 @@ external:
     timeLimit: 02:00:00
     gres: gpu:1
     sshMode: proxy-through-login
+    loginHost: login.cluster.example.edu
+    acquireTimeoutSeconds: 3600
+    runnerWorkRoot: /scratch/example-lab/crabbox
   workRoot: /scratch/example-lab/crabbox
 ```
 
@@ -113,13 +134,13 @@ The adapter should return the resolved endpoint as protocol JSON:
     "slug": "bright-coral",
     "name": "crabbox-bright-coral-012345",
     "cloudId": "slurm/job/123456",
-    "serverType": "slurm:batch cpu=16 mem=64G time=02:00:00 gres=gpu:1",
+    "serverType": "slurm partition=batch account=example-lab cpus=16 mem=64G timeLimit=02:00:00 gres=gpu:1",
     "ssh": {
-      "user": "crabbox",
-      "host": "login.cluster.example.edu",
-      "port": "22",
-      "key": "/home/example-user/.crabbox/slurm/cbx_0123456789ab/id_ed25519",
-      "proxyCommand": "ssh -W node123.cluster.example.edu:39022 login.cluster.example.edu",
+      "user": "alice",
+      "host": "node123.cluster.example.edu",
+      "port": "39022",
+      "key": "/home/example-user/.crabbox/slurm/jobs/cbx_0123456789ab/id_ed25519",
+      "proxyCommand": "ssh -W %h:%p login.cluster.example.edu",
       "readyCheck": "command -v bash && command -v python3 && command -v git && command -v rsync && command -v tar"
     }
   }
@@ -197,6 +218,14 @@ Also verify failure cleanup:
 - temporary keys and endpoint files disappear after `stop`;
 - registered mode outage does not block `scancel`.
 
+For the checked-in reference adapter, run the local syntax checks before a
+cluster smoke:
+
+```sh
+python3 -m py_compile examples/slurm-external-provider/slurm-cbx.py
+bash -n examples/slurm-external-provider/runner-unprivileged-sshd.sh
+```
+
 ## Future Built-In Provider Criteria
 
 Do not add `provider: slurm` until the external shape has survived real site
@@ -223,3 +252,4 @@ normal Crabbox key instead of creating their own key pair.
 - [Slurm REST quick start](https://slurm.schedmd.com/rest_quickstart.html)
 - [JupyterHub BatchSpawner](https://github.com/jupyterhub/batchspawner)
 - [Open OnDemand example campus documentation](https://www.chpc.utah.edu/documentation/software/ondemand.php)
+- [Reference Slurm external provider example](../../examples/slurm-external-provider/README.md)
