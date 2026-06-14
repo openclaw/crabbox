@@ -60,6 +60,9 @@ function main() {
     const message = error instanceof SmokeError ? error.message : String(error?.message || error);
     const classification = classify(message);
     emit(classification, redact(message));
+    if (classification !== "environment_blocked") {
+      process.exitCode = 1;
+    }
   } finally {
     cleanup();
   }

@@ -48,7 +48,8 @@ func (b *codeSandboxBackend) syncWorkspace(ctx context.Context, api codeSandboxA
 	}()
 	archiveDuration := b.now().Sub(archiveStart)
 
-	remoteArchive := path.Join("/tmp", "crabbox-codesandbox-sync-"+randomSuffix()+".tgz")
+	uploadArchive := ".crabbox-codesandbox-sync-" + randomSuffix() + ".tgz"
+	remoteArchive := path.Join(defaultWorkdir, uploadArchive)
 	extractDir := workdir
 	stagingDir := ""
 	if b.cfg.Sync.Delete {
@@ -75,7 +76,7 @@ func (b *codeSandboxBackend) syncWorkspace(ctx context.Context, api codeSandboxA
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
 		return nil, 0, exit(6, "rewind sync archive: %v", err)
 	}
-	if err := api.UploadFile(syncCtx, sandboxID, remoteArchive, archive); err != nil {
+	if err := api.UploadFile(syncCtx, sandboxID, uploadArchive, archive); err != nil {
 		return nil, 0, err
 	}
 	uploadDuration := b.now().Sub(uploadStart)

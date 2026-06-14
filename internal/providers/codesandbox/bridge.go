@@ -331,12 +331,12 @@ try {
       const sandbox = await resumeSandbox(sdk, req.sandboxId);
       emit({ ok: true, sandbox: normalizeSandbox(sandbox) });
     } else if (req.operation === "run_command") {
-      const sandbox = await openSandbox(sdk, req.sandboxId);
-      const command = await runCommand(sandbox);
+      const { client } = await connectSandbox(sdk, req.sandboxId);
+      const command = await runCommand(client);
       emit({ ok: true, command });
     } else if (req.operation === "write_file") {
-      const sandbox = await openSandbox(sdk, req.sandboxId);
-      await writeFile(sandbox);
+      const { client } = await connectSandbox(sdk, req.sandboxId);
+      await writeFile(client);
       emit({ ok: true });
     } else if (req.operation === "list_ports") {
       const ports = await listPorts(sdk);

@@ -134,6 +134,12 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 	if !strings.Contains(codeSandboxBridgeScript, "command.map((v) => String(v ?? \"\"))") {
 		t.Fatalf("bridge script must normalize command arguments without dropping empty strings")
 	}
+	if !strings.Contains(codeSandboxBridgeScript, "const { client } = await connectSandbox(sdk, req.sandboxId);\n      const command = await runCommand(client);") {
+		t.Fatalf("bridge script must run commands through the connected CodeSandbox client")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "const { client } = await connectSandbox(sdk, req.sandboxId);\n      await writeFile(client);") {
+		t.Fatalf("bridge script must write files through the connected CodeSandbox client")
+	}
 }
 
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {
