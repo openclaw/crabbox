@@ -37,7 +37,7 @@ func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults Config) an
 }
 
 func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName {
+	if isGitHubCodespacesProviderName(cfg.Provider) {
 		if flagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=github-codespaces; use --type or --github-codespaces-machine for a Codespaces machine slug")
 		}
@@ -92,7 +92,7 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 }
 
 func ValidateGitHubCodespacesConfig(cfg Config) error {
-	if cfg.Provider == providerName && strings.TrimSpace(cfg.TargetOS) != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
+	if isGitHubCodespacesProviderName(cfg.Provider) && strings.TrimSpace(cfg.TargetOS) != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
 		return exit(2, "provider=github-codespaces supports target=linux only")
 	}
 	c := cfg.GitHubCodespaces
@@ -119,6 +119,15 @@ func ValidateGitHubCodespacesConfig(cfg Config) error {
 func validRepo(repo string) bool {
 	owner, name, ok := strings.Cut(strings.TrimSpace(repo), "/")
 	return ok && validRepoPart(owner) && validRepoPart(name)
+}
+
+func isGitHubCodespacesProviderName(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case providerName, "codespaces", "gh-codespaces":
+		return true
+	default:
+		return false
+	}
 }
 
 func validRepoPart(value string) bool {

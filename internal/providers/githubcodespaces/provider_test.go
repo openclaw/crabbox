@@ -103,21 +103,23 @@ func TestApplyFlagsSetsCodespacesConfigAndRejectsClass(t *testing.T) {
 			WorkRoot:        defaultWorkRoot,
 		},
 	}
-	typeAlias := typeAliasDefaults
-	typeAlias.Provider = providerName
-	typeAlias.TargetOS = core.TargetLinux
-	typeFS := flag.NewFlagSet("test", flag.ContinueOnError)
-	typeValues := RegisterGitHubCodespacesProviderFlags(typeFS, typeAliasDefaults)
-	typeFS.String("class", "", "")
-	typeFS.String("type", "", "")
-	if err := typeFS.Parse([]string{"--type", "premiumLinux"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ApplyGitHubCodespacesProviderFlags(&typeAlias, typeFS, typeValues); err != nil {
-		t.Fatal(err)
-	}
-	if typeAlias.GitHubCodespaces.Machine != "premiumLinux" {
-		t.Fatalf("--type machine=%q", typeAlias.GitHubCodespaces.Machine)
+	for _, provider := range []string{providerName, "codespaces", "gh-codespaces"} {
+		typeAlias := typeAliasDefaults
+		typeAlias.Provider = provider
+		typeAlias.TargetOS = core.TargetLinux
+		typeFS := flag.NewFlagSet("test", flag.ContinueOnError)
+		typeValues := RegisterGitHubCodespacesProviderFlags(typeFS, typeAliasDefaults)
+		typeFS.String("class", "", "")
+		typeFS.String("type", "", "")
+		if err := typeFS.Parse([]string{"--type", "premiumLinux"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyGitHubCodespacesProviderFlags(&typeAlias, typeFS, typeValues); err != nil {
+			t.Fatal(err)
+		}
+		if typeAlias.GitHubCodespaces.Machine != "premiumLinux" {
+			t.Fatalf("provider=%s --type machine=%q", provider, typeAlias.GitHubCodespaces.Machine)
+		}
 	}
 
 	reject := flag.NewFlagSet("test", flag.ContinueOnError)
