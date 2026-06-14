@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.
 - Hardened runtime-adapter relays with end-to-end absolute deadlines, durable generation-scoped dispatch fences retained across ambiguous connector failures, atomic owner-only legacy cleanup, rejection of unfenced proxy deletes, per-owner in-flight quotas, post-cancellation accounting, response-delivery grace, connector-matched request validation, restart-safe TTL-first live-bridge revocation, retry-safe upstream rejection handling, generation-fenced confirmed-absence acknowledgments, and cleanup-fenced workspace bindings.
 - Fixed Cloudflare Dynamic Workers lifecycle reads, compatibility identity, bundle validation, and live-smoke credential isolation.
 - Fixed Windows local-container sync to avoid unusable WSL command shims, support Docker Desktop mount roots, and fall back to native rsync when WSL lacks native SSH tooling. Thanks @brokemac79.

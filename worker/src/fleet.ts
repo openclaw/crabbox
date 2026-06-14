@@ -1,4 +1,6 @@
-import { Client as SSHClient, type ClientChannel, utils as sshUtils } from "ssh2";
+import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
+
+const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import { isAdminRequest, sha256Hex } from "./auth";
@@ -2678,7 +2680,7 @@ export class FleetCoordinator {
       connect: while (Date.now() < readyDeadline) {
         for (const port of terminalPorts) {
           if (closed) break connect;
-          const candidate = new SSHClient();
+          const candidate = new SSHClientConstructor();
           connectingClient = candidate;
           try {
             // oxlint-disable-next-line eslint/no-await-in-loop -- SSH readiness retries are sequential.
