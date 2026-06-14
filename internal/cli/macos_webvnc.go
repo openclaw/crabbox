@@ -18,6 +18,8 @@ import (
 	"nhooyr.io/websocket"
 )
 
+const maxMacOSWebVNCCredentialBodyBytes = 4 << 10
+
 // macOSWebVNCBridge serves a browser noVNC viewer for a macOS (tart) lease
 // without any noVNC/websockify tooling on the guest. It SSH-tunnels to the
 // guest's built-in Screen Sharing port, creates a mode-0600 viewer file around
@@ -78,77 +80,29 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	bridgeCtx, cancelBridge := context.WithCancelCause(ctx)
 	defer cancelBridge(context.Canceled)
 
-	// A per-session token is handed to the browser through a mode-0600 temporary
-	// viewer file. It is used only in a credential POST body and WebSocket
-	// subprotocol, so neither the account password nor its bearer capability
-	// appears in argv, browser URLs, cookies, or DNS.
-	session, err := newMacOSWebVNCSession()
-	if err != nil {
-		return exit(5, "generate viewer session: %v", err)
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/credentials", macOSWebVNCCredentialsHandler(session, credentials))
-	mux.HandleFunc("/websockify", func(w http.ResponseWriter, r *http.Request) {
-		if !macOSWebVNCProtocolAllowed(r, session.Protocol) {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			Subprotocols:       []string{session.Protocol},
-			InsecureSkipVerify: true, // file:// viewers send Origin: null; the subprotocol is the bearer.
-		})
-		if err != nil {
-			return
-		}
-		ws.SetReadLimit(-1)
-		defer ws.Close(websocket.StatusNormalClosure, "")
-		relayCtx, cancelRelay := context.WithCancelCause(bridgeCtx)
-		stopRequestCancel := context.AfterFunc(r.Context(), func() {
-			cancelRelay(context.Cause(r.Context()))
-		})
-		defer func() {
-			stopRequestCancel()
-			cancelRelay(context.Canceled)
-		}()
-		tcp, err := dialVNCForegroundTunnel(relayCtx, tunnel, vncPort)
-		if err != nil {
-			_ = ws.Close(websocket.StatusInternalError, "vnc dial failed")
-			return
-		}
-		defer tcp.Close()
-		relayWebSocketVNC(relayCtx, ws, tcp)
-	})
-
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(webListener) }()
-	defer func() { _ = srv.Close() }()
 	go func() {
 		select {
 		case <-tunnel.Done():
 			cancelBridge(tunnel.ExitError())
 		case <-bridgeCtx.Done():
 		}
-		_ = srv.Close()
 	}()
-
-	handoff, err := createMacOSWebVNCHandoff(webPort, session)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(handoff.Path)
 
 	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=macos\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider))
 	fmt.Fprintf(a.Stdout, "bridge: serving noVNC locally; SSH tunnel -> guest 127.0.0.1:%s; keep this running while viewing\n", managedVNCPort)
-	fmt.Fprintf(a.Stdout, "webvnc: %s\n", handoff.URL)
-	fmt.Fprintf(a.Stdout, "remote: forward port %s over SSH, copy %s to your machine, then open the copied file\n", webPort, handoff.Path)
-	if openViewer {
-		if err := openLocalURL(handoff.URL); err != nil {
-			return err
-		}
-		fmt.Fprintf(a.Stdout, "opened: %s\n", handoff.URL)
-	}
-	<-bridgeCtx.Done()
-	return context.Cause(bridgeCtx)
+	return a.serveLocalWebVNCBridge(
+		bridgeCtx,
+		webListener,
+		webPort,
+		credentials,
+		openViewer,
+		func(ctx context.Context) (net.Conn, error) {
+			return dialVNCForegroundTunnel(ctx, tunnel, vncPort)
+		},
+		func(handoff macOSWebVNCHandoff) {
+			fmt.Fprintf(a.Stdout, "remote: forward port %s over SSH, copy %s to your machine, then open the copied file\n", webPort, handoff.Path)
+		},
+	)
 }
 
 func dialVNCForegroundTunnel(ctx context.Context, tunnel *vncForegroundTunnel, port string) (net.Conn, error) {
@@ -276,6 +230,7 @@ func macOSWebVNCCredentialsHandler(session macOSWebVNCSession, credentials rfbCr
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxMacOSWebVNCCredentialBodyBytes)
 		if err := r.ParseForm(); err != nil ||
 			subtle.ConstantTimeCompare([]byte(r.Form.Get("token")), []byte(session.Token)) != 1 {
 			http.Error(w, "forbidden", http.StatusForbidden)
