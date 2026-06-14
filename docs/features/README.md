@@ -84,6 +84,7 @@ Provider deep-dives that live here in `features/`:
 
 - [Sync](sync.md): Git file-list manifests, rsync, fingerprints, excludes, guardrails, and sanity checks.
 - [Jobs](jobs.md): named repo-local warmup, hydrate, run, and cleanup workflows.
+- [Station profiles](station-profiles.md): planned supervised workload records, agent profile, and model-access security gates.
 - [Actions hydration](actions-hydration.md): let GitHub Actions prepare a runner, then sync local work into that workspace.
 - [Capsules](capsules.md): local-first replay manifests for GitHub Actions failures.
 - [Checkpoints](checkpoints.md): save, restore, and fork reusable remote workspaces.

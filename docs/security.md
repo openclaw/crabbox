@@ -169,6 +169,9 @@ Handling rules:
 - The CLI forwards environment variables only by allowlist. The default allow
   list is `CI` and `NODE_OPTIONS`; extend it with repo-local `env.allow` config
   (or a profile's `env.allow`).
+- Future `modelAccess` credentials for Station profiles must not use ordinary
+  repo `env.allow`; they need a separate scoped, auditable, revocable delivery
+  path. See [Station profiles](features/station-profiles.md).
 - Never pass a secret value as a command-line flag.
 - Never log environment values; redact secret-looking strings in diagnostics.
 - Treat delegated-run providers as part of the runtime trust boundary: when you
