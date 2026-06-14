@@ -178,7 +178,7 @@ from the CLI.
 | [Proxmox](docs/providers/proxmox.md) — `proxmox` | Linux · direct | Clone QEMU templates on a private Proxmox VE cluster. |
 | [XCP-ng](docs/providers/xcp-ng.md) — `xcp-ng` | Linux · direct | Self-hosted XCP-ng pool on dedicated x86_64 server hardware. |
 | [Incus](docs/providers/incus.md) — `incus` | Linux · direct | SSH leases through the official Incus Go client. |
-| [Firecracker](docs/providers/firecracker.md) — `firecracker` | Linux · direct | Self-hosted Firecracker contract and doctor surface on a Linux KVM host; lifecycle is still pending in this worktree. |
+| [Firecracker](docs/providers/firecracker.md) — `firecracker` | Linux · direct | Self-hosted Firecracker microVM leases on a Linux KVM host with prepared kernel, rootfs, and CNI. |
 | [Static SSH](docs/providers/ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · direct | Existing machines; no provisioning. |
 | [Local Container](docs/providers/local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
 | [Apple Container](docs/providers/apple-container.md) — `apple-container` (`apple`, `applecontainer`) | Linux · direct | Apple's native `container` runtime on Apple silicon macOS. |

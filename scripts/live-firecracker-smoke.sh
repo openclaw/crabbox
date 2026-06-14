@@ -5,10 +5,10 @@ usage() {
   cat <<'EOF'
 Run the read-only Firecracker readiness smoke.
 
-The current worktree only ships the Firecracker provider contract plus
-`crabbox doctor --provider firecracker` checks, so this helper never mutates
-provider state. It validates the doctor JSON contract and classifies missing
-Linux/KVM/Firecracker/CNI prerequisites as environment_blocked.
+This helper never mutates provider state. It validates the
+`crabbox doctor --provider firecracker --json` contract and classifies missing
+Linux/KVM/Firecracker/CNI prerequisites as environment_blocked before any
+lifecycle command is attempted.
 
 Usage:
   scripts/live-firecracker-smoke.sh

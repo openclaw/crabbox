@@ -7,14 +7,14 @@ Read this when you:
   Crabbox runs;
 - need the `firecracker.*` config keys, `CRABBOX_FIRECRACKER_*` env overrides,
   or `--firecracker-*` flags;
-- want the current read-only doctor contract and guarded readiness smoke.
+- want the direct lifecycle, read-only doctor contract, and guarded readiness
+  smoke.
 
 `provider: firecracker` is the direct self-hosted Firecracker SSH-lease surface
-for Linux KVM hosts. In this worktree the public contract stops at provider
-registration, config/default rendering, and read-only `doctor` checks.
-`warmup`, `run`, `ssh`, `stop`, and `cleanup` are not implemented yet, so this
-page focuses on staging host prerequisites and validating readiness without
-mutating any microVM resources.
+for Linux KVM hosts. Crabbox prepares per-lease state, copies the configured
+rootfs into a writable lease artifact, writes a cloud-init config drive, starts
+the microVM through the Firecracker Go SDK on Linux, records the guest endpoint,
+and uses the normal Crabbox SSH sync/run path after the guest is reachable.
 
 ## Current contract
 
@@ -45,7 +45,7 @@ Choose a different provider when another ownership model fits better:
 - [E2B](e2b.md) or [Tensorlake](tensorlake.md) when the hosted provider should
   own the Firecracker lifecycle end to end.
 
-## Current lifecycle status
+## Lifecycle
 
 Already usable surfaces:
 
@@ -54,18 +54,15 @@ go build -trimpath -o bin/crabbox ./cmd/crabbox
 ./bin/crabbox providers --json
 CRABBOX_PROVIDER=firecracker ./bin/crabbox config show --json
 ./bin/crabbox doctor --provider firecracker --json
-```
-
-Unsupported today:
-
-```sh
 ./bin/crabbox warmup --provider firecracker
-# provider=firecracker acquire is not implemented yet; PLAN-01 only ships the provider contract and read-only doctor checks
 ```
 
-The same limitation applies to `run`, `ssh`, `stop`, and `cleanup`: the CLI
-accepts the provider contract and exposes its config/doctor surface, but does
-not yet start, resolve, or delete Firecracker microVMs.
+`warmup`, `run`, `ssh`, `stop`, and `cleanup` use the same SSH-lease lifecycle
+as other direct providers once the host prerequisites pass. `release` stops the
+VMM and removes Crabbox's local lease state, copied rootfs, cloud-init drive,
+socket, log, network namespace, and CNI cache when `firecracker.deleteOnRelease`
+is true. Set `--keep` or `firecracker.deleteOnRelease=false` when you want to
+retain the local artifacts for inspection.
 
 ## Host requirements
 
@@ -90,8 +87,8 @@ This provider rejects non-Linux targets and Tailscale-managed networking.
 
 ## Guest image contract
 
-The future lifecycle path expects the configured kernel and rootfs pair to boot
-an SSH-ready Linux guest that matches the rest of Crabbox's Linux SSH-lease
+The lifecycle path expects the configured kernel and rootfs pair to boot an
+SSH-ready Linux guest that matches the rest of Crabbox's Linux SSH-lease
 contract:
 
 - SSH listens on port `22`.
@@ -150,9 +147,9 @@ Defaults:
 For this provider Crabbox also normalizes `serverType` to `microvm`, `ssh.port`
 to `22`, and clears SSH fallback ports.
 
-`launchTimeout` and `deleteOnRelease` are already part of the public config
-surface, but they do not mutate anything in this worktree because lifecycle
-commands exit before acquiring a lease.
+`launchTimeout` bounds microVM startup, and `deleteOnRelease` controls whether
+Crabbox removes the copied rootfs, cloud-init drive, socket, logs, and local
+network artifacts during release.
 
 ## Environment overrides
 
@@ -228,7 +225,7 @@ CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh --dry-run
 CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh
 ```
 
-The script is read-only in this worktree. It validates the JSON shape from
+The script is read-only. It validates the JSON shape from
 `crabbox doctor --provider firecracker --json`, then classifies the result as:
 
 - `classification=readiness_passed` when all Firecracker readiness checks are
@@ -240,7 +237,7 @@ The script is read-only in this worktree. It validates the JSON shape from
 
 On macOS, Windows, or Linux hosts that are missing KVM or Firecracker assets,
 `environment_blocked` is the honest expected result. The helper does not fake a
-successful live proof while lifecycle is still pending.
+successful live proof when the current host cannot run Firecracker.
 
 ## Limits
 
@@ -248,8 +245,7 @@ successful live proof while lifecycle is still pending.
 - direct CLI only, no coordinator path
 - `firecracker.network=cni` only
 - no Tailscale-managed networking
-- no lifecycle mutation yet (`warmup`, `run`, `ssh`, `stop`, `cleanup`)
-- no provider-native snapshot, fork, or restore flow in this worktree
+- no provider-native snapshot, fork, or restore flow
 
 ## Troubleshooting
 
@@ -268,8 +264,9 @@ successful live proof while lifecycle is still pending.
   `--firecracker-disk-mib`.
 - `--type is not supported for provider=firecracker`: use explicit
   `--firecracker-kernel` and `--firecracker-rootfs` instead.
-- `provider=firecracker acquire is not implemented yet`: the provider contract
-  is present, but lifecycle work has not landed in this worktree.
+- `provider=firecracker requires a Linux KVM host`: run lifecycle commands on a
+  Linux host with `/dev/kvm`; non-Linux hosts can still run read-only docs and
+  doctor-shape checks.
 
 ## Related docs
 
