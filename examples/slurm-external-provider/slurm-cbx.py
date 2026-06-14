@@ -44,11 +44,32 @@ class AdapterError(Exception):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Crabbox external provider for Slurm")
-    parser.add_argument("--state-dir", default="~/.crabbox/slurm")
-    parser.add_argument("--runner-script", default="")
-    parser.add_argument("--poll-interval", type=float, default=5.0)
+    parser = argparse.ArgumentParser(
+        description="Crabbox external provider for Slurm. Reads a protocol "
+        "request as JSON on stdin and writes a protocol response as JSON on "
+        "stdout.",
+    )
+    parser.add_argument(
+        "--state-dir",
+        default="~/.crabbox/slurm",
+        help="Private directory for per-lease job state, keys, and endpoints "
+        "(must be visible to both submit host and compute job).",
+    )
+    parser.add_argument(
+        "--runner-script",
+        default="",
+        help="Default batch runner script used when external.config.runnerScript "
+        "is not set; defaults to the bundled runner-unprivileged-sshd.sh.",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between squeue/sacct polls while waiting for an endpoint.",
+    )
     args = parser.parse_args()
+    if args.poll_interval < 0:
+        parser.error("--poll-interval must not be negative")
 
     try:
         request = json.load(sys.stdin)
@@ -163,10 +184,16 @@ class SlurmCrabboxAdapter:
             env["CBX_WORK_ROOT"] = str(Path("~/crabbox-slurm-work").expanduser())
 
         result = run(command, env=env)
-        raw_job_id = result.stdout.strip().splitlines()[-1].strip()
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        raw_job_id = lines[-1] if lines else ""
         if not raw_job_id:
             raise AdapterError("sbatch returned no job id")
-        job_id = raw_job_id.split(";", 1)[0]
+        # ``sbatch --parsable`` prints "<jobid>" or "<jobid>;<cluster>". Keep the
+        # bare numeric job id for squeue/sacct/scancel but persist the raw value
+        # for display and cloud-id purposes.
+        job_id = raw_job_id.split(";", 1)[0].strip()
+        if not job_id:
+            raise AdapterError(f"sbatch returned an unparsable job id: {raw_job_id!r}")
         state.update(
             {
                 "jobId": job_id,
@@ -195,11 +222,27 @@ class SlurmCrabboxAdapter:
             return self.lease_from_state(state, config, require_endpoint=False)
         return self.wait_for_endpoint(state, config, keep=True)
 
+    def iter_states(self):
+        """Yield persisted lease states, skipping unreadable/corrupt files.
+
+        ``list`` and ``cleanup`` must not abort because a single state.json was
+        truncated by a crash mid-write or left behind by an older adapter.
+        """
+        jobs = self.state_dir / "jobs"
+        for state_path in sorted(jobs.glob("*/state.json")):
+            try:
+                state = read_json(state_path)
+            except (AdapterError, OSError, json.JSONDecodeError):
+                print(f"skipping unreadable Slurm state file: {state_path}", file=sys.stderr)
+                continue
+            if not state.get("leaseId"):
+                state["leaseId"] = state_path.parent.name
+            yield state
+
     def list_leases(self, request: Dict[str, Any], config: Dict[str, Any]) -> List[Dict[str, Any]]:
         include_all = bool(request.get("all"))
         leases: List[Dict[str, Any]] = []
-        for state_path in sorted((self.state_dir / "jobs").glob("*/state.json")):
-            state = read_json(state_path)
+        for state in self.iter_states():
             refreshed = self.refresh_state(state)
             if not include_all and str(refreshed.get("status") or "").lower() in {"released", "missing"}:
                 continue
@@ -230,9 +273,11 @@ class SlurmCrabboxAdapter:
     def cleanup(self, request: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
         dry_run = bool(request.get("dryRun"))
         removed: List[str] = []
-        for state_path in sorted((self.state_dir / "jobs").glob("*/state.json")):
-            state = self.refresh_state(read_json(state_path))
-            lease_id = str(state.get("leaseId") or state_path.parent.name)
+        for state in self.iter_states():
+            state = self.refresh_state(state)
+            lease_id = str(state.get("leaseId") or "")
+            if not lease_id:
+                continue
             if scheduler_state(state) in TERMINAL_STATES or str(state.get("status")) == "missing":
                 removed.append(lease_id)
                 if not dry_run:
@@ -292,11 +337,18 @@ class SlurmCrabboxAdapter:
                 ssh["proxyCommand"] = proxy
                 ssh["sshConfigProxy"] = True
 
+        # ``slug``, ``name``, ``lease``, ``externalResourceName`` and
+        # ``externalResourceNameFromEnv`` are reserved routing labels in the
+        # Crabbox external-provider protocol. Returning any of them makes the
+        # broker reject the lease (most visibly when ``idempotentLeaseId`` is
+        # enabled), so the adapter must keep its own labels namespaced.
         labels = {
-            "slug": str(state["slug"]),
             "state": str(state.get("status") or "pending"),
             "slurmJobId": str(state.get("rawJobId") or state.get("jobId") or ""),
         }
+        scheduler = state.get("schedulerState")
+        if scheduler:
+            labels["slurmState"] = str(scheduler)
         return {
             "leaseId": str(state["leaseId"]),
             "slug": str(state["slug"]),
@@ -403,9 +455,13 @@ class SlurmCrabboxAdapter:
                 check=False,
             )
             for line in result.stdout.splitlines():
-                value = line.split("|", 1)[0].strip().split()[0].upper()
-                if value:
-                    return value
+                # ``State`` can be e.g. "CANCELLED by 1000"; keep only the leading
+                # token. Empty lines (sacct sometimes prints blank step rows) are
+                # skipped without indexing into an empty split.
+                field = line.split("|", 1)[0].strip()
+                tokens = field.split()
+                if tokens:
+                    return tokens[0].upper()
         return ""
 
     def cancel_job(self, job_id: str) -> None:
@@ -461,8 +517,9 @@ class SlurmCrabboxAdapter:
         if isinstance(expected, dict):
             identifiers.extend([expected.get("leaseId"), expected.get("attemptLeaseId"), expected.get("slug"), expected.get("cloudId")])
         wanted = {str(value) for value in identifiers if value}
-        for state_path in sorted((self.state_dir / "jobs").glob("*/state.json")):
-            state = read_json(state_path)
+        if not wanted:
+            return None
+        for state in self.iter_states():
             values = {
                 str(state.get("leaseId") or ""),
                 str(state.get("slug") or ""),
