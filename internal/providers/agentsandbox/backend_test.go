@@ -1012,6 +1012,16 @@ func TestStatusReportsControllerClaimExpiredCondition(t *testing.T) {
 				t.Fatalf("expired=%t reason=%q conditions=%#v", expired, reason, liveClaim.Status.Conditions)
 			}
 
+			_, runErr := backend.Run(context.Background(), RunRequest{
+				Repo: repo, ID: claim.LeaseID, Keep: true, NoSync: true, Command: []string{"true"},
+			})
+			if runErr == nil || !strings.Contains(runErr.Error(), conditionReason) {
+				t.Fatalf("run err=%v", runErr)
+			}
+			if len(fake.execs) != 0 {
+				t.Fatalf("expired claim reached pod exec: %#v", fake.execs)
+			}
+
 			view, err := backend.Status(context.Background(), StatusRequest{ID: claim.LeaseID, Wait: true, WaitTimeout: time.Minute})
 			if err != nil {
 				t.Fatal(err)

@@ -551,6 +551,15 @@ func TestWaitForSandboxReadinessRejectsTerminalStates(t *testing.T) {
 			wantError: "Sandbox sandbox-a expired reason=SandboxExpired",
 		},
 		{
+			name: "expired claim",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxClaimResource+"/sandboxes/claim-a"].Status.Conditions = []conditionState{{
+					Type: "Ready", Status: "False", Reason: "ClaimExpired", Message: "shutdown time elapsed",
+				}}
+			},
+			wantError: "SandboxClaim claim-a expired reason=ClaimExpired",
+		},
+		{
 			name: "succeeded pod",
 			mutate: func(fake *fakeKubernetesClient) {
 				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
@@ -945,14 +954,14 @@ func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) 
 		if req.MaxCapturedOutputBytes != kubectlCaptureLimitBytes {
 			t.Fatalf("capture limit=%d", req.MaxCapturedOutputBytes)
 		}
-		if got := strings.Join(req.Args[:4], " "); got != "--kubeconfig /tmp/cluster.yaml --context agent-context" {
+		if got := strings.Join(req.Args[:2], " "); got != "--kubeconfig=/tmp/cluster.yaml --context=agent-context" {
 			t.Fatalf("global args=%q", got)
 		}
 	}
-	if got := strings.Join(runner.requests[0].Args[4:], " "); got != "get --raw /apis/extensions.agents.x-k8s.io/v1beta1" {
+	if got := strings.Join(runner.requests[0].Args[2:], " "); got != "get --raw /apis/extensions.agents.x-k8s.io/v1beta1" {
 		t.Fatalf("discovery args=%q", got)
 	}
-	if got := strings.Join(runner.requests[1].Args[4:], " "); got != "create --namespace sandboxes -f - -o json" {
+	if got := strings.Join(runner.requests[1].Args[2:], " "); got != "create --namespace=sandboxes -f - -o json" {
 		t.Fatalf("create args=%q", got)
 	}
 	if len(runner.inputs) != 1 || !bytes.Contains(runner.inputs[0], []byte(`"warmPoolRef":{"name":"linux-pool"}`)) {
@@ -1014,11 +1023,29 @@ func TestKubectlExecStreamsStdinWithoutPuttingItOnArgv(t *testing.T) {
 	if len(runner.requests) != 1 || len(runner.inputs) != 1 {
 		t.Fatalf("requests=%d inputs=%d", len(runner.requests), len(runner.inputs))
 	}
-	if args := strings.Join(runner.requests[0].Args, " "); strings.Contains(args, secret) || args != "exec --namespace sandboxes -i sandbox-a -- sh -s" {
+	if args := strings.Join(runner.requests[0].Args, " "); strings.Contains(args, secret) || args != "exec --namespace=sandboxes -i pod/sandbox-a -- sh -s" {
 		t.Fatalf("exec args=%q", args)
 	}
 	if string(runner.inputs[0]) != secret {
 		t.Fatalf("stdin=%q", runner.inputs[0])
+	}
+}
+
+func TestKubectlClientRejectsOptionLikeClusterNamesBeforeExec(t *testing.T) {
+	runner := &recordingCommandRunner{}
+	client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
+	if _, err := client.Get(context.Background(), sandboxGVR(), "sandboxes", "--server=attacker"); err == nil {
+		t.Fatal("option-like Sandbox name was accepted")
+	}
+	if err := client.Exec(context.Background(), podExecRequest{
+		Namespace: "sandboxes",
+		Pod:       "--kubeconfig=attacker",
+		Command:   []string{"true"},
+	}); err == nil {
+		t.Fatal("option-like pod name was accepted")
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("invalid names reached kubectl: %#v", runner.requests)
 	}
 }
 

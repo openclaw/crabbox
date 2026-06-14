@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,8 @@ const (
 	kubectlCaptureLimitBytes     = 8 << 20
 	kubectlErrorDetailLimitBytes = 16 << 10
 )
+
+var kubernetesDNSLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
 
 type resourceRef struct {
 	GroupVersion string
@@ -183,10 +186,10 @@ func newKubernetesClient(ctx context.Context, cfg Config, rt Runtime) (kubernete
 
 	baseArgs := make([]string, 0, 4)
 	if kubeconfig := expandHomePath(values.Kubeconfig); kubeconfig != "" {
-		baseArgs = append(baseArgs, "--kubeconfig", kubeconfig)
+		baseArgs = append(baseArgs, "--kubeconfig="+kubeconfig)
 	}
 	if contextName := strings.TrimSpace(values.Context); contextName != "" {
-		baseArgs = append(baseArgs, "--context", contextName)
+		baseArgs = append(baseArgs, "--context="+contextName)
 	}
 
 	return &kubectlKubernetesClient{
@@ -261,11 +264,14 @@ func (c *kubectlKubernetesClient) Get(
 	ref resourceRef,
 	namespace, name string,
 ) (*kubernetesObject, error) {
+	if err := validateKubernetesObjectName(ref.qualifiedResource(), name); err != nil {
+		return nil, err
+	}
 	result, err := c.run(
 		ctx,
 		LocalCommandRequest{},
-		"get", ref.qualifiedResource(), name,
-		"--namespace", namespace,
+		"get", ref.qualifiedResource()+"/"+name,
+		"--namespace="+namespace,
 		"--ignore-not-found=true",
 		"-o", "json",
 	)
@@ -289,6 +295,9 @@ func (c *kubectlKubernetesClient) Create(
 	namespace string,
 	object *kubernetesObject,
 ) (*kubernetesObject, error) {
+	if err := validateKubernetesObjectName(ref.qualifiedResource(), object.Metadata.Name); err != nil {
+		return nil, &kubernetesCreateError{err: err, ambiguous: false}
+	}
 	manifest, err := json.Marshal(object)
 	if err != nil {
 		return nil, &kubernetesCreateError{
@@ -300,7 +309,7 @@ func (c *kubectlKubernetesClient) Create(
 	result, err := c.run(
 		ctx,
 		LocalCommandRequest{Stdin: bytes.NewReader(manifest)},
-		"create", "--namespace", namespace, "-f", "-", "-o", "json",
+		"create", "--namespace="+namespace, "-f", "-", "-o", "json",
 	)
 	if err != nil {
 		return nil, &kubernetesCreateError{
@@ -353,6 +362,9 @@ func (c *kubectlKubernetesClient) Delete(
 	ref resourceRef,
 	namespace, name, uid string,
 ) error {
+	if err := validateKubernetesObjectName(ref.qualifiedResource(), name); err != nil {
+		return err
+	}
 	uid = strings.TrimSpace(uid)
 	if uid == "" {
 		return fmt.Errorf("delete %s/%s requires a Kubernetes UID precondition", ref.qualifiedResource(), name)
@@ -404,9 +416,9 @@ func (c *kubectlKubernetesClient) CanI(ctx context.Context, rule rbacRule) (bool
 		qualified += "." + rule.Group
 	}
 	for _, verb := range rule.Verbs {
-		args := []string{"auth", "can-i", verb, qualified, "--namespace", rule.Namespace}
+		args := []string{"auth", "can-i", verb, qualified, "--namespace=" + rule.Namespace}
 		if strings.TrimSpace(rule.Subresource) != "" {
-			args = append(args, "--subresource", rule.Subresource)
+			args = append(args, "--subresource="+rule.Subresource)
 		}
 		result, err := c.run(ctx, LocalCommandRequest{}, args...)
 		allowed, recognized := parseKubectlCanI(result.Stdout)
@@ -458,8 +470,8 @@ func (c *kubectlKubernetesClient) ListPods(
 		ctx,
 		LocalCommandRequest{},
 		"get", "pods",
-		"--namespace", namespace,
-		"--selector", selector,
+		"--namespace="+namespace,
+		"--selector="+selector,
 		"-o", "json",
 	)
 	if err != nil {
@@ -488,13 +500,19 @@ type podExecRequest struct {
 }
 
 func (c *kubectlKubernetesClient) Exec(ctx context.Context, req podExecRequest) error {
-	args := []string{"exec", "--namespace", req.Namespace}
+	if err := validateKubernetesObjectName("pod", req.Pod); err != nil {
+		return err
+	}
+	if container := strings.TrimSpace(req.Container); container != "" && !isKubernetesDNSLabel(container) {
+		return fmt.Errorf("agent-sandbox pod container name %q is invalid", req.Container)
+	}
+	args := []string{"exec", "--namespace=" + req.Namespace}
 	if req.Stdin != nil {
 		args = append(args, "-i")
 	}
-	args = append(args, req.Pod)
+	args = append(args, "pod/"+req.Pod)
 	if strings.TrimSpace(req.Container) != "" {
-		args = append(args, "-c", req.Container)
+		args = append(args, "--container="+req.Container)
 	}
 	args = append(args, "--")
 	args = append(args, req.Command...)
@@ -693,6 +711,22 @@ func claimSandboxName(claim *kubernetesObject) (string, error) {
 	return name, nil
 }
 
+func validateKubernetesObjectName(resource, name string) error {
+	if name != strings.TrimSpace(name) || name == "" || len(name) > 253 {
+		return resourceIdentityError{err: exit(4, "agent-sandbox %s name %q is invalid", resource, name)}
+	}
+	for _, label := range strings.Split(name, ".") {
+		if !isKubernetesDNSLabel(label) {
+			return resourceIdentityError{err: exit(4, "agent-sandbox %s name %q is invalid", resource, name)}
+		}
+	}
+	return nil
+}
+
+func isKubernetesDNSLabel(value string) bool {
+	return len(value) > 0 && len(value) <= 63 && kubernetesDNSLabelPattern.MatchString(value)
+}
+
 func sandboxReady(sandbox *kubernetesObject) error {
 	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == "Ready" &&
@@ -883,6 +917,14 @@ func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, 
 	}
 	if err := validateClaimIdentity(claim, identity); err != nil {
 		return sandboxResourceReadiness{}, err
+	}
+	if reason, expired := sandboxClaimControllerExpiry(claim); expired {
+		return sandboxResourceReadiness{}, sandboxExpiredError{err: exit(
+			4,
+			"agent-sandbox SandboxClaim %s expired reason=%s",
+			claim.Metadata.Name,
+			reason,
+		)}
 	}
 	sandboxName, err := claimSandboxName(claim)
 	if err != nil {

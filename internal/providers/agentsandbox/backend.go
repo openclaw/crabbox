@@ -1057,14 +1057,24 @@ func sandboxClaimExpired(claim LeaseClaim, obj *kubernetesObject, now time.Time)
 		return true, "TTL expired at " + strings.TrimSpace(claim.Labels[claimLabelExpiresAt])
 	}
 	if obj != nil {
-		for _, condition := range obj.Status.Conditions {
-			reason := strings.TrimSpace(condition.Reason)
-			if strings.EqualFold(reason, "ClaimExpired") || strings.EqualFold(reason, "SandboxExpired") {
-				return true, "controller reported " + reason
-			}
+		if reason, expired := sandboxClaimControllerExpiry(obj); expired {
+			return true, "controller reported " + reason
 		}
 	}
 	return false, ""
+}
+
+func sandboxClaimControllerExpiry(obj *kubernetesObject) (string, bool) {
+	if obj == nil {
+		return "", false
+	}
+	for _, condition := range obj.Status.Conditions {
+		reason := strings.TrimSpace(condition.Reason)
+		if strings.EqualFold(reason, "ClaimExpired") || strings.EqualFold(reason, "SandboxExpired") {
+			return reason, true
+		}
+	}
+	return "", false
 }
 
 func (b *backend) missingClaimRunError(claim LeaseClaim) error {
