@@ -106,7 +106,7 @@ agentSandbox:
   workdir: /workspace/crabbox      # default sync target and exec cwd
   sandboxReadyTimeout: 180s
   podReadyTimeout: 180s
-  execTimeoutSecs: 600
+  execTimeoutSecs: 600             # 0 = no provider command deadline
   deleteOnRelease: true
   forgetMissing: false
 ```

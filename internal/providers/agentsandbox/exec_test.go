@@ -1,9 +1,37 @@
 package agentsandbox
 
 import (
+	"context"
 	"reflect"
 	"testing"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestExecContextHonorsZeroAsNoDeadline(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.ExecTimeoutSecs = 0
+	b := backend{cfg: cfg}
+
+	ctx, cancel := b.execContext(context.Background())
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("zero exec timeout created a deadline")
+	}
+
+	b.cfg.AgentSandbox.ExecTimeoutSecs = 1
+	ctx, cancel = b.execContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("positive exec timeout did not create a deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > time.Second {
+		t.Fatalf("deadline remaining=%s, want within one second", remaining)
+	}
+}
 
 func TestBuildCommandUsesBashCompatibleShell(t *testing.T) {
 	tests := []struct {

@@ -33,7 +33,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		Workdir:             fs.String("agent-sandbox-workdir", defaults.AgentSandbox.Workdir, "absolute working directory inside the sandbox"),
 		SandboxReadyTimeout: fs.Duration("agent-sandbox-sandbox-ready-timeout", defaults.AgentSandbox.SandboxReadyTimeout, "SandboxClaim/Sandbox readiness timeout"),
 		PodReadyTimeout:     fs.Duration("agent-sandbox-pod-ready-timeout", defaults.AgentSandbox.PodReadyTimeout, "sandbox pod readiness timeout"),
-		ExecTimeoutSecs:     fs.Int("agent-sandbox-exec-timeout-secs", defaults.AgentSandbox.ExecTimeoutSecs, "command timeout in seconds"),
+		ExecTimeoutSecs:     fs.Int("agent-sandbox-exec-timeout-secs", defaults.AgentSandbox.ExecTimeoutSecs, "command timeout in seconds (0 = no provider deadline)"),
 		DeleteOnRelease:     fs.Bool("agent-sandbox-delete-on-release", defaults.AgentSandbox.DeleteOnRelease, "delete the SandboxClaim on release"),
 		ForgetMissing:       fs.Bool("agent-sandbox-forget-missing", defaults.AgentSandbox.ForgetMissing, "remove the local claim when stop sees a missing Kubernetes claim"),
 	}

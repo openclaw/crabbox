@@ -9,15 +9,11 @@ import (
 	"time"
 )
 
-func (b *backend) execTimeoutSecs() int {
-	if b.cfg.AgentSandbox.ExecTimeoutSecs > 0 {
-		return b.cfg.AgentSandbox.ExecTimeoutSecs
-	}
-	return 600
-}
-
 func (b *backend) execContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, time.Duration(b.execTimeoutSecs())*time.Second)
+	if b.cfg.AgentSandbox.ExecTimeoutSecs == 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, time.Duration(b.cfg.AgentSandbox.ExecTimeoutSecs)*time.Second)
 }
 
 func (b *backend) cleanupContext(context.Context) (context.Context, context.CancelFunc) {
