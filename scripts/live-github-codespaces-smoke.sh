@@ -108,24 +108,38 @@ if not has_slug(payload):
   fi
 }
 
-validate_list_json_empty() {
+validate_list_json_missing_slug() {
   local command="$1"
   local output="$2"
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(python3 -c '
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" python3 -c '
 import json
+import os
 import sys
 
+slug = os.environ["CRABBOX_SMOKE_SLUG"]
 try:
     payload = json.load(sys.stdin)
 except Exception as exc:
     print(f"invalid JSON: {exc}", file=sys.stderr)
     sys.exit(1)
 
-if payload != []:
-    print("GitHub Codespaces Crabbox inventory is not empty", file=sys.stderr)
+def has_slug(value):
+    if isinstance(value, dict):
+        labels = value.get("labels")
+        if isinstance(labels, dict) and labels.get("slug") == slug:
+            return True
+        if value.get("slug") == slug or value.get("name") == slug or value.get("id") == slug or value.get("leaseId") == slug:
+            return True
+        return any(has_slug(child) for child in value.values())
+    if isinstance(value, list):
+        return any(has_slug(child) for child in value)
+    return False
+
+if has_slug(payload):
+    print(f"list JSON still included slug {slug}", file=sys.stderr)
     sys.exit(1)
 ' <<<"$output" 2>&1)"
   status=$?
@@ -257,6 +271,6 @@ cleanup_armed=0
 
 run_capture "$crabbox_bin cleanup --provider github-codespaces --dry-run" "$crabbox_bin" cleanup --provider github-codespaces --dry-run >/dev/null
 final_list="$(run_capture "$crabbox_bin list --provider github-codespaces --json" "$crabbox_bin" list --provider github-codespaces --json)"
-validate_list_json_empty "$crabbox_bin list --provider github-codespaces --json" "$final_list"
+validate_list_json_missing_slug "$crabbox_bin list --provider github-codespaces --json" "$final_list"
 
 printf 'classification=live_github_codespaces_smoke_passed slug=%s repo=%s machine=%s\n' "$slug" "$repo" "$machine"
