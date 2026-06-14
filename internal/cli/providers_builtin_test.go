@@ -25,6 +25,7 @@ func init() {
 	RegisterProvider(testGCPProvider{})
 	RegisterProvider(testIncusProvider{})
 	RegisterProvider(testProxmoxProvider{})
+	RegisterProvider(testFirecrackerProvider{})
 	RegisterProvider(testXCPNgProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testExternalProvider{})
@@ -668,7 +669,29 @@ func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpoin
 
 type testProxmoxProvider struct{}
 
+type testFirecrackerProvider struct{}
+
 type testIncusProvider struct{}
+
+func (testFirecrackerProvider) Name() string      { return "firecracker" }
+func (testFirecrackerProvider) Aliases() []string { return nil }
+func (testFirecrackerProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "firecracker",
+		Family:      "firecracker",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testFirecrackerProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testFirecrackerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testFirecrackerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
 
 func (testIncusProvider) Name() string      { return "incus" }
 func (testIncusProvider) Aliases() []string { return nil }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -14,6 +16,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var incus *providerMatrixEntry
 	var digitalOcean *providerMatrixEntry
 	var vultr *providerMatrixEntry
+	var firecracker *providerMatrixEntry
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
@@ -36,6 +39,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "vultr" {
 			vultr = &entries[i]
+		}
+		if entries[i].Provider == "firecracker" {
+			firecracker = &entries[i]
 		}
 		if entries[i].Provider == "nvidia-brev" {
 			nvidiaBrev = &entries[i]
@@ -79,6 +85,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if vultr == nil {
 		t.Fatal("vultr provider not found")
+	}
+	if firecracker == nil {
+		t.Fatal("firecracker provider not found")
 	}
 	if nvidiaBrev == nil {
 		t.Fatal("nvidia-brev provider not found")
@@ -162,6 +171,20 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		if !containsFeature(vultr.Features, feature) {
 			t.Fatalf("vultr features=%v missing %s", vultr.Features, feature)
 		}
+	}
+	if firecracker.Kind != ProviderKindSSHLease || firecracker.Family != "firecracker" || firecracker.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("firecracker kind/family/coordinator=%q/%q/%q", firecracker.Kind, firecracker.Family, firecracker.Coordinator)
+	}
+	if !containsString(firecracker.Targets, targetLinux) {
+		t.Fatalf("firecracker targets=%v", firecracker.Targets)
+	}
+	for _, feature := range []Feature{FeatureSSH, FeatureCrabboxSync, FeatureCleanup} {
+		if !containsFeature(firecracker.Features, feature) {
+			t.Fatalf("firecracker features=%v missing %s", firecracker.Features, feature)
+		}
+	}
+	if len(firecracker.Aliases) != 0 {
+		t.Fatalf("firecracker aliases=%v, want none", firecracker.Aliases)
 	}
 	if linode.Kind != ProviderKindSSHLease || linode.Family != "linode" || linode.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("linode kind/family/coordinator=%q/%q/%q", linode.Kind, linode.Family, linode.Coordinator)
@@ -1792,6 +1815,60 @@ func TestProvidersRecommendRejectsUnknownUseCase(t *testing.T) {
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
 		t.Fatalf("providers recommend unknown error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+}
+
+func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	binary := filepath.Join(t.TempDir(), "crabbox")
+
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/crabbox: %v\n%s", err, output)
+	}
+
+	run := exec.Command(binary, "providers", "--json")
+	run.Dir = root
+	output, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("crabbox providers --json: %v\n%s", err, output)
+	}
+
+	var entries []providerMatrixEntry
+	if err := json.Unmarshal(output, &entries); err != nil {
+		t.Fatalf("invalid providers json: %v\n%s", err, output)
+	}
+
+	var firecracker *providerMatrixEntry
+	var aws *providerMatrixEntry
+	for i := range entries {
+		switch entries[i].Provider {
+		case "aws":
+			aws = &entries[i]
+		case "firecracker":
+			firecracker = &entries[i]
+		}
+	}
+	if aws == nil {
+		t.Fatal("built binary providers json missing aws")
+	}
+	if firecracker == nil {
+		t.Fatal("built binary providers json missing firecracker")
+	}
+	if firecracker.Kind != ProviderKindSSHLease || firecracker.Family != "firecracker" || firecracker.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("firecracker built-in spec=%#v", *firecracker)
+	}
+	if !containsString(firecracker.Targets, targetLinux) {
+		t.Fatalf("firecracker built-in targets=%v", firecracker.Targets)
+	}
+	for _, feature := range []Feature{FeatureSSH, FeatureCrabboxSync, FeatureCleanup} {
+		if !containsFeature(firecracker.Features, feature) {
+			t.Fatalf("firecracker built-in features=%v missing %s", firecracker.Features, feature)
+		}
+	}
+	if len(firecracker.Aliases) != 0 {
+		t.Fatalf("firecracker built-in aliases=%v, want none", firecracker.Aliases)
 	}
 }
 

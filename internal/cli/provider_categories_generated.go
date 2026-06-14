@@ -25,6 +25,7 @@ var benchmarkProviderCategories = map[string]string{
 	"exe-dev":                    "direct-cloud",
 	"external":                   "external-provider",
 	"fastapi-cloud":              "service-control",
+	"firecracker":                "self-hosted-virtualization",
 	"freestyle":                  "delegated-sandbox",
 	"gcp":                        "brokerable-cloud",
 	"hetzner":                    "brokerable-cloud",

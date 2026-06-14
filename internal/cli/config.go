@@ -121,6 +121,7 @@ type Config struct {
 	scalewayTypeExplicit          bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
+	Firecracker                   FirecrackerConfig
 	XCPNg                         XCPNgConfig
 	Parallels                     ParallelsConfig
 	parallelsTemplateApplied      bool
@@ -883,6 +884,24 @@ type ProxmoxConfig struct {
 	WorkRoot    string
 	FullClone   bool
 	InsecureTLS bool
+}
+
+type FirecrackerConfig struct {
+	Binary          string
+	Jailer          string
+	Kernel          string
+	RootFS          string
+	User            string
+	WorkRoot        string
+	CPUs            int
+	MemoryMiB       int
+	DiskMiB         int
+	Network         string
+	CNINetwork      string
+	CNIConfDir      string
+	CNIBinDir       string
+	LaunchTimeout   time.Duration
+	DeleteOnRelease bool
 }
 
 type XCPNgConfig struct {
@@ -1845,6 +1864,26 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		return nil
 	}
+	if cfg.Provider == "firecracker" {
+		base := baseConfig()
+		if cfg.Firecracker.User != "" && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser || cfg.Firecracker.User != base.Firecracker.User) {
+			cfg.SSHUser = cfg.Firecracker.User
+		}
+		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
+			cfg.SSHPort = "22"
+		}
+		cfg.SSHFallbackPorts = nil
+		if cfg.Firecracker.WorkRoot != "" && (isDefaultWorkRoot(cfg.WorkRoot) || cfg.Firecracker.WorkRoot != base.Firecracker.WorkRoot) {
+			cfg.WorkRoot = cfg.Firecracker.WorkRoot
+		}
+		if cfg.TargetOS == "" {
+			cfg.TargetOS = targetLinux
+		}
+		if !cfg.ServerTypeExplicit {
+			cfg.ServerType = firecrackerServerTypeForConfig(*cfg)
+		}
+		return nil
+	}
 	if cfg.Provider != "proxmox" {
 		if cfg.Provider == "xcp-ng" {
 			if cfg.XCPNg.User != "" {
@@ -2594,6 +2633,22 @@ func baseConfig() Config {
 			WorkRoot:  defaultPOSIXWorkRoot,
 			FullClone: true,
 		},
+		Firecracker: FirecrackerConfig{
+			Binary:          "firecracker",
+			Kernel:          "/var/lib/crabbox/firecracker/vmlinux",
+			RootFS:          "/var/lib/crabbox/firecracker/rootfs.ext4",
+			User:            "crabbox",
+			WorkRoot:        defaultPOSIXWorkRoot,
+			CPUs:            4,
+			MemoryMiB:       4096,
+			DiskMiB:         16384,
+			Network:         "cni",
+			CNINetwork:      "crabbox-firecracker",
+			CNIConfDir:      "/etc/cni/conf.d",
+			CNIBinDir:       "/opt/cni/bin",
+			LaunchTimeout:   2 * time.Minute,
+			DeleteOnRelease: true,
+		},
 		XCPNg: XCPNgConfig{
 			User:     "crabbox",
 			WorkRoot: defaultPOSIXWorkRoot,
@@ -2716,6 +2771,7 @@ type fileConfig struct {
 	GCP                      *fileGCPConfig                      `yaml:"gcp,omitempty"`
 	Incus                    *fileIncusConfig                    `yaml:"incus,omitempty"`
 	Proxmox                  *fileProxmoxConfig                  `yaml:"proxmox,omitempty"`
+	Firecracker              *fileFirecrackerConfig              `yaml:"firecracker,omitempty"`
 	XCPNg                    *fileXCPNgConfig                    `yaml:"xcpNg,omitempty"`
 	Parallels                *fileParallelsConfig                `yaml:"parallels,omitempty"`
 	SSH                      *fileSSHConfig                      `yaml:"ssh,omitempty"`
@@ -2956,6 +3012,24 @@ type fileProxmoxConfig struct {
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	FullClone   *bool  `yaml:"fullClone,omitempty"`
 	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
+}
+
+type fileFirecrackerConfig struct {
+	Binary          string `yaml:"binary,omitempty"`
+	Jailer          string `yaml:"jailer,omitempty"`
+	Kernel          string `yaml:"kernel,omitempty"`
+	RootFS          string `yaml:"rootfs,omitempty"`
+	User            string `yaml:"user,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	CPUs            *int   `yaml:"cpus,omitempty"`
+	MemoryMiB       *int   `yaml:"memoryMiB,omitempty"`
+	DiskMiB         *int   `yaml:"diskMiB,omitempty"`
+	Network         string `yaml:"network,omitempty"`
+	CNINetwork      string `yaml:"cniNetwork,omitempty"`
+	CNIConfDir      string `yaml:"cniConfDir,omitempty"`
+	CNIBinDir       string `yaml:"cniBinDir,omitempty"`
+	LaunchTimeout   string `yaml:"launchTimeout,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 type fileXCPNgConfig struct {
@@ -4584,6 +4658,54 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Proxmox.InsecureTLS != nil {
 			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
 			cfg.credentialProvenance.proxmoxInsecureTLS = credentialSource
+		}
+	}
+	if file.Firecracker != nil {
+		if file.Firecracker.Binary != "" {
+			cfg.Firecracker.Binary = expandUserPath(file.Firecracker.Binary)
+		}
+		if file.Firecracker.Jailer != "" {
+			cfg.Firecracker.Jailer = expandUserPath(file.Firecracker.Jailer)
+		}
+		if file.Firecracker.Kernel != "" {
+			cfg.Firecracker.Kernel = expandUserPath(file.Firecracker.Kernel)
+		}
+		if file.Firecracker.RootFS != "" {
+			cfg.Firecracker.RootFS = expandUserPath(file.Firecracker.RootFS)
+		}
+		if file.Firecracker.User != "" {
+			cfg.Firecracker.User = file.Firecracker.User
+		}
+		if file.Firecracker.WorkRoot != "" {
+			cfg.Firecracker.WorkRoot = file.Firecracker.WorkRoot
+		}
+		if file.Firecracker.CPUs != nil {
+			cfg.Firecracker.CPUs = *file.Firecracker.CPUs
+		}
+		if file.Firecracker.MemoryMiB != nil {
+			cfg.Firecracker.MemoryMiB = *file.Firecracker.MemoryMiB
+		}
+		if file.Firecracker.DiskMiB != nil {
+			cfg.Firecracker.DiskMiB = *file.Firecracker.DiskMiB
+		}
+		if file.Firecracker.Network != "" {
+			cfg.Firecracker.Network = file.Firecracker.Network
+		}
+		if file.Firecracker.CNINetwork != "" {
+			cfg.Firecracker.CNINetwork = file.Firecracker.CNINetwork
+		}
+		if file.Firecracker.CNIConfDir != "" {
+			cfg.Firecracker.CNIConfDir = expandUserPath(file.Firecracker.CNIConfDir)
+		}
+		if file.Firecracker.CNIBinDir != "" {
+			cfg.Firecracker.CNIBinDir = expandUserPath(file.Firecracker.CNIBinDir)
+		}
+		if file.Firecracker.LaunchTimeout != "" {
+			applyLeaseDuration(&cfg.Firecracker.LaunchTimeout, file.Firecracker.LaunchTimeout)
+		}
+		if file.Firecracker.DeleteOnRelease != nil {
+			cfg.Firecracker.DeleteOnRelease = *file.Firecracker.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "firecracker")
 		}
 	}
 	if file.XCPNg != nil {
@@ -6742,6 +6864,26 @@ func applyEnv(cfg *Config) error {
 		cfg.Proxmox.InsecureTLS = value
 		cfg.credentialProvenance.proxmoxInsecureTLS = credentialSourceEnvironment
 	}
+	cfg.Firecracker.Binary = expandUserPath(getenv("CRABBOX_FIRECRACKER_BINARY", cfg.Firecracker.Binary))
+	cfg.Firecracker.Jailer = expandUserPath(getenv("CRABBOX_FIRECRACKER_JAILER", cfg.Firecracker.Jailer))
+	cfg.Firecracker.Kernel = expandUserPath(getenv("CRABBOX_FIRECRACKER_KERNEL", cfg.Firecracker.Kernel))
+	cfg.Firecracker.RootFS = expandUserPath(getenv("CRABBOX_FIRECRACKER_ROOTFS", cfg.Firecracker.RootFS))
+	cfg.Firecracker.User = getenv("CRABBOX_FIRECRACKER_USER", cfg.Firecracker.User)
+	cfg.Firecracker.WorkRoot = getenv("CRABBOX_FIRECRACKER_WORK_ROOT", cfg.Firecracker.WorkRoot)
+	cfg.Firecracker.CPUs = getenvInt("CRABBOX_FIRECRACKER_CPUS", cfg.Firecracker.CPUs)
+	cfg.Firecracker.MemoryMiB = getenvInt("CRABBOX_FIRECRACKER_MEMORY_MIB", cfg.Firecracker.MemoryMiB)
+	cfg.Firecracker.DiskMiB = getenvInt("CRABBOX_FIRECRACKER_DISK_MIB", cfg.Firecracker.DiskMiB)
+	cfg.Firecracker.Network = getenv("CRABBOX_FIRECRACKER_NETWORK", cfg.Firecracker.Network)
+	cfg.Firecracker.CNINetwork = getenv("CRABBOX_FIRECRACKER_CNI_NETWORK", cfg.Firecracker.CNINetwork)
+	cfg.Firecracker.CNIConfDir = expandUserPath(getenv("CRABBOX_FIRECRACKER_CNI_CONF_DIR", cfg.Firecracker.CNIConfDir))
+	cfg.Firecracker.CNIBinDir = expandUserPath(getenv("CRABBOX_FIRECRACKER_CNI_BIN_DIR", cfg.Firecracker.CNIBinDir))
+	if timeout := os.Getenv("CRABBOX_FIRECRACKER_LAUNCH_TIMEOUT"); timeout != "" {
+		applyLeaseDuration(&cfg.Firecracker.LaunchTimeout, timeout)
+	}
+	if value, ok := getenvBool("CRABBOX_FIRECRACKER_DELETE_ON_RELEASE"); ok {
+		cfg.Firecracker.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "firecracker")
+	}
 	cfg.XCPNg.APIURL = getenv("CRABBOX_XCP_NG_API_URL", cfg.XCPNg.APIURL)
 	cfg.XCPNg.Username = getenv("CRABBOX_XCP_NG_USERNAME", cfg.XCPNg.Username)
 	cfg.XCPNg.Password = getenv("CRABBOX_XCP_NG_PASSWORD", cfg.XCPNg.Password)
@@ -7734,6 +7876,9 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "proxmox" {
 		return proxmoxServerTypeForConfig(cfg)
 	}
+	if cfg.Provider == "firecracker" {
+		return firecrackerServerTypeForConfig(cfg)
+	}
 	if cfg.Provider == "incus" {
 		return incusServerTypeForConfig(cfg)
 	}
@@ -7783,6 +7928,9 @@ func serverTypeForProviderClass(provider, class string) string {
 	if provider == "proxmox" {
 		return "template"
 	}
+	if provider == "firecracker" {
+		return "microvm"
+	}
 	if provider == "incus" {
 		return "container"
 	}
@@ -7808,6 +7956,10 @@ func proxmoxServerTypeForConfig(cfg Config) string {
 		return "template-" + strconv.Itoa(cfg.Proxmox.TemplateID)
 	}
 	return "template"
+}
+
+func firecrackerServerTypeForConfig(_ Config) string {
+	return "microvm"
 }
 
 func parallelsServerTypeForConfig(cfg Config) string {
