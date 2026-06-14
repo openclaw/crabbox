@@ -2715,6 +2715,7 @@ func baseConfig() Config {
 			Machine:         "basicLinux32gb",
 			IdleTimeout:     30 * time.Minute,
 			RetentionPeriod: 7 * 24 * time.Hour,
+			DeleteOnRelease: true,
 			WorkRoot:        "/workspaces/crabbox",
 		},
 		Lambda: LambdaConfig{
