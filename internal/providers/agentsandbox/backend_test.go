@@ -145,6 +145,56 @@ func TestListReportsPendingClaimAsNotReady(t *testing.T) {
 	t.Fatalf("pending claim absent from views=%#v", views)
 }
 
+func TestListAndStatusReportTerminalClaim(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "finished"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "finished")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	sandboxName := claim.Labels[claimLabelSandboxName]
+	fake.objects[sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName].Status.Conditions = []conditionState{{
+		Type: "Finished", Status: "True", Reason: "PodFailed", Message: "exit 1",
+	}}
+
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal LeaseView
+	for _, view := range views {
+		if view.Labels["slug"] == "finished" {
+			terminal = view
+			break
+		}
+	}
+	if terminal.Status != "failed" || !strings.Contains(terminal.Labels["reason"], "PodFailed") {
+		t.Fatalf("terminal view=%#v", terminal)
+	}
+	for _, wait := range []bool{false, true} {
+		start := time.Now()
+		status, err := backend.Status(context.Background(), StatusRequest{ID: claim.LeaseID, Wait: wait, WaitTimeout: time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != "failed" || status.Ready || !strings.Contains(status.Labels["reason"], "PodFailed") {
+			t.Fatalf("wait=%v status=%#v", wait, status)
+		}
+		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+			t.Fatalf("wait=%v terminal status took %s", wait, elapsed)
+		}
+	}
+}
+
 func TestListDisplayedClaimIDResolvesForStatus(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)

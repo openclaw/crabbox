@@ -34,6 +34,8 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
 - A Kubernetes kubeconfig that can reach the target cluster. Standard
   `KUBECONFIG` and default kubeconfig resolution apply when
   `agentSandbox.kubeconfig` is empty.
+  Configured kubeconfig paths and `KUBECONFIG` entries must be absolute after
+  home expansion so repository files cannot become cluster credentials.
 - A non-empty Kubernetes context. Crabbox requires the context so local claims
   cannot drift when the kubeconfig current context changes.
 - A namespace containing Agent Sandbox resources.
@@ -169,6 +171,8 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 3. Crabbox waits for `SandboxClaim.status.sandbox.name`, fetches the matching
    `Sandbox`, waits for its Ready condition, then resolves the pod from the
    sandbox pod annotation or selector and waits for the pod Ready condition.
+   A `Finished=True` Sandbox or a pod in `Succeeded`/`Failed` phase stops the
+   wait immediately with the terminal reason instead of consuming the timeout.
    Every claim lookup must retain the Kubernetes UID returned by creation.
    Before sync or command execution, the Sandbox must carry that claim UID and
    be controller-owned by the exact `SandboxClaim`; the pod must be

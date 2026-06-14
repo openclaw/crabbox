@@ -87,6 +87,9 @@ func validateConfig(cfg core.Config) error {
 	if !filepath.IsAbs(kubectl) && (kubectl == "." || kubectl == ".." || strings.ContainsAny(kubectl, `/\`)) {
 		return core.Exit(2, "agent-sandbox kubectl %q must be a bare executable name or absolute path", values.Kubectl)
 	}
+	if err := validateKubeconfigInputs(values.Kubeconfig); err != nil {
+		return err
+	}
 	if strings.ContainsAny(values.Namespace, " \t\r\n/") {
 		return core.Exit(2, "agent-sandbox namespace %q is invalid", values.Namespace)
 	}

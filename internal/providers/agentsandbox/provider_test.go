@@ -2,6 +2,8 @@ package agentsandbox
 
 import (
 	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +84,7 @@ func TestValidateConfigRejectsUnsafeInputs(t *testing.T) {
 		"missing warm pool":        func(cfg *core.Config) { cfg.AgentSandbox.WarmPool = "" },
 		"relative kubectl path":    func(cfg *core.Config) { cfg.AgentSandbox.Kubectl = "./bin/kubectl" },
 		"parent kubectl path":      func(cfg *core.Config) { cfg.AgentSandbox.Kubectl = "../kubectl" },
+		"relative kubeconfig path": func(cfg *core.Config) { cfg.AgentSandbox.Kubeconfig = ".kube/config" },
 		"bad namespace":            func(cfg *core.Config) { cfg.AgentSandbox.Namespace = "bad/ns" },
 		"bad container":            func(cfg *core.Config) { cfg.AgentSandbox.Container = "bad container" },
 		"relative workdir":         func(cfg *core.Config) { cfg.AgentSandbox.Workdir = "workspace" },
@@ -98,6 +101,49 @@ func TestValidateConfigRejectsUnsafeInputs(t *testing.T) {
 				t.Fatal("invalid config was accepted")
 			}
 		})
+	}
+}
+
+func TestValidateConfigRejectsRelativeKubeconfigEnvironment(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		configured  string
+		environment string
+	}{
+		{
+			name:        "relative list entry",
+			environment: filepath.Join(t.TempDir(), "config") + string(os.PathListSeparator) + ".kube/config",
+		},
+		{
+			name:        "leading whitespace remains relative",
+			environment: " " + filepath.Join(t.TempDir(), "config"),
+		},
+		{
+			name:        "whitespace configured value falls through",
+			configured:  " ",
+			environment: ".kube/config",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.AgentSandbox.Context = "agent-context"
+			cfg.AgentSandbox.WarmPool = "linux-pool"
+			cfg.AgentSandbox.Kubeconfig = tt.configured
+			t.Setenv("KUBECONFIG", tt.environment)
+			if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestValidateConfigAllowsEmptyKubeconfigListEntries(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	t.Setenv("KUBECONFIG", string(os.PathListSeparator)+filepath.Join(t.TempDir(), "config"))
+	if err := validateConfig(cfg); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -280,6 +280,8 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 				state = "missing-or-inaccessible"
 			} else if errors.Is(err, errNotReady) {
 				state = "not-ready"
+			} else if isResourceTerminalError(err) {
+				state = "failed"
 			} else {
 				return nil, err
 			}
@@ -296,6 +298,9 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 			"claim":     claimName,
 			"sandbox":   ready.SandboxName,
 			"pod":       ready.PodName,
+		}
+		if err != nil {
+			labels["reason"] = err.Error()
 		}
 		servers = append(servers, Server{Provider: providerName, CloudID: claimName, Name: claimName, Status: state, Labels: labels})
 	}
@@ -370,6 +375,11 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			if req.Wait {
 				return StatusView{}, exit(4, "agent-sandbox claim %s is missing in Kubernetes", claimName)
 			}
+			return view, nil
+		}
+		if isResourceTerminalError(readyErr) {
+			view.State = "failed"
+			view.Labels["reason"] = readyErr.Error()
 			return view, nil
 		}
 		if !errors.Is(readyErr, errNotReady) && !isNotFound(readyErr) {

@@ -455,6 +455,86 @@ func TestWaitForSandboxReadinessRetriesTransientKubernetesErrors(t *testing.T) {
 	}
 }
 
+func TestWaitForSandboxReadinessRejectsTerminalStates(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*fakeKubernetesClient)
+		wantError string
+	}{
+		{
+			name: "finished sandbox",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Status.Conditions = []conditionState{{
+					Type: "Finished", Status: "True", Reason: "PodFailed", Message: "exit 1",
+				}}
+			},
+			wantError: "Sandbox sandbox-a finished reason=PodFailed",
+		},
+		{
+			name: "succeeded pod",
+			mutate: func(fake *fakeKubernetesClient) {
+				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+				pod.Phase = "Succeeded"
+				pod.Ready = true
+				fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+			},
+			wantError: "terminal phase=Succeeded",
+		},
+		{
+			name: "failed pod",
+			mutate: func(fake *fakeKubernetesClient) {
+				pod := fake.pods["sandboxes/app=agent-sandbox"][0]
+				pod.Phase = "Failed"
+				pod.Ready = false
+				fake.pods["sandboxes/app=agent-sandbox"] = []podState{pod}
+			},
+			wantError: "terminal phase=Failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.AgentSandbox.Context = "agent-context"
+			cfg.AgentSandbox.Namespace = "sandboxes"
+			cfg.AgentSandbox.WarmPool = "linux-pool"
+			fake := readyFakeClient(cfg)
+			tt.mutate(fake)
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			_, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("err=%v want substring %q", err, tt.wantError)
+			}
+			if strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("terminal state was retried: %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitForSandboxPodReadinessRefreshesSandboxTerminalState(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	fake := readyFakeClient(cfg)
+	sandbox := cloneKubernetesObject(fake.objects[sandboxResource+"/sandboxes/sandbox-a"])
+	fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Status.Conditions = []conditionState{{
+		Type: "Finished", Status: "True", Reason: "PodFailed", Message: "exit 1",
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := waitForSandboxPodReadiness(ctx, fake, "sandboxes", "claim-a", sandbox, fakeClaimIdentity(cfg), time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "Sandbox sandbox-a finished reason=PodFailed") {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("terminal state was retried: %v", err)
+	}
+}
+
 func TestSandboxReadinessRejectsDownstreamIdentityMismatch(t *testing.T) {
 	tests := []struct {
 		name      string

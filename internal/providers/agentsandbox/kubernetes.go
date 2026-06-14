@@ -68,6 +68,18 @@ func (e resourceIdentityError) Unwrap() error {
 	return e.err
 }
 
+type resourceTerminalError struct {
+	err error
+}
+
+func (e resourceTerminalError) Error() string {
+	return e.err.Error()
+}
+
+func (e resourceTerminalError) Unwrap() error {
+	return e.err
+}
+
 type conditionState struct {
 	Type    string `json:"type,omitempty"`
 	Status  string `json:"status,omitempty"`
@@ -149,6 +161,9 @@ func newKubernetesClient(ctx context.Context, cfg Config, rt Runtime) (kubernete
 	}
 
 	values := cfg.AgentSandbox
+	if err := validateKubeconfigInputs(values.Kubeconfig); err != nil {
+		return nil, err
+	}
 	kubectl := strings.TrimSpace(values.Kubectl)
 	if kubectl == "" {
 		kubectl = "kubectl"
@@ -183,6 +198,28 @@ func expandHomePath(path string) string {
 		}
 	}
 	return path
+}
+
+func validateKubeconfigInputs(configured string) error {
+	if kubeconfig := expandHomePath(configured); kubeconfig != "" {
+		if !filepath.IsAbs(kubeconfig) {
+			return exit(2, "agent-sandbox kubeconfig %q must be absolute after home expansion", configured)
+		}
+		return nil
+	}
+	raw, ok := os.LookupEnv("KUBECONFIG")
+	if !ok || raw == "" {
+		return nil
+	}
+	for _, kubeconfig := range filepath.SplitList(raw) {
+		if kubeconfig == "" {
+			continue
+		}
+		if !filepath.IsAbs(kubeconfig) {
+			return exit(2, "agent-sandbox KUBECONFIG entry %q must be absolute", kubeconfig)
+		}
+	}
+	return nil
 }
 
 func (c *kubectlKubernetesClient) CheckResource(ctx context.Context, groupVersion, resource string) error {
@@ -631,6 +668,17 @@ func claimSandboxName(claim *kubernetesObject) (string, error) {
 
 func sandboxReady(sandbox *kubernetesObject) error {
 	for _, condition := range sandbox.Status.Conditions {
+		if condition.Type == "Finished" && condition.Status == "True" {
+			return resourceTerminalError{err: exit(
+				4,
+				"agent-sandbox Sandbox %s finished reason=%s message=%s",
+				sandbox.Metadata.Name,
+				blank(condition.Reason, "unknown"),
+				blank(condition.Message, "none"),
+			)}
+		}
+	}
+	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type != "Ready" {
 			continue
 		}
@@ -669,7 +717,7 @@ func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, names
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
-	pod, err := waitForSandboxPodReadiness(ctx, client, namespace, resource.Sandbox, identity, poll)
+	pod, err := waitForSandboxPodReadiness(ctx, client, namespace, resource.ClaimName, resource.Sandbox, identity, poll)
 	if err != nil {
 		return sandboxReadiness{}, err
 	}
@@ -692,7 +740,7 @@ func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesC
 	if podTimeout > 0 {
 		podCtx, podCancel = context.WithTimeout(ctx, podTimeout)
 	}
-	pod, err := waitForSandboxPodReadiness(podCtx, client, namespace, resource.Sandbox, identity, poll)
+	pod, err := waitForSandboxPodReadiness(podCtx, client, namespace, resource.ClaimName, resource.Sandbox, identity, poll)
 	podCancel()
 	if err != nil {
 		return sandboxReadiness{}, err
@@ -715,7 +763,7 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 		if errors.Is(err, errSandboxClaimNotFound) {
 			return sandboxResourceReadiness{}, err
 		}
-		if isResourceIdentityError(err) {
+		if isResourceIdentityError(err) || isResourceTerminalError(err) {
 			return sandboxResourceReadiness{}, err
 		}
 		lastErr = err
@@ -727,7 +775,7 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 	}
 }
 
-func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace string, sandbox *kubernetesObject, identity claimIdentity, poll time.Duration) (podState, error) {
+func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, sandbox *kubernetesObject, identity claimIdentity, poll time.Duration) (podState, error) {
 	if poll <= 0 {
 		poll = time.Second
 	}
@@ -735,19 +783,37 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		pod, err := resolveSandboxPod(ctx, client, namespace, sandbox)
+		currentSandbox, err := client.Get(ctx, sandboxGVR(), namespace, sandbox.Metadata.Name)
 		if err == nil {
-			if err := validatePodSandboxBinding(pod, sandbox, identity); err != nil {
+			err = validateSandboxClaimBinding(currentSandbox, claimName, identity)
+		}
+		if err == nil && currentSandbox.Metadata.UID != sandbox.Metadata.UID {
+			err = resourceIdentityError{err: exit(
+				4,
+				"agent-sandbox Sandbox identity changed from %s UID %s to %s UID %s",
+				sandbox.Metadata.Name,
+				sandbox.Metadata.UID,
+				currentSandbox.Metadata.Name,
+				currentSandbox.Metadata.UID,
+			)}
+		}
+		if err == nil {
+			err = sandboxReady(currentSandbox)
+		}
+		var pod podState
+		if err == nil {
+			pod, err = resolveSandboxPod(ctx, client, namespace, currentSandbox)
+		}
+		if err == nil {
+			if err := validatePodSandboxBinding(pod, currentSandbox, identity); err != nil {
 				return podState{}, err
 			}
+			err = podReady(pod)
+			if err == nil {
+				return pod, nil
+			}
 		}
-		if err == nil && pod.Ready {
-			return pod, nil
-		}
-		if err == nil {
-			err = fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
-		}
-		if isResourceIdentityError(err) {
+		if isResourceIdentityError(err) || isResourceTerminalError(err) {
 			return podState{}, err
 		}
 		lastErr = err
@@ -799,10 +865,27 @@ func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespac
 	if err := validatePodSandboxBinding(pod, resource.Sandbox, identity); err != nil {
 		return sandboxReadiness{}, err
 	}
-	if !pod.Ready {
-		return sandboxReadiness{}, fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
+	if err := podReady(pod); err != nil {
+		return sandboxReadiness{}, err
 	}
 	return newSandboxReadiness(resource, pod, identity), nil
+}
+
+func podReady(pod podState) error {
+	switch strings.ToLower(strings.TrimSpace(pod.Phase)) {
+	case "succeeded", "failed":
+		return resourceTerminalError{err: exit(
+			4,
+			"agent-sandbox pod %s reached terminal phase=%s conditions=%s",
+			pod.Name,
+			pod.Phase,
+			podConditionSummary(pod.Conditions),
+		)}
+	}
+	if pod.Ready {
+		return nil
+	}
+	return fmt.Errorf("%w: pod %s phase=%s conditions=%s", errNotReady, pod.Name, pod.Phase, podConditionSummary(pod.Conditions))
 }
 
 func newSandboxReadiness(resource sandboxResourceReadiness, pod podState, identity claimIdentity) sandboxReadiness {
@@ -893,6 +976,11 @@ func isResourceIdentityError(err error) bool {
 	return errors.As(err, &target)
 }
 
+func isResourceTerminalError(err error) bool {
+	var target resourceTerminalError
+	return errors.As(err, &target)
+}
+
 func controllerOwnerReference(refs []ownerReference) (ownerReference, bool) {
 	for _, ref := range refs {
 		if ref.Controller {
@@ -922,9 +1010,9 @@ func podConditionSummary(conditions []conditionState) string {
 
 func effectiveKubeconfigIdentity(cfg AgentSandboxConfig) string {
 	if path := strings.TrimSpace(cfg.Kubeconfig); path != "" {
-		return expandUserPath(path)
+		return expandHomePath(path)
 	}
-	if path := strings.TrimSpace(os.Getenv("KUBECONFIG")); path != "" {
+	if path := os.Getenv("KUBECONFIG"); path != "" {
 		return path
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
