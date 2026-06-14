@@ -209,8 +209,8 @@ to finish, then re-resolves the local claim before mutating Kubernetes.
 `status --wait` returns immediately when the root `SandboxClaim` disappears,
 while still polling temporary downstream Sandbox or pod readiness gaps.
 Retained claims whose pinned TTL elapsed, or whose controller condition reports
-`ClaimExpired`, return the terminal `expired` state without waiting for missing
-downstream resources.
+`ClaimExpired` or `SandboxExpired`, return the terminal `expired` state without
+waiting for missing downstream resources.
 
 ## Claim Scope And Cleanup Safety
 

@@ -541,6 +541,16 @@ func TestWaitForSandboxReadinessRejectsTerminalStates(t *testing.T) {
 			wantError: "Sandbox sandbox-a finished reason=PodFailed",
 		},
 		{
+			name: "expired sandbox",
+			mutate: func(fake *fakeKubernetesClient) {
+				fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Status.Conditions = []conditionState{
+					{Type: "Finished", Status: "True", Reason: "Completed", Message: "command exited"},
+					{Type: "Ready", Status: "False", Reason: "SandboxExpired", Message: "lifetime elapsed"},
+				}
+			},
+			wantError: "Sandbox sandbox-a expired reason=SandboxExpired",
+		},
+		{
 			name: "succeeded pod",
 			mutate: func(fake *fakeKubernetesClient) {
 				pod := fake.pods["sandboxes/app=agent-sandbox"][0]

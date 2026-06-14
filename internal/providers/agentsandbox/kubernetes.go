@@ -80,6 +80,18 @@ func (e resourceTerminalError) Unwrap() error {
 	return e.err
 }
 
+type sandboxExpiredError struct {
+	err error
+}
+
+func (e sandboxExpiredError) Error() string {
+	return e.err.Error()
+}
+
+func (e sandboxExpiredError) Unwrap() error {
+	return e.err
+}
+
 type conditionState struct {
 	Type    string `json:"type,omitempty"`
 	Status  string `json:"status,omitempty"`
@@ -683,6 +695,19 @@ func claimSandboxName(claim *kubernetesObject) (string, error) {
 
 func sandboxReady(sandbox *kubernetesObject) error {
 	for _, condition := range sandbox.Status.Conditions {
+		if condition.Type == "Ready" &&
+			condition.Status != "True" &&
+			strings.EqualFold(strings.TrimSpace(condition.Reason), "SandboxExpired") {
+			return sandboxExpiredError{err: exit(
+				4,
+				"agent-sandbox Sandbox %s expired reason=%s message=%s",
+				sandbox.Metadata.Name,
+				condition.Reason,
+				blank(condition.Message, "none"),
+			)}
+		}
+	}
+	for _, condition := range sandbox.Status.Conditions {
 		if condition.Type == "Finished" && condition.Status == "True" {
 			return resourceTerminalError{err: exit(
 				4,
@@ -1032,7 +1057,15 @@ func isResourceIdentityError(err error) bool {
 }
 
 func isResourceTerminalError(err error) bool {
+	if isSandboxExpiredError(err) {
+		return true
+	}
 	var target resourceTerminalError
+	return errors.As(err, &target)
+}
+
+func isSandboxExpiredError(err error) bool {
+	var target sandboxExpiredError
 	return errors.As(err, &target)
 }
 

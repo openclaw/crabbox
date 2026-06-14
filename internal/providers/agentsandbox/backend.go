@@ -362,6 +362,8 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 				state = "missing-or-inaccessible"
 			} else if errors.Is(stateErr, errNotReady) {
 				state = "not-ready"
+			} else if isSandboxExpiredError(stateErr) {
+				state = "expired"
 			} else if isResourceTerminalError(stateErr) {
 				state = "failed"
 			} else {
@@ -462,6 +464,11 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 			if req.Wait {
 				return StatusView{}, exit(4, "agent-sandbox claim %s is missing in Kubernetes", claimName)
 			}
+			return view, nil
+		}
+		if isSandboxExpiredError(readyErr) {
+			view.State = "expired"
+			view.Labels["reason"] = readyErr.Error()
 			return view, nil
 		}
 		if isResourceTerminalError(readyErr) {
@@ -1051,8 +1058,9 @@ func sandboxClaimExpired(claim LeaseClaim, obj *kubernetesObject, now time.Time)
 	}
 	if obj != nil {
 		for _, condition := range obj.Status.Conditions {
-			if strings.EqualFold(strings.TrimSpace(condition.Reason), "ClaimExpired") {
-				return true, "controller reported ClaimExpired"
+			reason := strings.TrimSpace(condition.Reason)
+			if strings.EqualFold(reason, "ClaimExpired") || strings.EqualFold(reason, "SandboxExpired") {
+				return true, "controller reported " + reason
 			}
 		}
 	}

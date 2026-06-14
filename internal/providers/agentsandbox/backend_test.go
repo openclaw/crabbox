@@ -990,30 +990,73 @@ func TestStatusAndListReportRetainedTTLExpiry(t *testing.T) {
 }
 
 func TestStatusReportsControllerClaimExpiredCondition(t *testing.T) {
+	for _, conditionReason := range []string{"ClaimExpired", "SandboxExpired"} {
+		t.Run(conditionReason, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			fake := readyFakeClient(cfg)
+			backend := testBackend(cfg, fake, nil, nil)
+			repo := testGitRepo(t)
+			slug := "controller-" + strings.ToLower(conditionReason)
+			if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: slug}); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := resolveLocalClaim(slug)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimName := claimNameFromLocalClaim(claim)
+			liveClaim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName]
+			liveClaim.Status.Conditions = append(liveClaim.Status.Conditions, conditionState{Type: "Ready", Status: "False", Reason: conditionReason})
+			wantReason := "controller reported " + conditionReason
+			if expired, reason := sandboxClaimExpired(claim, liveClaim, backend.now().UTC()); !expired || reason != wantReason {
+				t.Fatalf("expired=%t reason=%q conditions=%#v", expired, reason, liveClaim.Status.Conditions)
+			}
+
+			view, err := backend.Status(context.Background(), StatusRequest{ID: claim.LeaseID, Wait: true, WaitTimeout: time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.State != "expired" || view.Labels["reason"] != wantReason {
+				t.Fatalf("view=%#v", view)
+			}
+		})
+	}
+}
+
+func TestStatusAndListReportDirectSandboxExpiry(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)
 	backend := testBackend(cfg, fake, nil, nil)
 	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "controller-expired"}); err != nil {
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "sandbox-expired"}); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := resolveLocalClaim("controller-expired")
+	claim, err := resolveLocalClaim("sandbox-expired")
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimName := claimNameFromLocalClaim(claim)
-	liveClaim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName]
-	liveClaim.Status.Conditions = append(liveClaim.Status.Conditions, conditionState{Type: "Ready", Status: "False", Reason: "ClaimExpired"})
-	if expired, reason := sandboxClaimExpired(claim, liveClaim, backend.now().UTC()); !expired || reason != "controller reported ClaimExpired" {
-		t.Fatalf("expired=%t reason=%q conditions=%#v", expired, reason, liveClaim.Status.Conditions)
-	}
+	sandboxName := claim.Labels[claimLabelSandboxName]
+	fake.objects[sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName].Status.Conditions = []conditionState{{
+		Type: "Ready", Status: "False", Reason: "SandboxExpired", Message: "lifetime elapsed",
+	}}
 
+	start := time.Now()
 	view, err := backend.Status(context.Background(), StatusRequest{ID: claim.LeaseID, Wait: true, WaitTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.State != "expired" || view.Labels["reason"] != "controller reported ClaimExpired" {
+	if time.Since(start) > time.Second {
+		t.Fatalf("direct sandbox expiry was retried")
+	}
+	if view.State != "expired" || !strings.Contains(view.Labels["reason"], "SandboxExpired") {
 		t.Fatalf("view=%#v", view)
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Status != "expired" || !strings.Contains(views[0].Labels["reason"], "SandboxExpired") {
+		t.Fatalf("views=%#v", views)
 	}
 }
 
