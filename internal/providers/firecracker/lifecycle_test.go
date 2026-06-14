@@ -100,7 +100,7 @@ type lifecycleTestBackend struct {
 	stderr       *bytes.Buffer
 	stateRoot    string
 	repoRoot     string
-	cleanupCalls int
+	cleanupCalls *int
 }
 
 func newLifecycleTestBackend(t *testing.T, cfg core.Config) lifecycleTestBackend {
@@ -140,6 +140,7 @@ func newLifecycleTestBackend(t *testing.T, cfg core.Config) lifecycleTestBackend
 	repoRoot := t.TempDir()
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
+	cleanupCalls := 0
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: stdout, Stderr: stderr}).(*backend)
 	factory := &fakeMachineFactory{machine: &fakeMachine{pid: 4242, guestIP: "192.0.2.10"}}
 	processes := &fakeProcessManager{
@@ -153,16 +154,18 @@ func newLifecycleTestBackend(t *testing.T, cfg core.Config) lifecycleTestBackend
 	b.cleanupNetwork = func(context.Context, leaseStateRecord) error {
 		// remove generated runtime markers so retained-artifact tests stay honest
 		// without needing a real CNI stack.
+		cleanupCalls++
 		return nil
 	}
 	return lifecycleTestBackend{
-		backend:   b,
-		factory:   factory,
-		processes: processes,
-		stdout:    stdout,
-		stderr:    stderr,
-		stateRoot: stateRoot,
-		repoRoot:  repoRoot,
+		backend:      b,
+		factory:      factory,
+		processes:    processes,
+		stdout:       stdout,
+		stderr:       stderr,
+		stateRoot:    stateRoot,
+		repoRoot:     repoRoot,
+		cleanupCalls: &cleanupCalls,
 	}
 }
 
@@ -299,6 +302,9 @@ func TestAcquireRollbackRemovesStateOnSSHFailure(t *testing.T) {
 	}
 	if test.factory.machine.stopped != 1 {
 		t.Fatalf("fake machine stop count=%d want 1", test.factory.machine.stopped)
+	}
+	if *test.cleanupCalls != 1 {
+		t.Fatalf("cleanup calls=%d want 1", *test.cleanupCalls)
 	}
 	entries, err := os.ReadDir(filepath.Join(test.stateRoot, firecrackerLeasesDirName))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

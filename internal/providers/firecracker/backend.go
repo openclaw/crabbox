@@ -626,9 +626,7 @@ func (b *backend) rollbackAcquire(record leaseStateRecord, vm machine, cause err
 	if record.PID > 0 && cleanupErr != nil {
 		cleanupErr = errors.Join(cleanupErr, b.stopRecordedProcess(record))
 	}
-	if cleanupErr != nil || record.PID == 0 {
-		cleanupErr = errors.Join(cleanupErr, b.cleanupNetwork(context.Background(), record))
-	}
+	cleanupErr = errors.Join(cleanupErr, b.cleanupNetwork(context.Background(), record))
 	cleanupErr = errors.Join(cleanupErr, b.removeStateDir(record))
 	core.RemoveLeaseClaim(record.LeaseID)
 	return errors.Join(cause, cleanupErr)
