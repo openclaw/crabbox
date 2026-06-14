@@ -21,6 +21,7 @@ provider runs are not recorded by the coordinator in registered mode.
 | --- | --- |
 | Deterministic CLI create/delete commands and SSH names | declarative `external.lifecycle` |
 | Arbitrary logic or structured provider metadata | external JSON protocol executable |
+| Slurm allocation that publishes an SSH endpoint from a scheduled job | external JSON protocol executable |
 | KubeVirt cluster | built-in `kubevirt` provider |
 | Existing SSH hosts | built-in `ssh` provider |
 | New reusable public provider | implement a normal provider adapter |
@@ -120,6 +121,12 @@ route, and readiness check.
 Keep the executable separately versioned when it is proprietary. Public
 Crabbox needs only the protocol contract documented in
 [External Provider](../providers/external.md).
+
+Academic Slurm clusters usually fit this protocol path: the adapter submits an
+`sbatch` job, waits for the allocation to publish a host/port/key or proxy
+route, returns that as the external SSH target, and uses `scancel` on release.
+See [Slurm academic sandboxes](slurm-academic-sandboxes.md) for the full
+product and security contract.
 
 ## Persisted routing
 
@@ -324,6 +331,7 @@ sweep cannot select a live registered direct resource.
 ## Related documentation
 
 - [External Provider](../providers/external.md)
+- [Slurm academic sandboxes](slurm-academic-sandboxes.md)
 - [KubeVirt Provider](../providers/kubevirt.md)
 - [Coordinator](coordinator.md)
 - [Portable Coordinator](portable-coordinator.md)

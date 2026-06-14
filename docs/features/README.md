@@ -25,6 +25,7 @@ Read when:
   Durable Object and Node.js/PostgreSQL runtimes.
 - [Portable coordinator](portable-coordinator.md): deploy and operate the Node/PostgreSQL runtime on a conventional container platform.
 - [Bring your own infrastructure](bring-your-own-infrastructure.md): connect a private control plane through generic providers and optional registered mode.
+- [Slurm academic sandboxes](slurm-academic-sandboxes.md): offer Crabbox on campus Slurm clusters through a site-local external adapter before adding a built-in provider.
 - [Browser portal](portal.md): authenticated lease/run UI, detail pages, bridge routes, and runner visibility.
 - [Broker auth and routing](broker-auth-routing.md): GitHub login, shared bearer
   tokens, trusted proxy identity, optional Cloudflare Access, and public routes.
@@ -43,6 +44,7 @@ Read when:
 - [Authoring a provider](provider-authoring.md): step-by-step guide to writing a new provider.
 - [XCP-ng](../providers/xcp-ng.md): direct XCP-ng provider on dedicated x86_64 pool hardware. XCP-ng itself can host Linux, Windows, and BSD guests; Crabbox normal leases use Linux templates, with separate Windows x86_64/x64 ISO E2E coverage.
 - [Incus local E2E testbed](../providers/incus.md): local Apple Silicon runbook and smoke contract for the future `incus` adapter.
+- [Slurm academic sandboxes](slurm-academic-sandboxes.md): planning contract for academic Slurm allocations through `provider: external`.
 
 Provider deep-dives that live here in `features/`:
 
