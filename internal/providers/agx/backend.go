@@ -12,22 +12,16 @@ import (
 )
 
 type agxFlagValues struct {
-	APIURL    *string
 	Workspace *string
 	User      *string
 	WorkRoot  *string
-	Region    *string
-	Image     *string
 }
 
 func RegisterAGXProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	return agxFlagValues{
-		APIURL:    fs.String("agx-api-url", defaults.AGX.APIURL, "AGX control-plane API URL"),
 		Workspace: fs.String("agx-workspace", defaults.AGX.Workspace, "AGX SSH workspace gateway host"),
-		User:      fs.String("agx-user", defaults.AGX.User, "AGX in-VM SSH login user"),
+		User:      fs.String("agx-user", defaults.AGX.User, "AGX in-VM SSH login user (the <user> in <user>+<instance>)"),
 		WorkRoot:  fs.String("agx-work-root", defaults.AGX.WorkRoot, "AGX remote work root"),
-		Region:    fs.String("agx-region", defaults.AGX.Region, "AGX region"),
-		Image:     fs.String("agx-image", defaults.AGX.Image, "AGX base image or snapshot"),
 	}
 }
 
@@ -50,9 +44,6 @@ func ApplyAGXProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "agx-api-url") {
-		cfg.AGX.APIURL = *v.APIURL
-	}
 	if flagWasSet(fs, "agx-workspace") {
 		cfg.AGX.Workspace = *v.Workspace
 	}
@@ -61,12 +52,6 @@ func ApplyAGXProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "agx-work-root") {
 		cfg.AGX.WorkRoot = *v.WorkRoot
-	}
-	if flagWasSet(fs, "agx-region") {
-		cfg.AGX.Region = *v.Region
-	}
-	if flagWasSet(fs, "agx-image") {
-		cfg.AGX.Image = *v.Image
 	}
 	return nil
 }
@@ -78,17 +63,12 @@ func NewAGXBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error) {
 	cfg.Provider = agxProvider
 	cfg.TargetOS = targetLinux
 	cfg.Network = networkPublic
-	cfg.SSHUser = agxVMUser(cfg)
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if strings.TrimSpace(cfg.AGX.WorkRoot) != "" {
 		cfg.WorkRoot = cfg.AGX.WorkRoot
 	}
-	if strings.TrimSpace(cfg.AGX.Token) == "" {
-		return nil, exit(3, "provider=agx requires an API key in CRABBOX_AGX_API_KEY, AGX_API_KEY, or AGX_TOKEN")
-	}
-	client := newAGXClient(cfg, rt)
-	return &agxBackend{spec: spec, cfg: cfg, rt: rt, client: client}, nil
+	return &agxBackend{spec: spec, cfg: cfg, rt: rt}, nil
 }
 
 func validateAGXOptions(cfg Config) error {
@@ -104,19 +84,19 @@ func validateAGXOptions(cfg Config) error {
 	return nil
 }
 
+// agxBackend is an SSH-lease backend with no control-plane client. AGX exposes
+// sandboxes only over SSH ("no SDK required, no custom client"), so Crabbox
+// connects to <user>+<instance>@<workspace> with the operator's own SSH key and
+// lets AGX provision the microVM on connect. There is no published API to
+// create, enumerate, or delete instances, so List/Resolve are backed by local
+// Crabbox lease claims and release only drops local state.
 type agxBackend struct {
-	spec   ProviderSpec
-	cfg    Config
-	rt     Runtime
-	client agxAPI
+	spec ProviderSpec
+	cfg  Config
+	rt   Runtime
 }
 
 func (b *agxBackend) Spec() ProviderSpec { return b.spec }
-
-func (b *agxBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	useStoredTestboxKey(&target.SSH, leaseID)
-	return nil
-}
 
 func (b *agxBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	leaseID := newLeaseID()
@@ -124,134 +104,99 @@ func (b *agxBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarg
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	name := leaseProviderName(leaseID, slug)
-	keyPath, publicKey, err := ensureTestboxKey(leaseID)
-	if err != nil {
-		return LeaseTarget{}, err
-	}
+	instance := agxInstanceName(slug)
 	cfg := b.configForRun()
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=agx lease=%s slug=%s instance=%s keep=%v\n", leaseID, slug, name, req.Keep)
-	instance, err := b.client.CreateInstance(ctx, agxCreateRequest{
-		Name:      name,
-		PublicKey: publicKey,
-		Image:     strings.TrimSpace(cfg.AGX.Image),
-		Region:    strings.TrimSpace(cfg.AGX.Region),
-		Labels:    agxAPILabels(leaseID, slug),
-	})
-	if err != nil {
-		return LeaseTarget{}, agxError("create instance", err)
-	}
-	if instance.ID == "" {
-		instance.ID = name
-	}
-	cleanupFailedAcquire := func() {
-		if req.Keep {
-			return
-		}
-		if err := b.client.DeleteInstance(context.Background(), instance.ID); err == nil {
-			removeStoredTestboxKey(leaseID)
-		}
-	}
-	lease, err := b.prepareLease(ctx, instance, leaseID, slug, req.Keep, keyPath)
-	if err != nil {
-		cleanupFailedAcquire()
+	target := b.agxSSHTarget(instance)
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=agx lease=%s slug=%s instance=%s user=%s host=%s keep=%v\n", leaseID, slug, instance, target.User, target.Host, req.Keep)
+	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "agx ssh", bootstrapWaitTimeout(cfg)); err != nil {
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, agxProvider, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		cleanupFailedAcquire()
+	server := b.instanceServer(leaseID, slug, instance, "ready")
+	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return LeaseTarget{}, err
 	}
-	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, instance.ID)
+	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, instance)
 	return lease, nil
 }
 
 func (b *agxBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
-	id, leaseID, slug, err := b.resolveInstanceID(ctx, req.ID, req.Reclaim)
-	if err != nil {
+	if claim, ok, err := resolveLeaseClaimForProvider(req.ID, agxProvider); err != nil {
 		return LeaseTarget{}, err
+	} else if ok {
+		lease := b.leaseFromClaim(claim)
+		if req.ReleaseOnly {
+			return LeaseTarget{Server: lease.Server, LeaseID: lease.LeaseID}, nil
+		}
+		if err := waitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "agx ssh", bootstrapWaitTimeout(b.cfg)); err != nil {
+			return LeaseTarget{}, err
+		}
+		return lease, nil
 	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		return LeaseTarget{}, exit(2, "provider=agx requires a Crabbox lease id, slug, or AGX instance name")
+	}
+	slug := normalizeLeaseSlug(id)
+	leaseID := "agx_" + slug
+	instance := agxInstanceName(slug)
+	server := b.instanceServer(leaseID, slug, instance, "ready")
 	if req.ReleaseOnly {
-		instance := agxInstance{ID: id, Name: leaseProviderName(leaseID, slug), Labels: agxAPILabels(leaseID, slug)}
-		return LeaseTarget{Server: b.instanceToServer(instance, true), LeaseID: leaseID}, nil
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
-	instance, err := b.client.GetInstance(ctx, id)
-	if err != nil {
-		return LeaseTarget{}, agxError("get instance", err)
-	}
-	keyPath, _, err := ensureTestboxKey(leaseID)
-	if err != nil {
-		return LeaseTarget{}, err
-	}
-	lease, err := b.prepareLease(ctx, instance, leaseID, slug, true, keyPath)
-	if err != nil {
+	target := b.agxSSHTarget(instance)
+	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "agx ssh", bootstrapWaitTimeout(b.cfg)); err != nil {
 		return LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, agxProvider, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := claimLeaseTargetForRepoConfig(leaseID, slug, b.configForRun(), server, target, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
-	return lease, nil
+	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *agxBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *agxBackend) List(_ context.Context, req ListRequest) ([]LeaseView, error) {
 	_ = req
-	instances, err := b.client.ListInstances(ctx, leaseProviderNamePrefix())
+	claims, err := listLeaseClaims()
 	if err != nil {
-		return nil, agxError("list instances", err)
+		return nil, err
 	}
-	out := make([]Server, 0, len(instances))
-	for _, instance := range instances {
-		if !isCrabboxInstance(instance) {
+	out := make([]Server, 0, len(claims))
+	for _, claim := range claims {
+		if claim.Provider != agxProvider {
 			continue
 		}
-		out = append(out, b.instanceToServer(instance, true))
+		out = append(out, b.leaseFromClaim(claim).Server)
 	}
 	return out, nil
 }
 
-func (b *agxBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+func (b *agxBackend) Doctor(_ context.Context, _ DoctorRequest) (DoctorResult, error) {
+	claims, err := listLeaseClaims()
 	if err != nil {
 		return DoctorResult{}, err
 	}
-	return inventoryDoctorResult(agxProvider, len(servers)), nil
+	leases := 0
+	for _, claim := range claims {
+		if claim.Provider == agxProvider {
+			leases++
+		}
+	}
+	return DoctorResult{
+		Provider: agxProvider,
+		Message:  fmt.Sprintf("transport=ssh auth=ssh-key control_plane=none workspace=%s user=%s leases=%d runtime=unchecked", b.workspaceHost(""), b.vmUser(), leases),
+	}, nil
 }
 
-func (b *agxBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
-	id := strings.TrimSpace(req.Lease.Server.CloudID)
-	if id == "" {
-		var err error
-		id, _, _, err = b.resolveInstanceID(ctx, req.Lease.LeaseID, false)
-		if err != nil {
-			return err
-		}
-	}
-	if ok, err := agxLeaseHasClaim(req.Lease.LeaseID); err != nil {
-		return err
-	} else if !ok {
-		instance, err := b.client.GetInstance(ctx, id)
-		if err != nil {
-			if isAGXNotFound(err) {
-				removeLeaseClaim(req.Lease.LeaseID)
-				removeStoredTestboxKey(req.Lease.LeaseID)
-				return nil
-			}
-			return agxError("get instance", err)
-		}
-		if !isCrabboxInstance(instance) {
-			return exit(4, "agx instance %q is not Crabbox-managed; use --reclaim to adopt it before release", id)
-		}
-	}
-	if err := b.client.DeleteInstance(ctx, id); err != nil {
-		if !isAGXNotFound(err) {
-			return agxError("delete instance", err)
-		}
-	}
+func (b *agxBackend) ReleaseLease(_ context.Context, req ReleaseLeaseRequest) error {
 	removeLeaseClaim(req.Lease.LeaseID)
-	removeStoredTestboxKey(req.Lease.LeaseID)
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s\n", req.Lease.LeaseID, id)
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s instance=%s (local claim removed; AGX reclaims idle sandboxes)\n", req.Lease.LeaseID, blank(req.Lease.Server.CloudID, "-"))
 	return nil
+}
+
+func (b *agxBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	return fmt.Sprintf("released agx lease=%s instance=%s", lease.LeaseID, blank(lease.Server.CloudID, "-"))
 }
 
 func (b *agxBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
@@ -263,38 +208,11 @@ func (b *agxBackend) Touch(_ context.Context, req TouchRequest) (Server, error) 
 	return server, nil
 }
 
-func (b *agxBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
-	servers, err := b.List(ctx, ListRequest{Options: req.Options})
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	if b.rt.Clock != nil {
-		now = b.rt.Clock.Now().UTC()
-	}
-	for _, server := range servers {
-		shouldDelete, reason := core.ShouldCleanupServer(server, now)
-		if !shouldDelete {
-			fmt.Fprintf(b.rt.Stderr, "skip instance id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
-			continue
-		}
-		fmt.Fprintf(b.rt.Stderr, "delete instance id=%s name=%s\n", server.DisplayID(), server.Name)
-		if req.DryRun {
-			continue
-		}
-		if err := b.client.DeleteInstance(ctx, server.CloudID); err != nil && !isAGXNotFound(err) {
-			return agxError("delete instance", err)
-		}
-	}
-	return nil
-}
-
 func (b *agxBackend) configForRun() Config {
 	cfg := b.cfg
 	cfg.Provider = agxProvider
 	cfg.TargetOS = targetLinux
 	cfg.Network = networkPublic
-	cfg.SSHUser = agxVMUser(cfg)
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if strings.TrimSpace(cfg.AGX.WorkRoot) != "" {
@@ -303,170 +221,74 @@ func (b *agxBackend) configForRun() Config {
 	return cfg
 }
 
-func (b *agxBackend) prepareLease(ctx context.Context, instance agxInstance, leaseID, slug string, keep bool, keyPath string) (LeaseTarget, error) {
+func (b *agxBackend) leaseFromClaim(claim LeaseClaim) LeaseTarget {
+	instance := blank(claim.CloudID, blank(claim.Labels["instance_id"], agxInstanceName(claim.Slug)))
+	target := b.agxSSHTarget(instance)
+	if claim.SSHHost != "" {
+		target.Host = claim.SSHHost
+	}
+	if claim.SSHPort != 0 {
+		target.Port = fmt.Sprint(claim.SSHPort)
+	}
+	if claim.StaticUser != "" {
+		target.User = claim.StaticUser
+	}
+	server := b.instanceServer(claim.LeaseID, claim.Slug, instance, "ready")
+	return LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}
+}
+
+func (b *agxBackend) instanceServer(leaseID, slug, instance, state string) Server {
 	cfg := b.configForRun()
-	if err := cleanAGXWorkRoot(cfg.WorkRoot); err != nil {
-		return LeaseTarget{}, err
-	}
-	target := b.agxSSHTarget(instance, keyPath)
-	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
-	server := b.instanceToServer(instance, keep)
-	server.Labels["lease"] = leaseID
-	server.Labels["slug"] = slug
-	server.Labels["keep"] = fmt.Sprint(keep)
-	server.Labels["work_root"] = cfg.WorkRoot
-	server.Labels["state"] = "ready"
-	server.Status = "ready"
-	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "agx ssh", bootstrapWaitTimeout(cfg)); err != nil {
-		return LeaseTarget{}, err
-	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
-}
-
-func (b *agxBackend) resolveInstanceID(ctx context.Context, identifier string, reclaim bool) (string, string, string, error) {
-	if strings.TrimSpace(identifier) == "" {
-		return "", "", "", exit(2, "provider=agx requires a Crabbox lease id, slug, or AGX instance id")
-	}
-	if claim, ok, err := resolveLeaseClaim(identifier); err != nil {
-		return "", "", "", err
-	} else if ok {
-		if claim.Provider != "" && claim.Provider != agxProvider {
-			return "", "", "", exit(4, "lease %q is claimed for provider=%s, not agx", identifier, claim.Provider)
-		}
-		if id, ok := instanceIDFromClaim(claim); ok {
-			return id, claim.LeaseID, claim.Slug, nil
-		}
-	}
-	if strings.HasPrefix(identifier, "cbx_") {
-		instance, err := b.findInstanceByLease(ctx, identifier)
-		if err != nil {
-			return "", "", "", err
-		}
-		return instance.ID, identifier, agxSlug(identifier, instance), nil
-	}
-	instance, err := b.client.GetInstance(ctx, identifier)
-	if err != nil {
-		if isAGXNotFound(err) {
-			return "", "", "", exit(4, "agx lease or instance %q was not found", identifier)
-		}
-		return "", "", "", agxError("get instance", err)
-	}
-	if !isCrabboxInstance(instance) && !reclaim {
-		return "", "", "", exit(4, "agx instance %q is not Crabbox-managed; use --reclaim to adopt it", identifier)
-	}
-	leaseID := agxLeaseID(instance)
-	if leaseID == "" {
-		leaseID = "agx_" + normalizeLeaseSlug(blank(instance.Name, instance.ID))
-	}
-	return instance.ID, leaseID, agxSlug(leaseID, instance), nil
-}
-
-func instanceIDFromClaim(claim LeaseClaim) (string, bool) {
-	if id := strings.TrimSpace(claim.Labels["instance_id"]); id != "" {
-		return id, true
-	}
-	if strings.HasPrefix(claim.LeaseID, "agx_") {
-		return strings.TrimPrefix(claim.LeaseID, "agx_"), true
-	}
-	if strings.HasPrefix(claim.LeaseID, "cbx_") {
-		return leaseProviderName(claim.LeaseID, claim.Slug), true
-	}
-	return "", false
-}
-
-func agxLeaseHasClaim(leaseID string) (bool, error) {
-	leaseID = strings.TrimSpace(leaseID)
-	if leaseID == "" {
-		return false, nil
-	}
-	claim, ok, err := resolveLeaseClaim(leaseID)
-	if err != nil || !ok {
-		return false, err
-	}
-	return claim.Provider == "" || claim.Provider == agxProvider, nil
-}
-
-func (b *agxBackend) findInstanceByLease(ctx context.Context, leaseID string) (agxInstance, error) {
-	instances, err := b.client.ListInstances(ctx, leaseProviderNamePrefix())
-	if err != nil {
-		return agxInstance{}, agxError("list instances", err)
-	}
-	for _, instance := range instances {
-		if agxLeaseID(instance) == leaseID {
-			return instance, nil
-		}
-	}
-	return agxInstance{}, exit(4, "agx lease %q was not found", leaseID)
-}
-
-func (b *agxBackend) instanceToServer(instance agxInstance, keep bool) Server {
-	leaseID := agxLeaseID(instance)
-	slug := agxSlug(leaseID, instance)
-	cfg := b.configForRun()
-	labels := directLeaseLabels(cfg, leaseID, slug, agxProvider, "", keep, time.Now().UTC())
-	labels["name"] = instance.Name
-	labels["instance_id"] = instance.ID
-	labels["state"] = agxState(instance.Status)
+	labels := directLeaseLabels(cfg, leaseID, slug, agxProvider, "", false, time.Now().UTC())
+	labels["name"] = instance
+	labels["instance_id"] = instance
+	labels["state"] = agxState(state)
 	labels["work_root"] = cfg.WorkRoot
-	if instance.Region != "" {
-		labels["region"] = instance.Region
-	}
 	server := Server{
-		CloudID:  instance.ID,
-		HostID:   instance.ID,
+		CloudID:  instance,
+		HostID:   instance,
 		Provider: agxProvider,
-		Name:     blank(instance.Name, instance.ID),
+		Name:     instance,
 		Status:   labels["state"],
 		Labels:   labels,
 	}
 	server.ServerType.Name = "microvm"
-	server.PublicNet.IPv4.IP = b.workspaceHost(instance)
+	server.PublicNet.IPv4.IP = b.workspaceHost("")
 	return server
 }
 
-func (b *agxBackend) agxSSHTarget(instance agxInstance, keyPath string) SSHTarget {
-	port := "22"
-	if instance.SSHPort > 0 {
-		port = fmt.Sprint(instance.SSHPort)
-	}
+// agxSSHTarget builds the AGX gateway login. AGX routes to a sandbox through the
+// `<user>+<instance>` SSH username (ssh user+instance@workspace.agx.so) and
+// authenticates with the operator's own SSH key, so the key comes from the
+// standard Crabbox SSH config (cfg.SSHKey) rather than a per-lease Crabbox key.
+func (b *agxBackend) agxSSHTarget(instance string) SSHTarget {
 	return SSHTarget{
-		User:                   b.sshUser(instance),
-		Host:                   b.workspaceHost(instance),
-		Key:                    keyPath,
-		Port:                   port,
+		User:                   b.vmUser() + "+" + instance,
+		Host:                   b.workspaceHost(""),
+		Key:                    strings.TrimSpace(b.cfg.SSHKey),
+		Port:                   "22",
 		TargetOS:               targetLinux,
 		NetworkKind:            networkPublic,
 		DisableHostKeyChecking: true,
 	}
 }
 
-// sshUser builds the AGX gateway login. AGX routes to an instance through the
-// `<user>+<instance>` SSH username (ssh user+instance@workspace.agx.so). When
-// the control plane already returns a fully-formed ssh_user, trust it.
-func (b *agxBackend) sshUser(instance agxInstance) string {
-	if user := strings.TrimSpace(instance.SSHUser); user != "" {
-		return user
-	}
-	id := strings.TrimSpace(instance.ID)
-	if id == "" {
-		return agxVMUser(b.cfg)
-	}
-	return agxVMUser(b.cfg) + "+" + id
+func (b *agxBackend) vmUser() string {
+	return blank(strings.TrimSpace(b.cfg.AGX.User), defaultVMUser)
 }
 
-func (b *agxBackend) workspaceHost(instance agxInstance) string {
-	if host := strings.TrimSpace(instance.SSHHost); host != "" {
+func (b *agxBackend) workspaceHost(override string) string {
+	if host := strings.TrimSpace(override); host != "" {
 		return host
 	}
-	return blank(strings.TrimSpace(b.cfg.AGX.Workspace), "workspace.agx.so")
+	return blank(strings.TrimSpace(b.cfg.AGX.Workspace), defaultWorkspace)
 }
 
-func agxVMUser(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.AGX.User), "root")
-}
-
-func leaseProviderNamePrefix() string {
-	return "crabbox-"
+// agxInstanceName derives the AGX instance identifier from a Crabbox slug. The
+// slug is stable and human-readable, so the same lease reconnects to the same
+// `<user>+<instance>` address.
+func agxInstanceName(slug string) string {
+	return normalizeLeaseSlug(slug)
 }
 
 func agxState(status string) string {

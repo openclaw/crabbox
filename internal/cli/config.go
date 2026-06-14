@@ -1015,16 +1015,14 @@ type SpritesConfig struct {
 
 // AGXConfig configures the AGX provider. AGX (https://www.agx.so) exposes
 // fast-booting microVM sandboxes over plain SSH through a workspace gateway
-// (ssh <user>+<instance>@<workspace>). Token is read from the environment only
-// and is never persisted to config files or placed on argv.
+// (ssh <user>+<instance>@<workspace>). AGX publishes no SDK or control-plane
+// API ("no SDK required, no custom client — if it can ssh, it can work on
+// AGX"), so the provider authenticates with the operator's own SSH key
+// (cfg.SSHKey) and holds only the workspace gateway, in-VM user, and work root.
 type AGXConfig struct {
-	Token     string
-	APIURL    string
 	Workspace string
 	User      string
 	WorkRoot  string
-	Region    string
-	Image     string
 }
 
 type LocalContainerConfig struct {
@@ -2692,7 +2690,6 @@ func baseConfig() Config {
 			WorkRoot: "/home/sprite/crabbox",
 		},
 		AGX: AGXConfig{
-			APIURL:    "https://api.agx.so",
 			Workspace: "workspace.agx.so",
 			User:      "root",
 			WorkRoot:  "/root/crabbox",
@@ -3760,12 +3757,9 @@ type fileSpritesConfig struct {
 }
 
 type fileAGXConfig struct {
-	APIURL    string `yaml:"apiUrl,omitempty"`
 	Workspace string `yaml:"workspace,omitempty"`
 	User      string `yaml:"user,omitempty"`
 	WorkRoot  string `yaml:"workRoot,omitempty"`
-	Region    string `yaml:"region,omitempty"`
-	Image     string `yaml:"image,omitempty"`
 }
 
 type fileLocalContainerConfig struct {
@@ -5980,9 +5974,6 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.AGX != nil {
-		if file.AGX.APIURL != "" {
-			cfg.AGX.APIURL = file.AGX.APIURL
-		}
 		if file.AGX.Workspace != "" {
 			cfg.AGX.Workspace = file.AGX.Workspace
 		}
@@ -5991,12 +5982,6 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.AGX.WorkRoot != "" {
 			cfg.AGX.WorkRoot = file.AGX.WorkRoot
-		}
-		if file.AGX.Region != "" {
-			cfg.AGX.Region = file.AGX.Region
-		}
-		if file.AGX.Image != "" {
-			cfg.AGX.Image = file.AGX.Image
 		}
 	}
 	if file.LocalContainer != nil {
@@ -7661,13 +7646,9 @@ func applyEnv(cfg *Config) error {
 		cfg.credentialProvenance.spritesAPIURL = credentialSourceEnvironment
 	}
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
-	cfg.AGX.Token = getenv("CRABBOX_AGX_API_KEY", getenv("AGX_API_KEY", getenv("AGX_TOKEN", cfg.AGX.Token)))
-	cfg.AGX.APIURL = getenv("CRABBOX_AGX_API_URL", getenv("AGX_API_URL", cfg.AGX.APIURL))
 	cfg.AGX.Workspace = getenv("CRABBOX_AGX_WORKSPACE", getenv("AGX_WORKSPACE", cfg.AGX.Workspace))
 	cfg.AGX.User = getenv("CRABBOX_AGX_USER", getenv("AGX_USER", cfg.AGX.User))
 	cfg.AGX.WorkRoot = getenv("CRABBOX_AGX_WORK_ROOT", cfg.AGX.WorkRoot)
-	cfg.AGX.Region = getenv("CRABBOX_AGX_REGION", getenv("AGX_REGION", cfg.AGX.Region))
-	cfg.AGX.Image = getenv("CRABBOX_AGX_IMAGE", getenv("AGX_IMAGE", cfg.AGX.Image))
 	if runtimeName := os.Getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME"); runtimeName != "" {
 		cfg.LocalContainer.Runtime = runtimeName
 		cfg.localContainerRuntimeExplicit = true

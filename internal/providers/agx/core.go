@@ -21,7 +21,6 @@ type ResolveRequest = core.ResolveRequest
 type ReleaseLeaseRequest = core.ReleaseLeaseRequest
 type TouchRequest = core.TouchRequest
 type ListRequest = core.ListRequest
-type CleanupRequest = core.CleanupRequest
 type LeaseView = core.LeaseView
 type LeaseTarget = core.LeaseTarget
 type LeaseClaim = core.LeaseClaim
@@ -33,6 +32,9 @@ const (
 	agxProvider   = "agx"
 	targetLinux   = core.TargetLinux
 	networkPublic = core.NetworkPublic
+
+	defaultWorkspace = "workspace.agx.so"
+	defaultVMUser    = "root"
 )
 
 func exit(code int, format string, args ...any) core.ExitError {
@@ -51,20 +53,12 @@ func newLeaseID() string {
 	return core.NewLeaseID()
 }
 
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
 func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func leaseProviderName(leaseID, slug string) string {
-	return core.LeaseProviderName(leaseID, slug)
 }
 
 func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
@@ -75,28 +69,20 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
+func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
 
-func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaim(identifier)
+func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProvider(identifier, provider)
+}
+
+func listLeaseClaims() ([]core.LeaseClaim, error) {
+	return core.ListLeaseClaims()
 }
 
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
-}
-
-func ensureTestboxKey(leaseID string) (string, string, error) {
-	return core.EnsureTestboxKey(leaseID)
-}
-
-func removeStoredTestboxKey(leaseID string) {
-	core.RemoveStoredTestboxKey(leaseID)
-}
-
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	core.UseStoredTestboxKey(target, leaseID)
 }
 
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
@@ -105,8 +91,4 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 
 func bootstrapWaitTimeout(cfg Config) time.Duration {
 	return core.BootstrapWaitTimeout(cfg)
-}
-
-func inventoryDoctorResult(provider string, leases int) DoctorResult {
-	return core.InventoryDoctorResult(provider, leases)
 }
