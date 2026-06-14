@@ -226,7 +226,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	server = b.mergeLiveServer(server, item)
-	if req.ReleaseOnly || req.StatusOnly {
+	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if codespaceStopped(item.State) {

@@ -129,6 +129,27 @@ func TestResolveNoLocalStateMutationsDoesNotStoreSSHConfig(t *testing.T) {
 	}
 }
 
+func TestResolveStatusOnlyReadyProbeBuildsSSHTarget(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-status"] = fakeCodespace("cs-status", "Available")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	leaseID := "cbx_123456789ac4"
+	server := b.serverFromCodespace(fc.items["cs-status"], b.labelsFor(leaseID, "status-box", "example-org/my-app", "alice", false, releaseDelete, fc.items["cs-status"], "ready"))
+	if err := claimLeaseTargetForRepoConfig(leaseID, "status-box", b.cfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "status-box", StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "cs.cs-status.main" || len(b.waits) != 1 {
+		t.Fatalf("lease=%#v waits=%#v", lease, b.waits)
+	}
+}
+
 func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fc := newFakeCodespacesClient()
