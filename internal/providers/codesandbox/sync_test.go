@@ -1,6 +1,10 @@
 package codesandbox
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,5 +59,64 @@ func TestSpecAllowsArchiveSyncOptionsButRejectsUnsupportedDelegatedOptions(t *te
 	}
 	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{FullResync: true}); err == nil {
 		t.Fatal("--full-resync should be rejected for delegated archive sync")
+	}
+}
+
+func TestCodeSandboxMountReplaceCommandReplacesContentsNotMount(t *testing.T) {
+	command := codeSandboxMountReplaceCommand("/project/.workspace.crabbox-sync-fixed", defaultWorkdir)
+	for _, want := range []string{
+		"rollback()",
+		"mv -- \"$entry\" '/project/workspace/.workspace.crabbox-sync-fixed.previous/'",
+		"cp -a '/project/.workspace.crabbox-sync-fixed/.' '/project/workspace/'",
+		"rm -rf '/project/workspace/.workspace.crabbox-sync-fixed.previous' '/project/.workspace.crabbox-sync-fixed'",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("command missing %q: %s", want, command)
+		}
+	}
+	if strings.Contains(command, "mv '/project/workspace'") {
+		t.Fatalf("command attempts to rename CodeSandbox mount: %s", command)
+	}
+}
+
+func TestCodeSandboxMountReplaceCommandRestoresWorkspaceAfterCopyFailure(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "workspace")
+	stagingDir := filepath.Join(root, ".workspace.crabbox-sync-missing")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(workdir, "old.txt")
+	if err := os.WriteFile(oldFile, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command("bash", "-lc", codeSandboxMountReplaceCommand(stagingDir, workdir))
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("replace unexpectedly succeeded: %s", output)
+	}
+	got, err := os.ReadFile(oldFile)
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(got) != "old\n" {
+		t.Fatalf("restored file=%q", got)
+	}
+	matches, err := filepath.Glob(filepath.Join(workdir, "*.previous"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("rollback directories remain: %v", matches)
+	}
+}
+
+func TestCodeSandboxExecShellReportsCombinedSDKOutput(t *testing.T) {
+	fake := newFakeCodeSandboxAPI()
+	fake.commandResults = []CommandResult{{ExitCode: 1, Stdout: "mount is busy\n"}}
+	backend, _, _ := newFakeBackend(t, fake)
+	err := backend.execShell(context.Background(), fake, fake.sandboxID, "false")
+	if err == nil || !strings.Contains(err.Error(), "mount is busy") {
+		t.Fatalf("execShell err=%v", err)
 	}
 }

@@ -31,7 +31,7 @@ func TestWarmupCreatesSandboxClaim(t *testing.T) {
 	if len(fake.created) != 1 {
 		t.Fatalf("create calls=%d want 1", len(fake.created))
 	}
-	if got := fake.created[0].Tags; !contains(got, codeSandboxClaimTag) || !hasPrefix(got, codeSandboxScopeTagPrefix+"codesandbox/ownership:") {
+	if got := fake.created[0].Tags; !contains(got, codeSandboxClaimTag) || !hasPrefix(got, codeSandboxScopeTagPrefix) {
 		t.Fatalf("create tags=%v missing ownership tags", got)
 	}
 	leaseID := leasePrefix + fake.sandboxID
@@ -39,7 +39,7 @@ func TestWarmupCreatesSandboxClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read claim: %v", err)
 	}
-	if claim.Provider != providerName || claim.Slug != "codesandbox-blue" || claim.RepoRoot != "/repo" || !strings.HasPrefix(claim.ProviderScope, "codesandbox/ownership:") {
+	if claim.Provider != providerName || claim.Slug != "codesandbox-blue" || claim.RepoRoot != "/repo" || !strings.HasPrefix(claim.ProviderScope, codeSandboxClaimScopePrefix) {
 		t.Fatalf("claim=%#v", claim)
 	}
 	if !strings.Contains(stdout.String(), "leased "+leaseID) || !strings.Contains(stderr.String(), `"provider":"codesandbox"`) {
@@ -54,15 +54,29 @@ func TestResolveLeaseIDRequiresLocalClaimForRawIDs(t *testing.T) {
 	}
 }
 
+func TestCodeSandboxScopeTagUsesProviderAcceptedCharacters(t *testing.T) {
+	scope := codeSandboxClaimScopePrefix + strings.Repeat("a", 32)
+	tag := codeSandboxScopeTag(scope)
+	if tag != codeSandboxScopeTagPrefix+strings.Repeat("a", 32) {
+		t.Fatalf("tag=%q", tag)
+	}
+	if strings.ContainsAny(tag, ":/") {
+		t.Fatalf("tag=%q contains CodeSandbox-rejected punctuation", tag)
+	}
+	if got, ok := codeSandboxScopeFromTag(tag); !ok || got != scope {
+		t.Fatalf("round trip scope=%q ok=%v", got, ok)
+	}
+}
+
 func TestStopRejectsOwnershipMismatchBeforeDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeCodeSandboxAPI()
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, "codesandbox/ownership:local", "", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, codeSandboxClaimScopePrefix+"local", "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	fake.sandbox.Tags = []string{codeSandboxClaimTag, codeSandboxScopeTagPrefix + "codesandbox/ownership:remote"}
+	fake.sandbox.Tags = []string{codeSandboxClaimTag, codeSandboxScopeTag(codeSandboxClaimScopePrefix + "remote")}
 
 	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
@@ -123,10 +137,10 @@ func TestPauseRejectsOwnershipMismatchBeforeHibernate(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, "codesandbox/ownership:local", "", "/repo", time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, codeSandboxClaimScopePrefix+"local", "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	fake.sandbox.Tags = []string{codeSandboxClaimTag, codeSandboxScopeTagPrefix + "codesandbox/ownership:remote"}
+	fake.sandbox.Tags = []string{codeSandboxClaimTag, codeSandboxScopeTag(codeSandboxClaimScopePrefix + "remote")}
 
 	err := backend.Pause(context.Background(), PauseRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
@@ -351,6 +365,32 @@ func TestRunSyncOnlyUploadsArchiveAndExtracts(t *testing.T) {
 	}
 }
 
+func TestRunSyncOnlyReplacesDefaultWorkspaceMountContents(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "proof.txt"), []byte("proof\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, repoRoot)
+	fake := newFakeCodeSandboxAPI()
+	backend, _, _ := newFakeBackend(t, fake)
+
+	if _, err := backend.Run(context.Background(), RunRequest{
+		Repo:           Repo{Name: "my-app", Root: repoRoot},
+		SyncOnly:       true,
+		ForceSyncLarge: true,
+	}); err != nil {
+		t.Fatalf("Run sync-only err=%v", err)
+	}
+	if !fake.hasCommandContaining("rollback()") ||
+		!fake.hasCommandContaining("cp -a '/project/.workspace.crabbox-sync-") {
+		t.Fatalf("mount-safe replacement command missing: %#v", fake.commands)
+	}
+	if fake.hasCommandContaining("mv '/project/workspace'") {
+		t.Fatalf("attempted to rename CodeSandbox workspace mount: %#v", fake.commands)
+	}
+}
+
 func newFakeBackend(t *testing.T, api *fakeCodeSandboxAPI) (*codeSandboxBackend, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	cfg := newTestConfig()
@@ -392,7 +432,7 @@ type fakeCodeSandboxAPI struct {
 }
 
 func newFakeCodeSandboxAPI() *fakeCodeSandboxAPI {
-	scope := "codesandbox/ownership:local"
+	scope := codeSandboxClaimScopePrefix + "local"
 	return &fakeCodeSandboxAPI{
 		sandboxID: "sb-test01",
 		scope:     scope,
@@ -401,7 +441,7 @@ func newFakeCodeSandboxAPI() *fakeCodeSandboxAPI {
 			Title: "crabbox-my-app",
 			State: "running",
 			URL:   "https://sb-test01.csb.app",
-			Tags:  []string{codeSandboxClaimTag, codeSandboxScopeTagPrefix + scope},
+			Tags:  []string{codeSandboxClaimTag, codeSandboxScopeTag(scope)},
 		},
 	}
 }
@@ -414,8 +454,8 @@ func (f *fakeCodeSandboxAPI) CreateSandbox(_ context.Context, req CreateSandboxR
 	f.created = append(f.created, req)
 	f.sandbox.Tags = append([]string(nil), req.Tags...)
 	for _, tag := range req.Tags {
-		if strings.HasPrefix(tag, codeSandboxScopeTagPrefix) {
-			f.scope = strings.TrimPrefix(tag, codeSandboxScopeTagPrefix)
+		if scope, ok := codeSandboxScopeFromTag(tag); ok {
+			f.scope = scope
 		}
 	}
 	return f.sandbox, nil
@@ -439,7 +479,7 @@ func (f *fakeCodeSandboxAPI) HibernateSandbox(_ context.Context, id string) erro
 func (f *fakeCodeSandboxAPI) ResumeSandbox(_ context.Context, id string) (SandboxSummary, error) {
 	f.resumed = append(f.resumed, id)
 	f.sandbox.State = "running"
-	return f.sandbox, nil
+	return SandboxSummary{ID: id, State: "running"}, nil
 }
 
 func (f *fakeCodeSandboxAPI) RunCommand(ctx context.Context, _ string, req CommandRequest) (CommandResult, error) {

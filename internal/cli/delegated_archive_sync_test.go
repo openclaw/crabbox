@@ -100,6 +100,41 @@ func TestRunDelegatedArchiveSyncPreflightUsesFullArchive(t *testing.T) {
 	}
 }
 
+func TestRunDelegatedArchiveSyncSupportsProviderReplace(t *testing.T) {
+	root := newDelegatedArchiveSyncRepo(t)
+	cfg := baseConfig()
+	cfg.Sync.Delete = true
+	var commands []string
+	var replacedStaging string
+	var replacedWorkdir string
+
+	_, _, err := RunDelegatedArchiveSync(context.Background(), DelegatedArchiveSyncRequest{
+		Config:  cfg,
+		Repo:    Repo{Root: root},
+		Workdir: "/workspace",
+		Suffix:  func() string { return "fixed" },
+		Upload:  func(context.Context, string, io.Reader) error { return nil },
+		Exec: func(_ context.Context, command string) error {
+			commands = append(commands, command)
+			return nil
+		},
+		Replace: func(_ context.Context, stagingDir, workdir string) error {
+			replacedStaging = stagingDir
+			replacedWorkdir = workdir
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacedStaging != "/.workspace.crabbox-sync-fixed" || replacedWorkdir != "/workspace" {
+		t.Fatalf("replace staging=%q workdir=%q", replacedStaging, replacedWorkdir)
+	}
+	if strings.Contains(strings.Join(commands, "\n"), "mv '/.workspace.crabbox-sync-fixed' '/workspace'") {
+		t.Fatalf("default replacement ran despite provider hook: %#v", commands)
+	}
+}
+
 func TestRunDelegatedArchiveSyncCleanupOutlivesCanceledParent(t *testing.T) {
 	root := newDelegatedArchiveSyncRepo(t)
 	ctx, cancel := context.WithCancel(context.Background())

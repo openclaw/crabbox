@@ -110,8 +110,10 @@ Crabbox rejects broad paths such as `/` and `/project`.
    `git ls-files`-driven gzipped tar locally, uploads it through the SDK file
    bridge, and extracts it under `codeSandbox.workdir`. `--no-sync` skips the
    archive upload; `--sync-only` syncs and exits without running a command.
-   Manifest, guardrail, archive, staging, atomic replacement, and cleanup
-   orchestration use Crabbox's provider-neutral delegated archive-sync core.
+   Manifest, guardrail, archive, staging, replacement, and cleanup orchestration
+   use Crabbox's provider-neutral delegated archive-sync core. The root
+   `/project/workspace` mount is replaced in place because CodeSandbox does not
+   permit renaming that mount; configured subdirectories retain atomic rename.
 3. Commands run through the SDK command client with `cwd` set to the configured
    workdir. Selected `--allow-env` and `--env-from-profile` values are sent to
    the local SDK bridge in the request body and staged through a temporary
