@@ -11,7 +11,7 @@ for (const file of files) {
   const headings = headingAnchors(markdown);
   const links = markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g);
   for (const match of links) {
-    const href = match[1].trim();
+    const href = splitMarkdownTarget(match[1].trim());
     if (!href || href.startsWith("http://") || href.startsWith("https://") || href.startsWith("mailto:")) {
       continue;
     }
@@ -51,6 +51,7 @@ function walk(dir) {
 
 function headingAnchors(markdown) {
   const anchors = new Set();
+  const seen = new Map();
   for (const rawLine of markdown.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     let hashes = 0;
@@ -60,9 +61,20 @@ function headingAnchors(markdown) {
     if (hashes < 1 || hashes > 6 || line[hashes] !== " ") {
       continue;
     }
-    anchors.add(slugify(line.slice(hashes + 1)));
+    const base = slugify(line.slice(hashes + 1));
+    if (!base) {
+      continue;
+    }
+    const count = seen.get(base) || 0;
+    seen.set(base, count + 1);
+    anchors.add(count === 0 ? base : `${base}-${count}`);
   }
   return anchors;
+}
+
+function splitMarkdownTarget(href) {
+  const trimmed = href.replace(/\s+["'][^"']*["']\s*$/, "");
+  return stripAngleBrackets(trimmed);
 }
 
 function slugify(text) {
