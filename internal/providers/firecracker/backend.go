@@ -281,7 +281,13 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		return b.rollbackAcquire(record, vm, cause)
 	}
 
-	if err := vm.Start(context.WithoutCancel(ctx)); err != nil {
+	startCtx := ctx
+	cancelStart := func() {}
+	if cfg.Firecracker.LaunchTimeout > 0 {
+		startCtx, cancelStart = context.WithTimeout(ctx, cfg.Firecracker.LaunchTimeout)
+	}
+	defer cancelStart()
+	if err := vm.Start(startCtx); err != nil {
 		return LeaseTarget{}, rollback(err)
 	}
 
