@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1787,16 +1788,15 @@ func TestSDKClientRefreshesMissingCreateExpirationBeforeReadiness(t *testing.T) 
 
 func TestSDKClientUsesRefreshedExpirationForSecondRunningWait(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	getHits := 0
-	deleted := 0
+	var getHits atomic.Int32
+	var deleted atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
-			getHits++
-			if getHits > 1 {
+			if getHits.Add(1) > 1 {
 				<-r.Context().Done()
 				return
 			}
@@ -1804,7 +1804,7 @@ func TestSDKClientUsesRefreshedExpirationForSecondRunningWait(t *testing.T) {
 			expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
 			_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
-			deleted++
+			deleted.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -1828,8 +1828,8 @@ func TestSDKClientUsesRefreshedExpirationForSecondRunningWait(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("refreshed expiration wait took %s", elapsed)
 	}
-	if getHits != 2 || deleted != 1 {
-		t.Fatalf("getHits=%d deleted=%d want two status requests and rollback", getHits, deleted)
+	if getHits.Load() != 2 || deleted.Load() != 1 {
+		t.Fatalf("getHits=%d deleted=%d want two status requests and rollback", getHits.Load(), deleted.Load())
 	}
 }
 
