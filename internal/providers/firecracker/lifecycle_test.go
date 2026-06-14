@@ -313,6 +313,35 @@ func TestAcquirePassesLaunchTimeoutToMachineStart(t *testing.T) {
 	}
 }
 
+func TestAcquireRecordsEffectiveTopLevelSSHUser(t *testing.T) {
+	cfg := lifecycleConfig(t)
+	cfg.SSHUser = "alice"
+	cfg.Firecracker.User = core.BaseConfig().Firecracker.User
+	test := newLifecycleTestBackend(t, cfg)
+
+	lease, err := test.backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: test.repoRoot}})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if lease.SSH.User != "alice" {
+		t.Fatalf("lease ssh user=%q want alice", lease.SSH.User)
+	}
+	record, err := test.backend.readStateRecord(lease.LeaseID)
+	if err != nil {
+		t.Fatalf("readStateRecord: %v", err)
+	}
+	if record.SSHUser != "alice" || record.Labels["ssh_user"] != "alice" {
+		t.Fatalf("record ssh user=%q labels=%#v want alice", record.SSHUser, record.Labels)
+	}
+	resolved, err := test.backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.SSH.User != "alice" {
+		t.Fatalf("resolved ssh user=%q want alice", resolved.SSH.User)
+	}
+}
+
 func TestAcquireRollbackRemovesStateOnSSHFailure(t *testing.T) {
 	test := newLifecycleTestBackend(t, lifecycleConfig(t))
 	test.backend.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {

@@ -220,9 +220,9 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 	labels := core.TouchDirectLeaseLabels(core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, now), cfg, "provisioning", now)
 	labels["instance"] = name
 	labels["vmid"] = name
-	labels["ssh_user"] = cfg.Firecracker.User
+	labels["ssh_user"] = cfg.SSHUser
 	labels["ssh_port"] = cfg.SSHPort
-	labels["work_root"] = cfg.Firecracker.WorkRoot
+	labels["work_root"] = cfg.WorkRoot
 	labels["network"] = firecrackerNetworkCNI
 	labels["cni_network"] = cfg.Firecracker.CNINetwork
 
@@ -238,7 +238,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		CloudInitPath:   paths.CloudInit,
 		NetNSPath:       paths.NetNS,
 		CNICacheDir:     paths.CNICache,
-		SSHUser:         cfg.Firecracker.User,
+		SSHUser:         cfg.SSHUser,
 		SSHPort:         cfg.SSHPort,
 		BinaryPath:      cfg.Firecracker.Binary,
 		KernelPath:      cfg.Firecracker.Kernel,
