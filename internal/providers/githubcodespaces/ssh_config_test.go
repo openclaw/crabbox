@@ -33,6 +33,21 @@ func TestSSHConfigParsesProxyTarget(t *testing.T) {
 	}
 }
 
+func TestSSHConfigSelectsGeneratedGitHubCLIAliasByProxyCodespace(t *testing.T) {
+	target, err := selectSSHTarget(Config{}, `Host cs.sturdy-space.main
+  User vscode
+  IdentityFile "/tmp/codespaces/key"
+  UserKnownHostsFile /dev/null
+  ProxyCommand gh codespace ssh -c sturdy-space --stdio
+`, "sturdy-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "cs.sturdy-space.main" || !target.SSHConfigProxy {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
 func TestSSHConfigParsesDirectTarget(t *testing.T) {
 	target, err := selectSSHTarget(Config{}, `Host sturdy-space
   HostName 127.0.0.1

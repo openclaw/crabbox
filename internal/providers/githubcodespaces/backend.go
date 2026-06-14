@@ -463,9 +463,9 @@ func (b *backend) controlPlane(ctx context.Context) (githubCLI, codespacesAPI, s
 	if err != nil {
 		return nil, nil, "", err
 	}
-	token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	token := strings.TrimSpace(os.Getenv("GH_TOKEN"))
 	if token == "" {
-		token = strings.TrimSpace(os.Getenv("GH_TOKEN"))
+		token = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	}
 	if token == "" {
 		token, err = gh.authToken(ctx)
@@ -477,8 +477,15 @@ func (b *backend) controlPlane(ctx context.Context) (githubCLI, codespacesAPI, s
 }
 
 func (b *backend) waitForAvailable(ctx context.Context, api codespacesAPI, name string) (codespace, error) {
+	waitCtx := ctx
+	cancel := func() {}
+	if b.readyTimeout > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, b.readyTimeout)
+	}
+	defer cancel()
+
 	for {
-		item, err := api.getCodespace(ctx, name)
+		item, err := api.getCodespace(waitCtx, name)
 		if err != nil {
 			return codespace{}, err
 		}
@@ -489,8 +496,8 @@ func (b *backend) waitForAvailable(ctx context.Context, api codespacesAPI, name 
 			return codespace{}, exit(5, "github-codespaces codespace %s entered terminal state=%s", name, item.State)
 		}
 		select {
-		case <-ctx.Done():
-			return codespace{}, ctx.Err()
+		case <-waitCtx.Done():
+			return codespace{}, waitCtx.Err()
 		case <-time.After(b.pollInterval):
 		}
 	}
@@ -544,6 +551,9 @@ func (b *backend) githubIdleTimeout() time.Duration {
 
 func (b *backend) effectiveWorkRoot(repo string) string {
 	workRoot := strings.TrimSpace(b.cfg.GitHubCodespaces.WorkRoot)
+	if workRootExplicit(&b.cfg) && strings.TrimSpace(b.cfg.WorkRoot) != "" && (workRoot == "" || workRoot == defaultWorkRoot) {
+		return strings.TrimSpace(b.cfg.WorkRoot)
+	}
 	repoName := repoName(repo)
 	if workRoot == "" {
 		if repoName != "" {

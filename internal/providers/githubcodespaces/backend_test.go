@@ -2,12 +2,15 @@ package githubcodespaces
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
@@ -46,7 +49,7 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 		t.Fatalf("waits=%#v", b.waits)
 	}
 	wait := b.waits[0]
-	if wait.User != "vscode" || wait.Host != "cs-1" || wait.Key != "/tmp/codespaces/key" || !wait.SSHConfigProxy {
+	if wait.User != "vscode" || wait.Host != "cs.cs-1.main" || wait.Key != "/tmp/codespaces/key" || !wait.SSHConfigProxy {
 		t.Fatalf("wait target=%#v", wait)
 	}
 	if !strings.Contains(wait.ReadyCheck, "test -d '/workspaces/my-app'") {
@@ -56,7 +59,7 @@ func TestAcquireCreatesClaimGeneratesSSHConfigAndWaitsReady(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
-	if claim.CloudID != "cs-1" || claim.SSHHost != "cs-1" || claim.Labels[labelEnvironmentID] != "env-cs-1" {
+	if claim.CloudID != "cs-1" || claim.SSHHost != "cs.cs-1.main" || claim.Labels[labelEnvironmentID] != "env-cs-1" {
 		t.Fatalf("claim=%#v", claim)
 	}
 	if fg.configFor != "cs-1" {
@@ -88,14 +91,14 @@ func TestResolveStartsStoppedCodespaceAndRefreshesTarget(t *testing.T) {
 	if len(fc.starts) != 1 || fc.starts[0] != "cs-stopped" {
 		t.Fatalf("starts=%#v", fc.starts)
 	}
-	if lease.Server.Status != "Available" || lease.SSH.Host != "cs-stopped" {
+	if lease.Server.Status != "Available" || lease.SSH.Host != "cs.cs-stopped.main" {
 		t.Fatalf("lease=%#v", lease)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
-	if claim.Labels[labelState] != "ready" || claim.SSHHost != "cs-stopped" {
+	if claim.Labels[labelState] != "ready" || claim.SSHHost != "cs.cs-stopped.main" {
 		t.Fatalf("claim=%#v", claim)
 	}
 }
@@ -117,7 +120,7 @@ func TestResolveNoLocalStateMutationsDoesNotStoreSSHConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.SSH.Host != "cs-readonly" {
+	if lease.SSH.Host != "cs.cs-readonly.main" {
 		t.Fatalf("lease=%#v", lease)
 	}
 	stored := filepath.Join(stateHome, "crabbox", "github-codespaces", leaseID+".ssh_config")
@@ -287,6 +290,62 @@ func TestDoctorIsNonMutating(t *testing.T) {
 	}
 }
 
+func TestControlPlanePrefersGitHubCLITokenPrecedence(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("GH_TOKEN", "gh-token")
+	t.Setenv("GITHUB_TOKEN", "github-token")
+	fc := newFakeCodespacesClient()
+	fg := &fakeGH{login: "alice", token: "fallback-token"}
+	b := newTestBackend(t, fc, fg)
+	var gotToken string
+	b.clientFactory = func(token string) codespacesAPI {
+		gotToken = token
+		return fc
+	}
+
+	_, _, login, err := b.controlPlane(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login != "alice" {
+		t.Fatalf("login=%q", login)
+	}
+	if gotToken != "gh-token" {
+		t.Fatalf("token=%q", gotToken)
+	}
+}
+
+func TestWaitForAvailableUsesReadyTimeout(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fc := newFakeCodespacesClient()
+	fc.items["cs-slow"] = fakeCodespace("cs-slow", "Provisioning")
+	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+	b := newTestBackend(t, fc, fg)
+	b.readyTimeout = time.Nanosecond
+	b.pollInterval = time.Hour
+
+	_, err := b.waitForAvailable(context.Background(), fc, "cs-slow")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestEffectiveWorkRootHonorsExplicitGenericWorkRoot(t *testing.T) {
+	cfg := Config{
+		Provider: providerName,
+		WorkRoot: "/custom/workspace",
+		GitHubCodespaces: GitHubCodespacesConfig{
+			WorkRoot: defaultWorkRoot,
+		},
+	}
+	core.MarkWorkRootExplicit(&cfg)
+	b := newBackend(Provider{}.Spec(), cfg, Runtime{})
+
+	if got := b.effectiveWorkRoot("example-org/my-app"); got != "/custom/workspace" {
+		t.Fatalf("work root=%q", got)
+	}
+}
+
 type testBackend struct {
 	*backend
 	waits []SSHTarget
@@ -420,7 +479,7 @@ func (f *fakeGH) codespaceSSHConfig(_ context.Context, codespace string) (string
 	return f.config(codespace), nil
 }
 func (f *fakeGH) config(codespace string) string {
-	return fmt.Sprintf(`Host %s
+	return fmt.Sprintf(`Host cs.%s.main
   User vscode
   IdentityFile "/tmp/codespaces/key"
   UserKnownHostsFile /dev/null

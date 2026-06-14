@@ -718,6 +718,7 @@ func TestGitHubCodespacesConfigDefaultsFileEnvAndShow(t *testing.T) {
 		cfg.GitHubCodespaces.Machine != "basicLinux32gb" ||
 		cfg.GitHubCodespaces.IdleTimeout != 30*time.Minute ||
 		cfg.GitHubCodespaces.RetentionPeriod != 7*24*time.Hour ||
+		!cfg.GitHubCodespaces.DeleteOnRelease ||
 		cfg.GitHubCodespaces.WorkRoot != "/workspaces/crabbox" {
 		t.Fatalf("githubCodespaces defaults not applied: %#v", cfg.GitHubCodespaces)
 	}
