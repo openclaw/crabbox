@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Fixed coordinator hibernation recovery to preserve unambiguous live bridges while rejecting duplicate or stale restored endpoints.
 - Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.
 - Fixed CodeSandbox ownership tags, one-shot SDK bridge shutdown, mount-safe root workspace replacement, runtime-only resume responses, and authenticated preview URLs, preventing lifecycle rejection, command hangs, archive-sync failures, and unusable private port links.
 - Hardened runtime-adapter relays with end-to-end absolute deadlines, durable generation-scoped dispatch fences retained across ambiguous connector failures, atomic owner-only legacy cleanup, rejection of unfenced proxy deletes, per-owner in-flight quotas, post-cancellation accounting, response-delivery grace, connector-matched request validation, restart-safe TTL-first live-bridge revocation, retry-safe upstream rejection handling, generation-fenced confirmed-absence acknowledgments, and cleanup-fenced workspace bindings.

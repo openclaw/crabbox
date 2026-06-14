@@ -147,6 +147,197 @@ class FakeWebSocket {
 }
 
 describe("runtime adapter relay", () => {
+  it("restores unambiguous hibernated bridge sockets after validating lease state", async () => {
+    const storage = new MemoryStorage();
+    const list = vi.spyOn(storage, "list");
+    const lease = testLease({
+      id: "cbx_000000000001",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const webVNCAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      id: "agent_restart",
+      capabilities: new Set<string>(),
+    });
+    const restored = [
+      new FakeWebSocket({ kind: "code-agent", leaseID: lease.id }),
+      new FakeWebSocket({
+        kind: "egress-host",
+        leaseID: lease.id,
+        sessionID: "egress_restart",
+      }),
+      new FakeWebSocket({
+        kind: "egress-client",
+        leaseID: lease.id,
+        sessionID: "egress_restart",
+      }),
+      new FakeWebSocket({
+        kind: "runtime-adapter-agent",
+        adapterID: "example-adapter",
+        owner: "alice@example.com",
+        org: "example-org",
+      }),
+    ];
+
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => [webVNCAgent, ...restored] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect(list).not.toHaveBeenCalled();
+    for (const socket of [webVNCAgent, ...restored]) {
+      expect(socket.closeCode).toBeUndefined();
+    }
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    expect(list).toHaveBeenCalledTimes(1);
+    const relay = fleet as unknown as {
+      codeAgents: Map<string, WebSocket>;
+      runtimeAdapterAgents: Map<string, WebSocket>;
+    };
+    expect(relay.codeAgents.get(lease.id)).toBe(restored[0]);
+    expect(relay.runtimeAdapterAgents.get("example-adapter")).toBe(restored[3]);
+  });
+
+  it("fails closed ambiguous and invalid hibernated bridge sockets", () => {
+    const storage = new MemoryStorage();
+    const list = vi.spyOn(storage, "list");
+    const duplicateAdapters = [
+      new FakeWebSocket({
+        kind: "runtime-adapter-agent",
+        adapterID: "example-adapter",
+        owner: "alice@example.com",
+        org: "example-org",
+      }),
+      new FakeWebSocket({
+        kind: "runtime-adapter-agent",
+        adapterID: "example-adapter",
+        owner: "alice@example.com",
+        org: "example-org",
+      }),
+    ];
+    const competingEgressSessions = ["egress_old", "egress_new"].flatMap((sessionID) => [
+      new FakeWebSocket({
+        kind: "egress-host",
+        leaseID: "cbx_000000000001",
+        sessionID,
+      }),
+      new FakeWebSocket({
+        kind: "egress-client",
+        leaseID: "cbx_000000000001",
+        sessionID,
+      }),
+    ]);
+    const invalid = new FakeWebSocket({ kind: "invalid-restored-attachment" });
+
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () =>
+          [...duplicateAdapters, ...competingEgressSessions, invalid] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect(list).not.toHaveBeenCalled();
+    const relay = fleet as unknown as {
+      egressHosts: Map<string, WebSocket>;
+      runtimeAdapterAgents: Map<string, WebSocket>;
+    };
+    expect(relay.egressHosts.size).toBe(0);
+    expect(relay.runtimeAdapterAgents.size).toBe(0);
+    for (const socket of [...duplicateAdapters, ...competingEgressSessions, invalid]) {
+      expect(socket.closeCode).toBe(1012);
+      expect(socket.closeReason).toBe("coordinator restarted");
+    }
+  });
+
+  it("retries transient restored-lease reconciliation without dropping sockets", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000002",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const list = vi.spyOn(storage, "list").mockRejectedValueOnce(new Error("storage unavailable"));
+    const socket = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => [socket] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    const unavailable = await fleet.fetch(request("GET", "/v1/health"));
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.get("retry-after")).toBe("1");
+    expect(socket.closeCode).toBeUndefined();
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(socket.closeCode).toBeUndefined();
+  });
+
+  it("rejects omitted restored messages and ignores their delayed closes", async () => {
+    const fleet = new FleetDurableObject(
+      {
+        storage: new MemoryStorage(),
+        getWebSockets: () => [],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+    const staleHost = new FakeWebSocket({
+      kind: "egress-host",
+      leaseID: "cbx_000000000001",
+      sessionID: "egress_omitted",
+    });
+    const client = new FakeWebSocket({
+      kind: "egress-client",
+      leaseID: "cbx_000000000001",
+      sessionID: "egress_omitted",
+    });
+    const currentAdapter = new FakeWebSocket({
+      kind: "runtime-adapter-agent",
+      adapterID: "example-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+    });
+    const staleAdapter = new FakeWebSocket({
+      kind: "runtime-adapter-agent",
+      adapterID: "example-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+    });
+    const relay = fleet as unknown as {
+      egressClients: Map<string, WebSocket>;
+      runtimeAdapterAgents: Map<string, WebSocket>;
+    };
+    relay.egressClients.set("cbx_000000000001\0egress_omitted", client as unknown as WebSocket);
+    relay.runtimeAdapterAgents.set("example-adapter", currentAdapter as unknown as WebSocket);
+
+    await fleet.webSocketMessage(staleHost as unknown as WebSocket, "stale frame");
+    fleet.webSocketClose(staleAdapter as unknown as WebSocket, 1006, "late close", false);
+
+    expect(staleHost.closeCode).toBe(1012);
+    expect(staleHost.closeReason).toBe("coordinator restarted");
+    expect(client.sentJSON()).toEqual([]);
+    expect(relay.runtimeAdapterAgents.get("example-adapter")).toBe(currentAdapter);
+  });
+
   it("issues owner-scoped tickets and proxies only typed lifecycle requests", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -296,6 +487,10 @@ describe("runtime adapter relay", () => {
       id: "unknown-request",
       padding: "x".repeat(runtimeAdapterRelayFrameLimit),
     });
+    const relayState = fleet as unknown as {
+      runtimeAdapterAgents: Map<string, WebSocket>;
+    };
+    relayState.runtimeAdapterAgents.set("example-adapter", socket as unknown as WebSocket);
 
     await fleet.webSocketMessage(socket as unknown as WebSocket, message);
 

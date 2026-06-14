@@ -639,7 +639,8 @@ export class FleetCoordinator {
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
-  private readonly bridgeRestoreReady: Promise<boolean>;
+  private readonly restoredLeaseBridgeSockets = new Set<WebSocket>();
+  private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
@@ -651,17 +652,19 @@ export class FleetCoordinator {
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
   ) {
     this.restoreBridgeWebSockets();
-    this.bridgeRestoreReady = this.revokeInactiveRestoredBridgeSockets().then(
-      () => true,
-      (error) => {
-        console.warn("could not reconcile restored lease bridges", errorMessage(error));
-        return false;
-      },
-    );
   }
 
   async fetch(request: Request): Promise<Response> {
     try {
+      if (!(await this.restoredLeaseBridgesReady())) {
+        return json(
+          {
+            error: "bridge_state_unavailable",
+            message: "restored bridge lease state is temporarily unavailable",
+          },
+          { status: 503, headers: { "retry-after": "1" } },
+        );
+      }
       const parts = pathParts(request);
       const method = request.method.toUpperCase();
       const adminError = adminRouteError(request, method, parts);
@@ -907,6 +910,7 @@ export class FleetCoordinator {
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const attachment = this.bridgeAttachment(socket);
     if (!attachment) {
+      this.rejectRestoredBridgeSocket(socket, undefined);
       return;
     }
     await this.handleBridgeMessage(socket, attachment, message);
@@ -921,12 +925,43 @@ export class FleetCoordinator {
   }
 
   private restoreBridgeWebSockets(): void {
+    const candidates: Array<{
+      socket: WebSocket;
+      attachment: BridgeAttachment;
+      endpoint: string;
+    }> = [];
+    const endpointCounts = new Map<string, number>();
+    const egressSessions = new Map<string, Set<string>>();
     for (const socket of this.state.getWebSockets()) {
       const attachment = this.bridgeAttachment(socket);
-      if (!attachment || socket.readyState !== WebSocket.OPEN) {
+      if (!attachment) {
+        this.rejectRestoredBridgeSocket(socket, undefined);
+        continue;
+      }
+      if (socket.readyState !== WebSocket.OPEN) {
+        continue;
+      }
+      const endpoint = restoredBridgeEndpoint(attachment);
+      candidates.push({ socket, attachment, endpoint });
+      endpointCounts.set(endpoint, (endpointCounts.get(endpoint) ?? 0) + 1);
+      if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
+        const sessions = egressSessions.get(attachment.leaseID) ?? new Set<string>();
+        sessions.add(attachment.sessionID);
+        egressSessions.set(attachment.leaseID, sessions);
+      }
+    }
+    for (const { socket, attachment, endpoint } of candidates) {
+      const ambiguousEgressLease =
+        (attachment.kind === "egress-host" || attachment.kind === "egress-client") &&
+        (egressSessions.get(attachment.leaseID)?.size ?? 0) > 1;
+      if ((endpointCounts.get(endpoint) ?? 0) > 1 || ambiguousEgressLease) {
+        this.rejectRestoredBridgeSocket(socket, attachment);
         continue;
       }
       this.trackBridgeSocket(socket, attachment);
+      if ("leaseID" in attachment) {
+        this.restoredLeaseBridgeSockets.add(socket);
+      }
     }
   }
 
@@ -934,7 +969,7 @@ export class FleetCoordinator {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     const now = Date.now();
     const revoked = new Map<string, string>();
-    for (const socket of this.state.getWebSockets()) {
+    for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment || !("leaseID" in attachment)) {
         continue;
@@ -950,6 +985,48 @@ export class FleetCoordinator {
     for (const [leaseID, reason] of revoked) {
       this.closeLeaseBridges(leaseID, 1008, reason);
     }
+    for (const socket of this.restoredLeaseBridgeSockets) {
+      const attachment = this.bridgeAttachment(socket);
+      const reason =
+        attachment && "leaseID" in attachment ? revoked.get(attachment.leaseID) : undefined;
+      if (reason) {
+        closeSocket(socket, 1008, reason);
+      }
+    }
+    this.restoredLeaseBridgeSockets.clear();
+  }
+
+  private async restoredLeaseBridgesReady(): Promise<boolean> {
+    if (this.restoredLeaseBridgeSockets.size === 0) {
+      return true;
+    }
+    const pending =
+      this.bridgeRestoreReady ??
+      this.revokeInactiveRestoredBridgeSockets().then(
+        () => true,
+        (error) => {
+          console.warn("could not reconcile restored lease bridges", errorMessage(error));
+          return false;
+        },
+      );
+    this.bridgeRestoreReady = pending;
+    const ready = await pending;
+    if (this.bridgeRestoreReady === pending) {
+      this.bridgeRestoreReady = undefined;
+    }
+    return ready;
+  }
+
+  private rejectRestoredBridgeSocket(
+    socket: WebSocket,
+    attachment: BridgeAttachment | undefined,
+  ): void {
+    const webVNCAgent = attachment?.kind === "webvnc-agent";
+    closeSocket(
+      socket,
+      webVNCAgent ? 1011 : 1012,
+      webVNCAgent ? "WebVNC bridge reset" : "coordinator restarted",
+    );
   }
 
   private acceptBridgeWebSocket(socket: WebSocket, attachment: BridgeAttachment): void {
@@ -966,6 +1043,32 @@ export class FleetCoordinator {
 
   private bridgeAttachment(socket: WebSocket): BridgeAttachment | undefined {
     return bridgeAttachment(this.state.socketAttachment(socket));
+  }
+
+  private bridgeSocketIsCurrent(socket: WebSocket, attachment: BridgeAttachment): boolean {
+    switch (attachment.kind) {
+      case "webvnc-agent":
+        return this.webVNCAgents.get(attachment.leaseID)?.get(attachment.id) === socket;
+      case "webvnc-viewer":
+        return this.webVNCViewers.get(attachment.leaseID)?.get(attachment.id)?.socket === socket;
+      case "code-agent":
+        return this.codeAgents.get(attachment.leaseID) === socket;
+      case "code-viewer":
+        return this.codeViewers.get(attachment.id) === socket;
+      case "egress-host":
+        return (
+          this.egressHosts.get(egressSocketKey(attachment.leaseID, attachment.sessionID)) === socket
+        );
+      case "egress-client":
+        return (
+          this.egressClients.get(egressSocketKey(attachment.leaseID, attachment.sessionID)) ===
+          socket
+        );
+      case "runtime-adapter-agent":
+        return this.runtimeAdapterAgents.get(attachment.adapterID) === socket;
+      case "control":
+        return this.controlSockets.get(attachment.clientID) === socket;
+    }
   }
 
   private trackBridgeSocket(socket: WebSocket, attachment: BridgeAttachment): void {
@@ -1231,8 +1334,16 @@ export class FleetCoordinator {
     attachment: BridgeAttachment,
     message: string | ArrayBuffer | Blob,
   ): Promise<void> {
-    if (!(await this.bridgeRestoreReady)) {
-      closeSocket(socket, 1011, "lease state unavailable");
+    if (socket.readyState !== WebSocket.OPEN || !this.bridgeSocketIsCurrent(socket, attachment)) {
+      this.rejectRestoredBridgeSocket(socket, attachment);
+      return;
+    }
+    if (!(await this.restoredLeaseBridgesReady())) {
+      this.restoredLeaseBridgeSockets.delete(socket);
+      this.rejectRestoredBridgeSocket(socket, attachment);
+      return;
+    }
+    if (socket.readyState !== WebSocket.OPEN || !this.bridgeSocketIsCurrent(socket, attachment)) {
       return;
     }
     switch (attachment.kind) {
@@ -1294,8 +1405,9 @@ export class FleetCoordinator {
   }
 
   private handleBridgeClose(socket: WebSocket, code: number, reason: string): void {
+    this.restoredLeaseBridgeSockets.delete(socket);
     const attachment = this.bridgeAttachment(socket);
-    if (!attachment) {
+    if (!attachment || !this.bridgeSocketIsCurrent(socket, attachment)) {
       return;
     }
     switch (attachment.kind) {
@@ -1329,6 +1441,9 @@ export class FleetCoordinator {
   }
 
   async alarm(): Promise<void> {
+    if (!(await this.restoredLeaseBridgesReady())) {
+      throw new Error("restored bridge lease state is temporarily unavailable");
+    }
     await this.expireLeases();
     await this.reconcileRuntimeAdapterDeletes();
     await this.maintainWorkspacePrewarm();
@@ -11868,6 +11983,26 @@ function bridgeTags(attachment: BridgeAttachment): string[] {
     return [`adapter:${attachment.adapterID}`, attachment.kind];
   }
   return [`lease:${attachment.leaseID}`, attachment.kind];
+}
+
+function restoredBridgeEndpoint(attachment: BridgeAttachment): string {
+  switch (attachment.kind) {
+    case "webvnc-agent":
+      return JSON.stringify([attachment.kind, attachment.leaseID, attachment.id]);
+    case "webvnc-viewer":
+      return JSON.stringify([attachment.kind, attachment.leaseID, attachment.id]);
+    case "code-agent":
+      return JSON.stringify([attachment.kind, attachment.leaseID]);
+    case "code-viewer":
+      return JSON.stringify([attachment.kind, attachment.leaseID, attachment.id]);
+    case "egress-host":
+    case "egress-client":
+      return JSON.stringify([attachment.kind, attachment.leaseID, attachment.sessionID]);
+    case "runtime-adapter-agent":
+      return JSON.stringify([attachment.kind, attachment.adapterID]);
+    case "control":
+      return JSON.stringify([attachment.kind, attachment.clientID]);
+  }
 }
 
 function sendControl(socket: WebSocket, payload: unknown): void {
