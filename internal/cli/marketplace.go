@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +118,8 @@ func printMarketplaceStatus(out interface{ Write([]byte) (int, error) }, res Coo
 
 func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res CoordinatorMarketplaceQuoteResponse) {
 	quote := res.Quote
+	// integer display percents per route, allocated by largest remainder so each tier reads 100%
+	pct := marketplaceRoutePercents(quote.RoutingPlan)
 	fmt.Fprintf(out, "marketplace quote %s mode=%s strategy=%s ttl=%s\n",
 		quote.ID, quote.Mode, quote.Strategy, formatDurationSeconds(int64(quote.TTLSeconds)))
 	if quote.Selected != nil {
@@ -129,7 +133,7 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 			candidate.RetailHourlyUSD,
 			candidate.CostHourlyUSD,
 			candidate.MarginUSD,
-			marketplaceRouteShareSuffix(candidate.RouteShare))
+			marketplaceShareSuffix(candidate.RouteKey, candidate.RouteShare, pct))
 	} else {
 		fmt.Fprintln(out, "selected none")
 	}
@@ -152,11 +156,30 @@ func printMarketplaceQuote(out interface{ Write([]byte) (int, error) }, res Coor
 				candidate.CostHourlyUSD,
 				candidate.RouteKey,
 				status,
-				marketplaceRouteShareSuffix(candidate.RouteShare))
+				marketplaceShareSuffix(candidate.RouteKey, candidate.RouteShare, pct))
 		}
 	}
+	printMarketplaceRoutingPlan(out, quote.RoutingPlan, pct)
 	printMarketplaceWarnings(out, quote.Warnings)
 	printMarketplaceDecisions(out, res.Marketplace.DecisionsRequired)
+}
+
+func printMarketplaceRoutingPlan(out interface{ Write([]byte) (int, error) }, plan []CoordinatorMarketplaceRouteTier, pct map[string]int) {
+	if len(plan) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "routing plan (failover order; preview only, no traffic routed):")
+	for _, tier := range plan {
+		role := "failover"
+		if tier.Active {
+			role = "active"
+		}
+		members := make([]string, 0, len(tier.Members))
+		for _, member := range tier.Members {
+			members = append(members, fmt.Sprintf("%s %d%%", member.Provider, pct[member.RouteKey]))
+		}
+		fmt.Fprintf(out, "  tier priority=%-3d [%-8s] %s\n", tier.Priority, role, strings.Join(members, " | "))
+	}
 }
 
 func printMarketplaceWarnings(out interface{ Write([]byte) (int, error) }, warnings []string) {
@@ -223,11 +246,51 @@ func onOff(value bool) string {
 	return "off"
 }
 
-// marketplaceRouteShareSuffix renders the weighted load-balancing share (e.g. " share=75%") for the
-// weighted strategy; it stays empty for strategies that do not project a traffic split.
-func marketplaceRouteShareSuffix(share float64) string {
+// marketplaceShareSuffix renders the weighted load-balancing share (e.g. " share=75%"). When a
+// routing plan is present it uses the largest-remainder integer percents (which total 100% per tier);
+// otherwise it falls back to rounding the raw 0..1 share. It stays empty when no split applies.
+func marketplaceShareSuffix(routeKey string, share float64, pct map[string]int) string {
+	if value, ok := pct[routeKey]; ok {
+		return fmt.Sprintf(" share=%d%%", value)
+	}
 	if share <= 0 {
 		return ""
 	}
 	return fmt.Sprintf(" share=%.0f%%", share*100)
+}
+
+// marketplaceRoutePercents converts each tier's 0..1 routeShares into integer percents using
+// largest-remainder allocation, so the displayed percentages within a tier always sum to exactly 100.
+func marketplaceRoutePercents(plan []CoordinatorMarketplaceRouteTier) map[string]int {
+	percents := map[string]int{}
+	for _, tier := range plan {
+		n := len(tier.Members)
+		if n == 0 {
+			continue
+		}
+		base := make([]int, n)
+		sum := 0
+		for i, member := range tier.Members {
+			base[i] = int(math.Floor(member.RouteShare * 100))
+			sum += base[i]
+		}
+		residual := 100 - sum
+		order := make([]int, n)
+		for i := range order {
+			order[i] = i
+		}
+		// hand leftover percent points to the largest fractional parts (stable for determinism)
+		sort.SliceStable(order, func(a, b int) bool {
+			fa := tier.Members[order[a]].RouteShare*100 - math.Floor(tier.Members[order[a]].RouteShare*100)
+			fb := tier.Members[order[b]].RouteShare*100 - math.Floor(tier.Members[order[b]].RouteShare*100)
+			return fa > fb
+		})
+		for k := 0; k < residual && k < n; k++ {
+			base[order[k]]++
+		}
+		for i, member := range tier.Members {
+			percents[member.RouteKey] = base[i]
+		}
+	}
+	return percents
 }

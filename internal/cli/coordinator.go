@@ -669,15 +669,29 @@ type CoordinatorMarketplaceQuoteRequest struct {
 }
 
 type CoordinatorMarketplaceQuote struct {
-	ID         string                                 `json:"id"`
-	Mode       string                                 `json:"mode"`
-	Currency   string                                 `json:"currency"`
-	CreditUnit string                                 `json:"creditUnit"`
-	Strategy   string                                 `json:"strategy"`
-	TTLSeconds int                                    `json:"ttlSeconds"`
-	Candidates []CoordinatorMarketplaceQuoteCandidate `json:"candidates"`
-	Selected   *CoordinatorMarketplaceQuoteCandidate  `json:"selected,omitempty"`
-	Warnings   []string                               `json:"warnings"`
+	ID          string                                 `json:"id"`
+	Mode        string                                 `json:"mode"`
+	Currency    string                                 `json:"currency"`
+	CreditUnit  string                                 `json:"creditUnit"`
+	Strategy    string                                 `json:"strategy"`
+	TTLSeconds  int                                    `json:"ttlSeconds"`
+	Candidates  []CoordinatorMarketplaceQuoteCandidate `json:"candidates"`
+	Selected    *CoordinatorMarketplaceQuoteCandidate  `json:"selected,omitempty"`
+	RoutingPlan []CoordinatorMarketplaceRouteTier      `json:"routingPlan,omitempty"`
+	Warnings    []string                               `json:"warnings"`
+}
+
+type CoordinatorMarketplaceRouteTier struct {
+	Priority int                                     `json:"priority"`
+	Active   bool                                    `json:"active"`
+	Members  []CoordinatorMarketplaceRouteTierMember `json:"members"`
+}
+
+type CoordinatorMarketplaceRouteTierMember struct {
+	Provider   string  `json:"provider"`
+	RouteKey   string  `json:"routeKey"`
+	Weight     float64 `json:"weight"`
+	RouteShare float64 `json:"routeShare"`
 }
 
 type CoordinatorMarketplaceQuoteCandidate struct {

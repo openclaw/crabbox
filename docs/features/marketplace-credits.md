@@ -186,7 +186,9 @@ Initial strategies:
 - `cheapest`: lowest retail credits to the customer.
 - `balanced`: prefer routes with enough margin while still minimizing credits.
 - `weighted`: within the winning priority tier, load-balance by routing-group
-  `weight` and surface a per-candidate `routeShare` (0..1) previewing the split.
+  `weight` and surface a per-candidate `routeShare` (0..1, summing to 1 across the
+  tier) plus a `routingPlan` failover ladder previewing the split. Selection stays
+  deterministic (heaviest available route); the shares are a display-only projection.
 - `provider-default`: preserve configured provider order.
 
 Later routing inputs can include:
@@ -296,9 +298,13 @@ Example:
 
 Higher `priority` values are ranked first. `weight` drives the `weighted`
 strategy: the broker load-balances across providers sharing the winning priority
-and returns a per-candidate `routeShare` (0..1) previewing the traffic split.
-The split is a preview projection only; it routes no traffic and moves no
-credits.
+and returns a per-candidate `routeShare` (0..1) previewing the traffic split,
+plus a `routingPlan` array describing the whole failover ladder — one entry per
+priority tier (highest first), each with its `members` (provider, routeKey,
+weight, routeShare) and an `active` flag on the tier that serves the selected
+candidate. Per-tier `routeShare` values sum to exactly 1. The plan is a preview
+projection of priority failover plus weighted load balancing; it routes no
+traffic and moves no credits.
 
 ## Product Decisions Still Required
 
@@ -327,8 +333,8 @@ Before real payment code lands, maintainers need explicit decisions for:
 3. Payment MVP: customer checkout and webhooks with idempotent credit purchases.
 4. Enforcement MVP: credit authorization before brokered lease provisioning.
 5. Routing groups MVP: active members, priority failover, weighted same-priority
-   load balancing (preview `routeShare` split shipped; live routing and route
-   audit events still pending).
+   load balancing (preview `routeShare` split and the ordered `routingPlan`
+   failover ladder shipped; live routing and route audit events still pending).
 6. Smart routing MVP: route selection from quote into lease creation.
 7. Settlement reports: provider cost attribution and margin dashboards.
 8. Delegated providers: extend the marketplace contract beyond coordinator-owned

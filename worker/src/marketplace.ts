@@ -60,8 +60,23 @@ export interface MarketplaceQuoteCandidate {
   unavailableReason?: string;
   // fraction of traffic (0..1) this candidate would receive under weighted load balancing
   // among available candidates sharing the winning priority tier; only set for the "weighted"
-  // strategy. Preview-only: no traffic is actually routed.
+  // strategy. Mirrors the active tier's share in routingPlan. Preview-only: no traffic is routed.
   routeShare?: number;
+}
+
+export interface MarketplaceRouteTierMember {
+  provider: Provider;
+  routeKey: string;
+  weight: number;
+  // fraction of the tier's traffic (0..1); shares within a tier sum to exactly 1
+  routeShare: number;
+}
+
+export interface MarketplaceRouteTier {
+  priority: number;
+  // the single winning failover tier (the one that contains the selected candidate)
+  active: boolean;
+  members: MarketplaceRouteTierMember[];
 }
 
 export interface MarketplaceQuote {
@@ -73,6 +88,9 @@ export interface MarketplaceQuote {
   ttlSeconds: number;
   candidates: MarketplaceQuoteCandidate[];
   selected?: MarketplaceQuoteCandidate;
+  // ordered failover ladder (highest priority first), each tier with its weighted member split.
+  // Preview-only and weighted-strategy only: it routes no traffic and moves no credits.
+  routingPlan?: MarketplaceRouteTier[];
   warnings: string[];
 }
 
@@ -182,12 +200,25 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
     )
     .toSorted((left, right) => candidateRank(left, right, strategy));
   const selected = candidates.find((candidate) => candidate.available);
-  if (strategy === "weighted") {
-    applyRouteShares(candidates, selected);
+  // Build the failover ladder once, then mirror the winning tier's shares onto the flat
+  // candidate.routeShare so the two views are computed from a single source and cannot diverge.
+  let routingPlan: MarketplaceRouteTier[] | undefined;
+  if (strategy === "weighted" && selected) {
+    routingPlan = buildRoutingPlan(candidates, selected.priority);
+    const active = routingPlan.find((tier) => tier.active);
+    if (active) {
+      const shareByRoute = new Map(active.members.map((m) => [m.routeKey, m.routeShare]));
+      for (const candidate of candidates) {
+        const share = shareByRoute.get(candidate.routeKey);
+        if (share !== undefined) {
+          candidate.routeShare = share;
+        }
+      }
+    }
   }
   const warnings = quoteWarnings(input, status, selected, strategy, candidates);
   const quote: MarketplaceQuote = {
-    id: marketplaceQuoteID(providers, className, serverType, ttlSeconds),
+    id: marketplaceQuoteID(providers, className, serverType, ttlSeconds, strategy, maxCredits),
     mode: "preview",
     currency: "USD",
     creditUnit: "usd",
@@ -198,6 +229,9 @@ export function marketplaceQuote(env: Env, input: MarketplaceQuoteRequest): Mark
   };
   if (selected) {
     quote.selected = selected;
+  }
+  if (routingPlan) {
+    quote.routingPlan = routingPlan;
   }
   return quote;
 }
@@ -294,30 +328,69 @@ function quoteWarnings(
   return warnings;
 }
 
-// Compute the weighted load-balancing split (routeShare) across available candidates that share the
-// winning priority tier, mirroring AI-gateway weighted routing among equivalent providers. This is a
-// preview-only projection: it documents how weights would distribute traffic, but routes nothing.
-function applyRouteShares(
+// Build the failover ladder: available candidates grouped into priority tiers (highest priority
+// first = failover order), each tier carrying its members and weighted load-balancing shares.
+// This mirrors AI-gateway routing groups (priority = failover, weight = same-tier load balance) as a
+// preview-only projection: it documents how traffic would be distributed, but routes nothing.
+function buildRoutingPlan(
   candidates: MarketplaceQuoteCandidate[],
-  selected: MarketplaceQuoteCandidate | undefined,
-): void {
-  if (!selected) {
-    return;
+  activePriority: number,
+): MarketplaceRouteTier[] {
+  const byPriority = new Map<number, MarketplaceQuoteCandidate[]>();
+  for (const candidate of candidates) {
+    if (!candidate.available) {
+      continue;
+    }
+    const tier = byPriority.get(candidate.priority);
+    if (tier) {
+      tier.push(candidate);
+    } else {
+      byPriority.set(candidate.priority, [candidate]);
+    }
   }
-  const tier = candidates.filter(
-    (candidate) => candidate.available && candidate.priority === selected.priority,
+  return [...byPriority.entries()]
+    .toSorted(([leftPriority], [rightPriority]) => rightPriority - leftPriority)
+    .map(([priority, tier]) => {
+      const members = tier.toSorted(
+        (left, right) =>
+          right.weight - left.weight ||
+          left.credits - right.credits ||
+          left.provider.localeCompare(right.provider),
+      );
+      const shares = weightedShares(members.map((candidate) => candidate.weight));
+      return {
+        priority,
+        active: priority === activePriority,
+        members: members.map((candidate, index) => ({
+          provider: candidate.provider,
+          routeKey: candidate.routeKey,
+          weight: candidate.weight,
+          routeShare: shares[index] ?? 0,
+        })),
+      };
+    });
+}
+
+// Largest-remainder allocation: split 1.0 across weights so the rounded 4-decimal shares sum to
+// exactly 1 (independent rounding would drift, e.g. three equal weights -> 0.3333 x3 = 0.9999).
+function weightedShares(weights: number[]): number[] {
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  if (total <= 0) {
+    return weights.map(() => 0);
+  }
+  const scaled = weights.map((weight) => (weight / total) * 10000);
+  const base = scaled.map((value) => Math.floor(value));
+  const residual = 10000 - base.reduce((sum, value) => sum + value, 0);
+  // hand the leftover units to the largest fractional parts (stable: ties keep input order, so the
+  // heavier/cheaper primary route -- already first within the tier -- absorbs the residual)
+  const bump = new Set<number>(
+    scaled
+      .map((value, index) => ({ index, frac: value - Math.floor(value) }))
+      .toSorted((left, right) => right.frac - left.frac)
+      .slice(0, Math.max(0, residual))
+      .map((entry) => entry.index),
   );
-  const totalWeight = tier.reduce(
-    (sum, candidate) => sum + (candidate.weight > 0 ? candidate.weight : 0),
-    0,
-  );
-  if (totalWeight <= 0) {
-    return;
-  }
-  for (const candidate of tier) {
-    const weight = candidate.weight > 0 ? candidate.weight : 0;
-    candidate.routeShare = roundShare(weight / totalWeight);
-  }
+  return base.map((value, index) => (value + (bump.has(index) ? 1 : 0)) / 10000);
 }
 
 function quoteProviders(supported: Provider[], input: MarketplaceQuoteRequest): Provider[] {
@@ -521,8 +594,12 @@ function marketplaceQuoteID(
   className: string,
   serverType: string,
   ttlSeconds: number,
+  strategy: MarketplaceStrategy,
+  maxCredits: number | undefined,
 ): string {
-  const source = `${providers.join(",")}:${className}:${serverType}:${ttlSeconds}`;
+  // fold in strategy and the credit ceiling so two requests that differ only by those (and thus
+  // yield different selection / candidate ordering / routeShare) do not collide on the same id
+  const source = `${providers.join(",")}:${className}:${serverType}:${ttlSeconds}:${strategy}:${maxCredits ?? ""}`;
   let hash = 0;
   for (let index = 0; index < source.length; index++) {
     hash = (hash * 31 + source.charCodeAt(index)) >>> 0;
@@ -566,8 +643,4 @@ function nonEmpty(value: string | undefined): string {
 
 function roundUSD(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
-function roundShare(value: number): number {
-  return Math.round((value + Number.EPSILON) * 10000) / 10000;
 }

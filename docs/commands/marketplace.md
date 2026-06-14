@@ -101,8 +101,32 @@ number, interpreted as retail hourly credits, or an object:
 are ranked first for failover-style routing. `weight` drives the `weighted`
 strategy: within a single priority tier the broker load-balances by weight and
 returns a `routeShare` (0..1) per candidate previewing how traffic would split
-(e.g. weights `3` and `1` preview `share=75%` and `share=25%`). This is a
-preview projection only; no traffic is routed and no credits move.
+(e.g. weights `3` and `1` preview `share=75%` and `share=25%`). Per-tier
+`routeShare` values sum to exactly 1; the `share=NN%` the CLI prints is the
+rounded display and always totals 100% within a tier.
+
+Selection is deterministic, not probabilistic: the quote always selects the
+heaviest available candidate in the winning tier (ties broken by cheapest, then
+provider name). `routeShare` is a display-only projection of how traffic *would*
+split; it does not change which single candidate is selected.
+
+### Routing plan
+
+Under the `weighted` strategy the quote also returns a `routingPlan`: the
+failover ladder as an ordered array of priority tiers (highest priority first),
+each with its available `members` and their weighted `routeShare`, and an
+`active` flag on the single tier that contains the selected candidate. The CLI
+renders it as:
+
+```text
+routing plan (failover order; preview only, no traffic routed):
+  tier priority=10 [active  ] aws 75% | hetzner 25%
+  tier priority=5  [failover] gcp 100%
+```
+
+It is a preview projection of priority failover plus weighted load balancing:
+no tier is locked, no traffic is routed, and no credits move. Non-weighted
+strategies omit `routingPlan`.
 
 ## Related Docs
 
