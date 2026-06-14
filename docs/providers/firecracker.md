@@ -71,15 +71,16 @@ requirements:
 
 - Linux host. `doctor` fails on macOS and Windows because this provider expects
   a Linux KVM environment.
-- `/dev/kvm` must exist and be usable by the account running Crabbox.
+- `/dev/kvm` must exist and be openable by the account running Crabbox.
 - The configured Firecracker binary must exist on `PATH` or at
   `firecracker.binary`.
-- `firecracker.jailer` is optional, but when set it must resolve to an
-  executable file.
+- `firecracker.jailer` must stay unset; jailer launch is not supported yet and
+  doctor fails configured jailer paths instead of reporting false readiness.
 - `firecracker.kernel` and `firecracker.rootfs` must point to real files.
 - `firecracker.network` must remain `cni`, and `firecracker.cniNetwork`,
   `firecracker.cniConfDir`, and `firecracker.cniBinDir` must resolve to a real
-  CNI setup on the host.
+  CNI setup on the host. Doctor loads the named CNI config from the configured
+  conf dir before reporting readiness.
 - Size the host so the requested `firecracker.cpus`, `firecracker.memoryMiB`,
   and `firecracker.diskMiB` are realistic for the guest you plan to boot.
 
@@ -87,7 +88,7 @@ This provider rejects non-Linux targets and Tailscale-managed networking.
 
 ## Guest image contract
 
-The lifecycle path expects the configured kernel and rootfs pair to boot an
+The lifecycle expects the configured kernel and rootfs pair to boot an
 SSH-ready Linux guest that matches the rest of Crabbox's Linux SSH-lease
 contract:
 
@@ -100,8 +101,9 @@ contract:
 - The kernel, rootfs, architecture, and CNI networking model are compatible
   with each other.
 
-Current `doctor` checks do **not** validate guest-side tools or boot behavior
-yet. They only validate the host-side contract and configured file paths.
+Current `doctor` checks do **not** validate guest-side tools or boot behavior.
+They validate the host-side contract and configured file paths before lifecycle
+commands attempt to start a microVM.
 
 ## Configuration
 
@@ -110,8 +112,8 @@ provider: firecracker
 target: linux
 firecracker:
   binary: firecracker
-  # Optional when you do not use jailer mode.
-  jailer: /usr/local/bin/jailer
+  # Leave jailer unset until jailer launch support lands.
+  jailer: ""
   kernel: /var/lib/crabbox/firecracker/vmlinux
   rootfs: /var/lib/crabbox/firecracker/rootfs.ext4
   user: crabbox
@@ -202,12 +204,12 @@ starts, stops, or deletes a microVM. The provider-specific checks are stable:
 | Check | Meaning |
 | --- | --- |
 | `host` | The current host must be Linux. |
-| `kvm` | `/dev/kvm` exists and is not a directory. |
+| `kvm` | `/dev/kvm` exists and is openable by the current user. |
 | `binary` | `firecracker.binary` resolves to an executable. |
-| `jailer` | Optional `firecracker.jailer`; `skip` when unset. |
+| `jailer` | `skip` when unset; failed when configured because jailer launch is not supported yet. |
 | `kernel` | `firecracker.kernel` exists and is a file. |
 | `rootfs` | `firecracker.rootfs` exists and is a file. |
-| `network` | `firecracker.network=cni`, `firecracker.cniNetwork` is set, and the CNI config/bin directories exist. |
+| `network` | `firecracker.network=cni`, `firecracker.cniNetwork` is set, the CNI config/bin directories exist, and the named CNI config loads. |
 
 Provider checks include `mutation=false` in their details. Missing host assets
 such as the Linux KVM surface, Firecracker binary, kernel, rootfs, or CNI

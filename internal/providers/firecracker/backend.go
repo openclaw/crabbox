@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/containernetworking/cni/libcni"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -46,6 +47,8 @@ var (
 	firecrackerHostGOOS = runtime.GOOS
 	firecrackerLookPath = exec.LookPath
 	firecrackerStat     = os.Stat
+	firecrackerOpenKVM  = openKVMDevice
+	firecrackerLoadCNI  = libcni.LoadConfList
 	ensureTestboxKey    = core.EnsureTestboxKeyForConfig
 	removeTestboxKey    = core.RemoveStoredTestboxKey
 )
@@ -808,6 +811,15 @@ func doctorKVMCheck() DoctorCheck {
 			Details: details,
 		}
 	}
+	if err := firecrackerOpenKVM(); err != nil {
+		details["class"] = "environment_blocked"
+		return DoctorCheck{
+			Status:  "failed",
+			Check:   "kvm",
+			Message: fmt.Sprintf("/dev/kvm not accessible: %v", err),
+			Details: details,
+		}
+	}
 	return DoctorCheck{
 		Status:  "ok",
 		Check:   "kvm",
@@ -865,11 +877,13 @@ func doctorJailerCheck(configured string) DoctorCheck {
 			Details: details,
 		}
 	}
-	check := doctorExecutableCheck("jailer", "firecracker.jailer", value)
-	if check.Status == "ok" {
-		check.Message = fmt.Sprintf("jailer=%s mutation=false", check.Details["path"])
+	details["class"] = "configuration_incomplete"
+	return DoctorCheck{
+		Status:  "failed",
+		Check:   "jailer",
+		Message: "firecracker.jailer is configured, but jailer launch is not supported yet",
+		Details: details,
 	}
-	return check
 }
 
 func doctorFileCheck(check, field, configured string) DoctorCheck {
@@ -946,6 +960,12 @@ func doctorNetworkCheck(cfg Config) DoctorCheck {
 		class = "environment_blocked"
 		problems = append(problems, fmt.Sprintf("firecracker.cniBinDir %v", err))
 	}
+	if len(problems) == 0 {
+		if _, err := firecrackerLoadCNI(details["cniConfDir"], details["cniNetwork"]); err != nil {
+			class = "configuration_incomplete"
+			problems = append(problems, fmt.Sprintf("firecracker.cniNetwork %q unavailable in %s: %v", details["cniNetwork"], details["cniConfDir"], err))
+		}
+	}
 	if len(problems) > 0 {
 		details["class"] = class
 		return DoctorCheck{
@@ -976,6 +996,14 @@ func doctorRequireDir(path string) error {
 		return fmt.Errorf("must be a directory")
 	}
 	return nil
+}
+
+func openKVMDevice() error {
+	file, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func aggregateDoctorStatus(checks []DoctorCheck) string {

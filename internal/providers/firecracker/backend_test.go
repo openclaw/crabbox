@@ -6,10 +6,12 @@ import (
 	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/containernetworking/cni/libcni"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -178,6 +180,8 @@ func TestDoctorReportsUnsupportedHostAndMissingArtifacts(t *testing.T) {
 		"darwin",
 		func(string) (string, error) { return "", errors.New("executable file not found in $PATH") },
 		func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+		func() error { return nil },
+		func(string, string) (*libcni.NetworkConfigList, error) { return nil, errors.New("not reached") },
 	)
 	defer restore()
 
@@ -231,6 +235,8 @@ func TestDoctorReportsReadyChecksWhenPrereqsExist(t *testing.T) {
 				return nil, os.ErrNotExist
 			}
 		},
+		func() error { return nil },
+		func(string, string) (*libcni.NetworkConfigList, error) { return nil, nil },
 	)
 	defer restore()
 
@@ -252,6 +258,69 @@ func TestDoctorReportsReadyChecksWhenPrereqsExist(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsKVMAccessFailure(t *testing.T) {
+	restore := stubDoctorEnvironment(
+		"linux",
+		exec.LookPath,
+		func(path string) (os.FileInfo, error) {
+			if path == "/dev/kvm" {
+				return fakeFileInfo{name: path}, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		func() error { return os.ErrPermission },
+		func(string, string) (*libcni.NetworkConfigList, error) { return nil, nil },
+	)
+	defer restore()
+
+	check := doctorKVMCheck()
+	if check.Status != "failed" || !strings.Contains(check.Message, "not accessible") || check.Details["class"] != "environment_blocked" {
+		t.Fatalf("kvm check=%#v", check)
+	}
+}
+
+func TestDoctorReportsMissingNamedCNIConfig(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Firecracker.Network = firecrackerNetworkCNI
+	cfg.Firecracker.CNINetwork = "missing-firecracker"
+	cfg.Firecracker.CNIConfDir = "/etc/cni/conf.d"
+	cfg.Firecracker.CNIBinDir = "/opt/cni/bin"
+
+	restore := stubDoctorEnvironment(
+		"linux",
+		exec.LookPath,
+		func(path string) (os.FileInfo, error) {
+			switch path {
+			case cfg.Firecracker.CNIConfDir, cfg.Firecracker.CNIBinDir:
+				return fakeFileInfo{name: path, dir: true}, nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		func() error { return nil },
+		func(confDir, network string) (*libcni.NetworkConfigList, error) {
+			if confDir != cfg.Firecracker.CNIConfDir || network != cfg.Firecracker.CNINetwork {
+				t.Fatalf("LoadConfList(%q, %q)", confDir, network)
+			}
+			return nil, errors.New("no net config with name missing-firecracker")
+		},
+	)
+	defer restore()
+
+	check := doctorNetworkCheck(cfg)
+	if check.Status != "failed" || !strings.Contains(check.Message, "missing-firecracker") || check.Details["class"] != "configuration_incomplete" {
+		t.Fatalf("network check=%#v", check)
+	}
+}
+
+func TestDoctorRejectsConfiguredJailerUntilLifecycleSupportsIt(t *testing.T) {
+	check := doctorJailerCheck("/usr/local/bin/jailer")
+	if check.Status != "failed" || !strings.Contains(check.Message, "not supported yet") || check.Details["class"] != "configuration_incomplete" {
+		t.Fatalf("jailer check=%#v", check)
+	}
+}
+
 func checksByName(checks []core.DoctorCheck) map[string]core.DoctorCheck {
 	out := make(map[string]core.DoctorCheck, len(checks))
 	for _, check := range checks {
@@ -264,17 +333,25 @@ func stubDoctorEnvironment(
 	goos string,
 	lookPath func(string) (string, error),
 	stat func(string) (os.FileInfo, error),
+	openKVM func() error,
+	loadCNI func(string, string) (*libcni.NetworkConfigList, error),
 ) func() {
 	previousGOOS := firecrackerHostGOOS
 	previousLookPath := firecrackerLookPath
 	previousStat := firecrackerStat
+	previousOpenKVM := firecrackerOpenKVM
+	previousLoadCNI := firecrackerLoadCNI
 	firecrackerHostGOOS = goos
 	firecrackerLookPath = lookPath
 	firecrackerStat = stat
+	firecrackerOpenKVM = openKVM
+	firecrackerLoadCNI = loadCNI
 	return func() {
 		firecrackerHostGOOS = previousGOOS
 		firecrackerLookPath = previousLookPath
 		firecrackerStat = previousStat
+		firecrackerOpenKVM = previousOpenKVM
+		firecrackerLoadCNI = previousLoadCNI
 	}
 }
 
