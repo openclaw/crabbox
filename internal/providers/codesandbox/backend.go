@@ -233,7 +233,7 @@ func (b *codeSandboxBackend) List(ctx context.Context, _ ListRequest) ([]LeaseVi
 			if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
 				return nil, err
 			}
-			state = blank(sb.State, "ready")
+			state = blank(sb.State, "unknown")
 		}
 		servers = append(servers, codeSandboxServerView(claim, SandboxSummary{ID: sandboxID, Title: sb.Title, State: state, URL: sb.URL}))
 	}
@@ -274,7 +274,7 @@ func (b *codeSandboxBackend) Status(ctx context.Context, req StatusRequest) (Sta
 		if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
 			return StatusView{}, err
 		}
-		state := strings.ToLower(strings.TrimSpace(blank(sb.State, "ready")))
+		state := strings.ToLower(strings.TrimSpace(blank(sb.State, "unknown")))
 		view := StatusView{
 			ID:       leaseID,
 			Slug:     slug,
@@ -508,7 +508,7 @@ func (b *codeSandboxBackend) execCommand(ctx context.Context, api codeSandboxAPI
 }
 
 func codeSandboxServerView(claim LeaseClaim, sb SandboxSummary) Server {
-	state := blank(sb.State, "ready")
+	state := blank(sb.State, "unknown")
 	sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
 	if strings.TrimSpace(sb.ID) != "" {
 		sandboxID = sb.ID

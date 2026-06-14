@@ -1,6 +1,9 @@
 package codesandbox
 
-import "flag"
+import (
+	"flag"
+	"strings"
+)
 
 type codeSandboxFlagValues struct {
 	TemplateID               *string
@@ -37,6 +40,14 @@ func ApplyCodeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 	if !ok {
 		return nil
 	}
+	if codeSandboxProviderSelected(cfg.Provider) {
+		if flagWasSet(fs, "class") {
+			return exit(2, "--class is not supported for provider=codesandbox; use --codesandbox-vm-tier")
+		}
+		if flagWasSet(fs, "type") {
+			return exit(2, "--type is not supported for provider=codesandbox; use --codesandbox-vm-tier")
+		}
+	}
 	if flagWasSet(fs, "codesandbox-template-id") {
 		cfg.CodeSandbox.TemplateID = *v.TemplateID
 	}
@@ -71,4 +82,13 @@ func ApplyCodeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) er
 		cfg.CodeSandbox.OperationTimeoutSecs = *v.OperationTimeoutSecs
 	}
 	return validateCodeSandboxConfig(*cfg)
+}
+
+func codeSandboxProviderSelected(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case providerName, "csb", "code-sandbox":
+		return true
+	default:
+		return false
+	}
 }

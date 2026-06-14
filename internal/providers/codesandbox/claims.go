@@ -195,7 +195,7 @@ func codeSandboxWorkdir(cfg Config) (string, error) {
 
 func isReadyState(state string) bool {
 	switch strings.TrimSpace(strings.ToLower(state)) {
-	case "", "ready", "running", "started", "active", "awake":
+	case "ready", "running", "started", "active", "awake":
 		return true
 	default:
 		return false

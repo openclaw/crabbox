@@ -2112,7 +2112,7 @@ func baseConfig() Config {
 			AutomaticWakeupHTTP:      true,
 			AutomaticWakeupWebSocket: false,
 			BridgeCommand:            "node",
-			SDKPackage:               "@codesandbox/sdk",
+			SDKPackage:               "@codesandbox/sdk@2.4.2",
 			DoctorListLimit:          1,
 			OperationTimeoutSecs:     30,
 		},

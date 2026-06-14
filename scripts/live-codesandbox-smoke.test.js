@@ -16,7 +16,9 @@ const smokeEnv = {
 };
 let cleanupArmed = false;
 
-main();
+if (require.main === module) {
+  main();
+}
 
 function main() {
   if (!token.trim()) {
@@ -34,6 +36,8 @@ function main() {
     run("status", ["status", "--provider", "codesandbox", "--id", slug, "--wait", "--wait-timeout", "300s"], { cwd: smokeRepo });
     const noSync = run("run no-sync", ["run", "--provider", "codesandbox", "--id", slug, "--no-sync", "--", "/bin/sh", "-lc", "printf CODESANDBOX_SMOKE_NOSYNC_OK"], { cwd: smokeRepo });
     requireOutput(noSync, "CODESANDBOX_SMOKE_NOSYNC_OK", "no-sync command");
+    const failed = runExpectExit("run expected failure", ["run", "--provider", "codesandbox", "--id", slug, "--no-sync", "--", "/bin/sh", "-lc", "printf CODESANDBOX_SMOKE_EXIT_OK; exit 7"], 7, { cwd: smokeRepo });
+    requireOutput(failed, "CODESANDBOX_SMOKE_EXIT_OK", "nonzero command");
     fs.writeFileSync(path.join(smokeRepo, "proof.txt"), "v1\n", "utf8");
     run("run sync-only", ["run", "--provider", "codesandbox", "--id", slug, "--sync-only"], { cwd: smokeRepo });
     const sync = run("run sync proof", ["run", "--provider", "codesandbox", "--id", slug, "--", "/bin/sh", "-lc", "test \"$(cat proof.txt)\" = v1 && printf CODESANDBOX_SMOKE_SYNC_OK"], { cwd: smokeRepo });
@@ -101,6 +105,22 @@ function run(label, args, options = {}) {
   });
   if (result.status !== 0) {
     throw new SmokeError(`${label} failed`, result);
+  }
+  return {
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+  };
+}
+
+function runExpectExit(label, args, expectedStatus, options = {}) {
+  const result = spawnSync(bin, args, {
+    cwd: options.cwd || repoRoot,
+    env: smokeEnv,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024 * 8,
+  });
+  if (result.status !== expectedStatus) {
+    throw new SmokeError(`${label} returned ${result.status}, want ${expectedStatus}`, result);
   }
   return {
     stdout: result.stdout || "",
@@ -187,7 +207,7 @@ function classify(message) {
   if (lower.includes("quota") || lower.includes("rate limit") || lower.includes("too many requests") || lower.includes("429") || lower.includes("capacity")) {
     return "environment_blocked";
   }
-  if (lower.includes("api key") || lower.includes("auth") || lower.includes("forbidden") || lower.includes("unauthorized") || lower.includes("timeout") || lower.includes("enotfound") || lower.includes("econn") || lower.includes("sdk_error")) {
+  if (lower.includes("api key") || lower.includes("auth") || lower.includes("forbidden") || lower.includes("unauthorized") || lower.includes("timeout") || lower.includes("enotfound") || lower.includes("econn")) {
     return "environment_blocked";
   }
   return lower.includes("cleanup_failed") ? "diagnostic_only" : "diagnostic_only";
@@ -221,3 +241,5 @@ class SmokeError extends Error {
     super(`${message}: exit=${result?.status ?? "unknown"} ${output}`);
   }
 }
+
+module.exports = { classify };

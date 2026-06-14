@@ -1,7 +1,6 @@
 package codesandbox
 
 import (
-	"context"
 	"flag"
 	"io"
 	"os"
@@ -36,7 +35,6 @@ type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
 type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
-type SyncManifest = core.SyncManifest
 type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
 
@@ -46,7 +44,7 @@ const (
 	leasePrefix          = "csbx_"
 	defaultWorkdir       = "/project/workspace"
 	defaultBridgeCommand = "node"
-	defaultSDKPackage    = "@codesandbox/sdk"
+	defaultSDKPackage    = "@codesandbox/sdk@2.4.2"
 	targetLinux          = core.TargetLinux
 	NetworkPublic        = core.NetworkPublic
 
@@ -94,10 +92,6 @@ func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, 
 	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
-func resolveLeaseClaim(identifier string) (LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaim(identifier)
-}
-
 func readLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return core.ReadLeaseClaim(leaseID)
 }
@@ -124,22 +118,6 @@ func shellScriptFromArgv(command []string) string {
 
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
-}
-
-func syncExcludes(root string, cfg Config) ([]string, error) {
-	return core.SyncExcludes(root, cfg)
-}
-
-func syncManifest(root string, excludes, includes []string) (SyncManifest, error) {
-	return core.BuildSyncManifestFiltered(root, excludes, includes)
-}
-
-func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
-	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
-}
-
-func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
-	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }
 
 func operationTimeout(cfg CodeSandboxConfig) time.Duration {
@@ -197,8 +175,4 @@ func doctorCheck(name string, err error, details map[string]string) DoctorCheck 
 
 func discardRuntime() Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard}
-}
-
-func withOperationTimeout(ctx context.Context, cfg CodeSandboxConfig) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, operationTimeout(cfg))
 }

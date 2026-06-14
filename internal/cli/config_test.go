@@ -2333,7 +2333,7 @@ func TestCodeSandboxConfigDefaultsFileEnvAndNoPersistentSecretSurface(t *testing
 		!cfg.CodeSandbox.AutomaticWakeupHTTP ||
 		cfg.CodeSandbox.AutomaticWakeupWebSocket ||
 		cfg.CodeSandbox.BridgeCommand != "node" ||
-		cfg.CodeSandbox.SDKPackage != "@codesandbox/sdk" ||
+		cfg.CodeSandbox.SDKPackage != "@codesandbox/sdk@2.4.2" ||
 		cfg.CodeSandbox.DoctorListLimit != 1 ||
 		cfg.CodeSandbox.OperationTimeoutSecs != 30 {
 		t.Fatalf("unexpected codesandbox defaults: %#v", cfg.CodeSandbox)

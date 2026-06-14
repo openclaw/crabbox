@@ -143,7 +143,7 @@ func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridge
 	var stdout, stderr bytes.Buffer
 	result, runErr := b.rt.Exec.Run(setupCtx, LocalCommandRequest{
 		Name:                   "npm",
-		Args:                   []string{"install", "--no-audit", "--no-fund", "--loglevel=error", spec.InstallSpec},
+		Args:                   []string{"install", "--no-audit", "--no-fund", "--ignore-scripts", "--omit=optional", "--save-exact", "--loglevel=error", spec.InstallSpec},
 		Env:                    bridgeSetupEnv(),
 		Dir:                    dir,
 		Stdout:                 &stdout,
@@ -153,6 +153,9 @@ func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridge
 	})
 	if runErr != nil || result.ExitCode != 0 {
 		return bridgeSetupError(result.ExitCode, stdout.String(), stderr.String(), runErr)
+	}
+	if !bridgeSDKPackageInstalled(dir, spec) {
+		return fmt.Errorf("codesandbox bridge SDK setup did not install expected package %s", spec.InstallSpec)
 	}
 	if err := os.WriteFile(bridgeSDKMarkerPath(dir), []byte(spec.InstallSpec+"\n"+spec.ImportSpec+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write codesandbox bridge SDK marker: %w", err)
@@ -208,9 +211,10 @@ func bridgeWorkingDir() (string, error) {
 }
 
 type bridgeSDKSpec struct {
-	InstallSpec string
-	ImportSpec  string
-	Install     bool
+	InstallSpec     string
+	ImportSpec      string
+	ExpectedVersion string
+	Install         bool
 }
 
 func bridgeSDKSpecFor(cfg CodeSandboxConfig) bridgeSDKSpec {
@@ -219,7 +223,8 @@ func bridgeSDKSpecFor(cfg CodeSandboxConfig) bridgeSDKSpec {
 	if !ok {
 		return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: installSpec}
 	}
-	return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: importSpec, Install: true}
+	version, _ := npmExactPackageVersion(installSpec, importSpec)
+	return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: importSpec, ExpectedVersion: version, Install: true}
 }
 
 func npmPackageName(spec string) (string, bool) {
@@ -259,14 +264,40 @@ func npmPackageName(spec string) (string, bool) {
 	return spec[:nameEnd], true
 }
 
+func npmExactPackageVersion(spec, packageName string) (string, bool) {
+	suffix := strings.TrimPrefix(strings.TrimSpace(spec), packageName)
+	if !strings.HasPrefix(suffix, "@") {
+		return "", false
+	}
+	version := strings.TrimPrefix(suffix, "@")
+	if version == "" || version[0] < '0' || version[0] > '9' ||
+		strings.ContainsAny(version, " /\\*^~<>=|") {
+		return "", false
+	}
+	return version, true
+}
+
 func bridgeSDKInstalled(dir string, spec bridgeSDKSpec) bool {
 	marker, err := os.ReadFile(bridgeSDKMarkerPath(dir))
 	if err != nil || string(marker) != spec.InstallSpec+"\n"+spec.ImportSpec+"\n" {
 		return false
 	}
+	return bridgeSDKPackageInstalled(dir, spec)
+}
+
+func bridgeSDKPackageInstalled(dir string, spec bridgeSDKSpec) bool {
 	packagePath := filepath.Join(dir, "node_modules", filepath.FromSlash(spec.ImportSpec), "package.json")
-	_, err = os.Stat(packagePath)
-	return err == nil
+	data, err := os.ReadFile(packagePath)
+	if err != nil {
+		return false
+	}
+	if spec.ExpectedVersion == "" {
+		return true
+	}
+	var metadata struct {
+		Version string `json:"version"`
+	}
+	return json.Unmarshal(data, &metadata) == nil && metadata.Version == spec.ExpectedVersion
 }
 
 func writeBridgePackageJSON(dir string) error {
@@ -338,7 +369,7 @@ function emit(value) {
 function fail(code, message) {
   emit({ ok: false, error: { code, message: String(message || "") } });
 }
-function normalizeSandbox(sandbox) {
+function normalizeSandbox(sandbox, state = "") {
   if (!sandbox) return {};
   const tags = Array.isArray(sandbox.tags) ? sandbox.tags : [];
   return {
@@ -346,7 +377,7 @@ function normalizeSandbox(sandbox) {
     title: sandbox.title || sandbox.name || "",
     privacy: sandbox.privacy || "",
     tags,
-    state: sandbox.state || sandbox.status || sandbox.lifecycleStatus || "",
+    state,
     url: sandbox.url || sandbox.editorUrl || sandbox.previewUrl || ""
   };
 }
@@ -373,20 +404,39 @@ async function connectSandbox(sdk, id) {
   }
   return { sandbox, client: sandbox };
 }
-async function createSandbox(sdk) {
+async function createSandbox(sdk, VMTier) {
   const sandboxes = sdk.sandboxes || sdk;
   const options = {};
   if (req.title) options.title = req.title;
   if (Array.isArray(req.tags) && req.tags.length) options.tags = req.tags;
   if (req.templateId) options.id = req.templateId;
   if (req.privacy) options.privacy = req.privacy;
-  if (req.vmTier) options.vmTier = req.vmTier;
+  if (req.vmTier) options.vmTier = resolveVMTier(VMTier, req.vmTier);
   if (req.hibernationTimeoutSecs) options.hibernationTimeoutSeconds = Number(req.hibernationTimeoutSecs);
   options.automaticWakeupConfig = {
     http: !!req.automaticWakeupHttp,
     websocket: !!req.automaticWakeupWebSocket
   };
   return await callAny(sandboxes, ["create", "createSandbox"], options);
+}
+function resolveVMTier(VMTier, value) {
+  if (!VMTier || !Array.isArray(VMTier.All)) {
+    throw new Error("CodeSandbox SDK does not expose VMTier.All");
+  }
+  const normalized = String(value || "").trim().toLowerCase();
+  const tier = VMTier.All.find((candidate) => String(candidate && candidate.name || "").toLowerCase() === normalized);
+  if (!tier) throw new Error("unsupported CodeSandbox VM tier: " + String(value || ""));
+  return tier;
+}
+async function runningSandboxIDs(sdk) {
+  try {
+    const running = await callAny(sdk.sandboxes || sdk, ["listRunning"]);
+    const vms = running && Array.isArray(running.vms) ? running.vms : [];
+    return new Set(vms.map((vm) => String(vm && vm.id || "")).filter(Boolean));
+  } catch {
+    // listRunning is a delayed snapshot; metadata operations must not depend on it.
+    return new Set();
+  }
 }
 function shellQuote(value) {
   const text = String(value ?? "");
@@ -435,7 +485,14 @@ async function runCommand(sandbox) {
   const commandLine = commandLineFromRequest(command, cwd, envFilePath);
   let result;
   if (commands && typeof commands.run === "function") {
-    result = await commands.run(commandLine);
+    try {
+      result = await commands.run(commandLine);
+    } catch (err) {
+      if (err && Number.isInteger(err.exitCode)) {
+        return { exitCode: err.exitCode, stdout: String(err.output || ""), stderr: "" };
+      }
+      throw err;
+    }
   } else {
     result = await callAny(commands, ["exec", "runCommand"], {
       command: commandLine,
@@ -515,19 +572,22 @@ try {
     fail("auth_missing", "missing CodeSandbox API key");
   } else {
     const pkg = process.env.CRABBOX_CODESANDBOX_SDK_IMPORT || process.env.CRABBOX_CODESANDBOX_SDK_PACKAGE || "@codesandbox/sdk";
-    const { CodeSandbox } = await import(pkg);
+    const sdkModule = await import(pkg);
+    const { CodeSandbox, VMTier } = sdkModule;
     const sdk = new CodeSandbox(token);
     if (req.operation === "list_sandboxes") {
       const listed = await callAny(sdk.sandboxes || sdk, ["list", "listSandboxes"], { limit: Number(req.limit || 1) });
       const items = listed.sandboxes || listed.items || listed.results || listed || [];
-      const sandboxes = Array.from(items).map(normalizeSandbox);
+      const runningIDs = await runningSandboxIDs(sdk);
+      const sandboxes = Array.from(items).map((sandbox) => normalizeSandbox(sandbox, runningIDs.has(String(sandbox && sandbox.id || "")) ? "running" : ""));
       emit({ ok: true, sandboxes, totalCount: listed.totalCount || listed.total || sandboxes.length });
     } else if (req.operation === "create_sandbox") {
-      const sandbox = await createSandbox(sdk);
-      emit({ ok: true, sandbox: normalizeSandbox(sandbox) });
+      const sandbox = await createSandbox(sdk, VMTier);
+      emit({ ok: true, sandbox: normalizeSandbox(sandbox, "running") });
     } else if (req.operation === "get_sandbox") {
       const sandbox = await openSandbox(sdk, req.sandboxId);
-      emit({ ok: true, sandbox: normalizeSandbox(sandbox) });
+      const runningIDs = await runningSandboxIDs(sdk);
+      emit({ ok: true, sandbox: normalizeSandbox(sandbox, runningIDs.has(String(req.sandboxId)) ? "running" : "") });
     } else if (req.operation === "delete_sandbox") {
       await callAny(sdk.sandboxes || sdk, ["delete", "deleteSandbox"], req.sandboxId);
       emit({ ok: true });
@@ -536,7 +596,7 @@ try {
       emit({ ok: true });
     } else if (req.operation === "resume_sandbox") {
       const sandbox = await resumeSandbox(sdk, req.sandboxId);
-      emit({ ok: true, sandbox: normalizeSandbox(sandbox) });
+      emit({ ok: true, sandbox: normalizeSandbox(sandbox, "running") });
     } else if (req.operation === "run_command") {
       const { client } = await connectSandbox(sdk, req.sandboxId);
       const command = await runCommand(client);

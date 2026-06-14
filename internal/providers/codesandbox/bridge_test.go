@@ -7,6 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -28,7 +32,7 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 		if !envContains(req.Env, codesandboxFallbackAPIKeyEnv+"="+secret) {
 			t.Fatalf("bridge env missing SDK auth token")
 		}
-		if !envContains(req.Env, "CRABBOX_CODESANDBOX_SDK_PACKAGE=@codesandbox/sdk") {
+		if !envContains(req.Env, "CRABBOX_CODESANDBOX_SDK_PACKAGE=@codesandbox/sdk@2.4.2") {
 			t.Fatalf("bridge env missing SDK package")
 		}
 		if !envContains(req.Env, "CRABBOX_CODESANDBOX_SDK_IMPORT=@codesandbox/sdk") {
@@ -59,7 +63,7 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 		t.Fatalf("response=%#v", resp)
 	}
 	setup := runner.onlySetupCall(t)
-	if !reflect.DeepEqual(setup.Args, []string{"install", "--no-audit", "--no-fund", "--loglevel=error", "@codesandbox/sdk"}) {
+	if !reflect.DeepEqual(setup.Args, []string{"install", "--no-audit", "--no-fund", "--ignore-scripts", "--omit=optional", "--save-exact", "--loglevel=error", "@codesandbox/sdk@2.4.2"}) {
 		t.Fatalf("setup args=%#v", setup.Args)
 	}
 	if envContains(setup.Env, codesandboxFallbackAPIKeyEnv+"="+secret) ||
@@ -185,6 +189,19 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 		!strings.Contains(codeSandboxBridgeScript, "options.automaticWakeupConfig") {
 		t.Fatalf("bridge script must use documented CodeSandbox create option names")
 	}
+	if !strings.Contains(codeSandboxBridgeScript, "options.vmTier = resolveVMTier(VMTier, req.vmTier)") ||
+		!strings.Contains(codeSandboxBridgeScript, "VMTier.All.find") {
+		t.Fatalf("bridge script must pass a CodeSandbox VMTier object instead of a string")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "const runningIDs = await runningSandboxIDs(sdk)") ||
+		!strings.Contains(codeSandboxBridgeScript, "[\"listRunning\"]") ||
+		!strings.Contains(codeSandboxBridgeScript, "metadata operations must not depend on it") {
+		t.Fatalf("bridge script must use listRunning only as best-effort positive state evidence")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "Number.isInteger(err.exitCode)") ||
+		!strings.Contains(codeSandboxBridgeScript, "stdout: String(err.output || \"\")") {
+		t.Fatalf("bridge script must preserve CodeSandbox CommandError exit code and output")
+	}
 	if strings.Contains(codeSandboxBridgeScript, "[\"get\", \"connect\", \"open\", \"resume\"]") {
 		t.Fatalf("read-only openSandbox must not resume or connect hibernated sandboxes")
 	}
@@ -198,6 +215,114 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 	}
 	if !strings.Contains(codeSandboxBridgeScript, "process.env.CRABBOX_CODESANDBOX_SDK_IMPORT") {
 		t.Fatalf("bridge script must import the resolved SDK package name from the trusted cache package")
+	}
+}
+
+func TestSDKBridgeExecutesAgainstDocumentedSDKContracts(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is required")
+	}
+	modulePath := filepath.Join(t.TempDir(), "fake-codesandbox-sdk.mjs")
+	const module = `
+export class VMTier {}
+VMTier.All = ["Pico", "Nano", "Micro", "Small", "Medium", "Large", "XLarge"].map((name) => ({ name }));
+let listRunningCalls = 0;
+
+export class CodeSandbox {
+  constructor(token) {
+    if (token !== "secret") throw new Error("bad token");
+    this.sandboxes = {
+      create: async (opts) => {
+        if (!opts.vmTier || opts.vmTier.name !== "Micro") throw new Error("vmTier was not a VMTier object");
+        return { id: "sb_created", title: "created", tags: ["crabbox"] };
+      },
+      get: async (id) => ({ id, title: id, tags: ["crabbox"] }),
+      list: async () => ({ sandboxes: [{ id: "sb_running" }, { id: "sb_idle" }], totalCount: 2 }),
+      listRunning: async () => {
+        listRunningCalls++;
+        if (listRunningCalls === 3) throw new Error("snapshot unavailable");
+        return { concurrentVmCount: 1, concurrentVmLimit: 5, vms: [{ id: "sb_running" }] };
+      },
+      resume: async (id) => ({
+        id,
+        connect: async () => ({
+          commands: {
+            run: async () => {
+              const err = new Error("command failed");
+              err.exitCode = 7;
+              err.output = "EXPECTED_FAILURE_OUTPUT";
+              throw err;
+            }
+          }
+        })
+      })
+    };
+  }
+}
+`
+	if err := os.WriteFile(modulePath, []byte(module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig().CodeSandbox
+	cfg.SDKPackage = (&url.URL{Scheme: "file", Path: modulePath}).String()
+	bridge := NewSDKBridge(cfg, Runtime{Exec: actualBridgeRunner{}})
+
+	created, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "create_sandbox", VMTier: "micro"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.Sandbox.ID != "sb_created" || created.Sandbox.State != "running" {
+		t.Fatalf("created=%#v", created.Sandbox)
+	}
+	running, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "get_sandbox", SandboxID: "sb_running"})
+	if err != nil {
+		t.Fatalf("get running: %v", err)
+	}
+	idle, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "get_sandbox", SandboxID: "sb_idle"})
+	if err != nil {
+		t.Fatalf("get idle: %v", err)
+	}
+	unknown, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "get_sandbox", SandboxID: "sb_snapshot_error"})
+	if err != nil {
+		t.Fatalf("get with unavailable running snapshot: %v", err)
+	}
+	if running.Sandbox.State != "running" || idle.Sandbox.State != "" || unknown.Sandbox.State != "" {
+		t.Fatalf("states running=%q idle=%q", running.Sandbox.State, idle.Sandbox.State)
+	}
+	command, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{
+		Operation: "run_command",
+		SandboxID: "sb_running",
+		Command:   []string{"sh", "-lc", "exit 7"},
+	})
+	if err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+	if command.Command.ExitCode != 7 || command.Command.Stdout != "EXPECTED_FAILURE_OUTPUT" {
+		t.Fatalf("command=%#v", command.Command)
+	}
+}
+
+func TestBridgeSDKInstalledRejectsWrongPinnedVersion(t *testing.T) {
+	dir := t.TempDir()
+	spec := bridgeSDKSpecFor(CodeSandboxConfig{SDKPackage: "@codesandbox/sdk@2.4.2"})
+	packageDir := filepath.Join(dir, "node_modules", "@codesandbox", "sdk")
+	if err := os.MkdirAll(packageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"version":"2.4.1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridgeSDKMarkerPath(dir), []byte(spec.InstallSpec+"\n"+spec.ImportSpec+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if bridgeSDKInstalled(dir, spec) {
+		t.Fatal("wrong installed SDK version accepted")
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"version":"2.4.2"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !bridgeSDKInstalled(dir, spec) {
+		t.Fatal("matching installed SDK version rejected")
 	}
 }
 
@@ -350,12 +475,42 @@ func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest
 		r.deadlines = append(r.deadlines, deadline)
 	}
 	if req.Name == "npm" {
+		spec := req.Args[len(req.Args)-1]
+		name, ok := npmPackageName(spec)
+		if !ok {
+			return LocalCommandResult{ExitCode: 1}, errors.New("invalid package spec")
+		}
+		version, _ := npmExactPackageVersion(spec, name)
+		packageDir := filepath.Join(req.Dir, "node_modules", filepath.FromSlash(name))
+		if err := os.MkdirAll(packageDir, 0o700); err != nil {
+			return LocalCommandResult{ExitCode: 1}, err
+		}
+		if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"version":"`+version+`"}`), 0o600); err != nil {
+			return LocalCommandResult{ExitCode: 1}, err
+		}
 		return LocalCommandResult{ExitCode: 0}, nil
 	}
 	if r.fn != nil {
 		return r.fn(req)
 	}
 	return LocalCommandResult{ExitCode: 0}, nil
+}
+
+type actualBridgeRunner struct{}
+
+func (actualBridgeRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	cmd.Dir = req.Dir
+	cmd.Env = req.Env
+	cmd.Stdin = req.Stdin
+	cmd.Stdout = req.Stdout
+	cmd.Stderr = req.Stderr
+	err := cmd.Run()
+	result := LocalCommandResult{}
+	if cmd.ProcessState != nil {
+		result.ExitCode = cmd.ProcessState.ExitCode()
+	}
+	return result, err
 }
 
 func (r *recordingBridgeRunner) onlyCall(t *testing.T) LocalCommandRequest {

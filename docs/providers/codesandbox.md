@@ -71,7 +71,7 @@ codeSandbox:
   automaticWakeupHttp: true       # allow host URL access to wake hibernated sandboxes
   automaticWakeupWebSocket: false
   bridgeCommand: node
-  sdkPackage: "@codesandbox/sdk"
+  sdkPackage: "@codesandbox/sdk@2.4.2"
   doctorListLimit: 1
   operationTimeoutSecs: 30
 ```
@@ -110,6 +110,8 @@ Crabbox rejects broad paths such as `/` and `/project`.
    `git ls-files`-driven gzipped tar locally, uploads it through the SDK file
    bridge, and extracts it under `codeSandbox.workdir`. `--no-sync` skips the
    archive upload; `--sync-only` syncs and exits without running a command.
+   Manifest, guardrail, archive, staging, atomic replacement, and cleanup
+   orchestration use Crabbox's provider-neutral delegated archive-sync core.
 3. Commands run through the SDK command client with `cwd` set to the configured
    workdir. Selected `--allow-env` and `--env-from-profile` values are sent to
    the local SDK bridge in the request body and staged through a temporary
@@ -171,17 +173,23 @@ node scripts/live-codesandbox-smoke.test.js
 ```
 
 With auth present, the helper uses an isolated temporary repo and state
-directory, creates one Crabbox-owned sandbox, runs no-sync and sync-only
-checks, exercises pause/resume and ports, stops the sandbox, and verifies the
-local CodeSandbox list no longer contains the smoke slug. Provider quota, rate
-limit, auth, or service failures are classified without printing token values.
+directory, creates one Crabbox-owned sandbox, verifies successful and expected
+nonzero command exits, runs sync-only checks, exercises pause/resume and ports,
+stops the sandbox, and verifies the local CodeSandbox list no longer contains
+the smoke slug. Provider quota, rate limit, auth, capacity, or network failures
+are classified without printing token values; SDK contract failures remain
+diagnostic failures.
 
 ## Gotchas
 
 - The bridge command runs from a Crabbox-managed cache directory, not the
-  repository. Crabbox installs `@codesandbox/sdk` there on first use; set
+  repository. Crabbox installs exact `@codesandbox/sdk@2.4.2` there on first
+  use with install scripts and optional dependencies disabled. A clean measured
+  install is about 117 MB and 232 dependency packages; the SDK package itself
+  is about 6.8 MB unpacked. The dependency is required for CodeSandbox's
+  command, filesystem, and port transports. Set
   `CRABBOX_CODESANDBOX_SDK_PACKAGE` or `--codesandbox-sdk-package` to a trusted
-  npm package spec such as `@codesandbox/sdk@2.4.2` when pinning the bridge SDK.
+  npm package spec only when intentionally overriding the pinned bridge SDK.
 - `doctor` is non-mutating. It only checks env auth and a bounded sandbox list.
 - `operationTimeoutSecs` applies to each SDK bridge call. Increase it for slow
   creates, resumes, or port waits.

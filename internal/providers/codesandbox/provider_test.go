@@ -72,6 +72,29 @@ func TestProviderFlagsApplyAndValidateNonSecretFields(t *testing.T) {
 	}
 }
 
+func TestProviderFlagsRejectGenericSizingForAliases(t *testing.T) {
+	for _, provider := range []string{"codesandbox", "csb", "code-sandbox", " CodeSandbox "} {
+		for _, flagName := range []string{"class", "type"} {
+			t.Run(strings.TrimSpace(provider)+"/"+flagName, func(t *testing.T) {
+				cfg := newTestConfig()
+				cfg.Provider = provider
+				fs := flag.NewFlagSet("test", flag.ContinueOnError)
+				fs.SetOutput(io.Discard)
+				fs.String("class", "", "")
+				fs.String("type", "", "")
+				values := RegisterCodeSandboxProviderFlags(fs, cfg)
+				if err := fs.Parse([]string{"--" + flagName, "large"}); err != nil {
+					t.Fatal(err)
+				}
+				err := ApplyCodeSandboxProviderFlags(&cfg, fs, values)
+				if err == nil || !strings.Contains(err.Error(), "--codesandbox-vm-tier") {
+					t.Fatalf("provider=%q flag=%s err=%v", provider, flagName, err)
+				}
+			})
+		}
+	}
+}
+
 func TestValidateCodeSandboxConfigRejectsUnsafeValues(t *testing.T) {
 	tests := []struct {
 		name   string

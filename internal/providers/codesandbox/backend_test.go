@@ -207,6 +207,32 @@ func TestListAndStatusUseOwnedClaims(t *testing.T) {
 	}
 }
 
+func TestListAndStatusDoNotTreatMissingStateAsReady(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	fake.sandbox.State = ""
+	backend, _, _ := newFakeBackend(t, fake)
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "unknown-state", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	leases, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases) != 1 || leases[0].Status != "unknown" {
+		t.Fatalf("leases=%#v", leases)
+	}
+	status, err := backend.Status(context.Background(), StatusRequest{ID: "unknown-state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "unknown" || status.Ready {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunStreamsOutputAndCleansUpOneShot(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeCodeSandboxAPI()
