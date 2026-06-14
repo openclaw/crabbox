@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -70,6 +71,10 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	if err != nil {
 		return BridgeResponse{}, err
 	}
+	dir, err := bridgeWorkingDir()
+	if err != nil {
+		return BridgeResponse{}, err
+	}
 	ctx, cancel := withBridgeTimeout(ctx, b.cfg, req)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
@@ -77,6 +82,7 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 		Name:                   bridgeCommand(b.cfg),
 		Args:                   []string{"--input-type=module", "-e", codeSandboxBridgeScript},
 		Env:                    bridgeEnv(b.cfg, token),
+		Dir:                    dir,
 		Stdin:                  bytes.NewReader(payload),
 		Stdout:                 &stdout,
 		Stderr:                 &stderr,
@@ -125,10 +131,26 @@ func bridgeOutputLimit(req BridgeRequest) int {
 }
 
 func bridgeEnv(cfg CodeSandboxConfig, token string) []string {
-	env := append([]string{}, os.Environ()...)
+	env := make([]string, 0, 8)
+	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SYSTEMROOT", "COMSPEC", "PATHEXT"} {
+		if value := os.Getenv(key); value != "" {
+			env = upsertEnv(env, key, value)
+		}
+	}
 	env = upsertEnv(env, codesandboxFallbackAPIKeyEnv, token)
-	env = upsertEnv(env, "CRABBOX_CODESANDBOX_SDK_PACKAGE", sdkPackage(cfg))
-	return env
+	return upsertEnv(env, "CRABBOX_CODESANDBOX_SDK_PACKAGE", sdkPackage(cfg))
+}
+
+func bridgeWorkingDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil || strings.TrimSpace(base) == "" {
+		base = os.TempDir()
+	}
+	dir := filepath.Join(base, "crabbox", "codesandbox-bridge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create codesandbox bridge working directory: %w", err)
+	}
+	return dir, nil
 }
 
 func upsertEnv(env []string, key, value string) []string {

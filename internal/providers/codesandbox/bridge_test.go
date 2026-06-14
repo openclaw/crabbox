@@ -17,6 +17,7 @@ import (
 
 func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 	secret := "csb-secret-value"
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "ambient-secret")
 	runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		for _, arg := range req.Args {
 			if strings.Contains(arg, secret) {
@@ -28,6 +29,12 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 		}
 		if !envContains(req.Env, "CRABBOX_CODESANDBOX_SDK_PACKAGE=@codesandbox/sdk") {
 			t.Fatalf("bridge env missing SDK package")
+		}
+		if envContains(req.Env, "AWS_SECRET_ACCESS_KEY=ambient-secret") {
+			t.Fatalf("bridge env inherited unrelated ambient secret: %#v", req.Env)
+		}
+		if strings.TrimSpace(req.Dir) == "" {
+			t.Fatal("bridge must run from a trusted working directory outside the repository cwd")
 		}
 		var payload BridgeRequest
 		if err := json.Unmarshal([]byte(readRequestBody(req)), &payload); err != nil {

@@ -194,6 +194,9 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		}
 	}
 	if runErr != nil {
+		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			return result, runErr
+		}
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("codesandbox run failed: %v", runErr)}
 	}
