@@ -36,6 +36,7 @@ func firecrackerDrives(rootFSPath, cloudInitPath string) []fcmodels.Drive {
 }
 
 func (f sdkMachineFactory) New(ctx context.Context, launch machineLaunchConfig) (machine, error) {
+	processCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	binary := strings.TrimSpace(launch.BinaryPath)
 	if binary == "" {
 		binary = "firecracker"
@@ -69,7 +70,7 @@ func (f sdkMachineFactory) New(ctx context.Context, launch machineLaunchConfig) 
 	cmd := firesdk.VMCommandBuilder{}.
 		WithBin(binary).
 		WithSocketPath(sdkConfig.SocketPath).
-		Build(ctx)
+		Build(processCtx)
 
 	logger := logrus.New()
 	if f.LogWriter == nil {
@@ -80,27 +81,40 @@ func (f sdkMachineFactory) New(ctx context.Context, launch machineLaunchConfig) 
 	logger.SetLevel(logrus.WarnLevel)
 
 	vm, err := firesdk.NewMachine(
-		context.WithoutCancel(ctx),
+		processCtx,
 		sdkConfig,
 		firesdk.WithProcessRunner(cmd),
 		firesdk.WithLogger(logrus.NewEntry(logger)),
 	)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-	return &sdkMachine{machine: vm, cmd: cmd}, nil
+	return &sdkMachine{machine: vm, cmd: cmd, cancel: cancel, ctx: processCtx}, nil
 }
 
 type sdkMachine struct {
 	machine *firesdk.Machine
 	cmd     *exec.Cmd
+	cancel  context.CancelFunc
+	ctx     context.Context
 }
 
 func (m *sdkMachine) Start(ctx context.Context) error {
 	if m == nil || m.machine == nil {
 		return fmt.Errorf("firecracker machine is unavailable")
 	}
+	if m.ctx != nil {
+		ctx = m.ctx
+	}
 	return m.machine.Start(ctx)
+}
+
+func (m *sdkMachine) Cancel() {
+	if m == nil || m.cancel == nil {
+		return
+	}
+	m.cancel()
 }
 
 func (m *sdkMachine) StopVMM() error {

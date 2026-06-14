@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -17,19 +19,36 @@ import (
 )
 
 type fakeMachine struct {
-	pid      int
-	guestIP  string
-	startErr error
-	startCtx context.Context
-	stopErr  error
-	started  int
-	stopped  int
+	pid        int
+	guestIP    string
+	startErr   error
+	block      bool
+	startCtx   context.Context
+	canceled   atomic.Int32
+	cancelCh   chan struct{}
+	cancelOnce sync.Once
+	stopErr    error
+	started    int
+	stopped    int
 }
 
 func (m *fakeMachine) Start(ctx context.Context) error {
 	m.started++
 	m.startCtx = ctx
+	if m.block {
+		<-m.cancelCh
+		return context.Canceled
+	}
 	return m.startErr
+}
+
+func (m *fakeMachine) Cancel() {
+	m.canceled.Add(1)
+	if m.cancelCh != nil {
+		m.cancelOnce.Do(func() {
+			close(m.cancelCh)
+		})
+	}
 }
 
 func (m *fakeMachine) StopVMM() error {
@@ -297,7 +316,7 @@ func TestAcquireResolveListAndReleaseLifecycle(t *testing.T) {
 	}
 }
 
-func TestAcquirePassesLaunchTimeoutToMachineStart(t *testing.T) {
+func TestAcquireLeavesSuccessfulMachineContextAlive(t *testing.T) {
 	cfg := lifecycleConfig(t)
 	cfg.Firecracker.LaunchTimeout = 3 * time.Second
 	test := newLifecycleTestBackend(t, cfg)
@@ -308,24 +327,33 @@ func TestAcquirePassesLaunchTimeoutToMachineStart(t *testing.T) {
 	if test.factory.ctx == nil {
 		t.Fatal("machine factory context was not recorded")
 	}
-	deadline, ok := test.factory.ctx.Deadline()
-	if !ok {
-		t.Fatal("machine factory context has no deadline")
-	}
-	remaining := time.Until(deadline)
-	if remaining <= 0 || remaining > cfg.Firecracker.LaunchTimeout {
-		t.Fatalf("machine factory deadline remaining=%s want within %s", remaining, cfg.Firecracker.LaunchTimeout)
+	if _, ok := test.factory.ctx.Deadline(); ok {
+		t.Fatal("machine factory context should not carry the launch timeout after successful acquire")
 	}
 	if test.factory.machine.startCtx == nil {
 		t.Fatal("machine start context was not recorded")
 	}
-	startDeadline, ok := test.factory.machine.startCtx.Deadline()
-	if !ok {
-		t.Fatal("machine start context has no deadline")
+	if _, ok := test.factory.machine.startCtx.Deadline(); ok {
+		t.Fatal("machine start context should stay alive after successful acquire")
 	}
-	remaining = time.Until(startDeadline)
-	if remaining <= 0 || remaining > cfg.Firecracker.LaunchTimeout {
-		t.Fatalf("machine start deadline remaining=%s want within %s", remaining, cfg.Firecracker.LaunchTimeout)
+	if canceled := test.factory.machine.canceled.Load(); canceled != 0 {
+		t.Fatalf("machine canceled=%d want 0", canceled)
+	}
+}
+
+func TestAcquireCancelsMachineWhenLaunchTimeoutExpires(t *testing.T) {
+	cfg := lifecycleConfig(t)
+	cfg.Firecracker.LaunchTimeout = time.Nanosecond
+	test := newLifecycleTestBackend(t, cfg)
+	test.factory.machine.block = true
+	test.factory.machine.cancelCh = make(chan struct{})
+
+	_, err := test.backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: test.repoRoot}})
+	if err == nil || !strings.Contains(err.Error(), "firecracker launch timed out") {
+		t.Fatalf("Acquire err=%v want launch timeout", err)
+	}
+	if test.factory.machine.canceled.Load() == 0 {
+		t.Fatal("machine was not canceled after launch timeout")
 	}
 }
 

@@ -256,14 +256,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		return LeaseTarget{}, err
 	}
 
-	startCtx := ctx
-	cancelStart := func() {}
-	if cfg.Firecracker.LaunchTimeout > 0 {
-		startCtx, cancelStart = context.WithTimeout(ctx, cfg.Firecracker.LaunchTimeout)
-	}
-	defer cancelStart()
-
-	vm, err := b.machines.New(startCtx, machineLaunchConfig{
+	vm, err := b.machines.New(ctx, machineLaunchConfig{
 		BinaryPath:    cfg.Firecracker.Binary,
 		SocketPath:    record.SocketPath,
 		LogPath:       record.LogPath,
@@ -288,7 +281,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		return b.rollbackAcquire(record, vm, cause)
 	}
 
-	if err := vm.Start(startCtx); err != nil {
+	if err := startFirecrackerMachine(ctx, vm, cfg.Firecracker.LaunchTimeout); err != nil {
 		return LeaseTarget{}, rollback(err)
 	}
 
@@ -626,9 +619,42 @@ func serverFromClaim(cfg Config, claim LeaseClaim) Server {
 	return server
 }
 
+func startFirecrackerMachine(ctx context.Context, vm machine, timeout time.Duration) error {
+	if timeout <= 0 {
+		if err := vm.Start(ctx); err != nil {
+			vm.Cancel()
+			return err
+		}
+		return nil
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	started := make(chan error, 1)
+	go func() {
+		started <- vm.Start(ctx)
+	}()
+
+	select {
+	case err := <-started:
+		if err != nil {
+			vm.Cancel()
+		}
+		return err
+	case <-timer.C:
+		vm.Cancel()
+		return fmt.Errorf("firecracker launch timed out after %s", timeout)
+	case <-ctx.Done():
+		vm.Cancel()
+		return ctx.Err()
+	}
+}
+
 func (b *backend) rollbackAcquire(record leaseStateRecord, vm machine, cause error) error {
 	var cleanupErr error
 	if vm != nil {
+		vm.Cancel()
 		if err := vm.StopVMM(); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop firecracker lease %s: %w", record.LeaseID, err))
 		}

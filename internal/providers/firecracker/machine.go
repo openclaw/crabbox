@@ -21,6 +21,7 @@ const (
 
 type machine interface {
 	Start(context.Context) error
+	Cancel()
 	StopVMM() error
 	PID() int
 	GuestIP() string
