@@ -63,6 +63,10 @@ func deleteOnReleaseExplicit(cfg Config) bool {
 	return core.DeleteOnReleaseExplicit(cfg, providerName)
 }
 
+func workRootExplicit(cfg *Config) bool {
+	return core.IsWorkRootExplicit(cfg)
+}
+
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
