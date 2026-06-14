@@ -206,6 +206,20 @@ func configShowView(cfg Config) map[string]any {
 			"idleTimeout": cfg.Blacksmith.IdleTimeout.String(),
 			"debug":       cfg.Blacksmith.Debug,
 		},
+		"agentSandbox": map[string]any{
+			"kubectl":             cfg.AgentSandbox.Kubectl,
+			"kubeconfig":          cfg.AgentSandbox.Kubeconfig,
+			"context":             cfg.AgentSandbox.Context,
+			"namespace":           cfg.AgentSandbox.Namespace,
+			"warmPool":            cfg.AgentSandbox.WarmPool,
+			"container":           cfg.AgentSandbox.Container,
+			"workdir":             cfg.AgentSandbox.Workdir,
+			"sandboxReadyTimeout": cfg.AgentSandbox.SandboxReadyTimeout.String(),
+			"podReadyTimeout":     cfg.AgentSandbox.PodReadyTimeout.String(),
+			"execTimeoutSecs":     cfg.AgentSandbox.ExecTimeoutSecs,
+			"deleteOnRelease":     cfg.AgentSandbox.DeleteOnRelease,
+			"forgetMissing":       cfg.AgentSandbox.ForgetMissing,
+		},
 		"namespace": map[string]any{
 			"image":               cfg.Namespace.Image,
 			"size":                cfg.Namespace.Size,
@@ -455,6 +469,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	fmt.Fprintf(w, "blacksmith org=%s workflow=%s job=%s ref=%s idle_timeout=%s debug=%t\n", blank(cfg.Blacksmith.Org, "-"), blank(cfg.Blacksmith.Workflow, "-"), blank(cfg.Blacksmith.Job, "-"), blank(cfg.Blacksmith.Ref, "-"), cfg.Blacksmith.IdleTimeout, cfg.Blacksmith.Debug)
+	fmt.Fprintf(w, "agent_sandbox kubectl=%s kubeconfig=%s context=%s namespace=%s warm_pool=%s container=%s workdir=%s sandbox_ready_timeout=%s pod_ready_timeout=%s exec_timeout_secs=%d delete_on_release=%t forget_missing=%t\n", blank(cfg.AgentSandbox.Kubectl, "-"), blank(cfg.AgentSandbox.Kubeconfig, "-"), blank(cfg.AgentSandbox.Context, "-"), blank(cfg.AgentSandbox.Namespace, "-"), blank(cfg.AgentSandbox.WarmPool, "-"), blank(cfg.AgentSandbox.Container, "-"), blank(cfg.AgentSandbox.Workdir, "-"), cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, cfg.AgentSandbox.ExecTimeoutSecs, cfg.AgentSandbox.DeleteOnRelease, cfg.AgentSandbox.ForgetMissing)
 	fmt.Fprintf(w, "namespace image=%s size=%s repository=%s site=%s volume_size_gb=%d auto_stop_idle_timeout=%s work_root=%s delete_on_release=%t\n", cfg.Namespace.Image, blank(cfg.Namespace.Size, "-"), blank(cfg.Namespace.Repository, "-"), blank(cfg.Namespace.Site, "-"), cfg.Namespace.VolumeSizeGB, cfg.Namespace.AutoStopIdleTimeout, cfg.Namespace.WorkRoot, cfg.Namespace.DeleteOnRelease)
 	fmt.Fprintf(w, "namespace_instance cli=%s machine_type=%s duration=%s region=%s endpoint=%s keychain=%s volumes=%d work_root=%s bare=%t\n", cfg.NamespaceInstance.CLIPath, blank(cfg.NamespaceInstance.MachineType, "-"), cfg.NamespaceInstance.Duration, blank(cfg.NamespaceInstance.Region, "-"), blank(redactedConfigURL(cfg.NamespaceInstance.Endpoint), "-"), blank(cfg.NamespaceInstance.Keychain, "-"), len(cfg.NamespaceInstance.Volumes), cfg.NamespaceInstance.WorkRoot, cfg.NamespaceInstance.Bare)
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(cfg.Morph.APIURL, "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))

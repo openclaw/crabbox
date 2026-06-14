@@ -25,6 +25,7 @@ type fakeKubernetesClient struct {
 	execErrs      []error
 	execStarted   chan struct{}
 	execRelease   chan struct{}
+	execDelays    []time.Duration
 	getStarted    chan struct{}
 	getRelease    chan struct{}
 	getErrs       []error
@@ -192,6 +193,11 @@ func (f *fakeKubernetesClient) Exec(_ context.Context, req podExecRequest) error
 	if req.Stdin != nil {
 		data, _ := io.ReadAll(req.Stdin)
 		f.execInput = append(f.execInput, data)
+	}
+	if len(f.execDelays) > 0 {
+		delay := f.execDelays[0]
+		f.execDelays = f.execDelays[1:]
+		time.Sleep(delay)
 	}
 	if len(f.execErrs) > 0 {
 		err := f.execErrs[0]

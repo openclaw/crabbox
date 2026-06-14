@@ -215,6 +215,31 @@ func TestRunKeepOnFailureHintsPreserveProviderRoute(t *testing.T) {
 	}
 }
 
+func TestRunKeepOnFailureRefreshesLeaseActivity(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	fake.execDelays = []time.Duration{0, 1100 * time.Millisecond}
+	fake.execErrs = []error{nil, testExitError{code: 42}}
+	backend := testBackend(cfg, fake, nil, nil)
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:          testGitRepo(t),
+		KeepOnFailure: true,
+		NoSync:        true,
+		Command:       []string{"false"},
+	})
+	if err == nil || result.ExitCode != 42 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	claim, resolveErr := resolveLocalClaim(result.LeaseID)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	if claim.LastUsedAt == claim.ClaimedAt {
+		t.Fatalf("kept failed lease activity was not refreshed: %#v", claim)
+	}
+}
+
 func TestRunFailsWhenDefaultOneShotCleanupFails(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)

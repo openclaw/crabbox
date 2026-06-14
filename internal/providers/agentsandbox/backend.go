@@ -223,11 +223,15 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
 		commandErr = exit(exitCode, "agent-sandbox run exited %d", exitCode)
 	}
-	if !shouldStop && commandErr == nil {
+	if !shouldStop {
 		if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil && claim.LeaseID != "" {
 			fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
-			result.ExitCode = 1
-			commandErr = err
+			if commandErr == nil {
+				result.ExitCode = 1
+				commandErr = err
+			} else {
+				commandErr = errors.Join(commandErr, fmt.Errorf("refresh agent-sandbox lease activity: %w", err))
+			}
 		}
 	}
 	if req.TimingJSON {

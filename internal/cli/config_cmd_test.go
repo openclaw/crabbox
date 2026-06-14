@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
@@ -24,6 +25,49 @@ func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
 		}
 		if !strings.Contains(output, "api.example.test/path") || !strings.Contains(output, "redacted") {
 			t.Fatalf("%s output missing redacted endpoint: %s", name, output)
+		}
+	}
+}
+
+func TestConfigShowIncludesAgentSandboxRoute(t *testing.T) {
+	cfg := baseConfig()
+	cfg.AgentSandbox.Kubectl = "/opt/bin/kubectl"
+	cfg.AgentSandbox.Kubeconfig = "/tmp/agent-kubeconfig"
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+	cfg.AgentSandbox.Container = "worker"
+	cfg.AgentSandbox.Workdir = "/workspace/my-app"
+	cfg.AgentSandbox.SandboxReadyTimeout = 2 * time.Minute
+	cfg.AgentSandbox.PodReadyTimeout = 45 * time.Second
+	cfg.AgentSandbox.ExecTimeoutSecs = 42
+	cfg.AgentSandbox.DeleteOnRelease = false
+	cfg.AgentSandbox.ForgetMissing = true
+
+	view := configShowView(cfg)
+	agent, ok := view["agentSandbox"].(map[string]any)
+	if !ok || agent["kubeconfig"] != "/tmp/agent-kubeconfig" || agent["warmPool"] != "linux-pool" ||
+		agent["sandboxReadyTimeout"] != "2m0s" || agent["deleteOnRelease"] != false || agent["forgetMissing"] != true {
+		t.Fatalf("agentSandbox view=%#v", agent)
+	}
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	for _, want := range []string{
+		"agent_sandbox kubectl=/opt/bin/kubectl",
+		"kubeconfig=/tmp/agent-kubeconfig",
+		"context=agent-context",
+		"namespace=sandboxes",
+		"warm_pool=linux-pool",
+		"container=worker",
+		"workdir=/workspace/my-app",
+		"sandbox_ready_timeout=2m0s",
+		"pod_ready_timeout=45s",
+		"exec_timeout_secs=42",
+		"delete_on_release=false",
+		"forget_missing=true",
+	} {
+		if !strings.Contains(text.String(), want) {
+			t.Fatalf("config show missing %q: %q", want, text.String())
 		}
 	}
 }
