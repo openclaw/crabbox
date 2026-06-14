@@ -6658,6 +6658,7 @@ func applyEnv(cfg *Config) error {
 	if imageFamily := os.Getenv("CRABBOX_LAMBDA_IMAGE_FAMILY"); imageFamily != "" {
 		cfg.Lambda.ImageFamily = imageFamily
 		cfg.lambdaImageFamilyExplicit = true
+		cfg.Lambda.Image = ""
 	}
 	cfg.Lambda.FirewallRuleset = getenv("CRABBOX_LAMBDA_FIREWALL_RULESET", cfg.Lambda.FirewallRuleset)
 	if cidrs := os.Getenv("CRABBOX_LAMBDA_SSH_CIDRS"); cidrs != "" {

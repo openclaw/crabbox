@@ -69,7 +69,7 @@ func TestClientPreservesErrorCodeAndRedactsSecrets(t *testing.T) {
 	t.Setenv(tokenEnv, "lambda-secret-token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":{"code":"global/invalid-api-key","message":"token lambda-secret-token user_data=boot private_key=-----BEGIN PRIVATE KEY-----abc-----END PRIVATE KEY----- jupyter_url=https://example.test/?token=abc","suggestion":"replace api_key=lambda-secret-token"}}`))
+		_, _ = w.Write([]byte(`{"error":{"code":"global/invalid-api-key","message":"token lambda-secret-token user_data=#cloud-config\nruncmd:\n- export TS_AUTHKEY=tskey-secret\nprivate_key=-----BEGIN PRIVATE KEY-----abc-----END PRIVATE KEY-----\njupyter_url=https://example.test/?token=abc","suggestion":"replace api_key=lambda-secret-token"}}`))
 	}))
 	defer server.Close()
 
@@ -87,7 +87,7 @@ func TestClientPreservesErrorCodeAndRedactsSecrets(t *testing.T) {
 		t.Fatalf("Code=%q", apiErr.Code)
 	}
 	combined := apiErr.Error() + apiErr.Body + apiErr.Suggestion
-	for _, secret := range []string{"lambda-secret-token", "boot", "BEGIN PRIVATE KEY", "token=abc"} {
+	for _, secret := range []string{"lambda-secret-token", "cloud-config", "TS_AUTHKEY", "tskey-secret", "BEGIN PRIVATE KEY", "token=abc"} {
 		if strings.Contains(combined, secret) {
 			t.Fatalf("error leaked %q: %s", secret, combined)
 		}

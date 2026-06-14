@@ -133,6 +133,7 @@ func (c *Client) redact(value string) string {
 	if c.token != "" {
 		out = strings.ReplaceAll(out, c.token, "<redacted>")
 	}
+	out = redactInlineUserData(out)
 	for _, field := range []string{"token", "api_key", "user_data", "private_key", "privateKey", "jupyter_token", "jupyterToken", "jupyter_url", "jupyterUrl"} {
 		out = redactJSONishField(out, field)
 		out = redactInlineField(out, field)
@@ -149,6 +150,11 @@ func redactJSONishField(body, field string) string {
 
 func redactInlineField(body, field string) string {
 	pattern := regexp.MustCompile(`(?i)(` + regexp.QuoteMeta(field) + `\s*[=: ]\s*)[^",\s]+`)
+	return pattern.ReplaceAllString(body, `${1}<redacted>`)
+}
+
+func redactInlineUserData(body string) string {
+	pattern := regexp.MustCompile(`(?is)(\buser_data\s*[=:]\s*)(?:"(?:\\.|[^"])*"|[\s\S]*)`)
 	return pattern.ReplaceAllString(body, `${1}<redacted>`)
 }
 

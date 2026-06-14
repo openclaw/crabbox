@@ -197,12 +197,18 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		return core.LeaseTarget{}, err
 	}
 	server.Labels = lambdaLabelsWithKey(leaseTags(cfg, leaseID, slug, "ready", req.Keep, now), key)
+	target = core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}
+	if req.OnAcquired != nil {
+		if err := req.OnAcquired(target); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	committed = true
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s lambda=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
-	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
+	return target, nil
 }
 
 func (b *backend) launchRequest(cfg core.Config, leaseID, slug, publicKey string, key lambdaSSHKeyIdentity, keep bool, now time.Time) LaunchInstanceRequest {

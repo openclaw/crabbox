@@ -223,6 +223,35 @@ func TestAcquirePreservesExplicitSSHUserAndPort(t *testing.T) {
 	}
 }
 
+func TestAcquireRollsBackWhenOnAcquiredFails(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	var observed core.LeaseTarget
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "callback-fail",
+		OnAcquired: func(acquired core.LeaseTarget) error {
+			observed = acquired
+			return errors.New("controller unavailable")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "controller unavailable") {
+		t.Fatalf("err=%v", err)
+	}
+	if observed.Server.CloudID != "i-100" || observed.SSH.Host != "203.0.113.25" || observed.LeaseID == "" {
+		t.Fatalf("observed=%#v", observed)
+	}
+	if len(api.terminatedIDs) != 1 || api.terminatedIDs[0][0] != "i-100" {
+		t.Fatalf("terminated=%v", api.terminatedIDs)
+	}
+	if len(api.deletedKeyIDs) != 1 || api.deletedKeyIDs[0] != "key-700" {
+		t.Fatalf("deletedKeyIDs=%v", api.deletedKeyIDs)
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("callback-fail", providerName); claimErr != nil || ok {
+		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
+	}
+}
+
 func TestAcquireReusesMatchingSSHKeyAndReleaseDoesNotDeleteIt(t *testing.T) {
 	api := &fakeLambdaAPI{sshKeys: []SSHKey{{ID: "key-existing", Name: "placeholder", PublicKey: "will be replaced"}}}
 	b := newTestBackend(t, api)

@@ -1907,6 +1907,27 @@ func TestLambdaProviderConfigDefaultsAndEnv(t *testing.T) {
 	}
 }
 
+func TestLambdaImageFamilyEnvClearsFileImage(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "lambda"
+	if err := applyFileConfig(&cfg, fileConfig{Lambda: &fileLambdaConfig{
+		Image: "img-file",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_LAMBDA_IMAGE_FAMILY", "lambda-stack-24-04")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lambda.Image != "" || cfg.Lambda.ImageFamily != "lambda-stack-24-04" {
+		t.Fatalf("image family env did not clear file image: %#v", cfg.Lambda)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+}
+
 func TestNebiusConfigFileEnvAndDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
