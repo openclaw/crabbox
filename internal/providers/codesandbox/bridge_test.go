@@ -146,6 +146,10 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 	if !strings.Contains(codeSandboxBridgeScript, "result = await commands.run(commandLine);") {
 		t.Fatalf("bridge script must pass one command string to CodeSandbox commands.run")
 	}
+	if !strings.Contains(codeSandboxBridgeScript, "if (typeof result === \"string\")") ||
+		!strings.Contains(codeSandboxBridgeScript, "return { exitCode: 0, stdout: result, stderr: \"\" };") {
+		t.Fatalf("bridge script must preserve string output returned by CodeSandbox commands.run")
+	}
 	if !strings.Contains(codeSandboxBridgeScript, "options.id = req.templateId") ||
 		!strings.Contains(codeSandboxBridgeScript, "options.hibernationTimeoutSeconds") ||
 		!strings.Contains(codeSandboxBridgeScript, "options.automaticWakeupConfig") {

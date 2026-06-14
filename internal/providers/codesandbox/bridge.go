@@ -254,6 +254,9 @@ async function runCommand(sandbox) {
       cmd: commandLine
     });
   }
+  if (typeof result === "string") {
+    return { exitCode: 0, stdout: result, stderr: "" };
+  }
   return {
     exitCode: Number(result && (result.exitCode ?? result.code ?? result.status) || 0),
     stdout: String(result && (result.stdout ?? result.output ?? "") || ""),
