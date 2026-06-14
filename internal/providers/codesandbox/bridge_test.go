@@ -167,7 +167,10 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 		t.Fatalf("bridge script must write files through the connected CodeSandbox client")
 	}
 	if strings.Contains(codeSandboxBridgeScript, "commands.run(command[0]") {
-		t.Fatalf("bridge script must use the documented commands.run(command string) SDK signature")
+		t.Fatalf("bridge script must use the documented command string SDK signatures")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "process.stdout.write(JSON.stringify(value), () => process.exit(0));") {
+		t.Fatalf("bridge script must exit after flushing its one-shot response")
 	}
 	if !strings.Contains(codeSandboxBridgeScript, "result = await commands.run(commandLine);") {
 		t.Fatalf("bridge script must pass one command string to CodeSandbox commands.run")
@@ -253,9 +256,17 @@ export class CodeSandbox {
               err.output = "EXPECTED_FAILURE_OUTPUT";
               throw err;
             }
-          }
+          },
+          ports: {
+            getAll: async () => [{ port: 3000, host: "sb_running-3000.csb.app" }],
+            waitForPort: async (port) => ({ port })
+          },
         })
       })
+    };
+    this.hosts = {
+      createToken: async (sandboxId) => ({ sandboxId, token: "preview-secret" }),
+      getUrl: (token, port) => "https://" + token.sandboxId + "-" + port + ".csb.app?preview_token=" + token.token
     };
   }
 }
@@ -299,6 +310,27 @@ export class CodeSandbox {
 	}
 	if command.Command.ExitCode != 7 || command.Command.Stdout != "EXPECTED_FAILURE_OUTPUT" {
 		t.Fatalf("command=%#v", command.Command)
+	}
+	ports, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{
+		Operation: "list_ports",
+		SandboxID: "sb_running",
+	})
+	if err != nil {
+		t.Fatalf("list ports: %v", err)
+	}
+	if len(ports.Ports) != 1 || ports.Ports[0].Host != "https://sb_running-3000.csb.app" {
+		t.Fatalf("ports=%#v", ports.Ports)
+	}
+	port, err := bridge.RoundTrip(context.Background(), "secret", BridgeRequest{
+		Operation: "get_port_url",
+		SandboxID: "sb_running",
+		Port:      5173,
+	})
+	if err != nil {
+		t.Fatalf("get port URL: %v", err)
+	}
+	if port.Port.Host != "https://sb_running-5173.csb.app?preview_token=preview-secret" || port.Port.URL != port.Port.Host {
+		t.Fatalf("port=%#v", port.Port)
 	}
 }
 

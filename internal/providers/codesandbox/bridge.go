@@ -364,7 +364,7 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 const input = Buffer.concat(chunks).toString("utf8").trim();
 const req = input ? JSON.parse(input) : {};
 function emit(value) {
-  process.stdout.write(JSON.stringify(value));
+  process.stdout.write(JSON.stringify(value), () => process.exit(0));
 }
 function fail(code, message) {
   emit({ ok: false, error: { code, message: String(message || "") } });
@@ -527,7 +527,10 @@ async function writeFile(sandbox) {
 }
 function normalizePort(portInfo, fallbackPort, fallbackURL) {
   const port = Number((portInfo && (portInfo.port ?? portInfo.targetPort ?? portInfo.containerPort)) || fallbackPort || 0);
-  const host = String((portInfo && (portInfo.host ?? portInfo.url ?? portInfo.href)) || fallbackURL || "");
+  const rawHost = String(fallbackURL || (portInfo && (portInfo.host ?? portInfo.url ?? portInfo.href)) || "").trim();
+  const host = rawHost && !/^[a-z][a-z0-9+.-]*:\/\//i.test(rawHost)
+    ? (rawHost.startsWith("//") ? "https:" + rawHost : "https://" + rawHost)
+    : rawHost;
   return { port, host, url: host };
 }
 async function getHostURL(sdk, client, sandboxID, port) {
