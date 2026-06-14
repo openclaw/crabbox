@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Added an explicit `webvnc local --security-type vnc` mode that forces standard VNC password authentication when a server advertises account authentication first.
 - Fixed coordinator hibernation recovery to preserve unambiguous live bridges while rejecting duplicate or stale restored endpoints.
 - Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.
 - Fixed CodeSandbox ownership tags, one-shot SDK bridge shutdown, mount-safe root workspace replacement, runtime-only resume responses, and authenticated preview URLs, preventing lifecycle rejection, command hangs, archive-sync failures, and unusable private port links.

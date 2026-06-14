@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,13 @@ import (
 const maxLocalWebVNCPasswordBytes = 4096
 
 const localWebVNCListenerOwnershipInterval = time.Second
+
+const (
+	localWebVNCSecurityAuto = "auto"
+	localWebVNCSecurityVNC  = "vnc"
+)
+
+const localWebVNCSecurityTypePassword byte = 2
 
 const (
 	localWebVNCReadTimeout   = 10 * time.Second
@@ -43,12 +51,13 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 	fs := newFlagSet("webvnc local", a.Stderr)
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
-		fmt.Fprintln(fs.Output(), "  crabbox webvnc local --vnc-host 127.0.0.1 --vnc-port <port> --username <user> --password-stdin [--local-port <port>] [--open]")
+		fmt.Fprintln(fs.Output(), "  crabbox webvnc local --vnc-host 127.0.0.1 --vnc-port <port> --username <user> --password-stdin [--security-type auto|vnc] [--local-port <port>] [--open]")
 	}
 	vncHost := fs.String("vnc-host", "127.0.0.1", "loopback VNC source host")
 	vncPort := fs.String("vnc-port", "", "loopback VNC source port")
 	username := fs.String("username", "", "VNC username")
 	passwordStdin := fs.Bool("password-stdin", false, "read the VNC password from stdin")
+	securityType := fs.String("security-type", localWebVNCSecurityAuto, "RFB security negotiation: auto or vnc")
 	localPort := fs.String("local-port", "", "local WebVNC browser port")
 	openViewer := fs.Bool("open", false, "open the local WebVNC viewer")
 	if err := parseFlags(fs, args); err != nil {
@@ -65,6 +74,9 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 	}
 	if err := validateLocalWebVNCUsername(*username); err != nil {
 		return err
+	}
+	if *securityType != localWebVNCSecurityAuto && *securityType != localWebVNCSecurityVNC {
+		return exit(2, "--security-type must be auto or vnc")
 	}
 	if !*passwordStdin {
 		return exit(2, "webvnc local requires --password-stdin")
@@ -107,7 +119,16 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 	}
 	credentials := rfbCredentials{Username: *username, Password: password}
 	fmt.Fprintf(a.Stdout, "bridge: serving noVNC locally; VNC source %s:%s; keep this running while viewing\n", *vncHost, *vncPort)
-	return a.serveLocalWebVNCBridge(bridgeCtx, webListener, webPort, credentials, *openViewer, dialVNC, nil)
+	return a.serveLocalWebVNCBridge(
+		bridgeCtx,
+		webListener,
+		webPort,
+		credentials,
+		*openViewer,
+		*securityType == localWebVNCSecurityVNC,
+		dialVNC,
+		nil,
+	)
 }
 
 func reserveLocalWebVNCBrowserPort(requested string, excluded ...string) (*webVNCDaemonPortReservation, error) {
@@ -270,6 +291,7 @@ func (a App) serveLocalWebVNCBridge(
 	webPort string,
 	credentials rfbCredentials,
 	openViewer bool,
+	forceVNCAuthentication bool,
 	dialVNC localWebVNCDialer,
 	handoffOutput func(macOSWebVNCHandoff),
 ) error {
@@ -317,6 +339,10 @@ func (a App) serveLocalWebVNCBridge(
 			return
 		}
 		defer tcp.Close()
+		if forceVNCAuthentication {
+			_ = relayWebSocketVNCWithVNCAuthentication(relayCtx, ws, tcp)
+			return
+		}
 		relayWebSocketVNC(relayCtx, ws, tcp)
 	})
 
@@ -360,4 +386,176 @@ func (a App) serveLocalWebVNCBridge(
 	case err := <-serverErrors:
 		return exit(5, "serve local WebVNC: %v", err)
 	}
+}
+
+func relayWebSocketVNCWithVNCAuthentication(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
+	browser := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
+	negotiationCtx, cancelNegotiation := context.WithCancel(ctx)
+	negotiation := make(chan error, 1)
+	go func() {
+		negotiation <- forceRFBVNCAuthentication(negotiationCtx, browser, tcp)
+	}()
+	timer := time.NewTimer(localWebVNCReadTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-negotiation:
+		cancelNegotiation()
+		if cause := context.Cause(ctx); cause != nil {
+			_ = ws.Close(websocket.StatusGoingAway, "bridge stopped")
+			return cause
+		}
+		if err != nil {
+			_ = ws.Close(websocket.StatusPolicyViolation, "VNC authentication negotiation failed")
+			return err
+		}
+	case <-ctx.Done():
+		_ = ws.Close(websocket.StatusGoingAway, "bridge stopped")
+		cancelNegotiation()
+		<-negotiation
+		return context.Cause(ctx)
+	case <-timer.C:
+		_ = ws.Close(websocket.StatusPolicyViolation, "VNC authentication negotiation timed out")
+		cancelNegotiation()
+		<-negotiation
+		return fmt.Errorf("VNC authentication negotiation timed out")
+	}
+	errors := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(tcp, browser)
+		errors <- err
+	}()
+	go func() {
+		_, err := io.Copy(browser, tcp)
+		errors <- err
+	}()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case err := <-errors:
+		return err
+	}
+}
+
+func forceRFBVNCAuthentication(ctx context.Context, browser, server net.Conn) error {
+	deadline := time.Now().Add(localWebVNCReadTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := browser.SetDeadline(deadline); err != nil {
+		return fmt.Errorf("set RFB browser authentication deadline: %w", err)
+	}
+	if err := server.SetDeadline(deadline); err != nil {
+		_ = browser.SetDeadline(time.Time{})
+		return fmt.Errorf("set RFB server authentication deadline: %w", err)
+	}
+	cancellationDone := make(chan struct{})
+	stopCancellation := context.AfterFunc(ctx, func() {
+		defer close(cancellationDone)
+		_ = browser.SetDeadline(time.Now())
+		_ = server.SetDeadline(time.Now())
+	})
+	defer func() {
+		if !stopCancellation() {
+			<-cancellationDone
+		}
+		_ = browser.SetDeadline(time.Time{})
+		_ = server.SetDeadline(time.Time{})
+	}()
+
+	serverVersion := make([]byte, 12)
+	if _, err := io.ReadFull(server, serverVersion); err != nil {
+		return fmt.Errorf("read RFB server version: %w", err)
+	}
+	if err := validateRFBServerVersion(serverVersion); err != nil {
+		return fmt.Errorf("invalid RFB server version: %w", err)
+	}
+	if _, err := browser.Write(serverVersion); err != nil {
+		return fmt.Errorf("write RFB server version: %w", err)
+	}
+
+	browserVersion := make([]byte, 12)
+	if _, err := io.ReadFull(browser, browserVersion); err != nil {
+		return fmt.Errorf("read RFB browser version: %w", err)
+	}
+	major, minor, err := parseRFBVersion(browserVersion)
+	if err != nil {
+		return fmt.Errorf("invalid RFB browser version: %w", err)
+	}
+	if _, err := server.Write(browserVersion); err != nil {
+		return fmt.Errorf("write RFB browser version: %w", err)
+	}
+
+	if major == 3 && minor < 7 {
+		security := make([]byte, 4)
+		if _, err := io.ReadFull(server, security); err != nil {
+			return fmt.Errorf("read RFB 3.3 security type: %w", err)
+		}
+		if binary.BigEndian.Uint32(security) != uint32(localWebVNCSecurityTypePassword) {
+			return fmt.Errorf("RFB server did not select VNC password authentication")
+		}
+		if _, err := browser.Write(security); err != nil {
+			return fmt.Errorf("write RFB 3.3 security type: %w", err)
+		}
+		return nil
+	}
+
+	count := []byte{0}
+	if _, err := io.ReadFull(server, count); err != nil {
+		return fmt.Errorf("read RFB security type count: %w", err)
+	}
+	if count[0] == 0 {
+		return fmt.Errorf("RFB server rejected security negotiation")
+	}
+	types := make([]byte, int(count[0]))
+	if _, err := io.ReadFull(server, types); err != nil {
+		return fmt.Errorf("read RFB security types: %w", err)
+	}
+	passwordAuth := false
+	for _, securityType := range types {
+		if securityType == localWebVNCSecurityTypePassword {
+			passwordAuth = true
+			break
+		}
+	}
+	if !passwordAuth {
+		return fmt.Errorf("RFB server did not offer VNC password authentication")
+	}
+	if _, err := browser.Write([]byte{1, localWebVNCSecurityTypePassword}); err != nil {
+		return fmt.Errorf("write filtered RFB security types: %w", err)
+	}
+	selected := []byte{0}
+	if _, err := io.ReadFull(browser, selected); err != nil {
+		return fmt.Errorf("read RFB browser security selection: %w", err)
+	}
+	if selected[0] != localWebVNCSecurityTypePassword {
+		return fmt.Errorf("RFB browser did not select VNC password authentication")
+	}
+	if _, err := server.Write(selected); err != nil {
+		return fmt.Errorf("write RFB server security selection: %w", err)
+	}
+	return nil
+}
+
+func validateRFBServerVersion(version []byte) error {
+	if _, _, err := parseRFBVersion(version); err == nil {
+		return nil
+	}
+	switch string(version) {
+	case "RFB 004.000\n", "RFB 004.001\n", "RFB 005.000\n":
+		return nil
+	default:
+		return fmt.Errorf("unsupported protocol version %q", string(version))
+	}
+}
+
+func parseRFBVersion(version []byte) (int, int, error) {
+	if len(version) != 12 || string(version[:4]) != "RFB " || version[7] != '.' || version[11] != '\n' {
+		return 0, 0, fmt.Errorf("unexpected protocol banner")
+	}
+	major, majorErr := strconv.Atoi(string(version[4:7]))
+	minor, minorErr := strconv.Atoi(string(version[8:11]))
+	if majorErr != nil || minorErr != nil || major != 3 {
+		return 0, 0, fmt.Errorf("unsupported protocol version %q", string(version))
+	}
+	return major, minor, nil
 }

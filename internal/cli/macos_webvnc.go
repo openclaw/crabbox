@@ -96,6 +96,7 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 		webPort,
 		credentials,
 		openViewer,
+		false,
 		func(ctx context.Context) (net.Conn, error) {
 			return dialVNCForegroundTunnel(ctx, tunnel, vncPort)
 		},

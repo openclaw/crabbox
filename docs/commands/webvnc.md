@@ -87,6 +87,7 @@ secret-command | crabbox webvnc local \
   --vnc-port 5900 \
   --username admin \
   --password-stdin \
+  --security-type vnc \
   --open
 ```
 
@@ -97,6 +98,13 @@ the RFB banner before reading the password from stdin. The browser listener is
 also bound to `127.0.0.1`; use `--local-port <port>` only when a fixed browser
 port is required. The command stays in the foreground and must remain running
 alongside the underlying tunnel.
+
+Use `--security-type vnc` when the server advertises account-based security
+types ahead of standard VNC password authentication but the supplied password
+is the independent legacy VNC password. Crabbox then filters only the initial
+RFB security offer so the browser must choose type 2; all subsequent VNC bytes
+remain end-to-end between noVNC and the loopback source. The default `auto`
+preserves the server's advertised order.
 
 The self-contained noVNC handoff is a mode-`0600` temporary file. It contains
 only a fresh per-process bridge token, never the VNC password. The username is
