@@ -638,7 +638,16 @@ func claimedServerFromInstance(item Instance, cfg core.Config) (core.Server, boo
 	if err != nil {
 		return core.Server{}, false, err
 	}
-	if !ok || claim.Provider != providerName || claim.CloudID != item.ID {
+	if !ok {
+		claim, ok, err = ambiguousLaunchClaimForInstance(item)
+		if err != nil {
+			return core.Server{}, false, err
+		}
+	}
+	if !ok || claim.Provider != providerName {
+		return core.Server{}, false, nil
+	}
+	if claim.CloudID != "" && claim.CloudID != item.ID {
 		return core.Server{}, false, nil
 	}
 	if err := validateLambdaLabels(claim.Labels); err != nil {
@@ -647,6 +656,43 @@ func claimedServerFromInstance(item Instance, cfg core.Config) (core.Server, boo
 	server := serverFromInstance(item, cfg)
 	server.Labels = cloneLambdaLabels(claim.Labels)
 	return server, true, nil
+}
+
+func ambiguousLaunchClaimForInstance(item Instance) (core.LeaseClaim, bool, error) {
+	keyNames := make(map[string]struct{}, len(item.SSHKeyNames))
+	for _, keyName := range item.SSHKeyNames {
+		keyName = strings.TrimSpace(keyName)
+		if keyName != "" {
+			keyNames[keyName] = struct{}{}
+		}
+	}
+	if len(keyNames) == 0 {
+		return core.LeaseClaim{}, false, nil
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	var matched core.LeaseClaim
+	found := false
+	for _, claim := range claims {
+		if claim.Provider != providerName || claim.CloudID != "" || claim.Labels[lambdaRecoveryKeyLabel] != "ambiguous-create" {
+			continue
+		}
+		keyName := strings.TrimSpace(claim.Labels[lambdaKeyNameLabel])
+		if keyName == "" {
+			continue
+		}
+		if _, ok := keyNames[keyName]; !ok {
+			continue
+		}
+		if found {
+			return core.LeaseClaim{}, false, core.Exit(2, "multiple Lambda recovery claims match instance %s by SSH key", item.ID)
+		}
+		matched = claim
+		found = true
+	}
+	return matched, found, nil
 }
 
 func mergeLocalClaimLabels(server core.Server) (core.Server, error) {

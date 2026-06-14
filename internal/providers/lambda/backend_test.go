@@ -565,6 +565,44 @@ func TestAmbiguousLaunchPreservesRecoveryClaimAndStoredKey(t *testing.T) {
 	}
 }
 
+func TestAmbiguousLaunchRecoveryFindsInstanceBySSHKeyName(t *testing.T) {
+	api := &fakeLambdaAPI{launchErr: errors.New("transport closed")}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous-keyed"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("ambiguous-keyed", providerName)
+	if claimErr != nil || !ok || claim.CloudID != "" || claim.Labels[lambdaRecoveryKeyLabel] != "ambiguous-create" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+	}
+	api.launchErr = nil
+	api.instances = append(api.instances, Instance{
+		ID:          "i-late",
+		Name:        "late",
+		Status:      "active",
+		IP:          "203.0.113.90",
+		Type:        defaultType,
+		SSHKeyNames: []string{claim.Labels[lambdaKeyNameLabel]},
+	})
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "ambiguous-keyed", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Server.CloudID != "i-late" || target.Server.Labels[lambdaRecoveryKeyLabel] != "ambiguous-create" {
+		t.Fatalf("target=%#v", target)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 1 || api.terminatedIDs[0][0] != "i-late" || len(api.deletedKeyIDs) != 1 || api.deletedKeyIDs[0] != "key-700" {
+		t.Fatalf("terminated=%v deletedKeyIDs=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-keyed", providerName); err != nil || ok {
+		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
 func TestFailedRollbackRecoveryClaimKeepsInstanceIDForRetry(t *testing.T) {
 	api := &fakeLambdaAPI{terminateErr: errors.New("terminate unavailable")}
 	b := newTestBackend(t, api)

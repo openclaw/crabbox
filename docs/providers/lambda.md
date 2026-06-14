@@ -126,10 +126,11 @@ classed doctor output rather than hidden behind generic errors.
 
 If SSH-key creation, instance launch, or post-launch readiness becomes
 indeterminate, Crabbox records a local recovery claim with enough metadata to
-retry `crabbox stop --provider lambda <lease-or-slug>`. Empty provider inventory
-is not treated as proof that creation failed while the outcome remains
-indeterminate: Crabbox retains the recovery claim so a late-created billable
-instance can still be reconciled.
+retry `crabbox stop --provider lambda <lease-or-slug>`. Ambiguous launches are
+reconciled by the per-lease Lambda SSH key name when the instance id response was
+lost. Empty provider inventory is not treated as proof that creation failed
+while the outcome remains indeterminate: Crabbox retains the recovery claim so a
+late-created billable instance can still be reconciled.
 
 ## Ownership And Cleanup
 
