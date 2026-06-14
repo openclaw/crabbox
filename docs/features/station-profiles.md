@@ -1,9 +1,16 @@
 # Station Profiles Roadmap
 
-Station profiles are a planned lifecycle primitive for supervised long-running
-workloads. They are not implemented in the current CLI: there is no
-`crabbox station` command, `stationProfile` config key, or `modelAccess`
-credential path yet.
+Station profiles are a lifecycle primitive for supervised long-running
+workloads.
+
+**Status:** an initial, disabled-by-default primitive now exists in
+`internal/station`. It provides the `StationProfile` config struct with parsing
+and validation, the agent-profile boundary type, feature-gated phase
+enforcement (every phase returns a clear "not yet enabled" error until turned
+on), and the security gating that keeps `modelAccess` a separate, audited field
+that is never sourced from `env.allow`. There is still no `crabbox station`
+command, no top-level `stationProfile` config wiring, and no live `modelAccess`
+credential delivery; those land in later, separately reviewed phases.
 
 This page records the product and security boundary for
 [issue #193](https://github.com/openclaw/crabbox/issues/193) so future PRs can
