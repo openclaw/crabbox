@@ -43,10 +43,12 @@ func (m *fakeMachine) GuestIP() string { return m.guestIP }
 type fakeMachineFactory struct {
 	machine *fakeMachine
 	err     error
+	ctx     context.Context
 	launch  []machineLaunchConfig
 }
 
-func (f *fakeMachineFactory) New(_ context.Context, launch machineLaunchConfig) (machine, error) {
+func (f *fakeMachineFactory) New(ctx context.Context, launch machineLaunchConfig) (machine, error) {
+	f.ctx = ctx
 	f.launch = append(f.launch, launch)
 	if f.err != nil {
 		return nil, f.err
@@ -300,14 +302,25 @@ func TestAcquirePassesLaunchTimeoutToMachineStart(t *testing.T) {
 	if _, err := test.backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: test.repoRoot}}); err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
+	if test.factory.ctx == nil {
+		t.Fatal("machine factory context was not recorded")
+	}
+	deadline, ok := test.factory.ctx.Deadline()
+	if !ok {
+		t.Fatal("machine factory context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > cfg.Firecracker.LaunchTimeout {
+		t.Fatalf("machine factory deadline remaining=%s want within %s", remaining, cfg.Firecracker.LaunchTimeout)
+	}
 	if test.factory.machine.startCtx == nil {
 		t.Fatal("machine start context was not recorded")
 	}
-	deadline, ok := test.factory.machine.startCtx.Deadline()
+	startDeadline, ok := test.factory.machine.startCtx.Deadline()
 	if !ok {
 		t.Fatal("machine start context has no deadline")
 	}
-	remaining := time.Until(deadline)
+	remaining = time.Until(startDeadline)
 	if remaining <= 0 || remaining > cfg.Firecracker.LaunchTimeout {
 		t.Fatalf("machine start deadline remaining=%s want within %s", remaining, cfg.Firecracker.LaunchTimeout)
 	}

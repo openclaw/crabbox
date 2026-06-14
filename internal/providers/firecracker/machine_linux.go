@@ -54,7 +54,7 @@ func (f sdkMachineFactory) New(ctx context.Context, launch machineLaunchConfig) 
 	cmd := firesdk.VMCommandBuilder{}.
 		WithBin(binary).
 		WithSocketPath(sdkConfig.SocketPath).
-		Build(context.WithoutCancel(ctx))
+		Build(ctx)
 
 	logger := logrus.New()
 	if f.LogWriter == nil {
