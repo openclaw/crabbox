@@ -363,6 +363,20 @@
     "caveat": "Direct-only; optional firewall must already exist",
     "docs": "linode.md"
   },
+  "ovh": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "OVHcloud Public Cloud instance",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "optional",
+    "lifecycle": "Crabbox",
+    "cleanup": "instance, key, and local claim delete",
+    "bestFit": "OVHcloud Public Cloud Linux VM",
+    "caveat": "Direct-only; credentials use OVH signed requests and local claims",
+    "docs": "ovh.md"
+  },
   "local-container": {
     "status": "built-in",
     "category": "local-runtime",
