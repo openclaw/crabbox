@@ -256,7 +256,14 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		return LeaseTarget{}, err
 	}
 
-	vm, err := b.machines.New(ctx, machineLaunchConfig{
+	startCtx := ctx
+	cancelStart := func() {}
+	if cfg.Firecracker.LaunchTimeout > 0 {
+		startCtx, cancelStart = context.WithTimeout(ctx, cfg.Firecracker.LaunchTimeout)
+	}
+	defer cancelStart()
+
+	vm, err := b.machines.New(startCtx, machineLaunchConfig{
 		BinaryPath:    cfg.Firecracker.Binary,
 		SocketPath:    record.SocketPath,
 		LogPath:       record.LogPath,
@@ -281,12 +288,6 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		return b.rollbackAcquire(record, vm, cause)
 	}
 
-	startCtx := ctx
-	cancelStart := func() {}
-	if cfg.Firecracker.LaunchTimeout > 0 {
-		startCtx, cancelStart = context.WithTimeout(ctx, cfg.Firecracker.LaunchTimeout)
-	}
-	defer cancelStart()
 	if err := vm.Start(startCtx); err != nil {
 		return LeaseTarget{}, rollback(err)
 	}
