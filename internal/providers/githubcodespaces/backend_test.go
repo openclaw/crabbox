@@ -357,6 +357,16 @@ func TestLabelsCarryEffectiveWorkRoot(t *testing.T) {
 	}
 }
 
+func TestDisplayNameFitsGitHubCodespacesLimit(t *testing.T) {
+	name := githubCodespacesDisplayName("cbx_abcdef123456", strings.Repeat("a", 41))
+	if len(name) > 48 {
+		t.Fatalf("display name length=%d name=%q", len(name), name)
+	}
+	if !strings.HasPrefix(name, "crabbox-") || !strings.HasSuffix(name, "-c80c2195") {
+		t.Fatalf("display name=%q", name)
+	}
+}
+
 type testBackend struct {
 	*backend
 	waits []SSHTarget

@@ -59,6 +59,9 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 		gotBody["display_name"] != "Crabbox" {
 		t.Fatalf("body=%#v", gotBody)
 	}
+	if _, ok := gotBody["location"]; ok {
+		t.Fatalf("body used legacy location key: %#v", gotBody)
+	}
 	if created.Repository.FullName != "example-org/my-app" || created.EnvironmentID != "env_1" || created.Machine.Name != "standardLinux32gb" {
 		t.Fatalf("created=%#v", created)
 	}
