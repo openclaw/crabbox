@@ -20,6 +20,30 @@ func (r ghRunner) authStatus(ctx context.Context) error {
 	return err
 }
 
+func (r ghRunner) authToken(ctx context.Context) (string, error) {
+	result, err := r.run(ctx, "auth", "token")
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(result.Stdout)
+	if token == "" {
+		return "", fmt.Errorf("github-codespaces gh auth token returned empty token")
+	}
+	return token, nil
+}
+
+func (r ghRunner) userLogin(ctx context.Context) (string, error) {
+	result, err := r.run(ctx, "api", "user", "--jq", ".login")
+	if err != nil {
+		return "", err
+	}
+	login := strings.TrimSpace(result.Stdout)
+	if login == "" {
+		return "", fmt.Errorf("github-codespaces gh api user returned empty login")
+	}
+	return login, nil
+}
+
 func (r ghRunner) codespaceSSHConfig(ctx context.Context, codespace string) (string, error) {
 	result, err := r.run(ctx, "codespace", "ssh", "--config", "-c", strings.TrimSpace(codespace))
 	if err != nil {

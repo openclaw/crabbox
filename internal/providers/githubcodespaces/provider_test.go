@@ -1,7 +1,6 @@
 package githubcodespaces
 
 import (
-	"context"
 	"flag"
 	"strings"
 	"testing"
@@ -141,17 +140,6 @@ func TestNoTokenFlagRegistered(t *testing.T) {
 			t.Fatalf("token-bearing flag registered: %s", f.Name)
 		}
 	})
-}
-
-func TestDoctorFailsUntilLifecycleIsImplemented(t *testing.T) {
-	backend := &BackendSkeleton{spec: Provider{}.Spec()}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
-	if err == nil {
-		t.Fatal("expected doctor to fail until lifecycle is implemented")
-	}
-	if result.Status != "failed" || !strings.Contains(err.Error(), "doctor is not implemented yet") {
-		t.Fatalf("result=%#v err=%v", result, err)
-	}
 }
 
 func TestValidateGitHubCodespacesConfig(t *testing.T) {

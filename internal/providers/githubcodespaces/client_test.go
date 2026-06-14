@@ -53,7 +53,7 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 		gotBody["machine"] != "standardLinux32gb" ||
 		gotBody["devcontainer_path"] != ".devcontainer/devcontainer.json" ||
 		gotBody["working_directory"] != "/workspaces/my-app" ||
-		gotBody["location"] != "UsWest" ||
+		gotBody["geo"] != "UsWest" ||
 		gotBody["idle_timeout_minutes"].(float64) != 2 ||
 		gotBody["retention_period_minutes"].(float64) != 1440 ||
 		gotBody["display_name"] != "Crabbox" {
@@ -79,6 +79,89 @@ func TestFlexibleRefsDecodeRESTObjectsAndGHStrings(t *testing.T) {
 		if item.Machine.Name != "standardLinux32gb" {
 			t.Fatalf("machine=%q", item.Machine.Name)
 		}
+	}
+}
+
+func TestClientLifecycleOperationsRequestShape(t *testing.T) {
+	var calls []string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces?per_page=100":
+			w.Header().Set("Link", `<`+server.URL+`/api/v3/user/codespaces?per_page=100&page=2>; rel="next"`)
+			_, _ = w.Write([]byte(`{"codespaces":[{"name":"space-1","state":"Available","repository":"example-org/my-app","machine":"standardLinux32gb"}]}`))
+		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces?per_page=100&page=2":
+			_, _ = w.Write([]byte(`{"codespaces":[{"name":"space-2","state":"Shutdown","repository":"example-org/my-app","machine":"standardLinux32gb"}]}`))
+		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1":
+			_, _ = w.Write([]byte(`{"name":"space-1","state":"Available","repository":"example-org/my-app","machine":"standardLinux32gb"}`))
+		case r.Method == http.MethodPost && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1/start":
+			_, _ = w.Write([]byte(`{"name":"space-1","state":"Starting","repository":"example-org/my-app","machine":"standardLinux32gb"}`))
+		case r.Method == http.MethodPost && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1/stop":
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodDelete && r.URL.RequestURI() == "/api/v3/user/codespaces/space-1":
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodGet && r.URL.RequestURI() == "/api/v3/repos/example-org/my-app/codespaces/machines?ref=main":
+			_, _ = w.Write([]byte(`{"machines":[{"name":"standardLinux32gb","display_name":"Standard"}]}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	c := newClient(GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, Runtime{HTTP: server.Client()}, "token")
+	listed, err := c.listCodespaces(context.Background())
+	if err != nil || len(listed) != 2 || listed[0].Name != "space-1" || listed[1].Name != "space-2" {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+	if got, err := c.getCodespace(context.Background(), "space-1"); err != nil || got.Name != "space-1" {
+		t.Fatalf("get=%#v err=%v", got, err)
+	}
+	if got, err := c.startCodespace(context.Background(), "space-1"); err != nil || got.State != "Starting" {
+		t.Fatalf("start=%#v err=%v", got, err)
+	}
+	if err := c.stopCodespace(context.Background(), "space-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.deleteCodespace(context.Background(), "space-1"); err != nil {
+		t.Fatal(err)
+	}
+	machines, err := c.listMachines(context.Background(), "example-org/my-app", "main")
+	if err != nil || len(machines) != 1 || machines[0].Name != "standardLinux32gb" {
+		t.Fatalf("machines=%#v err=%v", machines, err)
+	}
+	want := strings.Join([]string{
+		"GET /api/v3/user/codespaces?per_page=100",
+		"GET /api/v3/user/codespaces?per_page=100&page=2",
+		"GET /api/v3/user/codespaces/space-1",
+		"POST /api/v3/user/codespaces/space-1/start",
+		"POST /api/v3/user/codespaces/space-1/stop",
+		"DELETE /api/v3/user/codespaces/space-1",
+		"GET /api/v3/repos/example-org/my-app/codespaces/machines?ref=main",
+	}, "\n")
+	if got := strings.Join(calls, "\n"); got != want {
+		t.Fatalf("calls:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestClientListCodespacesRejectsCrossOriginPagination(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Link", `<https://attacker.example/user/codespaces?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`{"codespaces":[{"name":"space-1","state":"Available","repository":"example-org/my-app","machine":"standardLinux32gb"}]}`))
+	}))
+	defer server.Close()
+
+	c := newClient(GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, Runtime{HTTP: server.Client()}, "token")
+	_, err := c.listCodespaces(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "outside configured API base") {
+		t.Fatalf("err=%v", err)
+	}
+	if got := strings.Join(calls, "\n"); got != "GET /api/v3/user/codespaces?per_page=100" {
+		t.Fatalf("calls=%q", got)
 	}
 }
 
