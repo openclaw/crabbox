@@ -601,7 +601,7 @@ func (s *controllerService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.getWorkspace(w, id)
 	case http.MethodDelete:
-		s.deleteWorkspace(w, id)
+		s.deleteWorkspace(w, r.Context(), id)
 	default:
 		writeControllerMethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
@@ -1007,9 +1007,15 @@ func (s *controllerService) getWorkspace(w http.ResponseWriter, id string) {
 	writeControllerJSON(w, http.StatusOK, controllerResponse(record))
 }
 
-func (s *controllerService) deleteWorkspace(w http.ResponseWriter, id string) {
+func (s *controllerService) deleteWorkspace(w http.ResponseWriter, requestCtx context.Context, id string) {
 	s.sideEffectGate.Lock()
 	s.mu.Lock()
+	if requestCtx.Err() != nil {
+		s.mu.Unlock()
+		s.sideEffectGate.Unlock()
+		writeControllerError(w, http.StatusRequestTimeout, "request_canceled", "workspace delete request was canceled before dispatch")
+		return
+	}
 	record, ok := s.state.Workspaces[id]
 	if !ok {
 		s.mu.Unlock()

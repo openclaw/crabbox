@@ -206,6 +206,9 @@ export interface LeaseRegistrationRequest {
   exposedPorts?: string[];
   ttlSeconds?: number;
   idleTimeoutSeconds?: number;
+  runtimeAdapterID?: string;
+  runtimeAdapterWorkspaceID?: string;
+  runtimeAdapterRegistrationID?: string;
 }
 
 export const coordinatorProviderRegistry = [
@@ -291,6 +294,15 @@ export interface LeaseRecord {
   workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;
+  runtimeAdapterID?: string;
+  runtimeAdapterWorkspaceID?: string;
+  runtimeAdapterRegistrationID?: string;
+  runtimeAdapterDeleteRequestedAt?: string;
+  runtimeAdapterDeleteClaimID?: string;
+  runtimeAdapterDeleteRetryAt?: string;
+  runtimeAdapterDeleteDispatchUntil?: string;
+  runtimeAdapterDeleteAttempts?: number;
+  runtimeAdapterDeleteError?: string;
   target: TargetOS;
   os?: string;
   windowsMode?: WindowsMode;

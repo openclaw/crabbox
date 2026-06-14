@@ -463,6 +463,58 @@ func TestControllerWorkspaceLifecycleAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestControllerCanceledDeleteDoesNotCrossSideEffectGate(t *testing.T) {
+	runner := newFakeControllerWorkspaceRunner()
+	service, cancelService := testControllerService(t, runner, 1)
+	defer cancelService()
+	created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{
+		ID: "canceled-delete-box",
+	})
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	want := waitControllerWorkspaceStatus(t, service, "canceled-delete-box", "ready")
+	waitControllerWorkspaceInactive(t, service, "canceled-delete-box")
+
+	service.sideEffectGate.Lock()
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	request := httptest.NewRequest(
+		http.MethodDelete,
+		"/v1/workspaces/canceled-delete-box",
+		nil,
+	).WithContext(requestCtx)
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		service.ServeHTTP(response, request)
+		close(done)
+	}()
+	select {
+	case <-done:
+		service.sideEffectGate.Unlock()
+		t.Fatal("delete crossed the held side-effect gate")
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancelRequest()
+	service.sideEffectGate.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("canceled delete did not return")
+	}
+	if response.Code != http.StatusRequestTimeout || !strings.Contains(response.Body.String(), `"code":"request_canceled"`) {
+		t.Fatalf("delete status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got, ok := service.workspace("canceled-delete-box"); !ok || got != want {
+		t.Fatalf("workspace changed after canceled delete: got=%#v exists=%t want=%#v", got, ok, want)
+	}
+	_, stops, _ := runner.counts()
+	if stops != 0 {
+		t.Fatalf("canceled delete dispatched %d provider stops", stops)
+	}
+}
+
 func TestControllerResponseCapabilitiesDoNotInferTerminalFromDesktop(t *testing.T) {
 	response := controllerResponse(controllerWorkspaceRecord{
 		Request: controllerWorkspaceRequest{

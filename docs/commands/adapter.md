@@ -50,12 +50,24 @@ Set `--id` to the same stable DNS-style ID used by
 [`crabbox adapter connect`](#outbound-connection) when the adapter is connected
 outbound to a coordinator. Child lifecycle commands then register both that
 adapter ID and the exact workspace ID with the coordinator. The portal can send
-Delete through the live relay and removes the registration only after the
-adapter confirms stable provider absence and completes matching local-state
-cleanup. Registration must return that exact adapter/workspace binding before
-the workspace can become ready; a failed or mismatched registration instead
-enters exact-identity provider cleanup. Without `--id`, registered leases retain
-the metadata-only removal behavior.
+Delete through the live relay. After the adapter proves stable provider absence,
+it sends an owner-scoped completion for that exact pending adapter/workspace
+registration generation before completing matching local-state cleanup. Each
+local claim persists a fresh registration ID; the coordinator retains it across
+refreshes and rejects stale completion retries after a later generation becomes
+active. If the coordinator record expires while the provider workspace remains
+live, the CLI rotates the persisted ID only after that explicit stale-generation
+rejection and retries registration. The old acknowledged ID remains durable
+beside the pending replacement until the replacement succeeds; confirmed-absence
+cleanup can safely try both after a crash or lost response. A workspace that
+never persisted a registration ID uses the legacy metadata-release cleanup path
+only after the coordinator confirms that its exact adapter/workspace binding
+also has no registration generation. Missing or malformed generation-aware
+claim state fails closed.
+Registration must return that exact adapter/workspace/registration
+binding before the workspace can become ready; a failed or mismatched
+registration instead enters exact-identity provider cleanup. Without `--id`,
+registered leases retain the metadata-only removal behavior.
 
 Validate a copied state file before an upgrade without locking, rewriting,
 reconciling, or running provider commands:
@@ -113,7 +125,8 @@ The relay accepts only typed JSON requests:
   "type": "request",
   "id": "request-1",
   "method": "DELETE",
-  "path": "/v1/workspaces/fleet-a-is-101"
+  "path": "/v1/workspaces/fleet-a-is-101",
+  "deadlineMs": 4102444800000
 }
 ```
 
@@ -126,11 +139,17 @@ Allowed operations are exactly:
 
 There is no arbitrary URL, shell, argv, environment, file, or provider-command
 surface. Request and response bodies are UTF-8 strings bounded to 64 KiB.
-Ordinary local requests time out after nine seconds. Desktop connection setup
+Only workspace creation accepts a non-empty request body. Ordinary local
+requests time out after nine seconds, and the coordinator allows five more
+seconds for response delivery. Every frame carries that absolute Unix
+millisecond deadline; the connector rejects expired frames before local
+dispatch and caps the local request context to the earlier of that deadline or
+its own timeout. Desktop connection setup
 gets the configured `--connection-timeout` plus 30 seconds of relay overhead,
-covering the adapter's matching setup budget without imposing a shorter relay
-deadline. Set it to the same value as `adapter serve --connection-timeout` when
-overriding the default. Responses contain only the request ID, HTTP status,
+and the connector negotiates that deadline plus five seconds of response grace
+with the coordinator. The setup value may not exceed 24 hours. Set it to the
+same value as `adapter serve --connection-timeout` when overriding the default.
+Responses contain only the request ID, HTTP status,
 optional content type, and exact bounded body:
 
 ```json
@@ -145,8 +164,12 @@ optional content type, and exact bounded body:
 
 The connector dispatches up to 64 ordinary requests concurrently and keeps a
 separate bounded lane for deletes, so a slow desktop setup cannot block its
-cancellation. WebSocket responses are serialized, and disconnecting the relay
-cancels every in-flight local request.
+cancellation. The coordinator also applies per-adapter, per-owner, and global
+in-flight limits; work already sent upstream remains counted after its caller
+disconnects until the response or deadline. A durable generation-scoped
+dispatch fence prevents confirmed absence from freeing and reusing a binding
+while an earlier delete can still reach the adapter. WebSocket responses are
+serialized, and disconnecting the relay cancels every in-flight local request.
 
 Flags:
 

@@ -59,7 +59,8 @@ export async function prepareCoordinatorRequest(
   if (
     isWebVNCAgentUpgrade(request, url) ||
     isCodeAgentUpgrade(request, url) ||
-    isEgressAgentUpgrade(request, url)
+    isEgressAgentUpgrade(request, url) ||
+    isRuntimeAdapterAgentUpgrade(request, url)
   ) {
     return { request: requestWithoutProxySecret(request), authenticated: false };
   }
@@ -107,6 +108,14 @@ function isEgressAgentUpgrade(request: Request, url: URL): boolean {
     request.method === "GET" &&
     request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
     /^\/v1\/leases\/[^/]+\/egress\/(?:host|client)$/.test(url.pathname)
+  );
+}
+
+function isRuntimeAdapterAgentUpgrade(request: Request, url: URL): boolean {
+  return (
+    request.method === "GET" &&
+    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
+    /^\/v1\/adapters\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\/agent$/.test(url.pathname)
   );
 }
 

@@ -113,6 +113,13 @@ describe("coordinator auth", () => {
       new Request("https://example.test/v1/leases/lease-1/webvnc/agent", {
         headers: { upgrade: "websocket", "x-crabbox-proxy-secret": "proxy-secret" },
       }),
+      new Request("https://example.test/v1/adapters/example-adapter/agent", {
+        headers: {
+          upgrade: "websocket",
+          authorization: "Bearer adapter_ticket",
+          "x-crabbox-proxy-secret": "proxy-secret",
+        },
+      }),
     ];
 
     const routedRequests = await Promise.all(
@@ -126,6 +133,7 @@ describe("coordinator auth", () => {
     );
 
     expect(routedRequests.map((request) => request.headers.get("x-crabbox-proxy-secret"))).toEqual([
+      null,
       null,
       null,
       null,

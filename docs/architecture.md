@@ -9,7 +9,7 @@ language runtimes, dependencies, services, and secrets through its own setup,
 [Actions hydration](features/actions-hydration.md), devcontainer, Nix/mise/asdf
 config, or shell scripts.
 
-The architecture separates the *control plane* from *command execution*. The
+The architecture separates the _control plane_ from _command execution_. The
 broker serializes lease and provider state, while the CLI keeps SSH keys local
 and streams command I/O directly between the developer machine and the leased
 box. That keeps provider credentials out of the box, keeps user secrets out of
@@ -52,7 +52,7 @@ The CLI picks one of four modes per provider in `loadBackend`
 (`internal/cli/provider_backend.go`):
 
 - **Brokered (coordinator) mode** — chosen when the provider declares
-  `Coordinator: supported` *and* a broker URL is configured
+  `Coordinator: supported` _and_ a broker URL is configured
   (`CRABBOX_COORDINATOR` or `config set-broker`). The provider's SSH backend is
   wrapped in a `coordinatorLeaseBackend`: lease lifecycle goes through the
   coordinator over HTTPS, but the CLI still drives SSH, rsync, and command execution
@@ -65,9 +65,10 @@ The CLI picks one of four modes per provider in `loadBackend`
   `parallels`, `proxmox`, `daytona`, `runpod`, and so on) always runs here.
 - **Registered direct mode** — `broker.mode: registered` keeps the same direct
   SSH provider lifecycle but registers lease metadata and heartbeats with the
-  coordinator. It can list and share portal bridges, but cannot call the
-  provider, delete the resource, charge it to managed usage, or place it in a
-  ready pool.
+  coordinator. It can list and share portal bridges, but cannot directly call
+  the provider, charge the resource to managed usage, or place it in a ready
+  pool. By default release removes only metadata; an explicitly bound outbound
+  runtime adapter can perform a user-confirmed workspace delete.
 - **Delegated mode** — the provider implements a delegated-run backend (e.g.
   `e2b`, `modal`, `cloudflare`, `azure-dynamic-sessions`). The provider owns
   sync and execution end to end; the CLI calls `Warmup`/`Run` and never performs
@@ -164,10 +165,10 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
 
 Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:
 
-| Runtime | Durable state | Scheduling | WebSockets |
-| --- | --- | --- | --- |
-| Cloudflare | Durable Object storage | DO alarms plus scheduled Worker reconciliation | Hibernating WebSockets |
-| Node.js | PostgreSQL `crabbox` schema | pg-boss `crabbox_jobs` schema | In-process `ws`; reconnect after restart |
+| Runtime    | Durable state               | Scheduling                                     | WebSockets                               |
+| ---------- | --------------------------- | ---------------------------------------------- | ---------------------------------------- |
+| Cloudflare | Durable Object storage      | DO alarms plus scheduled Worker reconciliation | Hibernating WebSockets                   |
+| Node.js    | PostgreSQL `crabbox` schema | pg-boss `crabbox_jobs` schema                  | In-process `ws`; reconnect after restart |
 
 The Node runtime currently requires one service replica because lifecycle
 serialization and live bridge ownership are process-local. PostgreSQL and
@@ -285,7 +286,7 @@ Git, rsync, curl, jq, and a writable work root (default `/work/crabbox` on
 Linux, `C:\crabbox` on Windows, `/Users/<user>/crabbox` on macOS). Readiness is
 signaled by the `crabbox-ready` marker.
 
-Language runtimes, Docker, services, dependencies, and secrets are *project*
+Language runtimes, Docker, services, dependencies, and secrets are _project_
 setup, not base bootstrap. Use [Actions hydration](features/actions-hydration.md),
 devcontainers, Nix, mise/asdf, or repository scripts for that layer. Prefer
 provider snapshots/images once bootstrap is proven; cloud-init is fine for a
@@ -312,18 +313,18 @@ credential chain.
 
 ## Defaults
 
-| Setting | Default |
-| --- | --- |
-| Lease ID format | `cbx_<12 hex>` |
-| User token prefix | `cbxu_` |
-| TTL | 5400 s (capped at 86400 s) |
-| Idle timeout | 1800 s |
-| SSH port | 2222, fallback 22 |
-| Machine class | `beast` |
-| Work root | `/work/crabbox` (Linux) |
-| Run log | 64 KiB chunks, 8 MiB stored cap |
-| Cleanup retry | 5 min |
-| Bridge ticket TTL | 120 s |
+| Setting           | Default                         |
+| ----------------- | ------------------------------- |
+| Lease ID format   | `cbx_<12 hex>`                  |
+| User token prefix | `cbxu_`                         |
+| TTL               | 5400 s (capped at 86400 s)      |
+| Idle timeout      | 1800 s                          |
+| SSH port          | 2222, fallback 22               |
+| Machine class     | `beast`                         |
+| Work root         | `/work/crabbox` (Linux)         |
+| Run log           | 64 KiB chunks, 8 MiB stored cap |
+| Cleanup retry     | 5 min                           |
+| Bridge ticket TTL | 120 s                           |
 
 ## Failure Model
 
@@ -339,12 +340,12 @@ retry. Therefore:
 
 ## Source of Truth
 
-| Concern | Files |
-| --- | --- |
-| CLI command tree and flags | `internal/cli/cli_kong.go`, `internal/cli/app.go` |
-| Backend selection / modes | `internal/cli/provider_backend.go` |
-| Broker client | `internal/cli/coordinator.go`, `provider_coordinator.go` |
-| Run / sync / lease | `internal/cli/run.go`, `lease.go` |
-| Coordinator entry / auth | `worker/src/coordinator-entry.ts`, `worker/src/index.ts`, `worker/node/server.ts`, `worker/src/auth.ts` |
-| Fleet state / endpoints | `worker/src/fleet.ts`, `types.ts`, `config.ts`, `usage.ts` |
-| Runtime adapters | `worker/src/coordinator-runtime.ts`, `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts` |
+| Concern                    | Files                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- |
+| CLI command tree and flags | `internal/cli/cli_kong.go`, `internal/cli/app.go`                                                       |
+| Backend selection / modes  | `internal/cli/provider_backend.go`                                                                      |
+| Broker client              | `internal/cli/coordinator.go`, `provider_coordinator.go`                                                |
+| Run / sync / lease         | `internal/cli/run.go`, `lease.go`                                                                       |
+| Coordinator entry / auth   | `worker/src/coordinator-entry.ts`, `worker/src/index.ts`, `worker/node/server.ts`, `worker/src/auth.ts` |
+| Fleet state / endpoints    | `worker/src/fleet.ts`, `types.ts`, `config.ts`, `usage.ts`                                              |
+| Runtime adapters           | `worker/src/coordinator-runtime.ts`, `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`   |

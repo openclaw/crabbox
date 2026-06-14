@@ -1,9 +1,10 @@
-import type { IncomingMessage, Server } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { BlockList, isIP } from "node:net";
 import type { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 
 import { coordinatorRequestQueue, type CoordinatorRequestQueue } from "../src/coordinator-runtime";
+import { runtimeAdapterRelayBodyLimit } from "../src/runtime-adapter-relay";
 
 export const unauthenticatedRequestBodyBytes = 1024 * 1024;
 export const authenticatedRequestBodyBytes = 16 * 1024 * 1024;
@@ -12,6 +13,29 @@ export const runFinishRequestBodyBytes = 64 * 1024 * 1024;
 const noop = () => {};
 
 export class RequestBodyTooLargeError extends Error {}
+
+export function nodeRequestAbortSignal(
+  request: IncomingMessage,
+  response: ServerResponse,
+): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const abortRequest = () => controller.abort();
+  const abortResponse = () => {
+    if (!response.writableFinished) controller.abort();
+  };
+  request.once("aborted", abortRequest);
+  response.once("close", abortResponse);
+  if (request.aborted || (response.destroyed && !response.writableFinished)) {
+    controller.abort();
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      request.off("aborted", abortRequest);
+      response.off("close", abortResponse);
+    },
+  };
+}
 
 export class AsyncMutex {
   private tail: Promise<void> = Promise.resolve();
@@ -62,6 +86,15 @@ export function requestBodyLimit(request: Request, authenticated: boolean): numb
   if (!authenticated) return unauthenticatedRequestBodyBytes;
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
+  if (
+    path.length >= 5 &&
+    path[0] === "v1" &&
+    path[1] === "adapters" &&
+    path[2] &&
+    path[3] === "proxy"
+  ) {
+    return runtimeAdapterRelayBodyLimit;
+  }
   if (
     request.method.toUpperCase() === "POST" &&
     path.length === 4 &&

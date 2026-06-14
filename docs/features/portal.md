@@ -23,7 +23,7 @@ GET  /portal                                    lease / runner / host index
 GET  /portal/leases/{id-or-slug}                lease detail
 GET  /portal/leases/{id-or-slug}/share          share page
 POST /portal/leases/{id-or-slug}/share          add/remove user, set org, clear
-POST /portal/leases/{id-or-slug}/release        stop managed lease / remove registration
+POST /portal/leases/{id-or-slug}/release        stop, delete via adapter, or remove registration
 GET  /portal/leases/{id-or-slug}/vnc            WebVNC viewer page
 GET  /portal/leases/{id-or-slug}/code/...       code-server bridge (HTTP/WS proxy)
 GET  /portal/runs/{run-id}                       run detail
@@ -91,8 +91,10 @@ kinds:
   state pills, the lease class, icon-only access capabilities (SSH, VNC,
   code, browser), relative time cells, and a confirmed lifecycle action for
   sessions with manage access. The action stops and deletes the backing machine
-  for coordinator-managed leases; registered leases instead show **remove
-  registration** and warn that the external machine keeps running.
+  for coordinator-managed leases. Runtime-adapter-managed registrations show
+  **delete workspace** and permanently delete through that adapter; other
+  registered leases show **remove registration** and warn that the external
+  machine keeps running.
 - **External runners** — visibility-only rows for Blacksmith Testboxes synced
   from `crabbox list` output. They render as muted, disabled rows with status
   badges, inferred GitHub Actions run/workflow links, `stuck` markers for
@@ -129,9 +131,10 @@ The lease detail page shows:
   `crabbox run`, the WebVNC bridge, the code bridge, and (when egress is
   active) `crabbox egress status` / `crabbox egress stop`;
 - a viewport-fitted "recent runs" grid with state filters;
-- a stop button for coordinator-managed leases, or a metadata-only remove
-  registration button for client-managed leases, when the session can manage
-  the lease.
+- a stop button for coordinator-managed leases, a destructive delete-workspace
+  button for runtime-adapter-managed registrations, or a metadata-only remove
+  registration button for other client-managed leases, when the session can
+  manage the lease.
 
 Owners and users with `manage` access see a share control in the lease
 header. The share page (`/share`) adds or removes individual users, sets
@@ -139,6 +142,8 @@ org-wide access (`use`, `manage`, or off), or clears sharing entirely; it can
 also render embedded (`?embed=1`) inside the VNC viewer's share dialog. A
 `use` share can open visible lease pages and portal bridges; a `manage` share
 can also change sharing and use the matching stop or deregistration action.
+For adapter-managed registrations, that matching action deletes the external
+workspace rather than only removing coordinator metadata.
 
 `/portal/leases/{id-or-slug}/vnc` and `/portal/leases/{id-or-slug}/code/` are
 not ordinary pages. VNC opens a noVNC viewer that talks to the lease's desktop

@@ -16,34 +16,36 @@ import (
 )
 
 type leaseClaim struct {
-	LeaseID            string            `json:"leaseID"`
-	Slug               string            `json:"slug,omitempty"`
-	Provider           string            `json:"provider,omitempty"`
-	CloudID            string            `json:"cloudID,omitempty"`
-	ProviderScope      string            `json:"providerScope,omitempty"`
-	StaticHost         string            `json:"staticHost,omitempty"`
-	StaticUser         string            `json:"staticUser,omitempty"`
-	StaticPort         string            `json:"staticPort,omitempty"`
-	StaticWorkRoot     string            `json:"staticWorkRoot,omitempty"`
-	TargetOS           string            `json:"targetOS,omitempty"`
-	WindowsMode        string            `json:"windowsMode,omitempty"`
-	Pond               string            `json:"pond,omitempty"`
-	RepoRoot           string            `json:"repoRoot"`
-	ClaimedAt          string            `json:"claimedAt"`
-	LastUsedAt         string            `json:"lastUsedAt"`
-	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
-	TailscaleIPv4      string            `json:"tailscaleIPv4,omitempty"`
-	TailscaleFQDN      string            `json:"tailscaleFQDN,omitempty"`
-	TailscaleHostname  string            `json:"tailscaleHostname,omitempty"`
-	TailscaleTags      []string          `json:"tailscaleTags,omitempty"`
-	TailscaleLoginURL  string            `json:"tailscaleLoginURL,omitempty"`
-	TailscaleExitNode  string            `json:"tailscaleExitNode,omitempty"`
-	TailscaleExitLAN   bool              `json:"tailscaleExitLAN,omitempty"`
-	SSHHost            string            `json:"sshHost,omitempty"`
-	SSHPort            int               `json:"sshPort,omitempty"`
-	BridgeURL          string            `json:"bridgeURL,omitempty"`
-	CacheVolumes       []string          `json:"cacheVolumes,omitempty"`
-	Labels             map[string]string `json:"labels,omitempty"`
+	LeaseID                             string            `json:"leaseID"`
+	Slug                                string            `json:"slug,omitempty"`
+	Provider                            string            `json:"provider,omitempty"`
+	CloudID                             string            `json:"cloudID,omitempty"`
+	ProviderScope                       string            `json:"providerScope,omitempty"`
+	StaticHost                          string            `json:"staticHost,omitempty"`
+	StaticUser                          string            `json:"staticUser,omitempty"`
+	StaticPort                          string            `json:"staticPort,omitempty"`
+	StaticWorkRoot                      string            `json:"staticWorkRoot,omitempty"`
+	TargetOS                            string            `json:"targetOS,omitempty"`
+	WindowsMode                         string            `json:"windowsMode,omitempty"`
+	Pond                                string            `json:"pond,omitempty"`
+	RepoRoot                            string            `json:"repoRoot"`
+	ClaimedAt                           string            `json:"claimedAt"`
+	LastUsedAt                          string            `json:"lastUsedAt"`
+	IdleTimeoutSeconds                  int               `json:"idleTimeoutSeconds,omitempty"`
+	TailscaleIPv4                       string            `json:"tailscaleIPv4,omitempty"`
+	TailscaleFQDN                       string            `json:"tailscaleFQDN,omitempty"`
+	TailscaleHostname                   string            `json:"tailscaleHostname,omitempty"`
+	TailscaleTags                       []string          `json:"tailscaleTags,omitempty"`
+	TailscaleLoginURL                   string            `json:"tailscaleLoginURL,omitempty"`
+	TailscaleExitNode                   string            `json:"tailscaleExitNode,omitempty"`
+	TailscaleExitLAN                    bool              `json:"tailscaleExitLAN,omitempty"`
+	SSHHost                             string            `json:"sshHost,omitempty"`
+	SSHPort                             int               `json:"sshPort,omitempty"`
+	BridgeURL                           string            `json:"bridgeURL,omitempty"`
+	RuntimeAdapterRegistrationID        string            `json:"runtimeAdapterRegistrationID,omitempty"`
+	RuntimeAdapterPendingRegistrationID string            `json:"runtimeAdapterPendingRegistrationID,omitempty"`
+	CacheVolumes                        []string          `json:"cacheVolumes,omitempty"`
+	Labels                              map[string]string `json:"labels,omitempty"`
 }
 
 var claimMutationMutexes sync.Map

@@ -185,6 +185,31 @@ describe("NodeCoordinatorRuntime", () => {
     expect(operationRunner).not.toHaveBeenCalled();
   });
 
+  it("lets runtime-adapter replies bypass the lifecycle queue", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const socket = Object.assign(new EventEmitter(), {
+      close: vi.fn<(code?: number, reason?: string) => void>(),
+      terminate: vi.fn<() => void>(),
+    });
+    const operationRunner = vi.fn<OperationRunner>(
+      async <T>(_callback: () => Promise<T>): Promise<T> => await new Promise<T>(() => {}),
+    );
+    const message = vi.fn<() => Promise<void>>(async () => {});
+    runtime.setOperationRunner(operationRunner);
+
+    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "runtime-adapter-agent" }, [], {
+      message,
+      close: vi.fn<(code: number, reason: string) => void>(),
+      error: vi.fn<() => void>(),
+    });
+    socket.emit("message", Buffer.from("{}"), false);
+
+    await vi.waitFor(() => {
+      expect(message).toHaveBeenCalledOnce();
+    });
+    expect(operationRunner).not.toHaveBeenCalled();
+  });
+
   it("serializes control messages with lifecycle operations", async () => {
     const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
     const socket = Object.assign(new EventEmitter(), {
@@ -267,9 +292,8 @@ describe("NodeCoordinatorRuntime", () => {
     await vi.waitFor(() => expect(message).toHaveBeenCalledOnce());
 
     runtime.beginShutdown();
-    expect(close).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
     const stopped = runtime.stop();
-    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
     expect(mocks.boss.stop).not.toHaveBeenCalled();
     expect(mocks.storage.close).not.toHaveBeenCalled();
     messageDone.resolve();

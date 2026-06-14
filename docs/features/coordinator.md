@@ -27,8 +27,10 @@ cleanup remain in the direct adapter, while the CLI idempotently registers an
 owner-scoped lease record with the coordinator. This enables portal inventory,
 sharing, and outbound WebVNC for external, KubeVirt, static SSH, local, and other
 direct SSH providers without giving the coordinator provider credentials.
-Coordinator release and expiry remove only the registration; they never delete
-the provider resource. Registered records are excluded from provider access
+By default coordinator release and expiry remove only the registration. A
+registered lease can instead bind an outbound runtime adapter and workspace ID;
+the portal then confirms provider deletion through that adapter before removing
+the registration. Registered records remain excluded from provider access
 reconciliation, ready pools, image operations, orphan sweeps, and cost totals.
 
 The coordinator brokers the **control plane**, not the data plane. Lease
@@ -124,6 +126,10 @@ POST   /v1/artifacts/uploads
 GET    /v1/runners
 POST   /v1/runners/sync
 GET    /v1/usage
+POST   /v1/adapters/{adapter-id}/ticket
+GET    /v1/adapters/{adapter-id}
+GET    /v1/adapters/{adapter-id}/agent    (websocket; one-time ticket auth)
+*      /v1/adapters/{adapter-id}/proxy/v1/workspaces/...
 ```
 
 Registration accepts generic provider and SSH metadata. Repeating the same
@@ -131,6 +137,51 @@ owner/org/id/provider tuple refreshes it and reactivates an expired record.
 Changing provider, claiming another owner's ID, or replacing a managed record
 returns `409`. The CLI treats registration as best effort, but an authenticated
 WebVNC/share operation still requires the record to exist.
+
+Runtime adapters connect outbound to `/agent`, so their local lifecycle service
+does not need an inbound public route. The coordinator issues a short-lived,
+single-use ticket after normal owner authentication. The first ticket safely
+claims the adapter ID for that owner and organization; lease registration
+rejects unclaimed IDs and claims owned by another identity. The relay permits
+only the versioned workspace create, inspect, delete, and desktop-connection
+methods. Public proxy `DELETE` requests are rejected; destructive dispatch must
+go through a registered lease release so the coordinator can fence its immutable
+registration generation. Relay bodies are valid UTF-8 and bounded to 64 KiB. Lifecycle responses
+have a nine-second local deadline plus five seconds for relay delivery; desktop
+setup has a 150-second window. The absolute deadline travels with every frame,
+so work delayed in WebSocket buffers is rejected before local dispatch. Only
+workspace creation accepts a non-empty request body. Per-adapter, per-owner,
+and global in-flight limits isolate relay capacity. A lease reaching its TTL
+loses coordinator-mediated access immediately, including closure of existing
+WebVNC, code, and egress bridge sockets, while any pending external delete
+continues retrying as cleanup.
+The adapter/workspace binding remains reserved until that cleanup finishes.
+Generic and administrative lease release cannot clear a pending adapter delete;
+only an owner-scoped confirmed-absence completion for the exact adapter,
+workspace, and immutable registration generation can finalize it. The generation
+is refreshed whenever a terminal registration is reactivated, so a delayed
+completion from the previous workspace lifecycle cannot release the new one.
+Client claims retain an acknowledged generation and any pending replacement
+separately until registration succeeds, making both registration and later
+confirmed-absence cleanup recoverable across request loss or process failure.
+If that local generation state is missing, the CLI permits legacy release only
+through an atomic owner-scoped completion that requires the exact adapter and
+workspace binding to have no registration generation.
+Once a delete reaches the adapter, authentication failures and other generic
+upstream rejections remain retryable; only an explicit confirmed-absence result
+for the matching generation ends cleanup. Adapter `404` and terminal-looking
+relay responses alone never release the coordinator binding.
+Already-dispatched work remains charged to relay quotas if its caller
+disconnects. A durable dispatch fence also keeps that generation reserved until
+each selected delete succeeds or its absolute relay deadline expires; connector
+timeouts and transport failures cannot clear it early. Only the
+idempotency key and response content type cross the relay. Provider credentials
+and arbitrary callback URLs are never stored in lease records.
+
+The agent upgrade carries its single-use ticket only as an
+`Authorization: Bearer ...` header. Adapter-agent routes bypass end-user
+authentication at the coordinator, and tickets are not accepted in URLs or
+proxy-specific headers.
 
 Bridge ticket and websocket routes (WebVNC, code-server, egress) live under
 `/v1/leases/{id-or-slug}/{webvnc|code|egress}/...`; see
