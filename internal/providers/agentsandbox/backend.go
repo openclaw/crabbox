@@ -52,7 +52,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, claimName, slug, ready, unlockOperation, err := b.createClaim(ctx, client, req.RequestedSlug, req.Repo, req.Reclaim)
+	leaseID, claimName, slug, ready, _, unlockOperation, err := b.createClaim(ctx, client, req.RequestedSlug, req.Repo, req.Reclaim)
 	if err != nil {
 		return err
 	}
@@ -91,11 +91,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 	}()
 	if req.ID == "" {
-		leaseID, claimName, slug, ready, unlockOperation, err = b.createClaim(ctx, client, req.RequestedSlug, req.Repo, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-		claim, err = readLeaseClaim(leaseID)
+		leaseID, claimName, slug, ready, claim, unlockOperation, err = b.createClaim(ctx, client, req.RequestedSlug, req.Repo, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -464,7 +460,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			}
 			checkedOne = true
 			claimName := claimNameFromLocalClaim(claim)
-			_, getErr := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+			liveClaim, getErr := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 			if getErr != nil {
 				if !isNotFound(getErr) {
 					return getErr
@@ -483,6 +479,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing claim\n", claim.LeaseID, blank(claim.Slug, "-"))
 				claimRemovedOne = true
 				return nil
+			}
+			identity, err := claimIdentityFromLocalClaim(claim)
+			if err != nil {
+				return err
+			}
+			if err := validateClaimIdentity(liveClaim, identity); err != nil {
+				return err
 			}
 			due, reason := claimCleanupDue(claim, now)
 			if !due {
@@ -520,11 +523,11 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 }
 
 func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requestedSlug string, repo Repo, reclaim bool) (
-	string, string, string, sandboxReadiness, func(), error,
+	string, string, string, sandboxReadiness, LeaseClaim, func(), error,
 ) {
 	unlockSlug, err := lockAgentSandboxSlugAllocation(ctx, requestedSlug)
 	if err != nil {
-		return "", "", "", sandboxReadiness{}, nil, err
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, err
 	}
 	defer func() {
 		if unlockSlug != nil {
@@ -534,11 +537,11 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	leaseID := newLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return "", "", "", sandboxReadiness{}, nil, err
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, err
 	}
 	unlockOperation, err := lockAgentSandboxLeaseOperation(ctx, leaseID)
 	if err != nil {
-		return "", "", "", sandboxReadiness{}, nil, err
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, err
 	}
 	createdSuccessfully := false
 	defer func() {
@@ -562,7 +565,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 	}
 	created, err := client.Create(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, obj)
 	if err != nil && !createMayHaveSucceeded(err) {
-		return "", "", "", sandboxReadiness{}, nil, err
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, err
 	}
 	if err != nil || created == nil || strings.TrimSpace(created.Metadata.UID) == "" {
 		cause := err
@@ -571,7 +574,7 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		}
 		created, err = b.reconcileCreatedClaim(ctx, client, leaseID, claimResourceName, cause)
 		if err != nil {
-			return "", "", "", sandboxReadiness{}, nil, err
+			return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: reconciled agent-sandbox claim=%s after ambiguous create result\n", claimResourceName)
 	}
@@ -582,20 +585,21 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		WarmPool:      b.cfg.AgentSandbox.WarmPool,
 	}
 	pending := sandboxReadiness{ClaimName: claimResourceName, ClaimUID: identity.UID}
-	if err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimResourceName); err != nil {
-		return "", "", "", sandboxReadiness{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
+	if _, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimResourceName); err != nil {
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
 	}
 	unlockSlug()
 	unlockSlug = nil
 	ready, err := waitForSandboxReadinessWithTimeouts(ctx, client, b.cfg.AgentSandbox.Namespace, claimResourceName, identity, readinessTimeout(b.cfg), podReadinessTimeout(b.cfg), time.Second)
 	if err != nil {
-		return "", "", "", sandboxReadiness{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
 	}
-	if err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, ready, claimResourceName); err != nil {
-		return "", "", "", sandboxReadiness{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
+	persistedClaim, err := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, ready, claimResourceName)
+	if err != nil {
+		return "", "", "", sandboxReadiness{}, LeaseClaim{}, nil, b.rollbackCreatedClaim(client, leaseID, slug, repo, reclaim, claimResourceName, pending, err)
 	}
 	createdSuccessfully = true
-	return leaseID, claimResourceName, slug, ready, unlockOperation, nil
+	return leaseID, claimResourceName, slug, ready, persistedClaim, unlockOperation, nil
 }
 
 func (b *backend) reconcileCreatedClaim(ctx context.Context, client kubernetesClient, leaseID, claimName string, cause error) (*kubernetesObject, error) {
@@ -657,7 +661,7 @@ func (b *backend) rollbackCreatedClaim(
 		}
 		return cause
 	}
-	if persistErr := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimName); persistErr != nil {
+	if _, persistErr := writeClaimLease(b.cfg, leaseID, slug, repo, reclaim, pending, claimName); persistErr != nil {
 		return errors.Join(
 			cause,
 			fmt.Errorf("failed to delete agent-sandbox claim %s/%s UID %s during rollback: %w", b.cfg.AgentSandbox.Namespace, claimName, pending.ClaimUID, cleanupErr),

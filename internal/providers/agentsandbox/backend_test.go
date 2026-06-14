@@ -51,6 +51,25 @@ func TestWarmupCreatesClaimAndPersistsLocalLease(t *testing.T) {
 	}
 }
 
+func TestCreateClaimReturnsPersistedLocalLease(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+
+	leaseID, claimName, slug, ready, claim, unlock, err := backend.createClaim(context.Background(), fake, "returned-claim", repo, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if claim.LeaseID != leaseID || claim.Slug != slug || claim.Labels[claimLabelClaimName] != claimName {
+		t.Fatalf("claim=%#v lease=%s slug=%s claimName=%s", claim, leaseID, slug, claimName)
+	}
+	if claim.Labels[claimLabelClaimUID] != ready.ClaimUID || claim.Labels[claimLabelWarmPool] != cfg.AgentSandbox.WarmPool {
+		t.Fatalf("claim labels=%#v ready=%#v", claim.Labels, ready)
+	}
+}
+
 func TestWarmupReconcilesAmbiguousCreateResults(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -935,6 +954,35 @@ func TestCleanupSerializesWithLeaseReuse(t *testing.T) {
 	}
 	if fake.deletes != 1 {
 		t.Fatalf("deletes=%d want=1", fake.deletes)
+	}
+}
+
+func TestCleanupValidatesClaimIdentityBeforeDryRunOrIdleSkip(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "redirected-cleanup"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "redirected-cleanup")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	claimName := claim.Labels[claimLabelClaimName]
+	liveClaim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName]
+	liveClaim.Spec["warmPoolRef"].(map[string]any)["name"] = "other-pool"
+
+	err = backend.Cleanup(context.Background(), CleanupRequest{DryRun: true})
+	if err == nil || !strings.Contains(err.Error(), "warm pool changed") {
+		t.Fatalf("cleanup err=%v", err)
+	}
+	if strings.Contains(backend.rt.Stdout.(*bytes.Buffer).String(), "would delete") {
+		t.Fatalf("dry-run predicted unsafe deletion: %s", backend.rt.Stdout)
 	}
 }
 

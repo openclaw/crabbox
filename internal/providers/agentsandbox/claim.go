@@ -123,16 +123,15 @@ func claimLeaseForRepo(cfg Config, leaseID, slug string, repo Repo, reclaim bool
 	return claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
 }
 
-func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName string) error {
+func writeClaimLease(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready sandboxReadiness, claimName string) (LeaseClaim, error) {
 	if err := claimLeaseForRepo(cfg, leaseID, slug, repo, reclaim); err != nil {
-		return err
+		return LeaseClaim{}, err
 	}
 	claim, err := readLeaseClaim(leaseID)
 	if err != nil {
-		return err
+		return LeaseClaim{}, err
 	}
-	_, err = updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName))
-	return err
+	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimMetadataLabels(cfg, leaseID, ready, claimName))
 }
 
 func refreshClaimLeaseActivity(cfg Config, claim LeaseClaim) error {

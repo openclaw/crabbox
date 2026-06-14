@@ -216,6 +216,10 @@ Before deleting a live `SandboxClaim`, Crabbox verifies:
 - the current `metadata.uid` matches the UID pinned in the local claim
 - `spec.warmPoolRef.name` matches the warm pool pinned in the local claim
 
+Cleanup performs the same live identity validation before idle checks and
+dry-run output, so a preview cannot claim that a replaced or redirected object
+would be deleted.
+
 Missing Kubernetes claims are preserved locally by default because a 404 can be
 ambiguous across clusters or accounts. Set `--agent-sandbox-forget-missing` or
 `CRABBOX_AGENT_SANDBOX_FORGET_MISSING=true` only after confirming the claim is
