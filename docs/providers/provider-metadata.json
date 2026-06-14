@@ -419,6 +419,20 @@
     "caveat": "Needs KubeVirt, virtctl, and an SSH-ready template",
     "docs": "kubevirt.md"
   },
+  "lambda": {
+    "status": "built-in",
+    "category": "gpu-cloud",
+    "substrate": "Lambda Cloud on-demand instance",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "yes",
+    "lifecycle": "Crabbox",
+    "cleanup": "instance and key termination",
+    "bestFit": "Direct GPU-backed Linux workload over SSH",
+    "caveat": "Direct-only; billing, quota, and capacity are account-owned",
+    "docs": "lambda.md"
+  },
   "linode": {
     "status": "built-in",
     "category": "direct-cloud",
