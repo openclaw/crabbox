@@ -19,9 +19,9 @@ func TestWarmupCreatesSandboxClaim(t *testing.T) {
 	backend, stdout, stderr := newFakeBackend(t, fake)
 
 	if err := backend.Warmup(context.Background(), WarmupRequest{
-		Repo: Repo{Name: "my-app", Root: "/repo"},
+		Repo:          Repo{Name: "my-app", Root: "/repo"},
 		RequestedSlug: "codesandbox-blue",
-		TimingJSON: true,
+		TimingJSON:    true,
 	}); err != nil {
 		t.Fatalf("Warmup err=%v", err)
 	}
@@ -108,10 +108,10 @@ func TestRunStreamsOutputAndCleansUpOneShot(t *testing.T) {
 	backend, stdout, stderr := newFakeBackend(t, fake)
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "my-app", Root: "/repo"},
-		NoSync: true,
-		Command: []string{"echo", "hello"},
-		Env: map[string]string{"SECRET_TOKEN": "super-secret"},
+		Repo:       Repo{Name: "my-app", Root: "/repo"},
+		NoSync:     true,
+		Command:    []string{"echo", "hello"},
+		Env:        map[string]string{"SECRET_TOKEN": "super-secret"},
 		EnvSummary: true,
 	})
 	if err != nil {
@@ -144,9 +144,9 @@ func TestRunPropagatesExitAndKeepOnFailureRetainsSandbox(t *testing.T) {
 	backend, _, stderr := newFakeBackend(t, fake)
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "my-app", Root: "/repo"},
-		NoSync: true,
-		Command: []string{"false"},
+		Repo:          Repo{Name: "my-app", Root: "/repo"},
+		NoSync:        true,
+		Command:       []string{"false"},
 		KeepOnFailure: true,
 	})
 	if err == nil {
@@ -173,8 +173,8 @@ func TestRunCancellationPropagates(t *testing.T) {
 	cancel()
 
 	_, err := backend.Run(ctx, RunRequest{
-		Repo: Repo{Name: "my-app", Root: "/repo"},
-		NoSync: true,
+		Repo:    Repo{Name: "my-app", Root: "/repo"},
+		NoSync:  true,
 		Command: []string{"sleep", "10"},
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -198,8 +198,8 @@ func TestRunSyncOnlyUploadsArchiveAndExtracts(t *testing.T) {
 	backend.cfg.CodeSandbox.Workdir = "/project/workspace/my-app"
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "my-app", Root: repoRoot},
-		SyncOnly: true,
+		Repo:           Repo{Name: "my-app", Root: repoRoot},
+		SyncOnly:       true,
 		ForceSyncLarge: true,
 	})
 	if err != nil {
