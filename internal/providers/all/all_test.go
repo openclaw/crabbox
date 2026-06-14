@@ -207,10 +207,13 @@ func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("codesandbox targets=%#v", spec.Targets)
 	}
-	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureURLBridge, core.FeaturePauseResume} {
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("codesandbox features=%v missing %s", spec.Features, feature)
 		}
+	}
+	if spec.Features.Has(core.FeatureURLBridge) {
+		t.Fatalf("codesandbox features=%v must not advertise URL bridge without BridgeProvider support", spec.Features)
 	}
 }
 

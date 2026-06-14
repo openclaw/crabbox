@@ -193,7 +193,7 @@ async function callAny(target, names, ...args) {
 }
 async function openSandbox(sdk, id) {
   const sandboxes = sdk.sandboxes || sdk;
-  return await callAny(sandboxes, ["get", "connect", "open", "resume"], id);
+  return await callAny(sandboxes, ["get"], id);
 }
 async function resumeSandbox(sdk, id) {
   const sandboxes = sdk.sandboxes || sdk;

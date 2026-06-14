@@ -20,10 +20,13 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("spec kind/coordinator=%#v", spec)
 	}
-	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureURLBridge, core.FeaturePauseResume} {
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}
+	}
+	if spec.Features.Has(core.FeatureURLBridge) {
+		t.Fatalf("features=%v must not advertise the pond URL bridge without BridgeProvider support", spec.Features)
 	}
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v", spec.Targets)

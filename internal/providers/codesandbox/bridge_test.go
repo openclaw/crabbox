@@ -155,6 +155,12 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 		!strings.Contains(codeSandboxBridgeScript, "options.automaticWakeupConfig") {
 		t.Fatalf("bridge script must use documented CodeSandbox create option names")
 	}
+	if strings.Contains(codeSandboxBridgeScript, "[\"get\", \"connect\", \"open\", \"resume\"]") {
+		t.Fatalf("read-only openSandbox must not resume or connect hibernated sandboxes")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "return await callAny(sandboxes, [\"get\"], id);") {
+		t.Fatalf("read-only openSandbox must use SDK get only")
+	}
 }
 
 func TestSDKBridgeClassifiesMalformedJSON(t *testing.T) {
