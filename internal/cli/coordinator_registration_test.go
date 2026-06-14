@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -763,6 +764,7 @@ func TestResolvedLeaseClaimUpdatesRejectActiveStateChange(t *testing.T) {
 }
 
 func TestRegisterCoordinatorLeaseBestEffortMapsDirectLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
 	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
 	var got CoordinatorLeaseRegistration
@@ -771,7 +773,11 @@ func TestRegisterCoordinatorLeaseBestEffortMapsDirectLease(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"external","lifecycle":"registered","state":"active","runtimeAdapterID":"mac-lab","runtimeAdapterWorkspaceID":"fleet-a-is-123"}}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": map[string]any{
+			"id": "cbx_123", "provider": "external", "lifecycle": "registered", "state": "active",
+			"runtimeAdapterID": "mac-lab", "runtimeAdapterWorkspaceID": "fleet-a-is-123",
+			"runtimeAdapterRegistrationID": got.RuntimeRegistrationID,
+		}})
 	}))
 	defer server.Close()
 
@@ -798,12 +804,117 @@ func TestRegisterCoordinatorLeaseBestEffortMapsDirectLease(t *testing.T) {
 		SSH: SSHTarget{Host: "192.0.2.10", User: "runner", Port: "22", TargetOS: targetLinux},
 	}
 	lease.Server.ServerType.Name = "cpu16"
+	if err := claimLeaseTargetForRepoConfig(
+		lease.LeaseID, "my-box", cfg, lease.Server, lease.SSH, "/workspace", cfg.IdleTimeout, true,
+	); err != nil {
+		t.Fatal(err)
+	}
 	app.registerCoordinatorLeaseBestEffort(context.Background(), cfg, lease)
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
-	if got.Provider != "external" || got.CloudID != "external-box-123" || got.Host != "192.0.2.10" || got.WorkRoot != "/workspace" || !got.Desktop || got.DesktopEnv != "gnome" || len(got.ExposedPorts) != 2 || got.TTLSeconds != 7200 || got.IdleTimeoutSeconds != 1800 || got.RuntimeAdapterID != "mac-lab" || got.RuntimeWorkspaceID != "fleet-a-is-123" {
+	if got.Provider != "external" || got.CloudID != "external-box-123" || got.Host != "192.0.2.10" || got.WorkRoot != "/workspace" || !got.Desktop || got.DesktopEnv != "gnome" || len(got.ExposedPorts) != 2 || got.TTLSeconds != 7200 || got.IdleTimeoutSeconds != 1800 || got.RuntimeAdapterID != "mac-lab" || got.RuntimeWorkspaceID != "fleet-a-is-123" || got.RuntimeRegistrationID == "" {
 		t.Fatalf("registration=%#v", got)
+	}
+	claim, err := readLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RuntimeAdapterRegistrationID != got.RuntimeRegistrationID {
+		t.Fatalf("claim registration id=%q request=%q", claim.RuntimeAdapterRegistrationID, got.RuntimeRegistrationID)
+	}
+}
+
+func TestAdapterRegistrationRotatesRejectedTerminalGeneration(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	var registrationIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got CoordinatorLeaseRegistration
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		registrationIDs = append(registrationIDs, got.RuntimeRegistrationID)
+		w.Header().Set("Content-Type", "application/json")
+		if len(registrationIDs) == 1 {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"runtime_adapter_registration_replayed"}`))
+			return
+		}
+		if len(registrationIDs) == 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"temporarily_unavailable"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": map[string]any{
+			"id": "cbx_123", "provider": "external", "lifecycle": "registered", "state": "active",
+			"runtimeAdapterID": "mac-lab", "runtimeAdapterWorkspaceID": "fleet-a-is-123",
+			"runtimeAdapterRegistrationID": got.RuntimeRegistrationID,
+		}})
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "token"
+	cfg.BrokerMode = BrokerModeRegistered
+	cfg.IdleTimeout = time.Hour
+	lease := LeaseTarget{
+		LeaseID: "cbx_123",
+		Server:  Server{Provider: "external", CloudID: "external-box-123"},
+		SSH:     SSHTarget{Host: "192.0.2.10", Port: "22", TargetOS: targetLinux},
+	}
+	if err := claimLeaseTargetForRepoConfig(
+		lease.LeaseID, "adapter-box", cfg, lease.Server, lease.SSH, "/repo", cfg.IdleTimeout, true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mutateLeaseClaim(lease.LeaseID, func(claim *leaseClaim) error {
+		claim.RuntimeAdapterRegistrationID = "registration-generation-old"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	app := App{Stderr: &stderr}
+	if err := app.registerCoordinatorLeaseBestEffort(
+		context.Background(), cfg, lease,
+	); err == nil {
+		t.Fatal("replacement registration unexpectedly succeeded through a transport failure")
+	}
+	claim, err := readLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registrationIDs) != 2 ||
+		registrationIDs[0] != "registration-generation-old" ||
+		registrationIDs[1] == "" ||
+		registrationIDs[1] == registrationIDs[0] {
+		t.Fatalf("registration ids=%q", registrationIDs)
+	}
+	if claim.RuntimeAdapterRegistrationID != registrationIDs[0] ||
+		claim.RuntimeAdapterPendingRegistrationID != registrationIDs[1] {
+		t.Fatalf("failed replacement claim=%#v requests=%q", claim, registrationIDs)
+	}
+	stderr.Reset()
+	if err := app.registerCoordinatorLeaseBestEffort(context.Background(), cfg, lease); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if len(registrationIDs) != 3 || registrationIDs[2] != registrationIDs[1] {
+		t.Fatalf("retried registration ids=%q", registrationIDs)
+	}
+	claim, err = readLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.RuntimeAdapterRegistrationID != registrationIDs[1] ||
+		claim.RuntimeAdapterPendingRegistrationID != "" {
+		t.Fatalf("claim registration id=%q requests=%q", claim.RuntimeAdapterRegistrationID, registrationIDs)
 	}
 }
 
@@ -918,13 +1029,25 @@ func TestReleaseRegisteredCoordinatorLeaseNeverRequestsProviderDeletion(t *testi
 }
 
 func TestControllerManagedCoordinatorDeregistrationWaitsForConfirmedAbsence(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
 	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
 	requests := 0
+	var completion struct {
+		RuntimeAdapterDeleteCompletion struct {
+			AdapterID      string `json:"adapterID"`
+			WorkspaceID    string `json:"workspaceID"`
+			RegistrationID string `json:"registrationID"`
+			Status         string `json:"status"`
+		} `json:"runtimeAdapterDeleteCompletion"`
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/release" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&completion); err != nil {
+			t.Fatal(err)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"external","lifecycle":"registered","state":"released"}}`))
@@ -933,6 +1056,19 @@ func TestControllerManagedCoordinatorDeregistrationWaitsForConfirmedAbsence(t *t
 
 	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := claimLeaseTargetForRepoConfig(
+		"cbx_123", "adapter-box", cfg,
+		Server{Provider: "external", CloudID: "adapter-box"},
+		SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo", time.Hour, true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mutateLeaseClaim("cbx_123", func(claim *leaseClaim) error {
+		claim.RuntimeAdapterRegistrationID = "registration-generation-123"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	app.releaseRegisteredCoordinatorLeaseBestEffort(context.Background(), cfg, "cbx_123")
 	if requests != 0 {
 		t.Fatalf("controller-owned provider stop deregistered coordinator early: requests=%d", requests)
@@ -943,9 +1079,388 @@ func TestControllerManagedCoordinatorDeregistrationWaitsForConfirmedAbsence(t *t
 	if requests != 1 {
 		t.Fatalf("confirmed absence deregistration requests=%d", requests)
 	}
+	if completion.RuntimeAdapterDeleteCompletion.AdapterID != "mac-lab" ||
+		completion.RuntimeAdapterDeleteCompletion.WorkspaceID != "fleet-a-is-123" ||
+		completion.RuntimeAdapterDeleteCompletion.RegistrationID != "registration-generation-123" ||
+		completion.RuntimeAdapterDeleteCompletion.Status != "absent" {
+		t.Fatalf("confirmed absence completion=%#v", completion.RuntimeAdapterDeleteCompletion)
+	}
+}
+
+func TestConfirmedAbsenceFallsBackFromPendingToAcknowledgedGeneration(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	var registrationIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var completion struct {
+			RuntimeAdapterDeleteCompletion struct {
+				RegistrationID string `json:"registrationID"`
+			} `json:"runtimeAdapterDeleteCompletion"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&completion); err != nil {
+			t.Fatal(err)
+		}
+		registrationIDs = append(registrationIDs, completion.RuntimeAdapterDeleteCompletion.RegistrationID)
+		w.Header().Set("Content-Type", "application/json")
+		if len(registrationIDs) == 1 {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"runtime_adapter_delete_completion_mismatch"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","state":"released"}}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	if err := claimLeaseTargetForRepoConfig(
+		"cbx_123", "adapter-box", cfg,
+		Server{Provider: "external", CloudID: "adapter-box"},
+		SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo", time.Hour, true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mutateLeaseClaim("cbx_123", func(claim *leaseClaim) error {
+		claim.RuntimeAdapterRegistrationID = "registration-generation-current"
+		claim.RuntimeAdapterPendingRegistrationID = "registration-generation-pending"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(context.Background(), cfg, "cbx_123"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(registrationIDs, []string{
+		"registration-generation-pending",
+		"registration-generation-current",
+	}) {
+		t.Fatalf("completion registration ids=%q", registrationIDs)
+	}
+}
+
+func TestConfirmedAbsenceFallsBackToVerifiedLegacyReleaseAfterGenerationMismatches(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	var requests []string
+	var registrationIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_123/release":
+			var body struct {
+				RuntimeAdapterDeleteCompletion *struct {
+					RegistrationID string `json:"registrationID"`
+				} `json:"runtimeAdapterDeleteCompletion"`
+				RuntimeAdapterLegacyDeleteCompletion *struct {
+					AdapterID   string `json:"adapterID"`
+					WorkspaceID string `json:"workspaceID"`
+					Status      string `json:"status"`
+				} `json:"runtimeAdapterLegacyDeleteCompletion"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.RuntimeAdapterDeleteCompletion != nil {
+				requests = append(requests, "complete")
+				registrationIDs = append(registrationIDs, body.RuntimeAdapterDeleteCompletion.RegistrationID)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":"runtime_adapter_delete_completion_mismatch"}`))
+				return
+			}
+			if body.RuntimeAdapterLegacyDeleteCompletion == nil {
+				t.Fatal("missing atomic legacy runtime adapter completion")
+			}
+			requests = append(requests, "legacy-complete")
+			if completion := body.RuntimeAdapterLegacyDeleteCompletion; completion.AdapterID != "mac-lab" ||
+				completion.WorkspaceID != "fleet-a-is-123" || completion.Status != "absent" {
+				t.Fatalf("legacy completion=%#v", completion)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","state":"released"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	if err := claimLeaseTargetForRepoConfig(
+		"cbx_123", "adapter-box", cfg,
+		Server{Provider: "external", CloudID: "adapter-box"},
+		SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo", time.Hour, true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mutateLeaseClaim("cbx_123", func(claim *leaseClaim) error {
+		claim.RuntimeAdapterRegistrationID = "registration-generation-current"
+		claim.RuntimeAdapterPendingRegistrationID = "registration-generation-pending"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(context.Background(), cfg, "cbx_123"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(registrationIDs, []string{
+		"registration-generation-pending",
+		"registration-generation-current",
+	}) {
+		t.Fatalf("completion registration ids=%q", registrationIDs)
+	}
+	if !reflect.DeepEqual(requests, []string{"complete", "complete", "legacy-complete"}) {
+		t.Fatalf("requests=%q", requests)
+	}
+}
+
+func TestConfirmedAbsenceGenerationMismatchRejectsGenerationAwareLegacyFallback(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	completionRequests := 0
+	legacyCompletionRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_123/release":
+			var body struct {
+				RuntimeAdapterDeleteCompletion       json.RawMessage `json:"runtimeAdapterDeleteCompletion"`
+				RuntimeAdapterLegacyDeleteCompletion *struct {
+					AdapterID   string `json:"adapterID"`
+					WorkspaceID string `json:"workspaceID"`
+					Status      string `json:"status"`
+				} `json:"runtimeAdapterLegacyDeleteCompletion"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			if len(body.RuntimeAdapterDeleteCompletion) != 0 {
+				completionRequests++
+				_, _ = w.Write([]byte(`{"error":"runtime_adapter_delete_completion_mismatch"}`))
+				return
+			}
+			if completion := body.RuntimeAdapterLegacyDeleteCompletion; completion == nil ||
+				completion.AdapterID != "mac-lab" || completion.WorkspaceID != "fleet-a-is-123" ||
+				completion.Status != "absent" {
+				t.Fatalf("legacy completion=%#v", completion)
+			}
+			legacyCompletionRequests++
+			_, _ = w.Write([]byte(`{"error":"runtime_adapter_delete_completion_mismatch"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	if err := claimLeaseTargetForRepoConfig(
+		"cbx_123", "adapter-box", cfg,
+		Server{Provider: "external", CloudID: "adapter-box"},
+		SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo", time.Hour, true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := mutateLeaseClaim("cbx_123", func(claim *leaseClaim) error {
+		claim.RuntimeAdapterRegistrationID = "registration-generation-old"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := (App{}).releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(
+		context.Background(),
+		cfg,
+		"cbx_123",
+	)
+	if err == nil || !strings.Contains(err.Error(), "runtime_adapter_delete_completion_mismatch") {
+		t.Fatalf("generation-aware cleanup error=%v", err)
+	}
+	if completionRequests != 1 || legacyCompletionRequests != 1 {
+		t.Fatalf("completion=%d legacy completion=%d", completionRequests, legacyCompletionRequests)
+	}
+}
+
+func TestControllerManagedCoordinatorDeregistrationWithoutGenerationUsesLegacyRelease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	requests := 0
+	var completion struct {
+		AdapterID   string `json:"adapterID"`
+		WorkspaceID string `json:"workspaceID"`
+		Status      string `json:"status"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/release" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			RuntimeAdapterLegacyDeleteCompletion json.RawMessage `json:"runtimeAdapterLegacyDeleteCompletion"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(body.RuntimeAdapterLegacyDeleteCompletion, &completion); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","state":"released"}}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	if err := claimLeaseTargetForRepoConfig(
+		"cbx_123", "adapter-box", cfg,
+		Server{Provider: "external", CloudID: "adapter-box"},
+		SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo", time.Hour, true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(context.Background(), cfg, "cbx_123"); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 || completion.AdapterID != "mac-lab" || completion.WorkspaceID != "fleet-a-is-123" ||
+		completion.Status != "absent" {
+		t.Fatalf("requests=%d completion=%#v", requests, completion)
+	}
+}
+
+func TestExpiredLegacyPendingDeleteUsesAtomicCoordinatorFinalizer(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	pending := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_expired/release" {
+			t.Fatalf("expired pending cleanup used non-atomic request %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			RuntimeAdapterLegacyDeleteCompletion *struct {
+				AdapterID   string `json:"adapterID"`
+				WorkspaceID string `json:"workspaceID"`
+				Status      string `json:"status"`
+			} `json:"runtimeAdapterLegacyDeleteCompletion"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if completion := body.RuntimeAdapterLegacyDeleteCompletion; completion == nil ||
+			completion.AdapterID != "mac-lab" || completion.WorkspaceID != "fleet-a-is-123" ||
+			completion.Status != "absent" {
+			t.Fatalf("legacy completion=%#v", completion)
+		}
+		pending = false
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"cbx_expired","state":"released"}}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	if err := (App{}).releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(
+		context.Background(),
+		cfg,
+		"cbx_expired",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if pending {
+		t.Fatal("expired legacy pending cleanup was treated as already complete")
+	}
+}
+
+func TestControllerManagedCoordinatorDeregistrationWithoutClaimRejectsGenerationAwareRelease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	completionRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/release" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		completionRequests++
+		var body struct {
+			RuntimeAdapterLegacyDeleteCompletion json.RawMessage `json:"runtimeAdapterLegacyDeleteCompletion"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.RuntimeAdapterLegacyDeleteCompletion) == 0 {
+			t.Fatal("missing atomic legacy runtime adapter completion")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"runtime_adapter_delete_completion_mismatch"}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+	err := (App{}).releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(
+		context.Background(),
+		cfg,
+		"cbx_123",
+	)
+	if err == nil || !strings.Contains(err.Error(), "runtime_adapter_delete_completion_mismatch") {
+		t.Fatalf("generation-aware cleanup error=%v", err)
+	}
+	if completionRequests != 1 {
+		t.Fatalf("generation-aware atomic completion requests=%d", completionRequests)
+	}
+}
+
+func TestConfirmedAbsenceWithoutAdapterBindingRejectsPersistedGeneration(t *testing.T) {
+	for _, field := range []string{"current", "pending"} {
+		t.Run(field, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("CRABBOX_ADAPTER_ID", "")
+			t.Setenv(controllerWorkspaceIDEnv, "")
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				t.Fatalf("generation-aware cleanup made unexpected request %s %s", r.Method, r.URL.Path)
+			}))
+			defer server.Close()
+
+			cfg := Config{Coordinator: server.URL, CoordToken: "token", BrokerMode: BrokerModeRegistered}
+			if err := claimLeaseTargetForRepoConfig(
+				"cbx_123", "adapter-box", cfg,
+				Server{Provider: "external", CloudID: "adapter-box"},
+				SSHTarget{Host: "192.0.2.10", Port: "22"}, "/repo", time.Hour, true,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := mutateLeaseClaim("cbx_123", func(claim *leaseClaim) error {
+				if field == "current" {
+					claim.RuntimeAdapterRegistrationID = "registration-generation-current"
+				} else {
+					claim.RuntimeAdapterPendingRegistrationID = "registration-generation-pending"
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			err := (App{}).releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(
+				context.Background(),
+				cfg,
+				"cbx_123",
+			)
+			if err == nil || !strings.Contains(err.Error(), "requires adapter binding") {
+				t.Fatalf("generation-aware cleanup error=%v", err)
+			}
+			if requests != 0 {
+				t.Fatalf("generation-aware cleanup requests=%d", requests)
+			}
+		})
+	}
 }
 
 func TestConfirmedAbsenceCoordinatorDeregistrationTreatsMissingAsClean(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/release" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)

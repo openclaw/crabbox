@@ -2,7 +2,9 @@
 
 `crabbox webvnc` opens a desktop lease in a browser tab. For coordinator-backed
 leases it bridges into the authenticated coordinator portal. The local container
-provider also supports WebVNC by serving noVNC locally over an SSH tunnel.
+provider also supports WebVNC by serving noVNC locally over an SSH tunnel. An
+existing loopback VNC tunnel can use the provider-neutral `webvnc local` bridge
+on a macOS or Linux host.
 
 ```sh
 crabbox warmup --desktop
@@ -10,6 +12,7 @@ crabbox webvnc --id swift-crab
 crabbox webvnc --id swift-crab --network tailscale
 crabbox webvnc --id swift-crab --open
 crabbox webvnc --id swift-crab --open --take-control
+secret-command | crabbox webvnc local --vnc-host 127.0.0.1 --vnc-port 5900 --username admin --password-stdin --open
 crabbox webvnc daemon start --id swift-crab --open
 crabbox webvnc daemon status --id swift-crab
 crabbox webvnc daemon list
@@ -72,6 +75,36 @@ while the browser tab is open. If the browser tab reloads or drops, the bridge
 re-registers so the portal retry can reconnect. If the SSH tunnel process
 exits, the foreground bridge exits instead of leaving a stale viewer URL; a
 background supervisor observes that exit and starts a freshly resolved bridge.
+
+### Existing local VNC tunnel
+
+On macOS and Linux, `crabbox webvnc local` adds the browser viewer to an
+already-running VNC tunnel. It neither creates nor owns the underlying tunnel:
+
+```sh
+secret-command | crabbox webvnc local \
+  --vnc-host 127.0.0.1 \
+  --vnc-port 5900 \
+  --username admin \
+  --password-stdin \
+  --open
+```
+
+The VNC source must be the literal IPv4 loopback address. Crabbox requires
+exactly one current-user process owner, pins its PID and process-start identity,
+verifies that identity around every connection, stops if it changes, and checks
+the RFB banner before reading the password from stdin. The browser listener is
+also bound to `127.0.0.1`; use `--local-port <port>` only when a fixed browser
+port is required. The command stays in the foreground and must remain running
+alongside the underlying tunnel.
+
+The self-contained noVNC handoff is a mode-`0600` temporary file. It contains
+only a fresh per-process bridge token, never the VNC password. The username is
+the non-secret value supplied explicitly through `--username`. The password
+remains in process memory, is returned to that file-origin viewer only after a
+token-authenticated POST, and is absent from arguments, environment variables,
+browser URLs, and the handoff file. The WebSocket relay requires the same token
+as a per-session subprotocol. The handoff is removed when the bridge exits.
 
 The bridge opens a small warm pool of backend sessions (4 slots for Linux and
 Windows targets, 2 for macOS). That pool is what the `slots=` field in

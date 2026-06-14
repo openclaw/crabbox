@@ -50,12 +50,12 @@ CLIs and coordinators still interoperate.
 
 ## Ownership
 
-| Layer | Owns |
-|:------|:-----|
-| **CLI** | config + flags; per-lease SSH key; SSH readiness; Git seeding + rsync; sync fingerprints and sanity checks; remote command + streaming; the control WebSocket when available, with HTTP fallback; release |
-| **Broker** | request auth + identity; serialized lease state; provider credentials; machine create/delete; lease expiry; pool/status/inspect; run records, logs, events, telemetry; usage; spend caps |
-| **Provider** | raw compute: the per-provider adapter creates and deletes hosts (Hetzner servers, AWS EC2 instances, Azure VMs, GCP instances, and others) |
-| **Runner** | nothing durable on a brokered box: Linux is prepared with SSH, Git, rsync, and a work root; non-Linux targets get provider-specific bootstrap; static targets are existing SSH hosts; project runtimes come from repo-owned setup |
+| Layer        | Owns                                                                                                                                                                                                                              |
+| :----------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CLI**      | config + flags; per-lease SSH key; SSH readiness; Git seeding + rsync; sync fingerprints and sanity checks; remote command + streaming; the control WebSocket when available, with HTTP fallback; release                         |
+| **Broker**   | request auth + identity; serialized lease state; provider credentials; machine create/delete; lease expiry; pool/status/inspect; run records, logs, events, telemetry; usage; spend caps                                          |
+| **Provider** | raw compute: the per-provider adapter creates and deletes hosts (Hetzner servers, AWS EC2 instances, Azure VMs, GCP instances, and others)                                                                                        |
+| **Runner**   | nothing durable on a brokered box: Linux is prepared with SSH, Git, rsync, and a work root; non-Linux targets get provider-specific bootstrap; static targets are existing SSH hosts; project runtimes come from repo-owned setup |
 
 ## What `crabbox run` does
 
@@ -141,8 +141,10 @@ the rest of the provider set).
 With `broker.mode: registered`, the provider path stays direct but the CLI
 mirrors owner-scoped lease metadata and heartbeats to the coordinator. That adds
 portal inventory, opt-in sharing, and outbound WebVNC without moving provider
-credentials or cleanup authority into the broker. Registered records do not
-count toward managed provider quotas, costs, images, pools, or maintenance.
+credentials or direct provider cleanup authority into the broker. Release
+removes only metadata by default; an explicitly bound outbound runtime adapter
+can perform a user-confirmed workspace delete. Registered records do not count
+toward managed provider quotas, costs, images, pools, or maintenance.
 
 Static SSH targets (`provider: ssh`) point at a preexisting machine and bypass
 the broker even when a broker URL exists in config. macOS and Windows WSL2

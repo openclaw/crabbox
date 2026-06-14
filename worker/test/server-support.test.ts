@@ -1,4 +1,5 @@
-import type { IncomingMessage } from "node:http";
+import { EventEmitter } from "node:events";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { Writable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
@@ -12,6 +13,7 @@ import {
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeRequestAbortSignal,
   readNodeRequestBody,
   requestBodyLimit,
   requestSourceIP,
@@ -21,6 +23,7 @@ import {
   unauthenticatedRequestBodyBytes,
   writeNodeResponseBody,
 } from "../node/server-support";
+import { runtimeAdapterRelayBodyLimit } from "../src/runtime-adapter-relay";
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -31,6 +34,39 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 describe("Node server support", () => {
+  it("aborts Fetch work when the Node client disconnects", () => {
+    const request = Object.assign(new EventEmitter(), { aborted: false });
+    const response = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableFinished: false,
+    });
+    const cancellation = nodeRequestAbortSignal(
+      request as unknown as IncomingMessage,
+      response as unknown as ServerResponse,
+    );
+
+    expect(cancellation.signal.aborted).toBe(false);
+    response.emit("close");
+    expect(cancellation.signal.aborted).toBe(true);
+    cancellation.dispose();
+  });
+
+  it("does not treat a completed Node response as client cancellation", () => {
+    const request = Object.assign(new EventEmitter(), { aborted: false });
+    const response = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableFinished: true,
+    });
+    const cancellation = nodeRequestAbortSignal(
+      request as unknown as IncomingMessage,
+      response as unknown as ServerResponse,
+    );
+
+    response.emit("close");
+    expect(cancellation.signal.aborted).toBe(false);
+    cancellation.dispose();
+  });
+
   it("keeps provider I/O, maintenance, and code proxy traffic off the lifecycle queue", () => {
     expect(
       fleetRequestQueue(new Request("https://coordinator.test/v1/leases", { method: "POST" })),
@@ -109,6 +145,14 @@ describe("Node server support", () => {
     expect(
       requestBodyLimit(new Request("https://coordinator.test/v1/leases", { method: "POST" }), true),
     ).toBe(authenticatedRequestBodyBytes);
+    expect(
+      requestBodyLimit(
+        new Request("https://coordinator.test/v1/adapters/example-adapter/proxy/v1/workspaces", {
+          method: "POST",
+        }),
+        true,
+      ),
+    ).toBe(runtimeAdapterRelayBodyLimit);
   });
 
   it("caps bodies drained before authentication completes", async () => {

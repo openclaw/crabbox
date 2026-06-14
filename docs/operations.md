@@ -202,6 +202,7 @@ CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for /v1/workspaces lease provisioning
 CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for /v1/workspaces terminal attachment
 CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
 CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default standard
+CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization; default 0, maximum 4
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
 CRABBOX_SESSION_SECRET            required for browser login
@@ -253,6 +254,12 @@ also receives a coordinator-generated SSH host identity whose fingerprint is
 persisted before provisioning, so first attachment does not rely on TOFU.
 The versioned workspace `attachUrl` is a bearer-authenticated server-to-server
 endpoint for control planes such as Crabfleet, not a browser portal URL.
+
+When `CRABBOX_WORKSPACE_PREWARM_COUNT` is positive, the coordinator keeps that
+many hidden ready workspaces for each organization with active workspace demand.
+Any owner in the organization can atomically adopt a matching spare. The
+coordinator replenishes adopted spares and drains them after the organization
+has no provisioning or ready workspaces.
 
 ### Artifact backend
 

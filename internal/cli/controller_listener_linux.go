@@ -8,25 +8,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 func controllerListenerOwnershipSupported() bool { return true }
 
 func controllerVerifyDaemonOwnedListener(port string, supervisorPID int) error {
-	portNumber, err := strconv.Atoi(port)
-	if err != nil || portNumber < 1 || portNumber > 65535 {
-		return fmt.Errorf("invalid local listener port")
-	}
-	inodes, err := controllerLinuxLoopbackListenerInodes(portNumber)
+	owners, err := controllerLinuxLoopbackListenerOwnerPIDs(port)
 	if err != nil {
 		return err
-	}
-	owners, err := controllerLinuxSocketOwners(inodes)
-	if err != nil {
-		return err
-	}
-	if len(owners) == 0 {
-		return fmt.Errorf("no process owns the loopback listener")
 	}
 	for _, pid := range owners {
 		owned, err := controllerLinuxProcessDescendsFrom(pid, supervisorPID)
@@ -38,6 +29,48 @@ func controllerVerifyDaemonOwnedListener(port string, supervisorPID int) error {
 		}
 	}
 	return nil
+}
+
+func localWebVNCListenerIdentity(port string) (localWebVNCSourceIdentity, error) {
+	owners, err := controllerLinuxLoopbackListenerOwnerPIDs(port)
+	if err != nil {
+		return localWebVNCSourceIdentity{}, err
+	}
+	pid, err := exactLocalWebVNCListenerOwnerPID(owners)
+	if err != nil {
+		return localWebVNCSourceIdentity{}, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Stat(filepath.Join("/proc", strconv.Itoa(pid)), &stat); err != nil {
+		return localWebVNCSourceIdentity{}, fmt.Errorf("inspect Linux listener process owner: %w", err)
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		return localWebVNCSourceIdentity{}, fmt.Errorf("IPv4 loopback listener process %d is not owned by the current user", pid)
+	}
+	started, err := webVNCDaemonProcessStartIdentity(pid)
+	if err != nil {
+		return localWebVNCSourceIdentity{}, fmt.Errorf("inspect listener process %d start identity: %w", pid, err)
+	}
+	return localWebVNCSourceIdentity{PID: pid, ProcessStarted: started}, nil
+}
+
+func controllerLinuxLoopbackListenerOwnerPIDs(port string) ([]int, error) {
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return nil, fmt.Errorf("invalid local listener port")
+	}
+	inodes, err := controllerLinuxLoopbackListenerInodes(portNumber)
+	if err != nil {
+		return nil, err
+	}
+	owners, err := controllerLinuxSocketOwners(inodes)
+	if err != nil {
+		return nil, err
+	}
+	if len(owners) == 0 {
+		return nil, fmt.Errorf("no process owns the loopback listener")
+	}
+	return owners, nil
 }
 
 func controllerLinuxLoopbackListenerInodes(port int) (map[string]struct{}, error) {

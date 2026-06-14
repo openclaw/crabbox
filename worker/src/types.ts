@@ -69,6 +69,7 @@ export interface Env {
   CRABBOX_PUBLIC_URL?: string;
   CRABBOX_WORKSPACE_PROVIDER?: string;
   CRABBOX_WORKSPACE_CLASS?: string;
+  CRABBOX_WORKSPACE_PREWARM_COUNT?: string;
   CRABBOX_WORKSPACE_SSH_PUBLIC_KEY?: string;
   CRABBOX_WORKSPACE_SSH_PRIVATE_KEY?: string;
   CRABBOX_DEFAULT_ORG?: string;
@@ -206,6 +207,9 @@ export interface LeaseRegistrationRequest {
   exposedPorts?: string[];
   ttlSeconds?: number;
   idleTimeoutSeconds?: number;
+  runtimeAdapterID?: string;
+  runtimeAdapterWorkspaceID?: string;
+  runtimeAdapterRegistrationID?: string;
 }
 
 export const coordinatorProviderRegistry = [
@@ -291,6 +295,15 @@ export interface LeaseRecord {
   workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;
+  runtimeAdapterID?: string;
+  runtimeAdapterWorkspaceID?: string;
+  runtimeAdapterRegistrationID?: string;
+  runtimeAdapterDeleteRequestedAt?: string;
+  runtimeAdapterDeleteClaimID?: string;
+  runtimeAdapterDeleteRetryAt?: string;
+  runtimeAdapterDeleteDispatchUntil?: string;
+  runtimeAdapterDeleteAttempts?: number;
+  runtimeAdapterDeleteError?: string;
   target: TargetOS;
   os?: string;
   windowsMode?: WindowsMode;

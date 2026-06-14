@@ -23,6 +23,7 @@ const bridgeDataAttachmentKinds = new Set([
   "egress-host",
   "egress-client",
   "workspace-terminal",
+  "runtime-adapter-agent",
 ]);
 
 export interface NodeUpgradeContext {
@@ -108,6 +109,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   beginShutdown(): void {
     this.shuttingDown = true;
     clearInterval(this.pingInterval);
+    this.closeSocketsForShutdown();
   }
 
   private closeSocketsForShutdown(): void {
@@ -117,7 +119,6 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
 
   async stop(): Promise<void> {
     this.beginShutdown();
-    this.closeSocketsForShutdown();
     await Promise.allSettled(this.socketClosures ?? []);
     await this.drainSocketOperations();
     await this.alarmRun;

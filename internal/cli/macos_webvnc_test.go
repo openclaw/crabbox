@@ -89,6 +89,20 @@ func TestMacOSWebVNCCredentialsHandler(t *testing.T) {
 	}
 }
 
+func TestMacOSWebVNCCredentialsHandlerRejectsOversizedBody(t *testing.T) {
+	session := macOSWebVNCSession{Token: "deadbeef", Protocol: "crabbox.deadbeef"}
+	body := strings.NewReader("token=" + strings.Repeat("x", maxMacOSWebVNCCredentialBodyBytes))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:6080/credentials", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "null")
+	recorder := httptest.NewRecorder()
+	macOSWebVNCCredentialsHandler(session, rfbCredentials{Username: "admin", Password: "secret"}).ServeHTTP(recorder, req)
+
+	if recorder.Code == http.StatusOK {
+		t.Fatal("oversized credential request was accepted")
+	}
+}
+
 func TestMacOSWebVNCProtocolAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:6080/websockify", nil)
 	req.Header.Set("Sec-WebSocket-Protocol", "binary, crabbox.deadbeef")

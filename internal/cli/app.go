@@ -196,7 +196,7 @@ Commands:
   ports       Publish, list, or unpublish provider-native ports
   cp          Copy files between host and a delegated sandbox
   vnc         Print or open VNC connection details for a desktop lease
-  webvnc      Bridge a desktop lease into the authenticated web portal
+  webvnc      Open a desktop lease or local VNC tunnel in a browser
   code        Bridge a code lease into the authenticated web portal
   egress      Bridge lease browser/app traffic through this machine
   screenshot  Capture a PNG from a desktop lease

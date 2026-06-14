@@ -4,18 +4,24 @@
 
 ### Added
 
+- Added configurable organization-wide workspace prewarming with cross-owner adoption, immediate replenishment while busy, and automatic idle drain.
+- Added `crabbox webvnc local` on macOS and Linux for token-gated browser access to an existing loopback VNC tunnel, with the VNC password accepted only through stdin and kept out of process arguments, environment variables, URLs, and viewer files.
 - Added authenticated Crabfleet workspace terminals with bounded SSH/WebSocket bridging, durable tmux resume, and lifecycle revocation.
 - Added `crabbox adapter connect`, an outbound ticket-authenticated relay for the narrow `crabfleet/v1` runtime-adapter API, with a current-user-owned peer-verified Unix-socket transport, per-request local-token reload, bounded bodies, configurable desktop request timeouts, and reconnecting coordinator login refresh.
 - Added `crabbox adapter serve`, a generic authenticated Linux/macOS-hosted workspace lifecycle API with a no-follow descriptor-verified lock in a private current-user-owned state directory, read-only state validation, crash-owned lifecycle children including bounded provider discovery, fixed TTL/idle and machine-shape override policy, explicit idempotent fixed-ID provider contracts, immutable full-identity status adoption and full-identity pre-release validation even before claim persistence, per-attempt provider route/config scopes, exact fixed external identities with crash-reclaimable fully fsynced slug reservations, restart-safe gated provider-side-effect durability with immediate memory-retried credential-bridge revocation on failed terminal writes, adapter-only side-effect-free WebVNC restarts with ordinary daemon heartbeats preserved, scope/state/resource-bound daemon reuse, per-workspace daemon OS locking, verified WebVNC supervisor/process-tree revocation, exact remote websockify socket/process ownership plus authenticated noVNC WebSocket readiness, full-identity refreshed-absence cleanup, bounded process-tree orchestration, no-follow token loading, exact-owned non-forking loopback SSH tunnels on Linux/macOS/Windows, and a public open-source Linux desktop bootstrap with noVNC/websockify, private user-owned VNC credentials, and a narrowly privileged desktop reset helper.
 - Added `provider: ovh` for direct OVHcloud Public Cloud Linux SSH leases with signed API authentication, local claim-backed ownership, guarded recovery, and live lifecycle coverage. Thanks @coygeek.
+- Added `provider: codesandbox` for delegated CodeSandbox Linux environments with archive sync, retained lifecycle, pause/resume, preview URLs, exact SDK pinning, truthful running-state checks, command exit propagation, and live lifecycle coverage; archive-sync orchestration is now shared across CodeSandbox, OpenComputer, OpenSandbox, Superserve, and Vercel Sandbox. Thanks @coygeek.
 - Added `provider: cloudflare-dynamic-workers` for authenticated Worker-runtime module execution through Cloudflare Dynamic Workers, including blocked-by-default egress, stable caching, durable run metadata, lifecycle commands, and isolated live smoke coverage. Thanks @coygeek.
 - Added `provider: agent-sandbox` for delegated Linux runs through Agent Sandbox `v0.5.0rc1` `v1beta1` warm pools, using the operator's `kubectl` for dependency-light discovery, lifecycle, archive sync, exec, guarded ownership cleanup, and live smoke coverage. Thanks @coygeek.
 - Added `provider: vercel-sandbox` for delegated Linux microVM runs through the official Vercel Sandbox SDK, including archive sync, streamed output, retained-session resume, ownership-guarded lifecycle operations, and guarded live smoke coverage. Thanks @coygeek.
 - Added generic Job evidence fields plus bounded Islo single-file `--require-artifact` and `--download` support, with provider capability gating and secret-safe archive upload errors. Thanks @zozo123.
+- Added owner-scoped outbound runtime-adapter relays so registered workspaces can be created and deleted through a provider-neutral lifecycle API without exposing the provider control plane, including confirmed Delete actions in the portal.
 
 ### Fixed
 
 - Hardened Agent Sandbox repository-config workload selection and retained UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes.
+- Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.
+- Hardened runtime-adapter relays with end-to-end absolute deadlines, durable generation-scoped dispatch fences retained across ambiguous connector failures, atomic owner-only legacy cleanup, rejection of unfenced proxy deletes, per-owner in-flight quotas, post-cancellation accounting, response-delivery grace, connector-matched request validation, restart-safe TTL-first live-bridge revocation, retry-safe upstream rejection handling, generation-fenced confirmed-absence acknowledgments, and cleanup-fenced workspace bindings.
 - Fixed Cloudflare Dynamic Workers lifecycle reads, compatibility identity, bundle validation, and live-smoke credential isolation.
 - Fixed Windows local-container sync to avoid unusable WSL command shims, support Docker Desktop mount roots, and fall back to native rsync when WSL lacks native SSH tooling. Thanks @brokemac79.
 - Fixed brokered Tailscale cleanup to avoid privileged deletion from client-posted device IDs, preserve connectivity across normal reboots, and fail live preflight on application-level errors.
@@ -42,7 +48,6 @@
 - Added direct SSH login helpers for kept Islo sandboxes through the official Islo CLI proxy. Thanks @zozo123.
 - Added a portable Node.js and PostgreSQL coordinator runtime with durable pg-boss maintenance jobs, WebSocket bridges, trusted reverse-proxy identity support, container packaging, and the existing Cloudflare Worker/Durable Object runtime preserved as an adapter over the same fleet implementation.
 - Added refreshable coordinator bearer authentication through a shell-free JSON argv token command, including HTTP and reconnecting WebSocket bridges behind expiring upstream identity proxies.
-
 ### Fixed
 
 - Fixed pond ACL bootstrap to preserve Tailscale HuJSON comments, ordering, trailing commas, and unrelated policy sections while failing closed on ambiguous shapes. Thanks @coygeek.

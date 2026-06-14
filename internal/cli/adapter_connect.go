@@ -23,6 +23,7 @@ const (
 	adapterRelayRequestTimeout        = 9 * time.Second
 	adapterRelayHandshakeTimeout      = 10 * time.Second
 	adapterRelayDefaultConnectionTime = 2 * time.Minute
+	adapterRelayMaxConnectionTime     = 24 * time.Hour
 	adapterRelayConnectionOverhead    = 30 * time.Second
 	adapterRelayWriteTimeout          = 5 * time.Second
 	adapterRelayMinBackoff            = 250 * time.Millisecond
@@ -38,12 +39,13 @@ type coordinatorAdapterTicket struct {
 }
 
 type adapterRelayRequest struct {
-	Type    string            `json:"type"`
-	ID      string            `json:"id"`
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    *string           `json:"body,omitempty"`
+	Type       string            `json:"type"`
+	ID         string            `json:"id"`
+	Method     string            `json:"method"`
+	Path       string            `json:"path"`
+	DeadlineMS int64             `json:"deadlineMs"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       *string           `json:"body,omitempty"`
 }
 
 type adapterRelayResponse struct {
@@ -87,6 +89,9 @@ func (a App) adapterConnect(ctx context.Context, args []string) error {
 	}
 	if *connectionTimeout <= 0 {
 		return exit(2, "--connection-timeout must be greater than zero")
+	}
+	if *connectionTimeout > adapterRelayMaxConnectionTime {
+		return exit(2, "--connection-timeout must not exceed %s", adapterRelayMaxConnectionTime)
 	}
 	desktopRequestTimeout := *connectionTimeout + adapterRelayConnectionOverhead
 	if desktopRequestTimeout <= *connectionTimeout {
@@ -197,7 +202,11 @@ func connectAdapterRelay(
 ) error {
 	dialCtx, cancelDial := context.WithTimeout(ctx, adapterRelayHandshakeTimeout)
 	defer cancelDial()
-	ticket, err := coord.CreateAdapterTicket(dialCtx, adapterID)
+	coordinatorDesktopTimeout := desktopRequestTimeout + adapterRelayWriteTimeout
+	if coordinatorDesktopTimeout <= desktopRequestTimeout {
+		return errors.New("adapter relay desktop timeout is too large")
+	}
+	ticket, err := coord.CreateAdapterTicket(dialCtx, adapterID, coordinatorDesktopTimeout)
 	if err != nil {
 		return fmt.Errorf("create adapter ticket: %w", err)
 	}
@@ -234,9 +243,11 @@ func connectAdapterRelay(
 	return relay.serve(ctx)
 }
 
-func (c *CoordinatorClient) CreateAdapterTicket(ctx context.Context, adapterID string) (coordinatorAdapterTicket, error) {
+func (c *CoordinatorClient) CreateAdapterTicket(ctx context.Context, adapterID string, desktopTimeout time.Duration) (coordinatorAdapterTicket, error) {
 	var result coordinatorAdapterTicket
-	err := c.do(ctx, http.MethodPost, "/v1/adapters/"+url.PathEscape(adapterID)+"/ticket", map[string]any{}, &result)
+	err := c.do(ctx, http.MethodPost, "/v1/adapters/"+url.PathEscape(adapterID)+"/ticket", map[string]any{
+		"desktopTimeoutMs": desktopTimeout.Milliseconds(),
+	}, &result)
 	return result, err
 }
 
@@ -339,12 +350,18 @@ func (r *adapterRelay) handle(ctx context.Context, request adapterRelayRequest) 
 	if err := validateAdapterRelayRequest(request); err != nil {
 		return adapterRelayErrorResponse(request.ID, http.StatusBadRequest, "invalid_request", err.Error())
 	}
+	deadline := time.UnixMilli(request.DeadlineMS)
+	if !deadline.After(time.Now()) {
+		return adapterRelayErrorResponse(request.ID, http.StatusGatewayTimeout, "adapter_timeout", "adapter relay request expired before local dispatch")
+	}
 	body := []byte(nil)
 	if request.Body != nil {
 		body = []byte(*request.Body)
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, adapterRelayTimeoutForRequest(request, r.desktopTimeout))
-	defer cancel()
+	deadlineCtx, cancelDeadline := context.WithDeadline(ctx, deadline)
+	defer cancelDeadline()
+	requestCtx, cancelTimeout := context.WithTimeout(deadlineCtx, adapterRelayTimeoutForRequest(request, r.desktopTimeout))
+	defer cancelTimeout()
 	localPath, ok := adapterRelayCanonicalPath(request.Method, request.Path)
 	if !ok {
 		return adapterRelayErrorResponse(request.ID, http.StatusBadRequest, "invalid_request", "method and path are outside the crabfleet/v1 adapter surface")
@@ -371,6 +388,9 @@ func (r *adapterRelay) handle(ctx context.Context, request adapterRelayRequest) 
 	localRequest.Header.Set("Accept", "application/json")
 	if request.Method == http.MethodPost && request.Path == "/v1/workspaces" && localRequest.Header.Get("Content-Type") == "" {
 		localRequest.Header.Set("Content-Type", "application/json")
+	}
+	if requestCtx.Err() != nil {
+		return adapterRelayErrorResponse(request.ID, http.StatusGatewayTimeout, "adapter_timeout", "adapter relay request expired before local dispatch")
 	}
 
 	localResponse, err := r.client.Do(localRequest)
@@ -413,6 +433,9 @@ func validateAdapterRelayRequest(request adapterRelayRequest) error {
 	}
 	if !validAdapterRelayRequestID(request.ID) {
 		return errors.New("id must be 1 to 128 printable characters")
+	}
+	if request.DeadlineMS <= 0 {
+		return errors.New("deadlineMs must be a positive Unix millisecond timestamp")
 	}
 	if request.Method != strings.ToUpper(request.Method) || !adapterRelayRouteAllowed(request.Method, request.Path) {
 		return errors.New("method and path are outside the crabfleet/v1 adapter surface")

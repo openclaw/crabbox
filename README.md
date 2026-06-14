@@ -63,11 +63,11 @@ infrastructure.
 
 ### Coordinator deployment choices
 
-| Path | State and scheduling | Best fit |
-| --- | --- | --- |
-| **Cloudflare Workers** | Fleet Durable Object, alarms, scheduled Worker trigger | Managed edge deployment with minimal server operations and optional Cloudflare Access. |
+| Path                     | State and scheduling                                          | Best fit                                                                                                                     |
+| ------------------------ | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Cloudflare Workers**   | Fleet Durable Object, alarms, scheduled Worker trigger        | Managed edge deployment with minimal server operations and optional Cloudflare Access.                                       |
 | **Node.js + PostgreSQL** | PostgreSQL key/value state, pg-boss alarms and reconciliation | Initial runtime for containers, a VM, or Kubernetes with one replica; requires Node.js, PostgreSQL 13+, TLS, and WebSockets. |
-| **No coordinator** | Local claims and provider-owned state | Personal/direct providers where shared credentials, history, budgets, and central cleanup are unnecessary. |
+| **No coordinator**       | Local claims and provider-owned state                         | Personal/direct providers where shared credentials, history, budgets, and central cleanup are unnecessary.                   |
 
 Both coordinator runtimes expose the same API, GitHub login, portal, provider
 adapters, cost controls, cleanup behavior, and live bridges. State is not
@@ -178,26 +178,26 @@ hardware for macOS VM workflows.
 
 ### Delegated-run providers (sandbox/proof runners, no SSH lease)
 
-| Provider and aliases | Runs on | Notes |
-| --- | --- | --- |
-| [Cloudflare](docs/providers/cloudflare.md) — `cloudflare` (`cf`) | Linux | Cloudflare Containers via the Worker runtime. |
-| [Docker Sandbox](docs/providers/docker-sandbox.md) — `docker-sandbox` | Linux | Docker Sandboxes through the standalone `sbx` CLI. |
-| [E2B](docs/providers/e2b.md) — `e2b` | Linux | E2B Firecracker sandbox. |
-| [Freestyle](docs/providers/freestyle.md) — `freestyle` | Linux | Freestyle VMs through the Freestyle REST API. |
-| [Islo](docs/providers/islo.md) — `islo` | Linux | Islo sandbox. |
-| [Modal](docs/providers/modal.md) — `modal` | Linux | Modal Sandbox through the local Python client. |
-| [Microsoft Execution Containers](docs/providers/mxc.md) — `mxc` (`execution-container`) | Windows | Policy-driven local Windows process containment. |
-| [OpenComputer](docs/providers/opencomputer.md) — `opencomputer` (`oc`, `open-computer`) | Linux | OpenComputer Linux VMs through the OpenComputer REST API. |
-| [OpenSandbox](docs/providers/opensandbox.md) — `opensandbox` | Linux | OpenSandbox delegated containers through the OpenSandbox Go SDK. |
-| [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`) | Linux | Redeploy and stream an existing Railway service. |
-| [Anthropic Sandbox Runtime](docs/providers/anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux | Local one-shot sandboxing through Anthropic's `srt` CLI. |
-| [SmolVM](docs/providers/smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`) | Linux | Smol Machines microVM sandboxes via the smolfleet API. |
-| [Tensorlake](docs/providers/tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`) | Linux | Tensorlake Firecracker sandbox via the Tensorlake CLI. |
-| [Upstash Box](docs/providers/upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`) | Linux | Upstash Box through the Box REST API. |
-| [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) — `azure-dynamic-sessions` | Linux | Azure Container Apps dynamic sessions. |
-| [Blacksmith Testbox](docs/providers/blacksmith-testbox.md) — `blacksmith-testbox` (`blacksmith`) | Linux | Delegated Blacksmith CI Testbox lifecycle and execution. |
-| [W&B Sandboxes](docs/providers/wandb.md) — `wandb` (`weights-and-biases`) | Linux | Weights & Biases Sandboxes; reuses `wandb login` credentials. |
-| [Windows Sandbox](docs/providers/windows-sandbox.md) — `windows-sandbox` (`wsb`, `windows-sandbox-provider`) | Windows | Disposable Microsoft Windows Sandbox sessions through generated `.wsb` configs. |
+| Provider and aliases                                                                                           | Runs on      | Notes                                                                           |
+| -------------------------------------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
+| [Cloudflare](docs/providers/cloudflare.md) — `cloudflare` (`cf`)                                               | Linux        | Cloudflare Containers via the Worker runtime.                                   |
+| [Docker Sandbox](docs/providers/docker-sandbox.md) — `docker-sandbox`                                          | Linux        | Docker Sandboxes through the standalone `sbx` CLI.                              |
+| [E2B](docs/providers/e2b.md) — `e2b`                                                                           | Linux        | E2B Firecracker sandbox.                                                        |
+| [Freestyle](docs/providers/freestyle.md) — `freestyle`                                                         | Linux        | Freestyle VMs through the Freestyle REST API.                                   |
+| [Islo](docs/providers/islo.md) — `islo`                                                                        | Linux        | Islo sandbox.                                                                   |
+| [Modal](docs/providers/modal.md) — `modal`                                                                     | Linux        | Modal Sandbox through the local Python client.                                  |
+| [Microsoft Execution Containers](docs/providers/mxc.md) — `mxc` (`execution-container`)                        | Windows      | Policy-driven local Windows process containment.                                |
+| [OpenComputer](docs/providers/opencomputer.md) — `opencomputer` (`oc`, `open-computer`)                        | Linux        | OpenComputer Linux VMs through the OpenComputer REST API.                       |
+| [OpenSandbox](docs/providers/opensandbox.md) — `opensandbox`                                                   | Linux        | OpenSandbox delegated containers through the OpenSandbox Go SDK.                |
+| [Railway](docs/providers/railway.md) — `railway` (`rail`, `railwayapp`)                                        | Linux        | Redeploy and stream an existing Railway service.                                |
+| [Anthropic Sandbox Runtime](docs/providers/anthropic-sandbox-runtime.md) — `anthropic-sandbox-runtime` (`srt`) | macOS, Linux | Local one-shot sandboxing through Anthropic's `srt` CLI.                        |
+| [SmolVM](docs/providers/smolvm.md) — `smolvm` (`smol`, `smolmachines`, `smolfleet`)                            | Linux        | Smol Machines microVM sandboxes via the smolfleet API.                          |
+| [Tensorlake](docs/providers/tensorlake.md) — `tensorlake` (`tl`, `tensorlake-sbx`)                             | Linux        | Tensorlake Firecracker sandbox via the Tensorlake CLI.                          |
+| [Upstash Box](docs/providers/upstash-box.md) — `upstash-box` (`upstash`, `box`, `upstashbox`)                  | Linux        | Upstash Box through the Box REST API.                                           |
+| [Azure Dynamic Sessions](docs/providers/azure-dynamic-sessions.md) — `azure-dynamic-sessions`                  | Linux        | Azure Container Apps dynamic sessions.                                          |
+| [Blacksmith Testbox](docs/providers/blacksmith-testbox.md) — `blacksmith-testbox` (`blacksmith`)               | Linux        | Delegated Blacksmith CI Testbox lifecycle and execution.                        |
+| [W&B Sandboxes](docs/providers/wandb.md) — `wandb` (`weights-and-biases`)                                      | Linux        | Weights & Biases Sandboxes; reuses `wandb login` credentials.                   |
+| [Windows Sandbox](docs/providers/windows-sandbox.md) — `windows-sandbox` (`wsb`, `windows-sandbox-provider`)   | Windows      | Disposable Microsoft Windows Sandbox sessions through generated `.wsb` configs. |
 
 See [Providers](docs/providers/README.md) for the full reference, capabilities,
 and authoring guide.
@@ -271,6 +271,7 @@ and authoring guide.
   verification, and service-token support keep normal use and operator
   automation separate. See [Auth and admin](docs/features/auth-admin.md) and
   [Security](docs/security.md).
+
 ## Machine classes
 
 `beast` is the default for providers that expose class-based managed capacity.
@@ -373,8 +374,9 @@ Set `broker.mode: registered` to keep provisioning and cleanup in any direct
 provider while registering lease metadata with the coordinator for inventory,
 sharing, and portal WebVNC. Kept desktop leases start the outbound WebVNC bridge
 automatically by default; set `broker.autoWebVNC: false` to opt out. The
-coordinator never receives provider credentials or deletes registered
-resources.
+coordinator never receives provider credentials or directly calls a registered
+provider. By default it removes only registration metadata; an explicitly
+bound outbound runtime adapter can perform a user-confirmed workspace delete.
 
 Forwarded environment is intentionally narrow: `NODE_OPTIONS` and `CI`. Do not
 pass secrets as command-line arguments. For live-secret smoke tests, use

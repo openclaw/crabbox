@@ -46,7 +46,7 @@ type crabboxKongCLI struct {
 	Checkpoint checkpointKongCmd `cmd:"" help:"Create, restore, and fork VM or workspace checkpoints."`
 	Ssh        sshKongCmd        `cmd:"" name:"ssh" passthrough:"" help:"Print the SSH command for a lease."`
 	Vnc        vncKongCmd        `cmd:"" name:"vnc" passthrough:"" help:"Print or open VNC connection details for a desktop lease."`
-	Webvnc     webvncKongCmd     `cmd:"" name:"webvnc" passthrough:"" help:"Bridge a desktop lease into the authenticated web portal."`
+	Webvnc     webvncKongCmd     `cmd:"" name:"webvnc" passthrough:"" help:"Open a desktop lease or local VNC tunnel in a browser."`
 	Code       codeKongCmd       `cmd:"" passthrough:"" help:"Bridge a code lease into the authenticated web portal."`
 	Egress     egressKongCmd     `cmd:"" passthrough:"" help:"Bridge lease browser/app traffic through this machine."`
 	Screenshot screenshotKongCmd `cmd:"" passthrough:"" help:"Capture a PNG from a desktop lease."`

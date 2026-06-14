@@ -1,4 +1,6 @@
-import { Client as SSHClient, type ClientChannel, utils as sshUtils } from "ssh2";
+import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
+
+const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import { isAdminRequest, sha256Hex } from "./auth";
@@ -59,6 +61,22 @@ import {
   type PortalMacHostRecord,
   webVNCBridgeCommand,
 } from "./portal";
+import {
+  readRuntimeAdapterRelayBody,
+  runtimeAdapterProxyPath,
+  runtimeAdapterRelayBodyAllowed,
+  runtimeAdapterRelayContentType,
+  runtimeAdapterRelayFrameLimit,
+  runtimeAdapterRelayHeaders,
+  runtimeAdapterRelayMethodAllowed,
+  runtimeAdapterRelayTimeoutForPath,
+  runtimeAdapterRelayTimeoutMs,
+  validRuntimeAdapterID,
+  validRuntimeAdapterDesktopRelayTimeout,
+  validRuntimeAdapterRelayResponse,
+  type RuntimeAdapterRelayRequest,
+  type RuntimeAdapterRelayResponse,
+} from "./runtime-adapter-relay";
 import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
 import {
   createTailscaleAuthKey,
@@ -117,6 +135,19 @@ const maxExternalRunnerSyncItems = 200;
 const webVNCTicketTTLSeconds = 120;
 const codeTicketTTLSeconds = 120;
 const egressTicketTTLSeconds = 120;
+const runtimeAdapterTicketTTLSeconds = 120;
+const runtimeAdapterDeleteRetryBaseMs = 5_000;
+const runtimeAdapterDeleteRetryMaxMs = 60_000;
+const runtimeAdapterDeleteDispatchGraceMs = 1_000;
+const runtimeAdapterDeleteInitialRetryMs =
+  runtimeAdapterRelayTimeoutMs + runtimeAdapterDeleteDispatchGraceMs;
+const runtimeAdapterMaxPendingPerAdapter = 16;
+const runtimeAdapterMaxPendingPerOwner = 32;
+const runtimeAdapterMaxPendingGlobal = 128;
+const runtimeAdapterReservedDeletesPerAdapter = 4;
+const runtimeAdapterReservedDeletesPerOwner = 8;
+const runtimeAdapterReservedDeletesGlobal = 16;
+const runtimeAdapterMaxBufferedBytes = runtimeAdapterRelayFrameLimit * 2;
 const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const leaseCleanupClaimStaleMs = 30 * 60 * 1000;
 const awsOrphanSweepInitialDelayMs = 60 * 1000;
@@ -131,6 +162,7 @@ const maxCodeRequestBytes = 10 * 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const fatalTextDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 const awsOrphanSweepRecordKey = "aws-orphan-sweep:last";
 const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
 const azureOrphanSweepRecordKey = "azure-orphan-sweep:last";
@@ -146,6 +178,9 @@ const workspaceMinimumTTLSeconds =
   (workspaceProvisionClaimMs + workspaceProvisionRecoveryGraceMs) / 1000;
 const workspaceMaxRecordsPerOwner = 100;
 const workspaceTerminalRetentionMs = 24 * 60 * 60_000;
+const workspacePrewarmOwner = "crabbox-internal-prewarm";
+const workspacePrewarmReplacementLeadMs = 5 * 60_000;
+const workspacePrewarmRetryDelayMs = 5 * 60_000;
 const workspaceTerminalMaxBufferedBytes = 1024 * 1024;
 const workspaceTerminalMaxBufferedFrames = 1024;
 const workspaceTerminalMaxPerWorkspace = 4;
@@ -173,6 +208,87 @@ interface CodeTicketRecord {
   org: string;
   createdAt: string;
   expiresAt: string;
+}
+
+interface RuntimeAdapterTicketRecord {
+  ticket: string;
+  adapterID: string;
+  owner: string;
+  org: string;
+  createdAt: string;
+  expiresAt: string;
+  desktopTimeoutMs?: number;
+}
+
+interface RuntimeAdapterIdentityRecord {
+  adapterID: string;
+  owner: string;
+  org: string;
+  createdAt: string;
+}
+
+interface RuntimeAdapterPendingRequest {
+  adapterID: string;
+  owner: string;
+  org: string;
+  dispatched: boolean;
+  clientSettled: boolean;
+  resolve: (result: RuntimeAdapterRelayResult) => void;
+  timeout: ReturnType<typeof setTimeout>;
+  signal: AbortSignal;
+  abortHandler: () => void;
+}
+
+interface RuntimeAdapterRelayResult {
+  origin: "relay" | "upstream";
+  response: RuntimeAdapterRelayResponse;
+}
+
+interface RuntimeAdapterProxyResult {
+  origin: "relay" | "upstream";
+  dispatched: boolean;
+  response: Response;
+}
+
+interface RuntimeAdapterProxyScope {
+  owner: string;
+  org: string;
+}
+
+interface RuntimeAdapterDeleteClaim {
+  requestedAt: string;
+  claimID: string;
+  created: boolean;
+}
+
+interface RuntimeAdapterDeleteVersion {
+  requestedAt: string;
+  claimID?: string;
+}
+
+interface RuntimeAdapterDeleteDispatch {
+  lease: LeaseRecord;
+  version: RuntimeAdapterDeleteVersion;
+  deadlineMs: number;
+  fenceUntil: string;
+}
+
+type RuntimeAdapterDeleteFinalization =
+  | { status: "completed"; lease: LeaseRecord }
+  | { status: "in-flight"; retryAt: string }
+  | { status: "mismatch" };
+
+interface RuntimeAdapterDeleteCompletion {
+  adapterID: string;
+  workspaceID: string;
+  registrationID: string;
+  status: "absent";
+}
+
+interface RuntimeAdapterLegacyDeleteCompletion {
+  adapterID: string;
+  workspaceID: string;
+  status: "absent";
 }
 
 type EgressRole = "host" | "client";
@@ -229,6 +345,7 @@ interface WorkspaceRecord {
   idleTimeoutSeconds: number;
   createdAt: string;
   updatedAt: string;
+  prewarm?: boolean;
   sshHostKeySha256?: string;
   provisionClaim?: string;
   provisionClaimExpiresAt?: string;
@@ -257,6 +374,7 @@ interface CodeProxyResponse {
 }
 
 interface CodePendingRequest {
+  leaseID: string;
   resolve: (response: CodeProxyResponse) => void;
   timeout: ReturnType<typeof setTimeout>;
   response?: CodeProxyResponse;
@@ -305,6 +423,7 @@ interface CodeWebSocketClose {
 }
 
 interface CodePendingWebSocketFrame {
+  leaseID: string;
   id: string;
   frame: "text" | "binary";
   chunks: string[];
@@ -460,6 +579,13 @@ type BridgeAttachment =
   | { kind: "egress-host"; leaseID: string; sessionID: string }
   | { kind: "egress-client"; leaseID: string; sessionID: string }
   | {
+      kind: "runtime-adapter-agent";
+      adapterID: string;
+      owner: string;
+      org: string;
+      desktopTimeoutMs?: number;
+    }
+  | {
       kind: "control";
       clientID: string;
       owner: string;
@@ -508,8 +634,12 @@ export class FleetCoordinator {
   private readonly egressHosts = new Map<string, WebSocket>();
   private readonly egressClients = new Map<string, WebSocket>();
   private readonly egressSessions = new Map<string, EgressSessionStatus>();
+  private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
+  private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
+  private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
+  private readonly bridgeRestoreReady: Promise<boolean>;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
@@ -521,6 +651,13 @@ export class FleetCoordinator {
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
   ) {
     this.restoreBridgeWebSockets();
+    this.bridgeRestoreReady = this.revokeInactiveRestoredBridgeSockets().then(
+      () => true,
+      (error) => {
+        console.warn("could not reconcile restored lease bridges", errorMessage(error));
+        return false;
+      },
+    );
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -654,6 +791,20 @@ export class FleetCoordinator {
       if (parts[0] === "v1" && parts[1] === "workspaces" && parts[2]) {
         return await this.workspaceRoute(request, parts[2], parts[3], parts[4]);
       }
+      if (parts[0] === "v1" && parts[1] === "adapters" && parts[2]) {
+        if (parts[3] === "ticket" && parts.length === 4) {
+          return await this.createRuntimeAdapterTicket(request, parts[2]);
+        }
+        if (parts[3] === "agent" && parts.length === 4) {
+          return await this.runtimeAdapterAgent(request, parts[2]);
+        }
+        if (parts[3] === "proxy") {
+          return await this.runtimeAdapterProxy(request, parts[2], parts.slice(4));
+        }
+        if (method === "GET" && parts.length === 3) {
+          return await this.runtimeAdapterStatus(request, parts[2]);
+        }
+      }
       if (
         parts[0] === "v1" &&
         parts[1] === "leases" &&
@@ -779,6 +930,28 @@ export class FleetCoordinator {
     }
   }
 
+  private async revokeInactiveRestoredBridgeSockets(): Promise<void> {
+    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const now = Date.now();
+    const revoked = new Map<string, string>();
+    for (const socket of this.state.getWebSockets()) {
+      const attachment = this.bridgeAttachment(socket);
+      if (!attachment || !("leaseID" in attachment)) {
+        continue;
+      }
+      const lease = leases.get(leaseKey(attachment.leaseID));
+      if (!lease || !leaseIsLive(lease) || Date.parse(lease.expiresAt) <= now) {
+        revoked.set(
+          attachment.leaseID,
+          lease && leaseIsLive(lease) ? "lease expired" : "lease ended",
+        );
+      }
+    }
+    for (const [leaseID, reason] of revoked) {
+      this.closeLeaseBridges(leaseID, 1008, reason);
+    }
+  }
+
   private acceptBridgeWebSocket(socket: WebSocket, attachment: BridgeAttachment): void {
     this.state.acceptWebSocket(socket, attachment, bridgeTags(attachment), {
       message: (data) => this.handleBridgeMessage(socket, attachment, data),
@@ -823,6 +996,14 @@ export class FleetCoordinator {
       case "egress-client":
         this.egressClients.set(egressSocketKey(attachment.leaseID, attachment.sessionID), socket);
         this.trackEgressSession(attachment);
+        break;
+      case "runtime-adapter-agent":
+        closeSocket(
+          this.runtimeAdapterAgents.get(attachment.adapterID),
+          1012,
+          "replaced by a newer runtime adapter agent",
+        );
+        this.runtimeAdapterAgents.set(attachment.adapterID, socket);
         break;
       case "control":
         this.controlSockets.set(attachment.clientID, socket);
@@ -1050,6 +1231,10 @@ export class FleetCoordinator {
     attachment: BridgeAttachment,
     message: string | ArrayBuffer | Blob,
   ): Promise<void> {
+    if (!(await this.bridgeRestoreReady)) {
+      closeSocket(socket, 1011, "lease state unavailable");
+      return;
+    }
     switch (attachment.kind) {
       case "webvnc-agent":
         await forwardOrBufferWebVNC(
@@ -1098,6 +1283,9 @@ export class FleetCoordinator {
           this.egressHosts.get(egressSocketKey(attachment.leaseID, attachment.sessionID)),
         );
         break;
+      case "runtime-adapter-agent":
+        await this.handleRuntimeAdapterAgentMessage(attachment.adapterID, socket, message);
+        break;
       case "control":
         await this.handleControlMessage(socket, attachment, message);
         break;
@@ -1129,6 +1317,9 @@ export class FleetCoordinator {
       case "egress-client":
         this.clearEgressClient(attachment.leaseID, attachment.sessionID, socket);
         break;
+      case "runtime-adapter-agent":
+        this.clearRuntimeAdapterAgent(attachment.adapterID, socket);
+        break;
       case "control":
         if (this.controlSockets.get(attachment.clientID) === socket) {
           this.controlSockets.delete(attachment.clientID);
@@ -1139,7 +1330,10 @@ export class FleetCoordinator {
 
   async alarm(): Promise<void> {
     await this.expireLeases();
+    await this.reconcileRuntimeAdapterDeletes();
+    await this.maintainWorkspacePrewarm();
     await this.provisionPendingWorkspace();
+    await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
@@ -1702,6 +1896,9 @@ export class FleetCoordinator {
       if (!existing) {
         return undefined;
       }
+      if (existing.prewarm) {
+        return notFound();
+      }
       await this.state.storage.put(workspaceLeaseReservationKey(existing.leaseID), true);
       const conflict = workspaceConflictResponse(
         existing,
@@ -1747,6 +1944,9 @@ export class FleetCoordinator {
     const reservation = await this.state.runExclusive(async () => {
       const current = await this.state.storage.get<WorkspaceRecord>(key);
       if (current) {
+        if (current.prewarm) {
+          return { response: notFound() };
+        }
         await this.state.storage.put(workspaceLeaseReservationKey(current.leaseID), true);
         const conflict = workspaceConflictResponse(
           current,
@@ -1764,7 +1964,7 @@ export class FleetCoordinator {
       }
       const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
       const ownerWorkspaceCount = [...workspaces.values()].filter(
-        (candidate) => candidate.owner === owner && candidate.org === org,
+        (candidate) => !candidate.prewarm && candidate.owner === owner && candidate.org === org,
       ).length;
       if (ownerWorkspaceCount >= workspaceMaxRecordsPerOwner) {
         return {
@@ -1776,6 +1976,24 @@ export class FleetCoordinator {
             { status: 429 },
           ),
         };
+      }
+      const prewarmed = await this.adoptPrewarmedWorkspace({
+        id,
+        owner,
+        org,
+        profile,
+        repo,
+        branch,
+        command,
+        provider,
+        class: machineClass,
+        desktop,
+        ttlSeconds,
+        idleTimeoutSeconds,
+        workspaces,
+      });
+      if (prewarmed) {
+        return prewarmed;
       }
       const leaseID = await this.allocateWorkspaceLeaseID();
       const nowISO = new Date().toISOString();
@@ -1803,11 +2021,211 @@ export class FleetCoordinator {
     if ("response" in reservation) {
       return reservation.response;
     }
-    if (!reservation.lease && !reservation.record.releaseRequestedAt && !reservation.record.error) {
-      await this.state.runExclusive(() => this.scheduleAlarm());
-    }
+    await this.maintainWorkspacePrewarm();
+    await this.state.runExclusive(() => this.scheduleAlarm());
     return json(workspaceResponse(reservation.record, reservation.lease, this.env), {
       status: workspaceHTTPStatus(reservation.record, reservation.lease),
+    });
+  }
+
+  private async adoptPrewarmedWorkspace(input: {
+    id: string;
+    owner: string;
+    org: string;
+    profile: string;
+    repo: string;
+    branch: string;
+    command: string;
+    provider: Provider;
+    class: string;
+    desktop: boolean;
+    ttlSeconds: number;
+    idleTimeoutSeconds: number;
+    workspaces: Map<string, WorkspaceRecord>;
+  }): Promise<{ record: WorkspaceRecord; lease: LeaseRecord } | undefined> {
+    if (workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) === 0) {
+      return undefined;
+    }
+    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+    const now = new Date();
+    const candidate = [...input.workspaces.entries()]
+      .filter(([, workspace]) => {
+        const lease = leases.get(leaseKey(workspace.leaseID));
+        return (
+          workspace.prewarm === true &&
+          workspace.org === input.org &&
+          workspacePrewarmMatches(workspace, input) &&
+          workspaceStatus(workspace, lease) === "ready" &&
+          Boolean(workspace.sshHostKeySha256) &&
+          Date.parse(lease?.expiresAt ?? "") > now.getTime() + workspacePrewarmReplacementLeadMs
+        );
+      })
+      .toSorted((a, b) => Date.parse(a[1].createdAt) - Date.parse(b[1].createdAt))[0];
+    if (!candidate) {
+      return undefined;
+    }
+    const [candidateKey, prewarm] = candidate;
+    const lease = structuredClone(leases.get(leaseKey(prewarm.leaseID)));
+    if (!lease || !workspaceOwnsLease(prewarm, lease)) {
+      return undefined;
+    }
+    const expiresAt = new Date(now.getTime() + input.ttlSeconds * 1000);
+    const createdAt = Date.parse(lease.createdAt);
+    const adoptedTTLSeconds = Math.max(1, Math.ceil((expiresAt.getTime() - createdAt) / 1000));
+    lease.workspaceID = input.id;
+    lease.owner = input.owner;
+    lease.org = input.org;
+    lease.profile = input.profile;
+    lease.ttlSeconds = adoptedTTLSeconds;
+    lease.idleTimeoutSeconds = adoptedTTLSeconds;
+    lease.lastTouchedAt = now.toISOString();
+    lease.updatedAt = now.toISOString();
+    lease.expiresAt = expiresAt.toISOString();
+    delete lease.share;
+    const cost = leaseCost(
+      this.env,
+      input.provider,
+      lease.serverType,
+      adoptedTTLSeconds,
+      lease.estimatedHourlyUSD,
+    );
+    lease.estimatedHourlyUSD = cost.hourlyUSD;
+    lease.maxEstimatedUSD = cost.maxUSD;
+    const otherLeases = [...leases.values()].filter(
+      (candidateLease) => candidateLease.id !== lease.id,
+    );
+    if (enforceCostLimits(otherLeases, lease, costLimits(this.env), now)) {
+      return undefined;
+    }
+    const nowISO = now.toISOString();
+    const record: WorkspaceRecord = {
+      id: input.id,
+      leaseID: lease.id,
+      owner: input.owner,
+      org: input.org,
+      profile: input.profile,
+      repo: input.repo,
+      branch: input.branch,
+      command: input.command,
+      provider: input.provider,
+      class: input.class,
+      desktop: input.desktop,
+      ttlSeconds: input.ttlSeconds,
+      idleTimeoutSeconds: input.idleTimeoutSeconds,
+      createdAt: nowISO,
+      updatedAt: nowISO,
+      sshHostKeySha256: prewarm.sshHostKeySha256!,
+    };
+    await this.putLease(lease);
+    await this.state.storage.put(workspaceKey(record.owner, record.org, record.id), record);
+    await this.state.storage.delete(candidateKey);
+    return { record, lease };
+  }
+
+  private async maintainWorkspacePrewarm(): Promise<void> {
+    const count = workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT);
+    await this.state.runExclusive(async () => {
+      const workspaces = await this.state.storage.list<WorkspaceRecord>({ prefix: "workspace:" });
+      const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+      const now = Date.now();
+      const templates = new Map<string, WorkspaceRecord>();
+      for (const workspace of workspaces.values()) {
+        if (workspace.prewarm) continue;
+        const status = workspaceStatus(workspace, leases.get(leaseKey(workspace.leaseID)));
+        if (status !== "provisioning" && status !== "ready") continue;
+        const shape = workspacePrewarmShape(workspace);
+        const current = templates.get(shape);
+        if (!current || Date.parse(workspace.createdAt) > Date.parse(current.createdAt)) {
+          templates.set(shape, workspace);
+        }
+      }
+      let changed = false;
+      const usableByShape = new Map<string, WorkspaceRecord[]>();
+      const failedByShape = new Map<string, WorkspaceRecord[]>();
+      const releaseUpdates: Array<[string, WorkspaceRecord]> = [];
+      for (const [key, workspace] of workspaces) {
+        if (!workspace.prewarm) continue;
+        const lease = leases.get(leaseKey(workspace.leaseID));
+        const shape = workspacePrewarmShape(workspace);
+        const template = templates.get(shape);
+        const status = workspaceStatus(workspace, lease);
+        const expiresSoon =
+          status === "ready" &&
+          Date.parse(lease?.expiresAt ?? "") <= now + workspacePrewarmReplacementLeadMs;
+        const usable =
+          count > 0 &&
+          template &&
+          workspacePrewarmMatches(workspace, template) &&
+          (status === "provisioning" || status === "ready") &&
+          !expiresSoon;
+        if (usable) {
+          const current = usableByShape.get(shape) ?? [];
+          current.push(workspace);
+          usableByShape.set(shape, current);
+          continue;
+        }
+        if (
+          (status === "failed" || workspace.error || lease?.state === "failed") &&
+          template &&
+          workspacePrewarmMatches(workspace, template)
+        ) {
+          const current = failedByShape.get(shape) ?? [];
+          current.push(workspace);
+          failedByShape.set(shape, current);
+        }
+        if (!workspace.releaseRequestedAt) {
+          workspace.releaseRequestedAt = new Date(now).toISOString();
+          workspace.updatedAt = workspace.releaseRequestedAt;
+          delete workspace.reconcileAfter;
+          releaseUpdates.push([key, workspace]);
+          changed = true;
+        }
+      }
+      await Promise.all(
+        releaseUpdates.map(([key, workspace]) => this.state.storage.put(key, workspace)),
+      );
+      if (count > 0) {
+        for (const [shape, template] of templates) {
+          const usable = usableByShape.get(shape) ?? [];
+          const recentFailure = (failedByShape.get(shape) ?? []).some(
+            (workspace) => Date.parse(workspace.updatedAt) > now - workspacePrewarmRetryDelayMs,
+          );
+          if (recentFailure) continue;
+          for (let index = usable.length; index < count; index += 1) {
+            const id = newWorkspacePrewarmID();
+            // oxlint-disable-next-line eslint/no-await-in-loop -- each ID must be reserved before allocating the next spare.
+            const leaseID = await this.allocateWorkspaceLeaseID();
+            const nowISO = new Date(now).toISOString();
+            const record: WorkspaceRecord = {
+              id,
+              leaseID,
+              owner: workspacePrewarmOwner,
+              org: template.org,
+              profile: template.profile,
+              repo: "",
+              branch: "main",
+              command: "exec bash -l",
+              provider: template.provider,
+              class: template.class,
+              desktop: template.desktop,
+              ttlSeconds: template.ttlSeconds,
+              idleTimeoutSeconds: template.idleTimeoutSeconds,
+              createdAt: nowISO,
+              updatedAt: nowISO,
+              prewarm: true,
+            };
+            // oxlint-disable-next-line eslint/no-await-in-loop -- preserve serialized ID allocation and reservation.
+            await Promise.all([
+              this.state.storage.put(workspaceKey(record.owner, record.org, record.id), record),
+              this.state.storage.put(workspaceLeaseReservationKey(record.leaseID), true),
+            ]);
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        await this.scheduleAlarm();
+      }
     });
   }
 
@@ -2238,7 +2656,7 @@ export class FleetCoordinator {
     if (method === "GET" && action === undefined) {
       return await this.state.runExclusive(async () => {
         const record = await this.state.storage.get<WorkspaceRecord>(key);
-        if (!record) {
+        if (!record || record.prewarm) {
           return notFound();
         }
         const lease = await this.getLease(record.leaseID);
@@ -2247,7 +2665,7 @@ export class FleetCoordinator {
     }
     if (method === "POST" && action === "connections" && connection === "desktop") {
       const record = await this.state.storage.get<WorkspaceRecord>(key);
-      if (!record) {
+      if (!record || record.prewarm) {
         return notFound();
       }
       return json(
@@ -2261,7 +2679,7 @@ export class FleetCoordinator {
     if (method === "DELETE" && action === undefined) {
       const release = await this.state.runExclusive(async () => {
         const record = await this.state.storage.get<WorkspaceRecord>(key);
-        if (!record) {
+        if (!record || record.prewarm) {
           return { response: notFound() };
         }
         const lease = await this.getLease(record.leaseID);
@@ -2322,6 +2740,7 @@ export class FleetCoordinator {
       const workspace = await this.state.storage.get<WorkspaceRecord>(key);
       if (
         !workspace ||
+        workspace.prewarm ||
         workspace.id !== workspaceID ||
         workspace.owner !== owner ||
         workspace.org !== org
@@ -2492,7 +2911,7 @@ export class FleetCoordinator {
       connect: while (Date.now() < readyDeadline) {
         for (const port of terminalPorts) {
           if (closed) break connect;
-          const candidate = new SSHClient();
+          const candidate = new SSHClientConstructor();
           connectingClient = candidate;
           try {
             // oxlint-disable-next-line eslint/no-await-in-loop -- SSH readiness retries are sequential.
@@ -2978,6 +3397,26 @@ export class FleetCoordinator {
     if (!host) {
       return json({ error: "host_required" }, { status: 400 });
     }
+    const runtimeAdapterID = input.runtimeAdapterID;
+    const runtimeAdapterWorkspaceID = input.runtimeAdapterWorkspaceID;
+    const runtimeAdapterRegistrationID = input.runtimeAdapterRegistrationID;
+    if (
+      (runtimeAdapterID !== undefined ||
+        runtimeAdapterWorkspaceID !== undefined ||
+        runtimeAdapterRegistrationID !== undefined) &&
+      (!validRuntimeAdapterID(runtimeAdapterID) ||
+        !validRuntimeAdapterID(runtimeAdapterWorkspaceID) ||
+        !validRuntimeAdapterID(runtimeAdapterRegistrationID))
+    ) {
+      return json(
+        {
+          error: "invalid_runtime_adapter_binding",
+          message:
+            "runtime adapter id, workspace id, and registration id must all be valid DNS-style identifiers",
+        },
+        { status: 400 },
+      );
+    }
 
     if (await this.state.storage.get(workspaceLeaseReservationKey(leaseID))) {
       return workspaceManagedLeaseResponse();
@@ -2998,8 +3437,118 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
+    if (existing?.runtimeAdapterDeleteRequestedAt) {
+      return json(
+        {
+          error: "runtime_adapter_delete_pending",
+          message: "registered lease cannot be refreshed while its workspace deletion is pending",
+        },
+        { status: 409 },
+      );
+    }
+    if (
+      existing &&
+      leaseIsLive(existing) &&
+      existing.runtimeAdapterID &&
+      runtimeAdapterID &&
+      (existing.runtimeAdapterID !== runtimeAdapterID ||
+        existing.runtimeAdapterWorkspaceID !== runtimeAdapterWorkspaceID ||
+        (existing.runtimeAdapterRegistrationID !== undefined &&
+          existing.runtimeAdapterRegistrationID !== runtimeAdapterRegistrationID))
+    ) {
+      return json(
+        {
+          error: "runtime_adapter_conflict",
+          message: "registered lease runtime adapter binding cannot change",
+        },
+        { status: 409 },
+      );
+    }
+    const inheritRuntimeAdapterBinding =
+      existing !== undefined && leaseIsLive(existing) && runtimeAdapterID === undefined;
+    const effectiveRuntimeAdapterID =
+      runtimeAdapterID ?? (inheritRuntimeAdapterBinding ? existing.runtimeAdapterID : undefined);
+    const effectiveRuntimeAdapterWorkspaceID =
+      runtimeAdapterWorkspaceID ??
+      (inheritRuntimeAdapterBinding ? existing.runtimeAdapterWorkspaceID : undefined);
+    const effectiveRuntimeAdapterRegistrationID =
+      runtimeAdapterRegistrationID ??
+      (inheritRuntimeAdapterBinding ? existing.runtimeAdapterRegistrationID : undefined);
+    if (
+      effectiveRuntimeAdapterID &&
+      effectiveRuntimeAdapterWorkspaceID &&
+      !validRuntimeAdapterID(effectiveRuntimeAdapterRegistrationID)
+    ) {
+      return json(
+        {
+          error: "runtime_adapter_registration_required",
+          message: "runtime adapter registrations require an immutable registration id",
+        },
+        { status: 409 },
+      );
+    }
+    if (
+      existing &&
+      effectiveRuntimeAdapterRegistrationID &&
+      existing.runtimeAdapterRegistrationID === effectiveRuntimeAdapterRegistrationID &&
+      (!leaseIsLive(existing) || !existing.runtimeAdapterID)
+    ) {
+      return json(
+        {
+          error: "runtime_adapter_registration_replayed",
+          message: "a new runtime adapter registration requires a new registration id",
+        },
+        { status: 409 },
+      );
+    }
+    if (effectiveRuntimeAdapterID && effectiveRuntimeAdapterWorkspaceID) {
+      const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(
+        runtimeAdapterIdentityKey(effectiveRuntimeAdapterID),
+      );
+      if (!identity) {
+        return json(
+          {
+            error: "runtime_adapter_unclaimed",
+            message: "runtime adapter id must be claimed before it can be bound to a lease",
+          },
+          { status: 409 },
+        );
+      }
+      if (
+        identity.adapterID !== effectiveRuntimeAdapterID ||
+        identity.owner !== owner ||
+        identity.org !== org
+      ) {
+        return json(
+          {
+            error: "runtime_adapter_conflict",
+            message: "runtime adapter id belongs to another owner or organization",
+          },
+          { status: 409 },
+        );
+      }
+    }
 
     const leases = await this.leaseRecords();
+    if (
+      effectiveRuntimeAdapterID &&
+      effectiveRuntimeAdapterWorkspaceID &&
+      leases.some(
+        (lease) =>
+          lease.id !== leaseID &&
+          (leaseIsLive(lease) || Boolean(lease.runtimeAdapterDeleteRequestedAt)) &&
+          lease.runtimeAdapterID === effectiveRuntimeAdapterID &&
+          lease.runtimeAdapterWorkspaceID === effectiveRuntimeAdapterWorkspaceID,
+      )
+    ) {
+      return json(
+        {
+          error: "runtime_adapter_workspace_conflict",
+          message: "runtime adapter workspace is already bound to a live lease or pending deletion",
+        },
+        { status: 409 },
+      );
+    }
     const now = new Date();
     const nowISO = now.toISOString();
     const ttlSeconds = clampLeaseSeconds(input.ttlSeconds, 86_400);
@@ -3019,6 +3568,13 @@ export class FleetCoordinator {
       slug,
       provider,
       lifecycle: "registered",
+      ...(effectiveRuntimeAdapterID && effectiveRuntimeAdapterWorkspaceID
+        ? {
+            runtimeAdapterID: effectiveRuntimeAdapterID,
+            runtimeAdapterWorkspaceID: effectiveRuntimeAdapterWorkspaceID,
+            runtimeAdapterRegistrationID: effectiveRuntimeAdapterRegistrationID!,
+          }
+        : {}),
       target,
       ...(target === "windows"
         ? { windowsMode: input.windowsMode === "wsl2" ? "wsl2" : "normal" }
@@ -3079,6 +3635,13 @@ export class FleetCoordinator {
     delete record.releasedAt;
     delete record.releaseDeletesServer;
     clearLeaseCleanupMetadata(record);
+    if (!effectiveRuntimeAdapterID || !effectiveRuntimeAdapterWorkspaceID) {
+      delete record.runtimeAdapterID;
+      delete record.runtimeAdapterWorkspaceID;
+    }
+    if (!existing || !leaseIsLive(existing)) {
+      clearRuntimeAdapterDeleteMetadata(record);
+    }
     await this.putLease(record);
     await this.scheduleAlarm();
     return json({ lease: record }, { status: existing ? 200 : 201 });
@@ -3280,7 +3843,71 @@ export class FleetCoordinator {
     if (lease.workspaceID) {
       return workspaceManagedLeaseResponse();
     }
-    const body = await optionalJson<{ delete?: boolean }>(request);
+    const body = await optionalJson<{
+      delete?: boolean;
+      runtimeAdapterDeleteCompletion?: unknown;
+      runtimeAdapterLegacyDeleteCompletion?: unknown;
+    }>(request);
+    const runtimeAdapterCompletion = runtimeAdapterDeleteCompletion(
+      body.runtimeAdapterDeleteCompletion,
+    );
+    const runtimeAdapterLegacyCompletion = runtimeAdapterLegacyDeleteCompletion(
+      body.runtimeAdapterLegacyDeleteCompletion,
+    );
+    if (
+      body.runtimeAdapterDeleteCompletion !== undefined &&
+      runtimeAdapterCompletion === undefined
+    ) {
+      return json(
+        {
+          error: "invalid_runtime_adapter_delete_completion",
+          message:
+            "runtime adapter delete completion must identify an absent adapter workspace registration",
+        },
+        { status: 400 },
+      );
+    }
+    if (
+      body.runtimeAdapterLegacyDeleteCompletion !== undefined &&
+      runtimeAdapterLegacyCompletion === undefined
+    ) {
+      return json(
+        {
+          error: "invalid_runtime_adapter_legacy_delete_completion",
+          message:
+            "legacy runtime adapter delete completion must identify an absent adapter workspace binding",
+        },
+        { status: 400 },
+      );
+    }
+    if (runtimeAdapterCompletion && runtimeAdapterLegacyCompletion) {
+      return json(
+        {
+          error: "invalid_runtime_adapter_delete_completion",
+          message: "runtime adapter delete completion must select exactly one generation mode",
+        },
+        { status: 400 },
+      );
+    }
+    if (runtimeAdapterCompletion) {
+      return await this.completeRuntimeAdapterDelete(
+        request,
+        lease,
+        runtimeAdapterCompletion,
+        admin,
+      );
+    }
+    if (runtimeAdapterLegacyCompletion) {
+      return await this.completeLegacyRuntimeAdapterDelete(
+        request,
+        lease,
+        runtimeAdapterLegacyCompletion,
+        admin,
+      );
+    }
+    if (lease.runtimeAdapterDeleteRequestedAt) {
+      return runtimeAdapterDeletePendingResponse(lease);
+    }
     const shouldDelete = body.delete ?? !lease.keep;
     if (lease.cleanupStartedAt) {
       if (!shouldDelete) {
@@ -3297,6 +3924,9 @@ export class FleetCoordinator {
       return json({ lease });
     }
     const released = await this.releaseResolvedLease(lease, { deleteServer: shouldDelete });
+    if (released.runtimeAdapterDeleteRequestedAt) {
+      return runtimeAdapterDeletePendingResponse(released);
+    }
     if (released.cleanupStartedAt && !shouldDelete) {
       return json(
         {
@@ -3308,6 +3938,110 @@ export class FleetCoordinator {
       );
     }
     return json({ lease: released });
+  }
+
+  private async completeRuntimeAdapterDelete(
+    request: Request,
+    lease: LeaseRecord,
+    completion: RuntimeAdapterDeleteCompletion,
+    admin: boolean,
+  ): Promise<Response> {
+    if (
+      !isRegisteredLease(lease) ||
+      lease.runtimeAdapterID !== completion.adapterID ||
+      lease.runtimeAdapterWorkspaceID !== completion.workspaceID ||
+      lease.runtimeAdapterRegistrationID !== completion.registrationID
+    ) {
+      return json(
+        {
+          error: "runtime_adapter_delete_completion_mismatch",
+          message:
+            "runtime adapter delete completion does not match the registered lease generation",
+        },
+        { status: 409 },
+      );
+    }
+    if (
+      !admin &&
+      (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env))
+    ) {
+      return json(
+        {
+          error: "forbidden",
+          message: "runtime adapter delete completion requires the lease owner",
+        },
+        { status: 403 },
+      );
+    }
+    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+      const result = await this.finalizeRuntimeAdapterDeleteCompletion(lease, completion);
+      if (result.status === "in-flight") {
+        return runtimeAdapterDeleteInFlightResponse(result.retryAt);
+      }
+      if (result.status === "mismatch") {
+        return json(
+          {
+            error: "lease_state_changed",
+            message: "lease changed while completing its runtime adapter delete",
+            lease: await this.getLease(lease.id),
+          },
+          { status: 409 },
+        );
+      }
+      return json({ lease: result.lease });
+    });
+  }
+
+  private async completeLegacyRuntimeAdapterDelete(
+    request: Request,
+    lease: LeaseRecord,
+    completion: RuntimeAdapterLegacyDeleteCompletion,
+    admin: boolean,
+  ): Promise<Response> {
+    if (
+      !isRegisteredLease(lease) ||
+      lease.runtimeAdapterID !== completion.adapterID ||
+      lease.runtimeAdapterWorkspaceID !== completion.workspaceID ||
+      lease.runtimeAdapterRegistrationID
+    ) {
+      return json(
+        {
+          error: "runtime_adapter_delete_completion_mismatch",
+          message:
+            "legacy runtime adapter delete completion does not match a generation-less registered binding",
+        },
+        { status: 409 },
+      );
+    }
+    if (
+      !admin &&
+      (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env))
+    ) {
+      return json(
+        {
+          error: "forbidden",
+          message: "legacy runtime adapter delete completion requires the lease owner",
+        },
+        { status: 403 },
+      );
+    }
+    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+      const result = await this.finalizeLegacyRuntimeAdapterDelete(lease, completion);
+      if (result.status === "in-flight") {
+        return runtimeAdapterDeleteInFlightResponse(result.retryAt);
+      }
+      if (result.status === "mismatch") {
+        return json(
+          {
+            error: "lease_state_changed",
+            message: "lease changed while completing its legacy runtime adapter delete",
+            lease: await this.getLease(lease.id),
+          },
+          { status: 409 },
+        );
+      }
+      return json({ lease: result.lease });
+    });
   }
 
   private async shareLeaseRoute(request: Request, leaseID: string): Promise<Response> {
@@ -3756,6 +4490,10 @@ export class FleetCoordinator {
         ...(lease.slug ? { slug: lease.slug } : {}),
         provider: lease.provider,
         lifecycle: lease.lifecycle,
+        ...(lease.runtimeAdapterID ? { runtimeAdapterID: lease.runtimeAdapterID } : {}),
+        ...(lease.runtimeAdapterWorkspaceID
+          ? { runtimeAdapterWorkspaceID: lease.runtimeAdapterWorkspaceID }
+          : {}),
         state: lease.state,
         target: lease.target || "linux",
         owner: lease.owner,
@@ -3979,10 +4717,374 @@ export class FleetCoordinator {
     if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
       return portalError("Stop unavailable", "Lease manage access is required.", 403);
     }
+    if (isRegisteredLease(lease) && lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID) {
+      const adapterID = lease.runtimeAdapterID;
+      const workspaceID = lease.runtimeAdapterWorkspaceID;
+      return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+        const current = await this.state.runExclusive(() => this.getLease(lease.id));
+        if (!current || !leaseIsLive(current)) {
+          return portalError("Delete unavailable", "That lease is no longer active.", 409);
+        }
+        if (!this.leaseManageableByRequest(current, request, isAdminRequest(request))) {
+          return portalError("Delete unavailable", "Lease manage access is required.", 403);
+        }
+        if (
+          current.runtimeAdapterID !== adapterID ||
+          current.runtimeAdapterWorkspaceID !== workspaceID ||
+          current.runtimeAdapterRegistrationID !== lease.runtimeAdapterRegistrationID
+        ) {
+          return portalError("Delete unavailable", "The runtime adapter binding changed.", 409);
+        }
+        const deleteClaim = await this.markRuntimeAdapterDeletePending(
+          current,
+          runtimeAdapterDeleteInitialRetryMs,
+        );
+        if (!deleteClaim) {
+          return portalError("Delete unavailable", "That lease is no longer active.", 409);
+        }
+        const dispatch = await this.beginRuntimeAdapterDeleteDispatch(current, deleteClaim);
+        if (!dispatch) {
+          return portalError(
+            "Delete unavailable",
+            "Another delete for this workspace is still settling. Try again shortly.",
+            503,
+          );
+        }
+        const proxyResult = await (async () => {
+          let result: RuntimeAdapterProxyResult | undefined;
+          try {
+            result = await this.runtimeAdapterProxyResult(
+              new Request(request.url, { method: "DELETE", headers: request.headers }),
+              adapterID,
+              ["v1", "workspaces", workspaceID],
+              { owner: current.owner, org: current.org },
+              dispatch.deadlineMs,
+            );
+            return result;
+          } finally {
+            await this.finishRuntimeAdapterDeleteDispatch(
+              dispatch,
+              result !== undefined && (await runtimeAdapterDeleteDispatchSafeToClear(result)),
+            );
+          }
+        })();
+        const response = proxyResult.response;
+        let body:
+          | { id?: unknown; status?: unknown; message?: unknown; error?: unknown }
+          | undefined;
+        if (response.status !== 204) {
+          body = (await response
+            .clone()
+            .json()
+            .catch(() => undefined)) as
+            | { status?: unknown; message?: unknown; error?: unknown }
+            | undefined;
+        }
+        if (!response.ok) {
+          const relayRetryable =
+            proxyResult.origin === "relay" &&
+            ["runtime_adapter_busy", "runtime_adapter_backpressure"].includes(
+              runtimeAdapterErrorCode(body) ?? "",
+            );
+          if (deleteClaim.created && !proxyResult.dispatched && !relayRetryable) {
+            await this.clearRuntimeAdapterDeletePending(current, deleteClaim);
+          }
+          const unavailable =
+            response.status === 429 || response.status === 503 || response.status === 504;
+          return portalError(
+            unavailable ? "Delete unavailable" : "Delete failed",
+            unavailable
+              ? "The runtime adapter is offline or did not respond. Try again after its lifecycle agent reconnects."
+              : "The runtime adapter rejected the delete request. The workspace is still registered.",
+            unavailable ? 503 : 502,
+          );
+        }
+        if (
+          response.ok &&
+          response.status !== 204 &&
+          (body?.id !== workspaceID ||
+            !["stopping", "stopped", "expired"].includes(String(body?.status)))
+        ) {
+          return portalError(
+            "Delete failed",
+            "The runtime adapter returned an invalid workspace confirmation. The workspace is still registered.",
+            502,
+          );
+        }
+        const applied = await this.scheduleRuntimeAdapterDeleteRetry(
+          current,
+          deleteClaim,
+          runtimeAdapterDeleteRetryBaseMs,
+        );
+        if (!applied) {
+          const latest = await this.getLease(lease.id);
+          if (
+            latest &&
+            !leaseIsLive(latest) &&
+            !latest.runtimeAdapterDeleteRequestedAt &&
+            latest.runtimeAdapterID === adapterID &&
+            latest.runtimeAdapterWorkspaceID === workspaceID &&
+            latest.runtimeAdapterRegistrationID === lease.runtimeAdapterRegistrationID
+          ) {
+            return new Response(null, {
+              status: 303,
+              headers: { location: portalReturnLocation(request) },
+            });
+          }
+          return portalError(
+            "Delete unavailable",
+            "The lease changed while the runtime adapter was deleting its workspace.",
+            409,
+          );
+        }
+        return new Response(null, {
+          status: 303,
+          headers: { location: portalReturnLocation(request) },
+        });
+      });
+    }
     await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
     return new Response(null, {
       status: 303,
       headers: { location: portalReturnLocation(request) },
+    });
+  }
+
+  private async serializeRuntimeAdapterDelete<T>(
+    leaseID: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.runtimeAdapterDeleteQueues.get(leaseID) ?? Promise.resolve();
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => turn);
+    this.runtimeAdapterDeleteQueues.set(leaseID, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.runtimeAdapterDeleteQueues.get(leaseID) === tail) {
+        this.runtimeAdapterDeleteQueues.delete(leaseID);
+      }
+    }
+  }
+
+  private async markRuntimeAdapterDeletePending(
+    lease: LeaseRecord,
+    retryDelay: number,
+  ): Promise<RuntimeAdapterDeleteClaim | undefined> {
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (
+        !current ||
+        !leaseIsLive(current) ||
+        !isRegisteredLease(current) ||
+        current.runtimeAdapterID !== lease.runtimeAdapterID ||
+        current.runtimeAdapterWorkspaceID !== lease.runtimeAdapterWorkspaceID ||
+        current.runtimeAdapterRegistrationID !== lease.runtimeAdapterRegistrationID
+      ) {
+        return undefined;
+      }
+      const now = new Date();
+      const created = !current.runtimeAdapterDeleteRequestedAt;
+      const claimID = crypto.randomUUID();
+      current.runtimeAdapterDeleteRequestedAt ??= now.toISOString();
+      current.runtimeAdapterDeleteClaimID = claimID;
+      current.runtimeAdapterDeleteRetryAt = new Date(now.getTime() + retryDelay).toISOString();
+      if (created) {
+        current.runtimeAdapterDeleteAttempts = 0;
+        delete current.runtimeAdapterDeleteError;
+      }
+      current.updatedAt = now.toISOString();
+      await this.putLease(current);
+      await this.scheduleAlarm();
+      return { requestedAt: current.runtimeAdapterDeleteRequestedAt, claimID, created };
+    });
+  }
+
+  private async beginRuntimeAdapterDeleteDispatch(
+    lease: LeaseRecord,
+    version: RuntimeAdapterDeleteVersion,
+  ): Promise<RuntimeAdapterDeleteDispatch | undefined> {
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (!current || !runtimeAdapterDeleteVersionMatches(current, lease, version)) {
+        return undefined;
+      }
+      const now = Date.now();
+      const existingFence = Date.parse(current.runtimeAdapterDeleteDispatchUntil ?? "");
+      if (Number.isFinite(existingFence) && existingFence > now) {
+        return undefined;
+      }
+      const deadlineMs = now + runtimeAdapterRelayTimeoutMs;
+      const fenceUntil = new Date(deadlineMs + runtimeAdapterDeleteDispatchGraceMs).toISOString();
+      current.runtimeAdapterDeleteDispatchUntil = fenceUntil;
+      const retryAt = Date.parse(current.runtimeAdapterDeleteRetryAt ?? "");
+      if (!Number.isFinite(retryAt) || retryAt < Date.parse(fenceUntil)) {
+        current.runtimeAdapterDeleteRetryAt = fenceUntil;
+      }
+      current.updatedAt = new Date(now).toISOString();
+      await this.putLease(current);
+      await this.scheduleAlarm();
+      return {
+        lease: structuredClone(current),
+        version,
+        deadlineMs,
+        fenceUntil,
+      };
+    });
+  }
+
+  private async finishRuntimeAdapterDeleteDispatch(
+    dispatch: RuntimeAdapterDeleteDispatch,
+    safeToClear: boolean,
+  ): Promise<void> {
+    if (!safeToClear) {
+      return;
+    }
+    await this.state.runExclusive(async () => {
+      const current = await this.getLease(dispatch.lease.id);
+      if (
+        !current ||
+        current.runtimeAdapterDeleteDispatchUntil !== dispatch.fenceUntil ||
+        !runtimeAdapterDeleteVersionMatches(current, dispatch.lease, dispatch.version)
+      ) {
+        return;
+      }
+      delete current.runtimeAdapterDeleteDispatchUntil;
+      current.updatedAt = new Date().toISOString();
+      await this.putLease(current);
+      await this.scheduleAlarm();
+    });
+  }
+
+  private async clearRuntimeAdapterDeletePending(
+    lease: LeaseRecord,
+    claim: RuntimeAdapterDeleteVersion,
+  ): Promise<void> {
+    await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (!current || !runtimeAdapterDeleteVersionMatches(current, lease, claim)) {
+        return;
+      }
+      clearRuntimeAdapterDeleteMetadata(current);
+      current.updatedAt = new Date().toISOString();
+      await this.putLease(current);
+      await this.scheduleAlarm();
+    });
+  }
+
+  private async finalizeRuntimeAdapterDeleteCompletion(
+    lease: LeaseRecord,
+    completion: RuntimeAdapterDeleteCompletion,
+  ): Promise<RuntimeAdapterDeleteFinalization> {
+    const result = await this.state.runExclusive(
+      async (): Promise<RuntimeAdapterDeleteFinalization> => {
+        const current = await this.getLease(lease.id);
+        if (
+          !current ||
+          !isRegisteredLease(current) ||
+          current.owner !== lease.owner ||
+          current.org !== lease.org ||
+          current.runtimeAdapterID !== completion.adapterID ||
+          current.runtimeAdapterWorkspaceID !== completion.workspaceID ||
+          current.runtimeAdapterRegistrationID !== completion.registrationID
+        ) {
+          return { status: "mismatch" };
+        }
+        const dispatchUntil = Date.parse(current.runtimeAdapterDeleteDispatchUntil ?? "");
+        if (Number.isFinite(dispatchUntil) && dispatchUntil > Date.now()) {
+          return {
+            status: "in-flight",
+            retryAt: current.runtimeAdapterDeleteDispatchUntil!,
+          };
+        }
+        if (!leaseIsLive(current) && !current.runtimeAdapterDeleteRequestedAt) {
+          return { status: "completed", lease: current };
+        }
+        const finalized = current.runtimeAdapterDeleteRequestedAt
+          ? finalizedRuntimeAdapterDeleteLease(current)
+          : finalizedReleasedLease(current, false);
+        await this.putLease(finalized);
+        await this.clearWorkspaceReleaseError(finalized);
+        await this.markAWSIngressReconcilePending(finalized);
+        await this.scheduleAlarm();
+        return { status: "completed", lease: finalized };
+      },
+    );
+    if (result.status === "completed") {
+      this.closeLeaseBridges(lease.id, 1008, "lease ended");
+    }
+    return result;
+  }
+
+  private async finalizeLegacyRuntimeAdapterDelete(
+    lease: LeaseRecord,
+    completion: RuntimeAdapterLegacyDeleteCompletion,
+  ): Promise<RuntimeAdapterDeleteFinalization> {
+    const result = await this.state.runExclusive(
+      async (): Promise<RuntimeAdapterDeleteFinalization> => {
+        const current = await this.getLease(lease.id);
+        if (
+          !current ||
+          !isRegisteredLease(current) ||
+          current.runtimeAdapterRegistrationID ||
+          current.owner !== lease.owner ||
+          current.org !== lease.org ||
+          current.runtimeAdapterID !== completion.adapterID ||
+          current.runtimeAdapterWorkspaceID !== completion.workspaceID
+        ) {
+          return { status: "mismatch" };
+        }
+        const dispatchUntil = Date.parse(current.runtimeAdapterDeleteDispatchUntil ?? "");
+        if (Number.isFinite(dispatchUntil) && dispatchUntil > Date.now()) {
+          return {
+            status: "in-flight",
+            retryAt: current.runtimeAdapterDeleteDispatchUntil!,
+          };
+        }
+        if (!leaseIsLive(current) && !current.runtimeAdapterDeleteRequestedAt) {
+          return { status: "completed", lease: current };
+        }
+        const finalized = current.runtimeAdapterDeleteRequestedAt
+          ? finalizedRuntimeAdapterDeleteLease(current)
+          : finalizedReleasedLease(current, false);
+        await this.putLease(finalized);
+        await this.clearWorkspaceReleaseError(finalized);
+        await this.markAWSIngressReconcilePending(finalized);
+        await this.scheduleAlarm();
+        return { status: "completed", lease: finalized };
+      },
+    );
+    if (result.status === "completed") {
+      this.closeLeaseBridges(lease.id, 1008, "lease ended");
+    }
+    return result;
+  }
+
+  private async scheduleRuntimeAdapterDeleteRetry(
+    lease: LeaseRecord,
+    claim: RuntimeAdapterDeleteVersion,
+    retryDelay: number,
+  ): Promise<boolean> {
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (!current || !runtimeAdapterDeleteVersionMatches(current, lease, claim)) {
+        return false;
+      }
+      const now = new Date();
+      const dispatchUntil = Date.parse(current.runtimeAdapterDeleteDispatchUntil ?? "");
+      current.runtimeAdapterDeleteRetryAt = new Date(
+        Math.max(now.getTime() + retryDelay, Number.isFinite(dispatchUntil) ? dispatchUntil : 0),
+      ).toISOString();
+      delete current.runtimeAdapterDeleteError;
+      current.updatedAt = now.toISOString();
+      await this.putLease(current);
+      await this.scheduleAlarm();
+      return true;
     });
   }
 
@@ -4280,6 +5382,678 @@ export class FleetCoordinator {
       createdAt: session?.createdAt ?? "",
       updatedAt: session?.updatedAt ?? "",
     });
+  }
+
+  private async reconcileRuntimeAdapterDeletes(): Promise<void> {
+    const pending = await this.state.runExclusive(async () => {
+      const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+      const now = Date.now();
+      return [...leases.values()]
+        .filter(
+          (lease) =>
+            (leaseIsLive(lease) || lease.state === "expired") &&
+            isRegisteredLease(lease) &&
+            Boolean(lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID) &&
+            Boolean(lease.runtimeAdapterDeleteRequestedAt) &&
+            (!Number.isFinite(Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "")) ||
+              Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "") <= now) &&
+            (!Number.isFinite(Date.parse(lease.runtimeAdapterDeleteDispatchUntil ?? "")) ||
+              Date.parse(lease.runtimeAdapterDeleteDispatchUntil ?? "") <= now),
+        )
+        .map((lease) => structuredClone(lease));
+    });
+    await Promise.all(pending.map((lease) => this.reconcileRuntimeAdapterDelete(lease)));
+  }
+
+  private async reconcileRuntimeAdapterDelete(lease: LeaseRecord): Promise<void> {
+    await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+      const requestedAt = lease.runtimeAdapterDeleteRequestedAt;
+      const adapterID = lease.runtimeAdapterID;
+      const workspaceID = lease.runtimeAdapterWorkspaceID;
+      if (!requestedAt || !adapterID || !workspaceID) {
+        return;
+      }
+      const version: RuntimeAdapterDeleteVersion = {
+        requestedAt,
+        ...(lease.runtimeAdapterDeleteClaimID === undefined
+          ? {}
+          : { claimID: lease.runtimeAdapterDeleteClaimID }),
+      };
+      const current = await this.state.runExclusive(async () => {
+        const latest = await this.getLease(lease.id);
+        if (!latest || !runtimeAdapterDeleteVersionMatches(latest, lease, version)) {
+          return undefined;
+        }
+        const now = Date.now();
+        const retryAt = Date.parse(latest.runtimeAdapterDeleteRetryAt ?? "");
+        const dispatchUntil = Date.parse(latest.runtimeAdapterDeleteDispatchUntil ?? "");
+        if (
+          (Number.isFinite(retryAt) && retryAt > now) ||
+          (Number.isFinite(dispatchUntil) && dispatchUntil > now)
+        ) {
+          return undefined;
+        }
+        return structuredClone(latest);
+      });
+      if (!current) {
+        return;
+      }
+      const dispatch = await this.beginRuntimeAdapterDeleteDispatch(current, version);
+      if (!dispatch) {
+        return;
+      }
+      const proxyResult = await (async () => {
+        let result: RuntimeAdapterProxyResult | undefined;
+        try {
+          result = await this.runtimeAdapterProxyResult(
+            new Request("https://coordinator.invalid/runtime-adapter-delete", {
+              method: "DELETE",
+            }),
+            adapterID,
+            ["v1", "workspaces", workspaceID],
+            { owner: dispatch.lease.owner, org: dispatch.lease.org },
+            dispatch.deadlineMs,
+          );
+          return result;
+        } finally {
+          await this.finishRuntimeAdapterDeleteDispatch(
+            dispatch,
+            result !== undefined && (await runtimeAdapterDeleteDispatchSafeToClear(result)),
+          );
+        }
+      })();
+      const response = proxyResult.response;
+      let body: { id?: unknown; status?: unknown; message?: unknown; error?: unknown } | undefined;
+      if (response.status !== 204) {
+        body = (await response
+          .clone()
+          .json()
+          .catch(() => undefined)) as
+          | { id?: unknown; status?: unknown; message?: unknown; error?: unknown }
+          | undefined;
+      }
+      const acknowledged =
+        proxyResult.origin === "upstream" &&
+        (response.status === 204 ||
+          (response.ok &&
+            body?.id === workspaceID &&
+            ["stopping", "stopped", "expired"].includes(String(body.status))));
+      await this.state.runExclusive(async () => {
+        const latest = await this.getLease(lease.id);
+        if (!latest || !runtimeAdapterDeleteVersionMatches(latest, dispatch.lease, version)) {
+          return;
+        }
+        const attempts = (latest.runtimeAdapterDeleteAttempts ?? 0) + 1;
+        const retryDelay = Math.min(
+          runtimeAdapterDeleteRetryMaxMs,
+          runtimeAdapterDeleteRetryBaseMs * 2 ** Math.min(attempts - 1, 4),
+        );
+        const dispatchUntil = Date.parse(latest.runtimeAdapterDeleteDispatchUntil ?? "");
+        latest.runtimeAdapterDeleteAttempts = attempts;
+        latest.runtimeAdapterDeleteRetryAt = new Date(
+          Math.max(Date.now() + retryDelay, Number.isFinite(dispatchUntil) ? dispatchUntil : 0),
+        ).toISOString();
+        if (acknowledged) {
+          delete latest.runtimeAdapterDeleteError;
+        } else {
+          latest.runtimeAdapterDeleteError =
+            response.status === 503 || response.status === 504
+              ? "runtime_adapter_unavailable"
+              : response.ok
+                ? "runtime_adapter_invalid_response"
+                : `runtime_adapter_http_${response.status}`;
+        }
+        latest.updatedAt = new Date().toISOString();
+        await this.putLease(latest);
+      });
+    });
+  }
+
+  private async createRuntimeAdapterTicket(request: Request, adapterID: string): Promise<Response> {
+    if (request.method.toUpperCase() !== "POST") {
+      return notFound();
+    }
+    if (!validRuntimeAdapterID(adapterID)) {
+      return json({ error: "invalid_adapter_id" }, { status: 400 });
+    }
+    let rawInput: unknown;
+    try {
+      rawInput = await optionalJson<unknown>(request);
+    } catch {
+      return json({ error: "invalid_adapter_ticket_request" }, { status: 400 });
+    }
+    if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
+      return json({ error: "invalid_adapter_ticket_request" }, { status: 400 });
+    }
+    const input = rawInput as { desktopTimeoutMs?: unknown };
+    if (
+      input.desktopTimeoutMs !== undefined &&
+      !validRuntimeAdapterDesktopRelayTimeout(input.desktopTimeoutMs)
+    ) {
+      return json(
+        {
+          error: "invalid_desktop_timeout",
+          message: "desktop timeout is outside the supported relay range",
+        },
+        { status: 400 },
+      );
+    }
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    const identityKey = runtimeAdapterIdentityKey(adapterID);
+    const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(identityKey);
+    if (
+      identity &&
+      (identity.adapterID !== adapterID || identity.owner !== owner || identity.org !== org)
+    ) {
+      return json(
+        {
+          error: "adapter_id_conflict",
+          message: "runtime adapter id belongs to another owner or organization",
+        },
+        { status: 409 },
+      );
+    }
+    await this.cleanupExpiredRuntimeAdapterTickets();
+    const now = new Date();
+    if (!identity) {
+      await this.state.storage.put<RuntimeAdapterIdentityRecord>(identityKey, {
+        adapterID,
+        owner,
+        org,
+        createdAt: now.toISOString(),
+      });
+    }
+    const ticket: RuntimeAdapterTicketRecord = {
+      ticket: newRuntimeAdapterTicket(),
+      adapterID,
+      owner,
+      org,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + runtimeAdapterTicketTTLSeconds * 1000).toISOString(),
+      ...(input.desktopTimeoutMs === undefined ? {} : { desktopTimeoutMs: input.desktopTimeoutMs }),
+    };
+    await this.state.storage.put(runtimeAdapterTicketKey(ticket.ticket), ticket);
+    return json({
+      ticket: ticket.ticket,
+      adapterID: ticket.adapterID,
+      expiresAt: ticket.expiresAt,
+    });
+  }
+
+  private async runtimeAdapterAgent(request: Request, adapterID: string): Promise<Response> {
+    if (request.method.toUpperCase() !== "GET") {
+      return notFound();
+    }
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return json(
+        { error: "upgrade_required", message: "runtime adapter agent requires websocket upgrade" },
+        { status: 426 },
+      );
+    }
+    const ticket = await this.consumeRuntimeAdapterTicket(request);
+    if (!ticket || ticket.adapterID !== adapterID) {
+      return json(
+        { error: "adapter_ticket_required", message: "valid runtime adapter ticket required" },
+        { status: 401 },
+      );
+    }
+    const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(
+      runtimeAdapterIdentityKey(adapterID),
+    );
+    if (
+      !identity ||
+      identity.adapterID !== adapterID ||
+      identity.owner !== ticket.owner ||
+      identity.org !== ticket.org
+    ) {
+      return json(
+        {
+          error: "adapter_identity_mismatch",
+          message: "runtime adapter ticket no longer matches the claimed adapter identity",
+        },
+        { status: 401 },
+      );
+    }
+    const upgrade = this.state.createWebSocketUpgrade({
+      maxPayload: runtimeAdapterRelayFrameLimit,
+    });
+    const agent = upgrade.socket;
+    const previous = this.runtimeAdapterAgents.get(adapterID);
+    if (previous) {
+      this.clearRuntimeAdapterAgent(adapterID, previous);
+      closeSocket(previous, 1012, "replaced by a newer runtime adapter agent");
+    }
+    this.runtimeAdapterAgents.set(adapterID, agent);
+    this.acceptBridgeWebSocket(agent, {
+      kind: "runtime-adapter-agent",
+      adapterID,
+      owner: ticket.owner,
+      org: ticket.org,
+      ...(ticket.desktopTimeoutMs === undefined
+        ? {}
+        : { desktopTimeoutMs: ticket.desktopTimeoutMs }),
+    });
+    return upgrade.response;
+  }
+
+  private async runtimeAdapterStatus(request: Request, adapterID: string): Promise<Response> {
+    if (!validRuntimeAdapterID(adapterID)) {
+      return notFound();
+    }
+    const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(
+      runtimeAdapterIdentityKey(adapterID),
+    );
+    const agent = this.runtimeAdapterAgents.get(adapterID);
+    const attachment = agent ? this.bridgeAttachment(agent) : undefined;
+    if (
+      !identity ||
+      identity.adapterID !== adapterID ||
+      !agent ||
+      agent.readyState !== WebSocket.OPEN ||
+      attachment?.kind !== "runtime-adapter-agent" ||
+      attachment.owner !== identity.owner ||
+      attachment.org !== identity.org ||
+      (!isAdminRequest(request) &&
+        (identity.owner !== requestOwner(request) ||
+          identity.org !== requestOrg(request, this.env)))
+    ) {
+      return json({ adapterID, connected: false });
+    }
+    return json({ adapterID, connected: true });
+  }
+
+  private async runtimeAdapterProxy(
+    request: Request,
+    adapterID: string,
+    proxyParts: string[],
+  ): Promise<Response> {
+    const path = runtimeAdapterProxyPath(proxyParts);
+    const method = request.method.toUpperCase();
+    if (path && method === "DELETE" && runtimeAdapterRelayMethodAllowed(method, path)) {
+      return json(
+        {
+          error: "runtime_adapter_delete_requires_lease",
+          message:
+            "runtime adapter workspace deletes must use a registered lease release so the lifecycle generation can be fenced",
+        },
+        { status: 409 },
+      );
+    }
+    return (await this.runtimeAdapterProxyResult(request, adapterID, proxyParts)).response;
+  }
+
+  private async runtimeAdapterProxyResult(
+    request: Request,
+    adapterID: string,
+    proxyParts: string[],
+    scope?: RuntimeAdapterProxyScope,
+    relayDeadlineMs?: number,
+  ): Promise<RuntimeAdapterProxyResult> {
+    if (!validRuntimeAdapterID(adapterID)) {
+      return { origin: "relay", dispatched: false, response: notFound() };
+    }
+    const path = runtimeAdapterProxyPath(proxyParts);
+    const method = request.method.toUpperCase();
+    if (!path || !runtimeAdapterRelayMethodAllowed(method, path)) {
+      return { origin: "relay", dispatched: false, response: notFound() };
+    }
+    let relayHeaders: Record<string, string> | undefined;
+    try {
+      relayHeaders = runtimeAdapterRelayHeaders(request);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        return {
+          origin: "relay",
+          dispatched: false,
+          response: json(
+            { error: "idempotency_key_too_long", message: error.message },
+            { status: 431 },
+          ),
+        };
+      }
+      throw error;
+    }
+    const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(
+      runtimeAdapterIdentityKey(adapterID),
+    );
+    if (!identity || identity.adapterID !== adapterID) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "runtime_adapter_unclaimed",
+            message: "runtime adapter id has not been claimed",
+          },
+          { status: 409 },
+        ),
+      };
+    }
+    const identityMismatch = scope
+      ? identity.owner !== scope.owner || identity.org !== scope.org
+      : identity.owner !== requestOwner(request) || identity.org !== requestOrg(request, this.env);
+    if (identityMismatch && (scope !== undefined || !isAdminRequest(request))) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "runtime_adapter_forbidden",
+            message: "runtime adapter belongs to another owner or organization",
+          },
+          { status: 403 },
+        ),
+      };
+    }
+    let body: string | undefined;
+    try {
+      body = await readRuntimeAdapterRelayBody(request);
+    } catch (error) {
+      if (error instanceof RangeError) {
+        return {
+          origin: "relay",
+          dispatched: false,
+          response: json({ error: "request_too_large", message: error.message }, { status: 413 }),
+        };
+      }
+      if (error instanceof TypeError) {
+        return {
+          origin: "relay",
+          dispatched: false,
+          response: json(
+            { error: "invalid_request_body", message: "runtime adapter body must be valid UTF-8" },
+            { status: 400 },
+          ),
+        };
+      }
+      throw error;
+    }
+    if (!runtimeAdapterRelayBodyAllowed(method, path, body)) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "invalid_request_body",
+            message: "runtime adapter request body is allowed only for workspace creation",
+          },
+          { status: 400 },
+        ),
+      };
+    }
+    const agent = this.runtimeAdapterAgents.get(adapterID);
+    const attachment = agent ? this.bridgeAttachment(agent) : undefined;
+    if (
+      !agent ||
+      agent.readyState !== WebSocket.OPEN ||
+      attachment?.kind !== "runtime-adapter-agent"
+    ) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          { error: "runtime_adapter_unavailable", message: "runtime adapter is not connected" },
+          { status: 503 },
+        ),
+      };
+    }
+    if (attachment.owner !== identity.owner || attachment.org !== identity.org) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "runtime_adapter_identity_mismatch",
+            message: "connected runtime adapter does not match its claimed identity",
+          },
+          { status: 503 },
+        ),
+      };
+    }
+    if (this.runtimeAdapterRelayAtCapacity(adapterID, identity, method)) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "runtime_adapter_busy",
+            message: "runtime adapter relay has too many in-flight requests",
+          },
+          { status: 429, headers: { "retry-after": "1" } },
+        ),
+      };
+    }
+    const bufferedAmount = (agent as WebSocket & { readonly bufferedAmount?: number })
+      .bufferedAmount;
+    if (typeof bufferedAmount === "number" && bufferedAmount > runtimeAdapterMaxBufferedBytes) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "runtime_adapter_backpressure",
+            message: "runtime adapter relay transport is congested",
+          },
+          { status: 503, headers: { "retry-after": "1" } },
+        ),
+      };
+    }
+    const relayTimeoutMs = runtimeAdapterRelayTimeoutForPath(path, attachment.desktopTimeoutMs);
+    const maximumDeadlineMs = Date.now() + relayTimeoutMs;
+    const deadlineMs =
+      relayDeadlineMs === undefined
+        ? maximumDeadlineMs
+        : Math.min(relayDeadlineMs, maximumDeadlineMs);
+    if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= Date.now()) {
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          {
+            error: "runtime_adapter_timeout",
+            message: "runtime adapter request expired before dispatch",
+          },
+          { status: 504 },
+        ),
+      };
+    }
+    const id = crypto.randomUUID();
+    const relayRequest: RuntimeAdapterRelayRequest = {
+      type: "request",
+      id,
+      method: method as RuntimeAdapterRelayRequest["method"],
+      path,
+      deadlineMs,
+      ...(relayHeaders ? { headers: relayHeaders } : {}),
+      ...(body === undefined ? {} : { body }),
+    };
+    let relayResult: RuntimeAdapterRelayResult;
+    try {
+      relayResult = await new Promise<RuntimeAdapterRelayResult>((resolve) => {
+        const timeout = setTimeout(
+          () => {
+            this.settleRuntimeAdapterPending(id, {
+              origin: "relay",
+              response: runtimeAdapterRelayError(
+                id,
+                504,
+                "runtime_adapter_timeout",
+                "runtime adapter did not respond in time",
+              ),
+            });
+          },
+          Math.max(0, deadlineMs - Date.now()),
+        );
+        const abortHandler = () => {
+          this.cancelRuntimeAdapterPending(id);
+        };
+        const pending: RuntimeAdapterPendingRequest = {
+          adapterID,
+          owner: identity.owner,
+          org: identity.org,
+          dispatched: false,
+          clientSettled: false,
+          resolve,
+          timeout,
+          signal: request.signal,
+          abortHandler,
+        };
+        this.runtimeAdapterPending.set(id, pending);
+        request.signal.addEventListener("abort", abortHandler, { once: true });
+        if (request.signal.aborted) {
+          abortHandler();
+        } else {
+          pending.dispatched = true;
+          agent.send(JSON.stringify(relayRequest));
+        }
+      });
+    } catch {
+      this.takeRuntimeAdapterPending(id);
+      return {
+        origin: "relay",
+        dispatched: false,
+        response: json(
+          { error: "runtime_adapter_unavailable", message: "runtime adapter disconnected" },
+          { status: 503 },
+        ),
+      };
+    }
+    const response = relayResult.response;
+    const headers = new Headers({ "cache-control": "no-store" });
+    const contentType = runtimeAdapterRelayContentType(response.headers);
+    headers.set(
+      "content-type",
+      contentType?.toLowerCase().startsWith("application/json")
+        ? "application/json; charset=utf-8"
+        : "text/plain; charset=utf-8",
+    );
+    const responseBody = [204, 205, 304].includes(response.status) ? null : (response.body ?? null);
+    return {
+      origin: relayResult.origin,
+      dispatched: true,
+      response: new Response(responseBody, {
+        status: response.status,
+        headers,
+      }),
+    };
+  }
+
+  private async handleRuntimeAdapterAgentMessage(
+    adapterID: string,
+    socket: WebSocket,
+    rawData: unknown,
+  ): Promise<void> {
+    const messageBytes = runtimeAdapterRelayMessageBytes(rawData);
+    if (messageBytes === undefined || messageBytes > runtimeAdapterRelayFrameLimit) {
+      closeSocket(socket, 1009, "runtime adapter response too large");
+      return;
+    }
+    let input: unknown;
+    try {
+      const raw = await normalizeWebVNCData(rawData);
+      const text = typeof raw === "string" ? raw : fatalTextDecoder.decode(raw);
+      input = JSON.parse(text);
+    } catch {
+      return;
+    }
+    const id =
+      input && typeof input === "object" && !Array.isArray(input)
+        ? (input as { id?: unknown }).id
+        : undefined;
+    if (typeof id !== "string") {
+      return;
+    }
+    const pending = this.runtimeAdapterPending.get(id);
+    if (!pending || pending.adapterID !== adapterID) {
+      return;
+    }
+    if (!validRuntimeAdapterRelayResponse(input, id)) {
+      return;
+    }
+    this.settleRuntimeAdapterPending(id, { origin: "upstream", response: input });
+  }
+
+  private runtimeAdapterRelayAtCapacity(
+    adapterID: string,
+    identity: RuntimeAdapterIdentityRecord,
+    method: string,
+  ): boolean {
+    const isDelete = method === "DELETE";
+    const globalLimit =
+      runtimeAdapterMaxPendingGlobal + (isDelete ? runtimeAdapterReservedDeletesGlobal : 0);
+    if (this.runtimeAdapterPending.size >= globalLimit) {
+      return true;
+    }
+    let adapterPending = 0;
+    let ownerPending = 0;
+    for (const pending of this.runtimeAdapterPending.values()) {
+      if (pending.adapterID === adapterID) adapterPending += 1;
+      if (pending.owner === identity.owner) ownerPending += 1;
+    }
+    const adapterLimit =
+      runtimeAdapterMaxPendingPerAdapter + (isDelete ? runtimeAdapterReservedDeletesPerAdapter : 0);
+    const ownerLimit =
+      runtimeAdapterMaxPendingPerOwner + (isDelete ? runtimeAdapterReservedDeletesPerOwner : 0);
+    return adapterPending >= adapterLimit || ownerPending >= ownerLimit;
+  }
+
+  private takeRuntimeAdapterPending(id: string): RuntimeAdapterPendingRequest | undefined {
+    const pending = this.runtimeAdapterPending.get(id);
+    if (!pending) return undefined;
+    this.runtimeAdapterPending.delete(id);
+    clearTimeout(pending.timeout);
+    pending.signal.removeEventListener("abort", pending.abortHandler);
+    return pending;
+  }
+
+  private settleRuntimeAdapterPending(id: string, result: RuntimeAdapterRelayResult): boolean {
+    const pending = this.takeRuntimeAdapterPending(id);
+    if (!pending) return false;
+    if (!pending.clientSettled) {
+      pending.resolve(result);
+    }
+    return true;
+  }
+
+  private cancelRuntimeAdapterPending(id: string): void {
+    const pending = this.runtimeAdapterPending.get(id);
+    if (!pending || pending.clientSettled) return;
+    const result: RuntimeAdapterRelayResult = {
+      origin: "relay",
+      response: runtimeAdapterRelayError(
+        id,
+        499,
+        "client_closed_request",
+        "runtime adapter request was cancelled",
+      ),
+    };
+    if (!pending.dispatched) {
+      this.settleRuntimeAdapterPending(id, result);
+      return;
+    }
+    pending.clientSettled = true;
+    pending.signal.removeEventListener("abort", pending.abortHandler);
+    pending.resolve(result);
+  }
+
+  private clearRuntimeAdapterAgent(adapterID: string, socket: WebSocket): void {
+    if (this.runtimeAdapterAgents.get(adapterID) !== socket) {
+      return;
+    }
+    this.runtimeAdapterAgents.delete(adapterID);
+    for (const [id, pending] of this.runtimeAdapterPending) {
+      if (pending.adapterID !== adapterID) continue;
+      this.settleRuntimeAdapterPending(id, {
+        origin: "relay",
+        response: runtimeAdapterRelayError(
+          id,
+          503,
+          "runtime_adapter_unavailable",
+          "runtime adapter disconnected",
+        ),
+      });
+    }
   }
 
   private async createWebVNCTicket(request: Request, identifier: string): Promise<Response> {
@@ -4651,7 +6425,7 @@ export class FleetCoordinator {
         this.pendingCodeRequests.delete(id);
         resolve({ type: "http", id, status: 504, error: "code bridge timed out" });
       }, 30_000);
-      this.pendingCodeRequests.set(id, { resolve, timeout, chunks: [] });
+      this.pendingCodeRequests.set(id, { leaseID: lease.id, resolve, timeout, chunks: [] });
       agent.send(JSON.stringify(message));
     });
     if (response.error) {
@@ -4783,6 +6557,7 @@ export class FleetCoordinator {
     if (message.type === "ws_start" && message.id) {
       const start = message as CodeWebSocketFrameStart;
       this.pendingCodeFrames.set(start.chunkID, {
+        leaseID,
         id: start.id,
         frame: start.frame ?? "binary",
         chunks: [],
@@ -4850,17 +6625,28 @@ export class FleetCoordinator {
     }
   }
 
-  private clearCodeLease(_leaseID: string): void {
+  private clearCodeLease(leaseID: string, code = 1011, reason = "code bridge disconnected"): void {
     for (const [id, viewer] of this.codeViewers) {
+      const attachment = this.bridgeAttachment(viewer);
+      if (attachment?.kind !== "code-viewer" || attachment.leaseID !== leaseID) {
+        continue;
+      }
       this.codeViewers.delete(id);
-      closeSocket(viewer, 1011, "code bridge disconnected");
+      closeSocket(viewer, code, reason);
     }
     for (const [id, pending] of this.pendingCodeRequests) {
+      if (pending.leaseID !== leaseID) {
+        continue;
+      }
       clearTimeout(pending.timeout);
       this.pendingCodeRequests.delete(id);
-      pending.resolve({ type: "http", id, status: 502, error: "code bridge disconnected" });
+      pending.resolve({ type: "http", id, status: 502, error: reason });
     }
-    this.pendingCodeFrames.clear();
+    for (const [chunkID, pending] of this.pendingCodeFrames) {
+      if (pending.leaseID === leaseID) {
+        this.pendingCodeFrames.delete(chunkID);
+      }
+    }
   }
 
   private clearEgressHost(leaseID: string, sessionID: string, socket: WebSocket): void {
@@ -4883,20 +6669,37 @@ export class FleetCoordinator {
     this.egressHosts.delete(key);
   }
 
-  private clearEgressLease(leaseID: string): void {
+  private clearEgressLease(leaseID: string, code = 1011, reason = "lease ended"): void {
     for (const [key, socket] of this.egressHosts) {
       if (egressSocketLeaseID(key) === leaseID) {
-        closeSocket(socket, 1011, "lease ended");
+        closeSocket(socket, code, reason);
         this.egressHosts.delete(key);
       }
     }
     for (const [key, socket] of this.egressClients) {
       if (egressSocketLeaseID(key) === leaseID) {
-        closeSocket(socket, 1011, "lease ended");
+        closeSocket(socket, code, reason);
         this.egressClients.delete(key);
       }
     }
     this.egressSessions.delete(leaseID);
+  }
+
+  private closeLeaseBridges(leaseID: string, code: number, reason: string): void {
+    const webVNCAgents = this.webVNCAgents.get(leaseID);
+    for (const [agentID, socket] of webVNCAgents ?? []) {
+      closeSocket(socket, code, reason);
+      this.pendingWebVNCToViewer.delete(webVNCBufferKey(leaseID, agentID));
+    }
+    this.webVNCAgents.delete(leaseID);
+    this.webVNCAgentCapabilities.delete(leaseID);
+    this.closeWebVNCViewers(leaseID, code, reason);
+
+    const codeAgent = this.codeAgents.get(leaseID);
+    this.codeAgents.delete(leaseID);
+    closeSocket(codeAgent, code, reason);
+    this.clearCodeLease(leaseID, code, reason);
+    this.clearEgressLease(leaseID, code, reason);
   }
 
   private clearEgressSessionSockets(
@@ -5100,6 +6903,37 @@ export class FleetCoordinator {
     }
     this.webVNCViewers.delete(leaseID);
     this.webVNCControllers.delete(leaseID);
+  }
+
+  private async consumeRuntimeAdapterTicket(
+    request: Request,
+  ): Promise<RuntimeAdapterTicketRecord | undefined> {
+    const value = runtimeAdapterTicketFromRequest(request);
+    if (!validRuntimeAdapterTicket(value)) {
+      return undefined;
+    }
+    const key = runtimeAdapterTicketKey(value);
+    const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
+    if (!ticket || ticket.ticket !== value) {
+      return undefined;
+    }
+    await this.state.storage.delete(key);
+    if (Date.parse(ticket.expiresAt) <= Date.now()) {
+      return undefined;
+    }
+    return ticket;
+  }
+
+  private async cleanupExpiredRuntimeAdapterTickets(): Promise<void> {
+    const tickets = await this.state.storage.list<RuntimeAdapterTicketRecord>({
+      prefix: runtimeAdapterTicketPrefix(),
+    });
+    const now = Date.now();
+    await Promise.all(
+      [...tickets.entries()]
+        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
+        .map(([key]) => this.state.storage.delete(key)),
+    );
   }
 
   private async consumeWebVNCTicket(request: Request): Promise<WebVNCTicketRecord | undefined> {
@@ -5997,9 +7831,13 @@ export class FleetCoordinator {
     if (!lease) {
       return notFound();
     }
-    return json({
-      lease: await this.releaseResolvedLease(lease, { deleteServer: true, keep: false }),
-    });
+    if (lease.runtimeAdapterDeleteRequestedAt) {
+      return runtimeAdapterDeletePendingResponse(lease);
+    }
+    const released = await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
+    return released.runtimeAdapterDeleteRequestedAt
+      ? runtimeAdapterDeletePendingResponse(released)
+      : json({ lease: released });
   }
 
   private filterLeases(leases: LeaseRecord[], request: Request): LeaseRecord[] {
@@ -6527,6 +8365,9 @@ export class FleetCoordinator {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       for (const stored of leases.values()) {
+        if (!leaseIsLive(stored)) {
+          this.closeLeaseBridges(stored.id, 1008, "lease ended");
+        }
         const workspace = workspacesByLeaseID.get(stored.id);
         if (
           workspace &&
@@ -6555,10 +8396,14 @@ export class FleetCoordinator {
           lease.endedAt = nowISO;
           delete lease.releaseDeletesServer;
           clearLeaseCleanupMetadata(lease);
+          if (!lease.runtimeAdapterDeleteRequestedAt) {
+            clearRuntimeAdapterDeleteMetadata(lease);
+          }
           delete lease.cleanupStartedAt;
           delete lease.cleanupClaimExpiresAt;
           // oxlint-disable-next-line eslint/no-await-in-loop -- each lease claim is committed while the state lock is held.
           await this.putLease(lease);
+          this.closeLeaseBridges(lease.id, 1008, "lease expired");
           continue;
         }
         if (lease.state === "provisioning" && !lease.cloudID) {
@@ -6651,7 +8496,9 @@ export class FleetCoordinator {
             workspaceOwnsLease(workspace, lease) &&
             workspaceProvisioningNeedsRecovery(workspace, lease, now)
           ) &&
-          (leaseIsLive(lease) || leaseNeedsCleanup(lease, now))
+          (leaseIsLive(lease) ||
+            Boolean(lease.runtimeAdapterDeleteRequestedAt) ||
+            leaseNeedsCleanup(lease, now))
         );
       })
       .map((lease) => nextLeaseAlarmTime(lease))
@@ -6674,6 +8521,40 @@ export class FleetCoordinator {
       .toSorted((left, right) => left - right)[0];
     if (workspaceRetentionAlarm !== undefined) {
       alarmTimes.push(workspaceRetentionAlarm);
+    }
+    if (workspacePrewarmCount(this.env.CRABBOX_WORKSPACE_PREWARM_COUNT) > 0) {
+      const activeWorkspaceOrgs = new Set(
+        [...workspaces.values()]
+          .filter((workspace) => !workspace.prewarm)
+          .filter((workspace) => {
+            const status = workspaceStatus(workspace, leasesByID.get(workspace.leaseID));
+            return status === "provisioning" || status === "ready";
+          })
+          .map((workspace) => workspace.org),
+      );
+      const workspacePrewarmAlarm = [...workspaces.values()]
+        .filter((workspace) => workspace.prewarm && !workspace.releaseRequestedAt)
+        .map((workspace) => leasesByID.get(workspace.leaseID))
+        .filter((lease): lease is LeaseRecord => lease?.state === "active")
+        .map((lease) => Date.parse(lease.expiresAt) - workspacePrewarmReplacementLeadMs)
+        .filter((time) => time > now)
+        .toSorted((left, right) => left - right)[0];
+      if (workspacePrewarmAlarm !== undefined) {
+        alarmTimes.push(workspacePrewarmAlarm);
+      }
+      const workspacePrewarmRetryAlarm = [...workspaces.values()]
+        .filter(
+          (workspace) =>
+            workspace.prewarm &&
+            activeWorkspaceOrgs.has(workspace.org) &&
+            Boolean(workspace.error || leasesByID.get(workspace.leaseID)?.state === "failed"),
+        )
+        .map((workspace) => Date.parse(workspace.updatedAt) + workspacePrewarmRetryDelayMs)
+        .filter(Number.isFinite)
+        .toSorted((left, right) => left - right)[0];
+      if (workspacePrewarmRetryAlarm !== undefined) {
+        alarmTimes.push(Math.max(now + 1, workspacePrewarmRetryAlarm));
+      }
     }
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
     if (orphanSweepAlarm !== undefined) {
@@ -7862,8 +9743,11 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     options: { deleteServer: boolean; keep?: boolean },
   ): Promise<LeaseRecord> {
-    await this.markWorkspaceReleaseRequested(lease);
     const current = (await this.getLease(lease.id)) ?? lease;
+    if (current.runtimeAdapterDeleteRequestedAt) {
+      return current;
+    }
+    await this.markWorkspaceReleaseRequested(current);
     if (
       current.workspaceID &&
       !current.cloudID &&
@@ -7905,11 +9789,13 @@ export class FleetCoordinator {
     lease: LeaseRecord,
     options: { deleteServer: boolean; keep?: boolean },
   ): Promise<LeaseRecord> {
-    this.clearEgressLease(lease.id);
     const preparation = await this.state.runExclusive(async () => {
       const current = (await this.getLease(lease.id)) ?? structuredClone(lease);
+      if (current.runtimeAdapterDeleteRequestedAt) {
+        return { cleanup: false as const, blocked: true as const, lease: current };
+      }
       if (current.cleanupStartedAt) {
-        return { cleanup: false as const, lease: current };
+        return { cleanup: false as const, blocked: false as const, lease: current };
       }
       const deleteServer = options.deleteServer && !isRegisteredLease(current);
       const shouldDelete = Boolean(
@@ -7925,7 +9811,7 @@ export class FleetCoordinator {
         await this.clearWorkspaceReleaseError(released);
         await this.markAWSIngressReconcilePending(released);
         await this.scheduleAlarm();
-        return { cleanup: false as const, lease: released };
+        return { cleanup: false as const, blocked: false as const, lease: released };
       }
       const now = new Date();
       const claimed = finalizedReleasedLease(current, true, options.keep);
@@ -7939,10 +9825,15 @@ export class FleetCoordinator {
       await this.scheduleAlarm();
       return {
         cleanup: true as const,
+        blocked: false as const,
         claim: claimed.cleanupStartedAt,
         lease: structuredClone(claimed),
       };
     });
+    if (preparation.blocked) {
+      return preparation.lease;
+    }
+    this.closeLeaseBridges(lease.id, 1008, "lease ended");
     if (!preparation.cleanup) {
       return preparation.lease;
     }
@@ -8465,6 +10356,111 @@ function egressTicketKey(ticket: string): string {
   return `${egressTicketPrefix()}${ticket}`;
 }
 
+function runtimeAdapterTicketPrefix(): string {
+  return "runtime-adapter-ticket:";
+}
+
+function runtimeAdapterTicketKey(ticket: string): string {
+  return `${runtimeAdapterTicketPrefix()}${ticket}`;
+}
+
+function runtimeAdapterIdentityKey(adapterID: string): string {
+  return `runtime-adapter-identity:${adapterID}`;
+}
+
+function runtimeAdapterRelayError(
+  id: string,
+  status: number,
+  error: string,
+  message: string,
+): RuntimeAdapterRelayResponse {
+  return {
+    type: "response",
+    id,
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ error, message }),
+  };
+}
+
+function runtimeAdapterErrorCode(body: unknown): string | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return undefined;
+  }
+  const error = (body as { error?: unknown }).error;
+  if (typeof error === "string") {
+    return error;
+  }
+  if (!error || typeof error !== "object" || Array.isArray(error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+async function runtimeAdapterDeleteDispatchSafeToClear(
+  result: RuntimeAdapterProxyResult,
+): Promise<boolean> {
+  if (!result.dispatched) {
+    return true;
+  }
+  if (result.origin !== "upstream") {
+    return false;
+  }
+  if (result.response.ok) {
+    return true;
+  }
+  const body = await result.response
+    .clone()
+    .json()
+    .catch(() => undefined);
+  return !["adapter_timeout", "adapter_unavailable"].includes(runtimeAdapterErrorCode(body) ?? "");
+}
+
+function runtimeAdapterDeleteCompletion(
+  value: unknown,
+): RuntimeAdapterDeleteCompletion | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const completion = value as Partial<RuntimeAdapterDeleteCompletion>;
+  if (
+    completion.status !== "absent" ||
+    !validRuntimeAdapterID(completion.adapterID) ||
+    !validRuntimeAdapterID(completion.workspaceID) ||
+    !validRuntimeAdapterID(completion.registrationID)
+  ) {
+    return undefined;
+  }
+  return {
+    adapterID: completion.adapterID,
+    workspaceID: completion.workspaceID,
+    registrationID: completion.registrationID,
+    status: completion.status,
+  };
+}
+
+function runtimeAdapterLegacyDeleteCompletion(
+  value: unknown,
+): RuntimeAdapterLegacyDeleteCompletion | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const completion = value as Partial<RuntimeAdapterLegacyDeleteCompletion>;
+  if (
+    completion.status !== "absent" ||
+    !validRuntimeAdapterID(completion.adapterID) ||
+    !validRuntimeAdapterID(completion.workspaceID)
+  ) {
+    return undefined;
+  }
+  return {
+    adapterID: completion.adapterID,
+    workspaceID: completion.workspaceID,
+    status: completion.status,
+  };
+}
+
 function newLeaseID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
@@ -8479,6 +10475,10 @@ function validWorkspaceID(value: string | undefined): value is string {
   );
 }
 
+function newWorkspacePrewarmID(): string {
+  return `prewarm-${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`;
+}
+
 function workspaceManagedLeaseResponse(): Response {
   return json(
     {
@@ -8486,6 +10486,32 @@ function workspaceManagedLeaseResponse(): Response {
       message: "workspace leases must be managed through the workspace lifecycle",
     },
     { status: 409 },
+  );
+}
+
+function runtimeAdapterDeletePendingResponse(lease: LeaseRecord): Response {
+  return json(
+    {
+      error: "runtime_adapter_delete_pending",
+      message: "lease release is blocked while its runtime adapter delete is pending",
+      lease,
+    },
+    { status: 409 },
+  );
+}
+
+function runtimeAdapterDeleteInFlightResponse(retryAt: string): Response {
+  const retryAtMs = Date.parse(retryAt);
+  const retryAfter = Number.isFinite(retryAtMs)
+    ? Math.max(1, Math.ceil((retryAtMs - Date.now()) / 1000))
+    : 1;
+  return json(
+    {
+      error: "runtime_adapter_delete_in_flight",
+      message: "a generation-scoped runtime adapter delete is still settling",
+      retryAt,
+    },
+    { status: 409, headers: { "retry-after": String(retryAfter) } },
   );
 }
 
@@ -8575,6 +10601,36 @@ function workspaceCommand(value: string | undefined): string | undefined {
 function workspaceClass(configured: string | undefined): string {
   const machineClass = configured?.trim() || "standard";
   return ["standard", "fast", "large", "beast"].includes(machineClass) ? machineClass : "standard";
+}
+
+function workspacePrewarmCount(value: string | undefined): number {
+  const parsed = Number.parseInt(value?.trim() ?? "", 10);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, 4)) : 0;
+}
+
+function workspacePrewarmMatches(
+  workspace: WorkspaceRecord,
+  target: Pick<WorkspaceRecord, "org" | "profile" | "provider" | "class" | "desktop">,
+): boolean {
+  return (
+    workspace.org === target.org &&
+    workspace.profile === target.profile &&
+    workspace.provider === target.provider &&
+    workspace.class === target.class &&
+    workspace.desktop === target.desktop
+  );
+}
+
+function workspacePrewarmShape(
+  workspace: Pick<WorkspaceRecord, "org" | "profile" | "provider" | "class" | "desktop">,
+): string {
+  return JSON.stringify([
+    workspace.org,
+    workspace.profile,
+    workspace.provider,
+    workspace.class,
+    workspace.desktop,
+  ]);
 }
 
 function workspaceSeconds(value: number | undefined, fallback: number): number | undefined {
@@ -9122,6 +11178,12 @@ function newEgressTicket(): string {
   return `egress_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function newRuntimeAdapterTicket(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `adapter_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 function newEgressSessionID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
@@ -9154,6 +11216,17 @@ function validRegisteredLeaseID(value: string | undefined): value is string {
 
 function validWebVNCTicket(value: string | undefined): value is string {
   return typeof value === "string" && /^wvnc_[a-f0-9]{32}$/.test(value);
+}
+
+function validRuntimeAdapterTicket(value: string | undefined): value is string {
+  return typeof value === "string" && /^adapter_[a-f0-9]{32}$/.test(value);
+}
+
+function runtimeAdapterTicketFromRequest(request: Request): string {
+  // Adapter-agent upgrades bypass user auth; keep the single-use ticket out of URLs and dedicated proxy headers.
+  const authorization = request.headers.get("authorization") ?? "";
+  const [scheme, token] = authorization.split(/\s+/, 2);
+  return scheme?.toLowerCase() === "bearer" ? (token ?? "") : "";
 }
 
 function validWebVNCSessionID(value: string | undefined): value is string {
@@ -9756,6 +11829,14 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
       return typeof attachment.leaseID === "string" && typeof attachment.sessionID === "string"
         ? attachment
         : undefined;
+    case "runtime-adapter-agent":
+      return validRuntimeAdapterID(attachment.adapterID) &&
+        typeof attachment.owner === "string" &&
+        typeof attachment.org === "string" &&
+        (attachment.desktopTimeoutMs === undefined ||
+          validRuntimeAdapterDesktopRelayTimeout(attachment.desktopTimeoutMs))
+        ? attachment
+        : undefined;
     case "control":
       return typeof attachment.clientID === "string" &&
         typeof attachment.owner === "string" &&
@@ -9782,6 +11863,9 @@ function bridgeTags(attachment: BridgeAttachment): string[] {
   }
   if (attachment.kind === "webvnc-agent" || attachment.kind === "webvnc-viewer") {
     return [`lease:${attachment.leaseID}`, `webvnc:${attachment.id}`, attachment.kind];
+  }
+  if (attachment.kind === "runtime-adapter-agent") {
+    return [`adapter:${attachment.adapterID}`, attachment.kind];
   }
   return [`lease:${attachment.leaseID}`, attachment.kind];
 }
@@ -9911,6 +11995,21 @@ async function normalizeWebVNCData(data: unknown): Promise<string | ArrayBuffer>
     return await data.arrayBuffer();
   }
   return String(data);
+}
+
+function runtimeAdapterRelayMessageBytes(data: unknown): number | undefined {
+  if (typeof data === "string") {
+    return data.length > runtimeAdapterRelayFrameLimit
+      ? data.length
+      : textEncoder.encode(data).byteLength;
+  }
+  if (data instanceof ArrayBuffer) {
+    return data.byteLength;
+  }
+  if (data instanceof Blob) {
+    return data.size;
+  }
+  return undefined;
 }
 
 function webVNCDataBytes(data: string | ArrayBuffer): number {
@@ -10628,11 +12727,29 @@ function provisionedLeaseRecord(
 
 function nextLeaseAlarmTime(lease: LeaseRecord): number {
   const now = Date.now();
+  const expiresAt = Date.parse(lease.expiresAt);
+  const runtimeAdapterDeleteRetryAt = Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "");
+  const runtimeAdapterDeleteDispatchUntil = Date.parse(
+    lease.runtimeAdapterDeleteDispatchUntil ?? "",
+  );
+  if (lease.runtimeAdapterDeleteRequestedAt) {
+    let deleteAlarm = Number.isFinite(runtimeAdapterDeleteRetryAt)
+      ? Math.max(now + 1000, runtimeAdapterDeleteRetryAt)
+      : now + 1000;
+    if (
+      Number.isFinite(runtimeAdapterDeleteDispatchUntil) &&
+      runtimeAdapterDeleteDispatchUntil > now
+    ) {
+      deleteAlarm = Math.max(deleteAlarm, runtimeAdapterDeleteDispatchUntil);
+    }
+    return leaseIsLive(lease) && Number.isFinite(expiresAt)
+      ? Math.min(expiresAt, deleteAlarm)
+      : deleteAlarm;
+  }
   const claimDeadline = cleanupClaimDeadline(lease);
   if (lease.cleanupStartedAt && Number.isFinite(claimDeadline)) {
     return claimDeadline;
   }
-  const expiresAt = Date.parse(lease.expiresAt);
   const cleanupRetryAt = Date.parse(lease.cleanupRetryAt ?? "");
   if (Number.isFinite(cleanupRetryAt) && cleanupRetryAt > now) {
     if (Number.isFinite(expiresAt) && expiresAt <= now) {
@@ -10659,6 +12776,41 @@ function clearLeaseCleanupMetadata(lease: LeaseRecord): void {
   delete lease.cleanupRetryAt;
 }
 
+function clearRuntimeAdapterDeleteMetadata(lease: LeaseRecord): void {
+  delete lease.runtimeAdapterDeleteRequestedAt;
+  delete lease.runtimeAdapterDeleteClaimID;
+  delete lease.runtimeAdapterDeleteRetryAt;
+  delete lease.runtimeAdapterDeleteDispatchUntil;
+  delete lease.runtimeAdapterDeleteAttempts;
+  delete lease.runtimeAdapterDeleteError;
+}
+
+function runtimeAdapterDeleteVersionMatches(
+  current: LeaseRecord,
+  anchor: LeaseRecord,
+  claim: RuntimeAdapterDeleteVersion,
+): boolean {
+  return (
+    (leaseIsLive(current) || current.state === "expired") &&
+    isRegisteredLease(current) &&
+    current.runtimeAdapterDeleteRequestedAt === claim.requestedAt &&
+    current.runtimeAdapterDeleteClaimID === claim.claimID &&
+    current.runtimeAdapterID === anchor.runtimeAdapterID &&
+    current.runtimeAdapterWorkspaceID === anchor.runtimeAdapterWorkspaceID &&
+    current.runtimeAdapterRegistrationID === anchor.runtimeAdapterRegistrationID
+  );
+}
+
+function finalizedRuntimeAdapterDeleteLease(current: LeaseRecord): LeaseRecord {
+  if (current.state !== "expired") {
+    return finalizedReleasedLease(current, false, true);
+  }
+  const lease = structuredClone(current);
+  lease.updatedAt = new Date().toISOString();
+  clearRuntimeAdapterDeleteMetadata(lease);
+  return lease;
+}
+
 function finalizedReleasedLease(
   current: LeaseRecord,
   deleteServer: boolean,
@@ -10680,6 +12832,7 @@ function finalizedReleasedLease(
     delete lease.releaseDeletesServer;
   }
   clearLeaseCleanupMetadata(lease);
+  clearRuntimeAdapterDeleteMetadata(lease);
   delete lease.cleanupStartedAt;
   delete lease.cleanupClaimExpiresAt;
   if (keep !== undefined) {

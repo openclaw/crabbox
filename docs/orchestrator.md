@@ -11,6 +11,11 @@ credentials, server lifecycle, expiry, cost guardrails, and usage accounting.
 The CLI still performs all data-plane work (SSH, rsync, command execution)
 directly against the runner host, even in brokered mode.
 
+The workspace API can also maintain an organization-scoped ready reserve while
+workspace demand is active. Matching requests from any owner in that
+organization adopt a ready lease atomically, and the coordinator immediately
+replenishes the reserve. The reserve drains when the organization becomes idle.
+
 For the broader request flow and the Worker's internals, see
 [Architecture](architecture.md) and the
 [Coordinator](features/coordinator.md) feature doc.

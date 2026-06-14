@@ -29,6 +29,13 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (path[0] === "v1" && path[1] === "images") {
     return "direct";
   }
+  if (
+    path[0] === "v1" &&
+    path[1] === "adapters" &&
+    ((method === "GET" && path.length === 3) || path[3] === "proxy")
+  ) {
+    return "direct";
+  }
   if (path.join("/") === "v1/pool") {
     return "direct";
   }

@@ -38,13 +38,13 @@
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
     "@typescript/native-preview": "^7.0.0-dev.20260527.2",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "oxfmt": "^0.52.0",
     "oxlint": "^1.67.0",
     "oxlint-tsgolint": "^0.23.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.7",
-    "wrangler": "^4.95.0"
+    "wrangler": "^4.100.0"
   },
   "engines": {
     "node": ">=22.12.0"
