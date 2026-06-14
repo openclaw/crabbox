@@ -8,6 +8,7 @@ import (
 )
 
 type flagValues struct {
+	Kubectl             *string
 	Kubeconfig          *string
 	Context             *string
 	Namespace           *string
@@ -23,6 +24,7 @@ type flagValues struct {
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
+		Kubectl:             fs.String("agent-sandbox-kubectl", defaults.AgentSandbox.Kubectl, "kubectl binary or path"),
 		Kubeconfig:          fs.String("agent-sandbox-kubeconfig", defaults.AgentSandbox.Kubeconfig, "Kubernetes kubeconfig path"),
 		Context:             fs.String("agent-sandbox-context", defaults.AgentSandbox.Context, "Kubernetes context"),
 		Namespace:           fs.String("agent-sandbox-namespace", defaults.AgentSandbox.Namespace, "Kubernetes namespace"),
@@ -41,6 +43,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	v, ok := values.(flagValues)
 	if !ok {
 		return nil
+	}
+	if flagWasSet(fs, "agent-sandbox-kubectl") {
+		cfg.AgentSandbox.Kubectl = *v.Kubectl
 	}
 	if flagWasSet(fs, "agent-sandbox-kubeconfig") {
 		cfg.AgentSandbox.Kubeconfig = expandUserPath(*v.Kubeconfig)

@@ -1,7 +1,9 @@
 package agentsandbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -10,14 +12,11 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type fakeKubernetesClient struct {
 	resources  map[string]map[string]bool
-	objects    map[string]*unstructured.Unstructured
+	objects    map[string]*kubernetesObject
 	rbac       map[string]bool
 	pods       map[string][]podState
 	gets       []string
@@ -29,6 +28,38 @@ type fakeKubernetesClient struct {
 	deletes    int
 }
 
+type recordingCommandRunner struct {
+	requests []LocalCommandRequest
+	inputs   [][]byte
+	results  []LocalCommandResult
+	errors   []error
+}
+
+func (r *recordingCommandRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	r.requests = append(r.requests, req)
+	if req.Stdin != nil {
+		input, _ := io.ReadAll(req.Stdin)
+		r.inputs = append(r.inputs, input)
+	}
+	var result LocalCommandResult
+	if len(r.results) > 0 {
+		result = r.results[0]
+		r.results = r.results[1:]
+	}
+	if req.Stdout != nil {
+		_, _ = io.WriteString(req.Stdout, result.Stdout)
+	}
+	if req.Stderr != nil {
+		_, _ = io.WriteString(req.Stderr, result.Stderr)
+	}
+	var err error
+	if len(r.errors) > 0 {
+		err = r.errors[0]
+		r.errors = r.errors[1:]
+	}
+	return result, err
+}
+
 func (f *fakeKubernetesClient) CheckResource(_ context.Context, groupVersion, resource string) error {
 	if f.resources[groupVersion][resource] {
 		return nil
@@ -36,73 +67,60 @@ func (f *fakeKubernetesClient) CheckResource(_ context.Context, groupVersion, re
 	return errors.New("missing resource " + groupVersion + "/" + resource)
 }
 
-func (f *fakeKubernetesClient) Get(_ context.Context, gvr schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
-	key := gvr.Resource + "/" + namespace + "/" + name
+func (f *fakeKubernetesClient) Get(_ context.Context, ref resourceRef, namespace, name string) (*kubernetesObject, error) {
+	key := ref.Resource + "/" + namespace + "/" + name
 	f.gets = append(f.gets, key)
 	obj := f.objects[key]
 	if obj == nil {
 		return nil, errKubernetesNotFound
 	}
-	return obj, nil
+	return cloneKubernetesObject(obj), nil
 }
 
-func (f *fakeKubernetesClient) Create(_ context.Context, gvr schema.GroupVersionResource, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	key := gvr.Resource + "/" + namespace + "/" + obj.GetName()
+func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namespace string, obj *kubernetesObject) (*kubernetesObject, error) {
+	key := ref.Resource + "/" + namespace + "/" + obj.Metadata.Name
 	if f.objects == nil {
-		f.objects = map[string]*unstructured.Unstructured{}
+		f.objects = map[string]*kubernetesObject{}
 	}
 	if f.objects[key] != nil {
 		return nil, errors.New("already exists " + key)
 	}
 	f.creates++
-	created := obj.DeepCopy()
+	created := cloneKubernetesObject(obj)
 	f.objects[key] = created
-	if gvr.Resource == sandboxClaimResource {
-		sandboxName := obj.GetName() + "-sandbox"
-		podName := obj.GetName() + "-pod"
-		_ = unstructured.SetNestedField(created.Object, sandboxName, "status", "sandbox", "name")
-		sandbox := &unstructured.Unstructured{Object: map[string]any{
-			"status": map[string]any{
-				"selector": "claim=" + obj.GetName(),
-				"conditions": []any{
-					map[string]any{"type": "Ready", "status": "True"},
-				},
+	if ref.Resource == sandboxClaimResource {
+		sandboxName := obj.Metadata.Name + "-sandbox"
+		podName := obj.Metadata.Name + "-pod"
+		created.Status.Sandbox.Name = sandboxName
+		sandbox := &kubernetesObject{
+			Metadata: objectMeta{Name: sandboxName},
+			Status: objectStatus{
+				Selector:   "claim=" + obj.Metadata.Name,
+				Conditions: []conditionState{{Type: "Ready", Status: "True"}},
 			},
-		}}
-		sandbox.SetName(sandboxName)
+		}
 		f.objects[sandboxResource+"/"+namespace+"/"+sandboxName] = sandbox
 		if f.pods == nil {
 			f.pods = map[string][]podState{}
 		}
-		f.pods[namespace+"/claim="+obj.GetName()] = []podState{{Name: podName, Phase: "Running", PodIP: "10.0.0.11", Ready: true}}
+		f.pods[namespace+"/claim="+obj.Metadata.Name] = []podState{{Name: podName, Phase: "Running", PodIP: "10.0.0.11", Ready: true}}
 	}
-	return obj.DeepCopy(), nil
+	return cloneKubernetesObject(created), nil
 }
 
-func (f *fakeKubernetesClient) Delete(_ context.Context, gvr schema.GroupVersionResource, namespace, name string) error {
+func (f *fakeKubernetesClient) Delete(_ context.Context, ref resourceRef, namespace, name string) error {
 	if len(f.deleteErrs) > 0 {
 		err := f.deleteErrs[0]
 		f.deleteErrs = f.deleteErrs[1:]
 		return err
 	}
-	key := gvr.Resource + "/" + namespace + "/" + name
+	key := ref.Resource + "/" + namespace + "/" + name
 	if f.objects[key] == nil {
 		return errKubernetesNotFound
 	}
 	f.deletes++
 	delete(f.objects, key)
 	return nil
-}
-
-func (f *fakeKubernetesClient) List(_ context.Context, gvr schema.GroupVersionResource, namespace string, _ metav1.ListOptions) (*unstructured.UnstructuredList, error) {
-	prefix := gvr.Resource + "/" + namespace + "/"
-	list := &unstructured.UnstructuredList{}
-	for key, obj := range f.objects {
-		if strings.HasPrefix(key, prefix) {
-			list.Items = append(list.Items, *obj.DeepCopy())
-		}
-	}
-	return list, nil
 }
 
 func (f *fakeKubernetesClient) CanI(_ context.Context, rule rbacRule) (bool, error) {
@@ -116,6 +134,13 @@ func (f *fakeKubernetesClient) GetPod(_ context.Context, namespace, name string)
 		return podState{}, errors.New("pod not found " + namespace + "/" + name)
 	}
 	return pods[0], nil
+}
+
+func cloneKubernetesObject(object *kubernetesObject) *kubernetesObject {
+	data, _ := json.Marshal(object)
+	var clone kubernetesObject
+	_ = json.Unmarshal(data, &clone)
+	return &clone
 }
 
 func (f *fakeKubernetesClient) ListPods(_ context.Context, namespace, selector string) ([]podState, error) {
@@ -210,6 +235,22 @@ func TestClaimScopeIncludesClusterContextAndRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestClaimAnnotationsStoreScopeFingerprint(t *testing.T) {
+	t.Setenv("KUBECONFIG", "/Users/alice/.kube/private-cluster")
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Context = "agent-context"
+	cfg.AgentSandbox.Namespace = "sandboxes"
+	cfg.AgentSandbox.WarmPool = "linux-pool"
+
+	annotations := claimAnnotations(cfg)
+	if got, want := annotations[annotationScope], scopeFingerprint(claimScope(cfg)); got != want {
+		t.Fatalf("scope annotation=%q want=%q", got, want)
+	}
+	if strings.Contains(annotations[annotationScope], "/Users/alice") {
+		t.Fatalf("scope annotation leaked local kubeconfig path: %q", annotations[annotationScope])
+	}
+}
+
 func TestClaimScopeDistinguishesImplicitAndExplicitDefaultContainer(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.AgentSandbox.Context = "agent-context"
@@ -289,6 +330,20 @@ func TestSandboxReadinessPreservesDiagnostics(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxPodRequiresControllerIdentity(t *testing.T) {
+	fake := &fakeKubernetesClient{
+		pods: map[string][]podState{
+			"sandboxes/name=sandbox-a": {{Name: "sandbox-a", Ready: true}},
+		},
+	}
+	_, err := resolveSandboxPod(context.Background(), fake, "sandboxes", &kubernetesObject{
+		Metadata: objectMeta{Name: "sandbox-a"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no pod annotation or selector") {
+		t.Fatalf("same-name pod fallback was accepted: %v", err)
+	}
+}
+
 func TestRetainMissingClaimRequiresExplicitForget(t *testing.T) {
 	cfg := core.BaseConfig()
 	claim := LeaseClaim{LeaseID: "asbx_missing"}
@@ -297,7 +352,7 @@ func TestRetainMissingClaimRequiresExplicitForget(t *testing.T) {
 	}
 	cfg.AgentSandbox.ForgetMissing = true
 	temp := t.TempDir()
-	t.Setenv("CRABBOX_STATE_DIR", temp)
+	t.Setenv("XDG_STATE_HOME", temp)
 	if err := retainMissingClaim(cfg, claim); err != nil {
 		t.Fatal(err)
 	}
@@ -343,28 +398,211 @@ func TestWaitForSandboxReadinessTimesOut(t *testing.T) {
 	}
 }
 
-func readyFakeClient(cfg Config) *fakeKubernetesClient {
-	claim := &unstructured.Unstructured{Object: map[string]any{
-		"status": map[string]any{"sandbox": map[string]any{"name": "sandbox-a"}},
-	}}
-	claim.SetName("claim-a")
-	sandbox := &unstructured.Unstructured{Object: map[string]any{
-		"status": map[string]any{
-			"selector": "app=agent-sandbox",
-			"conditions": []any{
-				map[string]any{"type": "Ready", "status": "True"},
-			},
+func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.AgentSandbox.Kubectl = "/opt/kubectl"
+	cfg.AgentSandbox.Kubeconfig = "/tmp/cluster.yaml"
+	cfg.AgentSandbox.Context = "agent-context"
+	runner := &recordingCommandRunner{
+		results: []LocalCommandResult{
+			{Stdout: `{"resources":[{"name":"sandboxclaims"}]}`},
+			{Stdout: `{"apiVersion":"extensions.agents.x-k8s.io/v1beta1","kind":"SandboxClaim","metadata":{"name":"claim-a","namespace":"sandboxes"}}`},
 		},
-	}}
-	sandbox.SetName("sandbox-a")
-	warmPool := &unstructured.Unstructured{}
-	warmPool.SetName(cfg.AgentSandbox.WarmPool)
+	}
+	clientRaw, err := newKubernetesClient(context.Background(), cfg, Runtime{Exec: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := clientRaw.(*kubectlKubernetesClient)
+	if err := client.CheckResource(context.Background(), agentSandboxExtensionsGroupVersion, sandboxClaimResource); err != nil {
+		t.Fatal(err)
+	}
+	object := &kubernetesObject{
+		APIVersion: agentSandboxExtensionsGroupVersion,
+		Kind:       "SandboxClaim",
+		Metadata:   objectMeta{Name: "claim-a", Namespace: "sandboxes"},
+		Spec:       map[string]any{"warmPoolRef": map[string]any{"name": "linux-pool"}},
+	}
+	if _, err := client.Create(context.Background(), sandboxClaimGVR(), "sandboxes", object); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(runner.requests) != 2 {
+		t.Fatalf("requests=%d", len(runner.requests))
+	}
+	for _, req := range runner.requests {
+		if req.Name != "/opt/kubectl" {
+			t.Fatalf("binary=%q", req.Name)
+		}
+		if req.MaxCapturedOutputBytes != kubectlCaptureLimitBytes {
+			t.Fatalf("capture limit=%d", req.MaxCapturedOutputBytes)
+		}
+		if got := strings.Join(req.Args[:4], " "); got != "--kubeconfig /tmp/cluster.yaml --context agent-context" {
+			t.Fatalf("global args=%q", got)
+		}
+	}
+	if got := strings.Join(runner.requests[0].Args[4:], " "); got != "get --raw /apis/extensions.agents.x-k8s.io/v1beta1" {
+		t.Fatalf("discovery args=%q", got)
+	}
+	if got := strings.Join(runner.requests[1].Args[4:], " "); got != "create --namespace sandboxes -f - -o json" {
+		t.Fatalf("create args=%q", got)
+	}
+	if len(runner.inputs) != 1 || !bytes.Contains(runner.inputs[0], []byte(`"warmPoolRef":{"name":"linux-pool"}`)) {
+		t.Fatalf("create stdin=%q", runner.inputs)
+	}
+}
+
+func TestKubectlExecStreamsStdinWithoutPuttingItOnArgv(t *testing.T) {
+	secret := "stdin-only-secret"
+	runner := &recordingCommandRunner{results: []LocalCommandResult{{ExitCode: 0}}}
+	client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
+	if err := client.Exec(context.Background(), podExecRequest{
+		Namespace: "sandboxes",
+		Pod:       "sandbox-a",
+		Command:   []string{"sh", "-s"},
+		Stdin:     strings.NewReader(secret),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 || len(runner.inputs) != 1 {
+		t.Fatalf("requests=%d inputs=%d", len(runner.requests), len(runner.inputs))
+	}
+	if args := strings.Join(runner.requests[0].Args, " "); strings.Contains(args, secret) || args != "exec --namespace sandboxes -i sandbox-a -- sh -s" {
+		t.Fatalf("exec args=%q", args)
+	}
+	if string(runner.inputs[0]) != secret {
+		t.Fatalf("stdin=%q", runner.inputs[0])
+	}
+}
+
+func TestKubectlClientUsesVersionedResourcesAndAsyncDelete(t *testing.T) {
+	runner := &recordingCommandRunner{}
+	client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
+	if err := client.Delete(context.Background(), sandboxClaimGVR(), "sandboxes", "claim-a"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("requests=%d", len(runner.requests))
+	}
+	got := strings.Join(runner.requests[0].Args, " ")
+	want := "delete sandboxclaims.v1beta1.extensions.agents.x-k8s.io claim-a --namespace sandboxes --ignore-not-found=true --wait=false"
+	if got != want {
+		t.Fatalf("delete args=%q want=%q", got, want)
+	}
+}
+
+func TestKubectlCanIDenialUsesExitOneContract(t *testing.T) {
+	tests := []struct {
+		name        string
+		result      LocalCommandResult
+		err         error
+		wantAllowed bool
+		wantErr     bool
+	}{
+		{
+			name:        "allowed",
+			result:      LocalCommandResult{Stdout: "yes\n"},
+			wantAllowed: true,
+		},
+		{
+			name:   "denied",
+			result: LocalCommandResult{ExitCode: 1, Stdout: "no - RBAC: access denied\n"},
+			err:    errors.New("exit status 1"),
+		},
+		{
+			name:    "transport failure",
+			result:  LocalCommandResult{ExitCode: 2, Stderr: "connection refused\n"},
+			err:     errors.New("exit status 2"),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingCommandRunner{
+				results: []LocalCommandResult{tt.result},
+				errors:  []error{tt.err},
+			}
+			client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
+			allowed, err := client.CanI(context.Background(), rbacRule{
+				Resource:  "pods",
+				Namespace: "sandboxes",
+				Verbs:     []string{"get"},
+			})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tt.wantErr)
+			}
+			if allowed != tt.wantAllowed {
+				t.Fatalf("allowed=%v want=%v", allowed, tt.wantAllowed)
+			}
+		})
+	}
+}
+
+func TestKubectlExecOnlyMapsProvenRemoteExitStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     LocalCommandResult
+		wantRemote bool
+	}{
+		{
+			name:       "remote command",
+			result:     LocalCommandResult{ExitCode: 42, Stderr: "command terminated with exit code 42\n"},
+			wantRemote: true,
+		},
+		{
+			name:       "remote stderr without newline",
+			result:     LocalCommandResult{ExitCode: 42, Stderr: "failurecommand terminated with exit code 42\n"},
+			wantRemote: true,
+		},
+		{
+			name:   "transport failure",
+			result: LocalCommandResult{ExitCode: 1, Stderr: "Unable to connect to the server: dial tcp: connection refused\n"},
+		},
+		{
+			name:   "mismatched diagnostic",
+			result: LocalCommandResult{ExitCode: 1, Stderr: "command terminated with exit code 42\n"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingCommandRunner{
+				results: []LocalCommandResult{tt.result},
+				errors:  []error{errors.New("kubectl failed")},
+			}
+			client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
+			err := client.Exec(context.Background(), podExecRequest{
+				Namespace: "sandboxes",
+				Pod:       "sandbox-a",
+				Command:   []string{"false"},
+			})
+			if err == nil {
+				t.Fatal("exec unexpectedly succeeded")
+			}
+			_, remote := remoteExitStatus(err)
+			if remote != tt.wantRemote {
+				t.Fatalf("remote=%v want=%v err=%v", remote, tt.wantRemote, err)
+			}
+		})
+	}
+}
+
+func readyFakeClient(cfg Config) *fakeKubernetesClient {
+	claim := &kubernetesObject{Metadata: objectMeta{Name: "claim-a"}}
+	claim.Status.Sandbox.Name = "sandbox-a"
+	sandbox := &kubernetesObject{
+		Metadata: objectMeta{Name: "sandbox-a"},
+		Status: objectStatus{
+			Selector:   "app=agent-sandbox",
+			Conditions: []conditionState{{Type: "Ready", Status: "True"}},
+		},
+	}
+	warmPool := &kubernetesObject{Metadata: objectMeta{Name: cfg.AgentSandbox.WarmPool}}
 	fake := &fakeKubernetesClient{
 		resources: map[string]map[string]bool{
 			agentSandboxCoreGroupVersion:       {sandboxResource: true},
 			agentSandboxExtensionsGroupVersion: {sandboxClaimResource: true, warmPoolResource: true},
 		},
-		objects: map[string]*unstructured.Unstructured{
+		objects: map[string]*kubernetesObject{
 			sandboxClaimResource + "/sandboxes/claim-a":                  claim,
 			sandboxResource + "/sandboxes/sandbox-a":                     sandbox,
 			warmPoolResource + "/sandboxes/" + cfg.AgentSandbox.WarmPool: warmPool,

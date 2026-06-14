@@ -148,6 +148,7 @@ esac
 
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(crabboxCalls, /doctor --provider agent-sandbox/);
+  assert.doesNotMatch(crabboxCalls, /--agent-sandbox-kubectl/);
   assert.match(crabboxCalls, /run --provider agent-sandbox/);
   assert.match(crabboxCalls, /--slug agent-sandbox-smoke-test/);
   assert.match(crabboxCalls, /status --provider agent-sandbox .* --id asbx_123456789abc/);
@@ -168,6 +169,7 @@ test("Agent Sandbox smoke cleanup reuses resolved provider args", () => {
   fs.writeFileSync(
     config,
     `agentSandbox:
+  kubectl: /trusted/kubectl
   kubeconfig: ${JSON.stringify(kubeconfig)}
   context: config-context
   namespace: config-namespace
@@ -220,7 +222,7 @@ esac
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(
     crabboxCalls,
-    /stop --provider agent-sandbox --agent-sandbox-kubeconfig \S+ --agent-sandbox-context config-context --agent-sandbox-namespace config-namespace --agent-sandbox-warm-pool config-pool/,
+    /stop --provider agent-sandbox --agent-sandbox-kubectl \/trusted\/kubectl --agent-sandbox-kubeconfig \S+ --agent-sandbox-context config-context --agent-sandbox-namespace config-namespace --agent-sandbox-warm-pool config-pool/,
   );
   assert.match(crabboxCalls, /--agent-sandbox-forget-missing asbx_cleanup123/);
 });

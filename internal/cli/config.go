@@ -276,6 +276,7 @@ type KubeVirtConfig struct {
 }
 
 type AgentSandboxConfig struct {
+	Kubectl             string
 	Kubeconfig          string
 	Context             string
 	Namespace           string
@@ -1954,6 +1955,7 @@ func baseConfig() Config {
 			DeleteOnRelease: true,
 		},
 		AgentSandbox: AgentSandboxConfig{
+			Kubectl:             "kubectl",
 			Namespace:           "default",
 			Workdir:             "/workspace/crabbox",
 			SandboxReadyTimeout: 180 * time.Second,
@@ -2562,6 +2564,7 @@ type fileKubeVirtConfig struct {
 }
 
 type fileAgentSandboxConfig struct {
+	Kubectl             string `yaml:"kubectl,omitempty"`
 	Kubeconfig          string `yaml:"kubeconfig,omitempty"`
 	Context             string `yaml:"context,omitempty"`
 	Namespace           string `yaml:"namespace,omitempty"`
@@ -4082,6 +4085,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.AgentSandbox != nil {
+		if trusted && file.AgentSandbox.Kubectl != "" {
+			cfg.AgentSandbox.Kubectl = file.AgentSandbox.Kubectl
+		}
 		if file.AgentSandbox.Kubeconfig != "" {
 			cfg.AgentSandbox.Kubeconfig = expandUserPath(file.AgentSandbox.Kubeconfig)
 		}
@@ -5790,6 +5796,7 @@ func applyEnv(cfg *Config) error {
 		cfg.KubeVirt.DeleteOnRelease = value
 		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 	}
+	cfg.AgentSandbox.Kubectl = getenv("CRABBOX_AGENT_SANDBOX_KUBECTL", cfg.AgentSandbox.Kubectl)
 	cfg.AgentSandbox.Kubeconfig = expandUserPath(getenv("CRABBOX_AGENT_SANDBOX_KUBECONFIG", cfg.AgentSandbox.Kubeconfig))
 	cfg.AgentSandbox.Context = getenv("CRABBOX_AGENT_SANDBOX_CONTEXT", cfg.AgentSandbox.Context)
 	cfg.AgentSandbox.Namespace = getenv("CRABBOX_AGENT_SANDBOX_NAMESPACE", cfg.AgentSandbox.Namespace)

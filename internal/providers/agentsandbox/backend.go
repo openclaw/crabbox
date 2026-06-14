@@ -7,9 +7,6 @@ import (
 	"path"
 	"strings"
 	"time"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 type backend struct {
@@ -430,17 +427,19 @@ func (b *backend) createClaim(ctx context.Context, client kubernetesClient, requ
 		return "", "", "", sandboxReadiness{}, err
 	}
 	claimName := claimName(leaseID, slug)
-	obj := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": agentSandboxExtensionsGroupVersion,
-		"kind":       "SandboxClaim",
-		"spec": map[string]any{
+	obj := &kubernetesObject{
+		APIVersion: agentSandboxExtensionsGroupVersion,
+		Kind:       "SandboxClaim",
+		Metadata: objectMeta{
+			Name:        claimName,
+			Namespace:   b.cfg.AgentSandbox.Namespace,
+			Labels:      claimLabels(leaseID, slug),
+			Annotations: claimAnnotations(b.cfg),
+		},
+		Spec: map[string]any{
 			"warmPoolRef": map[string]any{"name": b.cfg.AgentSandbox.WarmPool},
 		},
-	}}
-	obj.SetName(claimName)
-	obj.SetNamespace(b.cfg.AgentSandbox.Namespace)
-	obj.SetLabels(claimLabels(leaseID, slug))
-	obj.SetAnnotations(claimAnnotations(b.cfg))
+	}
 	if _, err := client.Create(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, obj); err != nil {
 		return "", "", "", sandboxReadiness{}, err
 	}
@@ -476,24 +475,24 @@ func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient,
 	if err := validateClaimOwnership(live, leaseID, providerScope); err != nil {
 		return err
 	}
-	if err := client.Delete(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName); err != nil && !isNotFound(err) && !apierrors.IsNotFound(err) {
+	if err := client.Delete(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName); err != nil && !isNotFound(err) {
 		return err
 	}
 	removeLeaseClaim(leaseID)
 	return nil
 }
 
-func validateClaimOwnership(obj *unstructured.Unstructured, leaseID, providerScope string) error {
-	labels := obj.GetLabels()
+func validateClaimOwnership(obj *kubernetesObject, leaseID, providerScope string) error {
+	labels := obj.Metadata.Labels
 	if labels[labelProvider] != providerName || labels[labelLeaseID] != safeLabelValue(leaseID) {
-		return exit(4, "agent-sandbox SandboxClaim %s is not owned by Crabbox lease %s", obj.GetName(), leaseID)
+		return exit(4, "agent-sandbox SandboxClaim %s is not owned by Crabbox lease %s", obj.Metadata.Name, leaseID)
 	}
-	scope := strings.TrimSpace(obj.GetAnnotations()[annotationScope])
+	scope := strings.TrimSpace(obj.Metadata.Annotations[annotationScope])
 	if scope == "" {
-		return exit(4, "agent-sandbox SandboxClaim %s has no Crabbox scope annotation", obj.GetName())
+		return exit(4, "agent-sandbox SandboxClaim %s has no Crabbox scope annotation", obj.Metadata.Name)
 	}
-	if providerScope != "" && scope != providerScope {
-		return exit(4, "agent-sandbox SandboxClaim %s belongs to a different Crabbox scope", obj.GetName())
+	if providerScope != "" && scope != scopeFingerprint(providerScope) {
+		return exit(4, "agent-sandbox SandboxClaim %s belongs to a different Crabbox scope", obj.Metadata.Name)
 	}
 	return nil
 }

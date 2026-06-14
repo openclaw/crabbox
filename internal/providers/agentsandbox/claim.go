@@ -10,17 +10,16 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const (
-	labelLeaseID  = "crabbox.openclaw.dev/lease-id"
-	labelSlug     = "crabbox.openclaw.dev/slug"
-	labelProvider = "crabbox.openclaw.dev/provider"
+	labelLeaseID  = "crabbox.dev/lease-id"
+	labelSlug     = "crabbox.dev/slug"
+	labelProvider = "crabbox.dev/provider"
 
-	annotationScope     = "crabbox.openclaw.dev/provider-scope"
-	annotationWorkdir   = "crabbox.openclaw.dev/workdir"
-	annotationContainer = "crabbox.openclaw.dev/container"
+	annotationScope     = "crabbox.dev/provider-scope"
+	annotationWorkdir   = "crabbox.dev/workdir"
+	annotationContainer = "crabbox.dev/container"
 
 	claimLabelClaimName   = "claim"
 	claimLabelSandboxName = "sandbox"
@@ -92,10 +91,15 @@ func claimAnnotations(cfg Config) map[string]string {
 		container = "default"
 	}
 	return map[string]string{
-		annotationScope:     claimScope(cfg),
+		annotationScope:     scopeFingerprint(claimScope(cfg)),
 		annotationWorkdir:   cfg.AgentSandbox.Workdir,
 		annotationContainer: container,
 	}
+}
+
+func scopeFingerprint(scope string) string {
+	sum := sha256.Sum256([]byte(scope))
+	return hex.EncodeToString(sum[:])
 }
 
 func safeLabelValue(value string) string {
@@ -253,7 +257,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 }
 
 func isNotFound(err error) bool {
-	return apierrors.IsNotFound(err) || errors.Is(err, errKubernetesNotFound)
+	return errors.Is(err, errKubernetesNotFound)
 }
 
 func newLeaseID() string {

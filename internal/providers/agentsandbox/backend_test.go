@@ -15,7 +15,6 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	kubeexec "k8s.io/client-go/util/exec"
 )
 
 func TestWarmupCreatesClaimAndPersistsLocalLease(t *testing.T) {
@@ -123,7 +122,7 @@ func TestRunMapsRemoteExitStatus(t *testing.T) {
 	fake := readyFakeClient(cfg)
 	fake.execErrs = []error{
 		nil,
-		kubeexec.CodeExitError{Err: errors.New("remote exited"), Code: 42},
+		testExitError{code: 42},
 	}
 	backend := testBackend(cfg, fake, nil, nil)
 	repo := testGitRepo(t)
@@ -264,7 +263,7 @@ func TestRunExistingLeaseValidatesLiveClaimOwnership(t *testing.T) {
 	}
 	claimName := claim.Labels[claimLabelClaimName]
 	live := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName]
-	live.SetLabels(map[string]string{labelProvider: providerName, labelLeaseID: "asbx_other"})
+	live.Metadata.Labels = map[string]string{labelProvider: providerName, labelLeaseID: "asbx_other"}
 	_, err = backend.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
 	if err == nil || !strings.Contains(err.Error(), "not owned") {
 		t.Fatalf("expected live ownership error, got %v", err)
@@ -272,6 +271,18 @@ func TestRunExistingLeaseValidatesLiveClaimOwnership(t *testing.T) {
 	if len(fake.execs) != 0 {
 		t.Fatalf("command executed despite ownership mismatch: %#v", fake.execs)
 	}
+}
+
+type testExitError struct {
+	code int
+}
+
+func (e testExitError) Error() string {
+	return "remote exited"
+}
+
+func (e testExitError) ExitStatus() int {
+	return e.code
 }
 
 func TestRunExistingLeaseReadinessIsBounded(t *testing.T) {
@@ -419,7 +430,7 @@ func TestCleanupRetainsMissingClaimsUnlessForgetMissing(t *testing.T) {
 
 func testAgentSandboxConfig(t *testing.T) Config {
 	t.Helper()
-	t.Setenv("CRABBOX_STATE_DIR", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
 	cfg.AgentSandbox.Context = "agent-context"
 	cfg.AgentSandbox.Namespace = "sandboxes"

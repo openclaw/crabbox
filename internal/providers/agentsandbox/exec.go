@@ -7,8 +7,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	kubeexec "k8s.io/client-go/util/exec"
 )
 
 func (b *backend) execTimeoutSecs() int {
@@ -85,14 +83,6 @@ func remoteExitStatus(err error) (int, bool) {
 	var exitErr interface{ ExitStatus() int }
 	if errors.As(err, &exitErr) {
 		code := exitErr.ExitStatus()
-		if code < 0 {
-			code = 1
-		}
-		return code, true
-	}
-	var codeExit kubeexec.CodeExitError
-	if errors.As(err, &codeExit) {
-		code := codeExit.ExitStatus()
 		if code < 0 {
 			code = 1
 		}

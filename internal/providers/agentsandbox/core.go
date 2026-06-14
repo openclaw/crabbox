@@ -34,6 +34,9 @@ type ExitError = core.ExitError
 type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 type SyncManifest = core.SyncManifest
+type CommandRunner = core.CommandRunner
+type LocalCommandRequest = core.LocalCommandRequest
+type LocalCommandResult = core.LocalCommandResult
 
 const (
 	providerName = "agent-sandbox"
@@ -75,10 +78,6 @@ func newLeaseSlug(leaseID string) string {
 	return core.NewLeaseSlug(leaseID)
 }
 
-func normalizeLeaseSlug(value string) string {
-	return core.NormalizeLeaseSlug(value)
-}
-
 func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
@@ -105,10 +104,6 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 
 func resolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
-}
-
-func leaseClaimMatchesIdentifier(claim LeaseClaim, identifier string) bool {
-	return core.LeaseClaimMatchesIdentifier(claim, identifier)
 }
 
 func listLeaseClaimsWithPrefix(prefix string) ([]LeaseClaim, error) {

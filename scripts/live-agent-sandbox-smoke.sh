@@ -133,6 +133,10 @@ if [[ "$providers" != *",agent-sandbox,"* ]]; then
   classify_and_exit environment_blocked "reason=provider_not_selected missing=CRABBOX_LIVE_PROVIDERS=agent-sandbox"
 fi
 
+kubectl="${CRABBOX_AGENT_SANDBOX_KUBECTL:-}"
+if [[ -z "$kubectl" && -n "${CRABBOX_CONFIG:-}" ]]; then
+  kubectl="$(config_value agentSandbox.kubectl || true)"
+fi
 kubeconfig="$(first_config_value CRABBOX_AGENT_SANDBOX_KUBECONFIG agentSandbox.kubeconfig)"
 context="$(first_config_value CRABBOX_AGENT_SANDBOX_CONTEXT agentSandbox.context)"
 namespace="$(first_config_value CRABBOX_AGENT_SANDBOX_NAMESPACE agentSandbox.namespace default)"
@@ -176,7 +180,11 @@ printf 'v1\n' >proof.txt
 git add .crabbox.yaml proof.txt
 git commit -qm "test: seed Agent Sandbox smoke fixture"
 
-provider_args=(--provider agent-sandbox --agent-sandbox-kubeconfig "$kubeconfig" --agent-sandbox-context "$context" --agent-sandbox-namespace "$namespace" --agent-sandbox-warm-pool "$warm_pool" --agent-sandbox-workdir "$workdir")
+provider_args=(--provider agent-sandbox)
+if [[ -n "$kubectl" ]]; then
+  provider_args+=(--agent-sandbox-kubectl "$kubectl")
+fi
+provider_args+=(--agent-sandbox-kubeconfig "$kubeconfig" --agent-sandbox-context "$context" --agent-sandbox-namespace "$namespace" --agent-sandbox-warm-pool "$warm_pool" --agent-sandbox-workdir "$workdir")
 if [[ -n "$container" ]]; then
   provider_args+=(--agent-sandbox-container "$container")
 fi

@@ -104,6 +104,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
 		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
 		"CRABBOX_AGENT_SANDBOX_KUBECONFIG",
+		"CRABBOX_AGENT_SANDBOX_KUBECTL",
 		"CRABBOX_AGENT_SANDBOX_CONTEXT",
 		"CRABBOX_AGENT_SANDBOX_NAMESPACE",
 		"CRABBOX_AGENT_SANDBOX_WARM_POOL",
@@ -647,7 +648,8 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if cfg.AgentSandbox.Namespace != "default" ||
+	if cfg.AgentSandbox.Kubectl != "kubectl" ||
+		cfg.AgentSandbox.Namespace != "default" ||
 		cfg.AgentSandbox.Workdir != "/workspace/crabbox" ||
 		cfg.AgentSandbox.SandboxReadyTimeout != 180*time.Second ||
 		cfg.AgentSandbox.PodReadyTimeout != 180*time.Second ||
@@ -662,6 +664,7 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	if err := applyFileConfig(&cfg, fileConfig{
 		Provider: "agent-sandbox",
 		AgentSandbox: &fileAgentSandboxConfig{
+			Kubectl:             "/opt/bin/kubectl",
 			Kubeconfig:          "~/.kube/agent-sandbox",
 			Context:             "agent-context",
 			Namespace:           "sandboxes",
@@ -678,6 +681,7 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "agent-sandbox" ||
+		cfg.AgentSandbox.Kubectl != "/opt/bin/kubectl" ||
 		!strings.HasSuffix(cfg.AgentSandbox.Kubeconfig, "/.kube/agent-sandbox") ||
 		cfg.AgentSandbox.Context != "agent-context" ||
 		cfg.AgentSandbox.Namespace != "sandboxes" ||
@@ -695,6 +699,7 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 		t.Fatal("file agentSandbox deleteOnRelease was not marked explicit")
 	}
 
+	t.Setenv("CRABBOX_AGENT_SANDBOX_KUBECTL", "/usr/local/bin/kubectl")
 	t.Setenv("CRABBOX_AGENT_SANDBOX_KUBECONFIG", "/tmp/kubeconfig")
 	t.Setenv("CRABBOX_AGENT_SANDBOX_CONTEXT", "env-context")
 	t.Setenv("CRABBOX_AGENT_SANDBOX_NAMESPACE", "env-ns")
@@ -709,7 +714,8 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AgentSandbox.Kubeconfig != "/tmp/kubeconfig" ||
+	if cfg.AgentSandbox.Kubectl != "/usr/local/bin/kubectl" ||
+		cfg.AgentSandbox.Kubeconfig != "/tmp/kubeconfig" ||
 		cfg.AgentSandbox.Context != "env-context" ||
 		cfg.AgentSandbox.Namespace != "env-ns" ||
 		cfg.AgentSandbox.WarmPool != "env-pool" ||
@@ -721,6 +727,25 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 		!cfg.AgentSandbox.DeleteOnRelease ||
 		cfg.AgentSandbox.ForgetMissing {
 		t.Fatalf("env agentSandbox config not applied: %#v", cfg.AgentSandbox)
+	}
+}
+
+func TestAgentSandboxUntrustedConfigCannotRedirectKubectl(t *testing.T) {
+	cfg := baseConfig()
+	cfg.AgentSandbox.Kubectl = "/trusted/kubectl"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		AgentSandbox: &fileAgentSandboxConfig{
+			Kubectl:   "./payload",
+			Namespace: "repo-sandboxes",
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentSandbox.Kubectl != "/trusted/kubectl" {
+		t.Fatalf("untrusted kubectl override applied: %q", cfg.AgentSandbox.Kubectl)
+	}
+	if cfg.AgentSandbox.Namespace != "repo-sandboxes" {
+		t.Fatalf("safe untrusted setting not applied: %#v", cfg.AgentSandbox)
 	}
 }
 

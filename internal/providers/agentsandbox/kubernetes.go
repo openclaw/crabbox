@@ -1,180 +1,314 @@
 package agentsandbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
-
-	authorizationv1 "k8s.io/api/authorization/v1"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/remotecommand"
 )
 
 var (
 	errNotReady           = errors.New("not ready")
-	errKubernetesNotFound = errors.New("kubernetes resource not found")
+	errKubernetesNotFound = errors.New("kubernetes object not found")
 )
+
+const (
+	kubectlCaptureLimitBytes     = 8 << 20
+	kubectlErrorDetailLimitBytes = 16 << 10
+)
+
+type resourceRef struct {
+	GroupVersion string
+	Resource     string
+}
+
+func (r resourceRef) qualifiedResource() string {
+	group, version, found := strings.Cut(r.GroupVersion, "/")
+	if !found || group == "" {
+		return r.Resource
+	}
+	return r.Resource + "." + version + "." + group
+}
+
+type objectMeta struct {
+	Name        string            `json:"name,omitempty"`
+	Namespace   string            `json:"namespace,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type conditionState struct {
+	Type    string `json:"type,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type objectStatus struct {
+	Sandbox struct {
+		Name string `json:"name,omitempty"`
+	} `json:"sandbox,omitempty"`
+	Selector   string           `json:"selector,omitempty"`
+	Phase      string           `json:"phase,omitempty"`
+	PodIP      string           `json:"podIP,omitempty"`
+	Conditions []conditionState `json:"conditions,omitempty"`
+}
+
+type kubernetesObject struct {
+	APIVersion string         `json:"apiVersion,omitempty"`
+	Kind       string         `json:"kind,omitempty"`
+	Metadata   objectMeta     `json:"metadata"`
+	Spec       map[string]any `json:"spec,omitempty"`
+	Status     objectStatus   `json:"status,omitempty"`
+}
+
+type kubernetesObjectList struct {
+	Items []kubernetesObject `json:"items"`
+}
+
+type apiResourceList struct {
+	Resources []struct {
+		Name string `json:"name"`
+	} `json:"resources"`
+}
 
 type kubernetesClient interface {
 	CheckResource(ctx context.Context, groupVersion, resource string) error
-	Get(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error)
-	Create(ctx context.Context, gvr schema.GroupVersionResource, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
-	Delete(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) error
-	List(ctx context.Context, gvr schema.GroupVersionResource, namespace string, opts metav1.ListOptions) (*unstructured.UnstructuredList, error)
+	Get(ctx context.Context, ref resourceRef, namespace, name string) (*kubernetesObject, error)
+	Create(ctx context.Context, ref resourceRef, namespace string, object *kubernetesObject) (*kubernetesObject, error)
+	Delete(ctx context.Context, ref resourceRef, namespace, name string) error
 	CanI(ctx context.Context, rule rbacRule) (bool, error)
 	GetPod(ctx context.Context, namespace, name string) (podState, error)
 	ListPods(ctx context.Context, namespace, selector string) ([]podState, error)
 	Exec(ctx context.Context, req podExecRequest) error
 }
 
-type dynamicKubernetesClient struct {
-	discovery discovery.DiscoveryInterface
-	dynamic   dynamic.Interface
-	core      kubernetes.Interface
-	rest      *rest.Config
+type kubectlKubernetesClient struct {
+	runner   CommandRunner
+	kubectl  string
+	baseArgs []string
 }
 
-func newKubernetesClient(_ context.Context, cfg Config, _ Runtime) (kubernetesClient, error) {
-	restConfig, err := loadRESTConfig(cfg.AgentSandbox)
-	if err != nil {
-		return nil, err
-	}
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create discovery client: %w", err)
-	}
-	dynamicClient, err := dynamic.NewForConfig(restConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create dynamic client: %w", err)
-	}
-	coreClient, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create core client: %w", err)
-	}
-	return &dynamicKubernetesClient{discovery: discoveryClient, dynamic: dynamicClient, core: coreClient, rest: restConfig}, nil
-}
-
-func loadRESTConfig(cfg AgentSandboxConfig) (*rest.Config, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if strings.TrimSpace(cfg.Kubeconfig) != "" {
-		loadingRules.ExplicitPath = cfg.Kubeconfig
-	}
-	overrides := &clientcmd.ConfigOverrides{CurrentContext: strings.TrimSpace(cfg.Context)}
-	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
-	if err == nil {
-		return restConfig, nil
-	}
-	if strings.TrimSpace(cfg.Kubeconfig) != "" || strings.TrimSpace(os.Getenv("KUBECONFIG")) != "" {
-		return nil, fmt.Errorf("load kubeconfig: %w", err)
-	}
-	inCluster, inClusterErr := rest.InClusterConfig()
-	if inClusterErr != nil {
-		return nil, fmt.Errorf("load kubeconfig: %w; in-cluster config unavailable: %w", err, inClusterErr)
-	}
-	return inCluster, nil
-}
-
-func (c *dynamicKubernetesClient) CheckResource(ctx context.Context, groupVersion, resource string) error {
+func newKubernetesClient(ctx context.Context, cfg Config, rt Runtime) (kubernetesClient, error) {
 	_ = ctx
-	resources, err := c.discovery.ServerResourcesForGroupVersion(groupVersion)
-	if err != nil {
-		return fmt.Errorf("discover %s %s: %w", groupVersion, resource, err)
+	if rt.Exec == nil {
+		return nil, fmt.Errorf("agent-sandbox provider requires a command runner")
 	}
-	for _, apiResource := range resources.APIResources {
-		if apiResource.Name == resource {
+
+	values := cfg.AgentSandbox
+	kubectl := strings.TrimSpace(values.Kubectl)
+	if kubectl == "" {
+		kubectl = "kubectl"
+	}
+
+	baseArgs := make([]string, 0, 4)
+	if kubeconfig := expandHomePath(values.Kubeconfig); kubeconfig != "" {
+		baseArgs = append(baseArgs, "--kubeconfig", kubeconfig)
+	}
+	if contextName := strings.TrimSpace(values.Context); contextName != "" {
+		baseArgs = append(baseArgs, "--context", contextName)
+	}
+
+	return &kubectlKubernetesClient{
+		runner:   rt.Exec,
+		kubectl:  kubectl,
+		baseArgs: baseArgs,
+	}, nil
+}
+
+func expandHomePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if path == "~" {
+				return home
+			}
+			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+	}
+	return path
+}
+
+func (c *kubectlKubernetesClient) CheckResource(ctx context.Context, groupVersion, resource string) error {
+	group, version, found := strings.Cut(strings.TrimSpace(groupVersion), "/")
+	if !found || group == "" || version == "" {
+		return fmt.Errorf("agent-sandbox API version must be group/version, got %q", groupVersion)
+	}
+	result, err := c.run(ctx, LocalCommandRequest{}, "get", "--raw", "/apis/"+group+"/"+version)
+	if err != nil {
+		return c.commandError("discover "+groupVersion, result, err)
+	}
+
+	var resources apiResourceList
+	if err := json.Unmarshal([]byte(result.Stdout), &resources); err != nil {
+		return fmt.Errorf("decode Kubernetes discovery for %s: %w", groupVersion, err)
+	}
+	for _, candidate := range resources.Resources {
+		if candidate.Name == resource {
 			return nil
 		}
 	}
-	return fmt.Errorf("discover %s %s: resource not found", groupVersion, resource)
+	return fmt.Errorf("Kubernetes resource %s is not served by %s", resource, groupVersion)
 }
 
-func (c *dynamicKubernetesClient) Get(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
-	obj, err := c.dynamic.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+func (c *kubectlKubernetesClient) Get(
+	ctx context.Context,
+	ref resourceRef,
+	namespace, name string,
+) (*kubernetesObject, error) {
+	result, err := c.run(
+		ctx,
+		LocalCommandRequest{},
+		"get", ref.qualifiedResource(), name,
+		"--namespace", namespace,
+		"--ignore-not-found=true",
+		"-o", "json",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("get %s/%s %s/%s: %w", gvr.Group, gvr.Resource, namespace, name, err)
+		return nil, c.commandError("get "+ref.qualifiedResource()+"/"+name, result, err)
 	}
-	return obj, nil
+	if len(bytes.TrimSpace([]byte(result.Stdout))) == 0 {
+		return nil, fmt.Errorf("%s/%s: %w", ref.qualifiedResource(), name, errKubernetesNotFound)
+	}
+
+	var object kubernetesObject
+	if err := json.Unmarshal([]byte(result.Stdout), &object); err != nil {
+		return nil, fmt.Errorf("decode %s/%s: %w", ref.qualifiedResource(), name, err)
+	}
+	return &object, nil
 }
 
-func (c *dynamicKubernetesClient) Create(ctx context.Context, gvr schema.GroupVersionResource, namespace string, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	created, err := c.dynamic.Resource(gvr).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
+func (c *kubectlKubernetesClient) Create(
+	ctx context.Context,
+	ref resourceRef,
+	namespace string,
+	object *kubernetesObject,
+) (*kubernetesObject, error) {
+	manifest, err := json.Marshal(object)
 	if err != nil {
-		return nil, fmt.Errorf("create %s/%s %s/%s: %w", gvr.Group, gvr.Resource, namespace, obj.GetName(), err)
+		return nil, fmt.Errorf("encode %s/%s: %w", ref.qualifiedResource(), object.Metadata.Name, err)
 	}
-	return created, nil
+
+	result, err := c.run(
+		ctx,
+		LocalCommandRequest{Stdin: bytes.NewReader(manifest)},
+		"create", "--namespace", namespace, "-f", "-", "-o", "json",
+	)
+	if err != nil {
+		return nil, c.commandError("create "+ref.qualifiedResource()+"/"+object.Metadata.Name, result, err)
+	}
+
+	var created kubernetesObject
+	if err := json.Unmarshal([]byte(result.Stdout), &created); err != nil {
+		return nil, fmt.Errorf("decode created %s/%s: %w", ref.qualifiedResource(), object.Metadata.Name, err)
+	}
+	return &created, nil
 }
 
-func (c *dynamicKubernetesClient) Delete(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) error {
-	if err := c.dynamic.Resource(gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-		return fmt.Errorf("delete %s/%s %s/%s: %w", gvr.Group, gvr.Resource, namespace, name, err)
+func (c *kubectlKubernetesClient) Delete(
+	ctx context.Context,
+	ref resourceRef,
+	namespace, name string,
+) error {
+	result, err := c.run(
+		ctx,
+		LocalCommandRequest{},
+		"delete", ref.qualifiedResource(), name,
+		"--namespace", namespace,
+		"--ignore-not-found=true",
+		"--wait=false",
+	)
+	if err != nil {
+		return c.commandError("delete "+ref.qualifiedResource()+"/"+name, result, err)
 	}
 	return nil
 }
 
-func (c *dynamicKubernetesClient) List(ctx context.Context, gvr schema.GroupVersionResource, namespace string, opts metav1.ListOptions) (*unstructured.UnstructuredList, error) {
-	list, err := c.dynamic.Resource(gvr).Namespace(namespace).List(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("list %s/%s namespace=%s: %w", gvr.Group, gvr.Resource, namespace, err)
+func (c *kubectlKubernetesClient) CanI(ctx context.Context, rule rbacRule) (bool, error) {
+	qualified := rule.Resource
+	if strings.TrimSpace(rule.Group) != "" {
+		qualified += "." + rule.Group
 	}
-	return list, nil
-}
-
-func (c *dynamicKubernetesClient) CanI(ctx context.Context, rule rbacRule) (bool, error) {
 	for _, verb := range rule.Verbs {
-		review := &authorizationv1.SelfSubjectAccessReview{
-			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
-				ResourceAttributes: &authorizationv1.ResourceAttributes{
-					Namespace:   rule.Namespace,
-					Verb:        verb,
-					Group:       rule.Group,
-					Resource:    rule.Resource,
-					Subresource: rule.Subresource,
-				},
-			},
+		args := []string{"auth", "can-i", verb, qualified, "--namespace", rule.Namespace}
+		if strings.TrimSpace(rule.Subresource) != "" {
+			args = append(args, "--subresource", rule.Subresource)
 		}
-		result, err := c.core.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+		result, err := c.run(ctx, LocalCommandRequest{}, args...)
+		allowed, recognized := parseKubectlCanI(result.Stdout)
 		if err != nil {
-			return false, fmt.Errorf("self subject access review %s: %w", rule.String(), err)
+			if result.ExitCode == 1 && recognized && !allowed {
+				return false, nil
+			}
+			return false, c.commandError("check Kubernetes authorization", result, err)
 		}
-		if !result.Status.Allowed {
-			return false, nil
+		if recognized {
+			if !allowed {
+				return false, nil
+			}
+			continue
 		}
+		return false, fmt.Errorf("unexpected kubectl auth can-i response %q", strings.TrimSpace(result.Stdout))
 	}
 	return true, nil
 }
 
-func (c *dynamicKubernetesClient) GetPod(ctx context.Context, namespace, name string) (podState, error) {
-	pod, err := c.core.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return podState{}, fmt.Errorf("get pod %s/%s: %w", namespace, name, err)
+func parseKubectlCanI(output string) (allowed, recognized bool) {
+	fields := strings.Fields(output)
+	if len(fields) == 0 {
+		return false, false
 	}
-	return podStateFromPod(pod), nil
+	switch fields[0] {
+	case "yes":
+		return true, true
+	case "no":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
-func (c *dynamicKubernetesClient) ListPods(ctx context.Context, namespace, selector string) ([]podState, error) {
-	list, err := c.core.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+func (c *kubectlKubernetesClient) GetPod(ctx context.Context, namespace, name string) (podState, error) {
+	object, err := c.Get(ctx, resourceRef{GroupVersion: "v1", Resource: "pods"}, namespace, name)
 	if err != nil {
-		return nil, fmt.Errorf("list pods namespace=%s selector=%q: %w", namespace, selector, err)
+		return podState{}, err
+	}
+	return podStateFromObject(*object), nil
+}
+
+func (c *kubectlKubernetesClient) ListPods(
+	ctx context.Context,
+	namespace, selector string,
+) ([]podState, error) {
+	result, err := c.run(
+		ctx,
+		LocalCommandRequest{},
+		"get", "pods",
+		"--namespace", namespace,
+		"--selector", selector,
+		"-o", "json",
+	)
+	if err != nil {
+		return nil, c.commandError("list pods", result, err)
+	}
+
+	var list kubernetesObjectList
+	if err := json.Unmarshal([]byte(result.Stdout), &list); err != nil {
+		return nil, fmt.Errorf("decode pods: %w", err)
 	}
 	pods := make([]podState, 0, len(list.Items))
-	for _, pod := range list.Items {
-		pods = append(pods, podStateFromPod(&pod))
+	for _, object := range list.Items {
+		pods = append(pods, podStateFromObject(object))
 	}
 	return pods, nil
 }
@@ -189,45 +323,164 @@ type podExecRequest struct {
 	Stderr    io.Writer
 }
 
-func (c *dynamicKubernetesClient) Exec(ctx context.Context, req podExecRequest) error {
-	execReq := c.core.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Namespace(req.Namespace).
-		Name(req.Pod).
-		SubResource("exec")
-	execReq.VersionedParams(&corev1.PodExecOptions{
-		Container: req.Container,
-		Command:   req.Command,
-		Stdin:     req.Stdin != nil,
-		Stdout:    req.Stdout != nil,
-		Stderr:    req.Stderr != nil,
-		TTY:       false,
-	}, runtime.NewParameterCodec(scheme.Scheme))
-	executor, err := remotecommand.NewSPDYExecutor(c.rest, "POST", execReq.URL())
+func (c *kubectlKubernetesClient) Exec(ctx context.Context, req podExecRequest) error {
+	args := []string{"exec", "--namespace", req.Namespace}
+	if req.Stdin != nil {
+		args = append(args, "-i")
+	}
+	args = append(args, req.Pod)
+	if strings.TrimSpace(req.Container) != "" {
+		args = append(args, "-c", req.Container)
+	}
+	args = append(args, "--")
+	args = append(args, req.Command...)
+
+	var stderrTail tailBuffer
+	stderrTail.limit = kubectlErrorDetailLimitBytes
+	stderr := io.Writer(&stderrTail)
+	if req.Stderr != nil {
+		stderr = io.MultiWriter(req.Stderr, &stderrTail)
+	}
+	result, err := c.run(ctx, LocalCommandRequest{
+		Stdin:                req.Stdin,
+		Stdout:               req.Stdout,
+		Stderr:               stderr,
+		DisableOutputCapture: true,
+	}, args...)
+	if err == nil {
+		return nil
+	}
+	commandErr := c.commandError("exec in pod "+req.Pod, LocalCommandResult{
+		ExitCode: result.ExitCode,
+		Stderr:   stderrTail.String(),
+	}, err)
+	if code, ok := kubectlRemoteExitStatus(stderrTail.String(), result.ExitCode); ok {
+		return kubectlExitError{code: code, err: commandErr}
+	}
+	return commandErr
+}
+
+func (c *kubectlKubernetesClient) run(
+	ctx context.Context,
+	req LocalCommandRequest,
+	args ...string,
+) (LocalCommandResult, error) {
+	req.Name = c.kubectl
+	req.Args = append(append([]string(nil), c.baseArgs...), args...)
+	if !req.DisableOutputCapture && req.MaxCapturedOutputBytes == 0 {
+		req.MaxCapturedOutputBytes = kubectlCaptureLimitBytes
+	}
+	return c.runner.Run(ctx, req)
+}
+
+func (c *kubectlKubernetesClient) commandError(operation string, result LocalCommandResult, err error) error {
+	detail := strings.TrimSpace(result.Stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(result.Stdout)
+	}
+	if detail == "" {
+		return fmt.Errorf("%s with %s: %w", operation, c.kubectl, err)
+	}
+	if len(detail) > kubectlErrorDetailLimitBytes {
+		detail = detail[:kubectlErrorDetailLimitBytes] + "\n[truncated]"
+	}
+	return fmt.Errorf("%s with %s: %w: %s", operation, c.kubectl, err, detail)
+}
+
+type kubectlExitError struct {
+	code int
+	err  error
+}
+
+func (e kubectlExitError) Error() string {
+	return e.err.Error()
+}
+
+func (e kubectlExitError) Unwrap() error {
+	return e.err
+}
+
+func (e kubectlExitError) ExitStatus() int {
+	return e.code
+}
+
+func kubectlRemoteExitStatus(stderr string, processExitCode int) (int, bool) {
+	const prefix = "command terminated with exit code "
+	detail := strings.TrimSpace(stderr)
+	index := strings.LastIndex(detail, prefix)
+	if index < 0 {
+		return 0, false
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(detail[index+len(prefix):]))
 	if err != nil {
-		return fmt.Errorf("create pod exec executor: %w", err)
+		return 0, false
 	}
-	if err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  req.Stdin,
-		Stdout: req.Stdout,
-		Stderr: req.Stderr,
-		Tty:    false,
-	}); err != nil {
-		return fmt.Errorf("exec pod %s/%s: %w", req.Namespace, req.Pod, err)
+	if code <= 0 || code != processExitCode {
+		return 0, false
 	}
-	return nil
+	return code, true
 }
 
-func sandboxGVR() schema.GroupVersionResource {
-	return schema.GroupVersionResource{Group: "agents.x-k8s.io", Version: "v1beta1", Resource: sandboxResource}
+type tailBuffer struct {
+	data  []byte
+	limit int
 }
 
-func sandboxClaimGVR() schema.GroupVersionResource {
-	return schema.GroupVersionResource{Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Resource: sandboxClaimResource}
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		return len(p), nil
+	}
+	if len(p) >= b.limit {
+		b.data = append(b.data[:0], p[len(p)-b.limit:]...)
+		return len(p), nil
+	}
+	overflow := len(b.data) + len(p) - b.limit
+	if overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
 }
 
-func warmPoolGVR() schema.GroupVersionResource {
-	return schema.GroupVersionResource{Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Resource: warmPoolResource}
+func (b *tailBuffer) String() string {
+	return string(b.data)
+}
+
+func podStateFromObject(object kubernetesObject) podState {
+	state := podState{
+		Name:       object.Metadata.Name,
+		Phase:      object.Status.Phase,
+		PodIP:      object.Status.PodIP,
+		Conditions: append([]conditionState(nil), object.Status.Conditions...),
+	}
+	for _, condition := range state.Conditions {
+		if condition.Type == "Ready" && condition.Status == "True" {
+			state.Ready = true
+			break
+		}
+	}
+	return state
+}
+
+type podState struct {
+	Name       string
+	Phase      string
+	PodIP      string
+	Ready      bool
+	Conditions []conditionState
+}
+
+func sandboxGVR() resourceRef {
+	return resourceRef{GroupVersion: agentSandboxCoreGroupVersion, Resource: sandboxResource}
+}
+
+func sandboxClaimGVR() resourceRef {
+	return resourceRef{GroupVersion: agentSandboxExtensionsGroupVersion, Resource: sandboxClaimResource}
+}
+
+func warmPoolGVR() resourceRef {
+	return resourceRef{GroupVersion: agentSandboxExtensionsGroupVersion, Resource: warmPoolResource}
 }
 
 type sandboxReadiness struct {
@@ -240,61 +493,40 @@ type sandboxReadiness struct {
 type sandboxResourceReadiness struct {
 	ClaimName   string
 	SandboxName string
-	Sandbox     *unstructured.Unstructured
+	Sandbox     *kubernetesObject
 }
 
-type podState struct {
-	Name       string
-	Phase      string
-	PodIP      string
-	Ready      bool
-	Conditions []conditionState
-}
-
-type conditionState struct {
-	Type    string
-	Status  string
-	Reason  string
-	Message string
-}
-
-func claimSandboxName(claim *unstructured.Unstructured) (string, error) {
-	name, ok, err := unstructured.NestedString(claim.Object, "status", "sandbox", "name")
-	if err != nil {
-		return "", err
-	}
-	if !ok || strings.TrimSpace(name) == "" {
-		return "", fmt.Errorf("%w: SandboxClaim %s has no status.sandbox.name", errNotReady, claim.GetName())
+func claimSandboxName(claim *kubernetesObject) (string, error) {
+	name := strings.TrimSpace(claim.Status.Sandbox.Name)
+	if name == "" {
+		return "", fmt.Errorf("%w: SandboxClaim %s has no status.sandbox.name", errNotReady, claim.Metadata.Name)
 	}
 	return name, nil
 }
 
-func sandboxReady(sandbox *unstructured.Unstructured) error {
-	conditions, ok, err := unstructured.NestedSlice(sandbox.Object, "status", "conditions")
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("%w: Sandbox %s has no Ready condition", errNotReady, sandbox.GetName())
-	}
-	for _, raw := range conditions {
-		condition, ok := raw.(map[string]any)
-		if !ok || condition["type"] != "Ready" {
+func sandboxReady(sandbox *kubernetesObject) error {
+	for _, condition := range sandbox.Status.Conditions {
+		if condition.Type != "Ready" {
 			continue
 		}
-		if condition["status"] == "True" {
+		if condition.Status == "True" {
 			return nil
 		}
-		return fmt.Errorf("%w: Sandbox %s Ready=%v reason=%v message=%v", errNotReady, sandbox.GetName(), condition["status"], condition["reason"], condition["message"])
+		return fmt.Errorf("%w: Sandbox %s Ready=%s reason=%s message=%s", errNotReady, sandbox.Metadata.Name, condition.Status, condition.Reason, condition.Message)
 	}
-	return fmt.Errorf("%w: Sandbox %s has no Ready condition", errNotReady, sandbox.GetName())
+	return fmt.Errorf("%w: Sandbox %s has no Ready condition", errNotReady, sandbox.Metadata.Name)
 }
 
-func resolveSandboxPod(ctx context.Context, client kubernetesClient, namespace string, sandbox *unstructured.Unstructured) (podState, error) {
-	if podName := strings.TrimSpace(sandbox.GetAnnotations()["agents.x-k8s.io/pod-name"]); podName != "" {
+func resolveSandboxPod(
+	ctx context.Context,
+	client kubernetesClient,
+	namespace string,
+	sandbox *kubernetesObject,
+) (podState, error) {
+	if podName := strings.TrimSpace(sandbox.Metadata.Annotations["agents.x-k8s.io/pod-name"]); podName != "" {
 		return client.GetPod(ctx, namespace, podName)
 	}
-	if selector, ok, _ := unstructured.NestedString(sandbox.Object, "status", "selector"); ok && strings.TrimSpace(selector) != "" {
+	if selector := strings.TrimSpace(sandbox.Status.Selector); selector != "" {
 		pods, err := client.ListPods(ctx, namespace, selector)
 		if err != nil {
 			return podState{}, err
@@ -302,9 +534,9 @@ func resolveSandboxPod(ctx context.Context, client kubernetesClient, namespace s
 		if len(pods) == 1 {
 			return pods[0], nil
 		}
-		return podState{}, fmt.Errorf("%w: Sandbox %s selector %q matched %d pods", errNotReady, sandbox.GetName(), selector, len(pods))
+		return podState{}, fmt.Errorf("%w: Sandbox %s selector %q matched %d pods", errNotReady, sandbox.Metadata.Name, selector, len(pods))
 	}
-	return podState{}, fmt.Errorf("%w: Sandbox %s has no pod annotation or selector", errNotReady, sandbox.GetName())
+	return podState{}, fmt.Errorf("%w: Sandbox %s has no pod annotation or selector", errNotReady, sandbox.Metadata.Name)
 }
 
 func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, poll time.Duration) (sandboxReadiness, error) {
@@ -364,7 +596,7 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 	}
 }
 
-func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace string, sandbox *unstructured.Unstructured, poll time.Duration) (podState, error) {
+func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace string, sandbox *kubernetesObject, poll time.Duration) (podState, error) {
 	if poll <= 0 {
 		poll = time.Second
 	}
@@ -382,7 +614,7 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 		lastErr = err
 		select {
 		case <-ctx.Done():
-			return podState{}, fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.GetName(), lastErr)
+			return podState{}, fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.Metadata.Name, lastErr)
 		case <-ticker.C:
 		}
 	}
@@ -391,7 +623,7 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string) (sandboxResourceReadiness, error) {
 	claim, err := client.Get(ctx, sandboxClaimGVR(), namespace, claimName)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if isNotFound(err) {
 			return sandboxResourceReadiness{}, fmt.Errorf("%w: SandboxClaim %s/%s not found", errNotReady, namespace, claimName)
 		}
 		return sandboxResourceReadiness{}, err
@@ -425,22 +657,6 @@ func sandboxReadinessOnce(ctx context.Context, client kubernetesClient, namespac
 	return sandboxReadiness{ClaimName: resource.ClaimName, SandboxName: resource.SandboxName, PodName: pod.Name, PodIP: pod.PodIP}, nil
 }
 
-func podStateFromPod(pod *corev1.Pod) podState {
-	state := podState{Name: pod.Name, Phase: string(pod.Status.Phase), PodIP: pod.Status.PodIP}
-	for _, condition := range pod.Status.Conditions {
-		state.Conditions = append(state.Conditions, conditionState{
-			Type:    string(condition.Type),
-			Status:  string(condition.Status),
-			Reason:  condition.Reason,
-			Message: condition.Message,
-		})
-		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-			state.Ready = true
-		}
-	}
-	return state
-}
-
 func podConditionSummary(conditions []conditionState) string {
 	if len(conditions) == 0 {
 		return "none"
@@ -469,5 +685,5 @@ func effectiveKubeconfigIdentity(cfg AgentSandboxConfig) string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".kube", "config")
 	}
-	return "in-cluster-or-default"
+	return "default"
 }

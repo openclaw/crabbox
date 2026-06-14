@@ -3,6 +3,7 @@ package agentsandbox
 import (
 	"flag"
 	"path"
+	"path/filepath"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -72,6 +73,7 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 func validateConfig(cfg core.Config) error {
 	values := cfg.AgentSandbox
 	for label, value := range map[string]string{
+		"kubectl":   values.Kubectl,
 		"context":   values.Context,
 		"namespace": values.Namespace,
 		"warmPool":  values.WarmPool,
@@ -80,6 +82,10 @@ func validateConfig(cfg core.Config) error {
 		if strings.TrimSpace(value) == "" {
 			return core.Exit(2, "agent-sandbox %s is required", label)
 		}
+	}
+	kubectl := strings.TrimSpace(values.Kubectl)
+	if !filepath.IsAbs(kubectl) && (kubectl == "." || kubectl == ".." || strings.ContainsAny(kubectl, `/\`)) {
+		return core.Exit(2, "agent-sandbox kubectl %q must be a bare executable name or absolute path", values.Kubectl)
 	}
 	if strings.ContainsAny(values.Namespace, " \t\r\n/") {
 		return core.Exit(2, "agent-sandbox namespace %q is invalid", values.Namespace)

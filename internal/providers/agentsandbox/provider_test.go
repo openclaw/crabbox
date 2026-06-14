@@ -80,6 +80,8 @@ func TestValidateConfigRejectsUnsafeInputs(t *testing.T) {
 	for name, mutate := range map[string]func(*core.Config){
 		"missing context":          func(cfg *core.Config) { cfg.AgentSandbox.Context = "" },
 		"missing warm pool":        func(cfg *core.Config) { cfg.AgentSandbox.WarmPool = "" },
+		"relative kubectl path":    func(cfg *core.Config) { cfg.AgentSandbox.Kubectl = "./bin/kubectl" },
+		"parent kubectl path":      func(cfg *core.Config) { cfg.AgentSandbox.Kubectl = "../kubectl" },
 		"bad namespace":            func(cfg *core.Config) { cfg.AgentSandbox.Namespace = "bad/ns" },
 		"bad container":            func(cfg *core.Config) { cfg.AgentSandbox.Container = "bad container" },
 		"relative workdir":         func(cfg *core.Config) { cfg.AgentSandbox.Workdir = "workspace" },
