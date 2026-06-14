@@ -191,9 +191,10 @@ such as `/`, `/tmp`, `/usr`, `/var`, or `/home`. `namespace`, `warmPool`, and
 4. Unless `--no-sync` is set, Crabbox builds a portable archive from the local
    Git file manifest and extracts it into the configured workdir with
    `kubectl exec`. With `sync.delete: true`, extraction happens in a
-   sibling staging directory and replaces the contents of the workdir only
-   after upload and extraction succeed, without renaming the workdir itself.
-   This remains valid when the workdir is a mounted volume.
+   hidden staging directory inside the workdir and replaces the workdir contents
+   only after upload and extraction succeed, without renaming the workdir
+   itself or requiring its parent directory to be writable. This remains valid
+   when the workdir is a mounted volume.
 5. The command runs through Kubernetes exec in the sandbox pod. Forwarded
    environment values are exported inside the streamed shell script, not placed
    on the local command line.

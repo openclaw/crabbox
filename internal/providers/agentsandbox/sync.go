@@ -49,7 +49,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	extractDir := workdir
 	stagingDir := ""
 	if b.cfg.Sync.Delete {
-		stagingDir = path.Join(path.Dir(workdir), "."+path.Base(workdir)+".crabbox-sync-"+randomSuffix())
+		stagingDir = path.Join(workdir, ".crabbox-sync-"+randomSuffix())
 		extractDir = stagingDir
 	}
 	cleanupPending := true
@@ -69,7 +69,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	if stagingDir == "" {
 		err = b.execShell(syncCtx, client, ready, "mkdir -p "+shellQuote(workdir))
 	} else {
-		err = b.execShell(syncCtx, client, ready, "rm -rf "+shellQuote(stagingDir)+" && mkdir -p "+shellQuote(stagingDir))
+		err = b.execShell(syncCtx, client, ready, "mkdir -p "+shellQuote(workdir)+" && rm -rf "+shellQuote(stagingDir)+" && mkdir -p "+shellQuote(stagingDir))
 	}
 	if err != nil {
 		return nil, 0, err
@@ -149,7 +149,7 @@ func agentSandboxMountReplaceCommand(stagingDir, workdir string) string {
 	stagingGlob := shellQuote(stagingDir) + "/*"
 	rollback := "rollback() { original_rc=$?; trap - EXIT HUP INT TERM; rollback_rc=0; " +
 		"if [ \"$copy_started\" -eq 1 ]; then for entry in " + workdirGlob + "; do " +
-		"if [ \"$entry\" != " + shellQuote(backupDir) + " ]; then rm -rf -- \"$entry\" || rollback_rc=$?; fi; done; fi; " +
+		"if [ \"$entry\" != " + shellQuote(backupDir) + " ] && [ \"$entry\" != " + shellQuote(stagingDir) + " ]; then rm -rf -- \"$entry\" || rollback_rc=$?; fi; done; fi; " +
 		"if [ \"$rollback_rc\" -eq 0 ]; then for entry in " + backupGlob + "; do " +
 		"mv -- \"$entry\" " + shellQuote(workdir+"/") + " || { rollback_rc=$?; break; }; done; fi; " +
 		"if [ \"$rollback_rc\" -eq 0 ]; then rmdir " + shellQuote(backupDir) + " || rollback_rc=$?; fi; " +
@@ -160,7 +160,7 @@ func agentSandboxMountReplaceCommand(stagingDir, workdir string) string {
 		" && mkdir -p " + shellQuote(backupDir) +
 		" && trap rollback EXIT HUP INT TERM" +
 		" && for entry in " + workdirGlob + "; do " +
-		"if [ \"$entry\" != " + shellQuote(backupDir) + " ]; then mv -- \"$entry\" " + shellQuote(backupDir+"/") + " || exit 1; fi; done" +
+		"if [ \"$entry\" != " + shellQuote(backupDir) + " ] && [ \"$entry\" != " + shellQuote(stagingDir) + " ]; then mv -- \"$entry\" " + shellQuote(backupDir+"/") + " || exit 1; fi; done" +
 		" && copy_started=1" +
 		" && for entry in " + stagingGlob + "; do cp -a -- \"$entry\" " + shellQuote(workdir+"/") + " || exit 1; done" +
 		" && trap - EXIT HUP INT TERM"

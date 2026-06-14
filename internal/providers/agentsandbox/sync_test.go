@@ -9,11 +9,12 @@ import (
 )
 
 func TestAgentSandboxMountReplaceCommandReplacesContentsNotMount(t *testing.T) {
-	command := agentSandboxMountReplaceCommand("/workspace/.crabbox.crabbox-sync-fixed", "/workspace/crabbox")
+	command := agentSandboxMountReplaceCommand("/workspace/crabbox/.crabbox-sync-fixed", "/workspace/crabbox")
 	for _, want := range []string{
 		"rollback()",
-		"mv -- \"$entry\" '/workspace/crabbox/.crabbox.crabbox-sync-fixed.previous/'",
-		`for entry in '/workspace/.crabbox.crabbox-sync-fixed'/*; do cp -a -- "$entry" '/workspace/crabbox/'`,
+		"mv -- \"$entry\" '/workspace/crabbox/.crabbox-sync-fixed.previous/'",
+		`for entry in '/workspace/crabbox/.crabbox-sync-fixed'/*; do cp -a -- "$entry" '/workspace/crabbox/'`,
+		`[ "$entry" != '/workspace/crabbox/.crabbox-sync-fixed' ]`,
 	} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("command missing %q: %s", want, command)
@@ -27,7 +28,7 @@ func TestAgentSandboxMountReplaceCommandReplacesContentsNotMount(t *testing.T) {
 func TestAgentSandboxMountReplaceCommandReplacesDotfiles(t *testing.T) {
 	root := t.TempDir()
 	workdir := filepath.Join(root, "workspace")
-	stagingDir := filepath.Join(root, ".workspace.crabbox-sync-fixed")
+	stagingDir := filepath.Join(workdir, ".crabbox-sync-fixed")
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +41,12 @@ func TestAgentSandboxMountReplaceCommandReplacesDotfiles(t *testing.T) {
 	if err := os.Chmod(stagingDir, 0o777); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = os.Chmod(root, 0o700)
+	}()
 	if err := os.WriteFile(filepath.Join(workdir, "old.txt"), []byte("old\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +86,7 @@ func TestAgentSandboxMountReplaceCommandReplacesDotfiles(t *testing.T) {
 func TestAgentSandboxMountReplaceCommandRestoresWorkspaceAfterCopyFailure(t *testing.T) {
 	root := t.TempDir()
 	workdir := filepath.Join(root, "workspace")
-	stagingDir := filepath.Join(root, ".workspace.crabbox-sync-fixed")
+	stagingDir := filepath.Join(workdir, ".crabbox-sync-fixed")
 	fakeBin := filepath.Join(root, "bin")
 	for _, dir := range []string{workdir, stagingDir, fakeBin} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -121,7 +128,7 @@ func TestAgentSandboxMountReplaceCommandRestoresWorkspaceAfterCopyFailure(t *tes
 func TestAgentSandboxMountReplaceCommandPreservesUntouchedEntriesAfterMoveFailure(t *testing.T) {
 	root := t.TempDir()
 	workdir := filepath.Join(root, "workspace")
-	stagingDir := filepath.Join(root, ".workspace.crabbox-sync-fixed")
+	stagingDir := filepath.Join(workdir, ".crabbox-sync-fixed")
 	fakeBin := filepath.Join(root, "bin")
 	for _, dir := range []string{workdir, stagingDir, fakeBin} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
