@@ -364,6 +364,9 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	if githubCodespacesClaimRelease(lease.LeaseID) == releaseStop {
+		return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
+	}
 	if githubCodespacesDeleteOnRelease(lease, b.cfg) {
 		return fmt.Sprintf("deleted github-codespaces lease=%s codespace=%s", lease.LeaseID, firstNonEmpty(lease.Server.CloudID, lease.Server.Name))
 	}
@@ -371,7 +374,21 @@ func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
 }
 
 func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+	switch githubCodespacesClaimRelease(lease.LeaseID) {
+	case releaseStop:
+		return true
+	case releaseDelete:
+		return false
+	}
 	return !githubCodespacesDeleteOnRelease(lease, b.cfg)
+}
+
+func githubCodespacesClaimRelease(leaseID string) string {
+	claim, ok, err := readLeaseClaimWithPresence(strings.TrimSpace(leaseID))
+	if err != nil || !ok {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(claim.Labels[labelRelease]))
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
