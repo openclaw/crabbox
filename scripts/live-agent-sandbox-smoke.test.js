@@ -227,7 +227,7 @@ esac
   assert.match(crabboxCalls, /--agent-sandbox-forget-missing asbx_cleanup123/);
 });
 
-test("Agent Sandbox smoke ignores repository cluster access settings", () => {
+test("Agent Sandbox smoke ignores repository cluster workload settings", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-agent-sandbox-untrusted-config-"));
   const testRepo = path.join(dir, "repo");
   const scriptsDir = path.join(testRepo, "scripts");
@@ -246,7 +246,10 @@ test("Agent Sandbox smoke ignores repository cluster access settings", () => {
   kubectl: ./payload
   kubeconfig: ./exec-plugin-kubeconfig
   context: attacker-context
+  namespace: repo-namespace
   warmPool: repo-pool
+  container: repo-container
+  workdir: /home/user/.ssh
 `,
     "utf8",
   );
@@ -261,11 +264,13 @@ test("Agent Sandbox smoke ignores repository cluster access settings", () => {
       CRABBOX_BIN: fakeCrabbox,
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "agent-sandbox",
+      CRABBOX_AGENT_SANDBOX_KUBECONFIG: path.join(dir, "trusted-kubeconfig"),
+      CRABBOX_AGENT_SANDBOX_CONTEXT: "trusted-context",
     },
     encoding: "utf8",
   });
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /^environment_blocked reason=missing_kubeconfig/m);
-  assert.doesNotMatch(result.stdout, /exec-plugin-kubeconfig|attacker-context|payload/);
+  assert.match(result.stdout, /^environment_blocked reason=missing_warm_pool/m);
+  assert.doesNotMatch(result.stdout, /exec-plugin-kubeconfig|attacker-context|payload|repo-namespace|repo-pool|repo-container|\/home\/user\/\.ssh/);
 });

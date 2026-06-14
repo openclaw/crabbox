@@ -151,10 +151,12 @@ fi
 kubectl="$(trusted_config_value CRABBOX_AGENT_SANDBOX_KUBECTL agentSandbox.kubectl || true)"
 kubeconfig="$(trusted_config_value CRABBOX_AGENT_SANDBOX_KUBECONFIG agentSandbox.kubeconfig || true)"
 context="$(trusted_config_value CRABBOX_AGENT_SANDBOX_CONTEXT agentSandbox.context || true)"
-namespace="$(first_config_value CRABBOX_AGENT_SANDBOX_NAMESPACE agentSandbox.namespace default)"
-warm_pool="$(first_config_value CRABBOX_AGENT_SANDBOX_WARM_POOL agentSandbox.warmPool)"
-container="$(first_config_value CRABBOX_AGENT_SANDBOX_CONTAINER agentSandbox.container)"
-workdir="$(first_config_value CRABBOX_AGENT_SANDBOX_WORKDIR agentSandbox.workdir /workspace/crabbox)"
+namespace="$(trusted_config_value CRABBOX_AGENT_SANDBOX_NAMESPACE agentSandbox.namespace || true)"
+warm_pool="$(trusted_config_value CRABBOX_AGENT_SANDBOX_WARM_POOL agentSandbox.warmPool || true)"
+container="$(trusted_config_value CRABBOX_AGENT_SANDBOX_CONTAINER agentSandbox.container || true)"
+workdir="$(trusted_config_value CRABBOX_AGENT_SANDBOX_WORKDIR agentSandbox.workdir || true)"
+namespace="${namespace:-default}"
+workdir="${workdir:-/workspace/crabbox}"
 
 if [[ -z "$kubeconfig" && -n "${KUBECONFIG:-}" ]]; then
   kubeconfig="$KUBECONFIG"

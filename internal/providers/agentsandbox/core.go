@@ -143,7 +143,7 @@ func agentSandboxRecoveryCommand(cfg Config, command string) string {
 }
 
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
-	return core.AllocateClaimLeaseSlug(leaseID, requested)
+	return core.AllocateDirectLeaseSlug(leaseID, requested, nil)
 }
 
 func resolveLeaseClaimForProvider(identifier, provider string) (LeaseClaim, bool, error) {

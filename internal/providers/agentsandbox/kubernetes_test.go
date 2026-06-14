@@ -27,8 +27,11 @@ type fakeKubernetesClient struct {
 	execRelease   chan struct{}
 	getStarted    chan struct{}
 	getRelease    chan struct{}
+	getErrs       []error
 	deleteErrs    []error
 	createPending bool
+	createStarted chan struct{}
+	createRelease chan struct{}
 	creates       int
 	deletes       int
 }
@@ -86,6 +89,13 @@ func (f *fakeKubernetesClient) Get(ctx context.Context, ref resourceRef, namespa
 			}
 		}
 	}
+	if len(f.getErrs) > 0 {
+		err := f.getErrs[0]
+		f.getErrs = f.getErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	key := ref.Resource + "/" + namespace + "/" + name
 	f.gets = append(f.gets, key)
 	obj := f.objects[key]
@@ -96,6 +106,12 @@ func (f *fakeKubernetesClient) Get(ctx context.Context, ref resourceRef, namespa
 }
 
 func (f *fakeKubernetesClient) Create(_ context.Context, ref resourceRef, namespace string, obj *kubernetesObject) (*kubernetesObject, error) {
+	if f.createStarted != nil {
+		f.createStarted <- struct{}{}
+		if f.createRelease != nil {
+			<-f.createRelease
+		}
+	}
 	key := ref.Resource + "/" + namespace + "/" + obj.Metadata.Name
 	if f.objects == nil {
 		f.objects = map[string]*kubernetesObject{}

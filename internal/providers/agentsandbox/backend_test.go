@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -493,6 +494,115 @@ func TestWarmupRetainsRecoverableClaimWhenReadinessCleanupFails(t *testing.T) {
 	}
 }
 
+func TestConcurrentRequestedSlugAllocationIsAtomic(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fakeA := readyFakeClient(cfg)
+	fakeA.createStarted = make(chan struct{}, 1)
+	fakeA.createRelease = make(chan struct{})
+	fakeB := readyFakeClient(cfg)
+	fakeB.createStarted = make(chan struct{}, 1)
+	backendA := testBackend(cfg, fakeA, nil, nil)
+	backendB := testBackend(cfg, fakeB, nil, nil)
+	repo := testGitRepo(t)
+	errs := make(chan error, 2)
+
+	go func() {
+		errs <- backendA.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "shared"})
+	}()
+	select {
+	case <-fakeA.createStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first create did not start")
+	}
+	go func() {
+		errs <- backendB.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "shared"})
+	}()
+	select {
+	case <-fakeB.createStarted:
+		t.Fatal("second create started before the first slug was persisted")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(fakeA.createRelease)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 2 || claims[0].Slug == claims[1].Slug {
+		t.Fatalf("claims=%#v, want two unique slugs", claims)
+	}
+}
+
+func TestGeneratedSlugAllocationIsSerialized(t *testing.T) {
+	testAgentSandboxConfig(t)
+	unlockFirst, err := lockAgentSandboxSlugAllocation(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlockFirst()
+
+	acquired := make(chan func(), 1)
+	go func() {
+		unlock, lockErr := lockAgentSandboxSlugAllocation(context.Background(), "")
+		if lockErr == nil {
+			acquired <- unlock
+		}
+	}()
+	select {
+	case unlock := <-acquired:
+		unlock()
+		t.Fatal("second generated-slug allocation acquired concurrently")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlockFirst()
+	unlockFirst = func() {}
+	select {
+	case unlock := <-acquired:
+		unlock()
+	case <-time.After(time.Second):
+		t.Fatal("second generated-slug allocation did not proceed")
+	}
+}
+
+func TestGeneratedSlugAllocationAvoidsExistingClaim(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	repo := testGitRepo(t)
+	firstID := ""
+	secondID := ""
+	bySlug := map[string]string{}
+	for i := 0; i < 1000; i++ {
+		leaseID := fmt.Sprintf("isb_%012x", i)
+		slug := core.NewLeaseSlug(leaseID)
+		bySlug[slug] = leaseID
+	}
+	for i := 0; i < 1000; i++ {
+		leaseID := fmt.Sprintf("asbx_%012x", i)
+		if previous := bySlug[core.NewLeaseSlug(leaseID)]; previous != "" {
+			firstID, secondID = previous, leaseID
+			break
+		}
+	}
+	if firstID == "" {
+		t.Fatal("could not find deterministic generated-slug collision")
+	}
+	base := core.NewLeaseSlug(firstID)
+	if err := core.ClaimLeaseForRepoProviderScope(firstID, base, "islo", "test-scope", repo.Root, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := allocateClaimLeaseSlug(secondID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == base {
+		t.Fatalf("generated slug collision was not resolved: %q", got)
+	}
+}
+
 func TestRunExistingLeaseForgetMissingStillFailsRun(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	cfg.AgentSandbox.ForgetMissing = true
@@ -703,6 +813,22 @@ func TestStatusWaitTimeoutBoundsInitialLookup(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("initial lookup ignored wait timeout: %s", elapsed)
+	}
+}
+
+func TestStatusReturnsUnexpectedReadinessError(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "status-error"}); err != nil {
+		t.Fatal(err)
+	}
+	fake.getErrs = []error{nil, errors.New("transport failed")}
+
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-error"})
+	if err == nil || !strings.Contains(err.Error(), "transport failed") {
+		t.Fatalf("status err=%v", err)
 	}
 }
 
