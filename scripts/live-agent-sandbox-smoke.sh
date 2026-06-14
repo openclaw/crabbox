@@ -70,6 +70,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 bin="${CRABBOX_BIN:-$repo_root/bin/crabbox}"
+if [[ "$bin" != /* ]]; then
+  bin="$repo_root/$bin"
+fi
 providers=",${CRABBOX_LIVE_PROVIDERS:-},"
 
 config_paths=()

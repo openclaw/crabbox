@@ -89,7 +89,7 @@ exit 99
   assert.equal(fs.existsSync(crabboxLog), false);
 });
 
-test("Agent Sandbox smoke stops only the created slug", () => {
+test("Agent Sandbox smoke supports a relative binary and stops only the created slug", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-agent-sandbox-success-"));
   const bin = path.join(dir, "bin");
   const fakeCrabbox = path.join(bin, "crabbox");
@@ -131,7 +131,7 @@ esac
     cwd: repoRoot,
     env: {
       ...process.env,
-      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_BIN: path.relative(repoRoot, fakeCrabbox),
       CRABBOX_LIVE: "1",
       CRABBOX_LIVE_PROVIDERS: "agent-sandbox",
       CRABBOX_AGENT_SANDBOX_KUBECONFIG: kubeconfig,
@@ -272,5 +272,8 @@ test("Agent Sandbox smoke ignores repository cluster workload settings", () => {
 
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /^environment_blocked reason=missing_warm_pool/m);
-  assert.doesNotMatch(result.stdout, /exec-plugin-kubeconfig|attacker-context|payload|repo-namespace|repo-pool|repo-container|\/home\/user\/\.ssh/);
+  assert.doesNotMatch(
+    result.stdout,
+    /exec-plugin-kubeconfig|attacker-context|payload|repo-namespace|repo-pool|repo-container|\/home\/user\/\.ssh/,
+  );
 });
