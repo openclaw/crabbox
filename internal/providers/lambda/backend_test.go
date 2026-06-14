@@ -14,16 +14,16 @@ import (
 )
 
 type fakeLambdaAPI struct {
-	instances       []Instance
-	sshKeys         []SSHKey
-	listKeyErr      error
-	addKeyErr       error
-	launchErr       error
-	terminateErr    error
-	deleteKeyErr    error
-	launchRequests  []LaunchInstanceRequest
-	addKeyRequests  []AddSSHKeyRequest
-	terminatedIDs   [][]string
+	instances        []Instance
+	sshKeys          []SSHKey
+	listKeyErr       error
+	addKeyErr        error
+	launchErr        error
+	terminateErr     error
+	deleteKeyErr     error
+	launchRequests   []LaunchInstanceRequest
+	addKeyRequests   []AddSSHKeyRequest
+	terminatedIDs    [][]string
 	deletedKeyIDs    []string
 	nextKeyID        int
 	nextInstanceID   int
