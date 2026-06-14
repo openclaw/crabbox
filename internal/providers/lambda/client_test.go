@@ -41,6 +41,30 @@ func TestClientUsesBearerAndDataEnvelope(t *testing.T) {
 	}
 }
 
+func TestClientListInstanceTypesAcceptsMapEnvelope(t *testing.T) {
+	t.Setenv(tokenEnv, "lambda-secret-token")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/instance-types" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":{"gpu_1x_a10":{"instance_type":{"name":"gpu_1x_a10","description":"A10"},"regions_with_capacity_available":["us-west-1"]}}}`))
+	}))
+	defer server.Close()
+
+	client, err := newClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL + "/api/v1"
+	types, err := client.ListInstanceTypes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 1 || types[0].Name != "gpu_1x_a10" || types[0].Description != "A10" || len(types[0].RegionsWithCapacityAvailable) != 1 || types[0].RegionsWithCapacityAvailable[0] != "us-west-1" {
+		t.Fatalf("types=%#v", types)
+	}
+}
+
 func TestClientPreservesErrorCodeAndRedactsSecrets(t *testing.T) {
 	t.Setenv(tokenEnv, "lambda-secret-token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -202,8 +202,11 @@ func TestAcquireCreatesKeyLaunchesPollsAndClaimsLease(t *testing.T) {
 		req.Tags[lambdaKeyIDLabel] != "key-700" || req.Tags[lambdaKeyNameLabel] != api.addKeyRequests[0].Name || req.Tags[lambdaKeyOwnedLabel] != "true" {
 		t.Fatalf("tags=%v", req.Tags)
 	}
-	if req.Tags["expires_at"] != "" || req.Tags["last_touched_at"] != "" || req.Tags["ttl_secs"] != "" {
-		t.Fatalf("provider launch tags should not carry stale cleanup timing: %v", req.Tags)
+	if req.Tags["expires_at"] == "" || req.Tags["ttl_secs"] == "" {
+		t.Fatalf("provider launch tags should carry orphan cleanup timing: %v", req.Tags)
+	}
+	if req.Tags["last_touched_at"] != "" || req.Tags["idle_timeout_secs"] != "" {
+		t.Fatalf("provider launch tags should not carry mutable touch timing: %v", req.Tags)
 	}
 	claim, ok, err := core.ResolveLeaseClaimForProvider("my-app", providerName)
 	if err != nil || !ok || claim.CloudID != "i-100" || claim.Labels[lambdaKeyOwnedLabel] != "true" || claim.Labels[lambdaKeyIDLabel] != "key-700" {
@@ -445,6 +448,22 @@ func TestCleanupDryRunDoesNotMutate(t *testing.T) {
 	}
 	if len(api.terminatedIDs) != 0 || len(api.deletedKeyIDs) != 0 {
 		t.Fatalf("mutated during dry run: terminated=%v keys=%v", api.terminatedIDs, api.deletedKeyIDs)
+	}
+}
+
+func TestCleanupDeletesProviderOnlyExpiredLambdaInstance(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = defaultType
+	old := time.Now().Add(-48 * time.Hour)
+	labels := lambdaProviderLaunchTags(leaseTags(cfg, "cbx_abcdef123456", "old", "provisioning", false, old), lambdaSSHKeyIdentity{ID: "key-old", Name: "crabbox-cbx-old", Created: true})
+	api := &fakeLambdaAPI{instances: []Instance{{ID: "i-old", Name: "old", Status: "active", IP: "203.0.113.50", Type: defaultType, Tags: labels}}}
+	if err := newTestBackend(t, api).Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminatedIDs) != 1 || len(api.terminatedIDs[0]) != 1 || api.terminatedIDs[0][0] != "i-old" {
+		t.Fatalf("terminated=%v", api.terminatedIDs)
 	}
 }
 

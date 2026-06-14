@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -162,9 +163,49 @@ func redactJupyterURLs(body string) string {
 }
 
 func (c *Client) ListInstanceTypes(ctx context.Context) ([]InstanceType, error) {
-	var out []InstanceType
-	err := c.do(ctx, http.MethodGet, "/instance-types", nil, &out)
-	return out, err
+	var raw json.RawMessage
+	if err := c.do(ctx, http.MethodGet, "/instance-types", nil, &raw); err != nil {
+		return nil, err
+	}
+	return decodeInstanceTypes(raw)
+}
+
+func decodeInstanceTypes(raw json.RawMessage) ([]InstanceType, error) {
+	var list []InstanceType
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list, nil
+	}
+
+	var keyed map[string]struct {
+		InstanceType                 InstanceType `json:"instance_type"`
+		Name                         string       `json:"name,omitempty"`
+		Description                  string       `json:"description,omitempty"`
+		RegionsWithCapacityAvailable []string     `json:"regions_with_capacity_available,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &keyed); err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(keyed))
+	for key := range keyed {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]InstanceType, 0, len(keys))
+	for _, key := range keys {
+		item := keyed[key]
+		instanceType := item.InstanceType
+		if instanceType.Name == "" {
+			instanceType.Name = firstNonBlank(item.Name, key)
+		}
+		if instanceType.Description == "" {
+			instanceType.Description = item.Description
+		}
+		if len(instanceType.RegionsWithCapacityAvailable) == 0 {
+			instanceType.RegionsWithCapacityAvailable = item.RegionsWithCapacityAvailable
+		}
+		out = append(out, instanceType)
+	}
+	return out, nil
 }
 
 func (c *Client) ListRegions(ctx context.Context) ([]Region, error) {

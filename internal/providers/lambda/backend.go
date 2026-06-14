@@ -240,10 +240,10 @@ func lambdaLabelsWithKey(labels map[string]string, key lambdaSSHKeyIdentity) map
 
 func lambdaProviderLaunchTags(labels map[string]string, key lambdaSSHKeyIdentity) map[string]string {
 	labels = lambdaLabelsWithKey(labels, key)
-	// Lambda has no safe tag-update method in the Plan 01 foundation. Keep
-	// provider-only inventory identifiable but non-expiring; local claims carry
-	// the mutable cleanup clock after acquire/touch.
-	for _, field := range []string{"expires_at", "last_touched_at", "idle_timeout", "idle_timeout_secs", "ttl_secs"} {
+	// Lambda has no safe tag-update method in the Plan 01 foundation. Provider
+	// tags keep the launch-time expiry so provider-only orphan cleanup can
+	// eventually reclaim billable instances; local claims carry fresh touch data.
+	for _, field := range []string{"last_touched_at", "idle_timeout", "idle_timeout_secs"} {
 		delete(labels, field)
 	}
 	return labels

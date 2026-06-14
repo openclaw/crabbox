@@ -132,7 +132,7 @@ instance can still be reconciled.
 
 ## Ownership And Cleanup
 
-Crabbox encodes owned Lambda leases with namespaced tags such as:
+Crabbox encodes owned Lambda leases with flat Lambda tags such as:
 
 ```text
 crabbox=true
@@ -142,15 +142,17 @@ lease=cbx_abcdef123456
 slug=my-app
 target=linux
 expires_at=<unix-seconds>
+ttl_secs=<seconds>
 ```
 
 Release and cleanup require a complete ownership predicate: Crabbox marker,
 provider marker, lease id, slug, and Linux target. Lambda instances with
 partial, foreign, or malformed Crabbox-like tags are skipped or refused.
 
-Tag updates replace only Crabbox's namespaced tags and preserve unrelated
-operator tags already attached to the instance. Direct mode has no coordinator
-alarm. Use:
+Lambda has no safe tag-update path in this phase. Provider tags keep launch-time
+expiry metadata so provider-only orphan cleanup can eventually reclaim billable
+instances, while local Crabbox claims carry fresh touch and idle-timeout state.
+Direct mode has no coordinator alarm. Use:
 
 ```sh
 crabbox list --provider lambda --json
