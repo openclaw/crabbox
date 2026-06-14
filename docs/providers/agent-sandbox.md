@@ -68,8 +68,8 @@ serves these `v1beta1` resources.
 
 Official project and release references:
 
-- https://github.com/kubernetes-sigs/agent-sandbox
-- https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v0.5.0rc1
+- [Agent Sandbox project](https://github.com/kubernetes-sigs/agent-sandbox)
+- [Agent Sandbox v0.5.0rc1 release](https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v0.5.0rc1)
 
 ## Commands
 
