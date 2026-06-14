@@ -394,15 +394,22 @@ function shellQuote(value) {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(text)) return text;
   return "'" + text.replace(/'/g, "'\\''") + "'";
 }
-function commandLineFromRequest(command, cwd, env) {
-  const assignments = Object.entries(env || {})
-    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
-    .map(([key, value]) => key + "=" + shellQuote(value));
+function validEnvEntries(env) {
+  return Object.entries(env || {})
+    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+}
+function envFileContent(env) {
+  return validEnvEntries(env)
+    .map(([key, value]) => "export " + key + "=" + shellQuote(value))
+    .join("\n") + "\n";
+}
+function commandLineFromRequest(command, cwd, envFilePath) {
   const parts = ["cd", shellQuote(cwd), "&&"];
-  if (assignments.length) {
-    parts.push("env", ...assignments);
+  if (envFilePath) {
+    const quoted = shellQuote(envFilePath);
+    parts.push("(chmod", "600", quoted, "2>/dev/null", "||", "true)", "&&", "set", "-a", "&&", ".", quoted, "&&", "set", "+a", "&&", "rm", "-f", quoted, "&&");
   }
-  parts.push(...command.map(shellQuote));
+  parts.push("exec", ...command.map(shellQuote));
   return parts.join(" ");
 }
 function workspaceFilePath(path) {
@@ -420,7 +427,12 @@ async function runCommand(sandbox) {
   const cwd = req.cwd || "/project/workspace";
   const env = req.env || {};
   const commands = sandbox.commands || sandbox.command || sandbox;
-  const commandLine = commandLineFromRequest(command, cwd, env);
+  let envFilePath = "";
+  if (validEnvEntries(env).length) {
+    envFilePath = "/project/workspace/.crabbox-env-" + process.pid + "-" + Date.now() + "-" + Math.random().toString(16).slice(2) + ".sh";
+    await writeWorkspaceBuffer(sandbox, envFilePath, Buffer.from(envFileContent(env), "utf8"));
+  }
+  const commandLine = commandLineFromRequest(command, cwd, envFilePath);
   let result;
   if (commands && typeof commands.run === "function") {
     result = await commands.run(commandLine);
@@ -439,10 +451,9 @@ async function runCommand(sandbox) {
     stderr: String(result && (result.stderr ?? result.errorOutput ?? "") || "")
   };
 }
-async function writeFile(sandbox) {
+async function writeWorkspaceBuffer(sandbox, path, buffer) {
   const files = sandbox.filesystem || sandbox.fs || sandbox.files || sandbox;
-  const targetPath = workspaceFilePath(req.path);
-  const buffer = Buffer.from(String(req.contentBase64 || ""), "base64");
+  const targetPath = workspaceFilePath(path);
   if (files && typeof files.writeFile === "function") {
     await files.writeFile(targetPath, buffer);
     return;
@@ -452,6 +463,10 @@ async function writeFile(sandbox) {
     return;
   }
   await callAny(files, ["writeTextFile", "createFile"], targetPath, buffer);
+}
+async function writeFile(sandbox) {
+  const buffer = Buffer.from(String(req.contentBase64 || ""), "base64");
+  await writeWorkspaceBuffer(sandbox, req.path, buffer);
 }
 function normalizePort(portInfo, fallbackPort, fallbackURL) {
   const port = Number((portInfo && (portInfo.port ?? portInfo.targetPort ?? portInfo.containerPort)) || fallbackPort || 0);

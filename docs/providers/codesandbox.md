@@ -111,8 +111,10 @@ Crabbox rejects broad paths such as `/` and `/project`.
    bridge, and extracts it under `codeSandbox.workdir`. `--no-sync` skips the
    archive upload; `--sync-only` syncs and exits without running a command.
 3. Commands run through the SDK command client with `cwd` set to the configured
-   workdir. Selected `--allow-env` and `--env-from-profile` values are sent in
-   the SDK command request body, not on argv.
+   workdir. Selected `--allow-env` and `--env-from-profile` values are sent to
+   the local SDK bridge in the request body and staged through a temporary
+   remote env file before the command runs, rather than embedded in local argv
+   or remote command text.
 4. `list`, `status`, `pause`, `resume`, `ports`, and `stop` start from local
    Crabbox claims and verify the remote ownership tag before mutating a
    sandbox. Raw user-created CodeSandbox IDs are rejected.
@@ -146,7 +148,8 @@ wake a hibernated sandbox when HTTP wakeup is enabled.
 
 - SSH: not driven by Crabbox.
 - Crabbox sync: archive sync through the SDK bridge; no rsync.
-- Env forwarding: yes — off-argv in SDK command requests.
+- Env forwarding: yes — local off-argv request payload, remote temporary env
+  file before command execution.
 - Pause/resume: yes — `pause` calls CodeSandbox hibernate and `resume` calls
   CodeSandbox resume.
 - URL bridge: yes — `ports` returns SDK-owned host URLs for open HTTP ports.

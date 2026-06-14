@@ -172,6 +172,14 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 		!strings.Contains(codeSandboxBridgeScript, "return { exitCode: 0, stdout: result, stderr: \"\" };") {
 		t.Fatalf("bridge script must preserve string output returned by CodeSandbox commands.run")
 	}
+	if strings.Contains(codeSandboxBridgeScript, "parts.push(\"env\", ...assignments)") {
+		t.Fatalf("bridge script must not embed forwarded env values in command text")
+	}
+	if !strings.Contains(codeSandboxBridgeScript, "await writeWorkspaceBuffer(sandbox, envFilePath, Buffer.from(envFileContent(env), \"utf8\"))") ||
+		!strings.Contains(codeSandboxBridgeScript, "rm\", \"-f\", quoted") ||
+		!strings.Contains(codeSandboxBridgeScript, "parts.push(\"exec\", ...command.map(shellQuote))") {
+		t.Fatalf("bridge script must pass forwarded env through a temporary remote env file before exec")
+	}
 	if !strings.Contains(codeSandboxBridgeScript, "options.id = req.templateId") ||
 		!strings.Contains(codeSandboxBridgeScript, "options.hibernationTimeoutSeconds") ||
 		!strings.Contains(codeSandboxBridgeScript, "options.automaticWakeupConfig") {
