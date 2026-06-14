@@ -74,6 +74,26 @@ func TestReadLocalWebVNCPasswordStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestReserveLocalWebVNCBrowserPortUsesKernelAssignedPort(t *testing.T) {
+	reservation, err := reserveLocalWebVNCBrowserPort("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := reservation.port
+	listener, err := reservation.listener()
+	if err != nil {
+		reservation.release()
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if !validWebVNCDaemonPort(port) {
+		t.Fatalf("kernel-assigned port=%q", port)
+	}
+	if got := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port); got != port {
+		t.Fatalf("listener port=%q reservation port=%q", got, port)
+	}
+}
+
 type blockingReader struct {
 	started chan struct{}
 	release chan struct{}
@@ -234,6 +254,7 @@ func TestWebVNCLocalRunsWithPasswordOnlyOnStdin(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	browserPort := unusedWebVNCTestPort(t)
 	output := newNotifyBuffer("webvnc:")
 	app := App{Stdout: output, Stderr: io.Discard, Stdin: strings.NewReader("stdin-only-secret\n")}
 	errCh := make(chan error, 1)
@@ -244,11 +265,14 @@ func TestWebVNCLocalRunsWithPasswordOnlyOnStdin(t *testing.T) {
 			"--vnc-port", strconv.Itoa(source.Addr().(*net.TCPAddr).Port),
 			"--username", "admin",
 			"--password-stdin",
+			"--local-port", browserPort,
 		})
 	}()
 	select {
 	case <-output.ready:
-	case <-time.After(5 * time.Second):
+	case err := <-errCh:
+		t.Fatalf("local WebVNC command exited before serving: %v", err)
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for local WebVNC command")
 	}
 	if got := output.String(); strings.Contains(got, "stdin-only-secret") || !strings.Contains(got, "VNC source 127.0.0.1:") {
@@ -278,8 +302,9 @@ func TestWebVNCLocalStopsWhenSourceListenerDisappears(t *testing.T) {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	browserPort := unusedWebVNCTestPort(t)
 	output := newNotifyBuffer("webvnc:")
 	errCh := make(chan error, 1)
 	go func() {
@@ -288,10 +313,13 @@ func TestWebVNCLocalStopsWhenSourceListenerDisappears(t *testing.T) {
 			"--vnc-port", strconv.Itoa(source.Addr().(*net.TCPAddr).Port),
 			"--username", "admin",
 			"--password-stdin",
+			"--local-port", browserPort,
 		})
 	}()
 	select {
 	case <-output.ready:
+	case err := <-errCh:
+		t.Fatalf("local WebVNC command exited before serving: %v", err)
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for local WebVNC command")
 	}

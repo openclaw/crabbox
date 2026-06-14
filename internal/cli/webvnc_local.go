@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,7 +86,7 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 		}
 	}()
 
-	reservation, err := reserveWebVNCDaemonPort(*localPort, *vncPort)
+	reservation, err := reserveLocalWebVNCBrowserPort(*localPort, *vncPort)
 	if err != nil {
 		return exit(5, "reserve local WebVNC port: %v", err)
 	}
@@ -107,6 +108,19 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 	credentials := rfbCredentials{Username: *username, Password: password}
 	fmt.Fprintf(a.Stdout, "bridge: serving noVNC locally; VNC source %s:%s; keep this running while viewing\n", *vncHost, *vncPort)
 	return a.serveLocalWebVNCBridge(bridgeCtx, webListener, webPort, credentials, *openViewer, dialVNC, nil)
+}
+
+func reserveLocalWebVNCBrowserPort(requested string, excluded ...string) (*webVNCDaemonPortReservation, error) {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		return reserveWebVNCDaemonPort(requested, excluded...)
+	}
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, fmt.Errorf("reserve kernel-assigned local WebVNC port: %w", err)
+	}
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	return &webVNCDaemonPortReservation{port: port, tcpListener: listener}, nil
 }
 
 func exactLocalWebVNCListenerOwnerPID(owners []int) (int, error) {
