@@ -18,6 +18,23 @@ type sdkMachineFactory struct {
 	LogWriter io.Writer
 }
 
+func firecrackerDrives(rootFSPath, cloudInitPath string) []fcmodels.Drive {
+	return []fcmodels.Drive{
+		{
+			DriveID:      firesdk.String("rootfs"),
+			PathOnHost:   firesdk.String(rootFSPath),
+			IsRootDevice: firesdk.Bool(true),
+			IsReadOnly:   firesdk.Bool(false),
+		},
+		{
+			DriveID:      firesdk.String("cidata"),
+			PathOnHost:   firesdk.String(cloudInitPath),
+			IsRootDevice: firesdk.Bool(false),
+			IsReadOnly:   firesdk.Bool(true),
+		},
+	}
+}
+
 func (f sdkMachineFactory) New(ctx context.Context, launch machineLaunchConfig) (machine, error) {
 	binary := strings.TrimSpace(launch.BinaryPath)
 	if binary == "" {
@@ -29,9 +46,7 @@ func (f sdkMachineFactory) New(ctx context.Context, launch machineLaunchConfig) 
 		LogLevel:        "Info",
 		KernelImagePath: launch.KernelPath,
 		KernelArgs:      launch.KernelArgs,
-		Drives: firesdk.NewDrivesBuilder(launch.RootFSPath).
-			AddDrive(launch.CloudInitPath, true, firesdk.WithDriveID("cidata")).
-			Build(),
+		Drives:          firecrackerDrives(launch.RootFSPath, launch.CloudInitPath),
 		NetworkInterfaces: firesdk.NetworkInterfaces{{
 			CNIConfiguration: &firesdk.CNIConfiguration{
 				NetworkName: launch.CNINetwork,

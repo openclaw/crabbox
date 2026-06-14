@@ -39,14 +39,16 @@ func TestProviderSpecAndAliases(t *testing.T) {
 
 func TestApplyFlagsUpdatesFirecrackerConfig(t *testing.T) {
 	defaults := core.BaseConfig()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	cfg := defaults
 	cfg.Provider = providerName
 	fs := flag.NewFlagSet("firecracker", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	values := RegisterFirecrackerProviderFlags(fs, defaults)
 	args := []string{
-		"--firecracker-binary=/usr/local/bin/firecracker",
-		"--firecracker-jailer=/usr/local/bin/jailer",
+		"--firecracker-binary=~/bin/firecracker",
+		"--firecracker-jailer=~/bin/jailer",
 		"--firecracker-kernel=/srv/firecracker/vmlinux",
 		"--firecracker-rootfs=/srv/firecracker/rootfs.ext4",
 		"--firecracker-user=runner",
@@ -67,7 +69,7 @@ func TestApplyFlagsUpdatesFirecrackerConfig(t *testing.T) {
 	if err := ApplyFirecrackerProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Firecracker.Binary != "/usr/local/bin/firecracker" || cfg.Firecracker.Jailer != "/usr/local/bin/jailer" || cfg.Firecracker.Kernel != "/srv/firecracker/vmlinux" || cfg.Firecracker.RootFS != "/srv/firecracker/rootfs.ext4" {
+	if cfg.Firecracker.Binary != home+"/bin/firecracker" || cfg.Firecracker.Jailer != home+"/bin/jailer" || cfg.Firecracker.Kernel != "/srv/firecracker/vmlinux" || cfg.Firecracker.RootFS != "/srv/firecracker/rootfs.ext4" {
 		t.Fatalf("paths=%#v", cfg.Firecracker)
 	}
 	if cfg.Firecracker.User != "runner" || cfg.SSHUser != "runner" || cfg.Firecracker.WorkRoot != "/workspace/firecracker" || cfg.WorkRoot != "/workspace/firecracker" {

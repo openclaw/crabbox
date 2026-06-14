@@ -59,10 +59,10 @@ func ApplyFirecrackerProviderFlags(cfg *core.Config, fs *flag.FlagSet, values an
 		return nil
 	}
 	if core.FlagWasSet(fs, "firecracker-binary") {
-		cfg.Firecracker.Binary = *v.BinaryPath
+		cfg.Firecracker.Binary = core.ExpandUserPath(*v.BinaryPath)
 	}
 	if core.FlagWasSet(fs, "firecracker-jailer") {
-		cfg.Firecracker.Jailer = *v.JailerPath
+		cfg.Firecracker.Jailer = core.ExpandUserPath(*v.JailerPath)
 	}
 	if core.FlagWasSet(fs, "firecracker-kernel") {
 		cfg.Firecracker.Kernel = core.ExpandUserPath(*v.KernelPath)
