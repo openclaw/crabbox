@@ -3,6 +3,7 @@ package githubcodespaces
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -152,6 +153,54 @@ func validatePrivateSSHConfigFile(path string) error {
 		return exit(2, "github-codespaces SSH config path %q must have mode 0600, got %04o", path, mode)
 	}
 	return nil
+}
+
+func storeSSHConfig(leaseID, data string) (string, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return "", exit(2, "github-codespaces lease id is required for SSH config storage")
+	}
+	dir, err := sshConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, leaseID+".ssh_config")
+	if err := os.WriteFile(path, []byte(data), defaultSSHConfigFileMode); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(path, defaultSSHConfigFileMode); err != nil {
+		return "", err
+	}
+	if err := validatePrivateSSHConfigFile(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func removeStoredSSHConfig(leaseID string) error {
+	if strings.TrimSpace(leaseID) == "" {
+		return nil
+	}
+	dir, err := sshConfigDir()
+	if err != nil {
+		return err
+	}
+	err = os.Remove(filepath.Join(dir, strings.TrimSpace(leaseID)+".ssh_config"))
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func sshConfigDir() (string, error) {
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(stateDir, "github-codespaces"), nil
 }
 
 func githubCodespacesReadyCheck(cfg Config) string {
