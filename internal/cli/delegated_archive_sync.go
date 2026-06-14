@@ -28,6 +28,7 @@ type DelegatedArchiveSyncRequest struct {
 	CleanupContext      func(context.Context) (context.Context, context.CancelFunc)
 	Upload              func(context.Context, string, io.Reader) error
 	Exec                func(context.Context, string) error
+	Replace             func(context.Context, string, string) error
 }
 
 func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncRequest) ([]TimingPhase, time.Duration, error) {
@@ -152,7 +153,13 @@ func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncReques
 	replaceDuration := time.Duration(0)
 	if stagingDir != "" {
 		replaceStart := now()
-		if err := replaceDelegatedArchiveWorkspace(syncCtx, req.Exec, stagingDir, req.Workdir, provider, stderr); err != nil {
+		replace := req.Replace
+		if replace == nil {
+			replace = func(ctx context.Context, stagingDir, workdir string) error {
+				return replaceDelegatedArchiveWorkspace(ctx, req.Exec, stagingDir, workdir, provider, stderr)
+			}
+		}
+		if err := replace(syncCtx, stagingDir, req.Workdir); err != nil {
 			return nil, 0, err
 		}
 		replaceDuration = now().Sub(replaceStart)

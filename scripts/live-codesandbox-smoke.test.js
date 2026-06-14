@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -16,11 +16,7 @@ const smokeEnv = {
 };
 let cleanupArmed = false;
 
-if (require.main === module) {
-  main();
-}
-
-function main() {
+async function main() {
   if (!token.trim()) {
     emit("environment_blocked", "reason=missing_CRABBOX_CODESANDBOX_API_KEY_or_CSB_API_KEY");
     cleanup();
@@ -44,20 +40,15 @@ function main() {
     requireOutput(sync, "CODESANDBOX_SMOKE_SYNC_OK", "sync proof command");
     run("pause", ["pause", "--provider", "codesandbox", slug], { cwd: smokeRepo });
     run("resume", ["resume", "--provider", "codesandbox", slug], { cwd: smokeRepo });
-    run("start preview server", [
-      "run",
-      "--provider",
-      "codesandbox",
-      "--id",
-      slug,
-      "--no-sync",
-      "--",
-      "/bin/sh",
-      "-lc",
-      "nohup node -e 'require(\"http\").createServer((_,res)=>res.end(\"CODESANDBOX_SMOKE_PORT_OK\")).listen(3000,\"0.0.0.0\"); setInterval(()=>{}, 1000)' >/tmp/crabbox-codesandbox-port.log 2>&1 &",
-    ], { cwd: smokeRepo });
-    const ports = run("ports", ["ports", "--provider", "codesandbox", "--id", slug, "--publish", "3000", "--json"], { cwd: smokeRepo });
-    requirePortURL(ports.stdout);
+    const preview = startPreviewServer();
+    try {
+      await waitForPreviewStart(preview);
+      const ports = run("ports", ["ports", "--provider", "codesandbox", "--id", slug, "--publish", "3000", "--json"], { cwd: smokeRepo });
+      const previewURL = requirePortURL(ports.stdout);
+      await requirePreviewResponse(previewURL);
+    } finally {
+      await stopPreviewServer(preview);
+    }
     stopAndVerifyEmpty();
     emit("live_codesandbox_smoke_passed");
   } catch (error) {
@@ -139,6 +130,100 @@ function runLocal(label, args, cwd) {
   }
 }
 
+function startPreviewServer() {
+  const child = spawn(
+    bin,
+    [
+      "run",
+      "--provider",
+      "codesandbox",
+      "--id",
+      slug,
+      "--no-sync",
+      "--",
+      "/bin/sh",
+      "-lc",
+      "exec node -e 'require(\"http\").createServer((_,res)=>res.end(\"CODESANDBOX_SMOKE_PORT_OK\")).listen(3000,\"0.0.0.0\")'",
+    ],
+    {
+      cwd: smokeRepo,
+      env: smokeEnv,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const preview = { child, stdout: "", stderr: "", spawnError: null };
+  child.stdout.on("data", (chunk) => {
+    preview.stdout = appendOutput(preview.stdout, chunk);
+  });
+  child.stderr.on("data", (chunk) => {
+    preview.stderr = appendOutput(preview.stderr, chunk);
+  });
+  child.on("error", (error) => {
+    preview.spawnError = error;
+  });
+  return preview;
+}
+
+async function waitForPreviewStart(preview) {
+  await delay(5000);
+  if (preview.spawnError) {
+    throw new Error(`start preview server failed: ${preview.spawnError.message}`);
+  }
+  if (preview.child.exitCode !== null || preview.child.signalCode !== null) {
+    throw new SmokeError("start preview server exited early", previewResult(preview));
+  }
+}
+
+async function stopPreviewServer(preview) {
+  if (!preview || preview.child.exitCode !== null || preview.child.signalCode !== null) return;
+  signalChild(preview.child, "SIGTERM");
+  await waitForExit(preview.child, 5000);
+  if (preview.child.exitCode === null && preview.child.signalCode === null) {
+    signalChild(preview.child, "SIGKILL");
+    await waitForExit(preview.child, 5000);
+  }
+}
+
+function signalChild(child, signal) {
+  try {
+    if (process.platform === "win32") {
+      child.kill(signal);
+    } else {
+      process.kill(-child.pid, signal);
+    }
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
+function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+function delay(timeoutMs) {
+  return new Promise((resolve) => setTimeout(resolve, timeoutMs));
+}
+
+function appendOutput(current, chunk) {
+  return `${current}${chunk}`.slice(-1024 * 1024);
+}
+
+function previewResult(preview) {
+  return {
+    status: preview.child.exitCode,
+    stdout: preview.stdout,
+    stderr: preview.stderr || (preview.child.signalCode ? `signal=${preview.child.signalCode}` : ""),
+  };
+}
+
 function stopAndVerifyEmpty() {
   run("stop", ["stop", "--provider", "codesandbox", slug], { cwd: smokeRepo });
   cleanupArmed = false;
@@ -182,6 +267,23 @@ function requirePortURL(stdout) {
   if (item.port !== 3000 || !/^https:\/\/.+\.csb\.app/.test(host)) {
     throw new Error(`diagnostic_only: ports output did not include a CodeSandbox URL for port 3000: ${JSON.stringify(payload)}`);
   }
+  return host;
+}
+
+async function requirePreviewResponse(url) {
+  let lastError;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const body = await response.text();
+      if (response.ok && body.includes("CODESANDBOX_SMOKE_PORT_OK")) return;
+      lastError = new Error(`HTTP ${response.status}: ${body.slice(0, 200)}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(2000);
+  }
+  throw new Error(`diagnostic_only: CodeSandbox preview request failed: ${lastError?.message || "unknown error"}`);
 }
 
 function jsonContainsSlug(text, want) {
@@ -204,6 +306,9 @@ function hasSlug(value, want) {
 
 function classify(message) {
   const lower = message.toLowerCase();
+  if (lower.includes("diagnostic_only:")) {
+    return "diagnostic_only";
+  }
   if (lower.includes("quota") || lower.includes("rate limit") || lower.includes("too many requests") || lower.includes("429") || lower.includes("capacity")) {
     return "environment_blocked";
   }
@@ -243,3 +348,7 @@ class SmokeError extends Error {
 }
 
 module.exports = { classify };
+
+if (require.main === module) {
+  main();
+}

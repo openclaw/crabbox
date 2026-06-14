@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	codeSandboxCleanupTimeout = 30 * time.Second
-	codeSandboxExecTimeout    = 3600
-	codeSandboxNamePrefix     = "crabbox-"
-	codeSandboxClaimTag       = "crabbox"
-	codeSandboxScopeTagPrefix = "crabbox-scope:"
+	codeSandboxCleanupTimeout   = 30 * time.Second
+	codeSandboxExecTimeout      = 3600
+	codeSandboxNamePrefix       = "crabbox-"
+	codeSandboxClaimTag         = "crabbox"
+	codeSandboxClaimScopePrefix = "codesandbox/ownership:"
+	codeSandboxScopeTagPrefix   = "crabboxscope"
 )
 
 func (b *codeSandboxBackend) createSandbox(ctx context.Context, api codeSandboxAPI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
@@ -27,7 +28,7 @@ func (b *codeSandboxBackend) createSandbox(ctx context.Context, api codeSandboxA
 	}
 	sb, err := api.CreateSandbox(ctx, CreateSandboxRequest{
 		Title:                  newSandboxTitle(repo),
-		Tags:                   []string{codeSandboxClaimTag, codeSandboxScopeTagPrefix + scope},
+		Tags:                   []string{codeSandboxClaimTag, codeSandboxScopeTag(scope)},
 		TemplateID:             strings.TrimSpace(b.cfg.CodeSandbox.TemplateID),
 		Privacy:                strings.TrimSpace(b.cfg.CodeSandbox.Privacy),
 		VMTier:                 strings.TrimSpace(b.cfg.CodeSandbox.VMTier),
@@ -122,7 +123,7 @@ func validateCodeSandboxClaimScope(claim LeaseClaim) error {
 	if claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
 		return exit(4, "codesandbox lease %q is not a CodeSandbox Crabbox claim", claim.LeaseID)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), "codesandbox/ownership:") {
+	if !strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), codeSandboxClaimScopePrefix) {
 		return exit(4, "codesandbox lease %q has an invalid ownership scope", claim.LeaseID)
 	}
 	return nil
@@ -134,8 +135,8 @@ func validateCodeSandboxSandboxOwnership(claim LeaseClaim, sb SandboxSummary) er
 	}
 	remoteScope := ""
 	for _, tag := range sb.Tags {
-		if strings.HasPrefix(tag, codeSandboxScopeTagPrefix) {
-			remoteScope = strings.TrimPrefix(tag, codeSandboxScopeTagPrefix)
+		if scope, ok := codeSandboxScopeFromTag(tag); ok {
+			remoteScope = scope
 			break
 		}
 	}
@@ -148,12 +149,27 @@ func validateCodeSandboxSandboxOwnership(claim LeaseClaim, sb SandboxSummary) er
 	return nil
 }
 
+func codeSandboxScopeTag(scope string) string {
+	return codeSandboxScopeTagPrefix + strings.TrimPrefix(scope, codeSandboxClaimScopePrefix)
+}
+
+func codeSandboxScopeFromTag(tag string) (string, bool) {
+	if !strings.HasPrefix(tag, codeSandboxScopeTagPrefix) {
+		return "", false
+	}
+	token := strings.TrimPrefix(tag, codeSandboxScopeTagPrefix)
+	if token == "" {
+		return "", false
+	}
+	return codeSandboxClaimScopePrefix + token, true
+}
+
 func newCodeSandboxClaimScope() (string, error) {
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return "", exit(5, "generate codesandbox ownership token: %v", err)
 	}
-	return "codesandbox/ownership:" + hex.EncodeToString(token[:]), nil
+	return codeSandboxClaimScopePrefix + hex.EncodeToString(token[:]), nil
 }
 
 func newSandboxTitle(repo Repo) string {

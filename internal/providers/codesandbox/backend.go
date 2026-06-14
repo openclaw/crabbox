@@ -380,8 +380,8 @@ func (b *codeSandboxBackend) Resume(ctx context.Context, req ResumeRequest) erro
 	if err != nil {
 		return err
 	}
-	if err := validateCodeSandboxSandboxOwnership(claim, resumed); err != nil {
-		return err
+	if strings.TrimSpace(resumed.ID) != "" && strings.TrimSpace(resumed.ID) != sandboxID {
+		return exit(4, "codesandbox resumed sandbox %q does not match local claim %q", resumed.ID, claim.LeaseID)
 	}
 	fmt.Fprintf(b.rt.Stderr, "resumed lease=%s sandbox=%s\n", leaseID, sandboxID)
 	return nil
