@@ -25,6 +25,8 @@ type fakeKubernetesClient struct {
 	execErrs    []error
 	execStarted chan struct{}
 	execRelease chan struct{}
+	getStarted  chan struct{}
+	getRelease  chan struct{}
 	deleteErrs  []error
 	creates     int
 	deletes     int
@@ -69,7 +71,20 @@ func (f *fakeKubernetesClient) CheckResource(_ context.Context, groupVersion, re
 	return errors.New("missing resource " + groupVersion + "/" + resource)
 }
 
-func (f *fakeKubernetesClient) Get(_ context.Context, ref resourceRef, namespace, name string) (*kubernetesObject, error) {
+func (f *fakeKubernetesClient) Get(ctx context.Context, ref resourceRef, namespace, name string) (*kubernetesObject, error) {
+	if f.getStarted != nil {
+		select {
+		case f.getStarted <- struct{}{}:
+		default:
+		}
+		if f.getRelease != nil {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-f.getRelease:
+			}
+		}
+	}
 	key := ref.Resource + "/" + namespace + "/" + name
 	f.gets = append(f.gets, key)
 	obj := f.objects[key]

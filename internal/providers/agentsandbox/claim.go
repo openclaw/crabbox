@@ -192,6 +192,13 @@ func authorizeClaimScope(cfg Config, claim LeaseClaim) error {
 	return nil
 }
 
+func authorizeAgentSandboxRepoClaim(claim LeaseClaim, repoRoot string, reclaim bool) error {
+	if repoRoot == "" || claim.RepoRoot == "" || claim.RepoRoot == repoRoot || reclaim {
+		return nil
+	}
+	return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
+}
+
 func retainMissingClaim(cfg Config, claim LeaseClaim) error {
 	if cfg.AgentSandbox.ForgetMissing {
 		removeLeaseClaim(claim.LeaseID)

@@ -139,18 +139,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err := authorizeClaimScope(b.cfg, claim); err != nil {
 			return RunResult{}, err
 		}
+		if err := authorizeAgentSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim); err != nil {
+			return RunResult{}, err
+		}
 		identity, err := claimIdentityFromLocalClaim(claim)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if err := claimLeaseForRepo(b.cfg, claim.LeaseID, claim.Slug, req.Repo, req.Reclaim); err != nil {
-			return RunResult{}, err
-		}
-		updated, err := readLeaseClaim(claim.LeaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claim.Labels)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -170,6 +162,17 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			if isNotFound(err) {
 				return RunResult{}, b.missingClaimRunError(claim)
 			}
+			return RunResult{}, err
+		}
+		if err := claimLeaseForRepo(b.cfg, claim.LeaseID, claim.Slug, req.Repo, req.Reclaim); err != nil {
+			return RunResult{}, err
+		}
+		updated, err := readLeaseClaim(claim.LeaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claim.Labels)
+		if err != nil {
 			return RunResult{}, err
 		}
 	}
@@ -339,7 +342,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		"namespace": b.cfg.AgentSandbox.Namespace,
 		"warm_pool": b.cfg.AgentSandbox.WarmPool,
 	}}
-	liveClaim, err := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
+	liveClaim, err := client.Get(pollCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 	if err != nil {
 		if isNotFound(err) {
 			baseView.State = "missing-or-inaccessible"

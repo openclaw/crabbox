@@ -320,6 +320,41 @@ func TestRunExistingLeaseReclaimRefreshesNewRepo(t *testing.T) {
 	}
 }
 
+func TestRunFailedValidationDoesNotPersistReclaim(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repoA := testGitRepo(t)
+	repoB := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repoA, RequestedSlug: "failed-reclaim"}); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := listAgentSandboxLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, ok := claimBySlug(claims, "failed-reclaim")
+	if !ok {
+		t.Fatalf("claims=%#v", claims)
+	}
+	claimName := claim.Labels[claimLabelClaimName]
+	fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName].Metadata.UID = "uid-replacement"
+
+	_, err = backend.Run(context.Background(), RunRequest{
+		Repo: repoB, ID: claim.LeaseID, Reclaim: true, Keep: true, NoSync: true, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "UID changed") {
+		t.Fatalf("failed reclaim err=%v", err)
+	}
+	updated, err := readLeaseClaim(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RepoRoot != repoA.Root || updated.LastUsedAt != claim.LastUsedAt {
+		t.Fatalf("failed reclaim mutated claim: before=%#v after=%#v", claim, updated)
+	}
+}
+
 func TestRunExistingLeaseValidatesLiveClaimOwnership(t *testing.T) {
 	cfg := testAgentSandboxConfig(t)
 	fake := readyFakeClient(cfg)
@@ -615,6 +650,27 @@ func TestStatusMissingClaimDoesNotWaitAsNotReady(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("status waited despite missing claim: %s", elapsed)
+	}
+}
+
+func TestStatusWaitTimeoutBoundsInitialLookup(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	backend := testBackend(cfg, fake, nil, nil)
+	repo := testGitRepo(t)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "status-timeout"}); err != nil {
+		t.Fatal(err)
+	}
+	fake.getStarted = make(chan struct{}, 1)
+	fake.getRelease = make(chan struct{})
+
+	start := time.Now()
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-timeout", Wait: true, WaitTimeout: 20 * time.Millisecond})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("status err=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("initial lookup ignored wait timeout: %s", elapsed)
 	}
 }
 
