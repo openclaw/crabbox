@@ -10,6 +10,7 @@ implements the pausable capability accept it; others return
 crabbox pause swift-crab
 crabbox pause --id isb_crabbox-repo-0a1b2c
 crabbox pause --provider islo swift-crab
+crabbox pause --provider codesandbox web-box
 ```
 
 ## Identifying the lease
@@ -25,6 +26,8 @@ local claim is kept so the lease can be resumed.
 - `islo` — snapshots the sandbox to disk and frees its CPU/memory via the Islo
   pause API; resume restores it. Accepts an `isb_...` ID, a Crabbox-created
   sandbox name, or a local slug.
+- `codesandbox` — hibernates the CodeSandbox sandbox through the SDK bridge and
+  keeps the `csbx_...` local claim so it can be resumed or stopped later.
 
 Run `crabbox providers` for the providers available in your build.
 

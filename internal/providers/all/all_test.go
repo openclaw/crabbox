@@ -182,11 +182,10 @@ func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("codesandbox targets=%#v", spec.Targets)
 	}
-	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
-		t.Fatalf("codesandbox features=%v want archive-sync and cleanup", spec.Features)
-	}
-	if spec.Features.Has(core.FeaturePauseResume) || spec.Features.Has(core.FeatureURLBridge) {
-		t.Fatalf("codesandbox features=%v includes later-plan capabilities", spec.Features)
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureURLBridge, core.FeaturePauseResume} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("codesandbox features=%v missing %s", spec.Features, feature)
+		}
 	}
 }
 

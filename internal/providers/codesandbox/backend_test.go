@@ -3,11 +3,14 @@ package codesandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +70,93 @@ func TestStopRejectsOwnershipMismatchBeforeDelete(t *testing.T) {
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%v, want no delete", fake.deleted)
+	}
+}
+
+func TestPauseResumeUseSDKLifecycleAndKeepClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	backend, _, stderr := newFakeBackend(t, fake)
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "nap", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Pause(context.Background(), PauseRequest{ID: "nap"}); err != nil {
+		t.Fatalf("Pause err=%v", err)
+	}
+	if err := backend.Resume(context.Background(), ResumeRequest{ID: leaseID}); err != nil {
+		t.Fatalf("Resume err=%v", err)
+	}
+	if !reflect.DeepEqual(fake.hibernated, []string{fake.sandboxID}) || !reflect.DeepEqual(fake.resumed, []string{fake.sandboxID}) {
+		t.Fatalf("hibernated=%v resumed=%v", fake.hibernated, fake.resumed)
+	}
+	if _, ok, err := resolveCodeSandboxLeaseClaim("nap"); err != nil || !ok {
+		t.Fatalf("claim missing after pause/resume ok=%v err=%v", ok, err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "paused lease="+leaseID) || !strings.Contains(got, "resumed lease="+leaseID) {
+		t.Fatalf("stderr=%q", got)
+	}
+}
+
+func TestPauseRejectsOwnershipMismatchBeforeHibernate(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	backend, _, _ := newFakeBackend(t, fake)
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, "codesandbox/ownership:local", "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Tags = []string{codeSandboxClaimTag, codeSandboxScopeTagPrefix + "codesandbox/ownership:remote"}
+
+	err := backend.Pause(context.Background(), PauseRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
+		t.Fatalf("Pause err=%v, want ownership rejection", err)
+	}
+	if len(fake.hibernated) != 0 {
+		t.Fatalf("hibernated=%v, want no call", fake.hibernated)
+	}
+}
+
+func TestPortsListPublishAndRejectUnsupportedUnpublish(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	fake.ports = []PortInfo{{Port: 3000, Host: "https://sb-test01-3000.csb.app"}}
+	backend, _, _ := newFakeBackend(t, fake)
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "web", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := backend.Ports(context.Background(), PortsRequest{ID: "web"})
+	if err != nil {
+		t.Fatalf("Ports list err=%v", err)
+	}
+	if out != "3000 https://sb-test01-3000.csb.app" {
+		t.Fatalf("list output=%q", out)
+	}
+	out, err = backend.Ports(context.Background(), PortsRequest{ID: leaseID, JSON: true, Publish: []string{"5173"}})
+	if err != nil {
+		t.Fatalf("Ports publish err=%v", err)
+	}
+	var got []PortInfo
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json output=%q err=%v", out, err)
+	}
+	if len(got) != 1 || got[0].Port != 5173 || got[0].Host != "https://sb-test01-5173.csb.app" {
+		t.Fatalf("publish ports=%#v", got)
+	}
+	if !reflect.DeepEqual(fake.waitedPorts, []int{5173}) {
+		t.Fatalf("waited ports=%v", fake.waitedPorts)
+	}
+
+	_, err = backend.Ports(context.Background(), PortsRequest{ID: "web", Publish: []string{"127.0.0.1:41000:3000"}})
+	if err == nil || !strings.Contains(err.Error(), "only support a sandbox port number") {
+		t.Fatalf("complex port spec err=%v", err)
+	}
+	_, err = backend.Ports(context.Background(), PortsRequest{ID: "web", Unpublish: []string{"3000"}})
+	if err == nil || !strings.Contains(err.Error(), "does not support ports --unpublish") {
+		t.Fatalf("unpublish err=%v", err)
 	}
 }
 
@@ -246,8 +336,12 @@ type fakeCodeSandboxAPI struct {
 	sandbox        SandboxSummary
 	created        []CreateSandboxRequest
 	deleted        []string
+	hibernated     []string
+	resumed        []string
 	commands       []CommandRequest
 	uploads        []uploadCall
+	ports          []PortInfo
+	waitedPorts    []int
 	commandResults []CommandResult
 	blockRun       bool
 }
@@ -291,6 +385,18 @@ func (f *fakeCodeSandboxAPI) DeleteSandbox(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeCodeSandboxAPI) HibernateSandbox(_ context.Context, id string) error {
+	f.hibernated = append(f.hibernated, id)
+	f.sandbox.State = "hibernated"
+	return nil
+}
+
+func (f *fakeCodeSandboxAPI) ResumeSandbox(_ context.Context, id string) (SandboxSummary, error) {
+	f.resumed = append(f.resumed, id)
+	f.sandbox.State = "running"
+	return f.sandbox, nil
+}
+
 func (f *fakeCodeSandboxAPI) RunCommand(ctx context.Context, _ string, req CommandRequest) (CommandResult, error) {
 	f.commands = append(f.commands, req)
 	if f.blockRun {
@@ -314,6 +420,15 @@ func (f *fakeCodeSandboxAPI) UploadFile(_ context.Context, sandboxID, remotePath
 	}
 	f.uploads = append(f.uploads, uploadCall{SandboxID: sandboxID, Path: remotePath, Data: data})
 	return nil
+}
+
+func (f *fakeCodeSandboxAPI) ListPorts(context.Context, string) ([]PortInfo, error) {
+	return append([]PortInfo(nil), f.ports...), nil
+}
+
+func (f *fakeCodeSandboxAPI) WaitForPortURL(_ context.Context, _ string, port int) (PortInfo, error) {
+	f.waitedPorts = append(f.waitedPorts, port)
+	return PortInfo{Port: port, Host: "https://sb-test01-" + strconv.Itoa(port) + ".csb.app"}, nil
 }
 
 func (f *fakeCodeSandboxAPI) hasCommandContaining(fragment string) bool {

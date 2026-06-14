@@ -9,6 +9,7 @@ backend implements the pausable capability accept it; others return
 crabbox resume swift-crab
 crabbox resume --id isb_crabbox-repo-0a1b2c
 crabbox resume --provider islo swift-crab
+crabbox resume --provider codesandbox web-box
 ```
 
 ## Identifying the lease
@@ -21,6 +22,9 @@ positional argument, or more than one positional argument, is an error.
 ## Provider support
 
 - `islo` — restores a paused sandbox to running via the Islo resume API.
+- `codesandbox` — resumes a hibernated CodeSandbox sandbox through the SDK
+  bridge. If CodeSandbox performs a clean boot rather than restoring a memory
+  snapshot, setup may take longer before the sandbox is ready.
 
 Run `crabbox providers` for the providers available in your build.
 

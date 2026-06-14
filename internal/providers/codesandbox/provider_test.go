@@ -20,11 +20,10 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("spec kind/coordinator=%#v", spec)
 	}
-	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
-		t.Fatalf("features=%v want archive-sync and cleanup", spec.Features)
-	}
-	if spec.Features.Has(core.FeaturePauseResume) || spec.Features.Has(core.FeatureURLBridge) {
-		t.Fatalf("features=%v includes Plan 03 capabilities", spec.Features)
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureURLBridge, core.FeaturePauseResume} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
 	}
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v", spec.Targets)
@@ -198,10 +197,26 @@ func (f *fakeSandboxLister) DeleteSandbox(context.Context, string) error {
 	return nil
 }
 
+func (f *fakeSandboxLister) HibernateSandbox(context.Context, string) error {
+	return nil
+}
+
+func (f *fakeSandboxLister) ResumeSandbox(context.Context, string) (SandboxSummary, error) {
+	return SandboxSummary{}, nil
+}
+
 func (f *fakeSandboxLister) RunCommand(context.Context, string, CommandRequest) (CommandResult, error) {
 	return CommandResult{}, nil
 }
 
 func (f *fakeSandboxLister) UploadFile(context.Context, string, string, io.Reader) error {
 	return nil
+}
+
+func (f *fakeSandboxLister) ListPorts(context.Context, string) ([]PortInfo, error) {
+	return nil, nil
+}
+
+func (f *fakeSandboxLister) WaitForPortURL(context.Context, string, int) (PortInfo, error) {
+	return PortInfo{}, nil
 }

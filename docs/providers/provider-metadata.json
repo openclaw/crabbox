@@ -153,6 +153,20 @@
     "caveat": "No shell, SSH, or filesystem sync; Dynamic Workers must be enabled",
     "docs": "cloudflare-dynamic-workers.md"
   },
+  "codesandbox": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "CodeSandbox SDK sandbox",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "no",
+    "lifecycle": "CodeSandbox",
+    "cleanup": "sandbox delete",
+    "bestFit": "Managed CodeSandbox Linux development environments",
+    "caveat": "Requires env-only SDK auth and a local Node bridge",
+    "docs": "codesandbox.md"
+  },
   "daytona": {
     "status": "built-in",
     "category": "direct-cloud",
