@@ -155,7 +155,7 @@ case "$1" in
   list)
     slug="$(cat ${JSON.stringify(slugFile)} 2>/dev/null || true)"
     if [[ -z "$slug" || -f ${JSON.stringify(`${slugFile}.stopped`)} ]]; then
-      printf '[]\\n'
+      printf '[{"labels":{"slug":"unrelated-retained-lease"},"name":"unrelated-retained-lease"}]\\n'
     else
       printf '[{"labels":{"slug":"%s"},"name":"%s"}]\\n' "$slug" "$slug"
     fi
