@@ -11781,16 +11781,16 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
     const headers = {
-      "x-crabbox-owner": "peter@example.com",
-      "x-crabbox-org": "openclaw",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
     };
     storage.seed(
       "lease:cbx_000000000001",
       testLease({
         id: "cbx_000000000001",
         slug: "blue-lobster",
-        owner: "peter@example.com",
-        org: "openclaw",
+        owner: "alice@example.com",
+        org: "example-org",
         share: {
           users: {
             "viewer@example.com": "use",
@@ -11874,7 +11874,7 @@ describe("fleet lease identity and idle", () => {
 
     const viewerHeaders = {
       "x-crabbox-owner": "viewer@example.com",
-      "x-crabbox-org": "openclaw",
+      "x-crabbox-org": "example-org",
     };
     const viewerStatus = await fleet.fetch(
       request("GET", "/v1/leases/blue-lobster/egress/status", {
@@ -11909,7 +11909,7 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/v1/leases/blue-lobster/egress/status", {
         headers: {
           "x-crabbox-owner": "manager@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -12064,16 +12064,16 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
     const headers = {
-      "x-crabbox-owner": "peter@example.com",
-      "x-crabbox-org": "openclaw",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
     };
     storage.seed(
       "lease:cbx_000000000001",
       testLease({
         id: "cbx_000000000001",
         slug: "blue-lobster",
-        owner: "peter@example.com",
-        org: "openclaw",
+        owner: "alice@example.com",
+        org: "example-org",
         desktop: true,
         share: {
           users: {
@@ -12090,8 +12090,8 @@ describe("fleet lease identity and idle", () => {
       testLease({
         id: "cbx_000000000002",
         slug: "plain-lobster",
-        owner: "peter@example.com",
-        org: "openclaw",
+        owner: "alice@example.com",
+        org: "example-org",
         desktop: false,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
@@ -12190,7 +12190,7 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/portal/leases/blue-lobster/vnc", {
         headers: {
           "x-crabbox-owner": "friend@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -12213,7 +12213,7 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/portal/leases/blue-lobster/vnc", {
         headers: {
           "x-crabbox-owner": "teammate@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -12226,7 +12226,7 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/portal/leases/blue-lobster/vnc/status", {
         headers: {
           "x-crabbox-owner": "friend@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -12241,7 +12241,7 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/portal/leases/blue-lobster/vnc/viewer", {
         headers: {
           "x-crabbox-owner": "friend@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
           upgrade: "websocket",
         },
       }),
@@ -12382,7 +12382,7 @@ describe("fleet lease identity and idle", () => {
     );
     const observerTheme = await fleet.fetch(
       request("POST", "/portal/leases/blue-lobster/vnc/theme", {
-        headers: { "x-crabbox-owner": "friend@example.com", "x-crabbox-org": "openclaw" },
+        headers: { "x-crabbox-owner": "friend@example.com", "x-crabbox-org": "example-org" },
         body: { theme: "dark", viewerID: "viewer_observer1" },
       }),
     );
