@@ -10828,6 +10828,8 @@ describe("fleet lease identity and idle", () => {
         hostId: "h-000000000001",
         cloudID: "i-000000000099",
         region: "eu-west-1",
+        owner: "alice@example.com",
+        org: "example-org",
         share: { users: { "friend@example.com": "use" } },
         createdAt: "2026-05-17T00:10:00.000Z",
         updatedAt: "2026-05-17T00:20:00.000Z",
@@ -10848,6 +10850,8 @@ describe("fleet lease identity and idle", () => {
         hostId: "h-000000000002",
         cloudID: "i-000000000100",
         region: "eu-west-1",
+        owner: "alice@example.com",
+        org: "example-org",
         createdAt: "2026-05-17T00:30:00.000Z",
         updatedAt: "2026-05-17T00:40:00.000Z",
         lastTouchedAt: "2026-05-17T00:40:00.000Z",
@@ -10867,8 +10871,8 @@ describe("fleet lease identity and idle", () => {
     const response = await fleet.fetch(
       request("GET", "/portal", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10896,8 +10900,8 @@ describe("fleet lease identity and idle", () => {
     const detail = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10915,7 +10919,7 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/portal/hosts/aws/h-000000000001", {
         headers: {
           "x-crabbox-owner": "friend@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10929,8 +10933,8 @@ describe("fleet lease identity and idle", () => {
     const vnc = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10940,8 +10944,8 @@ describe("fleet lease identity and idle", () => {
     const enablePage = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000002", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10953,8 +10957,8 @@ describe("fleet lease identity and idle", () => {
     const macVNC = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000002/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10964,8 +10968,8 @@ describe("fleet lease identity and idle", () => {
     const enabled = await fleet.fetch(
       request("POST", "/portal/hosts/aws/h-000000000002/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10976,8 +10980,8 @@ describe("fleet lease identity and idle", () => {
     const startPage = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000003/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10998,8 +11002,8 @@ describe("fleet lease identity and idle", () => {
     const idlePost = await fleet.fetch(
       request("POST", "/portal/hosts/aws/h-000000000003/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
         body: {},
       }),
