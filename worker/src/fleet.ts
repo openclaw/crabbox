@@ -4706,7 +4706,12 @@ export class FleetCoordinator {
         404,
       );
     }
-    return portalMacHostDetail(host, host.lease ? this.leaseBridgeStatus(host.lease) : undefined);
+    const canManage = Boolean(
+      host.lease && this.leaseManageableByRequest(host.lease, request, isAdminRequest(request)),
+    );
+    return portalMacHostDetail(host, host.lease ? this.leaseBridgeStatus(host.lease) : undefined, {
+      canManage,
+    });
   }
 
   private async portalMacHostLeaseRedirect(
@@ -4736,7 +4741,9 @@ export class FleetCoordinator {
     }
     const error = action === "vnc" ? webVNCLeaseError(lease) : codeLeaseError(lease);
     if (action === "vnc" && error === "lease was not created with desktop=true") {
-      return portalMacHostDetail(host, this.leaseBridgeStatus(lease));
+      return portalMacHostDetail(host, this.leaseBridgeStatus(lease), {
+        canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+      });
     }
     if (error) {
       return portalError(action === "vnc" ? "WebVNC unavailable" : "Code unavailable", error, 409);
@@ -5567,6 +5574,7 @@ export class FleetCoordinator {
     if (!lease) {
       return notFound();
     }
+    const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
     const session = this.egressSessions.get(lease.id);
     const key = session ? egressSocketKey(lease.id, session.sessionID) : undefined;
     const host = key ? this.egressHosts.get(key) : undefined;
@@ -5574,13 +5582,13 @@ export class FleetCoordinator {
     return json({
       leaseID: lease.id,
       slug: lease.slug,
-      sessionID: session?.sessionID ?? "",
-      profile: session?.profile ?? "",
-      allow: session?.allow ?? [],
+      sessionID: canManage ? (session?.sessionID ?? "") : "",
+      profile: canManage ? (session?.profile ?? "") : "",
+      allow: canManage ? (session?.allow ?? []) : [],
       hostConnected: host?.readyState === WebSocket.OPEN,
       clientConnected: client?.readyState === WebSocket.OPEN,
-      createdAt: session?.createdAt ?? "",
-      updatedAt: session?.updatedAt ?? "",
+      createdAt: canManage ? (session?.createdAt ?? "") : "",
+      updatedAt: canManage ? (session?.updatedAt ?? "") : "",
     });
   }
 
@@ -6317,7 +6325,8 @@ export class FleetCoordinator {
     const controller = controllerID
       ? this.webVNCViewers.get(lease.id)?.get(controllerID)
       : undefined;
-    const command = webVNCBridgeCommand(lease);
+    const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
+    const command = canManage ? webVNCBridgeCommand(lease) : "";
     return json({
       leaseID: lease.id,
       slug: lease.slug ?? "",
@@ -6346,7 +6355,9 @@ export class FleetCoordinator {
               ? "observer slots available"
               : "bridge connected"
             : "waiting for an available WebVNC observer slot"
-        : `WebVNC daemon not running; run: ${command}`,
+        : canManage
+          ? `WebVNC daemon not running; run: ${command}`
+          : "WebVNC daemon not running; ask a lease manager to start or refresh the bridge",
     });
   }
 
@@ -6937,11 +6948,14 @@ export class FleetCoordinator {
     }
     const agent = this.claimIdleWebVNCAgent(lease.id);
     if (!agent) {
-      const command = webVNCBridgeCommand(lease);
+      const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
+      const command = canManage ? webVNCBridgeCommand(lease) : "";
       return json(
         {
           error: "webvnc_bridge_missing",
-          message: `No WebVNC backend is available yet; start or refresh the bridge with: ${command}`,
+          message: canManage
+            ? `No WebVNC backend is available yet; start or refresh the bridge with: ${command}`
+            : "No WebVNC backend is available yet; ask a lease manager to start or refresh the bridge.",
           command,
         },
         { status: 409 },

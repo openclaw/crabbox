@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Redacted manage-only WebVNC bridge commands and egress session details from `use` share viewers. Thanks @coygeek.
 - Created run downloads, captures, proofs, and failure bundles with private POSIX permissions. Thanks @coygeek.
 - Rejected broker-supplied GitHub login URLs that do not use the expected HTTPS GitHub authorization endpoint.
 - Preserved single-use bridge tickets when presented to the wrong lease, role, or runtime-adapter endpoint. Thanks @coygeek.
