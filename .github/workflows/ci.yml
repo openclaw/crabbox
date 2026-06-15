@@ -154,6 +154,9 @@ jobs:
         run: npm run build:node
         working-directory: worker
 
+      - name: Check runtime base image pins
+        run: node scripts/check-docker-base-images.mjs
+
       - name: Build Node runtime image
         run: docker build -f worker/Dockerfile.node worker
 

@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Pinned shipped runtime container base images to reviewed multi-platform digests and enforced the pins in CI. Thanks @coygeek.
 - Redacted manage-only WebVNC bridge commands and egress session details from `use` share viewers. Thanks @coygeek.
 - Created run downloads, captures, proofs, and failure bundles with private POSIX permissions. Thanks @coygeek.
 - Rejected broker-supplied GitHub login URLs that do not use the expected HTTPS GitHub authorization endpoint.
