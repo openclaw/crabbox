@@ -1261,7 +1261,8 @@ export class FleetCoordinator {
   ): Promise<void> {
     const runID = typeof input.runID === "string" ? input.runID : "";
     const run = runID ? await this.getRun(runID) : undefined;
-    if (!run || !this.runVisibleToControl(run, attachment)) {
+    const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+    if (!run || !this.runReadableToControl(run, attachment, lease)) {
       sendControl(socket, { type: "error", code: "not_found", message: "run not found" });
       return;
     }
@@ -4824,11 +4825,18 @@ export class FleetCoordinator {
         404,
       );
     }
-    const runs = (await this.runRecords())
-      .filter((run) => run.leaseID === lease.id && this.runVisibleToRequest(run, request))
+    const runs = await this.runRecords();
+    const leases = new Map((await this.leaseRecords()).map((record) => [record.id, record]));
+    leases.set(lease.id, lease);
+    await Promise.all(runs.map((run) => this.ensureRunLeaseAttribution(run, leases)));
+    const visibleRuns = runs
+      .filter(
+        (run) =>
+          this.runReferencesLease(run, lease.id) && this.runReadableToRequest(run, request, lease),
+      )
       .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, 12);
-    return portalLeaseDetail(lease, runs, this.leaseBridgeStatus(lease), {
+    return portalLeaseDetail(lease, visibleRuns, this.leaseBridgeStatus(lease), {
       canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
     });
   }
@@ -5390,7 +5398,8 @@ export class FleetCoordinator {
     action?: string,
   ): Promise<Response> {
     const run = await this.getRun(runID);
-    if (!run || !this.runVisibleToRequest(run, request)) {
+    const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+    if (!run || !this.runReadableToRequest(run, request, lease)) {
       return notFound();
     }
     if (request.method.toUpperCase() !== "GET") {
@@ -8132,8 +8141,10 @@ export class FleetCoordinator {
     const run: RunRecord = {
       id: newRunID(),
       leaseID,
+      leaseIDs: [],
       owner,
       org,
+      leaseOwners: [],
       provider: lease?.provider ?? input.provider ?? "hetzner",
       target: lease?.target ?? input.target ?? "linux",
       class: lease?.class ?? input.class ?? "",
@@ -8147,6 +8158,9 @@ export class FleetCoordinator {
       lastEventAt: now,
       eventCount: 0,
     };
+    if (lease) {
+      this.setRunLeaseAttribution(run, lease);
+    }
     const windowsMode = lease?.windowsMode ?? input.windowsMode;
     if (windowsMode) {
       run.windowsMode = windowsMode;
@@ -8181,11 +8195,13 @@ export class FleetCoordinator {
     const method = request.method.toUpperCase();
     if (method === "GET" && action === undefined) {
       const run = await this.getRun(runID);
-      return run && this.runVisibleToRequest(run, request) ? json({ run }) : notFound();
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      return run && this.runReadableToRequest(run, request, lease) ? json({ run }) : notFound();
     }
     if (method === "GET" && action === "logs") {
       const run = await this.getRun(runID);
-      if (!run || !this.runVisibleToRequest(run, request)) {
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      if (!run || !this.runReadableToRequest(run, request, lease)) {
         return notFound();
       }
       const log = await this.readRunLog(runID);
@@ -8195,7 +8211,8 @@ export class FleetCoordinator {
     }
     if (method === "GET" && action === "events") {
       const run = await this.getRun(runID);
-      if (!run || !this.runVisibleToRequest(run, request)) {
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      if (!run || !this.runReadableToRequest(run, request, lease)) {
         return notFound();
       }
       const url = new URL(request.url);
@@ -8205,10 +8222,16 @@ export class FleetCoordinator {
     }
     if (method === "POST" && action === "events") {
       const run = await this.getRun(runID);
-      if (!run || !this.runVisibleToRequest(run, request)) {
+      if (!run || !this.runWritableByRequest(run, request)) {
         return notFound();
       }
       const input = await readJson<RunEventRequest>(request);
+      if (input.leaseID && input.leaseID !== run.leaseID) {
+        const lease = validLeaseID(input.leaseID) ? await this.getLease(input.leaseID) : undefined;
+        if (!lease || !this.leaseVisibleToRequest(lease, request, isAdminRequest(request))) {
+          return notFound();
+        }
+      }
       const event = await this.appendRunEventRecord(run, input);
       return json({ event }, { status: 201 });
     }
@@ -8223,7 +8246,7 @@ export class FleetCoordinator {
 
   private async appendRunTelemetry(request: Request, runID: string): Promise<Response> {
     const run = await this.getRun(runID);
-    if (!run || !this.runVisibleToRequest(run, request)) {
+    if (!run || !this.runWritableByRequest(run, request)) {
       return notFound();
     }
     const input = await readJson<RunTelemetryRequest>(request);
@@ -8238,7 +8261,7 @@ export class FleetCoordinator {
 
   private async finishRun(request: Request, runID: string): Promise<Response> {
     const run = await this.getRun(runID);
-    if (!run || !this.runVisibleToRequest(run, request)) {
+    if (!run || !this.runWritableByRequest(run, request)) {
       return notFound();
     }
     const input = await readJson<RunFinishRequest>(request);
@@ -8325,13 +8348,14 @@ export class FleetCoordinator {
     const limit = clampLimit(url.searchParams.get("limit"), 50);
     const admin = isAdminRequest(request);
     const runs = await this.runRecords();
-    const scopedOwner = admin ? owner : requestOwner(request);
-    const scopedOrg = admin ? org : requestOrg(request, this.env);
+    const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
+    await Promise.all(runs.map((run) => this.ensureRunLeaseAttribution(run, leases)));
     return json({
       runs: runs
-        .filter((run) => !leaseID || run.leaseID === leaseID)
-        .filter((run) => !scopedOwner || run.owner === scopedOwner)
-        .filter((run) => !scopedOrg || run.org === scopedOrg)
+        .filter((run) => !leaseID || this.runReferencesLease(run, leaseID))
+        .filter((run) => admin || this.runReadableToRequest(run, request, leases.get(run.leaseID)))
+        .filter((run) => !owner || run.owner === owner)
+        .filter((run) => !org || run.org === org)
         .filter((run) => !state || run.state === state)
         .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
         .slice(0, limit),
@@ -9697,20 +9721,99 @@ export class FleetCoordinator {
     return undefined;
   }
 
-  private runVisibleToRequest(run: RunRecord, request: Request): boolean {
+  private runWritableByRequest(run: RunRecord, request: Request): boolean {
     return (
       isAdminRequest(request) ||
       (run.owner === requestOwner(request) && run.org === requestOrg(request, this.env))
     );
   }
 
-  private runVisibleToControl(
+  private runReadableToRequest(run: RunRecord, request: Request, lease?: LeaseRecord): boolean {
+    if (this.runWritableByRequest(run, request)) {
+      return true;
+    }
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    return (
+      run.leaseOwners?.some(
+        (attribution) => attribution.owner === owner && attribution.org === org,
+      ) ||
+      (!run.leaseOwners?.length && lease?.owner === owner && lease.org === org)
+    );
+  }
+
+  private runReadableToControl(
     run: RunRecord,
     attachment: Extract<BridgeAttachment, { kind: "control" }>,
+    lease?: LeaseRecord,
   ): boolean {
     return Boolean(
-      attachment.admin || (run.owner === attachment.owner && run.org === attachment.org),
+      attachment.admin ||
+      (run.owner === attachment.owner && run.org === attachment.org) ||
+      run.leaseOwners?.some(
+        (attribution) =>
+          attribution.owner === attachment.owner && attribution.org === attachment.org,
+      ) ||
+      (!run.leaseOwners?.length &&
+        lease?.owner === attachment.owner &&
+        lease.org === attachment.org),
     );
+  }
+
+  private setRunLeaseAttribution(run: RunRecord, lease: LeaseRecord): void {
+    if (!run.leaseIDs?.includes(lease.id)) {
+      run.leaseIDs = [...(run.leaseIDs ?? []), lease.id];
+    }
+    if (
+      !run.leaseOwners?.some(
+        (attribution) => attribution.owner === lease.owner && attribution.org === lease.org,
+      )
+    ) {
+      run.leaseOwners = [...(run.leaseOwners ?? []), { owner: lease.owner, org: lease.org }];
+    }
+  }
+
+  private runReferencesLease(run: RunRecord, leaseID: string): boolean {
+    return run.leaseID === leaseID || run.leaseIDs?.includes(leaseID) === true;
+  }
+
+  private async ensureRunLeaseAttribution(
+    run: RunRecord,
+    knownLeases?: Map<string, LeaseRecord>,
+  ): Promise<LeaseRecord | undefined> {
+    if (run.leaseIDs !== undefined && run.leaseOwners !== undefined) {
+      return undefined;
+    }
+    const events = await this.state.storage.list<RunEventRecord>({
+      prefix: runEventPrefix(run.id),
+    });
+    const leaseIDs = new Set(
+      [...events.values()]
+        .toSorted((a, b) => a.seq - b.seq)
+        .map((event) => event.leaseID)
+        .filter((leaseID): leaseID is string => Boolean(leaseID && validLeaseID(leaseID))),
+    );
+    if (validLeaseID(run.leaseID)) {
+      leaseIDs.add(run.leaseID);
+    }
+    const ids = [...leaseIDs];
+    const leases = knownLeases
+      ? ids.map((leaseID) => knownLeases.get(leaseID))
+      : await Promise.all(ids.map((leaseID) => this.getLease(leaseID)));
+    run.leaseIDs = ids;
+    run.leaseOwners = [];
+    let currentLease: LeaseRecord | undefined;
+    for (const [index, lease] of leases.entries()) {
+      if (!lease) {
+        continue;
+      }
+      this.setRunLeaseAttribution(run, lease);
+      if (ids[index] === run.leaseID) {
+        currentLease = lease;
+      }
+    }
+    await this.putRun(run);
+    return currentLease;
   }
 
   private leaseVisibleToControl(
@@ -9794,7 +9897,17 @@ export class FleetCoordinator {
     const now = new Date().toISOString();
     const seq = (run.eventCount ?? 0) + 1;
     const event = boundedRunEvent(run.id, seq, now, input);
+    const previousLeaseID = run.leaseID;
     applyRunEventSummary(run, event);
+    if (
+      validLeaseID(run.leaseID) &&
+      (run.leaseID !== previousLeaseID || !run.leaseIDs?.includes(run.leaseID))
+    ) {
+      const lease = await this.getLease(run.leaseID);
+      if (lease) {
+        this.setRunLeaseAttribution(run, lease);
+      }
+    }
     run.eventCount = seq;
     run.lastEventAt = now;
     await this.state.storage.put(runEventKey(run.id, seq), event);
@@ -9821,7 +9934,11 @@ export class FleetCoordinator {
         continue;
       }
       const after = attachment.subscriptions?.[run.id];
-      if (after === undefined || after >= event.seq || !this.runVisibleToControl(run, attachment)) {
+      if (
+        after === undefined ||
+        after >= event.seq ||
+        !this.runReadableToControl(run, attachment)
+      ) {
         continue;
       }
       attachment.subscriptions = { ...attachment.subscriptions, [run.id]: event.seq };

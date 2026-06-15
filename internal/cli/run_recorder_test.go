@@ -155,6 +155,38 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	}
 }
 
+func TestRunRecorderAttachLeaseUsesResolvedCoordinator(t *testing.T) {
+	var authorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs/run_123/events" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"event":{"runID":"run_123","seq":1,"type":"lease.created","createdAt":"2026-05-02T00:00:01Z"}}`))
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Token: "user-token", Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	rec.UseCoordinator(&CoordinatorClient{
+		BaseURL: server.URL,
+		Token:   "admin-token",
+		Client:  server.Client(),
+	})
+	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	})
+
+	if authorization != "Bearer admin-token" {
+		t.Fatalf("authorization=%q, want resolved admin token", authorization)
+	}
+}
+
 func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	var stderr bytes.Buffer
 	var eventRequests int
