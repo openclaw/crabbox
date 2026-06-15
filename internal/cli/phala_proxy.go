@@ -164,13 +164,19 @@ func tunnelPhalaProxy(ctx context.Context, host string, input io.Reader, output,
 }
 
 // phalaJSONObjectPrefix mirrors the provider-side prefix scanner: it returns the
-// leading JSON object from a CLI stream, discarding the libuv assertion line the
-// phala CLI appends on some platforms.
+// first top-level JSON object embedded in a CLI stream, discarding BOTH a
+// leading human progress line (e.g. "Provisioning CVM ...") and the libuv
+// assertion line the phala CLI appends on some platforms.
 func phalaJSONObjectPrefix(stdout string) string {
 	trimmed := strings.TrimSpace(stdout)
-	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+	if trimmed == "" {
 		return ""
 	}
+	start := strings.IndexAny(trimmed, "{[")
+	if start < 0 {
+		return ""
+	}
+	trimmed = trimmed[start:]
 	open, closeCh := byte('{'), byte('}')
 	if trimmed[0] == '[' {
 		open, closeCh = '[', ']'

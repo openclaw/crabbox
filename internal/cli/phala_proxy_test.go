@@ -289,9 +289,39 @@ func TestPhalaJSONObjectPrefixDiscardsTrailingNoise(t *testing.T) {
 		{`{"s":"}not-a-close"}rest`, `{"s":"}not-a-close"}`},
 		{"libuv noise only", ""},
 		{"", ""},
+		// Leading human progress line ahead of the JSON object (deploy-style noise).
+		{"Provisioning CVM crabbox-x...\n" + `{"app_id":"a"}`, `{"app_id":"a"}`},
 	} {
 		if got := phalaJSONObjectPrefix(test.raw); got != test.want {
 			t.Fatalf("phalaJSONObjectPrefix(%q)=%q want %q", test.raw, got, test.want)
 		}
+	}
+}
+
+// TestResolvePhalaProxyHostParsesRealCVMSGetShape pins the gateway-host
+// derivation against the EXACT snake_case `phala cvms get --cvm-id <id> --json`
+// payload observed on real TDX hardware: top-level app_id/vm_uuid/name plus a
+// nested gateway.base_domain. The host must be <appId>-22.<base_domain>.
+func TestResolvePhalaProxyHostParsesRealCVMSGetShape(t *testing.T) {
+	const realGetStdout = `{
+  "success": true,
+  "app_id": "b60d1f55eeb01f17e0a5220b4c03792248d49f92",
+  "vm_uuid": "42fd1f82-7b4c-47cc-92f9-a5d39476c649",
+  "name": "crabbox-cbx-abcdef123456",
+  "status": "running",
+  "gateway": {
+    "base_domain": "dstack-pha-prod5.phala.network",
+    "cname": "abc.cname.phala.network"
+  }
+}`
+	phala, _ := fakePhalaCLI(t, realGetStdout, 0)
+	var stderr bytes.Buffer
+	got, err := resolvePhalaProxyHost(context.Background(), phala, "b60d1f55eeb01f17e0a5220b4c03792248d49f92", &stderr)
+	if err != nil {
+		t.Fatalf("resolvePhalaProxyHost failed on real cvms get shape: %v", err)
+	}
+	const want = "b60d1f55eeb01f17e0a5220b4c03792248d49f92-22.dstack-pha-prod5.phala.network"
+	if got != want {
+		t.Fatalf("host=%q want %q", got, want)
 	}
 }

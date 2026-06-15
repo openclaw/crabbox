@@ -2,6 +2,7 @@ package phala
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -1003,5 +1004,170 @@ func TestJSONObjectPrefixHandlesNoiseAndStrings(t *testing.T) {
 	}
 	if got := jsonObjectPrefix(`[1,2,3]trailing`); got != `[1,2,3]` {
 		t.Fatalf("array prefix=%q", got)
+	}
+	// A live `phala deploy --json` run prints a leading human progress line
+	// before the JSON object; the extractor must skip leading non-JSON lines too.
+	leading := "Provisioning CVM crabbox-cbx-abcdef123456...\n" + `{"success":true,"app_id":"abc"}`
+	if got := jsonObjectPrefix(leading); got != `{"success":true,"app_id":"abc"}` {
+		t.Fatalf("leading-noise prefix=%q", got)
+	}
+}
+
+// realDeployStdout is the EXACT stdout a live `phala deploy --json --dev-os
+// --ssh-pubkey <pub> --wait -t tdx.small -n <name> --compose <file>` run wrote
+// against real Phala TDX hardware: a leading human progress line, then the JSON
+// object. The provider previously reported "phala deploy produced no JSON
+// output" because its extractor would not skip the leading line.
+const realDeployStdout = `Provisioning CVM crabbox-cbx-abcdef123456...
+{
+  "success": true,
+  "vm_uuid": "42fd1f82-7b4c-47cc-92f9-a5d39476c649",
+  "name": "crabbox-cbx-abcdef123456",
+  "app_id": "b60d1f55eeb01f17e0a5220b4c03792248d49f92",
+  "dashboard_url": "https://cloud.phala.com/dashboard/cvms/42fd1f82-7b4c-47cc-92f9-a5d39476c649"
+}`
+
+// TestParseDeployIDFromRealHardwareStdout pins the deploy parser against the
+// literal stdout observed on real TDX hardware: a leading "Provisioning CVM..."
+// progress line ahead of the JSON object. The canonical id is the app_id.
+func TestParseDeployIDFromRealHardwareStdout(t *testing.T) {
+	id, err := parseDeployID(realDeployStdout)
+	if err != nil {
+		t.Fatalf("parseDeployID rejected real deploy stdout: %v", err)
+	}
+	if id != "b60d1f55eeb01f17e0a5220b4c03792248d49f92" {
+		t.Fatalf("deploy id=%q want canonical app_id", id)
+	}
+}
+
+// TestCreateParsesRealHardwareDeployStdout drives create() end-to-end with the
+// exact real deploy stdout to prove the provider no longer fails with "produced
+// no JSON output" and returns the app_id as the CVM handle.
+func TestCreateParsesRealHardwareDeployStdout(t *testing.T) {
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: realDeployStdout}}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Phala.Compose = "/srv/compose.yml"
+	applyDefaults(&cfg)
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	id, err := b.create(context.Background(), cfg, "/tmp/id.pub", map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"lease":      "cbx_abcdef123456",
+		"provider":   providerName,
+	})
+	if err != nil {
+		t.Fatalf("create failed on real deploy stdout: %v", err)
+	}
+	if id != "b60d1f55eeb01f17e0a5220b4c03792248d49f92" {
+		t.Fatalf("create id=%q want canonical app_id", id)
+	}
+}
+
+// realCVMSListStdout is the EXACT `phala cvms list --json` payload observed on
+// real hardware: a {success,total,items:[...]} wrapper whose items use
+// camelCase keys (appId, status, name, vmUuid). The provider previously parsed
+// only snake_case and so read blank identifiers from this payload.
+const realCVMSListStdout = `{
+  "success": true,
+  "total": 1,
+  "items": [
+    {
+      "appId": "b60d1f55eeb01f17e0a5220b4c03792248d49f92",
+      "name": "crabbox-cbx-abcdef123456",
+      "vmUuid": "42fd1f82-7b4c-47cc-92f9-a5d39476c649",
+      "instanceId": "i-0a5d39476c649",
+      "status": "running"
+    }
+  ]
+}`
+
+// TestListParsesRealCamelCaseListPayload pins list parsing against the exact
+// camelCase `cvms list --json` payload from real hardware: the item's appId,
+// name, vmUuid, instanceId and status must all decode (snake_case-only parsing
+// would have read blanks), and cloudID() must return the canonical app_id.
+func TestListParsesRealCamelCaseListPayload(t *testing.T) {
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: realCVMSListStdout}}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	items, err := b.listInstances(context.Background())
+	if err != nil {
+		t.Fatalf("listInstances failed on real camelCase payload: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items=%#v want exactly one", items)
+	}
+	item := items[0]
+	if item.AppID != "b60d1f55eeb01f17e0a5220b4c03792248d49f92" {
+		t.Fatalf("appId=%q not decoded from camelCase", item.AppID)
+	}
+	if item.Name != "crabbox-cbx-abcdef123456" {
+		t.Fatalf("name=%q not decoded from camelCase", item.Name)
+	}
+	if item.VMUUID != "42fd1f82-7b4c-47cc-92f9-a5d39476c649" {
+		t.Fatalf("vmUuid=%q not decoded from camelCase", item.VMUUID)
+	}
+	if item.InstanceID != "i-0a5d39476c649" {
+		t.Fatalf("instanceId=%q not decoded from camelCase", item.InstanceID)
+	}
+	if item.Status != "running" {
+		t.Fatalf("status=%q not decoded", item.Status)
+	}
+	// app_id is the canonical handle passed to cvms get/delete --cvm-id.
+	if item.cloudID() != "b60d1f55eeb01f17e0a5220b4c03792248d49f92" {
+		t.Fatalf("cloudID=%q want canonical app_id", item.cloudID())
+	}
+	// Ownership is derived from the name prefix, so the lease label must resolve.
+	if item.Labels["lease"] != "cbx_abcdef123456" {
+		t.Fatalf("lease label=%q not derived from camelCase name", item.Labels["lease"])
+	}
+}
+
+// TestInstanceUnmarshalAcceptsBothCaseStyles asserts the tolerant decoder reads
+// both the snake_case (`cvms get`) and camelCase (`cvms list`) spelling of
+// every identifier, accepting appId OR app_id et al.
+func TestInstanceUnmarshalAcceptsBothCaseStyles(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		json string
+	}{
+		{name: "snake_case (cvms get)", json: `{"app_id":"app1","vm_uuid":"vm1","instance_id":"in1","name":"n1","status":"running"}`},
+		{name: "camelCase (cvms list)", json: `{"appId":"app1","vmUuid":"vm1","instanceId":"in1","name":"n1","status":"running"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var item instance
+			if err := json.Unmarshal([]byte(test.json), &item); err != nil {
+				t.Fatal(err)
+			}
+			if item.AppID != "app1" || item.VMUUID != "vm1" || item.InstanceID != "in1" ||
+				item.Name != "n1" || item.Status != "running" {
+				t.Fatalf("item=%#v", item)
+			}
+			if item.cloudID() != "app1" {
+				t.Fatalf("cloudID=%q want app_id", item.cloudID())
+			}
+		})
+	}
+}
+
+// TestListSkipsItemMissingName proves listInstances skips (rather than crashes
+// on or surfaces) a list item with no name and no usable handle.
+func TestListSkipsItemMissingName(t *testing.T) {
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[
+		{"status":"running"},
+		{"appId":"keeper","name":"crabbox-cbx-abcdef123456","status":"running"}
+	]}`}}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	items, err := b.listInstances(context.Background())
+	if err != nil {
+		t.Fatalf("listInstances crashed on a nameless item: %v", err)
+	}
+	if len(items) != 1 || items[0].cloudID() != "keeper" {
+		t.Fatalf("items=%#v want only the named keeper", items)
 	}
 }

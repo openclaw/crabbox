@@ -52,30 +52,73 @@ type backend struct {
 }
 
 // instance models the subset of `phala cvms list/get` JSON that crabbox needs.
-// Phala exposes several identifiers for one CVM; ID is the canonical handle
-// passed back to ssh/get/delete and accepts UUID, app_id, instance_id, or name.
+// Phala exposes several identifiers for one CVM; AppID is the canonical handle
+// passed back to ssh/get/delete (a real live run confirmed `cvms get/delete
+// --cvm-id <app_id>` works, with name and vm_uuid also accepted).
+//
+// The live `phala cvms list --json` payload emits camelCase keys (appId,
+// vmUuid, instanceId, name, status), while `phala cvms get --json` emits
+// snake_case (app_id, vm_uuid, instance_id). instance therefore reads BOTH
+// spellings of every identifier via a custom unmarshaler.
 type instance struct {
-	ID           string `json:"id"`
-	VMUUID       string `json:"vm_uuid"`
-	AppID        string `json:"app_id"`
-	InstanceID   string `json:"instance_id"`
-	Name         string `json:"name"`
-	Status       string `json:"status"`
-	InstanceType string `json:"instance_type"`
-	Node         string `json:"node"`
-	NodeID       string `json:"node_id"`
-	Region       string `json:"region"`
-	CreatedAt    string `json:"created_at"`
+	ID           string
+	VMUUID       string
+	AppID        string
+	InstanceID   string
+	Name         string
+	Status       string
+	InstanceType string
+	Node         string
+	NodeID       string
+	Region       string
+	CreatedAt    string
 
 	// Labels are synthesized locally from the CVM name and the matching lease
 	// claim; Phala does not store crabbox ownership labels on the resource.
-	Labels map[string]string `json:"-"`
+	Labels map[string]string
 }
 
-// cloudID is the canonical handle crabbox passes back to ssh/get/delete. Phala
-// accepts UUID, app_id, instance_id, or name; the most stable is preferred.
+// UnmarshalJSON decodes a CVM list/get item tolerant of BOTH snake_case (the
+// `cvms get` shape) and camelCase (the `cvms list` shape) keys for every
+// identifier. Where both spellings are present the first non-blank wins, so a
+// payload mixing the two never drops a field.
+func (i *instance) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	str := func(keys ...string) string {
+		for _, key := range keys {
+			value, ok := raw[key]
+			if !ok {
+				continue
+			}
+			var s string
+			if err := json.Unmarshal(value, &s); err == nil && strings.TrimSpace(s) != "" {
+				return s
+			}
+		}
+		return ""
+	}
+	i.ID = str("id")
+	i.VMUUID = str("vm_uuid", "vmUuid")
+	i.AppID = str("app_id", "appId")
+	i.InstanceID = str("instance_id", "instanceId")
+	i.Name = str("name", "appName")
+	i.Status = str("status")
+	i.InstanceType = str("instance_type", "instanceType")
+	i.Node = str("node")
+	i.NodeID = str("node_id", "nodeId")
+	i.Region = str("region")
+	i.CreatedAt = str("created_at", "createdAt")
+	return nil
+}
+
+// cloudID is the canonical handle crabbox passes back to ssh/get/delete. The
+// app_id is preferred (confirmed working against live `cvms get/delete
+// --cvm-id`); vm_uuid, instance_id, and name are accepted fallbacks.
 func (i instance) cloudID() string {
-	return firstNonBlank(i.ID, i.VMUUID, i.AppID, i.InstanceID, i.Name)
+	return firstNonBlank(i.AppID, i.VMUUID, i.ID, i.InstanceID, i.Name)
 }
 
 // matchesID reports whether identifier names this CVM under any of the handles
@@ -101,22 +144,39 @@ type listOutput struct {
 	Items   []instance `json:"items"`
 }
 
-// deployOutput is the wrapper object `phala deploy --json` returns. The created
-// CVM identifier may surface under several keys; resolution prefers id.
+// deployOutput is the wrapper object `phala deploy --json` returns. A live run
+// against real Phala TDX hardware emits the created CVM under a top-level
+// snake_case shape:
+//
+//	{"success":true,"vm_uuid":"...","name":"...","app_id":"...","dashboard_url":"..."}
+//
+// app_id is the canonical handle (`cvms get/delete --cvm-id <app_id>` is
+// confirmed working), so resolution prefers it. The identifier may also surface
+// nested under cvm or in camelCase on other CLI versions, so deployOutput reads
+// both spellings via instance's tolerant unmarshaler.
 type deployOutput struct {
-	Success    bool   `json:"success"`
-	ID         string `json:"id"`
-	VMUUID     string `json:"vm_uuid"`
-	AppID      string `json:"app_id"`
-	InstanceID string `json:"instance_id"`
-	Name       string `json:"name"`
-	CVM        *struct {
-		ID         string `json:"id"`
-		VMUUID     string `json:"vm_uuid"`
-		AppID      string `json:"app_id"`
-		InstanceID string `json:"instance_id"`
-		Name       string `json:"name"`
-	} `json:"cvm"`
+	Success bool
+	Top     instance
+	CVM     *instance
+}
+
+// UnmarshalJSON decodes the deploy wrapper: the top-level CVM identifiers (via
+// instance's snake/camel-tolerant decoder) plus an optionally-nested cvm object
+// and the success flag.
+func (d *deployOutput) UnmarshalJSON(data []byte) error {
+	if err := d.Top.UnmarshalJSON(data); err != nil {
+		return err
+	}
+	var wrapper struct {
+		Success bool      `json:"success"`
+		CVM     *instance `json:"cvm"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return err
+	}
+	d.Success = wrapper.Success
+	d.CVM = wrapper.CVM
+	return nil
 }
 
 type ambiguousPhalaCreateError struct {
@@ -563,14 +623,15 @@ func parseDeployID(stdout string) (string, error) {
 	if err := json.Unmarshal([]byte(payload), &output); err != nil {
 		return "", core.Exit(5, "parse phala deploy output: %v", err)
 	}
-	candidates := []string{output.ID, output.VMUUID, output.AppID, output.InstanceID}
+	// Prefer a nested cvm object when present, else the top-level identifiers.
+	// instance.cloudID() ranks app_id first, matching the canonical --cvm-id.
 	if output.CVM != nil {
-		candidates = append([]string{output.CVM.ID, output.CVM.VMUUID, output.CVM.AppID, output.CVM.InstanceID}, candidates...)
-	}
-	for _, candidate := range candidates {
-		if id := strings.TrimSpace(candidate); id != "" {
+		if id := output.CVM.cloudID(); id != "" {
 			return id, nil
 		}
+	}
+	if id := output.Top.cloudID(); id != "" {
+		return id, nil
 	}
 	return "", core.Exit(5, "phala deploy output did not include a CVM identifier")
 }
@@ -641,10 +702,18 @@ func (b *backend) listInstances(ctx context.Context) ([]instance, error) {
 	if err := json.Unmarshal([]byte(payload), &output); err != nil {
 		return nil, core.Exit(5, "parse phala cvms list output: %v", err)
 	}
-	for i := range output.Items {
-		output.Items[i].Labels = phalaLabels(output.Items[i], cfg)
+	// crabbox ownership is derived from the CVM name prefix (crabbox-<lease>), so
+	// a list item with no name can never be owned and would also have no usable
+	// handle. Skip such items defensively rather than surfacing a blank instance.
+	items := make([]instance, 0, len(output.Items))
+	for _, item := range output.Items {
+		if strings.TrimSpace(item.Name) == "" && item.cloudID() == "" {
+			continue
+		}
+		item.Labels = phalaLabels(item, cfg)
+		items = append(items, item)
 	}
-	return output.Items, nil
+	return items, nil
 }
 
 func (b *backend) findInstance(ctx context.Context, id string) (instance, error) {
@@ -1131,15 +1200,22 @@ func firstNonBlank(values ...string) string {
 	return ""
 }
 
-// jsonObjectPrefix returns the leading JSON object/array from a CLI stdout
-// stream, discarding trailing non-JSON noise. The phala CLI on some platforms
-// appends a libuv assertion line after the JSON payload; parsing the prefix
-// keeps that noise from corrupting decoding.
+// jsonObjectPrefix returns the first top-level JSON object/array embedded in a
+// CLI stdout stream, discarding BOTH leading and trailing non-JSON noise. The
+// phala CLI prints a leading human progress line (e.g. "Provisioning CVM
+// <name>...") before the JSON payload on `deploy`, and appends a libuv
+// assertion line after the payload on some platforms; scanning from the first
+// top-level brace keeps both kinds of noise from corrupting decoding.
 func jsonObjectPrefix(stdout string) string {
 	trimmed := strings.TrimSpace(stdout)
 	if trimmed == "" {
 		return ""
 	}
+	start := strings.IndexAny(trimmed, "{[")
+	if start < 0 {
+		return ""
+	}
+	trimmed = trimmed[start:]
 	var open, close byte
 	switch trimmed[0] {
 	case '{':
