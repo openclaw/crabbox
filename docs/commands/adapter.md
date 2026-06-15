@@ -1,5 +1,9 @@
 # adapter
 
+See [Runtime adapter stack](../features/runtime-adapter-stack.md) for the
+end-to-end topology, trust boundaries, startup order, and failure signals for
+`adapter serve`, `adapter ingress`, and `adapter connect`.
+
 `crabbox adapter serve` exposes a small authenticated HTTP service that
 creates and stops Crabbox workspaces. It is intended for a trusted fleet UI or
 automation service that should use normal Crabbox provider configuration rather
