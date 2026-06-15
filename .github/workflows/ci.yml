@@ -158,38 +158,63 @@ jobs:
         run: docker build -f worker/Dockerfile.node worker
 
   mobile:
-    name: Mobile
+    name: Mobile (CrabboxKit + e2e)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      EXPO_NO_TELEMETRY: "1"
+    timeout-minutes: 25
 
     steps:
       - name: Check out
         uses: actions/checkout@v6
 
-      - name: Set up Node
-        uses: actions/setup-node@v6
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v2
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: mobile/package-lock.json
+          swift-version: "6.0"
 
-      - name: Install
-        run: npm ci
+      - name: Build CrabboxKit + headless e2e
+        run: swift build
         working-directory: mobile
 
-      - name: Test coordinator URL policy
-        run: npm run test:urls
+      - name: Unit tests
+        run: swift test
         working-directory: mobile
 
-      - name: Typecheck
-        run: npm run check
+      - name: Headless e2e (17 scenarios / 13 invariants, deterministic)
+        run: swift run crabbox-sim --json
         working-directory: mobile
 
-      - name: Export iOS bundle
-        run: npm run export:ios
+  mobile-ios:
+    name: Mobile (iOS app build)
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
         working-directory: mobile
+
+      - name: Build iOS app (build-only, unsigned)
+        working-directory: mobile
+        run: |
+          xcodebuild \
+            -project Crabbox.xcodeproj \
+            -scheme Crabbox \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
 
   scripts:
     name: Scripts

@@ -1,0 +1,119 @@
+import Foundation
+
+/// Result of running a command in a sandbox (any provider).
+public struct ExecResult: Sendable {
+    public let exitCode: Int
+    public let stdout: String
+    public let stderr: String
+    public init(exitCode: Int, stdout: String, stderr: String) {
+        self.exitCode = exitCode
+        self.stdout = stdout
+        self.stderr = stderr
+    }
+}
+
+/// A leased sandbox, provider-agnostic.
+public struct SandboxHandle: Sendable, Equatable {
+    public let id: String
+    public let provider: String
+    public var status: String
+    /// Public Ollama endpoint once exposed (e.g. an islo share URL or a
+    /// coordinator-managed sandbox URL). `nil` until `expose` is called.
+    public var ollamaEndpoint: String?
+    public init(id: String, provider: String, status: String = "unknown", ollamaEndpoint: String? = nil) {
+        self.id = id
+        self.provider = provider
+        self.status = status
+        self.ollamaEndpoint = ollamaEndpoint
+    }
+}
+
+/// The seam that lets the app provision a sandbox without caring which provider
+/// is behind it. crabbox.sh (the coordinator) is the primary manager; islo.dev
+/// is an optional direct provider the user can enable and save a key for.
+public protocol SandboxProvisioner: Sendable {
+    var providerName: String { get }
+    func launch(name: String, model: String) async throws -> SandboxHandle
+    func list() async throws -> [SandboxHandle]
+    func stop(id: String) async throws
+}
+
+// MARK: - islo (direct) provisioner
+
+/// Optional direct-to-islo provisioner. islo is the one brokerless crabbox
+/// provider, so it cannot be driven through crabbox.sh; this talks to
+/// api.islo.dev directly with a saved key.
+public struct IsloProvisioner: SandboxProvisioner {
+    public let providerName = "islo.dev"
+    private let client: IsloClient
+    private let spec: IsloSandboxSpec
+
+    public init(client: IsloClient, spec: IsloSandboxSpec = IsloSandboxSpec()) {
+        self.client = client
+        self.spec = spec
+    }
+
+    public init?(apiKey: String, baseURL: String = "https://api.islo.dev", spec: IsloSandboxSpec = IsloSandboxSpec()) {
+        guard let client = IsloClient(apiKey: apiKey, baseURL: baseURL) else { return nil }
+        self.init(client: client, spec: spec)
+    }
+
+    public func launch(name: String, model: String) async throws -> SandboxHandle {
+        let sandbox = try await client.createSandbox(name: name, spec: spec)
+        _ = try await client.exec(name: sandbox.name, script: isloOllamaBootstrapScript(model: model))
+        let share = try await client.createShare(name: sandbox.name, port: 11434)
+        return SandboxHandle(id: sandbox.name, provider: providerName, status: sandbox.status, ollamaEndpoint: share.url)
+    }
+
+    public func list() async throws -> [SandboxHandle] {
+        try await client.listSandboxes().map { SandboxHandle(id: $0.name, provider: providerName, status: $0.status) }
+    }
+
+    public func stop(id: String) async throws {
+        try await client.deleteSandbox(name: id)
+    }
+}
+
+// MARK: - crabbox.sh (coordinator) provisioner — primary
+
+/// The primary provisioner: drives the crabbox coordinator (crabbox.sh) `/v1`
+/// API, which owns provider credentials and lease state. The phone holds only a
+/// crabbox session token, never raw provider keys.
+public struct CoordinatorProvisioner: SandboxProvisioner {
+    public let providerName = "crabbox.sh"
+    private let client: CoordinatorClient
+
+    public init(client: CoordinatorClient) { self.client = client }
+
+    public init?(coordinatorURL: String, token: String) {
+        guard let client = CoordinatorClient(coordinatorURL: coordinatorURL, token: token) else { return nil }
+        self.init(client: client)
+    }
+
+    public func launch(name: String, model: String) async throws -> SandboxHandle {
+        try await client.launchLLMSandbox(name: name, model: model)
+    }
+
+    public func list() async throws -> [SandboxHandle] {
+        try await client.listSandboxes()
+    }
+
+    public func stop(id: String) async throws {
+        try await client.stopSandbox(id: id)
+    }
+}
+
+/// Provisions a sandbox running Ollama and returns a ready-to-chat engine. This
+/// is the one call the "Sandboxes" tab makes for the demo, regardless of
+/// provider.
+public func launchLLMSandbox(
+    provisioner: SandboxProvisioner,
+    name: String,
+    model: String
+) async throws -> (handle: SandboxHandle, engine: SandboxEngine) {
+    let handle = try await provisioner.launch(name: name, model: model)
+    guard let endpoint = handle.ollamaEndpoint, let engine = SandboxEngine(endpoint: endpoint, model: model) else {
+        throw LLMError.unavailable("sandbox \(handle.id) did not expose an Ollama endpoint")
+    }
+    return (handle, engine)
+}

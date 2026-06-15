@@ -1,115 +1,114 @@
-# Crabbox Mobile
+# Crabbox iOS
 
-iOS-first Expo app for `https://crabbox.sh` and self-hosted Crabbox
-coordinators. The app keeps GitHub OAuth and portal cookies inside a native
-WebView, adds iOS safe-area chrome, and provides native reload, share, browser
-open, and coordinator switching controls.
+A native SwiftUI client for [`crabbox.sh`](https://crabbox.sh) — plus an
+on-device and sandbox-backed LLM assistant, and first-class management of
+crabbox.sh-provisioned sandboxes. No web wrapper, no Expo, no third-party
+runtime: just SwiftUI, WebKit, and (for on-device inference) MLX.
 
-## Requirements
+## What it is
 
-- macOS
-- Node.js 22.12 or newer
-- Xcode with an iOS simulator installed
-- Expo CLI through `npx`
+Three native tabs over one portable brain (`CrabboxKit`):
 
-If `npm run ios` reports that Xcode is not fully installed, finish Xcode setup:
+- **Portal** — a real `WKWebView` pointed at your Crabbox coordinator
+  (`https://crabbox.sh` by default). GitHub OAuth and portal cookies persist in
+  the default `WKWebsiteDataStore`, navigation is HTTPS-only and origin-
+  whitelisted, and the chrome (host + status pill, back/reload/home, settings
+  sheet to switch coordinators) is fully native to satisfy App Store
+  Guideline 4.2.
+- **Assistant** — a provider-agnostic chat. Pick an engine kind and talk to it:
+  - **On-device** (MLX) — runs a small model locally, fully offline.
+  - **Sandbox** (Ollama) — talks to a model running on a crabbox.sh- or
+    islo.dev-provisioned sandbox via `CrabboxKit.SandboxEngine`.
+  - **System** (Apple Foundation Models) — the OS-provided on-device model on
+    supported hardware.
+- **Sandboxes** — list / create / stop sandboxes through the
+  `SandboxProvisioner` abstraction. The crabbox.sh coordinator is the primary
+  provider; an optional islo.dev section lets you paste and save (Keychain) a
+  direct islo key. Launching an LLM sandbox makes its Ollama endpoint
+  immediately selectable as an Assistant engine.
 
-```sh
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-sudo xcodebuild -runFirstLaunch
-```
+## Architecture
 
-## Run On iOS
+The codebase is split so that all logic is testable on Linux with no Apple SDK:
 
-```sh
-cd mobile
-npm ci
-npm run validate
-npm run ios
-```
+- **`CrabboxKit`** — the portable brain. Pure Swift, no UIKit/SwiftUI/WebKit:
+  coordinator-URL normalization, the navigation/whitelist policy, the
+  `reduce()` app state machine, and the LLM/sandbox clients
+  (`OllamaClient`, `SandboxEngine`, `IsloClient`, `CoordinatorClient`,
+  `SandboxProvisioner`). Compiles and is unit-tested on macOS **and** Linux.
+- **SwiftUI app** — the iOS target. Thin views that import `CrabboxKit`, wrap
+  `WKWebView` via `UIViewRepresentable` + `Coordinator`, and drive an
+  `ObservableObject` around `reduce()` — mapping `WKNavigationDelegate`/KVO
+  callbacks to `AppAction`s and rendering `AppState`. The views never
+  reimplement URL/nav/state logic.
+- **`crabbox-sim`** — a headless end-to-end runner that drives the *exact*
+  `reduce()` the app uses through 18 checks / 17 scenarios, asserting 13
+  safety/UI invariants after every step. Optionally driven by a tiny local LLM
+  (`--agent`). This is what runs on a sandbox in CI/e2e.
+- **`crabbox-mac`** — a tiny macOS preview harness (real `WKWebView` + native
+  chrome) for exercising the portal on a Mac that only has the Command Line
+  Tools. A developer convenience; the shippable artifact is the iOS app.
 
-For the Expo dev menu instead:
+See [`docs/architecture.md`](docs/architecture.md) for the full picture.
 
-```sh
-cd mobile
-npm run start -- --localhost
-```
+## Build
 
-Press `i` in the Expo terminal to open the iOS simulator.
-
-## End-To-End Test
-
-Start from the PR checkout:
-
-```sh
-cd /Users/yossi.eliaz/Documents/crabbox-pr379/mobile
-npm ci
-npm run doctor:ios
-npm run validate
-```
-
-If `doctor:ios` cannot find `simctl`, install Xcode from the Mac App Store,
-open Xcode once, install an iOS simulator runtime, then select Xcode:
-
-```sh
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-sudo xcodebuild -runFirstLaunch
-npm run doctor:ios
-```
-
-Run the app in the iOS simulator:
+The portable targets need only a Swift toolchain (macOS or Linux):
 
 ```sh
-npm run ios
+swift build            # build CrabboxKit + crabbox-sim (+ crabbox-mac on macOS)
+swift test             # run the CrabboxKit unit suite
+swift run crabbox-sim  # run the headless e2e (deterministic, no network)
+swift run crabbox-mac  # macOS-only: real WKWebView preview of the portal
 ```
 
-For a physical iPhone with Expo Go installed, keep the phone and Mac on the same
-network, then run:
+The iOS app target is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+and built in Xcode (the iOS SDK is required):
 
 ```sh
-npm run start
+xcodegen generate      # produce Crabbox.xcodeproj
+open Crabbox.xcodeproj  # build & run the Crabbox scheme in Xcode
 ```
 
-Scan the QR code from Expo Go. If the phone cannot reach the Mac over LAN, use:
+> Do not expect `swift build` to compile the iOS app target — the SwiftUI/WebKit
+> views need Xcode and the iOS SDK. Linux/CLI builds cover `CrabboxKit`,
+> `crabbox-sim`, and the tests.
 
-```sh
-npx expo start --tunnel
-```
+## Run on a device
 
-For a native device/simulator build instead of Expo Go:
+- **Try it today (free):** with a free Apple ID you can use *free provisioning*
+  — open `Crabbox.xcodeproj` in Xcode, pick your iPhone, set a unique bundle id
+  under Signing & Capabilities, and run. The app installs for ~7 days before the
+  provisioning profile expires and must be re-signed.
+- **Real distribution (paid):** TestFlight and the App Store require a paid
+  Apple Developer Program account. With one, archive the app and upload to
+  App Store Connect for TestFlight builds and review.
 
-```sh
-npm run prebuild:ios
-npm run run:ios
-```
+Full details, including the PWA add-to-home-screen alternative that needs no
+Apple account at all, are in [`docs/distribution.md`](docs/distribution.md).
 
-E2E proof checklist:
+## LLM engines
 
-- Open the app and confirm the header shows `crabbox.sh`.
-- Complete the GitHub/portal login flow with private details redacted.
-- Tap reload and confirm the portal session stays signed in.
-- Open coordinator settings and switch to another HTTPS coordinator.
-- Try a non-local `http://` coordinator and confirm the app rejects it.
-- In a development build, optionally try `http://localhost:8787` and confirm
-  loopback HTTP is accepted only for local testing.
-- Capture a redacted screenshot or short recording and add it to the PR.
+The Assistant is engine-agnostic (`protocol LLMEngine`). Three engine kinds ship:
 
-## Coordinator URL
+- **On-device (MLX)** — local inference, offline, no key.
+- **Sandbox (Ollama)** — `SandboxEngine` over an Ollama endpoint running on a
+  sandbox you launched from the Sandboxes tab.
+- **System (Apple Foundation Models)** — the OS model on supported devices.
 
-The app starts at `https://crabbox.sh`. Tap the settings button in the header to
-switch to another coordinator, for example `https://broker.example.com`.
+## Sandboxes & the islo.dev provider
 
-Coordinator sessions require HTTPS. Development builds also accept local
-loopback HTTP URLs such as `http://localhost:8787` for testing a broker on the
-same machine; production builds reject HTTP coordinators and the WebView does
-not whitelist arbitrary cleartext origins.
+Sandboxes are managed through the `SandboxProvisioner` protocol:
 
-## Native Project
+- **crabbox.sh coordinator (primary)** — `CoordinatorProvisioner`. The
+  coordinator brokers sandbox lifecycle for you.
+- **islo.dev (optional, direct)** — `IsloProvisioner`. islo is brokerless by
+  Crabbox design, so the app talks to islo.dev directly with a key you save in
+  the Keychain. Use this if you want to bring your own islo account.
 
-This app uses Expo managed workflow. Native `ios/` and `android/` folders are
-generated locally only when needed:
+`launchLLMSandbox(provisioner:name:model:)` boots a sandbox and returns a ready
+`SandboxEngine`, which the app then offers as a selectable Assistant engine.
 
-```sh
-cd mobile
-npx expo prebuild --platform ios
-```
+## License
+
+See [`LICENSE`](LICENSE).
