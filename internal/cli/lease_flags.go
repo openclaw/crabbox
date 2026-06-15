@@ -412,14 +412,6 @@ func (a App) resolveNetworkLeaseTargetForRepo(ctx context.Context, cfg Config, i
 	return a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, id, printFallback, reclaim)
 }
 
-func (a App) resolveNetworkLoginTargetForRepo(ctx context.Context, cfg Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
-	lease, err := a.resolveNetworkLoginLeaseTargetForRepo(ctx, &cfg, id, printFallback, reclaim, true)
-	if err != nil {
-		return Server{}, SSHTarget{}, "", err
-	}
-	return lease.Server, lease.SSH, lease.LeaseID, nil
-}
-
 func (a App) resolveNetworkLoginLeaseTargetForRepo(ctx context.Context, cfg *Config, id string, printFallback, reclaim, probeTransport bool) (LeaseTarget, error) {
 	repo, err := findRepo()
 	if err != nil {
