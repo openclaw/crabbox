@@ -852,7 +852,7 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string) core.Lea
 		Key:                    cfg.SSHKey,
 		Port:                   "22",
 		TargetOS:               core.TargetLinux,
-		ReadyCheck:             "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
+		ReadyCheck:             "command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
 		NoControlMaster:        true,
 		DisableHostKeyChecking: true,
 		NetworkKind:            "public",
@@ -882,21 +882,31 @@ func (b *backend) prepareSSH(ctx context.Context, cfg core.Config, target *core.
 	return core.WaitForSSHReady(ctx, target, b.rt.Stderr, "phala cvm tools", core.BootstrapWaitTimeout(cfg))
 }
 
+// phalaToolBootstrapCommand prepares a leased Phala CVM for crabbox's
+// rsync-based sync. The canonical dstack --dev-os guest is an immutable
+// confidential-compute appliance (read-only squashfs root, no package manager,
+// no network egress) that already ships rsync, tar and python3 -- exactly what
+// the sync and exec path needs. crabbox does NOT need git on the box: the file
+// manifest is computed locally and the tree is rsync'd (not git-cloned) over the
+// SSH gateway tunnel. So the REQUIRED set is rsync+tar+python3; git is installed
+// only opportunistically when a package manager happens to exist (e.g. a
+// non-dev-os image) and is never required -- otherwise the bootstrap could never
+// succeed on the appliance guest, which is the supported deployment.
 func phalaToolBootstrapCommand() string {
 	return strings.Join([]string{
 		"set -e",
-		"if command -v git >/dev/null 2>&1 && command -v rsync >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then exit 0; fi",
+		"if command -v rsync >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then exit 0; fi",
 		"if command -v apt-get >/dev/null 2>&1; then",
 		"  apt-get update >/tmp/crabbox-phala-apt-update.log 2>&1",
-		"  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git rsync python3 >/tmp/crabbox-phala-apt-install.log 2>&1",
+		"  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git rsync tar python3 >/tmp/crabbox-phala-apt-install.log 2>&1",
 		"elif command -v dnf >/dev/null 2>&1; then",
-		"  dnf install -y git rsync python3 >/tmp/crabbox-phala-dnf-install.log 2>&1",
+		"  dnf install -y git rsync tar python3 >/tmp/crabbox-phala-dnf-install.log 2>&1",
 		"elif command -v yum >/dev/null 2>&1; then",
-		"  yum install -y git rsync python3 >/tmp/crabbox-phala-yum-install.log 2>&1",
+		"  yum install -y git rsync tar python3 >/tmp/crabbox-phala-yum-install.log 2>&1",
 		"elif command -v apk >/dev/null 2>&1; then",
-		"  apk add --no-cache git rsync python3 >/tmp/crabbox-phala-apk-install.log 2>&1",
+		"  apk add --no-cache git rsync tar python3 >/tmp/crabbox-phala-apk-install.log 2>&1",
 		"fi",
-		"command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
+		"command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
 	}, "\n")
 }
 

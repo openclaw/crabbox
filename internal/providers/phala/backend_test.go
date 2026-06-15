@@ -947,10 +947,56 @@ func TestCleanupAppliesRecoveryPolicyToLiveCVMs(t *testing.T) {
 	}
 }
 
-func TestPhalaToolBootstrapUsesAlpinePythonPackage(t *testing.T) {
+// TestPhalaToolBootstrapRequiresOnlyRsyncSyncEssentials pins the dev-os contract
+// discovered on real TDX hardware: the dstack --dev-os guest is an immutable
+// appliance (read-only root, NO package manager, no egress) that already ships
+// rsync, tar and python3 but NOT git. The bootstrap must therefore require only
+// the rsync-sync essentials and treat git as opportunistic, or it could never
+// succeed on the supported guest (the earlier git-required form failed live with
+// "Phala CVM tool bootstrap failed: exit status 1").
+func TestPhalaToolBootstrapRequiresOnlyRsyncSyncEssentials(t *testing.T) {
 	command := phalaToolBootstrapCommand()
-	if !strings.Contains(command, "apk add --no-cache git rsync python3") {
-		t.Fatalf("bootstrap command missing Alpine python3 package:\n%s", command)
+
+	// The early-exit fast path (taken on the dev-os guest) must check exactly the
+	// required set and must NOT require git.
+	earlyExit := "if command -v rsync >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then exit 0; fi"
+	if !strings.Contains(command, earlyExit) {
+		t.Fatalf("bootstrap missing rsync+tar+python3 early-exit:\n%s", command)
+	}
+
+	// The final verification line is the gate that returns the exit status; it
+	// must require rsync+tar+python3 and must NOT require git.
+	finalCheck := "command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
+	if !strings.Contains(command, finalCheck) {
+		t.Fatalf("bootstrap missing rsync+tar+python3 final check:\n%s", command)
+	}
+	if strings.Contains(command, "command -v git >/dev/null &&") {
+		t.Fatalf("bootstrap must not REQUIRE git (unavailable on the immutable dev-os guest):\n%s", command)
+	}
+
+	// git stays in the opportunistic install lines for non-dev-os images that do
+	// have a package manager.
+	if !strings.Contains(command, "apk add --no-cache git rsync tar python3") {
+		t.Fatalf("bootstrap should still opportunistically install git via apk for non-dev-os images:\n%s", command)
+	}
+}
+
+// TestPhalaLeaseReadyCheckDropsGit guards the lease ReadyCheck the same way: the
+// SSH readiness probe must not block on git, which the dev-os guest cannot
+// provide.
+func TestPhalaLeaseReadyCheckDropsGit(t *testing.T) {
+	b := &backend{rt: core.Runtime{}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	lease := b.lease(instance{ID: "appid123", Labels: map[string]string{"lease": "cbx_test"}}, cfg, "cbx_test")
+	if strings.Contains(lease.SSH.ReadyCheck, "git") {
+		t.Fatalf("lease ReadyCheck must not require git:\n%s", lease.SSH.ReadyCheck)
+	}
+	for _, tool := range []string{"rsync", "tar", "python3"} {
+		if !strings.Contains(lease.SSH.ReadyCheck, "command -v "+tool) {
+			t.Fatalf("lease ReadyCheck missing %s:\n%s", tool, lease.SSH.ReadyCheck)
+		}
 	}
 }
 
