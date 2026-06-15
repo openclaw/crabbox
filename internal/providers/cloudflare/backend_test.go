@@ -803,12 +803,23 @@ func TestCloudflareRunKeepReturnsSessionHandle(t *testing.T) {
 	if !result.Session.Kept {
 		t.Fatal("Session.Kept = false, want true under --keep")
 	}
-	if result.Session.LeaseID != createdID || result.Session.RunID != createdID {
-		t.Fatalf("Session lease/run id = %q/%q, want %q", result.Session.LeaseID, result.Session.RunID, createdID)
+	if result.Session.LeaseID != createdID {
+		t.Fatalf("Session.LeaseID = %q, want %q", result.Session.LeaseID, createdID)
 	}
-	wantCleanup := fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, createdID)
+	if result.Session.RunID != "" {
+		t.Fatalf("Session.RunID = %q, want empty because Cloudflare has no distinct run id", result.Session.RunID)
+	}
+	wantCleanup := cloudflareCleanupCommand(createdID)
 	if result.Session.CleanupCommand != wantCleanup {
 		t.Fatalf("Session.CleanupCommand = %q, want %q", result.Session.CleanupCommand, wantCleanup)
+	}
+}
+
+func TestCloudflareCleanupCommandQuotesLeaseID(t *testing.T) {
+	got := cloudflareCleanupCommand("cbx_test; touch /tmp/unsafe")
+	want := "crabbox stop --provider cloudflare --id 'cbx_test; touch /tmp/unsafe'"
+	if got != want {
+		t.Fatalf("cloudflareCleanupCommand() = %q, want %q", got, want)
 	}
 }
 

@@ -136,8 +136,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		Slug:           slug,
 		Reused:         !acquired,
 		Kept:           !shouldStop,
-		RunID:          leaseID,
-		CleanupCommand: fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, leaseID),
+		CleanupCommand: cloudflareCleanupCommand(leaseID),
 	}
 
 	syncDuration := time.Duration(0)
@@ -388,6 +387,10 @@ func cloudflareNotFoundError(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "404") || strings.Contains(text, "not found")
+}
+
+func cloudflareCleanupCommand(leaseID string) string {
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(leaseID))
 }
 
 func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo Repo, reclaim bool, requestedSlug string) (string, cloudflareContainer, string, error) {
