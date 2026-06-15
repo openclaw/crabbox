@@ -26,6 +26,10 @@ paid program required:
 4. Build & run. First launch may require trusting the developer certificate on
    the device under **Settings → General → VPN & Device Management**.
 
+Prefer one command? [`scripts/install-on-device.sh`](../scripts/install-on-device.sh)
+does steps 1–4 non-interactively given your Team ID:
+`DEVELOPMENT_TEAM=XXXXXXXXXX ./scripts/install-on-device.sh`.
+
 Caveats of free provisioning: the app's provisioning profile expires in about
 **7 days**, after which you re-run from Xcode to re-sign. You're also limited to
 a handful of app installs per week. It's perfect for kicking the tires; it is

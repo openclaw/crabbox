@@ -74,18 +74,77 @@ open Crabbox.xcodeproj  # build & run the Crabbox scheme in Xcode
 > views need Xcode and the iOS SDK. Linux/CLI builds cover `CrabboxKit`,
 > `crabbox-sim`, and the tests.
 
-## Run on a device
+## Install on a physical iPhone (end-to-end)
 
-- **Try it today (free):** with a free Apple ID you can use *free provisioning*
-  — open `Crabbox.xcodeproj` in Xcode, pick your iPhone, set a unique bundle id
-  under Signing & Capabilities, and run. The app installs for ~7 days before the
-  provisioning profile expires and must be re-signed.
-- **Real distribution (paid):** TestFlight and the App Store require a paid
-  Apple Developer Program account. With one, archive the app and upload to
-  App Store Connect for TestFlight builds and review.
+This is the full path to get the app onto a connected iPhone with a **free**
+Apple ID (no paid Developer Program needed).
 
-Full details, including the PWA add-to-home-screen alternative that needs no
-Apple account at all, are in [`docs/distribution.md`](docs/distribution.md).
+### Prerequisites
+
+- **Full Xcode** (not just the Command Line Tools). Check with
+  `xcode-select -p` — it must point at `…/Xcode.app/...`, not
+  `/Library/Developer/CommandLineTools`. Install Xcode from the Mac App Store, or
+  via the CLI:
+  ```sh
+  brew install xcodes          # one-time
+  xcodes install --latest      # ~40 GB, prompts for your Apple ID + 2FA
+  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+  sudo xcodebuild -runFirstLaunch
+  ```
+  Xcode needs **~40 GB free** to download and expand.
+- **A connected, unlocked iPhone** that has tapped **Trust** for this Mac.
+- **Your Apple Team ID** — Xcode ▸ Settings ▸ Accounts ▸ add your Apple ID; the
+  10-character Team ID shows there. A free "Personal Team" is fine.
+
+### One command
+
+```sh
+cd mobile
+DEVELOPMENT_TEAM=XXXXXXXXXX ./scripts/install-on-device.sh
+```
+
+The script ([`scripts/install-on-device.sh`](scripts/install-on-device.sh))
+runs `xcodegen generate`, finds your connected device, builds and code-signs the
+app with free provisioning, and installs it. Pass a unique
+`BUNDLE_ID=sh.crabbox.Crabbox.<you>` if the default identifier is taken.
+
+After it installs, on the iPhone go to **Settings ▸ General ▸ VPN & Device
+Management** and **trust** your developer certificate, then launch **Crabbox**.
+
+> Free provisioning expires after ~7 days; re-run the script to re-sign.
+
+### Or do it in the Xcode GUI
+
+```sh
+cd mobile && xcodegen generate && open Crabbox.xcodeproj
+```
+
+Pick the **Crabbox** scheme and your iPhone, set a unique bundle id under
+**Signing & Capabilities** (select your team), and press **Run**.
+
+### Enter your islo key on the phone
+
+Open the **Sandboxes** tab ▸ provider settings (the slider icon) ▸ enable
+**islo.dev** ▸ paste a key from `islo api-key create <name>`. It is stored in the
+iOS Keychain. Then **Launch LLM sandbox** and chat with it from the Assistant
+tab.
+
+### Verify your islo key first (on the Mac, no phone needed)
+
+Prove the exact sandbox/LLM flow the app uses before installing:
+
+```sh
+printf %s 'ak_your_islo_key' > ~/.crabbox_islo_key && chmod 600 ~/.crabbox_islo_key
+cd mobile && ./scripts/verify-islo-key.sh --llm
+```
+
+See [`scripts/verify-islo-key.sh`](scripts/verify-islo-key.sh).
+
+### Real distribution (paid)
+
+TestFlight and the App Store require a paid Apple Developer Program account.
+Full details — plus the **PWA add-to-home-screen** alternative that needs no
+Apple account at all — are in [`docs/distribution.md`](docs/distribution.md).
 
 ## LLM engines
 

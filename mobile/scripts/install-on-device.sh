@@ -30,14 +30,20 @@ command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
 echo "==> Generating Xcode project"
 xcodegen generate
 
-# Find the first connected physical device's UDID.
+# Find the connected physical device's UDID. Override with DEVICE_ID=… if the
+# auto-detect picks the wrong one (list candidates with:
+#   xcrun devicectl list devices    — or —   xcrun xctrace list devices).
 echo "==> Locating connected device"
-UDID="$(xcrun xctrace list devices 2>&1 \
-  | awk '/\(([0-9]+\.[0-9]+).*\) \(/{next} /iPhone|iPad/{print}' \
-  | grep -vi simulator | head -1 | sed -E 's/.*\(([0-9A-Fa-f-]{8,})\).*/\1/')"
+UDID="${DEVICE_ID:-}"
+if [ -z "$UDID" ]; then
+  UDID="$(xcrun xctrace list devices 2>&1 \
+    | grep -iE 'iPhone|iPad' | grep -vi simulator \
+    | head -1 | sed -E 's/.*\(([0-9A-Fa-f-]{8,})\).*/\1/')"
+fi
 if [ -z "${UDID:-}" ]; then
-  echo "No physical device found. Connect + unlock your iPhone and trust this Mac."
-  echo "Devices seen:"; xcrun xctrace list devices 2>&1 | sed -n '1,20p'
+  echo "No physical device auto-detected. Connect + unlock your iPhone, tap Trust,"
+  echo "then re-run with the UDID, e.g.: DEVICE_ID=<udid> $0"
+  echo "Devices seen:"; xcrun xctrace list devices 2>&1 | sed -n '1,25p'
   exit 1
 fi
 echo "    device UDID: $UDID"
