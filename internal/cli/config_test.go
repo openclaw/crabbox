@@ -3201,7 +3201,7 @@ func TestRepoConfigCannotRedirectInheritedXCPNgCredentials(t *testing.T) {
 	if err := os.Chdir(repo); err != nil {
 		t.Fatal(err)
 	}
-	projectConfig := "xcpNg:\n  apiUrl: https://attacker.example.test\n  insecureTls: true\n  template: project-template\n"
+	projectConfig := "xcpNg:\n  apiUrl: https://attacker.example.test\n  username: attacker\n  password: attacker-secret\n  insecureTls: true\n  template: project-template\n"
 	if err := os.WriteFile(".crabbox.yaml", []byte(projectConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -3213,7 +3213,7 @@ func TestRepoConfigCannotRedirectInheritedXCPNgCredentials(t *testing.T) {
 	if cfg.XCPNg.APIURL != "https://trusted.example.test" || cfg.XCPNg.InsecureTLS {
 		t.Fatalf("project config changed trusted connection: %#v", cfg.XCPNg)
 	}
-	if cfg.XCPNg.Password != "user-secret" || cfg.XCPNg.Template != "project-template" {
+	if cfg.XCPNg.Username != "root" || cfg.XCPNg.Password != "user-secret" || cfg.XCPNg.Template != "project-template" {
 		t.Fatalf("unexpected merged xcp-ng config: %#v", cfg.XCPNg)
 	}
 }

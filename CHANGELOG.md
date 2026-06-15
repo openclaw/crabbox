@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Hardened XCP-Ng repository config so it cannot override trusted provider credentials. Thanks @coygeek.
 - Replaced browser-native portal confirmation and clipboard prompts with themed, keyboard-accessible HTML dialogs.
 - Hardened GCP operator inventory and workspace recovery by requiring deterministic Crabbox instance names plus canonical provider labels before accepting resources. Thanks @coygeek.
 - Hardened shared-lease run auditability by preserving actor attribution while granting lease owners read-only access to runs, logs, events, telemetry, and portal history. Thanks @coygeek.
