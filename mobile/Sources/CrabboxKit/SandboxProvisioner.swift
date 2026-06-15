@@ -31,11 +31,16 @@ public struct SandboxHandle: Sendable, Equatable {
 /// The seam that lets the app provision a sandbox without caring which provider
 /// is behind it. crabbox.sh (the coordinator) is the primary manager; islo.dev
 /// is an optional direct provider the user can enable and save a key for.
+///
+/// Extended with pause/resume for direct control of remote sandboxes (primarily
+/// supported by islo.dev). Coordinator may report unavailable.
 public protocol SandboxProvisioner: Sendable {
     var providerName: String { get }
     func launch(name: String, model: String) async throws -> SandboxHandle
     func list() async throws -> [SandboxHandle]
     func stop(id: String) async throws
+    func pause(id: String) async throws
+    func resume(id: String) async throws
 }
 
 // MARK: - islo (direct) provisioner
@@ -76,6 +81,14 @@ public struct IsloProvisioner: SandboxProvisioner {
     public func stop(id: String) async throws {
         try await client.deleteSandbox(name: id)
     }
+
+    public func pause(id: String) async throws {
+        try await client.pauseSandbox(name: id)
+    }
+
+    public func resume(id: String) async throws {
+        try await client.resumeSandbox(name: id)
+    }
 }
 
 // MARK: - crabbox.sh (coordinator) provisioner — primary
@@ -104,6 +117,14 @@ public struct CoordinatorProvisioner: SandboxProvisioner {
 
     public func stop(id: String) async throws {
         try await client.stopSandbox(id: id)
+    }
+
+    public func pause(id: String) async throws {
+        throw LLMError.unavailable("pause/resume not supported for crabbox.sh managed sandboxes (use islo.dev direct for full control)")
+    }
+
+    public func resume(id: String) async throws {
+        throw LLMError.unavailable("pause/resume not supported for crabbox.sh managed sandboxes (use islo.dev direct for full control)")
     }
 }
 

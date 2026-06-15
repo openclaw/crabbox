@@ -21,6 +21,45 @@ enum RootTab: Hashable {
     case run, sandboxes, assistant, portal
 }
 
+/// Shared store for active remote sandboxes (islo.dev or crabbox.sh).
+/// SandboxesView populates it; Run tab reads it to let the user pick targets
+/// and distribute commands across remote Crabbox sandboxes. This is what turns
+/// the iOS app into the command center / orchestrator for fleets of islo sandboxes.
+@MainActor
+final class SandboxStore: ObservableObject {
+    @Published private(set) var handles: [SandboxHandle] = []
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var lastError: String?
+
+    /// Refreshes from the currently configured provisioner (islo or coordinator).
+    func refresh(using settings: AppSettings) async {
+        guard let provisioner = settings.makeProvisioner() else {
+            handles = []
+            lastError = nil
+            return
+        }
+        isRefreshing = true
+        lastError = nil
+        defer { isRefreshing = false }
+        do {
+            handles = try await provisioner.list()
+        } catch {
+            handles = []
+            lastError = "Couldn't load sandboxes: \(describe(error))"
+        }
+    }
+
+    func clear() {
+        handles = []
+        lastError = nil
+    }
+
+    private func describe(_ error: Error) -> String {
+        if let llm = error as? LLMError { return llm.description }
+        return (error as NSError).localizedDescription
+    }
+}
+
 @main
 struct CrabboxApp: App {
     var body: some Scene {
@@ -34,6 +73,7 @@ struct CrabboxApp: App {
 struct RootView: View {
     @StateObject private var settings = AppSettings()
     @StateObject private var engineHub = EngineHub()
+    @StateObject private var sandboxStore = SandboxStore()
     @StateObject private var chat = ChatStore()
     @State private var selectedTab: RootTab = .run
 
@@ -58,6 +98,7 @@ struct RootView: View {
         .tint(Theme.accent)
         .environmentObject(settings)
         .environmentObject(engineHub)
+        .environmentObject(sandboxStore)
         // Sandbox engines minted in the Sandboxes tab flow into the Assistant.
         .onReceive(engineHub.$sandboxEngines) { engines in
             chat.syncSandboxEngines(engines)

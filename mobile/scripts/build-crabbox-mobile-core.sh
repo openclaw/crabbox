@@ -7,6 +7,13 @@ sdk_name="${SDK_NAME:-iphoneos}"
 target_arch="${CURRENT_ARCH:-${ARCHS%% *}}"
 deployment_target="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 
+# Xcode sometimes passes CURRENT_ARCH=undefined_arch (or empty) in script phases
+# especially with certain destinations or universal builds. On Apple Silicon
+# hosts the iOS Simulator always uses arm64 slices for our purposes.
+if [ -z "${target_arch}" ] || [ "${target_arch}" = "undefined_arch" ]; then
+  target_arch="$(uname -m)"
+fi
+
 case "$sdk_name" in
   iphoneos*) sdk="iphoneos"; goarch="arm64"; min_flag="-mios-version-min=${deployment_target}" ;;
   iphonesimulator*)
@@ -14,7 +21,7 @@ case "$sdk_name" in
     min_flag="-mios-simulator-version-min=${deployment_target}"
     case "$target_arch" in
       x86_64) goarch="amd64" ;;
-      arm64|"") goarch="arm64" ;;
+      arm64|aarch64|"") goarch="arm64" ;;
       *) echo "unsupported simulator arch: $target_arch" >&2; exit 2 ;;
     esac
     ;;

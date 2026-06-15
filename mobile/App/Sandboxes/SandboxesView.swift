@@ -97,15 +97,11 @@ private enum LaunchPhase: Equatable {
 struct SandboxesView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var engineHub: EngineHub
+    @EnvironmentObject private var sandboxStore: SandboxStore
 
     /// Binding to the root `TabView` selection so a successful launch can jump the
     /// user straight to the Assistant tab.
     @Binding var selectedTab: RootTab
-
-    // Existing leases.
-    @State private var handles: [SandboxHandle] = []
-    @State private var isRefreshing = false
-    @State private var listError: String?
 
     // Launch flow.
     @State private var model = SandboxModel.default.id
@@ -115,8 +111,10 @@ struct SandboxesView: View {
     // Provider settings sheet.
     @State private var showingProviderSettings = false
 
-    // IDs we are currently stopping (for per-row spinners).
+    // IDs we are currently stopping/pausing/resuming (for per-row spinners).
     @State private var stoppingIDs: Set<String> = []
+    @State private var pausingIDs: Set<String> = []
+    @State private var resumingIDs: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -150,8 +148,8 @@ struct SandboxesView: View {
                 ProviderSettingsView()
                     .environmentObject(settings)
             }
-            .task(id: providerIdentity) { await refresh() }
-            .refreshable { await refresh() }
+            .task(id: providerIdentity) { await sandboxStore.refresh(using: settings) }
+            .refreshable { await sandboxStore.refresh(using: settings) }
         }
     }
 
@@ -309,11 +307,11 @@ struct SandboxesView: View {
                         .font(.headline)
                         .foregroundStyle(Theme.textPrimary)
                     Spacer()
-                    if isRefreshing {
+                    if sandboxStore.isRefreshing {
                         ProgressView().tint(Theme.accent)
                     } else {
                         Button {
-                            Task { await refresh() }
+                            Task { await sandboxStore.refresh(using: settings) }
                         } label: {
                             Image(systemName: "arrow.clockwise")
                                 .foregroundStyle(Theme.accent)
@@ -322,23 +320,27 @@ struct SandboxesView: View {
                     }
                 }
 
-                if let listError {
+                if let listError = sandboxStore.lastError {
                     Label(listError, systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(.orange)
-                } else if handles.isEmpty {
+                } else if sandboxStore.handles.isEmpty {
                     Text("No sandboxes yet. Launch one above to get started.")
                         .font(.subheadline)
                         .foregroundStyle(Theme.textMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    ForEach(handles, id: \.id) { handle in
+                    ForEach(sandboxStore.handles, id: \.id) { handle in
                         SandboxRow(
                             handle: handle,
                             isStopping: stoppingIDs.contains(handle.id),
-                            onStop: { Task { await stop(handle) } }
+                            isPausing: pausingIDs.contains(handle.id),
+                            isResuming: resumingIDs.contains(handle.id),
+                            onStop: { Task { await stop(handle) } },
+                            onPause: { Task { await pause(handle) } },
+                            onResume: { Task { await resume(handle) } }
                         )
-                        if handle.id != handles.last?.id {
+                        if handle.id != sandboxStore.handles.last?.id {
                             Divider().overlay(Theme.divider)
                         }
                     }
@@ -361,23 +363,11 @@ struct SandboxesView: View {
         Task { await refresh() }
     }
 
-    /// Loads existing leases via the active provisioner.
+    /// Loads existing leases via the active provisioner (delegates to shared store
+    /// so the Run tab sees the same live list for targeting/distribution).
     @MainActor
     private func refresh() async {
-        guard let provisioner = settings.makeProvisioner() else {
-            handles = []
-            listError = nil
-            return
-        }
-        isRefreshing = true
-        listError = nil
-        defer { isRefreshing = false }
-        do {
-            handles = try await provisioner.list()
-        } catch {
-            handles = []
-            listError = "Couldn't load leases: \(describe(error))"
-        }
+        await sandboxStore.refresh(using: settings)
     }
 
     /// Drives the full launch flow and registers the resulting engine.
@@ -409,11 +399,7 @@ struct SandboxesView: View {
             engineHub.register(engine)
             lastLaunchedEngineName = engine.displayName
             phase = .ready
-            // Reflect the new lease immediately, then reconcile with the server.
-            if !handles.contains(where: { $0.id == handle.id }) {
-                handles.insert(handle, at: 0)
-            }
-            await refresh()
+            await sandboxStore.refresh(using: settings)
         } catch {
             ticker.cancel()
             phase = .failed("Launch failed: \(describe(error))")
@@ -428,10 +414,37 @@ struct SandboxesView: View {
         defer { stoppingIDs.remove(handle.id) }
         do {
             try await provisioner.stop(id: handle.id)
-            handles.removeAll { $0.id == handle.id }
+            await sandboxStore.refresh(using: settings)
             engineHub.remove(displayName: "Sandbox · \(handle.id)")
         } catch {
-            listError = "Couldn't stop \(handle.id): \(describe(error))"
+            // store will have the error surfaced on next refresh if needed
+            print("stop error: \(error)")
+        }
+    }
+
+    @MainActor
+    private func pause(_ handle: SandboxHandle) async {
+        guard let provisioner = settings.makeProvisioner() else { return }
+        pausingIDs.insert(handle.id)
+        defer { pausingIDs.remove(handle.id) }
+        do {
+            try await provisioner.pause(id: handle.id)
+            await sandboxStore.refresh(using: settings)
+        } catch {
+            print("pause error: \(error)")
+        }
+    }
+
+    @MainActor
+    private func resume(_ handle: SandboxHandle) async {
+        guard let provisioner = settings.makeProvisioner() else { return }
+        resumingIDs.insert(handle.id)
+        defer { resumingIDs.remove(handle.id) }
+        do {
+            try await provisioner.resume(id: handle.id)
+            await sandboxStore.refresh(using: settings)
+        } catch {
+            print("resume error: \(error)")
         }
     }
 
@@ -447,7 +460,11 @@ struct SandboxesView: View {
 private struct SandboxRow: View {
     let handle: SandboxHandle
     let isStopping: Bool
+    let isPausing: Bool
+    let isResuming: Bool
     let onStop: () -> Void
+    let onPause: () -> Void
+    let onResume: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -472,15 +489,41 @@ private struct SandboxRow: View {
             }
             Spacer()
 
-            if isStopping {
+            if isStopping || isPausing || isResuming {
                 ProgressView().tint(Theme.accent)
             } else {
-                Button(role: .destructive, action: onStop) {
-                    Image(systemName: "stop.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.red.opacity(0.85))
+                if handle.provider.lowercased().contains("islo") {
+                    // Direct islo control: pause/resume + stop
+                    HStack(spacing: 4) {
+                        Button(action: onPause) {
+                            Image(systemName: "pause.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(.orange)
+                        }
+                        .accessibilityLabel("Pause \(handle.id)")
+
+                        Button(action: onResume) {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(Theme.accent)
+                        }
+                        .accessibilityLabel("Resume \(handle.id)")
+
+                        Button(role: .destructive, action: onStop) {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(.red.opacity(0.85))
+                        }
+                        .accessibilityLabel("Stop \(handle.id)")
+                    }
+                } else {
+                    Button(role: .destructive, action: onStop) {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(.red.opacity(0.85))
+                    }
+                    .accessibilityLabel("Stop \(handle.id)")
                 }
-                .accessibilityLabel("Stop \(handle.id)")
             }
         }
         .padding(.vertical, 6)
@@ -490,7 +533,7 @@ private struct SandboxRow: View {
         switch handle.status.lowercased() {
         case "running", "ready", "active": return Theme.accent
         case "creating", "pending", "starting": return .yellow
-        case "stopped", "error", "failed": return .red
+        case "stopped", "error", "failed", "paused": return .red
         default: return Theme.textMuted
         }
     }

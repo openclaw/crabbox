@@ -13,6 +13,7 @@ import CrabboxKit
 
 struct CommandRunnerView: View {
     @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var sandboxStore: SandboxStore
 
     @State private var repo = "openclaw/crabbox"
     @State private var branch = "main"
@@ -26,6 +27,15 @@ struct CommandRunnerView: View {
     @State private var isStopping = false
     @State private var terminal: WorkspaceTerminalStream?
     @State private var showingProviderSettings = false
+
+    // Distribution / targeting (the command center part).
+    // When sandboxes are available (islo key or coordinator token), user can pick
+    // one or many remote sandboxes and the app will distribute the command across
+    // them in parallel using the embedded Go core (CrabboxMobile). This is how the
+    // iOS app becomes the orchestrator for fleets of islo.dev sandboxes.
+    @State private var selectedTargetIDs: Set<String> = []
+    @State private var distributeResults: [String: String] = [:] // id -> combined output
+    @State private var isDistributing = false
 
     var body: some View {
         NavigationStack {
@@ -58,6 +68,12 @@ struct CommandRunnerView: View {
             .sheet(isPresented: $showingProviderSettings) {
                 ProviderSettingsView()
                     .environmentObject(settings)
+            }
+            .task {
+                await sandboxStore.refresh(using: settings)
+            }
+            .onChange(of: settings.providerLabel) {
+                Task { await sandboxStore.refresh(using: settings) }
             }
         }
     }
@@ -160,21 +176,78 @@ struct CommandRunnerView: View {
                         .disabled(isRunning)
                 }
 
+                // Command center targeting & distribution UI.
+                // Populated live from the shared SandboxStore (refreshed by Sandboxes tab
+                // or on-demand). Lets the iOS app act as orchestrator: pick one or many
+                // remote islo.dev (or coordinator) sandboxes and distribute the exact
+                // same command to all of them in parallel. Results are shown per-sandbox.
+                if !sandboxStore.handles.isEmpty || settings.makeProvisioner() != nil {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("TARGET SANDBOXES (islo.dev / coordinator)")
+                            .font(.caption.bold())
+                            .foregroundStyle(Theme.textMuted)
+
+                        if sandboxStore.handles.isEmpty {
+                            Button {
+                                Task { await sandboxStore.refresh(using: settings) }
+                            } label: {
+                                Label("Refresh active sandboxes", systemImage: "arrow.clockwise")
+                            }
+                            .font(.subheadline)
+                        } else {
+                            // Multi-select for distribution. Tap to toggle.
+                            ForEach(sandboxStore.handles, id: \.id) { h in
+                                let isSel = selectedTargetIDs.contains(h.id)
+                                Button {
+                                    if isSel { selectedTargetIDs.remove(h.id) } else { selectedTargetIDs.insert(h.id) }
+                                } label: {
+                                    HStack {
+                                        Image(systemName: isSel ? "checkmark.circle.fill" : "circle")
+                                            .foregroundStyle(isSel ? Theme.accent : Theme.textMuted)
+                                        VStack(alignment: .leading) {
+                                            Text(h.id).font(.subheadline.monospacedDigit())
+                                            Text("\(h.provider) · \(h.status)").font(.caption).foregroundStyle(Theme.textMuted)
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.vertical, 4)
+                            }
+
+                            HStack {
+                                Button("All") { selectedTargetIDs = Set(sandboxStore.handles.map { $0.id }) }
+                                    .font(.caption)
+                                Button("None") { selectedTargetIDs.removeAll() }
+                                    .font(.caption)
+                                Spacer()
+                                if !selectedTargetIDs.isEmpty {
+                                    Text("\(selectedTargetIDs.count) target(s) — will distribute")
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.accent)
+                                }
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .background(Theme.field.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+                }
+
                 HStack(spacing: 12) {
                     Button {
                         Task { await runCommand() }
                     } label: {
                         HStack {
-                            if isRunning {
+                            if isRunning || isDistributing {
                                 ProgressView().tint(.black)
                             } else {
                                 Image(systemName: "play.fill")
                             }
-                            Text(isRunning ? "Running" : "Run")
+                            Text((isRunning || isDistributing) ? "Running..." : (selectedTargetIDs.isEmpty ? "Run" : "Distribute & Run"))
                         }
                     }
                     .buttonStyle(PrimaryButtonStyle())
-                    .disabled(isRunning || isStopping)
+                    .disabled(isRunning || isStopping || isDistributing)
 
                     if runningMode == .workspaceTerminal || workspace != nil {
                         Button(role: .destructive) {
@@ -189,6 +262,12 @@ struct CommandRunnerView: View {
                         .buttonStyle(SecondaryButtonStyle(fullWidth: false))
                         .disabled(isStopping)
                         .accessibilityLabel("Stop workspace")
+                    }
+
+                    if !selectedTargetIDs.isEmpty {
+                        Button("Clear targets") { selectedTargetIDs.removeAll() }
+                            .font(.caption)
+                            .foregroundStyle(Theme.textMuted)
                     }
                 }
             }
@@ -244,10 +323,10 @@ struct CommandRunnerView: View {
 
     @MainActor
     private func runCommand() async {
-        guard !isRunning else { return }
-        let args: [String]
+        guard !isRunning && !isDistributing else { return }
+        let baseArgs: [String]
         do {
-            args = try parseCrabboxCommandLine(commandLine)
+            baseArgs = try parseCrabboxCommandLine(commandLine)
         } catch {
             status = "Invalid command"
             output = "parse error: \(describe(error))\n"
@@ -255,7 +334,7 @@ struct CommandRunnerView: View {
             return
         }
 
-        if commandLineNeedsIsloKey(args) && !settings.hasIsloProvider {
+        if commandLineNeedsIsloKey(baseArgs) && !settings.hasIsloProvider {
             status = "islo key missing"
             output = "provider=islo requires an islo key in provider settings\n"
             exitCode = 2
@@ -263,12 +342,84 @@ struct CommandRunnerView: View {
             return
         }
 
-        if CrabboxBinaryEngine.isAvailable {
-            await runNativeCrabbox(args)
+        // Distribution mode (the command center feature).
+        // If user selected sandboxes in the UI (populated from the live islo/coordinator
+        // list), we fan the command out to all of them in parallel using the embedded
+        // Go core. Each run gets `--id <sandbox>` injected so it targets that remote box.
+        // This lets the iPhone act as the central dispatcher for work across a fleet of
+        // islo.dev remote sandboxes.
+        let targets = selectedTargetIDs.isEmpty ? [] : sandboxStore.handles.filter { selectedTargetIDs.contains($0.id) }
+
+        if !targets.isEmpty && CrabboxBinaryEngine.isAvailable {
+            await distributeToSandboxes(baseArgs: baseArgs, targets: targets)
             return
         }
 
-        await runWorkspaceCommand(args)
+        if CrabboxBinaryEngine.isAvailable {
+            await runNativeCrabbox(baseArgs)
+            return
+        }
+
+        await runWorkspaceCommand(baseArgs)
+    }
+
+    /// Distribute the same command (with --id injected) to multiple remote sandboxes
+    /// in parallel. Results are collected per-sandbox and shown in the output area.
+    /// This is the "iOS as command center" distribution path.
+    @MainActor
+    private func distributeToSandboxes(baseArgs: [String], targets: [SandboxHandle]) async {
+        isDistributing = true
+        distributeResults = [:]
+        status = "Distributing to \(targets.count) sandbox(es)..."
+        output = "$ distributing \(commandLine) to \(targets.map { $0.id }.joined(separator: ", "))\n"
+
+        // Capture MainActor-isolated settings on the actor before entering concurrent tasks.
+        let isloKey = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let coordinator = settings.coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let crabboxToken = settings.crabboxToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        await withTaskGroup(of: (String, CrabboxBinaryResult?).self) { group in
+            for h in targets {
+                group.addTask {
+                    var args = baseArgs
+                    // Inject target id if not already present in the user's command line.
+                    if !args.contains("--id") && !args.contains("-id") {
+                        args = ["--id", h.id] + args
+                    }
+                    var env: [String: String] = [:]
+                    if !isloKey.isEmpty {
+                        env["ISLO_API_KEY"] = isloKey
+                        env["CRABBOX_ISLO_API_KEY"] = isloKey
+                    }
+                    if !coordinator.isEmpty { env["CRABBOX_COORDINATOR"] = coordinator }
+                    if !crabboxToken.isEmpty {
+                        env["CRABBOX_COORDINATOR_TOKEN"] = crabboxToken
+                    }
+
+                    do {
+                        let res = try CrabboxBinaryEngine.run(args: args, env: env)
+                        return (h.id, res)
+                    } catch {
+                        let errRes = CrabboxBinaryResult(exitCode: 1, stdout: "", stderr: "error: \(error)", error: String(describing: error))
+                        return (h.id, errRes)
+                    }
+                }
+            }
+
+            for await (id, res) in group {
+                if let res {
+                    let chunk = "\n=== \(id) (exit \(res.exitCode)) ===\n\(res.stdout)\(res.stderr.isEmpty ? "" : "\n[stderr]\n\(res.stderr)")\(res.error.map { "\n[err] \($0)" } ?? "")\n"
+                    distributeResults[id] = chunk
+                    await MainActor.run {
+                        output += chunk
+                    }
+                }
+            }
+        }
+
+        isDistributing = false
+        status = "Distributed to \(targets.count)"
+        // Keep the single-run output area as aggregate; per-id also in distributeResults if UI wants tabs later.
     }
 
     @MainActor
