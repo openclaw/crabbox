@@ -306,6 +306,15 @@ interface EgressTicketRecord {
   expiresAt: string;
 }
 
+type LeaseBridgeTicketConsumption<T> =
+  | { status: "invalid" }
+  | { status: "not_found" }
+  | { status: "accepted"; ticket: T; lease: LeaseRecord };
+
+type RuntimeAdapterTicketConsumption =
+  | { status: "invalid" }
+  | { status: "accepted"; ticket: RuntimeAdapterTicketRecord };
+
 interface EgressSessionStatus {
   leaseID: string;
   sessionID: string;
@@ -642,6 +651,7 @@ export class FleetCoordinator {
   private readonly restoredLeaseBridgeSockets = new Set<WebSocket>();
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
+  private bridgeTicketQueue: Promise<void> = Promise.resolve();
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
   private providerMaintenanceQueue: Promise<void> = Promise.resolve();
@@ -5408,17 +5418,17 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeWebVNCTicket(request);
-    if (!ticket) {
+    const consumed = await this.consumeWebVNCTicket(request, identifier);
+    if (consumed.status === "invalid") {
       return json(
         { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
         { status: 401 },
       );
     }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
+    if (consumed.status === "not_found") {
       return notFound();
     }
+    const { lease } = consumed;
     const error = webVNCLeaseError(lease);
     if (error) {
       return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
@@ -5511,17 +5521,17 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeEgressTicket(request);
-    if (!ticket || ticket.role !== role) {
+    const consumed = await this.consumeEgressTicket(request, identifier, role);
+    if (consumed.status === "invalid") {
       return json(
         { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
         { status: 401 },
       );
     }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
+    if (consumed.status === "not_found") {
       return notFound();
     }
+    const { lease, ticket } = consumed;
     if (lease.state !== "active") {
       return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
     }
@@ -5781,13 +5791,14 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeRuntimeAdapterTicket(request);
-    if (!ticket || ticket.adapterID !== adapterID) {
+    const consumed = await this.consumeRuntimeAdapterTicket(request, adapterID);
+    if (consumed.status === "invalid") {
       return json(
         { error: "adapter_ticket_required", message: "valid runtime adapter ticket required" },
         { status: 401 },
       );
     }
+    const { ticket } = consumed;
     const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(
       runtimeAdapterIdentityKey(adapterID),
     );
@@ -6523,17 +6534,17 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeCodeTicket(request);
-    if (!ticket) {
+    const consumed = await this.consumeCodeTicket(request, identifier);
+    if (consumed.status === "invalid") {
       return json(
         { error: "code_ticket_required", message: "valid code bridge ticket required" },
         { status: 401 },
       );
     }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
+    if (consumed.status === "not_found") {
       return notFound();
     }
+    const { lease } = consumed;
     const error = codeLeaseError(lease);
     if (error) {
       return json({ error: "code_unavailable", message: error }, { status: 409 });
@@ -7101,21 +7112,28 @@ export class FleetCoordinator {
 
   private async consumeRuntimeAdapterTicket(
     request: Request,
-  ): Promise<RuntimeAdapterTicketRecord | undefined> {
+    adapterID: string,
+  ): Promise<RuntimeAdapterTicketConsumption> {
     const value = runtimeAdapterTicketFromRequest(request);
     if (!validRuntimeAdapterTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = runtimeAdapterTicketKey(value);
-    const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = runtimeAdapterTicketKey(value);
+      const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      if (ticket.adapterID !== adapterID) {
+        return { status: "invalid" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket };
+    });
   }
 
   private async cleanupExpiredRuntimeAdapterTickets(): Promise<void> {
@@ -7130,21 +7148,31 @@ export class FleetCoordinator {
     );
   }
 
-  private async consumeWebVNCTicket(request: Request): Promise<WebVNCTicketRecord | undefined> {
+  private async consumeWebVNCTicket(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
     const value = bridgeTicketFromRequest(request);
     if (!validWebVNCTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = webVNCTicketKey(value);
-    const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = webVNCTicketKey(value);
+      const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      const lease = await this.getLease(ticket.leaseID);
+      if (!lease || !identifierMatchesLease(identifier, lease)) {
+        return { status: "not_found" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket, lease };
+    });
   }
 
   private async cleanupExpiredWebVNCTickets(): Promise<void> {
@@ -7159,21 +7187,31 @@ export class FleetCoordinator {
     );
   }
 
-  private async consumeCodeTicket(request: Request): Promise<CodeTicketRecord | undefined> {
+  private async consumeCodeTicket(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
     const value = bridgeTicketFromRequest(request);
     if (!validCodeTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = codeTicketKey(value);
-    const ticket = await this.state.storage.get<CodeTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = codeTicketKey(value);
+      const ticket = await this.state.storage.get<CodeTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      const lease = await this.getLease(ticket.leaseID);
+      if (!lease || !identifierMatchesLease(identifier, lease)) {
+        return { status: "not_found" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket, lease };
+    });
   }
 
   private async cleanupExpiredCodeTickets(): Promise<void> {
@@ -7188,21 +7226,35 @@ export class FleetCoordinator {
     );
   }
 
-  private async consumeEgressTicket(request: Request): Promise<EgressTicketRecord | undefined> {
+  private async consumeEgressTicket(
+    request: Request,
+    identifier: string,
+    role: EgressRole,
+  ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
     const value = bridgeTicketFromRequest(request);
     if (!validEgressTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = egressTicketKey(value);
-    const ticket = await this.state.storage.get<EgressTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = egressTicketKey(value);
+      const ticket = await this.state.storage.get<EgressTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      if (ticket.role !== role) {
+        return { status: "invalid" };
+      }
+      const lease = await this.getLease(ticket.leaseID);
+      if (!lease || !identifierMatchesLease(identifier, lease)) {
+        return { status: "not_found" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket, lease };
+    });
   }
 
   private async cleanupExpiredEgressTickets(): Promise<void> {
@@ -9474,6 +9526,21 @@ export class FleetCoordinator {
       release = resolve;
     });
     this.readyPoolBorrowQueue = previous.then(() => next);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async withBridgeTicketLock<T>(operation: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const previous = this.bridgeTicketQueue.catch(() => {});
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.bridgeTicketQueue = previous.then(() => next);
     await previous;
     try {
       return await operation();

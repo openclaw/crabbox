@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Preserved single-use bridge tickets when presented to the wrong lease, role, or runtime-adapter endpoint. Thanks @coygeek.
 - Required lease manage access before resetting another operator's WebVNC bridge. Thanks @coygeek.
 - Aligned the `apple-container` provider fallback image with the portable OS default while preserving explicit image choices. Thanks @coygeek.
 - Fixed `apple-container` inventory parsing for Apple container 1.0 object-form status and nested network addresses. Thanks @coygeek.

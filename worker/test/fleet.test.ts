@@ -11535,6 +11535,145 @@ describe("fleet lease identity and idle", () => {
     expect(missingTicket.status).toBe(401);
   });
 
+  it("keeps bridge tickets usable after endpoint binding mismatches", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = testLease({
+      id: "cbx_000000000001",
+      slug: "bound-lease",
+      owner: "owner@example.com",
+      org: "example-org",
+      desktop: true,
+      code: true,
+      state: "active",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const webVNCTicket = `wvnc_${"a".repeat(32)}`;
+    const codeTicket = `code_${"b".repeat(32)}`;
+    const egressTicket = `egress_${"c".repeat(32)}`;
+    const adapterTicket = `adapter_${"d".repeat(32)}`;
+    storage.seed(`webvnc-ticket:${webVNCTicket}`, {
+      ticket: webVNCTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`code-ticket:${codeTicket}`, {
+      ticket: codeTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`egress-ticket:${egressTicket}`, {
+      ticket: egressTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      role: "host",
+      sessionID: "egress_bound1",
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`runtime-adapter-ticket:${adapterTicket}`, {
+      ticket: adapterTicket,
+      adapterID: "bound-adapter",
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+
+    const bridgeRequest = (path: string, ticket: string) =>
+      request("GET", path, {
+        headers: {
+          authorization: `Bearer ${ticket}`,
+          upgrade: "websocket",
+        },
+      });
+
+    const wrongWebVNCLease = await fleet.fetch(
+      bridgeRequest("/v1/leases/other-lease/webvnc/agent", webVNCTicket),
+    );
+    expect(wrongWebVNCLease.status).toBe(404);
+    expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeDefined();
+
+    const wrongCodeLease = await fleet.fetch(
+      bridgeRequest("/v1/leases/other-lease/code/agent", codeTicket),
+    );
+    expect(wrongCodeLease.status).toBe(404);
+    expect(storage.value(`code-ticket:${codeTicket}`)).toBeDefined();
+
+    const wrongEgressRole = await fleet.fetch(
+      bridgeRequest(`/v1/leases/${lease.id}/egress/client`, egressTicket),
+    );
+    expect(wrongEgressRole.status).toBe(401);
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeDefined();
+
+    const wrongEgressLease = await fleet.fetch(
+      bridgeRequest("/v1/leases/other-lease/egress/host", egressTicket),
+    );
+    expect(wrongEgressLease.status).toBe(404);
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeDefined();
+
+    const wrongAdapter = await fleet.fetch(
+      bridgeRequest("/v1/adapters/other-adapter/agent", adapterTicket),
+    );
+    expect(wrongAdapter.status).toBe(401);
+    expect(storage.value(`runtime-adapter-ticket:${adapterTicket}`)).toBeDefined();
+
+    const consumers = fleet as unknown as {
+      consumeWebVNCTicket(request: Request, identifier: string): Promise<{ status: string }>;
+      consumeCodeTicket(request: Request, identifier: string): Promise<{ status: string }>;
+      consumeEgressTicket(
+        request: Request,
+        identifier: string,
+        role: "host" | "client",
+      ): Promise<{ status: string }>;
+      consumeRuntimeAdapterTicket(request: Request, adapterID: string): Promise<{ status: string }>;
+    };
+
+    await expect(
+      consumers.consumeWebVNCTicket(
+        bridgeRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeCodeTicket(
+        bridgeRequest(`/v1/leases/${lease.id}/code/agent`, codeTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`code-ticket:${codeTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeEgressTicket(
+        bridgeRequest(`/v1/leases/${lease.id}/egress/host`, egressTicket),
+        lease.id,
+        "host",
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeRuntimeAdapterTicket(
+        bridgeRequest("/v1/adapters/bound-adapter/agent", adapterTicket),
+        "bound-adapter",
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`runtime-adapter-ticket:${adapterTicket}`)).toBeUndefined();
+  });
+
   it("stops code bridge polling after terminal status responses", async () => {
     const page = await portalCode(
       testLease({
