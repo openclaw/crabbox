@@ -833,8 +833,11 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 			}
 			return instance{}, "", core.Exit(4, "Phala CVM not found: %s", id)
 		}
-		if !owned(item, cfg) || item.Labels["lease"] != claim.LeaseID {
-			return instance{}, "", core.Exit(4, "refusing Phala CVM %s: ownership labels do not match lease %s", id, claim.LeaseID)
+		// owned() re-resolves the claim by this CVM's cloud id; a match proves the
+		// CVM belongs to this lease. Phala carries no server labels to cross-check,
+		// so the local claim is the authority.
+		if !owned(item, cfg) {
+			return instance{}, "", core.Exit(4, "refusing Phala CVM %s: no local claim maps to lease %s", id, claim.LeaseID)
 		}
 		return item, claim.LeaseID, nil
 	}
@@ -944,12 +947,32 @@ func (b *backend) server(item instance, cfg core.Config) core.Server {
 	return server
 }
 
+// owned reports whether a leased CVM belongs to this crabbox install. Phala
+// exposes no server-side labels and `cvms list` omits even the CVM name (only
+// `cvms get`/`deploy`/`delete` echo it), so ownership is established two ways:
+//
+//   - Post-acquire authority: a local lease claim under our state dir maps to
+//     this CVM's cloud id (recorded at acquire time). This is the reliable path
+//     for List/Resolve/Release, where cvms list returns no name.
+//   - Pre-claim recovery: the CVM name carries the crabbox-<lease> prefix. The
+//     claim is written only AFTER create succeeds, so recovering our own
+//     just-created CVM (e.g. after garbled deploy output) can only match by
+//     name.
+//
+// The name path alone is NOT sufficient for destructive ops -- validateDestroyTarget
+// separately requires a matching local claim -- so a foreign crabbox-named CVM
+// can never be deleted or surfaced as a lease, the ownership-safety property the
+// review required.
 func owned(item instance, cfg core.Config) bool {
-	return item.Labels["provider"] == providerName &&
-		item.Labels["crabbox"] == "true" &&
-		item.Labels["created_by"] == "crabbox" &&
-		item.Labels["lease"] != "" &&
-		nodeMatchesScope(item, cfg)
+	if id := item.cloudID(); id != "" {
+		if claim, ok, err := resolvePhalaClaim(id, cfg); err == nil && ok && claim.CloudID == id {
+			return true
+		}
+	}
+	if leaseID := leaseIDFromName(item.Name); leaseID != "" {
+		return nodeMatchesScope(item, cfg)
+	}
+	return false
 }
 
 // nodeMatchesScope keeps ownership scoped to the configured node when one is
@@ -968,20 +991,38 @@ func nodeMatchesScope(item instance, cfg core.Config) bool {
 // the local claim during resolution.
 func phalaLabels(item instance, cfg core.Config) map[string]string {
 	labels := map[string]string{}
+	// Primary source of truth: the local claim keyed on this CVM's cloud id.
+	// Phala returns no server labels and cvms list omits the name, so the claim
+	// recorded at acquire time is the only reliable owner/lease/slug record.
+	if claim, ok, _ := resolvePhalaClaim(item.cloudID(), cfg); ok && claim.CloudID == item.cloudID() {
+		for key, value := range claim.Labels {
+			labels[key] = value
+		}
+		labels["provider"] = providerName
+		labels["crabbox"] = "true"
+		labels["created_by"] = "crabbox"
+		labels["lease"] = claim.LeaseID
+		if claim.Slug != "" {
+			labels["slug"] = claim.Slug
+		}
+		return labels
+	}
+	// Fallback for objects that DO carry a name (cvms get/delete): derive the
+	// lease from the crabbox- name prefix and enrich from a claim by lease.
 	if leaseID := leaseIDFromName(item.Name); leaseID != "" {
 		labels["provider"] = providerName
 		labels["crabbox"] = "true"
 		labels["created_by"] = "crabbox"
 		labels["lease"] = leaseID
-	}
-	if claim, ok, _ := resolvePhalaClaim(labels["lease"], cfg); ok {
-		for key, value := range claim.Labels {
-			if _, exists := labels[key]; !exists {
-				labels[key] = value
+		if claim, ok, _ := resolvePhalaClaim(leaseID, cfg); ok {
+			for key, value := range claim.Labels {
+				if _, exists := labels[key]; !exists {
+					labels[key] = value
+				}
 			}
-		}
-		if claim.Slug != "" {
-			labels["slug"] = claim.Slug
+			if claim.Slug != "" {
+				labels["slug"] = claim.Slug
+			}
 		}
 	}
 	return labels
@@ -1158,33 +1199,77 @@ func (b *backend) destroy(ctx context.Context, id string) error {
 	return commandError("phala cvms delete", result, err)
 }
 
+// getInstance fetches a single CVM via `phala cvms get --cvm-id <id> --json`.
+// Unlike `cvms list` (which omits the CVM name on real hardware), `cvms get`
+// echoes the name, which the destroy path needs to corroborate crabbox
+// ownership against the local lease claim. A not-found response (the CLI exits
+// non-zero with "not found"/"does not exist" on stderr) is treated as ok=false
+// with a nil error so a CVM that is already gone is not an error. The payload is
+// a snake_case object that may be flat or nested under a top-level cvm object;
+// instance's tolerant unmarshaler reads both spellings, and deployOutput's
+// decoder already handles the optional cvm nesting, so it is reused here.
+func (b *backend) getInstance(ctx context.Context, id string) (instance, bool, error) {
+	cfg := b.configForRun()
+	result, err := b.phala(ctx, cfg, []string{"cvms", "get", "--cvm-id", id, "--json"}, nil)
+	if err != nil {
+		detail := strings.ToLower(result.Stdout + "\n" + result.Stderr + "\n" + err.Error())
+		if strings.Contains(detail, "not found") || strings.Contains(detail, "does not exist") {
+			return instance{}, false, nil
+		}
+		return instance{}, false, commandError("phala cvms get", result, err)
+	}
+	payload := jsonObjectPrefix(result.Stdout)
+	if payload == "" {
+		return instance{}, false, nil
+	}
+	// `cvms get` returns the CVM either as a flat object or nested under a cvm
+	// key; deployOutput's decoder already merges both, ranking the nested object
+	// first. Reuse it so a name carried only on the nested object is not lost.
+	var output deployOutput
+	if err := json.Unmarshal([]byte(payload), &output); err != nil {
+		return instance{}, false, core.Exit(5, "parse phala cvms get output: %v", err)
+	}
+	item := output.Top
+	if output.CVM != nil && output.CVM.cloudID() != "" {
+		item = *output.CVM
+	}
+	if item.cloudID() == "" {
+		return instance{}, false, nil
+	}
+	item.Labels = phalaLabels(item, cfg)
+	return item, true, nil
+}
+
 func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id, leaseID string) (bool, error) {
-	// Phala has no server-side ownership label: owned() only proves the crabbox-
-	// name prefix, which a foreign CVM could also carry. The local lease claim is
-	// the destructive-op authority, so require a matching claim before issuing a
-	// delete.
+	// Phala has no server-side ownership label: the local lease claim is the
+	// destructive-op authority, so require a matching claim before any CLI call.
 	if _, ok, err := resolvePhalaClaim(leaseID, cfg); err != nil {
 		return false, err
 	} else if !ok {
 		return false, core.Exit(4, "refusing to destroy Phala CVM %s: no local claim for lease %s", id, leaseID)
 	}
-	instances, err := b.listInstances(ctx)
+	// Source the CVM (and its name) from `cvms get`, not `cvms list`: real
+	// `cvms list` omits the name, so the name-based ownership corroboration below
+	// can only succeed off the `cvms get` payload.
+	item, found, err := b.getInstance(ctx, id)
 	if err != nil {
 		return false, err
 	}
-	for _, item := range instances {
-		if !item.matchesID(id) {
-			continue
-		}
-		if !owned(item, cfg) {
-			return false, core.Exit(4, "refusing to destroy Phala CVM %s without Crabbox ownership labels", id)
-		}
-		if leaseID != "" && item.Labels["lease"] != leaseID {
-			return false, core.Exit(4, "refusing to destroy Phala CVM %s: lease label %q does not match %q", id, item.Labels["lease"], leaseID)
-		}
-		return true, nil
+	if !found {
+		// Already gone: nothing to destroy, no error.
+		return false, nil
 	}
-	return false, nil
+	// Corroborate ownership against the CVM name: a foreign CVM carries no
+	// crabbox- prefix, and a crabbox- CVM for a DIFFERENT lease must not be
+	// deleted under this claim.
+	nameLease := leaseIDFromName(item.Name)
+	if nameLease == "" {
+		return false, core.Exit(4, "refusing to destroy Phala CVM %s without Crabbox ownership labels", id)
+	}
+	if nameLease != leaseID {
+		return false, core.Exit(4, "refusing to destroy Phala CVM %s: lease %q does not match %q", id, nameLease, leaseID)
+	}
+	return true, nil
 }
 
 func (b *backend) phala(ctx context.Context, cfg core.Config, args []string, stderr io.Writer) (core.LocalCommandResult, error) {

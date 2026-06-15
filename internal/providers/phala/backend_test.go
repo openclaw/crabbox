@@ -562,32 +562,27 @@ func TestPhalaCVMNameRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOwnedRequiresLeaseAndCreatorLabels(t *testing.T) {
+func TestOwnedAcceptsCrabboxNamePrefix(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// owned() proves ownership two ways: a local claim keyed on the cloud id, OR
+	// the crabbox-<lease> name prefix (the pre-claim recovery path). `cvms list`
+	// omits the name on real hardware, so an item carrying neither is not ours.
 	cfg := core.BaseConfig()
-	item := instance{Labels: map[string]string{
-		"crabbox":    "true",
-		"created_by": "crabbox",
-		"lease":      "cbx_abcdef123456",
-		"provider":   providerName,
-	}}
+	item := instance{AppID: "appid123", Name: phalaCVMName("cbx_abcdef123456")}
 	if !owned(item, cfg) {
-		t.Fatal("complete ownership labels rejected")
+		t.Fatal("crabbox- name-prefixed CVM rejected")
 	}
-	delete(item.Labels, "lease")
+	item.Name = "someone-elses-cvm"
 	if owned(item, cfg) {
-		t.Fatal("instance without lease label accepted")
+		t.Fatal("foreign-named CVM accepted")
 	}
 }
 
 func TestOwnedScopesByPinnedNode(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
 	cfg.Phala.NodeID = "node-7"
-	item := instance{NodeID: "node-7", Labels: map[string]string{
-		"crabbox":    "true",
-		"created_by": "crabbox",
-		"lease":      "cbx_abcdef123456",
-		"provider":   providerName,
-	}}
+	item := instance{AppID: "appid123", NodeID: "node-7", Name: phalaCVMName("cbx_abcdef123456")}
 	if !owned(item, cfg) {
 		t.Fatal("matching node rejected")
 	}
@@ -631,9 +626,10 @@ func claimPhalaLease(t *testing.T, cfg core.Config, leaseID, cloudID string) {
 
 func TestReleaseRejectsForeignCVM(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[
-		{"id":"foreign","name":"someone-elses-cvm"}
-	]}`}}}
+	// validateDestroyTarget sources the CVM (and its name) from `cvms get`, whose
+	// real-hardware payload is a snake_case object that DOES carry the name. A
+	// foreign CVM has no crabbox- name prefix, so the destroy is refused.
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"app_id":"foreign","name":"someone-elses-cvm","status":"running"}`}}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
@@ -646,16 +642,17 @@ func TestReleaseRejectsForeignCVM(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "without Crabbox ownership labels") {
 		t.Fatalf("err=%v", err)
 	}
-	if len(runner.calls) != 1 {
+	// Only the `cvms get` lookup runs; no `cvms delete` may be issued.
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms get --cvm-id foreign --json" {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
 }
 
 func TestReleaseRejectsMismatchedLeaseLabel(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[
-		{"id":"owned","name":"crabbox-cbx-other00000000"}
-	]}`}}}
+	// The `cvms get` payload names a crabbox- CVM, but its name encodes a
+	// DIFFERENT lease than the claim, so the destroy is refused.
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"app_id":"owned","name":"crabbox-cbx-other00000000","status":"running"}`}}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
@@ -668,18 +665,19 @@ func TestReleaseRejectsMismatchedLeaseLabel(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("err=%v", err)
 	}
-	if len(runner.calls) != 1 {
+	// Only the `cvms get` lookup runs; no `cvms delete` may be issued.
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms get --cvm-id owned --json" {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
 }
 
 func TestReleaseRefusesNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	// A foreign CVM that merely carries the crabbox- name prefix (so owned()
-	// passes) must not be deleted when no local claim backs its lease id.
-	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[
-		{"id":"prefixed","name":"crabbox-cbx-abcdef123456","status":"running"}
-	]}`}}}
+	// A foreign CVM that merely carries the crabbox- name prefix must not be
+	// deleted when no local claim backs its lease id. validateDestroyTarget runs
+	// the local-claim check FIRST and returns before issuing any CLI call, so the
+	// runner is never invoked.
+	runner := &fakeRunner{}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
@@ -691,17 +689,22 @@ func TestReleaseRefusesNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no local claim for lease") {
 		t.Fatalf("err=%v", err)
 	}
-	// No `cvms delete` may be issued; only the inventory list runs.
-	for _, c := range runner.calls {
-		if len(c.args) > 1 && c.args[0] == "cvms" && c.args[1] == "delete" {
-			t.Fatalf("issued delete for unclaimed CVM: calls=%#v", runner.calls)
-		}
+	// The claim check refuses before any CLI call: no `cvms get`, no `cvms delete`.
+	if len(runner.calls) != 0 {
+		t.Fatalf("issued a CLI call before the local-claim check: calls=%#v", runner.calls)
 	}
 }
 
 func TestReleaseSkipsDeleteWhenCVMMissingFromInventory(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[]}`}}}
+	// The claim exists but the CVM is gone: real `cvms get` for a missing CVM
+	// exits non-zero with "CVM not found" on stderr, which getInstance tolerates
+	// as found=false. validateDestroyTarget then returns present=false: no delete,
+	// no error, and the local claim is reaped.
+	runner := &fakeRunner{
+		results: []core.LocalCommandResult{{Stderr: "Error: CVM not found"}},
+		errs:    []error{errors.New("exit status 1")},
+	}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
@@ -727,7 +730,8 @@ func TestReleaseSkipsDeleteWhenCVMMissingFromInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms list --json" {
+	// Only the `cvms get` lookup runs; the missing CVM means no `cvms delete`.
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms get --cvm-id missing-cvm --json" {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
 	claims, err := core.ListLeaseClaims()
@@ -1231,6 +1235,63 @@ func TestInstanceUnmarshalAcceptsBothCaseStyles(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetInstanceParsesRealCVMSGetShapes pins getInstance against the real
+// `cvms get --json` payloads: a flat snake_case object that carries the name,
+// the same object nested under a top-level cvm key, and the missing-CVM error
+// (non-zero exit with "not found" on stderr) which must read as found=false with
+// no error so an already-gone CVM is not an error on the destroy path.
+func TestGetInstanceParsesRealCVMSGetShapes(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "flat object",
+			body: `{"success":true,"app_id":"b60d1f55","vm_uuid":"42fd1f82","name":"crabbox-cbx-abcdef123456","status":"running"}`,
+		},
+		{
+			name: "nested cvm object",
+			body: `{"success":true,"cvm":{"app_id":"b60d1f55","vm_uuid":"42fd1f82","name":"crabbox-cbx-abcdef123456","status":"running"}}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: test.body}}}
+			b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			item, ok, err := b.getInstance(context.Background(), "b60d1f55")
+			if err != nil || !ok {
+				t.Fatalf("ok=%t err=%v", ok, err)
+			}
+			if strings.Join(runner.calls[0].args, " ") != "cvms get --cvm-id b60d1f55 --json" {
+				t.Fatalf("args=%q", strings.Join(runner.calls[0].args, " "))
+			}
+			if item.cloudID() != "b60d1f55" || item.Name != "crabbox-cbx-abcdef123456" {
+				t.Fatalf("item=%#v", item)
+			}
+			if item.Labels["lease"] != "cbx_abcdef123456" {
+				t.Fatalf("lease label=%q not derived from name", item.Labels["lease"])
+			}
+		})
+	}
+	t.Run("missing CVM", func(t *testing.T) {
+		runner := &fakeRunner{
+			results: []core.LocalCommandResult{{Stderr: "Error: CVM not found"}},
+			errs:    []error{errors.New("exit status 1")},
+		}
+		b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+		item, ok, err := b.getInstance(context.Background(), "gone")
+		if err != nil || ok {
+			t.Fatalf("missing CVM should be found=false nil-err: ok=%t err=%v", ok, err)
+		}
+		if item.cloudID() != "" {
+			t.Fatalf("missing CVM yielded an item: %#v", item)
+		}
+	})
 }
 
 // TestListSkipsItemMissingName proves listInstances skips (rather than crashes
