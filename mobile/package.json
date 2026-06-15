@@ -23,8 +23,11 @@
     "prebuild:ios": "expo prebuild --platform ios",
     "run:ios": "expo run:ios",
     "web": "expo start --web",
+    "doctor:ios": "xcode-select -p && xcrun simctl list devices available",
     "check": "tsc --noEmit",
-    "test:urls": "rm -rf /tmp/crabbox-mobile-url-test && tsc --ignoreConfig --target ES2022 --module Node16 --moduleResolution Node16 --outDir /tmp/crabbox-mobile-url-test src/coordinatorURL.ts test/coordinatorURL.test.ts && node /tmp/crabbox-mobile-url-test/test/coordinatorURL.test.js"
+    "test:urls": "rm -rf /tmp/crabbox-mobile-url-test && tsc --ignoreConfig --target ES2022 --module Node16 --moduleResolution Node16 --outDir /tmp/crabbox-mobile-url-test src/coordinatorURL.ts test/coordinatorURL.test.ts && node /tmp/crabbox-mobile-url-test/test/coordinatorURL.test.js",
+    "export:ios": "expo export --platform ios --output-dir /tmp/crabbox-mobile-export",
+    "validate": "npm run test:urls && npm run check && npm run export:ios"
   },
   "private": true
 }

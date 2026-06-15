@@ -188,7 +188,7 @@ jobs:
         working-directory: mobile
 
       - name: Export iOS bundle
-        run: npx expo export --platform ios --output-dir /tmp/crabbox-mobile-export
+        run: npm run export:ios
         working-directory: mobile
 
   scripts:
