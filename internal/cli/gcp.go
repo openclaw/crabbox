@@ -371,7 +371,10 @@ func (c *GCPClient) listCrabboxServers(ctx context.Context, returnPartialSuccess
 			if instanceZone == "" {
 				instanceZone = c.Zone
 			}
-			servers = append(servers, gcpInstanceToServer(instanceZone, instance))
+			server := gcpInstanceToServer(instanceZone, instance)
+			if IsCanonicalGCPServer(server) {
+				servers = append(servers, server)
+			}
 		}
 	}
 	sort.Slice(servers, func(i, j int) bool {
@@ -381,6 +384,21 @@ func (c *GCPClient) listCrabboxServers(ctx context.Context, returnPartialSuccess
 		return servers[i].Name < servers[j].Name
 	})
 	return servers, nil
+}
+
+func IsCanonicalGCPServer(server Server) bool {
+	labels := server.Labels
+	if labels == nil {
+		return false
+	}
+	leaseID := strings.TrimSpace(labels["lease"])
+	slug := strings.TrimSpace(labels["slug"])
+	return isCanonicalLeaseID(leaseID) &&
+		slug != "" &&
+		server.Name == leaseProviderName(leaseID, slug) &&
+		labels["crabbox"] == "true" &&
+		labels["created_by"] == "crabbox" &&
+		labels["provider"] == "gcp"
 }
 
 func (c *GCPClient) DeleteServer(ctx context.Context, name string) error {

@@ -4693,6 +4693,155 @@ describe("fleet lease identity and idle", () => {
     expect(providerReleases).toBe(1);
   });
 
+  it("uses provider-owned GCP recovery instead of project-wide label inventory", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    let inventoryCalls = 0;
+    let recoveryCalls = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onList: () => {
+          inventoryCalls += 1;
+          return [
+            {
+              provider: "gcp",
+              id: 999,
+              cloudID: "foreign-instance",
+              name: "foreign-instance",
+              status: "running",
+              serverType: "e2-micro",
+              host: "192.0.2.99",
+              labels: { crabbox: "true", lease: leaseID },
+            },
+          ];
+        },
+        onRecoverServer: (lease) => {
+          recoveryCalls += 1;
+          expect(lease.id).toBe(leaseID);
+          expect(lease.slug).toBe("fleet-is-gcp-recovery");
+          return {
+            provider: "gcp",
+            id: 123,
+            cloudID: "crabbox-fleet-is-gcp-recovery-c80c2195",
+            name: "crabbox-fleet-is-gcp-recovery-c80c2195",
+            status: "running",
+            serverType: "e2-micro",
+            region: "us-central1-a",
+            host: "192.0.2.10",
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "gcp",
+              lease: leaseID,
+            },
+          };
+        },
+      }),
+    });
+    const now = new Date().toISOString();
+    storage.seed("workspace:example-org:alice%40example.com:fleet-is-gcp-recovery", {
+      id: "fleet-is-gcp-recovery",
+      leaseID,
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      provider: "gcp",
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      provisionClaim: "expired-claim",
+      provisionClaimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+    });
+    storage.seed(`lease:${leaseID}`, {
+      id: leaseID,
+      slug: "fleet-is-gcp-recovery",
+      workspaceID: "fleet-is-gcp-recovery",
+      provider: "gcp",
+      providerProject: "proj",
+      region: "us-central1-a",
+      target: "linux",
+      desktop: false,
+      browser: false,
+      code: false,
+      cloudID: "stale-cloud-id",
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      class: "standard",
+      serverType: "e2-micro",
+      requestedServerType: "e2-micro",
+      serverID: 0,
+      serverName: "",
+      providerKey: "workspace-test",
+      host: "",
+      sshUser: "root",
+      sshPort: "22",
+      workRoot: "/workspaces/crabbox",
+      keep: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      estimatedHourlyUSD: 0,
+      maxEstimatedUSD: 0,
+      state: "provisioning",
+      provisioningRequestStartedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      lastTouchedAt: now,
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    } as LeaseRecord);
+
+    await fleet.alarm();
+
+    expect(recoveryCalls).toBe(1);
+    expect(inventoryCalls).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "active",
+      cloudID: "crabbox-fleet-is-gcp-recovery-c80c2195",
+      host: "192.0.2.10",
+    });
+  });
+
+  it("persists the active GCP fallback zone before provider mutation", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-a" });
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
+          throw new Error("capacity unavailable");
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      region: "us-central1-b",
+    });
+  });
+
   it("fails deterministic workspace provisioning errors without waiting for the lease TTL", async () => {
     const storage = new MemoryStorage();
     let providerLookups = 0;
@@ -16427,6 +16576,9 @@ function fakeProvider(
           lease: LeaseRecord;
         }
       | undefined;
+    onRecoverServer?: (
+      lease: LeaseRecord,
+    ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
   } = {},
   onDelete?: (id: string) => Promise<void>,
   onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
@@ -16442,6 +16594,13 @@ function fakeProvider(
       }
       return result.servers ?? [];
     },
+    ...(result.onRecoverServer
+      ? {
+          async recoverServer(lease: LeaseRecord) {
+            return await result.onRecoverServer?.(lease);
+          },
+        }
+      : {}),
     async findServerByLease(leaseID: string) {
       const servers = result.onList ? await result.onList() : (result.servers ?? []);
       return servers.find((server) => server.labels?.["lease"] === leaseID);

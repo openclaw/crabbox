@@ -1756,12 +1756,18 @@ export class FleetCoordinator {
             lastProvisioningTarget = { ...target };
             await prepared.provisioning?.onTargetAttempt?.(target);
             const region = target.region;
-            if (record.provider !== "aws" || !region) {
+            if (!region) {
               return;
             }
             await this.state.runExclusive(async () => {
               const current = (await this.getLease(record.id)) ?? record;
-              await this.markAWSIngressReconcilePending({ ...current, region });
+              if (record.provider === "aws") {
+                await this.markAWSIngressReconcilePending({ ...current, region });
+              } else {
+                current.region = region;
+                current.updatedAt = new Date().toISOString();
+                await this.putLease(current);
+              }
               await this.scheduleAlarm();
             });
           },
@@ -2642,7 +2648,9 @@ export class FleetCoordinator {
     const provider = this.provider(workspace.provider, lease.region, lease.providerProject);
     let server: ProviderMachine | undefined;
     try {
-      if (lease.cloudID && provider.getServer) {
+      if (provider.recoverServer) {
+        server = await provider.recoverServer(lease);
+      } else if (lease.cloudID && provider.getServer) {
         server = await provider.getServer(lease.cloudID);
       } else if (provider.findServerByLease) {
         server = await provider.findServerByLease(lease.id);
@@ -13714,6 +13722,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   findServerByLease?(leaseID: string): Promise<ProviderMachine | undefined>;
   getServer?(id: string): Promise<ProviderMachine>;
   prepareLeaseConfig?(
@@ -14064,6 +14073,14 @@ class GCPProvider implements CloudProvider {
     return this.client.listCrabboxServers();
   }
 
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
+  }
+
+  recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return this.client.recoverServerForLease(lease.id, lease.slug);
+  }
+
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
@@ -14076,18 +14093,26 @@ class GCPProvider implements CloudProvider {
     };
   }
 
+  prepareLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    return Promise.resolve({ config, lease, provisioning: {} });
+  }
+
   createServerWithFallback(
     config: ReturnType<typeof leaseConfig>,
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: ProviderProvisioningContext,
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    return this.client.createServerWithFallback(config, leaseID, slug, owner);
+    return this.client.createServerWithFallback(config, leaseID, slug, owner, provisioning);
   }
 
   deleteServer(id: string): Promise<void> {

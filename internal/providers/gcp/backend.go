@@ -158,16 +158,7 @@ func (b *gcpLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 }
 
 func isCrabboxGCPLease(server Server) bool {
-	if server.Labels == nil {
-		return false
-	}
-	if server.Labels["crabbox"] != "true" {
-		return false
-	}
-	if provider := server.Labels["provider"]; provider != "" && provider != "gcp" {
-		return false
-	}
-	return true
+	return core.IsCanonicalGCPServer(server)
 }
 
 func (b *gcpLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -176,7 +167,17 @@ func (b *gcpLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseVie
 	if err != nil {
 		return nil, err
 	}
-	return client.ListCrabboxServers(ctx)
+	servers, err := client.ListCrabboxServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	canonical := make([]Server, 0, len(servers))
+	for _, server := range servers {
+		if isCrabboxGCPLease(server) {
+			canonical = append(canonical, server)
+		}
+	}
+	return canonical, nil
 }
 
 func (b *gcpLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -249,6 +250,9 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 	}
 	liveLeaseIDs := make(map[string]struct{}, len(completeServers))
 	for _, server := range completeServers {
+		if !isCrabboxGCPLease(server) {
+			continue
+		}
 		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
 			liveLeaseIDs[leaseID] = struct{}{}
 		}

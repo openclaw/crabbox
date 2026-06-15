@@ -105,12 +105,45 @@ export class GCPClient {
       if (isNotFound(error)) return { items: [] };
       throw error;
     });
-    return Object.entries(data.items ?? {}).flatMap(([scope, list]) => {
-      const zone = lastPathPart(scope);
-      return (list.instances ?? []).map((instance) =>
-        toMachine(instance, lastPathPart(instance.zone ?? zone)),
+    return Object.entries(data.items ?? {})
+      .flatMap(([scope, list]) => {
+        const zone = lastPathPart(scope);
+        return (list.instances ?? []).map((instance) =>
+          toMachine(instance, lastPathPart(instance.zone ?? zone)),
+        );
+      })
+      .filter(canonicalGCPMachine);
+  }
+
+  async recoverServerForLease(
+    leaseID: string,
+    slug: string | undefined,
+  ): Promise<ProviderMachine | undefined> {
+    const expectedName = leaseProviderName(leaseID, slug);
+    let server: ProviderMachine | undefined;
+    try {
+      server = await this.getServer(expectedName);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      // Pre-upgrade fallback attempts may have created the canonical instance
+      // before the selected zone was persisted on the lease.
+      const matches = (await this.listCrabboxServers()).filter(
+        (candidate) => candidate.name === expectedName && candidate.labels["lease"] === leaseID,
       );
-    });
+      if (matches.length > 1) {
+        throw new Error(
+          `ambiguous GCP recovery for ${leaseID}: ${matches.length} canonical instances named ${expectedName}`,
+          { cause: error },
+        );
+      }
+      server = matches[0];
+    }
+    if (!server) return undefined;
+    return server.name === expectedName &&
+      canonicalGCPMachine(server) &&
+      server.labels["lease"] === leaseID
+      ? server
+      : undefined;
   }
 
   async createServerWithFallback(
@@ -118,6 +151,7 @@ export class GCPClient {
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: { onTargetAttempt?: (target: { region?: string }) => Promise<void> },
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -142,6 +176,9 @@ export class GCPClient {
           : new GCPClient(this.env, zone, project);
       for (const machineType of candidates) {
         try {
+          // Persist the zone before an instance create can outlive the coordinator request.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- fallback must preserve capacity order.
+          await provisioning?.onTargetAttempt?.({ region: zone });
           // oxlint-disable-next-line eslint/no-await-in-loop -- fallback must preserve capacity order.
           const server = await client.createServer(
             { ...config, gcpZone: zone, serverType: machineType },
@@ -181,6 +218,9 @@ export class GCPClient {
             : new GCPClient(this.env, zone, project);
         for (const machineType of candidates) {
           try {
+            // Persist the zone before an instance create can outlive the coordinator request.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- fallback must preserve capacity order.
+            await provisioning?.onTargetAttempt?.({ region: zone });
             // oxlint-disable-next-line eslint/no-await-in-loop -- fallback must preserve capacity order.
             const server = await client.createServer(
               {
@@ -660,6 +700,19 @@ function toMachine(instance: GCPInstance, zone: string): ProviderMachine {
     host,
     labels: { ...instance.labels, zone },
   };
+}
+
+function canonicalGCPMachine(machine: ProviderMachine): boolean {
+  const leaseID = machine.labels["lease"] ?? "";
+  const slug = machine.labels["slug"] ?? "";
+  return (
+    /^cbx_[a-f0-9]{12}$/.test(leaseID) &&
+    slug.length > 0 &&
+    machine.name === leaseProviderName(leaseID, slug) &&
+    machine.labels["crabbox"] === "true" &&
+    machine.labels["created_by"] === "crabbox" &&
+    machine.labels["provider"] === "gcp"
+  );
 }
 
 function gcpLabels(labels: Record<string, string>): Record<string, string> {

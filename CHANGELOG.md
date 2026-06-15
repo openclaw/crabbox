@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Hardened GCP operator inventory and workspace recovery by requiring deterministic Crabbox instance names plus canonical provider labels before accepting resources. Thanks @coygeek.
 - Hardened shared-lease run auditability by preserving actor attribution while granting lease owners read-only access to runs, logs, events, telemetry, and portal history. Thanks @coygeek.
 - Pinned shipped runtime container base images to reviewed multi-platform digests and enforced the pins in CI. Thanks @coygeek.
 - Redacted manage-only WebVNC bridge commands and egress session details from `use` share viewers. Thanks @coygeek.
