@@ -41,6 +41,32 @@ func TestCleanupHelpListsRegisteredXCPNgProvider(t *testing.T) {
 	}
 }
 
+func TestTopLevelAndCommandHelpDescribeInteractiveConnect(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"--help"}); err != nil {
+		t.Fatalf("crabbox --help error=%v", err)
+	}
+	if !strings.Contains(stdout.String(), "connect     Open an interactive SSH session to a lease") {
+		t.Fatalf("top-level help omitted connect:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	err := app.Run(context.Background(), []string{"connect", "--help"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 0 {
+		t.Fatalf("crabbox connect --help error=%v stderr=%q", err, stderr.String())
+	}
+	help := stderr.String()
+	if !strings.Contains(help, "-id string") || !strings.Contains(help, "-network string") {
+		t.Fatalf("connect help omitted lease flags:\n%s", help)
+	}
+	if strings.Contains(help, "show-secret") {
+		t.Fatalf("connect help exposed print-only show-secret flag:\n%s", help)
+	}
+}
+
 func helpLineContaining(text, want string) string {
 	for _, line := range strings.Split(text, "\n") {
 		if strings.Contains(line, want) {

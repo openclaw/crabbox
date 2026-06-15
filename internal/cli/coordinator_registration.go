@@ -126,7 +126,7 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 		ServerName:         server.Name,
 		ServerType:         firstNonBlank(server.ServerType.Name, cfg.ServerType),
 		Host:               target.Host,
-		SSHUser:            target.User,
+		SSHUser:            coordinatorRegistrationSSHUser(target),
 		SSHPort:            target.Port,
 		SSHFallbackPorts:   append([]string(nil), target.FallbackPorts...),
 		WorkRoot:           cfg.WorkRoot,
@@ -197,6 +197,13 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 		}
 	}
 	return nil
+}
+
+func coordinatorRegistrationSSHUser(target SSHTarget) string {
+	if target.AuthSecret {
+		return "<token>"
+	}
+	return target.User
 }
 
 func coordinatorRegistrationURLForConfig(cfg Config) (string, error) {

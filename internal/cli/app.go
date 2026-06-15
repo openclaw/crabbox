@@ -99,6 +99,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.usage(ctx, helpArgs), true
 	case "ssh":
 		return a.ssh(ctx, helpArgs), true
+	case "connect":
+		return a.connect(ctx, helpArgs), true
 	case "ports":
 		return a.ports(ctx, helpArgs), true
 	case "cp":
@@ -193,6 +195,7 @@ Commands:
   capsule     Capture and replay lightweight failure capsules
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease
+  connect     Open an interactive SSH session to a lease
   ports       Publish, list, or unpublish provider-native ports
   cp          Copy files between host and a delegated sandbox
   vnc         Print or open VNC connection details for a desktop lease
@@ -217,6 +220,7 @@ Common Flows:
   crabbox warmup
   crabbox status --id blue-lobster --wait
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
+  crabbox connect blue-lobster
   crabbox ssh --id blue-lobster
   crabbox ports --id blue-lobster --publish 8080
   crabbox cp --id blue-lobster ./coverage.xml SANDBOX:/tmp/coverage.xml

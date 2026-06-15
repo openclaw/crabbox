@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `crabbox connect <lease-id-or-slug>` to open an interactive SSH session to key-, certificate-, and proxy-authenticated provider targets while keeping `crabbox ssh` as the print-only command surface for token-as-username providers.
 - Added JSON API initiation of generation-fenced runtime-adapter workspace deletion through explicit registered lease release.
 - Added reusable Cloudflare container run-session handles with exact cleanup commands for `--keep --lease-output`. Thanks @zozo123.
 

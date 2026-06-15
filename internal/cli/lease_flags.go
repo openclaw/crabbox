@@ -413,11 +413,50 @@ func (a App) resolveNetworkLeaseTargetForRepo(ctx context.Context, cfg Config, i
 }
 
 func (a App) resolveNetworkLoginTargetForRepo(ctx context.Context, cfg Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
-	repo, err := findRepo()
+	lease, err := a.resolveNetworkLoginLeaseTargetForRepo(ctx, &cfg, id, printFallback, reclaim, true)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
-	return a.resolveNetworkSSHTargetWithRepoConfig(ctx, &cfg, id, printFallback, repo, reclaim, true)
+	return lease.Server, lease.SSH, lease.LeaseID, nil
+}
+
+func (a App) resolveNetworkLoginLeaseTargetForRepo(ctx context.Context, cfg *Config, id string, printFallback, reclaim, probeTransport bool) (LeaseTarget, error) {
+	repo, err := findRepo()
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	req := ResolveRequest{Repo: repo, ID: id, Reclaim: reclaim, RejectAuthSecret: !probeTransport}
+	lease, err := a.resolveSSHLeaseWithRequestConfig(ctx, cfg, req, true)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !probeTransport && lease.SSH.AuthSecret {
+		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
+	}
+	resolved, err := resolveSSHTargetNetwork(ctx, *cfg, lease.Server, lease.SSH, true)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	lease.SSH = resolved.Target
+	if lease.SSH.Host != "" {
+		if probeTransport {
+			_ = probeSSHTransport(ctx, &lease.SSH, 4*time.Second)
+		} else {
+			_ = probeConnectSSHTransport(ctx, &lease.SSH, 4*time.Second)
+		}
+	}
+	updatedClaim, claimExists, err := updateResolvedLeaseClaimEndpoint(lease.LeaseID, lease.Server, lease.SSH)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if claimExists {
+		lease.Server.claimSnapshot = updatedClaim
+		lease.Server.claimSnapshotExists = true
+	}
+	if printFallback && resolved.FallbackReason != "" {
+		fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+	}
+	return lease, nil
 }
 
 func (a App) resolveNetworkLeaseTargetForRepoWithConfig(ctx context.Context, cfg *Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {

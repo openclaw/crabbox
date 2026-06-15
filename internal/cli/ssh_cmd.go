@@ -8,41 +8,70 @@ import (
 )
 
 func (a App) ssh(ctx context.Context, args []string) error {
+	resolved, err := a.resolveSSHCommandTarget(ctx, "ssh", args, true)
+	if err != nil {
+		return err
+	}
+	target := resolved.Lease.SSH
+	if target.AuthSecret && !resolved.ShowSecret {
+		fmt.Fprintf(a.Stderr, "warning: ssh auth user is secret; rerun with --show-secret to print a pasteable command\n")
+	}
+	fmt.Fprintln(a.Stdout, sshCommandLine(target, target.AuthSecret && !resolved.ShowSecret))
+	return nil
+}
+
+type resolvedSSHCommandTarget struct {
+	Config     Config
+	Lease      LeaseTarget
+	ShowSecret bool
+}
+
+func (a App) resolveSSHCommandTarget(ctx context.Context, command string, args []string, allowShowSecret bool) (resolvedSSHCommandTarget, error) {
 	defaults := defaultConfig()
-	fs := newFlagSet("ssh", a.Stderr)
+	fs := newFlagSet(command, a.Stderr)
 	provider := fs.String("provider", defaults.Provider, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
-	showSecret := fs.Bool("show-secret", false, "print secret auth material for token-based SSH providers")
+	var showSecret *bool
+	if allowShowSecret {
+		showSecret = fs.Bool("show-secret", false, "print secret auth material for token-based SSH providers")
+	}
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
-	if err := parseFlags(fs, args); err != nil {
-		return err
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return resolvedSSHCommandTarget{}, err
 	}
+	idFlagSet := flagWasSet(fs, "id")
 	setIDFromFirstArg(fs, id)
+	if fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
+		return resolvedSSHCommandTarget{}, exit(2, "usage: crabbox %s [flags] <lease-id-or-slug>", command)
+	}
 	cfg, err := loadSSHCommandConfig(fs, *provider, providerFlags, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
-		return err
+		return resolvedSSHCommandTarget{}, err
 	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
-		return err
+		return resolvedSSHCommandTarget{}, err
 	}
-	if err := requireLeaseID(*id, "crabbox ssh --id <lease-id-or-slug>", cfg); err != nil {
-		return err
+	if err := requireLeaseID(*id, "crabbox "+command+" --id <lease-id-or-slug>", cfg); err != nil {
+		return resolvedSSHCommandTarget{}, err
 	}
-	server, target, leaseID, err := a.resolveNetworkLoginTargetForRepo(ctx, cfg, *id, false, *reclaim)
+	lease, err := a.resolveNetworkLoginLeaseTargetForRepo(ctx, &cfg, *id, false, *reclaim, command != "connect")
 	if err != nil {
-		return err
+		return resolvedSSHCommandTarget{}, err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
-		return err
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, lease.Server, lease.SSH, lease.LeaseID, *reclaim); err != nil {
+		return resolvedSSHCommandTarget{}, err
 	}
-	if target.AuthSecret && !*showSecret {
-		fmt.Fprintf(a.Stderr, "warning: ssh auth user is secret; rerun with --show-secret to print a pasteable command\n")
+	resolved := resolvedSSHCommandTarget{
+		Config: cfg,
+		Lease:  lease,
 	}
-	fmt.Fprintln(a.Stdout, sshCommandLine(target, target.AuthSecret && !*showSecret))
-	return nil
+	if showSecret != nil {
+		resolved.ShowSecret = *showSecret
+	}
+	return resolved, nil
 }
 
 func loadSSHCommandConfig(fs *flag.FlagSet, provider string, providerFlags providerFlagValues, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {

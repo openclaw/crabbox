@@ -610,6 +610,9 @@ type ResolveRequest struct {
 	StatusOnly  bool
 	ReadyProbe  bool
 	Prepare     bool
+	// RejectAuthSecret prevents interactive callers from launching SSH probes
+	// for token-as-username targets they cannot safely execute.
+	RejectAuthSecret bool
 	// NoLocalStateMutations is reserved for controller-owned identity-bound
 	// lookups that must not rewrite claims or provider routing before the
 	// resolved identity has been accepted by the caller.
