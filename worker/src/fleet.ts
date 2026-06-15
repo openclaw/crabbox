@@ -6343,9 +6343,13 @@ export class FleetCoordinator {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const error = webVNCLeaseError(lease);
     if (error) {

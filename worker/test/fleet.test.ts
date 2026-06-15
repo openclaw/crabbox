@@ -11768,6 +11768,74 @@ describe("fleet lease identity and idle", () => {
     ).toBe(true);
   });
 
+  it("requires manage access to reset a WebVNC bridge", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "shared-desktop",
+        owner: "owner@example.com",
+        org: "example-org",
+        desktop: true,
+        share: {
+          users: {
+            "viewer@example.com": "use",
+            "manager@example.com": "manage",
+          },
+          org: "use",
+        },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const resetAs = (owner: string, org: string, admin = false) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/shared-desktop/webvnc/reset", {
+          headers: {
+            "x-crabbox-owner": owner,
+            "x-crabbox-org": org,
+            ...(admin ? { "x-crabbox-admin": "true" } : {}),
+          },
+          body: {},
+        }),
+      );
+
+    const directUse = await resetAs("viewer@example.com", "example-org");
+    expect(directUse.status).toBe(403);
+    await expect(directUse.json()).resolves.toEqual({
+      error: "forbidden",
+      message: "lease manage access required",
+    });
+
+    const orgUse = await resetAs("org-viewer@example.com", "example-org");
+    expect(orgUse.status).toBe(403);
+    await expect(orgUse.json()).resolves.toEqual({
+      error: "forbidden",
+      message: "lease manage access required",
+    });
+
+    const status = await fleet.fetch(
+      request("GET", "/v1/leases/shared-desktop/webvnc/status", {
+        headers: {
+          "x-crabbox-owner": "owner@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    await expect(status.json()).resolves.toMatchObject({ events: [] });
+
+    const manager = await resetAs("manager@example.com", "example-org");
+    expect(manager.status).toBe(200);
+
+    const owner = await resetAs("owner@example.com", "example-org");
+    expect(owner.status).toBe(200);
+
+    const admin = await resetAs("admin@example.com", "other-org", true);
+    expect(admin.status).toBe(200);
+  });
+
   it("serves WebVNC pages only for desktop leases and requires an agent upgrade", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
