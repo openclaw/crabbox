@@ -16,10 +16,39 @@ import (
 //
 // Reference: https://github.com/apple/container/blob/main/docs/how-to.md
 type inspectContainer struct {
-	Status        string               `json:"status"`
+	Status        inspectStatus        `json:"status"`
 	Configuration inspectConfiguration `json:"configuration"`
 	Networks      []inspectNetwork     `json:"networks"`
 	Labels        map[string]string    `json:"labels,omitempty"`
+}
+
+// inspectStatus tolerates both the older string status form ("running") and
+// Apple's container 1.0 object status form ({"state":"running", ...}).
+type inspectStatus struct {
+	State    string           `json:"state,omitempty"`
+	Networks []inspectNetwork `json:"networks,omitempty"`
+}
+
+func (s *inspectStatus) UnmarshalJSON(data []byte) error {
+	data = []byte(strings.TrimSpace(string(data)))
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	if data[0] == '"' {
+		var state string
+		if err := json.Unmarshal(data, &state); err != nil {
+			return err
+		}
+		s.State = state
+		return nil
+	}
+	type alias inspectStatus
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*s = inspectStatus(a)
+	return nil
 }
 
 type inspectConfiguration struct {
@@ -113,12 +142,21 @@ func (c inspectContainer) image() string {
 }
 
 func (c inspectContainer) status() string {
-	return strings.ToLower(strings.TrimSpace(c.Status))
+	return strings.ToLower(strings.TrimSpace(c.Status.State))
 }
 
 // ip returns the container's first network address without its CIDR suffix.
 func (c inspectContainer) ip() string {
-	for _, n := range c.Networks {
+	for _, networks := range [][]inspectNetwork{c.Networks, c.Status.Networks} {
+		if addr := firstNetworkAddress(networks); addr != "" {
+			return addr
+		}
+	}
+	return ""
+}
+
+func firstNetworkAddress(networks []inspectNetwork) string {
+	for _, n := range networks {
 		addr := firstNonBlank(n.Address, n.IPv4Address)
 		if addr == "" {
 			continue
