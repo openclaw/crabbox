@@ -1,9 +1,9 @@
-const assert = require("node:assert/strict");
-const path = require("node:path");
-const { spawnSync } = require("node:child_process");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
 
-const { classify } = require("./live-codesandbox-smoke.test.js");
+import { classify } from "./live-codesandbox-smoke.test.js";
 
 test("CodeSandbox smoke treats explicit environment blockers as non-diagnostic", () => {
   for (const message of [
@@ -25,7 +25,7 @@ test("CodeSandbox smoke does not hide SDK contract failures", () => {
 });
 
 test("CodeSandbox smoke classifies early command failures without masking them", () => {
-  const script = path.join(__dirname, "live-codesandbox-smoke.test.js");
+  const script = path.join(import.meta.dirname, "live-codesandbox-smoke.test.js");
   const result = spawnSync(process.execPath, [script], {
     env: {
       ...process.env,
