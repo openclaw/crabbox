@@ -40,6 +40,54 @@ if args.contains("--chat") {
     exit(0)
 }
 
+// `--islo-demo`: the live "trigger islo from the phone" e2e, exercising the
+// EXACT IsloClient the app's Sandboxes tab uses. Validates token exchange,
+// sandbox lifecycle, and (with CRABBOX_ISLO_LLM=1) the full provision → Ollama
+// bootstrap → share → chat flow. Needs ISLO_API_KEY in the environment.
+if args.contains("--islo-demo") {
+    let env = ProcessInfo.processInfo.environment
+    guard let key = env["ISLO_API_KEY"] ?? env["CRABBOX_ISLO_API_KEY"], !key.isEmpty else {
+        FileHandle.standardError.write(Data("set ISLO_API_KEY\n".utf8)); exit(2)
+    }
+    let base = env["ISLO_BASE_URL"] ?? "https://api.islo.dev"
+    let withLLM = env["CRABBOX_ISLO_LLM"] == "1"
+    guard let islo = IsloClient(apiKey: key, baseURL: base, timeout: withLLM ? 600 : 60) else {
+        FileHandle.standardError.write(Data("bad islo config\n".utf8)); exit(2)
+    }
+    do {
+        let existing = try await islo.listSandboxes()
+        print("auth OK — \(existing.count) existing sandbox(es)")
+        let name = "crab-e2e-\(env["USER"] ?? "x")"
+        print("creating sandbox \(name)…")
+        let created = try await islo.createSandbox(name: name)
+        print("created: \(created.name) [\(created.status)]")
+
+        if withLLM {
+            let model = env["CRABBOX_AGENT_MODEL"] ?? "qwen2.5:0.5b"
+            print("bootstrapping Ollama + \(model) (this takes a few minutes)…")
+            let boot = try await islo.exec(name: created.name, script: isloOllamaBootstrapScript(model: model))
+            print("bootstrap exit=\(boot.exitCode)")
+            let share = try await islo.createShare(name: created.name, port: 11434)
+            print("share: \(share.url)")
+            if let engine = SandboxEngine(endpoint: share.url, model: model) {
+                let reply = try await engine.reply(
+                    messages: [ChatMessage(role: .user, content: "Say hello from the sandbox in one sentence.")],
+                    options: LLMOptions(temperature: 0, numPredict: 48)
+                )
+                print("LLM reply: \(reply.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+
+        print("cleaning up: deleting \(created.name)…")
+        try await islo.deleteSandbox(name: created.name)
+        print("DONE — islo e2e succeeded.")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("islo e2e failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 struct ScenarioResult { let name: String; let steps: Int; let violations: [String] }
 
 var results: [ScenarioResult] = []

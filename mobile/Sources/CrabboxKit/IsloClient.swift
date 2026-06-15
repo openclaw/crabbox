@@ -48,12 +48,20 @@ public struct IsloSandboxSpec: Sendable {
 
 /// A direct client for the islo sandbox API, mirroring crabbox's own islo
 /// provider (`internal/providers/islo`). islo is brokerless: the client talks to
-/// `https://api.islo.dev` directly with a bearer API key. The phone stores the
-/// key in the Keychain and never sends it anywhere else.
-public struct IsloClient: Sendable {
+/// `https://api.islo.dev` directly.
+///
+/// Auth is a two-step exchange (matching the islo Go SDK's `customauth`): the
+/// long-lived API key (`access_key`) is POSTed to `/auth/token` for a short-lived
+/// session JWT, which is then sent as `Authorization: Bearer <jwt>` on every API
+/// call and cached until shortly before it expires. The phone stores only the API
+/// key (in the Keychain) and never sends it anywhere but `/auth/token`.
+public actor IsloClient {
     public let baseURL: URL
     private let apiKey: String
     public let timeout: TimeInterval
+
+    private var cachedToken: String?
+    private var tokenExpiry: Date?
 
     public init?(apiKey: String, baseURL: String = "https://api.islo.dev", timeout: TimeInterval = 120) {
         guard !apiKey.isEmpty, let url = URL(string: baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL)
@@ -83,9 +91,14 @@ public struct IsloClient: Sendable {
         let data = try await send("GET", "/sandboxes?limit=100&offset=0")
         guard let obj = try? JSONSerialization.jsonObject(with: data) else { throw LLMError.decode("sandboxes") }
         let rows: [[String: Any]]
-        if let arr = obj as? [[String: Any]] { rows = arr }
-        else if let dict = obj as? [String: Any], let arr = dict["sandboxes"] as? [[String: Any]] { rows = arr }
-        else { rows = [] }
+        if let arr = obj as? [[String: Any]] {
+            rows = arr
+        } else if let dict = obj as? [String: Any] {
+            // islo returns {"items":[…]}; tolerate {"sandboxes":[…]} too.
+            rows = (dict["items"] as? [[String: Any]]) ?? (dict["sandboxes"] as? [[String: Any]]) ?? []
+        } else {
+            rows = []
+        }
         return rows.compactMap { try? Self.sandbox(from: $0) }
     }
 
@@ -141,14 +154,37 @@ public struct IsloClient: Sendable {
         s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s
     }
 
+    /// Exchanges the API key for a session JWT (`POST /auth/token` with
+    /// `{access_key}` → `{session_token, expires_in}`), caching it until shortly
+    /// before expiry. Mirrors the islo Go SDK's `customauth` provider.
+    private func authToken() async throws -> String {
+        if let token = cachedToken, let expiry = tokenExpiry, Date() < expiry {
+            return token
+        }
+        let data = try await rawSend("POST", "/auth/token", json: ["access_key": apiKey], bearer: nil)
+        guard let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = dict["session_token"] as? String, !token.isEmpty
+        else { throw LLMError.decode("auth/token missing session_token") }
+        let ttl = (dict["expires_in"] as? Double) ?? (dict["cookie_max_age"] as? Double) ?? 600
+        cachedToken = token
+        tokenExpiry = Date().addingTimeInterval(max(0, ttl - 30)) // refresh margin
+        return token
+    }
+
     private func send(_ method: String, _ path: String, json: [String: Any]? = nil, accept: String = "application/json") async throws -> Data {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path))
-        // appendingPathComponent percent-encodes '?'; build the URL directly to keep query strings.
-        if let url = URL(string: baseURL.absoluteString + path) { request.url = url }
+        let token = try await authToken()
+        return try await rawSend(method, path, json: json, accept: accept, bearer: token)
+    }
+
+    /// One HTTP round-trip. `bearer == nil` is used only by the `/auth/token`
+    /// exchange itself (which authenticates with the body, not a header).
+    private func rawSend(_ method: String, _ path: String, json: [String: Any]?, accept: String = "application/json", bearer: String?) async throws -> Data {
+        guard let url = URL(string: baseURL.absoluteString + path) else { throw LLMError.invalidResponse }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = timeout
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue(accept, forHTTPHeaderField: "Accept")
+        if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
         if let json {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
@@ -172,7 +208,10 @@ public struct IsloClient: Sendable {
     }
 
     private static func sandbox(from dict: [String: Any]) throws -> IsloSandbox {
-        guard let name = dict["name"] as? String else { throw LLMError.decode("sandbox.name") }
+        // islo identifies sandboxes by `name`; fall back to `id` if name is absent.
+        guard let name = (dict["name"] as? String) ?? (dict["id"] as? String) else {
+            throw LLMError.decode("sandbox.name")
+        }
         let status = (dict["status"] as? String) ?? (dict["state"] as? String) ?? "unknown"
         return IsloSandbox(name: name, status: status)
     }
