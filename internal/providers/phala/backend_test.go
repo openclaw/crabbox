@@ -279,7 +279,7 @@ func TestCreateAlwaysSuppliesComposeFlag(t *testing.T) {
 func TestCreateRecoversCVMAfterInvalidOutput(t *testing.T) {
 	runner := &fakeRunner{results: []core.LocalCommandResult{
 		{Stdout: `not-json`},
-		{Stdout: `{"success":true,"items":[{"id":"recovered","name":"crabbox-cbx-abcdef123456"}]}`},
+		{Stdout: `{"success":true,"items":[{"appId":"recovered","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`},
 	}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -299,11 +299,43 @@ func TestCreateRecoversCVMAfterInvalidOutput(t *testing.T) {
 	}
 }
 
+// TestFindByLeaseRecoversFromRealListCvmNameWithoutClaim pins the FIX A
+// foundational property: a just-created CVM has NO local claim yet, and the
+// real `cvms list` item carries its name ONLY under `cvmName` (no `name` key).
+// findByLease must still recover it by deriving the lease from the cvmName
+// prefix via owned()'s name-branch. Reading the name from `name`/`appName`
+// alone (the pre-fix behavior) left item.Name blank and silently broke recovery.
+func TestFindByLeaseRecoversFromRealListCvmNameWithoutClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"items":[
+			{"appId":"b60d1f55","cvmName":"crabbox-cbx-abcdef123456","status":"running","uptime":"1 minute"}
+		]}`},
+	}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	item, err := b.findByLease(context.Background(), cfg, "cbx_abcdef123456")
+	if err != nil {
+		t.Fatalf("findByLease failed to recover from cvmName-only list item: %v", err)
+	}
+	if item.cloudID() != "b60d1f55" {
+		t.Fatalf("cloudID=%q want app_id from list item", item.cloudID())
+	}
+	if item.Name != "crabbox-cbx-abcdef123456" {
+		t.Fatalf("name=%q not decoded from cvmName", item.Name)
+	}
+	if item.Labels["lease"] != "cbx_abcdef123456" {
+		t.Fatalf("lease label=%q not derived from cvmName prefix", item.Labels["lease"])
+	}
+}
+
 func TestCreateRecoversAfterCallerCancellation(t *testing.T) {
 	runner := &fakeRunner{
 		results: []core.LocalCommandResult{
 			{},
-			{Stdout: `{"success":true,"items":[{"id":"recovered","name":"crabbox-cbx-abcdef123456"}]}`},
+			{Stdout: `{"success":true,"items":[{"appId":"recovered","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`},
 		},
 		errs: []error{context.Canceled},
 	}
@@ -321,6 +353,35 @@ func TestCreateRecoversAfterCallerCancellation(t *testing.T) {
 	})
 	if err != nil || id != "recovered" {
 		t.Fatalf("id=%q err=%v", id, err)
+	}
+}
+
+// TestAmbiguousPhalaCreateOutcomeAnchorsMarkers pins FIX E.2: cancellation is
+// detected structurally, anchored transport phrases trigger recovery, but the
+// bare "eof"/"unavailable" substrings inside larger unrelated words must NOT
+// false-match and waste the recovery window.
+func TestAmbiguousPhalaCreateOutcomeAnchorsMarkers(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result core.LocalCommandResult
+		err    error
+		want   bool
+	}{
+		{name: "context canceled (structural)", err: context.Canceled, want: true},
+		{name: "deadline exceeded (structural)", err: context.DeadlineExceeded, want: true},
+		{name: "unexpected eof", result: core.LocalCommandResult{Stderr: "rpc error: unexpected EOF"}, err: errors.New("exit status 1"), want: true},
+		{name: "service unavailable", result: core.LocalCommandResult{Stderr: "503 Service Unavailable"}, err: errors.New("exit status 1"), want: true},
+		{name: "connection reset", result: core.LocalCommandResult{Stderr: "connection reset by peer"}, err: errors.New("exit status 1"), want: true},
+		// "eof" embedded in an unrelated word must NOT trigger recovery.
+		{name: "bare eof in word", result: core.LocalCommandResult{Stderr: "wrote /tmp/eofdata.json"}, err: errors.New("exit status 1"), want: false},
+		// A definitive validation error must NOT be treated as ambiguous.
+		{name: "definitive validation error", result: core.LocalCommandResult{Stderr: "InvalidArgument: bad instance type"}, err: errors.New("exit status 1"), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ambiguousPhalaCreateOutcome(test.result, test.err); got != test.want {
+				t.Fatalf("ambiguousPhalaCreateOutcome=%t want %t", got, test.want)
+			}
+		})
 	}
 }
 
@@ -348,8 +409,8 @@ func TestListParsesItemsWrapperAndFiltersOwnership(t *testing.T) {
 	runner := &fakeRunner{results: []core.LocalCommandResult{
 		{Stdout: `{"success":true,"items":[]}`},
 		{Stdout: `{"success":true,"items":[
-			{"id":"owned","name":"crabbox-cbx-abcdef123456","status":"running"},
-			{"id":"foreign","name":"someone-elses-cvm"}
+			{"appId":"owned","cvmName":"crabbox-cbx-abcdef123456","status":"running"},
+			{"appId":"foreign","cvmName":"someone-elses-cvm","status":"running"}
 		]}`},
 	}}
 	cfg := core.BaseConfig()
@@ -377,7 +438,7 @@ func TestListExcludesNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	// no backing local claim must be excluded — it could be a foreign resource.
 	runner := &fakeRunner{results: []core.LocalCommandResult{
 		{Stdout: `{"success":true,"items":[
-			{"id":"prefixed","name":"crabbox-cbx-abcdef123456","status":"running"}
+			{"appId":"prefixed","cvmName":"crabbox-cbx-abcdef123456","status":"running"}
 		]}`},
 	}}
 	cfg := core.BaseConfig()
@@ -395,7 +456,7 @@ func TestListExcludesNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 
 func TestListIgnoresTrailingCLINoise(t *testing.T) {
 	runner := &fakeRunner{results: []core.LocalCommandResult{
-		{Stdout: "{\"success\":true,\"items\":[{\"id\":\"owned\",\"name\":\"crabbox-cbx-abcdef123456\"}]}\nAssertion failed: !(handle->flags & UV_HANDLE_CLOSING)\n"},
+		{Stdout: "{\"success\":true,\"items\":[{\"appId\":\"owned\",\"cvmName\":\"crabbox-cbx-abcdef123456\",\"status\":\"running\"}]}\nAssertion failed: !(handle->flags & UV_HANDLE_CLOSING)\n"},
 	}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -762,6 +823,58 @@ func TestReleaseSkipsDeleteWhenCVMMissingFromInventory(t *testing.T) {
 	}
 }
 
+// TestReleaseRetainsClaimOnTransientNotFound pins FIX C: a TRANSIENT `cvms get`
+// failure whose body merely CONTAINS "not found" as part of an unrelated message
+// (here a gateway endpoint error) must NOT be mistaken for a definitively-gone
+// CVM. The local claim is the sole ownership anchor, so it must be retained (and
+// the release returns an error) so a later `crabbox stop` can retry rather than
+// orphaning a live billing CVM.
+func TestReleaseRetainsClaimOnTransientNotFound(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := &fakeRunner{
+		results: []core.LocalCommandResult{{Stderr: "Error: gateway endpoint not found (upstream route unavailable)"}},
+		errs:    []error{errors.New("exit status 1")},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	server := core.Server{
+		CloudID:  "live-cvm",
+		Provider: providerName,
+		Labels: map[string]string{
+			"crabbox":    "true",
+			"created_by": "crabbox",
+			"lease":      leaseID,
+			"provider":   providerName,
+		},
+	}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "live", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  server,
+	}})
+	if err == nil {
+		t.Fatal("transient cvms-get failure must surface as an error, not a silent reap")
+	}
+	// No delete may be issued, and the claim must SURVIVE for a later retry.
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && c.args[1] == "delete" {
+			t.Fatalf("issued a delete on a transient lookup failure: calls=%#v", runner.calls)
+		}
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].LeaseID != leaseID {
+		t.Fatalf("claim was dropped on a transient not-found: claims=%#v", claims)
+	}
+}
+
 func TestReleaseOnlyResolveAllowsExpiredClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
@@ -790,6 +903,63 @@ func TestReleaseOnlyResolveAllowsExpiredClaim(t *testing.T) {
 	}
 	if item.cloudID() != "expired-cvm" || resolvedLeaseID != leaseID {
 		t.Fatalf("item=%#v lease=%q", item, resolvedLeaseID)
+	}
+}
+
+// TestResolveStatusOnlyReadyProbeSkipsBootstrap pins FIX F: a `status --wait`
+// resolve (StatusOnly + ReadyProbe) must NOT run prepareSSH (the FULL tool
+// bootstrap over SSH). prepareSSH's first act is WaitForSSHReady, which returns
+// the context error immediately on a cancelled context; so with a cancelled
+// context, a Resolve that returns NIL proves prepareSSH was skipped, while a
+// non-status Resolve returns that context error. The fakeRunner ignores the
+// context, so the `cvms list` inside resolve() still succeeds.
+func TestResolveStatusOnlyReadyProbeSkipsBootstrap(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.IdleTimeout = 5 * time.Minute
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	const host = "b60d1f55-22.dstack-pha-prod5.phala.network"
+	labels := core.DirectLeaseLabels(cfg, leaseID, "blue-box", providerName, "", false, time.Now())
+	labels["phala_cvm"] = "owned"
+	labels["gateway_host"] = host
+	server := core.Server{CloudID: "owned", Provider: providerName, Name: "blue-box", Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, core.SSHTarget{Host: "owned", User: "root", Port: "22"}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	listPayload := `{"success":true,"items":[{"appId":"owned","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`
+
+	// status --wait: StatusOnly + ReadyProbe, cancelled context. prepareSSH is
+	// skipped, so Resolve returns the lease with no error.
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lease, err := b.Resolve(ctx, core.ResolveRequest{ID: leaseID, StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatalf("status --wait Resolve must skip bootstrap, got err=%v", err)
+	}
+	if lease.LeaseID != leaseID {
+		t.Fatalf("lease=%#v", lease)
+	}
+	// The cached gateway host must be on the status path's lease target so the
+	// lightweight probe does not pay a per-connection `cvms get`.
+	if !strings.Contains(lease.SSH.ProxyCommand, "--gateway-host "+host) {
+		t.Fatalf("status lease ProxyCommand missing cached gateway host: %q", lease.SSH.ProxyCommand)
+	}
+	// Only the `cvms list` from resolve() ran; no per-connection `cvms get`.
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms list --json" {
+		t.Fatalf("status path issued unexpected CLI calls: %#v", runner.calls)
+	}
+
+	// Control: a non-status Resolve (acquire/run) on the same cancelled context
+	// DOES run prepareSSH, which surfaces the cancellation. This proves the guard
+	// is what suppressed the bootstrap above, not some other short-circuit.
+	runner2 := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
+	b2 := &backend{cfg: cfg, rt: core.Runtime{Exec: runner2, Stdout: io.Discard, Stderr: io.Discard}}
+	if _, err := b2.Resolve(ctx, core.ResolveRequest{ID: leaseID}); err == nil {
+		t.Fatal("non-status Resolve on a cancelled context must run prepareSSH and error")
 	}
 }
 
@@ -823,8 +993,8 @@ func TestResolveExactCVMIDOutranksClaimSlug(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[
-		{"id":"cvm-exact","name":"crabbox-cbx-bbbbbbbbbbbb","status":"running"},
-		{"id":"instance-slug","name":"crabbox-cbx-aaaaaaaaaaaa","status":"running"}
+		{"appId":"cvm-exact","cvmName":"crabbox-cbx-bbbbbbbbbbbb","status":"running"},
+		{"appId":"instance-slug","cvmName":"crabbox-cbx-aaaaaaaaaaaa","status":"running"}
 	]}`}}}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 	item, leaseID, err := b.resolve(context.Background(), "cvm-exact", cfg, false)
@@ -833,6 +1003,87 @@ func TestResolveExactCVMIDOutranksClaimSlug(t *testing.T) {
 	}
 	if item.cloudID() != "cvm-exact" || leaseID != "cbx_bbbbbbbbbbbb" {
 		t.Fatalf("item=%#v lease=%q", item, leaseID)
+	}
+}
+
+// TestSlugRoundTripsThroughResolveAndList pins FIX G: after a claim carries
+// slug=X, (1) resolve("X") must find the lease, (2) List must surface slug=X,
+// and (3) a Resolve re-claim (with a repo root) must NOT blank the stored slug.
+// The regression was Resolve re-claiming with item.Labels["slug"] -- which is
+// empty on the synthetic/list path -- writing an empty slug over the stored one,
+// so List then showed slug=- and resolve-by-slug missed.
+func TestSlugRoundTripsThroughResolveAndList(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.IdleTimeout = 5 * time.Minute
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	const slug = "blue-box"
+	repoRoot := t.TempDir()
+	// Mirror the fixed acquire: the slug is in BOTH claim.Slug (explicit arg) and
+	// the server labels.
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels["phala_cvm"] = "owned"
+	labels["state"] = "ready"
+	server := core.Server{CloudID: "owned", Provider: providerName, Name: slug, Labels: labels}
+	target := core.SSHTarget{Host: "owned", User: "root", Port: "22"}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	listPayload := `{"success":true,"items":[{"appId":"owned","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`
+
+	// (1) resolve-by-slug finds the lease, and the server label surfaces slug=X.
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	item, resolvedLease, err := b.resolve(context.Background(), slug, cfg, false)
+	if err != nil {
+		t.Fatalf("resolve-by-slug failed: %v", err)
+	}
+	if resolvedLease != leaseID {
+		t.Fatalf("resolve-by-slug lease=%q want %q", resolvedLease, leaseID)
+	}
+	srv := b.server(item, cfg)
+	if claim, ok, _ := resolvePhalaClaim(leaseID, cfg); ok {
+		mergeClaimLabels(&srv, claim)
+	}
+	if srv.Labels["slug"] != slug {
+		t.Fatalf("server slug=%q want %q", srv.Labels["slug"], slug)
+	}
+
+	// (2) List surfaces slug=X.
+	runner2 := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
+	b2 := &backend{cfg: cfg, rt: core.Runtime{Exec: runner2, Stdout: io.Discard, Stderr: io.Discard}}
+	views, err := b2.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].Labels["slug"] != slug {
+		t.Fatalf("List did not surface slug=%q: views=%#v", slug, views)
+	}
+
+	// (3) A Resolve re-claim (with a repo root) must NOT blank the stored slug.
+	// The resolve path returns a synthetic/list item whose labels may lack slug;
+	// the re-claim must prefer the authoritative slug, not overwrite it with blank.
+	runner3 := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
+	b3 := &backend{cfg: cfg, rt: core.Runtime{Exec: runner3, Stdout: io.Discard, Stderr: io.Discard}}
+	// ReadyProbe:true gets past the status-only early return; StatusOnly:true still
+	// skips the SSH bootstrap (FIX F), so the re-claim block runs without SSH.
+	if _, err := b3.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, StatusOnly: true, ReadyProbe: true, Repo: core.Repo{Root: repoRoot}}); err != nil {
+		t.Fatalf("Resolve re-claim failed: %v", err)
+	}
+	claim, ok, err := resolvePhalaClaim(leaseID, cfg)
+	if err != nil || !ok {
+		t.Fatalf("claim missing after Resolve: ok=%t err=%v", ok, err)
+	}
+	if claim.Slug != slug {
+		t.Fatalf("Resolve re-claim blanked the slug: claim.Slug=%q want %q", claim.Slug, slug)
+	}
+	// And resolve-by-slug must STILL work after the re-claim.
+	runner4 := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
+	b4 := &backend{cfg: cfg, rt: core.Runtime{Exec: runner4, Stdout: io.Discard, Stderr: io.Discard}}
+	if _, lease2, err := b4.resolve(context.Background(), slug, cfg, false); err != nil || lease2 != leaseID {
+		t.Fatalf("resolve-by-slug broke after re-claim: lease=%q err=%v", lease2, err)
 	}
 }
 
@@ -856,8 +1107,9 @@ func TestCleanupTransitionsAndRemovesClaim(t *testing.T) {
 	}
 	runner := &fakeRunner{results: []core.LocalCommandResult{
 		{Stdout: `{"success":true,"items":[
-			{"id":"expired-cvm","name":"crabbox-cbx-abcdef123456","status":"running"}
+			{"appId":"expired-cvm","cvmName":"crabbox-cbx-abcdef123456","status":"running"}
 		]}`},
+		{Stdout: `{"success":true,"app_id":"expired-cvm","name":"crabbox-cbx-abcdef123456","status":"running"}`},
 		{},
 	}}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
@@ -871,7 +1123,11 @@ func TestCleanupTransitionsAndRemovesClaim(t *testing.T) {
 	if len(claims) != 0 {
 		t.Fatalf("claims=%#v", claims)
 	}
-	if len(runner.calls) != 2 || strings.Join(runner.calls[1].args, " ") != "cvms delete --cvm-id expired-cvm --force" {
+	// Cleanup now corroborates ownership via `cvms get` before deleting (FIX B),
+	// so the call sequence is list -> get -> delete.
+	if len(runner.calls) != 3 ||
+		strings.Join(runner.calls[1].args, " ") != "cvms get --cvm-id expired-cvm --json" ||
+		strings.Join(runner.calls[2].args, " ") != "cvms delete --cvm-id expired-cvm --force" {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
 }
@@ -885,7 +1141,7 @@ func TestCleanupSkipsNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	// no server-side ownership label it could be a foreign resource.
 	runner := &fakeRunner{results: []core.LocalCommandResult{
 		{Stdout: `{"success":true,"items":[
-			{"id":"prefixed","name":"crabbox-cbx-abcdef123456","status":"running"}
+			{"appId":"prefixed","cvmName":"crabbox-cbx-abcdef123456","status":"running"}
 		]}`},
 	}}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
@@ -894,6 +1150,62 @@ func TestCleanupSkipsNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	}
 	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms list --json" {
 		t.Fatalf("issued more than the inventory list (possible delete): calls=%#v", runner.calls)
+	}
+}
+
+// TestCleanupRejectsForeignAppIDReuse pins FIX B: a stale-but-unexpired local
+// claim records an app_id that dstack has since reused for a FOREIGN CVM. The
+// `cvms list` item's appId matches the claim (so owned() is true and the claim
+// resolves), but the corroborating `cvms get` returns a name that encodes a
+// DIFFERENT lease. Cleanup must NOT delete it, and must NOT drop the claim/key:
+// it mirrors ReleaseLease's validateDestroyTarget gate.
+func TestCleanupRejectsForeignAppIDReuse(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	labels := map[string]string{
+		"crabbox":    "true",
+		"created_by": "crabbox",
+		"expires_at": "1", // expired, so ShouldCleanupServer would want to delete
+		"lease":      leaseID,
+		"provider":   providerName,
+		"slug":       "expired",
+	}
+	server := core.Server{CloudID: "reused-appid", Provider: providerName, Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "expired", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		// list: the reused app_id is live again, name encodes a DIFFERENT lease.
+		{Stdout: `{"success":true,"items":[
+			{"appId":"reused-appid","cvmName":"crabbox-cbx-other00000000","status":"running"}
+		]}`},
+		// cvms get corroboration: name belongs to a different lease.
+		{Stdout: `{"success":true,"app_id":"reused-appid","name":"crabbox-cbx-other00000000","status":"running"}`},
+	}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	// list + get, but NO delete: the lease-name mismatch refuses the destroy.
+	if len(runner.calls) != 2 ||
+		strings.Join(runner.calls[1].args, " ") != "cvms get --cvm-id reused-appid --json" {
+		t.Fatalf("calls=%#v (expected list+get, no delete)", runner.calls)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && c.args[1] == "delete" {
+			t.Fatalf("Cleanup deleted a foreign CVM on app_id reuse: calls=%#v", runner.calls)
+		}
+	}
+	// The claim and key are retained (foreign reuse / transient must not drop them).
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].LeaseID != leaseID {
+		t.Fatalf("claim was dropped on a corroboration failure: claims=%#v", claims)
 	}
 }
 
@@ -917,14 +1229,14 @@ func TestCleanupAppliesRecoveryPolicyToLiveCVMs(t *testing.T) {
 			name:       "ambiguous grace expired",
 			recovery:   "ambiguous-create",
 			createdAt:  now.Add(-phalaAmbiguousCreateRecoveryGrace - time.Second),
-			wantCalls:  2,
+			wantCalls:  3,
 			wantClaims: 0,
 		},
 		{
 			name:       "rollback cleanup",
 			recovery:   "rollback-cleanup",
 			createdAt:  now,
-			wantCalls:  2,
+			wantCalls:  3,
 			wantClaims: 0,
 		},
 		{
@@ -950,8 +1262,10 @@ func TestCleanupAppliesRecoveryPolicyToLiveCVMs(t *testing.T) {
 			}
 			runner := &fakeRunner{results: []core.LocalCommandResult{
 				{Stdout: `{"success":true,"items":[
-					{"id":"recovery-cvm","name":"crabbox-cbx-abcdef123456","status":"running"}
+					{"appId":"recovery-cvm","cvmName":"crabbox-cbx-abcdef123456","status":"running"}
 				]}`},
+				// FIX B: Cleanup corroborates ownership via `cvms get` before delete.
+				{Stdout: `{"success":true,"app_id":"recovery-cvm","name":"crabbox-cbx-abcdef123456","status":"running"}`},
 				{},
 			}}
 			b := &backend{
@@ -1084,6 +1398,20 @@ func TestDestroyOnlySuppressesExplicitMissingCVMResponse(t *testing.T) {
 			err:     errors.New("exit status 1"),
 			wantErr: true,
 		},
+		{
+			// FIX C: a "not found" that is GATEWAY-scoped, not CVM-scoped, is a real
+			// delete failure and must propagate so a live billing CVM is not orphaned.
+			name:    "gateway endpoint not found is not an already-gone CVM",
+			result:  core.LocalCommandResult{Stderr: "Error: gateway endpoint not found"},
+			err:     errors.New("exit status 1"),
+			wantErr: true,
+		},
+		{
+			// An unambiguous CVM-scoped phrase is suppressed as already-gone.
+			name:   "no such cvm is already gone",
+			result: core.LocalCommandResult{Stderr: "Error: no such cvm: missing-cvm"},
+			err:    errors.New("exit status 1"),
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &fakeRunner{
@@ -1169,27 +1497,28 @@ func TestCreateParsesRealHardwareDeployStdout(t *testing.T) {
 }
 
 // realCVMSListStdout is the EXACT `phala cvms list --json` payload observed on
-// real hardware: a {success,total,items:[...]} wrapper whose items use
-// camelCase keys (appId, status, name, vmUuid). The provider previously parsed
-// only snake_case and so read blank identifiers from this payload.
+// real hardware: a {success,total,items:[...]} wrapper whose items carry ONLY
+// appId, cvmName, status and uptime -- the CVM name is under `cvmName` (there
+// is NO `name` key). The provider previously read the name from `name`/`appName`
+// and so read a BLANK name for every real list item, silently breaking
+// ownership and recovery.
 const realCVMSListStdout = `{
   "success": true,
   "total": 1,
   "items": [
     {
       "appId": "b60d1f55eeb01f17e0a5220b4c03792248d49f92",
-      "name": "crabbox-cbx-abcdef123456",
-      "vmUuid": "42fd1f82-7b4c-47cc-92f9-a5d39476c649",
-      "instanceId": "i-0a5d39476c649",
-      "status": "running"
+      "cvmName": "crabbox-cbx-abcdef123456",
+      "status": "running",
+      "uptime": "3 minutes"
     }
   ]
 }`
 
 // TestListParsesRealCamelCaseListPayload pins list parsing against the exact
-// camelCase `cvms list --json` payload from real hardware: the item's appId,
-// name, vmUuid, instanceId and status must all decode (snake_case-only parsing
-// would have read blanks), and cloudID() must return the canonical app_id.
+// `cvms list --json` payload from real hardware: the item's appId, cvmName and
+// status must all decode (reading the name from `name` only would have read a
+// blank), and cloudID() must return the canonical app_id.
 func TestListParsesRealCamelCaseListPayload(t *testing.T) {
 	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: realCVMSListStdout}}}
 	cfg := core.BaseConfig()
@@ -1207,14 +1536,9 @@ func TestListParsesRealCamelCaseListPayload(t *testing.T) {
 	if item.AppID != "b60d1f55eeb01f17e0a5220b4c03792248d49f92" {
 		t.Fatalf("appId=%q not decoded from camelCase", item.AppID)
 	}
+	// The list item carries the name under `cvmName`, NOT `name`.
 	if item.Name != "crabbox-cbx-abcdef123456" {
-		t.Fatalf("name=%q not decoded from camelCase", item.Name)
-	}
-	if item.VMUUID != "42fd1f82-7b4c-47cc-92f9-a5d39476c649" {
-		t.Fatalf("vmUuid=%q not decoded from camelCase", item.VMUUID)
-	}
-	if item.InstanceID != "i-0a5d39476c649" {
-		t.Fatalf("instanceId=%q not decoded from camelCase", item.InstanceID)
+		t.Fatalf("name=%q not decoded from cvmName", item.Name)
 	}
 	if item.Status != "running" {
 		t.Fatalf("status=%q not decoded", item.Status)
@@ -1239,6 +1563,8 @@ func TestInstanceUnmarshalAcceptsBothCaseStyles(t *testing.T) {
 	}{
 		{name: "snake_case (cvms get)", json: `{"app_id":"app1","vm_uuid":"vm1","instance_id":"in1","name":"n1","status":"running"}`},
 		{name: "camelCase (cvms list)", json: `{"appId":"app1","vmUuid":"vm1","instanceId":"in1","name":"n1","status":"running"}`},
+		// The real `cvms list` item carries the name under `cvmName`, not `name`.
+		{name: "real list cvmName", json: `{"appId":"app1","vmUuid":"vm1","instanceId":"in1","cvmName":"n1","status":"running"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var item instance
@@ -1318,7 +1644,7 @@ func TestGetInstanceParsesRealCVMSGetShapes(t *testing.T) {
 func TestListSkipsItemMissingName(t *testing.T) {
 	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[
 		{"status":"running"},
-		{"appId":"keeper","name":"crabbox-cbx-abcdef123456","status":"running"}
+		{"appId":"keeper","cvmName":"crabbox-cbx-abcdef123456","status":"running"}
 	]}`}}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -1434,5 +1760,315 @@ func TestGatewayHostRoundTripsThroughClaimToProxyCommand(t *testing.T) {
 	lease := b.lease(item, cfg, leaseID)
 	if !strings.Contains(lease.SSH.ProxyCommand, "--gateway-host "+host) {
 		t.Fatalf("ProxyCommand=%q missing cached --gateway-host %q", lease.SSH.ProxyCommand, host)
+	}
+}
+
+// TestReleaseDestroysOwnedCVM drives the ONLY branch of validateDestroyTarget
+// that issues a delete: the present-and-owned success path (`return true, nil`).
+// The sibling release tests all exercise the REFUSAL branches (foreign name,
+// mismatched lease, missing CVM, transient failure), so a mutation that flips
+// validateDestroyTarget's final `return true` to `return false` would otherwise
+// survive -- no test asserts a delete is actually issued. Here a local claim
+// maps the lease to a cloud id, the `cvms get` payload names a crabbox- CVM
+// whose name encodes THIS lease, so the destroy proceeds: assert the
+// `cvms delete --cvm-id <id> --force` call WAS issued, the release returned nil,
+// and the claim + stored testbox key were reaped.
+func TestReleaseDestroysOwnedCVM(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	const cloudID = "owned"
+	claimPhalaLease(t, cfg, leaseID, cloudID)
+	// ReleaseLease's call sequence for an OWNED, present CVM:
+	//   1. validateDestroyTarget -> getInstance -> `cvms get --cvm-id <id> --json`
+	//      returns the real FLAT snake_case object whose `name` is the crabbox-
+	//      CVM name encoding THIS lease, so ownership corroborates and the success
+	//      branch (`return true, nil`) is taken.
+	//   2. destroy -> `cvms delete --cvm-id <id> --force` succeeds.
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"app_id":"owned","vm_uuid":"42fd1f82","id":"owned","instance_id":"in1","name":"crabbox-cbx-abcdef123456","status":"running","gateway":{"base_domain":"dstack-pha-prod5.phala.network"}}`},
+		{},
+	}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  core.Server{CloudID: cloudID},
+	}}); err != nil {
+		t.Fatalf("ReleaseLease on an owned present CVM must succeed: %v", err)
+	}
+	// The success branch must have issued a delete (this is the assertion the
+	// `return true->false` mutation breaks).
+	const wantGet = "cvms get --cvm-id owned --json"
+	const wantDelete = "cvms delete --cvm-id owned --force"
+	if len(runner.calls) != 2 ||
+		strings.Join(runner.calls[0].args, " ") != wantGet ||
+		strings.Join(runner.calls[1].args, " ") != wantDelete {
+		t.Fatalf("expected get+delete, calls=%#v", runner.calls)
+	}
+	deleted := false
+	for _, c := range runner.calls {
+		if strings.Join(c.args, " ") == wantDelete {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatalf("no `cvms delete --cvm-id owned --force` was issued: calls=%#v", runner.calls)
+	}
+	// The CVM is gone, so the claim and stored testbox key are reaped: the claim
+	// is no longer resolvable.
+	if _, ok, err := resolvePhalaClaim(leaseID, cfg); err != nil || ok {
+		t.Fatalf("claim still resolvable after destroy: ok=%t err=%v", ok, err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claim not reaped after destroy: claims=%#v", claims)
+	}
+}
+
+// acquireDeployStdout is a real `phala deploy --json` stdout (leading
+// "Provisioning CVM ..." progress line then the snake_case object) whose app_id
+// is the canonical CVM handle Acquire threads through resolveGatewayHost,
+// findInstance and -- on a post-create failure -- rollback's `cvms delete`.
+const acquireDeployStdout = `Provisioning CVM ...
+{
+  "success": true,
+  "vm_uuid": "42fd1f82-7b4c-47cc-92f9-a5d39476c649",
+  "name": "crabbox-cbx-acquire000000",
+  "app_id": "acq11f55eeb01f17e0a5220b4c03792248d49f92",
+  "dashboard_url": "https://cloud.phala.com/dashboard/cvms/42fd1f82"
+}`
+
+const acquireAppID = "acq11f55eeb01f17e0a5220b4c03792248d49f92"
+
+// TestAcquireHappyPath drives Acquire through every CLI call it makes up to the
+// SSH bootstrap boundary and asserts the create/resolve sequence threads the
+// canonical app_id through correctly.
+//
+// TESTABILITY GAP (documented, not forced): a fully successful Acquire (claim
+// written, ready LeaseTarget returned) is NOT reachable in a unit test for this
+// provider. After create succeeds, Acquire calls prepareSSH, which runs the REAL
+// tool bootstrap over SSH (core.WaitForSSHReady + core.RunSSHQuiet) against the
+// just-created CVM. Unlike the DigitalOcean backend -- whose struct exposes an
+// injectable `waitSSH func(...)` field that its Acquire tests override with a
+// no-op -- the Phala backend wires WaitForSSHReady/RunSSHQuiet directly with no
+// seam, and this change set may touch ONLY backend_test.go, so no stub can be
+// injected. The only way to make prepareSSH terminate without a live host is a
+// cancelled context, which makes WaitForSSHReady return the cancellation
+// immediately (proven by TestResolveStatusOnlyReadyProbeSkipsBootstrap's control
+// case) -- and that necessarily routes Acquire into its rollback path. So the
+// furthest reachable point on a "happy" create is the SSH boundary: this test
+// queues a SUCCESSFUL create + gateway-resolve + findInstance, then lets
+// prepareSSH fail on the cancelled context, and asserts (a) the create reached
+// findInstance with the canonical app_id (the four pre-SSH CLI calls ran in
+// order) and (b) the post-create failure deletes exactly the just-created CVM by
+// that app_id so no confidential VM leaks. Closing this gap so the happy path
+// can assert a written claim + ready lease would require a `waitSSH`-style seam
+// on the backend struct (a production change), mirroring DigitalOcean.
+func TestAcquireHappyPath(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Phala.Compose = "/srv/compose.yml"
+	applyDefaults(&cfg)
+	// Acquire's CLI sequence (the fakeRunner is shared across every b.phala call):
+	//   1. listInstances            -> `cvms list --json`           (no owned CVMs)
+	//   2. create                   -> `deploy --json ...`          (app_id=acq...)
+	//   3. resolveGatewayHost(id)   -> `cvms get --cvm-id <id> --json`
+	//   4. findInstance(id)         -> `cvms list --json`           (the new CVM)
+	//   5. prepareSSH               -> WaitForSSHReady fails (cancelled ctx)
+	//   6. rollback -> destroy      -> `cvms delete --cvm-id <id> --force`
+	listAfterCreate := `{"success":true,"items":[{"appId":"` + acquireAppID + `","cvmName":"crabbox-cbx-acquire000000","status":"running"}]}`
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"items":[]}`},
+		{Stdout: acquireDeployStdout},
+		{Stdout: `{"success":true,"app_id":"` + acquireAppID + `","name":"crabbox-cbx-acquire000000","status":"running","gateway":{"base_domain":"dstack-pha-prod5.phala.network"}}`},
+		{Stdout: listAfterCreate},
+		{}, // rollback delete
+	}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := b.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "blue-box"})
+	// prepareSSH fails on the cancelled context, so Acquire returns that error
+	// after rolling back. (A fully successful Acquire is unreachable without an
+	// SSH seam -- see the doc comment above.)
+	if err == nil {
+		t.Fatal("Acquire on a cancelled context must surface the prepareSSH failure")
+	}
+	// The four pre-SSH calls ran in order, proving create+gateway+findInstance
+	// threaded the canonical app_id through.
+	wantPreSSH := []string{
+		"cvms list --json",
+		"deploy --json", // prefix-checked below
+		"cvms get --cvm-id " + acquireAppID + " --json",
+		"cvms list --json",
+	}
+	if len(runner.calls) < 4 {
+		t.Fatalf("Acquire did not reach the SSH boundary: calls=%#v", runner.calls)
+	}
+	if got := strings.Join(runner.calls[0].args, " "); got != wantPreSSH[0] {
+		t.Fatalf("call 0 = %q want %q", got, wantPreSSH[0])
+	}
+	if got := strings.Join(runner.calls[1].args, " "); !strings.HasPrefix(got, "deploy --json") {
+		t.Fatalf("call 1 = %q want a `deploy --json` invocation", got)
+	}
+	if got := strings.Join(runner.calls[2].args, " "); got != wantPreSSH[2] {
+		t.Fatalf("call 2 (gateway resolve) = %q want %q", got, wantPreSSH[2])
+	}
+	if got := strings.Join(runner.calls[3].args, " "); got != wantPreSSH[3] {
+		t.Fatalf("call 3 (findInstance) = %q want %q", got, wantPreSSH[3])
+	}
+	// The post-create failure must delete exactly the just-created CVM so no
+	// confidential VM leaks.
+	wantDelete := "cvms delete --cvm-id " + acquireAppID + " --force"
+	deleted := false
+	for _, c := range runner.calls {
+		if strings.Join(c.args, " ") == wantDelete {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatalf("rollback did not delete the created CVM %s: calls=%#v", acquireAppID, runner.calls)
+	}
+}
+
+// TestAcquireRollbackDestroysLeakedCVM pins the rollback safety property: a
+// POST-create failure (here prepareSSH failing on a cancelled context) must
+// issue a `cvms delete` for the just-created CVM so a confidential VM is never
+// leaked, and -- since req.Keep is false -- must NOT persist a recovery claim.
+// This mirrors the DigitalOcean TestAcquireRollsBackDropletAndKeyOnSSHFailure,
+// except the SSH failure is induced via the cancelled context rather than an
+// injectable waitSSH stub (the Phala backend exposes no such seam; see
+// TestAcquireHappyPath's doc comment).
+func TestAcquireRollbackDestroysLeakedCVM(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Phala.Compose = "/srv/compose.yml"
+	applyDefaults(&cfg)
+	listAfterCreate := `{"success":true,"items":[{"appId":"` + acquireAppID + `","cvmName":"crabbox-cbx-acquire000000","status":"running"}]}`
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"items":[]}`}, // listInstances
+		{Stdout: acquireDeployStdout},           // create
+		{Stdout: `{"success":true,"app_id":"` + acquireAppID + `","gateway":{"base_domain":"gw.example"}}`}, // resolveGatewayHost
+		{Stdout: listAfterCreate}, // findInstance
+		{},                        // rollback delete (succeeds)
+	}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := b.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-box"})
+	if err == nil {
+		t.Fatal("post-create prepareSSH failure must surface as an Acquire error")
+	}
+	// The leaked CVM must be destroyed by its app_id.
+	wantDelete := "cvms delete --cvm-id " + acquireAppID + " --force"
+	deletes := 0
+	for _, c := range runner.calls {
+		if strings.Join(c.args, " ") == wantDelete {
+			deletes++
+		}
+	}
+	if deletes != 1 {
+		t.Fatalf("expected exactly one rollback `%s`, calls=%#v", wantDelete, runner.calls)
+	}
+	// req.Keep is false, so a successful rollback-destroy leaves NO recovery claim
+	// behind (the claim is only persisted when the destroy itself fails).
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("rollback left a claim behind despite a successful destroy: claims=%#v", claims)
+	}
+}
+
+// TestResolveGatewayHostDomainPreferenceTable pins the firstNonBlank preference
+// the gatewayGetOutput parser applies to BOTH the gateway domain and the app id.
+// The only sibling test (TestResolveGatewayHostParsesRealCVMSGetShape) feeds a
+// nested gateway.base_domain, so a reorder of any other spelling -- nested
+// gateway_domain, nested domain, top-level gateway_domain, the appId/id/
+// instance_id app-id fallbacks, or the nested cvm wrapper -- would survive. This
+// drives each spelling through b.resolveGatewayHost (the production parse path,
+// via a fakeRunner returning the crafted `cvms get` payload) and asserts the
+// derived host is `<app_id>-22.<expected_domain>` for each, including that a
+// nested gateway_domain wins over a same-payload base_domain and that the app-id
+// preference (app_id > appId > id > instance_id) holds.
+func TestResolveGatewayHostDomainPreferenceTable(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	for _, test := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			// gatewayDomain ranks gateway.gateway_domain ahead of base_domain, so
+			// the nested gateway_domain wins when both are present.
+			name: "nested gateway_domain wins over base_domain",
+			body: `{"success":true,"app_id":"app1","gateway":{"gateway_domain":"win.example","base_domain":"lose.example"}}`,
+			want: "app1-22.win.example",
+		},
+		{
+			name: "nested base_domain",
+			body: `{"success":true,"app_id":"app1","gateway":{"base_domain":"base.example"}}`,
+			want: "app1-22.base.example",
+		},
+		{
+			name: "nested domain",
+			body: `{"success":true,"app_id":"app1","gateway":{"domain":"plain.example"}}`,
+			want: "app1-22.plain.example",
+		},
+		{
+			name: "top-level gateway_domain",
+			body: `{"success":true,"app_id":"app1","gateway_domain":"top.example"}`,
+			want: "app1-22.top.example",
+		},
+		{
+			// app_id is absent, so the camelCase appId alias supplies the host label.
+			name: "camelCase appId fallback",
+			body: `{"success":true,"appId":"camel1","gateway":{"base_domain":"camel.example"}}`,
+			want: "camel1-22.camel.example",
+		},
+		{
+			// app_id/appId absent: the id fallback supplies the host label.
+			name: "id app-id fallback",
+			body: `{"success":true,"id":"idonly","gateway":{"base_domain":"id.example"}}`,
+			want: "idonly-22.id.example",
+		},
+		{
+			// app_id/appId/id absent: the instance_id fallback supplies the label.
+			name: "instance_id app-id fallback",
+			body: `{"success":true,"instance_id":"inst1","gateway":{"base_domain":"inst.example"}}`,
+			want: "inst1-22.inst.example",
+		},
+		{
+			// Both the app id and the gateway domain live ONLY on the nested cvm
+			// wrapper, so the parser must fall through into it for each.
+			name: "nested cvm wrapper",
+			body: `{"success":true,"cvm":{"app_id":"nested1","gateway":{"gateway_domain":"nested.example"}}}`,
+			want: "nested1-22.nested.example",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: test.body}}}
+			b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			host, err := b.resolveGatewayHost(context.Background(), "cvm-1")
+			if err != nil {
+				t.Fatalf("resolveGatewayHost failed: %v", err)
+			}
+			if host != test.want {
+				t.Fatalf("host=%q want %q", host, test.want)
+			}
+			if got := strings.Join(runner.calls[0].args, " "); got != "cvms get --cvm-id cvm-1 --json" {
+				t.Fatalf("args=%q", got)
+			}
+		})
 	}
 }

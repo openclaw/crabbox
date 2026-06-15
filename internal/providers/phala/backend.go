@@ -63,10 +63,12 @@ type backend struct {
 // passed back to ssh/get/delete (a real live run confirmed `cvms get/delete
 // --cvm-id <app_id>` works, with name and vm_uuid also accepted).
 //
-// The live `phala cvms list --json` payload emits camelCase keys (appId,
-// vmUuid, instanceId, name, status), while `phala cvms get --json` emits
-// snake_case (app_id, vm_uuid, instance_id). instance therefore reads BOTH
-// spellings of every identifier via a custom unmarshaler.
+// The live `phala cvms list --json` item emits camelCase keys (appId, cvmName,
+// status, uptime) and carries the name under `cvmName` (there is NO `name`
+// key), while `phala cvms get --json` emits a flat snake_case object (app_id,
+// vm_uuid, instance_id, name). instance therefore reads BOTH spellings of every
+// identifier -- including the `cvmName` list-name key -- via a custom
+// unmarshaler.
 type instance struct {
 	ID           string
 	VMUUID       string
@@ -111,7 +113,10 @@ func (i *instance) UnmarshalJSON(data []byte) error {
 	i.VMUUID = str("vm_uuid", "vmUuid")
 	i.AppID = str("app_id", "appId")
 	i.InstanceID = str("instance_id", "instanceId")
-	i.Name = str("name", "appName")
+	// The live `cvms list` item carries the CVM name under `cvmName` (camelCase);
+	// `cvms get`/deploy carry it under `name`. Read all spellings so ownership and
+	// recovery work against either shape (real list items have NO `name` key).
+	i.Name = str("name", "cvmName", "appName")
 	i.Status = str("status")
 	i.InstanceType = str("instance_type", "instanceType")
 	i.Node = str("node")
@@ -350,13 +355,19 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, rollback(err)
 	}
 	// findInstance rebuilt item.Labels from listInstances (no claim exists yet),
-	// so re-apply the cached gateway host directly so the initial prepareSSH and
-	// the persisted claim both carry it.
+	// so re-apply the cached gateway host AND the allocated slug directly. Without
+	// the slug here, lease.Server.Labels["slug"] is blank and the claim's endpoint
+	// labels persist an empty slug (claim.Slug is still set from the explicit slug
+	// arg, but the labels diverge), which surfaces as slug=- on List and a later
+	// resolve-by-slug miss.
+	if item.Labels == nil {
+		item.Labels = map[string]string{}
+	}
 	if host := labels["gateway_host"]; host != "" {
-		if item.Labels == nil {
-			item.Labels = map[string]string{}
-		}
 		item.Labels["gateway_host"] = host
+	}
+	if slug != "" {
+		item.Labels["slug"] = slug
 	}
 	lease := b.lease(item, cfg, leaseID)
 	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
@@ -385,13 +396,28 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if leaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "Phala CVM %s has no Crabbox lease id", item.cloudID())
 	}
-	if req.ReadyProbe || !req.StatusOnly {
+	// prepareSSH re-runs the FULL tool bootstrap over SSH. That belongs ONLY to a
+	// non-status acquire/run resolve. For status checks (StatusOnly, including
+	// `status --wait` which sets ReadyProbe) readiness is decided by the caller's
+	// lightweight probeSSHReady in statusViewFromLeaseTarget -- re-bootstrapping on
+	// every status poll re-runs apt/dnf over SSH and times the poll out. The cached
+	// gateway_host on the lease target keeps that lightweight probe from paying a
+	// per-connection `phala cvms get`.
+	if !req.StatusOnly {
 		if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
 	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, item.Labels["slug"], cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		// The slug is stored in BOTH the claim.Slug field and the claim labels, but
+		// the claim labels can carry a blank slug (acquire records the endpoint
+		// labels before any claim exists, so item.Labels["slug"] is empty then).
+		// Re-claiming with item.Labels["slug"] would write an EMPTY slug and WIPE the
+		// stored one. b.lease()/mergeClaimLabels surfaced the authoritative claim.Slug
+		// onto lease.Server.Labels["slug"], so prefer that, and never overwrite a
+		// non-empty stored slug with a blank.
+		slug := firstNonBlank(lease.Server.Labels["slug"], item.Labels["slug"])
+		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -457,15 +483,28 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if leaseID == "" {
 		return core.Exit(4, "refusing to destroy Phala CVM %s without a Crabbox lease id", id)
 	}
+	// validateDestroyTarget returns (true,nil) when the CVM is confirmed present
+	// and owned, (false,nil) ONLY when it is PROVABLY gone (a definitive
+	// not-found), and a real error on any ambiguous lookup failure (e.g. a
+	// transient transport error, even one whose text contains "not found"). The
+	// local claim is the SOLE ownership anchor, so it must survive an ambiguous
+	// failure: returning that error here retains the claim+key so a later
+	// `crabbox stop` can retry.
 	present, err := b.validateDestroyTarget(ctx, cfg, id, leaseID)
 	if err != nil {
 		return err
 	}
 	if present {
 		if err := b.destroy(ctx, id); err != nil {
+			// The destroy failed (e.g. a transient gateway error that destroy() did
+			// NOT classify as already-gone): keep the claim+key so a retry can finish
+			// the release rather than orphaning a live billing CVM with no anchor.
 			return err
 		}
 	}
+	// Reached only when the CVM was destroyed (present) or is PROVABLY gone
+	// (present=false from a definitive not-found): both mean the resource no longer
+	// exists, so the claim+key are safe to reap.
 	if leaseID != "" {
 		core.RemoveLeaseClaim(leaseID)
 		core.RemoveStoredTestboxKey(leaseID)
@@ -492,14 +531,19 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		if idleTimeout <= 0 {
 			idleTimeout = cfg.IdleTimeout
 		}
+		// The claim write unconditionally overwrites claim.Slug with the slug arg, so
+		// a blank server.Labels["slug"] (e.g. a lease target whose labels lost it)
+		// would WIPE the stored slug on every idle keepalive. Prefer the existing
+		// claim's slug so Touch never blanks it.
+		slug := firstNonBlank(server.Labels["slug"], claim.Slug)
 		if ok {
 			if claim.RepoRoot != "" {
-				_, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], cfg, server, req.Lease.SSH, claim.RepoRoot, idleTimeout, false, claim, true)
+				_, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, req.Lease.SSH, claim.RepoRoot, idleTimeout, false, claim, true)
 			} else {
-				_, err = core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, server.Labels["slug"], cfg, server, req.Lease.SSH, idleTimeout, claim, true)
+				_, err = core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, server, req.Lease.SSH, idleTimeout, claim, true)
 			}
 		} else {
-			err = core.ClaimLeaseTargetForConfig(leaseID, server.Labels["slug"], cfg, server, req.Lease.SSH, idleTimeout)
+			err = core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, req.Lease.SSH, idleTimeout)
 		}
 		if err != nil {
 			return core.Server{}, err
@@ -554,6 +598,31 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		if req.DryRun {
 			fmt.Fprintf(b.rt.Stdout, "would destroy phala_cvm=%s lease=%s reason=%s\n", item.cloudID(), item.Labels["lease"], reason)
+			continue
+		}
+		// Corroborate ownership the same way ReleaseLease does before any delete:
+		// require a matching local claim AND a `cvms get` whose name encodes THIS
+		// lease. On dstack app_id reuse a stale-but-unexpired claim recording a
+		// reused app_id makes owned() true, so without this gate a Cleanup could
+		// delete a FOREIGN CVM.
+		present, err := b.validateDestroyTarget(ctx, cfg, item.cloudID(), claim.LeaseID)
+		if err != nil {
+			// An ownership/name-corroboration refusal (exit 4) on a reused app_id must
+			// not abort the whole sweep nor drop the claim/key (it may be a foreign
+			// reuse): skip this CVM and continue. Any other error (CLI/transport
+			// failure) is genuine and propagates.
+			var exitErr core.ExitError
+			if core.AsExitError(err, &exitErr) && exitErr.Code == 4 {
+				fmt.Fprintf(b.rt.Stderr, "skip phala_cvm=%s reason=ownership/name corroboration failed: %v\n", item.cloudID(), err)
+				continue
+			}
+			return err
+		}
+		if !present {
+			// The CVM is already gone (a definitive not-found at corroboration time).
+			// Skip without dropping the claim/key here; the missing-from-inventory
+			// reaping pass below removes claims whose CVM is absent.
+			fmt.Fprintf(b.rt.Stderr, "skip phala_cvm=%s reason=CVM not present at corroboration\n", item.cloudID())
 			continue
 		}
 		if claim.LeaseID != "" {
@@ -695,6 +764,15 @@ func composeFileForDeploy(cfg core.Config, publicKeyPath string) (string, error)
 	return path, nil
 }
 
+// ambiguousPhalaCreateOutcome reports whether a failed `phala deploy` MIGHT have
+// nonetheless created a CVM, so create() should recover-by-lease rather than
+// surface the error. Cancellation is detected structurally via errors.Is. The
+// remaining markers are ANCHORED, multi-word transport/transient phrases: the
+// bare "eof"/"unavailable" substrings were widened to "unexpected eof" /
+// "service unavailable" so they cannot false-match inside larger words or
+// unrelated messages (e.g. "eof" inside a path) and waste the ~30s recovery
+// window. Detail is scanned over the CLI's stdout/stderr plus the wrapped error
+// text, since the transport signal often lives in the error.
 func ambiguousPhalaCreateOutcome(result core.LocalCommandResult, err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
@@ -705,11 +783,14 @@ func ambiguousPhalaCreateOutcome(result core.LocalCommandResult, err error) bool
 		"connection closed",
 		"connection reset",
 		"context deadline exceeded",
-		"eof",
+		"unexpected eof",
 		"i/o timeout",
 		"timed out",
 		"transport is closing",
-		"unavailable",
+		"service unavailable",
+		"server unavailable",
+		"currently unavailable",
+		"temporarily unavailable",
 	} {
 		if strings.Contains(detail, marker) {
 			return true
@@ -1214,14 +1295,47 @@ func quoteProxyWord(word string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(word) + `"`
 }
 
+// missingCVMResponse reports whether the phala CLI's stdout/stderr unambiguously
+// signals the CVM itself is gone (so the caller treats it as already-deleted /
+// not-found), as opposed to some OTHER not-found-ish failure such as a gateway
+// endpoint or route lookup error. It matches only anchored, CVM-scoped phrases
+// and explicitly rejects generic gateway/route errors so a real delete failure
+// (e.g. "gateway endpoint not found") is never swallowed as success. The
+// command's wrapped error text is deliberately NOT scanned here: a transient
+// transport error can carry the words "not found" in an unrelated context.
+func missingCVMResponse(stdout, stderr string) bool {
+	detail := strings.ToLower(stdout + "\n" + stderr)
+	// A generic gateway/route/endpoint failure is NOT a missing CVM, even if it
+	// contains "not found"; do not treat it as already-gone.
+	for _, generic := range []string{"gateway", "endpoint", "route", "upstream", "dns"} {
+		if strings.Contains(detail, generic) {
+			return false
+		}
+	}
+	for _, phrase := range []string{
+		"cvm not found",
+		"no such cvm",
+		"cvm does not exist",
+		"could not find cvm",
+		"does not exist",
+	} {
+		if strings.Contains(detail, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *backend) destroy(ctx context.Context, id string) error {
 	cfg := b.configForRun()
 	result, err := b.phala(ctx, cfg, []string{"cvms", "delete", "--cvm-id", id, "--force"}, b.rt.Stderr)
 	if err == nil {
 		return nil
 	}
-	detail := strings.ToLower(result.Stdout + "\n" + result.Stderr)
-	if strings.Contains(detail, "not found") || strings.Contains(detail, "does not exist") {
+	// Only swallow the error when the CLI's own output unambiguously reports the
+	// CVM is already gone. A generic failure (e.g. "gateway endpoint not found")
+	// must propagate so a live billing CVM is never orphaned on a false success.
+	if missingCVMResponse(result.Stdout, result.Stderr) {
 		return nil
 	}
 	return commandError("phala cvms delete", result, err)
@@ -1230,18 +1344,23 @@ func (b *backend) destroy(ctx context.Context, id string) error {
 // getInstance fetches a single CVM via `phala cvms get --cvm-id <id> --json`.
 // Unlike `cvms list` (which omits the CVM name on real hardware), `cvms get`
 // echoes the name, which the destroy path needs to corroborate crabbox
-// ownership against the local lease claim. A not-found response (the CLI exits
-// non-zero with "not found"/"does not exist" on stderr) is treated as ok=false
-// with a nil error so a CVM that is already gone is not an error. The payload is
-// a snake_case object that may be flat or nested under a top-level cvm object;
-// instance's tolerant unmarshaler reads both spellings, and deployOutput's
-// decoder already handles the optional cvm nesting, so it is reused here.
+// ownership against the local lease claim. A DEFINITIVE not-found response (the
+// CLI exits non-zero and its OWN output unambiguously names a missing CVM) is
+// treated as ok=false with a nil error so a CVM that is already gone is not an
+// error. Any other failure -- including a transient/transport error whose
+// wrapped text merely happens to contain "not found" -- propagates as a real
+// error so the destroy path does NOT mistake it for an already-gone CVM and
+// orphan a live billing CVM. The payload is a snake_case object that may be flat
+// or nested under a top-level cvm object; instance's tolerant unmarshaler reads
+// both spellings, and deployOutput's decoder already handles the optional cvm
+// nesting, so it is reused here.
 func (b *backend) getInstance(ctx context.Context, id string) (instance, bool, error) {
 	cfg := b.configForRun()
 	result, err := b.phala(ctx, cfg, []string{"cvms", "get", "--cvm-id", id, "--json"}, nil)
 	if err != nil {
-		detail := strings.ToLower(result.Stdout + "\n" + result.Stderr + "\n" + err.Error())
-		if strings.Contains(detail, "not found") || strings.Contains(detail, "does not exist") {
+		// Scan only the CLI's own stdout/stderr (NOT err.Error()): a wrapped
+		// transport error text can contain "not found" in an unrelated message.
+		if missingCVMResponse(result.Stdout, result.Stderr) {
 			return instance{}, false, nil
 		}
 		return instance{}, false, commandError("phala cvms get", result, err)
@@ -1278,6 +1397,8 @@ func (b *backend) getInstance(ctx context.Context, id string) (instance, bool, e
 type gatewayGetOutput struct {
 	AppID         string
 	AppIDAlt      string
+	ID            string
+	InstanceID    string
 	GatewayDomain string
 	BaseDomain    string
 	Domain        string
@@ -1289,6 +1410,8 @@ func (g *gatewayGetOutput) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		AppID         string          `json:"app_id"`
 		AppIDAlt      string          `json:"appId"`
+		ID            string          `json:"id"`
+		InstanceID    string          `json:"instance_id"`
 		GatewayDomain string          `json:"gateway_domain"`
 		CVM           json.RawMessage `json:"cvm"`
 		Gateway       struct {
@@ -1302,6 +1425,8 @@ func (g *gatewayGetOutput) UnmarshalJSON(data []byte) error {
 	}
 	g.AppID = raw.AppID
 	g.AppIDAlt = raw.AppIDAlt
+	g.ID = raw.ID
+	g.InstanceID = raw.InstanceID
 	g.GatewayDomain = raw.Gateway.GatewayDomain
 	g.BaseDomain = raw.Gateway.BaseDomain
 	g.Domain = raw.Gateway.Domain
@@ -1317,10 +1442,12 @@ func (g *gatewayGetOutput) UnmarshalJSON(data []byte) error {
 }
 
 // appID returns the CVM app id used as the `<appId>-22` host label, preferring
-// the canonical app_id then its camelCase alias, falling through to the nested
-// cvm object.
+// the canonical app_id then its camelCase alias, then id/instance_id, falling
+// through to the nested cvm object. This fallback order mirrors the proxy-side
+// phalaCVM.appID() EXACTLY so the cached host and the proxy-resolved fallback
+// host are identical (the gateway domain preference already matches).
 func (g *gatewayGetOutput) appID() string {
-	id := firstNonBlank(g.AppID, g.AppIDAlt)
+	id := firstNonBlank(g.AppID, g.AppIDAlt, g.ID, g.InstanceID)
 	if id == "" && g.CVM != nil {
 		id = g.CVM.appID()
 	}
@@ -1346,8 +1473,10 @@ func (b *backend) resolveGatewayHost(ctx context.Context, id string) (string, er
 	cfg := b.configForRun()
 	result, err := b.phala(ctx, cfg, []string{"cvms", "get", "--cvm-id", id, "--json"}, nil)
 	if err != nil {
-		detail := strings.ToLower(result.Stdout + "\n" + result.Stderr + "\n" + err.Error())
-		if strings.Contains(detail, "not found") || strings.Contains(detail, "does not exist") {
+		// Best-effort: a definitively missing CVM yields ("", nil) so SSH falls back
+		// to per-connection resolution. Scan only the CLI's own output, mirroring
+		// getInstance, so a transient transport error is surfaced rather than masked.
+		if missingCVMResponse(result.Stdout, result.Stderr) {
 			return "", nil
 		}
 		return "", commandError("phala cvms get", result, err)
