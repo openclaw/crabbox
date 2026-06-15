@@ -51,6 +51,7 @@ phala:
   workRoot: /var/volatile/crabbox
   nodeId: ""
   compose: ""
+  attest: true   # verify Intel TDX attestation before trusting the CVM (default)
 ```
 
 Class defaults are `standard=tdx.small`, `fast=tdx.medium`, `large=tdx.large`,
@@ -106,12 +107,28 @@ Because Phala has no extend/touch primitive, lease lifetime is enforced entirely
 by Crabbox's idle timeout and the cleanup sweep rather than a provider-side
 duration deadline.
 
-## Attestation (deferred)
+## Attestation (verified by default)
 
-Phala publishes a TDX attestation quote per CVM (`phala cvms attestation`).
-Crabbox does not yet model confidential attestation as a Feature, so this
-provider does **not** advertise or verify the quote. Treat the TEE guarantee as
-best-effort until a dedicated attestation Feature lands; the deferred hook is the
-single follow-up needed to make this a fully verifiable confidential provider.
+Before the lease is trusted, `acquire` verifies a genuine Intel TDX attestation
+that binds the CVM to the exact code Crabbox deployed. After the box is
+reachable it fetches the dstack guest-agent attestation over SSH
+(`/var/run/tappd.sock` → `Tappd.Info` → `app_cert` + `tcb_info`) and checks,
+against the app id of the CVM it just created:
+
+- **RTMR replay** — RTMR0..3 must equal the SHA-384 fold of the `tcb_info` event
+  log (the measurement is genuine; a tampered event breaks it);
+- **quote ↔ measurement** — the Intel TDX quote embedded in `app_cert` (X.509
+  extension OID `1.3.6.1.4.1.62397.1.1`) must carry the same MRTD/RTMRs;
+- **DCAP signature** — the quote must chain to the Intel SGX/TDX Root CA
+  (`go-tdx-guest`), proving genuine Intel silicon;
+- **identity binding** — the RTMR3 event log's `app-id` must equal the deployed
+  CVM's app id.
+
+On failure the just-created CVM is destroyed and the lease is refused; on success
+the verified `app-id`/`compose-hash`/`rtmr3` are recorded in the lease labels
+(`attested=true`). The gate is **on by default**; pass `--phala-skip-attestation`
+(or `attest: false` in trusted config / `CRABBOX_PHALA_ATTEST=false`) to opt out.
+Verification is pure Go; the DCAP step reaches Intel PCS at runtime, so `openssl`
+and outbound network to Intel's provisioning service are host dependencies.
 
 See the [Phala Cloud CLI reference](https://docs.phala.com/phala-cloud/references/phala-cli).

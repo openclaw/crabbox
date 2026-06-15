@@ -570,7 +570,7 @@
     "lifecycle": "Phala phala CLI",
     "cleanup": "CVM delete",
     "bestFit": "Short-lived confidential Linux compute over SSH",
-    "caveat": "Requires the phala CLI and its stored auth; attestation not yet verified",
+    "caveat": "Requires the phala CLI and its stored auth; verifies Intel TDX attestation by default (needs openssl + outbound Intel PCS network; --phala-skip-attestation to opt out)",
     "docs": "phala.md"
   },
   "proxmox": {

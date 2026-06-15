@@ -1945,6 +1945,47 @@ func TestAcquireHappyPath(t *testing.T) {
 // except the SSH failure is induced via the cancelled context rather than an
 // injectable waitSSH stub (the Phala backend exposes no such seam; see
 // TestAcquireHappyPath's doc comment).
+// TestClaimAcquiredLeasePersistsNonRepoClaim pins the ClawSweeper P1: a
+// successful acquire WITHOUT a repo root (e.g. `warmup`, or `run` outside a
+// repo) must still write the local ownership claim -- the sole anchor List/
+// stop/Cleanup use -- instead of silently no-opping through the repo-only claim
+// writer and orphaning a live, billing, unmanageable CVM.
+func TestClaimAcquiredLeasePersistsNonRepoClaim(t *testing.T) {
+	for _, repoRoot := range []string{"", "  "} {
+		t.Run("repoRoot="+repoRoot, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			applyDefaults(&cfg)
+			leaseID := "cbx_nonrepo01234"
+			lease := core.LeaseTarget{
+				LeaseID: leaseID,
+				Server: core.Server{
+					CloudID:  "appid-nonrepo",
+					Provider: providerName,
+					Labels: map[string]string{
+						"crabbox": "true", "created_by": "crabbox",
+						"lease": leaseID, "provider": providerName, "slug": "green-box",
+					},
+				},
+			}
+			if err := claimAcquiredLease(leaseID, "green-box", cfg, lease, repoRoot, false); err != nil {
+				t.Fatalf("claimAcquiredLease(repoRoot=%q): %v", repoRoot, err)
+			}
+			claim, ok, err := resolvePhalaClaim(leaseID, cfg)
+			if err != nil || !ok {
+				t.Fatalf("no local claim written for a non-repo acquire (ok=%v err=%v) -- CVM would be unmanageable", ok, err)
+			}
+			if claim.CloudID != "appid-nonrepo" {
+				t.Fatalf("claim CloudID=%q want appid-nonrepo", claim.CloudID)
+			}
+			if claim.Slug != "green-box" {
+				t.Fatalf("claim Slug=%q want green-box", claim.Slug)
+			}
+		})
+	}
+}
+
 func TestAcquireRollbackDestroysLeakedCVM(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()

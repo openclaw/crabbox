@@ -395,12 +395,26 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	lease.Server.Status = "ready"
 	lease.Server.Labels["state"] = "ready"
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if err := claimAcquiredLease(leaseID, slug, cfg, lease, req.Repo.Root, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s phala_cvm=%s state=ready\n", leaseID, id)
 	return lease, nil
+}
+
+// claimAcquiredLease persists the ownership claim for a freshly acquired CVM.
+// Phala has no server-side labels, so this LOCAL claim is the sole anchor List/
+// stop/Cleanup use to find and safely destroy the lease -- it MUST be written on
+// every successful acquire. ClaimLeaseTargetForRepoConfig no-ops when repoRoot is
+// empty, so a non-repo acquire (e.g. `warmup`, or `run` outside a repo) would
+// otherwise return a live, billing, UNMANAGEABLE CVM. Fall back to the non-repo
+// claim writer when there is no repo root.
+func claimAcquiredLease(leaseID, slug string, cfg core.Config, lease core.LeaseTarget, repoRoot string, reclaim bool) error {
+	if strings.TrimSpace(repoRoot) != "" {
+		return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, repoRoot, cfg.IdleTimeout, reclaim)
+	}
+	return core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, lease.Server, lease.SSH, cfg.IdleTimeout)
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
