@@ -110,7 +110,9 @@ file. `--capture-on-fail` is still accepted as a compatibility alias; failure
 bundles are saved automatically on non-zero exit regardless.
 
 Crabbox does **not** redact captured files. Treat every bundle and capture file
-as secret-bearing until you have reviewed it.
+as secret-bearing until you have reviewed it. On Unix-like hosts, Crabbox
+creates local captures, downloads, proofs, and failure bundles with owner-only
+file permissions (`0600`); new output directories use `0700`.
 
 To pull successful-run artifacts back without routing file bytes through the
 coordinator log, use `--download remote=local` (repeatable):

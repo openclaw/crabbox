@@ -344,7 +344,9 @@ the box. Downloads run only after a successful remote command, paths resolve
 relative to the remote workdir unless absolute, and Windows paths use `=`
 instead of `:` so drive letters stay unambiguous. Crabbox rejects local output
 path collisions between stdout capture, stderr capture, and downloads before
-command execution.
+command execution. On Unix-like hosts, Crabbox-created download, capture, proof,
+and failure-bundle files use owner-only permissions (`0600`), and newly created
+output directories use `0700`.
 
 See [artifacts](artifacts.md) for the richer collection and publishing workflow.
 

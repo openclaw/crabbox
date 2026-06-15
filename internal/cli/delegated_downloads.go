@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 )
 
@@ -67,12 +65,7 @@ func MaterializeDelegatedRunDownloads(ctx context.Context, backend DelegatedRunD
 		if err != nil {
 			return nil, err
 		}
-		if dir := filepath.Dir(spec.Local); dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return nil, exit(2, "download %s: create %s: %v", spec.Remote, dir, err)
-			}
-		}
-		if err := os.WriteFile(spec.Local, data, 0o666); err != nil {
+		if err := writeRunDownloadFile(spec.Local, data); err != nil {
 			return nil, exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, err)
 		}
 		fmt.Fprintf(stderr, "downloaded %s bytes=%d\n", spec.Local, len(data))

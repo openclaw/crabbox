@@ -73,7 +73,7 @@ func (c *failureStreamCapture) writer(base io.Writer, phase *phaseMarkerWriter, 
 		return base, false, nil
 	}
 	if c.explicitPath != "" {
-		file, err := os.Create(c.explicitPath)
+		file, err := openPrivateRunOutputFile(c.explicitPath)
 		if err != nil {
 			return nil, false, exit(2, "capture %s: %v", c.label, err)
 		}

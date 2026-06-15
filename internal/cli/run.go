@@ -328,7 +328,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	if strings.TrimSpace(*leaseOutput) != "" {
-		if err := preflightLocalOutputPath("lease output", strings.TrimSpace(*leaseOutput), false); err != nil {
+		if err := preflightLocalOutputPath("lease output", strings.TrimSpace(*leaseOutput), false, false); err != nil {
 			return err
 		}
 	}
@@ -350,7 +350,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 				return exit(2, "proof template %q is not configured for profile %q", strings.TrimSpace(*proofTemplate), cfg.Profile)
 			}
 		}
-		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true); err != nil {
+		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true, true); err != nil {
 			return err
 		}
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -329,11 +328,11 @@ func writeRunProof(path, templateName string, input proofRenderInput) (runArtifa
 		return runArtifact{}, err
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := createPrivateRunOutputDir(dir); err != nil {
 			return runArtifact{}, exit(2, "create proof directory: %v", err)
 		}
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := writePrivateRunOutputFile(path, []byte(content)); err != nil {
 		return runArtifact{}, exit(2, "write proof %s: %v", path, err)
 	}
 	return runArtifact{Kind: "proof", Path: path, Template: templateName, Bytes: len(content)}, nil

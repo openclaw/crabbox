@@ -624,10 +624,10 @@ func captureFailureBundle(ctx context.Context, target SSHTarget, workdir, leaseI
 
 func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMetadata) (string, int, error) {
 	localPath := filepath.Join(".crabbox", "captures", name)
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	if err := ensurePrivateRunOutputDir(filepath.Dir(localPath)); err != nil {
 		return localPath, 0, exit(2, "failure bundle create %s: %v", filepath.Dir(localPath), err)
 	}
-	file, err := os.Create(localPath)
+	file, err := openPrivateRunOutputFile(localPath)
 	if err != nil {
 		return localPath, 0, exit(2, "failure bundle create %s: %v", localPath, err)
 	}

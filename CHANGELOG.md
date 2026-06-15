@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Created run downloads, captures, proofs, and failure bundles with private POSIX permissions. Thanks @coygeek.
 - Preserved single-use bridge tickets when presented to the wrong lease, role, or runtime-adapter endpoint. Thanks @coygeek.
 - Required lease manage access before resetting another operator's WebVNC bridge. Thanks @coygeek.
 - Aligned the `apple-container` provider fallback image with the portable OS default while preserving explicit image choices. Thanks @coygeek.
