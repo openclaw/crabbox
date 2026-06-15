@@ -30,8 +30,12 @@ import {
 } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { WebView } from 'react-native-webview';
+import {
+  defaultCoordinatorURL,
+  normalizeCoordinatorURL,
+  webViewOriginWhitelist,
+} from './src/coordinatorURL';
 
-const defaultCoordinatorURL = 'https://crabbox.sh';
 const coordinatorStorageKey = 'crabbox.mobile.coordinator-url';
 const appIcon = require('./assets/icon.png');
 
@@ -72,7 +76,7 @@ export default function App() {
           return;
         }
 
-        const normalized = normalizeCoordinatorURL(storedURL ?? '');
+        const normalized = normalizeCoordinatorURL(storedURL ?? '', { allowLocalHTTP: __DEV__ });
         const nextURL = normalized ?? defaultCoordinatorURL;
         setHomeURL(nextURL);
         setDraftURL(nextURL);
@@ -98,6 +102,7 @@ export default function App() {
 
   const currentHost = useMemo(() => hostLabel(currentURL || homeURL), [currentURL, homeURL]);
   const loadingWidth = `${Math.max(6, Math.round(progress * 100))}%` as DimensionValue;
+  const originWhitelist = useMemo(() => webViewOriginWhitelist(homeURL), [homeURL]);
 
   const reload = useCallback(() => {
     setLoadFailed(false);
@@ -130,9 +135,9 @@ export default function App() {
   }, [currentURL]);
 
   const saveCoordinatorURL = useCallback(async () => {
-    const normalized = normalizeCoordinatorURL(draftURL);
+    const normalized = normalizeCoordinatorURL(draftURL, { allowLocalHTTP: __DEV__ });
     if (!normalized) {
-      setURLError('Enter a valid http or https URL.');
+      setURLError('Enter an HTTPS URL. HTTP is available only for localhost in development builds.');
       return;
     }
 
@@ -215,7 +220,7 @@ export default function App() {
             ref={webView}
             source={{ uri: homeURL }}
             style={styles.webView}
-            originWhitelist={['http://*', 'https://*', 'about:*']}
+            originWhitelist={originWhitelist}
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
             setSupportMultipleWindows={false}
@@ -368,32 +373,6 @@ function IconButton({ disabled = false, icon: Icon, label, onPress }: IconButton
       <Icon color={disabled ? colors.disabled : colors.text} size={20} strokeWidth={2.35} />
     </Pressable>
   );
-}
-
-function normalizeCoordinatorURL(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
-    ? trimmed
-    : `https://${trimmed}`;
-
-  try {
-    const url = new URL(withProtocol);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-      return null;
-    }
-
-    url.hash = '';
-    url.search = '';
-    url.pathname = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
-
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return null;
-  }
 }
 
 function hostLabel(value: string): string {

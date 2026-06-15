@@ -157,6 +157,40 @@ jobs:
       - name: Build Node runtime image
         run: docker build -f worker/Dockerfile.node worker
 
+  mobile:
+    name: Mobile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXPO_NO_TELEMETRY: "1"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: mobile
+
+      - name: Test coordinator URL policy
+        run: npm run test:urls
+        working-directory: mobile
+
+      - name: Typecheck
+        run: npm run check
+        working-directory: mobile
+
+      - name: Export iOS bundle
+        run: npx expo export --platform ios --output-dir /tmp/crabbox-mobile-export
+        working-directory: mobile
+
   scripts:
     name: Scripts
     runs-on: ubuntu-latest

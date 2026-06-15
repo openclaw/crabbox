@@ -23,7 +23,8 @@
     "prebuild:ios": "expo prebuild --platform ios",
     "run:ios": "expo run:ios",
     "web": "expo start --web",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:urls": "rm -rf /tmp/crabbox-mobile-url-test && tsc --ignoreConfig --target ES2022 --module Node16 --moduleResolution Node16 --outDir /tmp/crabbox-mobile-url-test src/coordinatorURL.ts test/coordinatorURL.test.ts && node /tmp/crabbox-mobile-url-test/test/coordinatorURL.test.js"
   },
   "private": true
 }

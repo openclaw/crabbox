@@ -23,8 +23,9 @@ sudo xcodebuild -runFirstLaunch
 
 ```sh
 cd mobile
-npm install
+npm ci
 npm run check
+npm run test:urls
 npm run ios
 ```
 
@@ -41,6 +42,11 @@ Press `i` in the Expo terminal to open the iOS simulator.
 
 The app starts at `https://crabbox.sh`. Tap the settings button in the header to
 switch to another coordinator, for example `https://broker.example.com`.
+
+Coordinator sessions require HTTPS. Development builds also accept local
+loopback HTTP URLs such as `http://localhost:8787` for testing a broker on the
+same machine; production builds reject HTTP coordinators and the WebView does
+not whitelist arbitrary cleartext origins.
 
 ## Native Project
 
