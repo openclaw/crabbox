@@ -10828,6 +10828,7 @@ describe("fleet lease identity and idle", () => {
         hostId: "h-000000000001",
         cloudID: "i-000000000099",
         region: "eu-west-1",
+        share: { users: { "friend@example.com": "use" } },
         createdAt: "2026-05-17T00:10:00.000Z",
         updatedAt: "2026-05-17T00:20:00.000Z",
         lastTouchedAt: "2026-05-17T00:20:00.000Z",
@@ -10906,6 +10907,24 @@ describe("fleet lease identity and idle", () => {
     expect(detailBody).toContain("attached lease");
     expect(detailBody).toContain("mac-mini / cbx_000000000099");
     expect(detailBody).toContain("/portal/leases/cbx_000000000099/vnc");
+    expect(detailBody).toContain(
+      "crabbox webvnc --provider aws --target macos --id mac-mini --open",
+    );
+
+    const friendDetail = await fleet.fetch(
+      request("GET", "/portal/hosts/aws/h-000000000001", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+      }),
+    );
+    expect(friendDetail.status).toBe(200);
+    const friendDetailBody = await friendDetail.text();
+    expect(friendDetailBody).toContain("mac-mini / cbx_000000000099");
+    expect(friendDetailBody).not.toContain(
+      "crabbox webvnc --provider aws --target macos --id mac-mini --open",
+    );
 
     const vnc = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001/vnc", {
@@ -11768,6 +11787,13 @@ describe("fleet lease identity and idle", () => {
         slug: "blue-lobster",
         owner: "peter@example.com",
         org: "openclaw",
+        share: {
+          users: {
+            "viewer@example.com": "use",
+            "manager@example.com": "manage",
+          },
+          org: "use",
+        },
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
@@ -11825,6 +11851,9 @@ describe("fleet lease identity and idle", () => {
     expect(status.status).toBe(200);
     await expect(status.json()).resolves.toMatchObject({
       leaseID: "cbx_000000000001",
+      sessionID: "egress_camel123",
+      profile: "discord",
+      allow: ["discord.com"],
       hostConnected: false,
       clientConnected: false,
     });
@@ -11838,6 +11867,53 @@ describe("fleet lease identity and idle", () => {
     expect(portalBody).toContain("discord · discord.com");
     expect(portalBody).toContain("crabbox egress status --id blue-lobster");
     expect(portalBody).toContain("crabbox egress stop --id blue-lobster");
+
+    const viewerHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const viewerStatus = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/egress/status", {
+        headers: viewerHeaders,
+      }),
+    );
+    expect(viewerStatus.status).toBe(200);
+    await expect(viewerStatus.json()).resolves.toMatchObject({
+      leaseID: "cbx_000000000001",
+      sessionID: "",
+      profile: "",
+      allow: [],
+      hostConnected: false,
+      clientConnected: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+
+    const viewerPortal = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster", { headers: viewerHeaders }),
+    );
+    expect(viewerPortal.status).toBe(200);
+    const viewerPortalBody = await viewerPortal.text();
+    expect(viewerPortalBody).toContain("<strong>egress</strong><small>waiting for host</small>");
+    expect(viewerPortalBody).toContain('<span class="muted">active</span>');
+    expect(viewerPortalBody).not.toContain("discord · discord.com");
+    expect(viewerPortalBody).not.toContain("*.discordcdn.com");
+    expect(viewerPortalBody).not.toContain("crabbox egress status --id blue-lobster");
+    expect(viewerPortalBody).not.toContain("crabbox egress stop --id blue-lobster");
+
+    const managerStatus = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/egress/status", {
+        headers: {
+          "x-crabbox-owner": "manager@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+      }),
+    );
+    await expect(managerStatus.json()).resolves.toMatchObject({
+      sessionID: "egress_camel123",
+      profile: "discord",
+      allow: ["discord.com"],
+    });
 
     const missingTicket = await fleet.fetch(
       request("GET", "/v1/leases/blue-lobster/egress/host", {
@@ -12116,6 +12192,11 @@ describe("fleet lease identity and idle", () => {
     );
     expect(friendPage.status).toBe(200);
     const friendPageBody = await friendPage.text();
+    expect(friendPageBody).not.toContain(
+      "crabbox webvnc --provider hetzner --target linux --id blue-lobster --open",
+    );
+    expect(friendPageBody).not.toContain('id="vnc-bridge-cmd"');
+    expect(friendPageBody).not.toContain('id="vnc-copy"');
     expect(friendPageBody).not.toContain('<button id="vnc-share"');
     expect(friendPageBody).not.toContain('<dialog id="vnc-share-dialog"');
     expect(friendPageBody).not.toContain("People with access");
@@ -12123,6 +12204,51 @@ describe("fleet lease identity and idle", () => {
     expect(friendPageBody).not.toContain("friend@example.com");
     expect(friendPageBody).not.toContain("teammate@example.com");
     expect(friendPageBody).not.toContain('"org":"use"');
+
+    const managerPage = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/vnc", {
+        headers: {
+          "x-crabbox-owner": "teammate@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+      }),
+    );
+    expect(managerPage.status).toBe(200);
+    expect(await managerPage.text()).toContain(
+      "crabbox webvnc --provider hetzner --target linux --id blue-lobster --open",
+    );
+
+    const friendStatus = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/vnc/status", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "openclaw",
+        },
+      }),
+    );
+    expect(friendStatus.status).toBe(200);
+    await expect(friendStatus.json()).resolves.toMatchObject({
+      leaseID: "cbx_000000000001",
+      command: "",
+      message: "WebVNC daemon not running; ask a lease manager to start or refresh the bridge",
+    });
+
+    const friendViewer = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/vnc/viewer", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "openclaw",
+          upgrade: "websocket",
+        },
+      }),
+    );
+    expect(friendViewer.status).toBe(409);
+    await expect(friendViewer.json()).resolves.toEqual({
+      error: "webvnc_bridge_missing",
+      message:
+        "No WebVNC backend is available yet; ask a lease manager to start or refresh the bridge.",
+      command: "",
+    });
 
     const status = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/vnc/status", { headers }),

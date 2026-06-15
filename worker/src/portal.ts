@@ -505,6 +505,7 @@ export function portalLeaseDetail(
   const target = lease.target || "linux";
   const active = lease.state === "active";
   const registered = lease.lifecycle === "registered";
+  const canManage = options.canManage === true;
   const runRows = runs.length
     ? runs.map((run) => runRow(run)).join("")
     : `<tr><td colspan="8" class="empty">no recorded runs for this lease</td></tr>`;
@@ -518,18 +519,18 @@ export function portalLeaseDetail(
       : `<span class="muted">no code</span>`;
   const egressAction =
     active && bridgeStatus.egress
-      ? `<span class="muted">${escapeHTML(egressSummary(bridgeStatus.egress))}</span>`
+      ? `<span class="muted">${escapeHTML(canManage ? egressSummary(bridgeStatus.egress) : "active")}</span>`
       : `<span class="muted">no egress</span>`;
   const commands = active
     ? [
         commandBlock("shell", `crabbox ssh --id ${shellArg(slug)}`),
         commandBlock("run", `crabbox run --id ${shellArg(slug)} -- <command>`),
-        lease.desktop ? commandBlock("WebVNC bridge", webVNCBridgeCommand(lease)) : "",
+        lease.desktop && canManage ? commandBlock("WebVNC bridge", webVNCBridgeCommand(lease)) : "",
         lease.code ? commandBlock("code bridge", codeBridgeCommand(lease)) : "",
-        bridgeStatus.egress
+        bridgeStatus.egress && canManage
           ? commandBlock("egress status", `crabbox egress status --id ${shellArg(slug)}`)
           : "",
-        bridgeStatus.egress
+        bridgeStatus.egress && canManage
           ? commandBlock("egress stop", `crabbox egress stop --id ${shellArg(slug)}`)
           : "",
       ]
@@ -543,7 +544,7 @@ export function portalLeaseDetail(
         meta: `${escapeHTML(slug)} · ${escapeHTML(lease.provider)} ${escapeHTML(target)} ${registered ? "registered " : ""}lease <span class="mono">${escapeHTML(lease.id)}</span>`,
         actions: `
           ${
-            options.canManage
+            canManage
               ? `<a class="icon-btn" href="/portal/leases/${encodeURIComponent(lease.id)}/share" title="share lease" aria-label="share lease">${shareIcon}</a>`
               : ""
           }
@@ -570,7 +571,7 @@ export function portalLeaseDetail(
           </dl>
           ${leaseTelemetryTimeline(lease.telemetry, lease.telemetryHistory)}
           ${
-            active && options.canManage
+            active && canManage
               ? `<form method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release" class="stop-form" data-confirm="${escapeHTML(leaseReleaseConfirmation(lease))}">
                   <button class="button ${registered && !lease.runtimeAdapterID ? "secondary" : "danger"}" type="submit">${registered ? (lease.runtimeAdapterID ? "delete workspace" : "remove registration") : "stop lease"}</button>
                 </form>`
@@ -780,9 +781,11 @@ export function portalExternalRunnerDetail(
 export function portalMacHostDetail(
   host: PortalMacHostRecord,
   bridgeStatus: PortalLeaseBridgeStatus | undefined,
+  options: { canManage?: boolean } = {},
 ): Response {
   const lease = host.lease;
   const activeLease = lease?.state === "active" ? lease : undefined;
+  const canManage = options.canManage === true;
   const stateTone = macHostStateTone(host.state);
   const hostID = shortHostID(host.id);
   const startDesktopCommand = activeLease ? "" : macHostStartDesktopCommand(host);
@@ -806,7 +809,9 @@ export function portalMacHostDetail(
           "run",
           `crabbox run --id ${shellArg(activeLease.slug || activeLease.id)} -- <command>`,
         ),
-        activeLeaseVNC ? commandBlock("WebVNC bridge", webVNCBridgeCommand(activeLease)) : "",
+        activeLeaseVNC && canManage
+          ? commandBlock("WebVNC bridge", webVNCBridgeCommand(activeLease))
+          : "",
         activeLease.code ? commandBlock("code bridge", codeBridgeCommand(activeLease)) : "",
       ]
         .filter(Boolean)
@@ -1036,7 +1041,10 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
           org: "",
         },
       };
-  const bridgeCmd = webVNCBridgeCommand(lease);
+  const bridgeCmd = canManage ? webVNCBridgeCommand(lease) : "";
+  const bridgeMissingMessage = canManage
+    ? "WebVNC daemon not running; run the bridge command below"
+    : "WebVNC daemon not running; ask a lease manager to start or refresh the bridge";
   const fullscreenIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/></svg>`;
   const reconnectIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>`;
   const pasteIcon = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2h6a2 2 0 0 1 2 2v1H7V4a2 2 0 0 1 2-2Z"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11v6"/><path d="m9 14 3 3 3-3"/></svg>`;
@@ -1059,11 +1067,15 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
         `,
       })}
       <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
-      <footer class="vnc-bridge">
+      ${
+        canManage
+          ? `<footer class="vnc-bridge">
         <span class="vnc-bridge-label">bridge</span>
         <code id="vnc-bridge-cmd" class="vnc-bridge-cmd">${escapeHTML(bridgeCmd)}</code>
         <button id="vnc-copy" class="icon-btn" type="button" title="copy command" aria-label="copy bridge command">${copyIcon}</button>
-      </footer>
+      </footer>`
+          : ""
+      }
       ${
         canManage
           ? `<dialog id="vnc-share-dialog" class="vnc-share-dialog" aria-label="Share lease">
@@ -1131,6 +1143,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       const username = fragment.get("username") || "";
       const password = fragment.get("password") || "";
       const takeControlOnConnect = fragment.get("control") === "take";
+      const bridgeMissingMessage = ${JSON.stringify(bridgeMissingMessage)};
       const credentials = {};
       if (username) credentials.username = username;
       if (password) credentials.password = password;
@@ -1356,7 +1369,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             return;
           }
           if (state && !state.bridgeConnected) {
-            scheduleRetry(state.message || "WebVNC daemon not running; run the bridge command below");
+            scheduleRetry(state.message || bridgeMissingMessage);
             return;
           }
           if (state && state.availableViewerSlots === 0) {
