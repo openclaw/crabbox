@@ -513,9 +513,11 @@ export interface PromotedImageRecord extends ProviderImage {
 export interface RunRecord {
   id: string;
   leaseID: string;
+  leaseIDs?: string[];
   slug?: string;
   owner: string;
   org: string;
+  leaseOwners?: Array<{ owner: string; org: string }>;
   provider: string;
   target?: TargetOS;
   windowsMode?: WindowsMode;

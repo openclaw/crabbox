@@ -12,6 +12,34 @@ import (
 	"nhooyr.io/websocket"
 )
 
+func TestHistoryJSONPreservesLeaseAttribution(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/runs" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{"runs":[{"id":"run_123","leaseID":"cbx_2","leaseIDs":["cbx_1","cbx_2"],"owner":"bob@example.com","org":"elsewhere","leaseOwners":[{"owner":"alice@example.com","org":"example-org"},{"owner":"bob@example.com","org":"elsewhere"}],"provider":"aws","class":"standard","serverType":"t3.small","command":["true"],"state":"succeeded","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.history(context.Background(), []string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var runs []CoordinatorRun
+	if err := json.Unmarshal(stdout.Bytes(), &runs); err != nil {
+		t.Fatalf("decode history JSON: %v", err)
+	}
+	if len(runs) != 1 || len(runs[0].LeaseIDs) != 2 || runs[0].LeaseIDs[0] != "cbx_1" {
+		t.Fatalf("lease IDs not preserved: %#v", runs)
+	}
+	if len(runs[0].LeaseOwners) != 2 || runs[0].LeaseOwners[0].Owner != "alice@example.com" {
+		t.Fatalf("lease owners not preserved: %#v", runs[0].LeaseOwners)
+	}
+}
+
 func TestEventsCommandPassesPagination(t *testing.T) {
 	var path string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

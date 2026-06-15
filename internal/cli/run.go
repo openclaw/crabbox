@@ -624,6 +624,11 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			if lease.Coordinator != nil {
+				coord = lease.Coordinator
+				useCoordinator = true
+				recorder.UseCoordinator(coord)
+			}
 			applyResolvedLeaseConfig(&cfg, server, &target)
 			if borrowedPool != nil {
 				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
@@ -920,6 +925,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		acquired = true
 		coord = newLease.Coordinator
 		useCoordinator = coord != nil
+		recorder.UseCoordinator(coord)
 		applyResolvedServerConfig(&cfg, server)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err

@@ -230,10 +230,13 @@ POST /v1/admin/aws-orphan-sweep
 ```
 
 `GET /v1/pool` and `/v1/admin/*` require the admin token. User tokens scope
-list, lookup, heartbeat, release, run history, logs, and usage to the token's
-owner/org. The CLI client wraps these in `internal/cli/coordinator.go`; when a
-user request 404s or 401s, an admin-token fallback re-resolves and retries as
-admin.
+list, lookup, heartbeat, release, run mutation, and usage to the token's
+owner/org. Run reads also permit every recorded backing lease owner so
+shared-lease and replacement activity remains auditable without granting those
+owners event, telemetry, or finish writes. The CLI client wraps these in
+`internal/cli/coordinator.go`;
+when a user request 404s or 401s, an admin-token fallback re-resolves and
+retries as admin.
 
 ## What Flows on a Run
 

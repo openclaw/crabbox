@@ -38,7 +38,8 @@ When the command exits, the CLI finishes the run with:
 
 - exit code;
 - sync duration, command duration, and total duration;
-- owner and org;
+- initiating actor owner and org;
+- backing lease IDs and owner/org identities for lease-backed runs;
 - provider, target, class, and server type;
 - the retained command log (capped — see below);
 - a parsed test-result summary when JUnit results are available;
@@ -63,6 +64,13 @@ crabbox attach run_a1b2c3d4          # follow an in-progress run live
 control WebSocket and falling back to polling. Use `attach` for active runs and
 `logs` for the retained output of a finished run. All four commands accept
 `--json`.
+
+Run records keep the initiating actor in `owner`/`org` and retain every backing
+lease identity used by a replacement flow. Each backing lease owner has
+read-only access to history, details, logs, events, telemetry, live event
+subscriptions, and portal pages for auditing work on their lease. Only the
+initiating actor or an admin can append events or telemetry and finish the run.
+Lease shares do not grant access to runs created by other actors.
 
 ## Storage limits
 

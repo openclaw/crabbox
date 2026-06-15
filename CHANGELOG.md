@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Hardened shared-lease run auditability by preserving actor attribution while granting lease owners read-only access to runs, logs, events, telemetry, and portal history. Thanks @coygeek.
 - Pinned shipped runtime container base images to reviewed multi-platform digests and enforced the pins in CI. Thanks @coygeek.
 - Redacted manage-only WebVNC bridge commands and egress session details from `use` share viewers. Thanks @coygeek.
 - Created run downloads, captures, proofs, and failure bundles with private POSIX permissions. Thanks @coygeek.
