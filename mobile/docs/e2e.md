@@ -76,6 +76,22 @@ points at `OLLAMA_HOST` with `CRABBOX_AGENT_MODEL` (default `tinyllama`), checks
 non-zero if the engine isn't ready — proving the engine the app uses works
 against a real model.
 
+### `--islo-demo` — the live "trigger islo from the phone" path
+
+```sh
+ISLO_API_KEY=ak_…  swift run crabbox-sim --islo-demo                     # lifecycle only
+CRABBOX_ISLO_LLM=1 ISLO_API_KEY=ak_…  swift run crabbox-sim --islo-demo  # + LLM chat
+```
+
+Exercises the **exact `IsloClient` the app's Sandboxes tab uses** against the
+real islo API (`api.islo.dev`): API-key→JWT exchange (`POST /auth/token`),
+create → list → delete a sandbox, and — with `CRABBOX_ISLO_LLM=1` — the full
+flow the phone drives: provision → detached Ollama bootstrap (the multi-minute
+install + model pull runs detached because islo's `exec/stream` has a max
+duration) → public share → chat → reply → cleanup. The sandbox is always
+deleted, even on failure. Needs an islo key (`islo api-key create <name>`),
+read from the environment and never passed on argv.
+
 ## Running on a sandbox
 
 The deterministic suite (`swift run crabbox-sim`) needs no network and no model,
