@@ -67,6 +67,47 @@ public struct CoordinatorClient: Sendable {
         _ = try await send("DELETE", "/v1/sandboxes/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id)")
     }
 
+    /// Creates a coordinator-managed workspace. This is the native-app analogue
+    /// of starting a `crabbox` command session: the coordinator owns the machine,
+    /// clones the requested GitHub repo when provided, and exposes a terminal
+    /// websocket once the workspace is ready.
+    public func createWorkspace(_ request: WorkspaceCreateRequest) async throws -> WorkspaceSession {
+        guard isValidWorkspaceID(request.id) else {
+            throw LLMError.unavailable("invalid workspace id")
+        }
+        var body: [String: Any] = [
+            "id": request.id,
+            "runtime": "crabbox",
+            "command": request.command,
+            "profile": request.profile,
+            "ttlSeconds": request.ttlSeconds,
+            "idleTimeoutSeconds": request.idleTimeoutSeconds,
+            "capabilities": ["desktop": false],
+        ]
+        if !request.repo.isEmpty { body["repo"] = request.repo }
+        if !request.branch.isEmpty { body["branch"] = request.branch }
+        let data = try await send("POST", "/v1/workspaces", json: body, timeout: 30)
+        return try Self.decodeWorkspace(data)
+    }
+
+    public func getWorkspace(id: String) async throws -> WorkspaceSession {
+        guard isValidWorkspaceID(id) else {
+            throw LLMError.unavailable("invalid workspace id")
+        }
+        let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let data = try await send("GET", "/v1/workspaces/\(escaped)", timeout: 30)
+        return try Self.decodeWorkspace(data)
+    }
+
+    public func deleteWorkspace(id: String) async throws -> WorkspaceSession {
+        guard isValidWorkspaceID(id) else {
+            throw LLMError.unavailable("invalid workspace id")
+        }
+        let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let data = try await send("DELETE", "/v1/workspaces/\(escaped)", timeout: 30)
+        return try Self.decodeWorkspace(data)
+    }
+
     private static func endpoint(from dict: [String: Any]) -> String? {
         if let url = dict["url"] as? String { return url }
         if let shares = dict["shares"] as? [[String: Any]],
@@ -77,11 +118,28 @@ public struct CoordinatorClient: Sendable {
         return nil
     }
 
-    private func send(_ method: String, _ path: String, json: [String: Any]? = nil) async throws -> Data {
+    private static func decodeWorkspace(_ data: Data) throws -> WorkspaceSession {
+        guard let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LLMError.decode("workspace response")
+        }
+        guard let id = (dict["id"] as? String) ?? (dict["workspaceId"] as? String) else {
+            throw LLMError.decode("workspace id")
+        }
+        let status = (dict["status"] as? String) ?? "unknown"
+        return WorkspaceSession(
+            id: id,
+            status: status,
+            attachURL: dict["attachUrl"] as? String,
+            message: (dict["message"] as? String) ?? status,
+            expiresAt: dict["expiresAt"] as? String
+        )
+    }
+
+    private func send(_ method: String, _ path: String, json: [String: Any]? = nil, timeout: TimeInterval? = nil) async throws -> Data {
         guard let url = URL(string: baseURL.absoluteString + path) else { throw LLMError.invalidResponse }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = timeout
+        request.timeoutInterval = timeout ?? self.timeout
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let json {

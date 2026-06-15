@@ -2,7 +2,7 @@
 //  CrabboxApp.swift
 //  Crabbox
 //
-//  App entry point. Wires the three tabs (Portal / Assistant / Sandboxes) and the
+//  App entry point. Wires the native tabs (Run / Sandboxes / Assistant / Portal) and the
 //  shared environment: AppSettings (prefs + provider credentials), EngineHub
 //  (runtime sandbox engines), and a single ChatStore (the Assistant conversation).
 //
@@ -18,7 +18,7 @@ import CrabboxKit
 /// The root tabs, used both for the TabView selection and for programmatic jumps
 /// (e.g. "Chat with this sandbox" switches to `.assistant`).
 enum RootTab: Hashable {
-    case portal, assistant, sandboxes
+    case run, sandboxes, assistant, portal
 }
 
 @main
@@ -35,21 +35,25 @@ struct RootView: View {
     @StateObject private var settings = AppSettings()
     @StateObject private var engineHub = EngineHub()
     @StateObject private var chat = ChatStore()
-    @State private var selectedTab: RootTab = .portal
+    @State private var selectedTab: RootTab = .run
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            PortalView()
-                .tag(RootTab.portal)
-                .tabItem { Label("Portal", systemImage: "globe") }
+            CommandRunnerView()
+                .tag(RootTab.run)
+                .tabItem { Label("Run", systemImage: "terminal") }
+
+            SandboxesView(selectedTab: $selectedTab)
+                .tag(RootTab.sandboxes)
+                .tabItem { Label("Sandboxes", systemImage: "shippingbox") }
 
             AssistantView(store: chat)
                 .tag(RootTab.assistant)
                 .tabItem { Label("Assistant", systemImage: "bubble.left.and.text.bubble.right") }
 
-            SandboxesView(selectedTab: $selectedTab)
-                .tag(RootTab.sandboxes)
-                .tabItem { Label("Sandboxes", systemImage: "shippingbox") }
+            PortalView()
+                .tag(RootTab.portal)
+                .tabItem { Label("Portal", systemImage: "globe") }
         }
         .tint(Theme.accent)
         .environmentObject(settings)

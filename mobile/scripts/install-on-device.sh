@@ -27,6 +27,11 @@ fi
 BUNDLE_ID="${BUNDLE_ID:-sh.crabbox.Crabbox}"
 
 command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+if ! command -v go >/dev/null 2>&1; then
+  echo "ERROR: Go is required because the iOS app links the CrabboxMobile Go core."
+  echo "Install it with: brew install go"
+  exit 1
+fi
 echo "==> Generating Xcode project"
 xcodegen generate
 
@@ -66,4 +71,4 @@ xcrun devicectl device install app --device "$UDID" "$APP"
 echo
 echo "DONE. On the iPhone: Settings > General > VPN & Device Management >"
 echo "trust your developer certificate, then launch Crabbox."
-echo "Enter your islo key in: Sandboxes tab > provider settings > islo.dev."
+echo "Enter your islo key in: Run tab > provider settings > islo.dev."

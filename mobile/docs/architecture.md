@@ -8,16 +8,15 @@ declarative.
 ```
                 ┌──────────────────────────────────────────┐
                 │            SwiftUI app (iOS)               │
-                │  Portal · Assistant · Sandboxes tabs       │
-                │  WKWebView (UIViewRepresentable)           │
-                │  ObservableObject around reduce()          │
+                │  Run · Sandboxes · Assistant · Portal tabs  │
+                │  CrabboxMobile Go core + native UI         │
+                │  WKWebView only for Portal/OAuth           │
                 └──────────────────┬───────────────────────┘
-                                   │ import (no logic reimplemented)
+                                   │ import / bridge
                 ┌──────────────────▼───────────────────────┐
                 │               CrabboxKit                  │
                 │  pure Swift · no UIKit/SwiftUI/WebKit      │
-                │  URL policy · nav guards · reduce()        │
-                │  LLM + sandbox clients                     │
+                │  command parsing · URL policy · clients     │
                 └───────┬───────────────────────┬───────────┘
               imports   │                       │   imports
         ┌───────────────▼──────┐        ┌───────▼──────────────┐
@@ -45,14 +44,31 @@ state machine and security policy be verified without an iOS device. It owns:
   `reduce(state, action, env) -> ReduceResult`. All Portal behavior (boot,
   switch coordinator, reload, back, home, load/error transitions, progress) is a
   function of state + action, so it is fully testable without a UI.
-- **LLM + sandbox clients** — `LLMEngine`, `OllamaClient`, `SandboxEngine`,
-  `IsloClient`, `CoordinatorClient`, and the `SandboxProvisioner` protocol with
-  its two implementations.
+- **Command parsing, workspace, LLM, and sandbox clients** —
+  `parseCrabboxCommandLine`, `CoordinatorClient` for `/v1/workspaces`,
+  `LLMEngine`, `OllamaClient`, `SandboxEngine`, `IsloClient`, and the
+  `SandboxProvisioner` protocol with its two implementations.
 
 ## The SwiftUI app
 
 The iOS target is intentionally thin. Views import `CrabboxKit` and **never**
-reimplement URL, navigation, or state logic. The Portal in particular:
+reimplement coordinator request shapes, URL policy, navigation, or state logic.
+The Run tab parses a `crabbox ...` command line and calls the compiled Go
+`CrabboxMobile` core when it is linked. That core lives in
+`mobile/go/crabboxmobile`, imports the real `internal/cli` package and
+the mobile-safe `internal/providers/islo` provider, and exports:
+
+```c
+char* CrabboxMobileRun(char* json_request);
+void CrabboxMobileFree(char* ptr);
+```
+
+This is the iOS form of a real Crabbox binary: the code is linked into the app
+binary and invoked in-process because iOS apps cannot spawn a separate
+desktop-style command-line tool. The coordinator `/v1/workspaces` terminal path
+remains available as a fallback for builds that intentionally omit the Go core.
+
+The Portal in particular:
 
 - Wraps `WKWebView` via `UIViewRepresentable` + a `Coordinator`.
 - Drives an `ObservableObject` around `reduce()`: `WKNavigationDelegate` and KVO
