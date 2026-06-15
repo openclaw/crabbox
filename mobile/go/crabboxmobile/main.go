@@ -40,8 +40,8 @@ func main() {}
 // CrabboxMobileRun runs the real Crabbox Go CLI entrypoint inside the app
 // process. The request and response are JSON so Swift can keep a tiny C bridge:
 //
-//   request:  {"args":["run","--provider","islo","--no-sync","--","uname","-a"],"env":{"ISLO_API_KEY":"..."}}
-//   response: {"exitCode":0,"stdout":"...","stderr":"..."}
+//	request:  {"args":["run","--provider","islo","--no-sync","--","uname","-a"],"env":{"ISLO_API_KEY":"..."}}
+//	response: {"exitCode":0,"stdout":"...","stderr":"..."}
 //
 // iOS apps cannot spawn a separate `crabbox` process, but this function executes
 // the same internal CLI package and the mobile-safe islo provider compiled into
