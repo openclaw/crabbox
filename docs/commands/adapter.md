@@ -80,6 +80,52 @@ The command uses the production state decoder and record invariants, rejects
 unknown fields, incompatible versions, corrupt records, symlinks, and broad
 file permissions, and exits nonzero on failure.
 
+## Authenticated ingress
+
+`crabbox adapter ingress` exposes a loopback HTTP service through an exact
+identity-and-secret assertion supplied by a trusted upstream proxy. It is a
+small provider-neutral building block for a fleet UI or adapter deployment that
+needs HTTP streaming and WebSocket upgrades without maintaining a custom
+reverse proxy.
+
+The command accepts one private JSON config file:
+
+```json
+{
+  "listen": "0.0.0.0:8443",
+  "upstream": "http://127.0.0.1:8787",
+  "publicOrigin": "https://fleet.example.test",
+  "identityHeader": "X-Proxy-User",
+  "identity": "operator@example.test",
+  "secretHeader": "X-Proxy-Secret",
+  "secretFile": "/home/operator/.config/crabbox/proxy.secret",
+  "denyPaths": ["/login/provider", "/auth/provider/callback"],
+  "denyPrefixes": ["/api/admin/"],
+  "stripHeaderPrefixes": ["x-crabbox-", "x-fleet-private-"]
+}
+```
+
+```sh
+crabbox adapter ingress --config /home/operator/.config/crabbox/ingress.json
+```
+
+Both the config and secret must be current-user-owned regular non-symlink files
+with mode `0400` or `0600`. The config is strict JSON and rejects unknown keys.
+The command currently requires Linux or macOS.
+The listen host must be a literal IP address, the upstream must be one exact
+loopback HTTP origin, and the public origin must be one exact non-loopback HTTPS
+origin. Keep the listener behind the trusted proxy and terminate TLS there.
+
+For ordinary HTTP requests, `Origin` may be absent but must exactly match
+`publicOrigin` when present. WebSocket upgrades always require the exact origin.
+The ingress rejects duplicate or incorrect assertion headers, removes browser
+credentials, forwarding headers, hop-by-hop headers, and configured private
+header prefixes, then installs the configured assertion and sanitized public
+host/protocol forwarding headers before proxying. Header names containing
+underscores are rejected to prevent downstream dash/underscore aliasing.
+Denied routes return `404` before authentication. `/healthz` is forwarded
+without assertions only for loopback peers.
+
 ## Outbound connection
 
 `crabbox adapter connect` exposes a local `crabfleet/v1` runtime adapter to the

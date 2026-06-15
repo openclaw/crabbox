@@ -494,9 +494,13 @@ type configSetBrokerKongCmd struct {
 type adapterKongCmd struct {
 	Serve   controllerServeKongCmd `cmd:"" passthrough:"" help:"Serve the authenticated workspace lifecycle API."`
 	Connect adapterConnectKongCmd  `cmd:"" passthrough:"" help:"Connect a local Unix-socket runtime adapter to the configured coordinator."`
+	Ingress adapterIngressKongCmd  `cmd:"" passthrough:"" help:"Serve an authenticated ingress for a loopback adapter or fleet service."`
 	State   controllerStateKongCmd `cmd:"" help:"Inspect adapter state without lifecycle side effects."`
 }
 type adapterConnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adapterIngressKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type controllerServeKongCmd struct {
@@ -791,6 +795,10 @@ func (c *controllerStateValidateKongCmd) Run(app App) error {
 
 func (c *adapterConnectKongCmd) Run(ctx context.Context, app App) error {
 	return app.adapterConnect(ctx, stripKongCommandPath(c.Args, "adapter", "connect"))
+}
+
+func (c *adapterIngressKongCmd) Run(ctx context.Context, app App) error {
+	return app.adapterIngress(ctx, stripKongCommandPath(c.Args, "adapter", "ingress"))
 }
 
 func (c *azureLoginKongCmd) Run(ctx context.Context, app App) error {
