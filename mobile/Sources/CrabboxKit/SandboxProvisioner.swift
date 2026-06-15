@@ -60,7 +60,11 @@ public struct IsloProvisioner: SandboxProvisioner {
 
     public func launch(name: String, model: String) async throws -> SandboxHandle {
         let sandbox = try await client.createSandbox(name: name, spec: spec)
-        _ = try await client.exec(name: sandbox.name, script: isloOllamaBootstrapScript(model: model))
+        // Launch the (multi-minute) Ollama install + model pull DETACHED so the
+        // exec returns immediately — islo's exec/stream has a max duration. The
+        // detached job persists; the returned engine's isReady()/first chat polls
+        // until it's up.
+        _ = try await client.exec(name: sandbox.name, script: isloDetachedLaunch(script: isloOllamaBootstrapScript(model: model)))
         let share = try await client.createShare(name: sandbox.name, port: 11434)
         return SandboxHandle(id: sandbox.name, provider: providerName, status: sandbox.status, ollamaEndpoint: share.url)
     }

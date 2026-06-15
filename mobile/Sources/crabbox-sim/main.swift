@@ -54,28 +54,55 @@ if args.contains("--islo-demo") {
     guard let islo = IsloClient(apiKey: key, baseURL: base, timeout: withLLM ? 600 : 60) else {
         FileHandle.standardError.write(Data("bad islo config\n".utf8)); exit(2)
     }
+    // Cheap persistence probe over the HTTP /exec/stream API the app uses.
+    if env["CRABBOX_ISLO_PROBE"] == "1" {
+        let pname = "crab-probe-\(UUID().uuidString.prefix(6).lowercased())"
+        do {
+            _ = try await islo.createSandbox(name: pname)
+            _ = try await islo.exec(name: pname, script: "nohup setsid sleep 400 </dev/null >/tmp/s.log 2>&1 & disown; echo started $!")
+            let check = try await islo.exec(name: pname, script: "pgrep -af 'sleep 400' || echo GONE")
+            print("PROBE result: \(check.stdout.trimmingCharacters(in: .whitespacesAndNewlines))")
+            try await islo.deleteSandbox(name: pname)
+            exit(0)
+        } catch {
+            try? await islo.deleteSandbox(name: pname)
+            FileHandle.standardError.write(Data("probe failed: \(error)\n".utf8)); exit(1)
+        }
+    }
+
+    let name = "crab-e2e-\(UUID().uuidString.prefix(8).lowercased())"
     do {
         let existing = try await islo.listSandboxes()
         print("auth OK — \(existing.count) existing sandbox(es)")
-        let name = "crab-e2e-\(env["USER"] ?? "x")"
         print("creating sandbox \(name)…")
         let created = try await islo.createSandbox(name: name)
         print("created: \(created.name) [\(created.status)]")
 
         if withLLM {
             let model = env["CRABBOX_AGENT_MODEL"] ?? "qwen2.5:0.5b"
-            print("bootstrapping Ollama + \(model) (this takes a few minutes)…")
-            let boot = try await islo.exec(name: created.name, script: isloOllamaBootstrapScript(model: model))
-            print("bootstrap exit=\(boot.exitCode)")
+            print("launching detached Ollama bootstrap + \(model) (installs in background)…")
+            let launch = try await islo.exec(name: created.name, script: isloDetachedLaunch(script: isloOllamaBootstrapScript(model: model)))
+            print("launch: \(launch.stdout.trimmingCharacters(in: .whitespacesAndNewlines))")
             let share = try await islo.createShare(name: created.name, port: 11434)
             print("share: \(share.url)")
-            if let engine = SandboxEngine(endpoint: share.url, model: model) {
-                let reply = try await engine.reply(
-                    messages: [ChatMessage(role: .user, content: "Say hello from the sandbox in one sentence.")],
-                    options: LLMOptions(temperature: 0, numPredict: 48)
-                )
-                print("LLM reply: \(reply.trimmingCharacters(in: .whitespacesAndNewlines))")
+            // Poll for readiness — the detached bootstrap takes a few minutes.
+            let engine = SandboxEngine(endpoint: share.url, model: model)
+            var reply = ""
+            let maxAttempts = 72  // ~6 min at 5s
+            for attempt in 1...maxAttempts {
+                do {
+                    reply = try await engine!.reply(
+                        messages: [ChatMessage(role: .user, content: "Say hello from the sandbox in one sentence.")],
+                        options: LLMOptions(temperature: 0, numPredict: 48)
+                    )
+                    break
+                } catch {
+                    if attempt == maxAttempts { throw error }
+                    if attempt % 6 == 0 { print("  still provisioning… (\(attempt * 5)s)") }
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                }
             }
+            print("LLM reply: \(reply.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
         print("cleaning up: deleting \(created.name)…")
@@ -83,7 +110,9 @@ if args.contains("--islo-demo") {
         print("DONE — islo e2e succeeded.")
         exit(0)
     } catch {
-        FileHandle.standardError.write(Data("islo e2e failed: \(error)\n".utf8))
+        // Best-effort cleanup so a failed run never leaks a sandbox.
+        try? await islo.deleteSandbox(name: name)
+        FileHandle.standardError.write(Data("islo e2e failed: \(error) (cleaned up \(name))\n".utf8))
         exit(1)
     }
 }

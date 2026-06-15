@@ -217,23 +217,45 @@ public actor IsloClient {
     }
 
     /// Parses an islo `exec/stream` SSE body collected to completion. Events
-    /// carry `data:` JSON lines with `stdout`/`stderr` chunks and a final
-    /// `exit_code`.
+    /// uses named SSE events: `event: stdout|stderr|exit|error` followed by one
+    /// or more `data:` lines, blocks separated by a blank line (matching the islo
+    /// Go SDK's `parseIsloSSE`).
     static func parseExecStream(_ data: Data) -> ExecResult {
         let text = String(data: data, encoding: .utf8) ?? ""
         var stdout = "", stderr = "", exit = 0
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("data:") else { continue }
-            let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
-            guard let jsonData = payload.data(using: .utf8),
-                  let event = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
-            else { continue }
-            if let chunk = event["stdout"] as? String { stdout += chunk }
-            if let chunk = event["stderr"] as? String { stderr += chunk }
-            if let code = event["exit_code"] as? Int { exit = code }
-            if let code = event["exitCode"] as? Int { exit = code }
+        var event = ""
+        var dataLines: [String] = []
+
+        func flush() {
+            guard !event.isEmpty || !dataLines.isEmpty else { return }
+            let payload = dataLines.joined(separator: "\n")
+            switch event {
+            case "stdout": stdout += payload
+            case "stderr": stderr += payload
+            case "exit": exit = Int(payload.trimmingCharacters(in: .whitespaces)) ?? exit
+            default: break
+            }
+            event = ""
+            dataLines.removeAll()
         }
+
+        for line in text.components(separatedBy: "\n") {
+            if line.isEmpty { flush(); continue }
+            if line.hasPrefix(":") { continue }
+            let field: String, value: String
+            if let r = line.range(of: ":") {
+                field = String(line[..<r.lowerBound])
+                var v = String(line[r.upperBound...])
+                if v.hasPrefix(" ") { v.removeFirst() }
+                value = v
+            } else {
+                field = line
+                value = ""
+            }
+            if field == "event" { event = value }
+            else if field == "data" { dataLines.append(value) }
+        }
+        flush()
         return ExecResult(exitCode: exit, stdout: stdout, stderr: stderr)
     }
 }
@@ -241,18 +263,45 @@ public actor IsloClient {
 /// The script that turns a fresh Ubuntu islo sandbox into an Ollama LLM server
 /// the phone can chat with. Pulls a small model and serves on 0.0.0.0:11434.
 public func isloOllamaBootstrapScript(model: String) -> String {
+    // Deliberately defensive: NO `set` flags and `|| true` on the installer, so
+    // the Ollama install script (which exits non-zero trying to reach systemd in
+    // a non-systemd sandbox) can't abort the serve/pull that follow. islo
+    // sandboxes run as root with no systemd; detached processes persist across
+    // exec calls, so we start Ollama bound to 0.0.0.0 with nohup+setsid.
     """
-    set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
-    SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
     if ! command -v ollama >/dev/null 2>&1; then
-      $SUDO apt-get update -y
-      $SUDO apt-get install -y curl ca-certificates
-      curl -fsSL https://ollama.com/install.sh | $SUDO sh
+      apt-get update -y || true
+      apt-get install -y curl ca-certificates procps zstd || true
+      curl -fsSL https://ollama.com/install.sh | sh || true
     fi
-    (OLLAMA_HOST=0.0.0.0:11434 OLLAMA_KEEP_ALIVE=-1 ollama serve >/tmp/ollama.log 2>&1 &)
-    sleep 5
-    ollama pull \(model)
-    echo "ready: \(model)"
+
+    pkill -f 'ollama serve' 2>/dev/null || true
+    nohup setsid env OLLAMA_HOST=0.0.0.0:11434 OLLAMA_KEEP_ALIVE=-1 ollama serve >/tmp/ollama.log 2>&1 </dev/null &
+    disown 2>/dev/null || true
+
+    for i in $(seq 1 60); do
+      if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then break; fi
+      sleep 1
+    done
+
+    ollama pull \(model) || true
+    echo "BOOTSTRAP_DONE model=\(model) tags=$(curl -s http://127.0.0.1:11434/api/tags | head -c 120)"
+    """
+}
+
+/// Wraps a long-running script so it runs fully detached in the sandbox and the
+/// `exec` call returns immediately. islo's `/exec/stream` has a max duration, so
+/// a multi-minute bootstrap (apt + Ollama install + model pull) must NOT run in
+/// the foreground of an exec — it gets SIGTERM'd. We base64 the script (avoiding
+/// all quoting issues), decode it to a file, and launch it with nohup+setsid.
+/// Readiness is then polled separately (the detached job persists across execs).
+public func isloDetachedLaunch(script: String) -> String {
+    let b64 = Data(script.utf8).base64EncodedString()
+    return """
+    echo \(b64) | base64 -d > /tmp/crabbox-boot.sh
+    nohup setsid bash /tmp/crabbox-boot.sh >/tmp/crabbox-boot.log 2>&1 </dev/null &
+    disown 2>/dev/null || true
+    echo LAUNCHED pid=$!
     """
 }
