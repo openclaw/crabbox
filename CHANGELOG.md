@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added JSON API initiation of generation-fenced runtime-adapter workspace deletion through explicit registered lease release.
+
 ## 0.31.0 - 2026-06-14
 
 ### Added

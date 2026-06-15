@@ -782,6 +782,146 @@ describe("runtime adapter relay", () => {
     await expect(Promise.all(alicePending)).resolves.toHaveLength(32);
   });
 
+  it("deletes a generation-bound adapter workspace through the JSON release API", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const lease = testLease({
+      id: "cbx_000000000071",
+      provider: "external",
+      lifecycle: "registered",
+      runtimeAdapterID: "example-adapter",
+      runtimeAdapterWorkspaceID: "example-workspace-71",
+      runtimeAdapterRegistrationID: "registration-generation-71",
+      owner: "alice@example.com",
+      org: "example-org",
+      keep: true,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    const legacyLease = testLease({
+      ...lease,
+      id: "cbx_000000000070",
+      runtimeAdapterWorkspaceID: "example-workspace-70",
+      runtimeAdapterRegistrationID: undefined,
+    });
+    storage.seed("runtime-adapter-identity:example-adapter", {
+      adapterID: "example-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    storage.seed(`lease:${legacyLease.id}`, legacyLease);
+
+    const unfenced = await fleet.fetch(
+      request("POST", `/v1/leases/${legacyLease.id}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    expect(unfenced.status).toBe(409);
+    await expect(unfenced.json()).resolves.toMatchObject({
+      error: "runtime_adapter_registration_required",
+    });
+    expect(storage.value<LeaseRecord>(`lease:${legacyLease.id}`)?.state).toBe("active");
+
+    const wrongOwner = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: {
+          "x-crabbox-owner": "mallory@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(wrongOwner.status).toBe(404);
+
+    const socket = new FakeWebSocket({
+      kind: "runtime-adapter-agent",
+      adapterID: "example-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+    });
+    const relayState = fleet as unknown as {
+      runtimeAdapterAgents: Map<string, WebSocket>;
+    };
+    relayState.runtimeAdapterAgents.set("example-adapter", socket as unknown as WebSocket);
+    socket.onSend = (data) => {
+      const message = JSON.parse(data) as {
+        id: string;
+        method: string;
+        path: string;
+        body?: string;
+      };
+      expect(message).toMatchObject({
+        method: "DELETE",
+        path: "/v1/workspaces/example-workspace-71",
+      });
+      expect(message.body).toBeUndefined();
+      void fleet.webSocketMessage(
+        socket as unknown as WebSocket,
+        JSON.stringify({
+          type: "response",
+          id: message.id,
+          status: 202,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: "example-workspace-71", status: "stopping" }),
+        }),
+      );
+    };
+
+    const deleted = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    expect(deleted.status).toBe(202);
+    await expect(deleted.json()).resolves.toMatchObject({
+      status: "deleting",
+      lease: {
+        id: lease.id,
+        owner: "alice@example.com",
+        org: "example-org",
+        runtimeAdapterID: "example-adapter",
+        runtimeAdapterWorkspaceID: "example-workspace-71",
+        runtimeAdapterRegistrationID: "registration-generation-71",
+        runtimeAdapterDeleteRequestedAt: expect.any(String),
+      },
+    });
+    expect(socket.sentJSON()).toHaveLength(1);
+
+    const rawDelete = await fleet.fetch(
+      request("DELETE", "/v1/adapters/example-adapter/proxy/v1/workspaces/example-workspace-71", {
+        headers,
+      }),
+    );
+    expect(rawDelete.status).toBe(409);
+    await expect(rawDelete.json()).resolves.toMatchObject({
+      error: "runtime_adapter_delete_requires_lease",
+    });
+    expect(socket.sentJSON()).toHaveLength(1);
+
+    const wrongGeneration = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers,
+        body: {
+          runtimeAdapterDeleteCompletion: {
+            adapterID: "example-adapter",
+            workspaceID: "example-workspace-71",
+            registrationID: "registration-generation-other",
+            status: "absent",
+          },
+        },
+      }),
+    );
+    expect(wrongGeneration.status).toBe(409);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.state).toBe("active");
+  });
+
   it("routes portal Delete through the bound adapter and keeps deregistration as fallback", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

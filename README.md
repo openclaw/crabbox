@@ -377,6 +377,8 @@ automatically by default; set `broker.autoWebVNC: false` to opt out. The
 coordinator never receives provider credentials or directly calls a registered
 provider. By default it removes only registration metadata; an explicitly
 bound outbound runtime adapter can perform a user-confirmed workspace delete.
+API clients request the same generation-fenced delete with
+`POST /v1/leases/{id}/release` and body `{"delete":true}`.
 
 Forwarded environment is intentionally narrow: `NODE_OPTIONS` and `CI`. Do not
 pass secrets as command-line arguments. For live-secret smoke tests, use
