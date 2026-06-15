@@ -263,7 +263,12 @@ the same body.
 
 **Release.** `POST /v1/leases/{id}/release` (body `{delete?}`, defaulting to
 `!keep`) deletes the cloud server when the lease is still active and sets state
-`released`. The CLI client retries as admin when a user request 404s or 401s.
+`released`. For a registered lease bound to a runtime-adapter workspace,
+explicit `{"delete":true}` instead initiates the same owner/org-scoped,
+immutable-registration-generation-fenced delete used by the portal and returns
+`202` while confirmed-absence cleanup is pending. Omitting `delete` preserves
+metadata-only registered release. The CLI client retries as admin when a user
+request 404s or 401s.
 
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`
