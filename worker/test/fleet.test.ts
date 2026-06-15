@@ -3109,6 +3109,48 @@ describe("fleet lease identity and idle", () => {
     expect(providerReleases).toBe(1);
   });
 
+  it("keeps accepted workspace creates successful when post-persist maintenance fails", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test",
+      },
+    );
+    const maintenance = fleet as unknown as {
+      maintainWorkspacePrewarm: () => Promise<void>;
+    };
+    vi.spyOn(maintenance, "maintainWorkspacePrewarm").mockRejectedValueOnce(
+      new Error("maintenance error code=10000"),
+    );
+
+    const created = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          id: "fleet-maintenance-failure",
+          runtime: "crabbox",
+          ttlSeconds: 1800,
+          idleTimeoutSeconds: 360,
+          capabilities: { desktop: false },
+        },
+      }),
+    );
+
+    expect(created.status).toBe(202);
+    await expect(created.json()).resolves.toMatchObject({
+      id: "fleet-maintenance-failure",
+      status: "provisioning",
+    });
+    expect(
+      storage.value("workspace:example-org:alice%40example.com:fleet-maintenance-failure"),
+    ).toBeDefined();
+  });
+
   it("keeps an organization-wide workspace spare while demand is active", async () => {
     type StoredWorkspace = {
       id: string;

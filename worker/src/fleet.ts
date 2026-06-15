@@ -2136,7 +2136,11 @@ export class FleetCoordinator {
     if ("response" in reservation) {
       return reservation.response;
     }
-    await this.maintainWorkspacePrewarm();
+    try {
+      await this.maintainWorkspacePrewarm();
+    } catch (error) {
+      console.warn(`workspace prewarm maintenance deferred: ${errorMessage(error)}`);
+    }
     await this.state.runExclusive(() => this.scheduleAlarm());
     return json(workspaceResponse(reservation.record, reservation.lease, this.env), {
       status: workspaceHTTPStatus(reservation.record, reservation.lease),

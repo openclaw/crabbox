@@ -11,6 +11,7 @@
 
 - Fixed `apple-container` inventory parsing for Apple container 1.0 object-form status and nested network addresses. Thanks @coygeek.
 - Added a dedicated route-scoped service credential for Crabfleet workspace lifecycle requests without granting general coordinator access.
+- Kept accepted workspace creates successful when post-persist prewarm maintenance is temporarily unavailable.
 
 ## 0.31.0 - 2026-06-14
 
