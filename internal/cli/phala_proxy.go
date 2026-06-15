@@ -73,6 +73,7 @@ func (a App) phalaProxy(ctx context.Context, args []string) error {
 	fs.SetOutput(a.Stderr)
 	phala := fs.String("phala", "phala", "phala CLI path")
 	nodeID := fs.String("node-id", "", "Phala node id")
+	gatewayHost := fs.String("gateway-host", "", "pre-resolved TLS SSH gateway host (skips the per-connection cvms-get lookup)")
 	if err := fs.Parse(args); err != nil {
 		return exit(2, "%v", err)
 	}
@@ -82,9 +83,17 @@ func (a App) phalaProxy(ctx context.Context, args []string) error {
 	cvmID := fs.Arg(0)
 	_ = nodeID // reserved for future node-scoped gateway resolution
 
-	host, err := resolvePhalaProxyHost(ctx, *phala, cvmID, a.Stderr)
-	if err != nil {
-		return err
+	// A cached gateway host (resolved once at acquire time and carried on the
+	// SSH ProxyCommand) lets every SSH connection tunnel straight to the TLS
+	// gateway, skipping the `phala cvms get` API round-trip. This is what keeps
+	// the short `status --wait` readiness probe inside its timeout budget.
+	host := strings.TrimSpace(*gatewayHost)
+	if host == "" {
+		var err error
+		host, err = resolvePhalaProxyHost(ctx, *phala, cvmID, a.Stderr)
+		if err != nil {
+			return err
+		}
 	}
 	return tunnelPhalaProxy(ctx, host, a.input(), a.Stdout, a.Stderr)
 }

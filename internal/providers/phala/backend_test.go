@@ -435,7 +435,7 @@ func TestProxyCommandPreservesConfiguredScope(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Phala.CLIPath = "/Applications/Phala CLI/phala"
 	cfg.Phala.NodeID = "node 7"
-	got := proxyCommand(cfg, "cvm-1")
+	got := proxyCommand(cfg, "cvm-1", "")
 	for _, want := range []string{
 		`"/Applications/Phala CLI/phala"`,
 		`--node-id "node 7"`,
@@ -446,12 +446,31 @@ func TestProxyCommandPreservesConfiguredScope(t *testing.T) {
 			t.Fatalf("proxy=%q missing %q", got, want)
 		}
 	}
+	// With no cached gateway host the proxy command must NOT carry --gateway-host,
+	// so the proxy falls back to the per-connection cvms-get resolution.
+	if strings.Contains(got, "--gateway-host") {
+		t.Fatalf("proxy=%q carried --gateway-host with no cached host", got)
+	}
+}
+
+func TestProxyCommandCarriesCachedGatewayHost(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Phala.CLIPath = "phala"
+	const host = "b60d1f55-22.dstack-pha-prod5.phala.network"
+	got := proxyCommand(cfg, "cvm-1", host)
+	if !strings.Contains(got, "--gateway-host "+host) {
+		t.Fatalf("proxy=%q missing --gateway-host %q", got, host)
+	}
+	// The CVM id must still be the trailing positional argument.
+	if !strings.HasSuffix(strings.TrimSpace(got), "cvm-1") {
+		t.Fatalf("proxy=%q does not end with the cvm id", got)
+	}
 }
 
 func TestProxyCommandEscapesOpenSSHPercentTokens(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Phala.CLIPath = "/opt/phala%test"
-	got := proxyCommand(cfg, "cvm%1")
+	got := proxyCommand(cfg, "cvm%1", "")
 	if !strings.Contains(got, "/opt/phala%%test") || !strings.Contains(got, "cvm%%1") {
 		t.Fatalf("proxy=%q", got)
 	}
@@ -1311,5 +1330,109 @@ func TestListSkipsItemMissingName(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].cloudID() != "keeper" {
 		t.Fatalf("items=%#v want only the named keeper", items)
+	}
+}
+
+// TestResolveGatewayHostParsesRealCVMSGetShape pins resolveGatewayHost against
+// the EXACT snake_case `phala cvms get --cvm-id <id> --json` payload observed on
+// real TDX hardware: top-level app_id/vm_uuid/name plus a nested
+// gateway.base_domain. The cached host must be <appId>-22.<base_domain>, matching
+// the proxy-side resolver so the cached and fallback hosts are identical.
+func TestResolveGatewayHostParsesRealCVMSGetShape(t *testing.T) {
+	const realGetStdout = `{
+  "success": true,
+  "app_id": "b60d1f55eeb01f17e0a5220b4c03792248d49f92",
+  "vm_uuid": "42fd1f82-7b4c-47cc-92f9-a5d39476c649",
+  "name": "crabbox-cbx-abcdef123456",
+  "status": "running",
+  "gateway": {
+    "base_domain": "dstack-pha-prod5.phala.network",
+    "cname": "abc.cname.phala.network"
+  }
+}`
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: realGetStdout}}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	host, err := b.resolveGatewayHost(context.Background(), "b60d1f55eeb01f17e0a5220b4c03792248d49f92")
+	if err != nil {
+		t.Fatalf("resolveGatewayHost failed on real cvms get shape: %v", err)
+	}
+	const want = "b60d1f55eeb01f17e0a5220b4c03792248d49f92-22.dstack-pha-prod5.phala.network"
+	if host != want {
+		t.Fatalf("host=%q want %q", host, want)
+	}
+	if strings.Join(runner.calls[0].args, " ") != "cvms get --cvm-id b60d1f55eeb01f17e0a5220b4c03792248d49f92 --json" {
+		t.Fatalf("args=%q", strings.Join(runner.calls[0].args, " "))
+	}
+}
+
+// TestResolveGatewayHostToleratesMissingAndIncomplete proves resolveGatewayHost
+// is best-effort: a missing CVM and a payload missing the app id or gateway
+// domain all return ("", nil) so the caller silently falls back to the
+// per-connection proxy resolution rather than failing the acquire.
+func TestResolveGatewayHostToleratesMissingAndIncomplete(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	for _, test := range []struct {
+		name   string
+		result core.LocalCommandResult
+		err    error
+	}{
+		{name: "missing CVM", result: core.LocalCommandResult{Stderr: "Error: CVM not found"}, err: errors.New("exit status 1")},
+		{name: "no gateway domain", result: core.LocalCommandResult{Stdout: `{"success":true,"app_id":"app1","gateway":{}}`}},
+		{name: "no app id", result: core.LocalCommandResult{Stdout: `{"success":true,"gateway":{"base_domain":"gw.example"}}`}},
+		{name: "non-json output", result: core.LocalCommandResult{Stdout: "libuv: assertion failed"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{results: []core.LocalCommandResult{test.result}}
+			if test.err != nil {
+				runner.errs = []error{test.err}
+			}
+			b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			host, err := b.resolveGatewayHost(context.Background(), "cvm-1")
+			if err != nil {
+				t.Fatalf("expected best-effort nil error, got %v", err)
+			}
+			if host != "" {
+				t.Fatalf("host=%q want empty for best-effort fallback", host)
+			}
+		})
+	}
+}
+
+// TestGatewayHostRoundTripsThroughClaimToProxyCommand proves a gateway_host
+// recorded on the lease claim at acquire time is surfaced back onto item.Labels
+// during resolution (via phalaLabels) and baked into the SSH ProxyCommand as
+// --gateway-host, so the cached host survives the claim round-trip and every SSH
+// connection skips the per-connection cvms-get call.
+func TestGatewayHostRoundTripsThroughClaimToProxyCommand(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.IdleTimeout = 5 * time.Minute
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	const host = "b60d1f55-22.dstack-pha-prod5.phala.network"
+	labels := core.DirectLeaseLabels(cfg, leaseID, "blue-box", providerName, "", false, time.Now())
+	labels["phala_cvm"] = "cvm-1"
+	labels["gateway_host"] = host
+	server := core.Server{CloudID: "cvm-1", Provider: providerName, Name: "blue-box", Labels: labels}
+	target := core.SSHTarget{Host: "cvm-1", User: "root", Port: "22"}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, target, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	// phalaLabels resolves the claim by cloud id and must surface gateway_host.
+	item := instance{ID: "cvm-1"}
+	item.Labels = phalaLabels(item, cfg)
+	if item.Labels["gateway_host"] != host {
+		t.Fatalf("gateway_host not surfaced from claim: labels=%v", item.Labels)
+	}
+	b := &backend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	lease := b.lease(item, cfg, leaseID)
+	if !strings.Contains(lease.SSH.ProxyCommand, "--gateway-host "+host) {
+		t.Fatalf("ProxyCommand=%q missing cached --gateway-host %q", lease.SSH.ProxyCommand, host)
 	}
 }

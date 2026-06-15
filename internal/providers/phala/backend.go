@@ -332,9 +332,31 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return cause
 	}
+	// Resolve the TLS SSH gateway host ONCE, here, and cache it on the lease so
+	// every subsequent SSH connection (including the initial prepareSSH probe
+	// below and `status --wait`'s short readiness probe) tunnels straight to the
+	// gateway without a per-connection `phala cvms get` call. Best-effort: if
+	// resolution fails the label is omitted and the proxy falls back to resolving
+	// the host itself.
+	if gatewayHost, err := b.resolveGatewayHost(ctx, id); err != nil {
+		fmt.Fprintf(b.rt.Stderr, "warning: could not cache phala gateway host for phala_cvm=%s: %v\n", id, err)
+	} else if gatewayHost != "" {
+		labels["gateway_host"] = gatewayHost
+	} else {
+		fmt.Fprintf(b.rt.Stderr, "warning: phala gateway host unresolved for phala_cvm=%s; SSH will resolve it per connection\n", id)
+	}
 	item, err := b.findInstance(ctx, id)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
+	}
+	// findInstance rebuilt item.Labels from listInstances (no claim exists yet),
+	// so re-apply the cached gateway host directly so the initial prepareSSH and
+	// the persisted claim both carry it.
+	if host := labels["gateway_host"]; host != "" {
+		if item.Labels == nil {
+			item.Labels = map[string]string{}
+		}
+		item.Labels["gateway_host"] = host
 	}
 	lease := b.lease(item, cfg, leaseID)
 	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
@@ -872,7 +894,7 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string) core.Lea
 		DisableHostKeyChecking: true,
 		NetworkKind:            "public",
 		SSHConfigProxy:         true,
-		ProxyCommand:           proxyCommand(cfg, item.cloudID()),
+		ProxyCommand:           proxyCommand(cfg, item.cloudID(), item.Labels["gateway_host"]),
 	}
 	if leaseID != "" {
 		core.UseStoredTestboxKey(&target, leaseID)
@@ -1159,7 +1181,7 @@ func mergeClaimLabels(server *core.Server, claim core.LeaseClaim) {
 	}
 }
 
-func proxyCommand(cfg core.Config, cvmID string) string {
+func proxyCommand(cfg core.Config, cvmID, gatewayHost string) string {
 	executable, err := os.Executable()
 	if err != nil {
 		executable = os.Args[0]
@@ -1167,6 +1189,12 @@ func proxyCommand(cfg core.Config, cvmID string) string {
 	words := []string{executable, "__phala-proxy", "--phala", cfg.Phala.CLIPath}
 	if nodeID := strings.TrimSpace(cfg.Phala.NodeID); nodeID != "" {
 		words = append(words, "--node-id", nodeID)
+	}
+	// A cached gateway host (resolved once at acquire time) lets each SSH
+	// connection skip the per-connection `phala cvms get` lookup. When absent
+	// the proxy falls back to resolving it itself.
+	if host := strings.TrimSpace(gatewayHost); host != "" {
+		words = append(words, "--gateway-host", host)
 	}
 	words = append(words, cvmID)
 	for i := range words {
@@ -1238,6 +1266,106 @@ func (b *backend) getInstance(ctx context.Context, id string) (instance, bool, e
 	}
 	item.Labels = phalaLabels(item, cfg)
 	return item, true, nil
+}
+
+// gatewayGetOutput models the subset of `phala cvms get --cvm-id <id> --json`
+// crabbox needs to derive the TLS SSH gateway host: the CVM app id and the
+// gateway base domain. The payload is snake_case and may carry the gateway both
+// nested under a gateway object and at the top level on some CLI versions, so
+// every spelling is decoded and the first non-blank wins. This mirrors the
+// proxy-side resolver (resolvePhalaProxyHost) field preference exactly so the
+// cached host and the proxy-resolved fallback host are identical.
+type gatewayGetOutput struct {
+	AppID         string
+	AppIDAlt      string
+	GatewayDomain string
+	BaseDomain    string
+	Domain        string
+	TopGateway    string
+	CVM           *gatewayGetOutput
+}
+
+func (g *gatewayGetOutput) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		AppID         string          `json:"app_id"`
+		AppIDAlt      string          `json:"appId"`
+		GatewayDomain string          `json:"gateway_domain"`
+		CVM           json.RawMessage `json:"cvm"`
+		Gateway       struct {
+			GatewayDomain string `json:"gateway_domain"`
+			BaseDomain    string `json:"base_domain"`
+			Domain        string `json:"domain"`
+		} `json:"gateway"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	g.AppID = raw.AppID
+	g.AppIDAlt = raw.AppIDAlt
+	g.GatewayDomain = raw.Gateway.GatewayDomain
+	g.BaseDomain = raw.Gateway.BaseDomain
+	g.Domain = raw.Gateway.Domain
+	g.TopGateway = raw.GatewayDomain
+	if len(raw.CVM) > 0 && string(raw.CVM) != "null" {
+		nested := &gatewayGetOutput{}
+		if err := json.Unmarshal(raw.CVM, nested); err != nil {
+			return err
+		}
+		g.CVM = nested
+	}
+	return nil
+}
+
+// appID returns the CVM app id used as the `<appId>-22` host label, preferring
+// the canonical app_id then its camelCase alias, falling through to the nested
+// cvm object.
+func (g *gatewayGetOutput) appID() string {
+	id := firstNonBlank(g.AppID, g.AppIDAlt)
+	if id == "" && g.CVM != nil {
+		id = g.CVM.appID()
+	}
+	return id
+}
+
+// gatewayDomain returns the gateway base domain, preferring gateway_domain then
+// the nested base_domain/domain, then a top-level gateway_domain, falling
+// through to the nested cvm object. This preference matches resolvePhalaProxyHost.
+func (g *gatewayGetOutput) gatewayDomain() string {
+	domain := firstNonBlank(g.GatewayDomain, g.BaseDomain, g.Domain, g.TopGateway)
+	if domain == "" && g.CVM != nil {
+		domain = g.CVM.gatewayDomain()
+	}
+	return domain
+}
+
+// resolveGatewayHost queries `phala cvms get --cvm-id <id> --json` once and
+// derives the cached TLS SSH gateway host `<appId>-22.<gateway-domain>`. Callers
+// treat it best-effort: a not-found CVM or a payload missing the app id/domain
+// returns ("", nil) so the per-connection proxy fallback still applies.
+func (b *backend) resolveGatewayHost(ctx context.Context, id string) (string, error) {
+	cfg := b.configForRun()
+	result, err := b.phala(ctx, cfg, []string{"cvms", "get", "--cvm-id", id, "--json"}, nil)
+	if err != nil {
+		detail := strings.ToLower(result.Stdout + "\n" + result.Stderr + "\n" + err.Error())
+		if strings.Contains(detail, "not found") || strings.Contains(detail, "does not exist") {
+			return "", nil
+		}
+		return "", commandError("phala cvms get", result, err)
+	}
+	payload := jsonObjectPrefix(result.Stdout)
+	if payload == "" {
+		return "", nil
+	}
+	var parsed gatewayGetOutput
+	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+		return "", core.Exit(5, "parse phala cvms get output: %v", err)
+	}
+	appID := parsed.appID()
+	domain := parsed.gatewayDomain()
+	if appID == "" || domain == "" {
+		return "", nil
+	}
+	return appID + "-22." + domain, nil
 }
 
 func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id, leaseID string) (bool, error) {

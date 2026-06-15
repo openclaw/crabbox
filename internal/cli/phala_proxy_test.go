@@ -279,6 +279,68 @@ func TestOpenSSLHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+// TestPhalaProxyResolvesHostViaCVMSGetWithoutCachedFlag preserves the existing
+// behavior: with NO --gateway-host the proxy resolves the host itself via
+// `phala cvms get` and tunnels to the derived host.
+func TestPhalaProxyResolvesHostViaCVMSGetWithoutCachedFlag(t *testing.T) {
+	const getStdout = `{"success":true,"app_id":"app-abc","gateway":{"gateway_domain":"gw.phala.network"}}`
+	phala, argvPath := fakePhalaCLI(t, getStdout, 0)
+	opensslArgv := fakeOpenSSL(t, "remote-tail")
+	app := App{Stdout: io.Discard, Stderr: io.Discard, Stdin: strings.NewReader("request")}
+	if err := app.phalaProxy(context.Background(), []string{"--phala", phala, "cvm-id-123"}); err != nil {
+		t.Fatalf("phalaProxy failed: %v", err)
+	}
+	// The cvms-get lookup MUST run to resolve the host.
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("phala cvms get was not invoked: %v", err)
+	}
+	if strings.TrimSpace(string(argv)) != "cvms get --cvm-id cvm-id-123 --json" {
+		t.Fatalf("phala argv=%q", strings.TrimSpace(string(argv)))
+	}
+	openssl, err := os.ReadFile(opensslArgv)
+	if err != nil {
+		t.Fatalf("openssl was not invoked: %v", err)
+	}
+	if !strings.Contains(string(openssl), "-connect app-abc-22.gw.phala.network:443") {
+		t.Fatalf("openssl argv=%q did not tunnel to the resolved host", string(openssl))
+	}
+}
+
+// TestPhalaProxyUsesCachedGatewayHostWithoutCVMSGet proves the cached
+// --gateway-host short-circuits the per-connection `phala cvms get` lookup
+// entirely: the fake phala CLI is never invoked (its argv record is never
+// written) and openssl tunnels straight to the supplied host.
+func TestPhalaProxyUsesCachedGatewayHostWithoutCVMSGet(t *testing.T) {
+	const host = "b60d1f55-22.dstack-pha-prod5.phala.network"
+	// A fake phala that would exit non-zero AND record its argv if ever called.
+	phala, argvPath := fakePhalaCLI(t, "should-not-be-called", 9)
+	opensslArgv := fakeOpenSSL(t, "remote-tail")
+	output := &bytes.Buffer{}
+	app := App{Stdout: output, Stderr: io.Discard, Stdin: strings.NewReader("request")}
+	if err := app.phalaProxy(context.Background(), []string{"--phala", phala, "--gateway-host", host, "cvm-id-123"}); err != nil {
+		t.Fatalf("phalaProxy with cached host failed: %v", err)
+	}
+	// The phala CLI must NOT have been invoked: its argv record stays absent.
+	if _, err := os.Stat(argvPath); err == nil {
+		recorded, _ := os.ReadFile(argvPath)
+		t.Fatalf("phala cvms get was invoked despite cached --gateway-host: argv=%q", string(recorded))
+	}
+	openssl, err := os.ReadFile(opensslArgv)
+	if err != nil {
+		t.Fatalf("openssl was not invoked: %v", err)
+	}
+	recorded := string(openssl)
+	for _, want := range []string{"-connect " + host + ":443", "-servername " + host} {
+		if !strings.Contains(recorded, want) {
+			t.Fatalf("openssl argv=%q missing %q", recorded, want)
+		}
+	}
+	if output.String() != "remote-tail" {
+		t.Fatalf("output=%q want remote-tail", output.String())
+	}
+}
+
 func TestPhalaJSONObjectPrefixDiscardsTrailingNoise(t *testing.T) {
 	for _, test := range []struct {
 		raw  string
