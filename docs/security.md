@@ -38,8 +38,10 @@ are rejected `401 unauthorized`. The Node runtime can instead accept an
 explicitly configured trusted reverse-proxy identity from allowlisted peer
 CIDRs. The generally unauthenticated routes are `GET /v1/health`, the GitHub
 login/OAuth and portal login/logout routes, and bridge agent upgrades that use
-short-lived tickets. Authentication is resolved in `worker/src/auth.ts` in this
-precedence:
+short-lived tickets. The `/v1/workspaces` route tree also accepts the dedicated
+`CRABBOX_RUNTIME_ADAPTER_TOKEN` as a non-admin `service@openclaw.org` identity;
+that credential is rejected from every other coordinator route. Normal
+authentication is resolved in `worker/src/auth.ts` in this precedence:
 
 1. **Admin token** — the request token equals the coordinator secret
    `CRABBOX_ADMIN_TOKEN`. Grants admin scope.
@@ -170,6 +172,8 @@ Inject these as Cloudflare Worker secrets or Node service secrets, never in the
 repo:
 
 - `CRABBOX_ADMIN_TOKEN` — admin and image-lifecycle routes.
+- `CRABBOX_RUNTIME_ADAPTER_TOKEN` — route-scoped service access to the
+  `/v1/workspaces` lifecycle API only.
 - `CRABBOX_SHARED_TOKEN` — trusted operator automation; also the fallback
   signing key when `CRABBOX_SESSION_SECRET` is unset.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Added JSON API initiation of generation-fenced runtime-adapter workspace deletion through explicit registered lease release.
+- Added reusable Cloudflare container run-session handles with exact cleanup commands for `--keep --lease-output`. Thanks @zozo123.
+
+### Fixed
+
+- Added a dedicated route-scoped service credential for Crabfleet workspace lifecycle requests without granting general coordinator access.
+
 ## 0.31.0 - 2026-06-14
 
 ### Added

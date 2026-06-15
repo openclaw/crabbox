@@ -27,6 +27,9 @@ func TestCloudflareProviderSpec(t *testing.T) {
 	if !hasCloudflareFeature(spec.Features, "archive-sync") || !hasCloudflareFeature(spec.Features, "cleanup") {
 		t.Fatalf("spec.Features = %#v, want archive-sync and cleanup", spec.Features)
 	}
+	if !hasCloudflareFeature(spec.Features, "run-session") {
+		t.Fatalf("spec.Features = %#v, want run-session", spec.Features)
+	}
 	if hasCloudflareFeature(spec.Features, "url-bridge") {
 		t.Fatalf("spec.Features = %#v, should not advertise unsupported URL bridge", spec.Features)
 	}
@@ -744,6 +747,137 @@ func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning: cloudflare destroy failed for "+createdID+":") || !strings.Contains(stderr.String(), "context deadline exceeded") {
 		t.Fatalf("stderr=%q, want destroy timeout warning", stderr.String())
+	}
+}
+
+func TestCloudflareRunKeepReturnsSessionHandle(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var createdID string
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			var req createSandboxRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			createdID = req.ID
+			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
+			deleteCalls++
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard, Stdout: io.Discard}}
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"true"},
+		NoSync:  true,
+		Keep:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("destroy called %d times with --keep, want 0", deleteCalls)
+	}
+	if result.Session == nil {
+		t.Fatal("result.Session = nil, want a run-session handle")
+	}
+	if result.Session.Provider != providerName {
+		t.Fatalf("Session.Provider = %q, want %q", result.Session.Provider, providerName)
+	}
+	if result.Session.Reused {
+		t.Fatal("Session.Reused = true, want false for a freshly acquired lease")
+	}
+	if !result.Session.Kept {
+		t.Fatal("Session.Kept = false, want true under --keep")
+	}
+	if result.Session.LeaseID != createdID {
+		t.Fatalf("Session.LeaseID = %q, want %q", result.Session.LeaseID, createdID)
+	}
+	if result.Session.RunID != "" {
+		t.Fatalf("Session.RunID = %q, want empty because Cloudflare has no distinct run id", result.Session.RunID)
+	}
+	wantCleanup := cloudflareCleanupCommand(createdID)
+	if result.Session.CleanupCommand != wantCleanup {
+		t.Fatalf("Session.CleanupCommand = %q, want %q", result.Session.CleanupCommand, wantCleanup)
+	}
+}
+
+func TestCloudflareCleanupCommandQuotesLeaseID(t *testing.T) {
+	got := cloudflareCleanupCommand("cbx_test; touch /tmp/unsafe")
+	want := "crabbox stop --provider cloudflare --id 'cbx_test; touch /tmp/unsafe'"
+	if got != want {
+		t.Fatalf("cloudflareCleanupCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestCloudflareRunKeepOnFailureRetainsSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var createdID string
+	execCalls := 0
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			var req createSandboxRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode create request: %v", err)
+			}
+			createdID = req.ID
+			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
+			execCalls++
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			if execCalls == 1 { // prepareWorkspace
+				_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
+				return
+			}
+			_, _ = io.WriteString(w, `{"type":"complete","exitCode":2}`+"\n") // command fails
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
+			deleteCalls++
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: providerName}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = "token"
+	backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard, Stdout: io.Discard}}
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:          Repo{Name: "repo", Root: t.TempDir()},
+		Command:       []string{"false"},
+		NoSync:        true,
+		KeepOnFailure: true,
+	})
+	if err == nil {
+		t.Fatal("Run succeeded, want non-nil error for failing command")
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("destroy called %d times with --keep-on-failure, want 0", deleteCalls)
+	}
+	if result.Session == nil {
+		t.Fatal("result.Session = nil, want a retained run-session handle")
+	}
+	if !result.Session.Kept {
+		t.Fatal("Session.Kept = false, want true after keep-on-failure")
+	}
+	if result.Session.LeaseID != createdID {
+		t.Fatalf("Session.LeaseID = %q, want %q", result.Session.LeaseID, createdID)
 	}
 }
 

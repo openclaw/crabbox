@@ -154,6 +154,62 @@ describe("coordinator auth", () => {
     });
   });
 
+  it("accepts the runtime adapter token only for workspace routes", async () => {
+    const env = {
+      CRABBOX_DEFAULT_ORG: "openclaw",
+      CRABBOX_RUNTIME_ADAPTER_TOKEN: "runtime-adapter",
+    } as Env;
+    const accepted = await Promise.all(
+      [
+        new Request("https://example.test/v1/workspaces", { method: "POST" }),
+        new Request("https://example.test/v1/workspaces/fleet-is-101"),
+        new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
+          headers: { upgrade: "websocket" },
+        }),
+      ].map((request) => {
+        request.headers.set("authorization", "Bearer runtime-adapter");
+        return prepareCoordinatorRequest(request, env);
+      }),
+    );
+    expect(
+      accepted.map((prepared) =>
+        "response" in prepared
+          ? null
+          : {
+              authenticated: prepared.authenticated,
+              owner: prepared.request.headers.get("x-crabbox-owner"),
+              org: prepared.request.headers.get("x-crabbox-org"),
+            },
+      ),
+    ).toEqual([
+      { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
+      { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
+      { authenticated: true, owner: "service@openclaw.org", org: "openclaw" },
+    ]);
+
+    const denied = await Promise.all(
+      [
+        new Request("https://example.test/v1/leases", {
+          headers: { authorization: "Bearer runtime-adapter" },
+        }),
+        new Request("https://example.test/v1/workspaces", {
+          method: "POST",
+          headers: { authorization: "Bearer wrong" },
+        }),
+      ].map((request) => prepareCoordinatorRequest(request, env)),
+    );
+    expect(
+      denied.map((prepared) =>
+        "response" in prepared
+          ? { authenticated: prepared.authenticated, status: prepared.response.status }
+          : null,
+      ),
+    ).toEqual([
+      { authenticated: false, status: 401 },
+      { authenticated: false, status: 401 },
+    ]);
+  });
+
   it("keeps shared bearer token non-admin and ignores caller-supplied identity headers", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",

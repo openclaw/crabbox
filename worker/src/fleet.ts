@@ -4020,6 +4020,24 @@ export class FleetCoordinator {
         admin,
       );
     }
+    if (
+      body.delete === true &&
+      isRegisteredLease(lease) &&
+      lease.runtimeAdapterID &&
+      lease.runtimeAdapterWorkspaceID
+    ) {
+      if (!lease.runtimeAdapterRegistrationID) {
+        return json(
+          {
+            error: "runtime_adapter_registration_required",
+            message:
+              "runtime adapter workspace deletion requires an immutable registration generation",
+          },
+          { status: 409 },
+        );
+      }
+      return await this.deleteRegisteredRuntimeAdapterWorkspace(request, lease);
+    }
     if (lease.runtimeAdapterDeleteRequestedAt) {
       return runtimeAdapterDeletePendingResponse(lease);
     }
@@ -4833,135 +4851,188 @@ export class FleetCoordinator {
       return portalError("Stop unavailable", "Lease manage access is required.", 403);
     }
     if (isRegisteredLease(lease) && lease.runtimeAdapterID && lease.runtimeAdapterWorkspaceID) {
-      const adapterID = lease.runtimeAdapterID;
-      const workspaceID = lease.runtimeAdapterWorkspaceID;
-      return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
-        const current = await this.state.runExclusive(() => this.getLease(lease.id));
-        if (!current || !leaseIsLive(current)) {
-          return portalError("Delete unavailable", "That lease is no longer active.", 409);
-        }
-        if (!this.leaseManageableByRequest(current, request, isAdminRequest(request))) {
-          return portalError("Delete unavailable", "Lease manage access is required.", 403);
-        }
-        if (
-          current.runtimeAdapterID !== adapterID ||
-          current.runtimeAdapterWorkspaceID !== workspaceID ||
-          current.runtimeAdapterRegistrationID !== lease.runtimeAdapterRegistrationID
-        ) {
-          return portalError("Delete unavailable", "The runtime adapter binding changed.", 409);
-        }
-        const deleteClaim = await this.markRuntimeAdapterDeletePending(
-          current,
-          runtimeAdapterDeleteInitialRetryMs,
-        );
-        if (!deleteClaim) {
-          return portalError("Delete unavailable", "That lease is no longer active.", 409);
-        }
-        const dispatch = await this.beginRuntimeAdapterDeleteDispatch(current, deleteClaim);
-        if (!dispatch) {
-          return portalError(
-            "Delete unavailable",
-            "Another delete for this workspace is still settling. Try again shortly.",
-            503,
-          );
-        }
-        const proxyResult = await (async () => {
-          let result: RuntimeAdapterProxyResult | undefined;
-          try {
-            result = await this.runtimeAdapterProxyResult(
-              new Request(request.url, { method: "DELETE", headers: request.headers }),
-              adapterID,
-              ["v1", "workspaces", workspaceID],
-              { owner: current.owner, org: current.org },
-              dispatch.deadlineMs,
-            );
-            return result;
-          } finally {
-            await this.finishRuntimeAdapterDeleteDispatch(
-              dispatch,
-              result !== undefined && (await runtimeAdapterDeleteDispatchSafeToClear(result)),
-            );
-          }
-        })();
-        const response = proxyResult.response;
-        let body:
-          | { id?: unknown; status?: unknown; message?: unknown; error?: unknown }
-          | undefined;
-        if (response.status !== 204) {
-          body = (await response
-            .clone()
-            .json()
-            .catch(() => undefined)) as
-            | { status?: unknown; message?: unknown; error?: unknown }
-            | undefined;
-        }
-        if (!response.ok) {
-          const relayRetryable =
-            proxyResult.origin === "relay" &&
-            ["runtime_adapter_busy", "runtime_adapter_backpressure"].includes(
-              runtimeAdapterErrorCode(body) ?? "",
-            );
-          if (deleteClaim.created && !proxyResult.dispatched && !relayRetryable) {
-            await this.clearRuntimeAdapterDeletePending(current, deleteClaim);
-          }
-          const unavailable =
-            response.status === 429 || response.status === 503 || response.status === 504;
-          return portalError(
-            unavailable ? "Delete unavailable" : "Delete failed",
-            unavailable
-              ? "The runtime adapter is offline or did not respond. Try again after its lifecycle agent reconnects."
-              : "The runtime adapter rejected the delete request. The workspace is still registered.",
-            unavailable ? 503 : 502,
-          );
-        }
-        if (
-          response.ok &&
-          response.status !== 204 &&
-          (body?.id !== workspaceID ||
-            !["stopping", "stopped", "expired"].includes(String(body?.status)))
-        ) {
-          return portalError(
-            "Delete failed",
-            "The runtime adapter returned an invalid workspace confirmation. The workspace is still registered.",
-            502,
-          );
-        }
-        const applied = await this.scheduleRuntimeAdapterDeleteRetry(
-          current,
-          deleteClaim,
-          runtimeAdapterDeleteRetryBaseMs,
-        );
-        if (!applied) {
-          const latest = await this.getLease(lease.id);
-          if (
-            latest &&
-            !leaseIsLive(latest) &&
-            !latest.runtimeAdapterDeleteRequestedAt &&
-            latest.runtimeAdapterID === adapterID &&
-            latest.runtimeAdapterWorkspaceID === workspaceID &&
-            latest.runtimeAdapterRegistrationID === lease.runtimeAdapterRegistrationID
-          ) {
-            return new Response(null, {
-              status: 303,
-              headers: { location: portalReturnLocation(request) },
-            });
-          }
-          return portalError(
-            "Delete unavailable",
-            "The lease changed while the runtime adapter was deleting its workspace.",
-            409,
-          );
-        }
+      const response = await this.deleteRegisteredRuntimeAdapterWorkspace(request, lease);
+      if (response.ok) {
         return new Response(null, {
           status: 303,
           headers: { location: portalReturnLocation(request) },
         });
-      });
+      }
+      const body = (await response.json().catch(() => undefined)) as
+        | { title?: unknown; message?: unknown }
+        | undefined;
+      return portalError(
+        typeof body?.title === "string" ? body.title : "Delete unavailable",
+        typeof body?.message === "string"
+          ? body.message
+          : "The runtime adapter could not delete this workspace.",
+        response.status,
+      );
     }
     await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
     return new Response(null, {
       status: 303,
       headers: { location: portalReturnLocation(request) },
+    });
+  }
+
+  private async deleteRegisteredRuntimeAdapterWorkspace(
+    request: Request,
+    lease: LeaseRecord,
+  ): Promise<Response> {
+    const adapterID = lease.runtimeAdapterID;
+    const workspaceID = lease.runtimeAdapterWorkspaceID;
+    if (!adapterID || !workspaceID || !isRegisteredLease(lease)) {
+      return runtimeAdapterWorkspaceDeleteError(
+        "runtime_adapter_binding_required",
+        "Delete unavailable",
+        "That lease is not bound to a runtime adapter workspace.",
+        409,
+      );
+    }
+    return await this.serializeRuntimeAdapterDelete(lease.id, async () => {
+      const current = await this.state.runExclusive(() => this.getLease(lease.id));
+      if (!current || !leaseIsLive(current)) {
+        return runtimeAdapterWorkspaceDeleteError(
+          "runtime_adapter_lease_inactive",
+          "Delete unavailable",
+          "That lease is no longer active.",
+          409,
+        );
+      }
+      if (!this.leaseManageableByRequest(current, request, isAdminRequest(request))) {
+        return runtimeAdapterWorkspaceDeleteError(
+          "forbidden",
+          "Delete unavailable",
+          "Lease manage access is required.",
+          403,
+        );
+      }
+      if (
+        current.runtimeAdapterID !== adapterID ||
+        current.runtimeAdapterWorkspaceID !== workspaceID ||
+        current.runtimeAdapterRegistrationID !== lease.runtimeAdapterRegistrationID
+      ) {
+        return runtimeAdapterWorkspaceDeleteError(
+          "runtime_adapter_binding_changed",
+          "Delete unavailable",
+          "The runtime adapter binding changed.",
+          409,
+        );
+      }
+      const deleteClaim = await this.markRuntimeAdapterDeletePending(
+        current,
+        runtimeAdapterDeleteInitialRetryMs,
+      );
+      if (!deleteClaim) {
+        return runtimeAdapterWorkspaceDeleteError(
+          "runtime_adapter_lease_inactive",
+          "Delete unavailable",
+          "That lease is no longer active.",
+          409,
+        );
+      }
+      const dispatch = await this.beginRuntimeAdapterDeleteDispatch(current, deleteClaim);
+      if (!dispatch) {
+        return runtimeAdapterWorkspaceDeleteError(
+          "runtime_adapter_delete_in_flight",
+          "Delete unavailable",
+          "Another delete for this workspace is still settling. Try again shortly.",
+          503,
+        );
+      }
+      const proxyResult = await (async () => {
+        let result: RuntimeAdapterProxyResult | undefined;
+        try {
+          result = await this.runtimeAdapterProxyResult(
+            new Request(request.url, { method: "DELETE", headers: request.headers }),
+            adapterID,
+            ["v1", "workspaces", workspaceID],
+            { owner: current.owner, org: current.org },
+            dispatch.deadlineMs,
+          );
+          return result;
+        } finally {
+          await this.finishRuntimeAdapterDeleteDispatch(
+            dispatch,
+            result !== undefined && (await runtimeAdapterDeleteDispatchSafeToClear(result)),
+          );
+        }
+      })();
+      const response = proxyResult.response;
+      let body: { id?: unknown; status?: unknown; message?: unknown; error?: unknown } | undefined;
+      if (response.status !== 204) {
+        body = (await response
+          .clone()
+          .json()
+          .catch(() => undefined)) as
+          | { status?: unknown; message?: unknown; error?: unknown }
+          | undefined;
+      }
+      if (!response.ok) {
+        const relayRetryable =
+          proxyResult.origin === "relay" &&
+          ["runtime_adapter_busy", "runtime_adapter_backpressure"].includes(
+            runtimeAdapterErrorCode(body) ?? "",
+          );
+        if (deleteClaim.created && !proxyResult.dispatched && !relayRetryable) {
+          await this.clearRuntimeAdapterDeletePending(current, deleteClaim);
+        }
+        const unavailable =
+          response.status === 429 || response.status === 503 || response.status === 504;
+        return runtimeAdapterWorkspaceDeleteError(
+          unavailable ? "runtime_adapter_unavailable" : "runtime_adapter_delete_rejected",
+          unavailable ? "Delete unavailable" : "Delete failed",
+          unavailable
+            ? "The runtime adapter is offline or did not respond. Try again after its lifecycle agent reconnects."
+            : "The runtime adapter rejected the delete request. The workspace is still registered.",
+          unavailable ? 503 : 502,
+        );
+      }
+      if (
+        response.ok &&
+        response.status !== 204 &&
+        (body?.id !== workspaceID ||
+          !["stopping", "stopped", "expired"].includes(String(body?.status)))
+      ) {
+        return runtimeAdapterWorkspaceDeleteError(
+          "runtime_adapter_invalid_response",
+          "Delete failed",
+          "The runtime adapter returned an invalid workspace confirmation. The workspace is still registered.",
+          502,
+        );
+      }
+      const applied = await this.scheduleRuntimeAdapterDeleteRetry(
+        current,
+        deleteClaim,
+        runtimeAdapterDeleteRetryBaseMs,
+      );
+      if (!applied) {
+        const latest = await this.getLease(lease.id);
+        if (
+          latest &&
+          !leaseIsLive(latest) &&
+          !latest.runtimeAdapterDeleteRequestedAt &&
+          latest.runtimeAdapterID === adapterID &&
+          latest.runtimeAdapterWorkspaceID === workspaceID &&
+          latest.runtimeAdapterRegistrationID === lease.runtimeAdapterRegistrationID
+        ) {
+          return json({ lease: latest, status: "deleted" });
+        }
+        return runtimeAdapterWorkspaceDeleteError(
+          "runtime_adapter_lease_changed",
+          "Delete unavailable",
+          "The lease changed while the runtime adapter was deleting its workspace.",
+          409,
+        );
+      }
+      return json(
+        {
+          lease: (await this.getLease(lease.id)) ?? current,
+          status: "deleting",
+        },
+        { status: 202 },
+      );
     });
   }
 
@@ -10602,6 +10673,15 @@ function workspaceManagedLeaseResponse(): Response {
     },
     { status: 409 },
   );
+}
+
+function runtimeAdapterWorkspaceDeleteError(
+  error: string,
+  title: string,
+  message: string,
+  status: number,
+): Response {
+  return json({ error, title, message }, { status });
 }
 
 function runtimeAdapterDeletePendingResponse(lease: LeaseRecord): Response {

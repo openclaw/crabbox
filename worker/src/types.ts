@@ -53,6 +53,7 @@ export interface Env {
   CRABBOX_GCP_SSH_CIDRS?: string;
   CRABBOX_GCP_ROOT_GB?: string;
   CRABBOX_GCP_SERVICE_ACCOUNT?: string;
+  CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
   CRABBOX_ADMIN_TOKEN?: string;

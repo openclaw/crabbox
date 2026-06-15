@@ -130,20 +130,28 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			removeLeaseClaim(leaseID)
 		}()
 	}
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: cloudflareCleanupCommand(leaseID),
+	}
 
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir)
 		if err != nil {
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
+			return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.prepareWorkspace(ctx, client, sandboxID, workdir, false); err != nil {
-		return RunResult{}, err
+		return RunResult{Session: session}, err
 	}
 	if req.SyncOnly {
-		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true}
+		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true, Session: session}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
 			err := writeTimingJSON(b.rt.Stderr, timingReport{
@@ -165,7 +173,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 
 	command, err := buildCloudflareCommand(req.Command, req.ShellMode)
 	if err != nil {
-		return RunResult{}, err
+		return RunResult{Session: session}, err
 	}
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
@@ -186,6 +194,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
+		Session:       session,
 	}
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "%s run summary sync_skipped=true command=%s total=%s exit=%d\n", providerName, result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
@@ -211,10 +220,12 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	}
 	if commandErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		session.Kept = !shouldStop
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, commandErr)}
 	}
 	if result.ExitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		session.Kept = !shouldStop
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
 	}
 	return result, nil
@@ -376,6 +387,10 @@ func cloudflareNotFoundError(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "404") || strings.Contains(text, "not found")
+}
+
+func cloudflareCleanupCommand(leaseID string) string {
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(leaseID))
 }
 
 func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo Repo, reclaim bool, requestedSlug string) (string, cloudflareContainer, string, error) {
