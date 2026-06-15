@@ -4,6 +4,7 @@
 
 ### Added
 
+- Documented the end-to-end runtime adapter topology, trust boundaries, request paths, startup order, and failure signals.
 - Added `crabbox connect <lease-id-or-slug>` to open an interactive SSH session to key-, certificate-, and proxy-authenticated provider targets while keeping `crabbox ssh` as the print-only command surface for token-as-username providers.
 - Added `crabbox adapter ingress` as a provider-neutral authenticated HTTP and WebSocket bridge for loopback fleet services.
 - Added JSON API initiation of generation-fenced runtime-adapter workspace deletion through explicit registered lease release.
