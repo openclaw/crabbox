@@ -650,6 +650,23 @@ For repository-local config, Crabbox ignores `cli`, `endpoint`, `region`,
 `keychain`, and `volumes`; set those through trusted user config, environment
 variables, or explicit flags.
 
+### Phala Cloud (confidential TDX)
+
+```yaml
+provider: phala
+phala:
+  cli: phala
+  instanceType: tdx.small
+  workRoot: /work/crabbox
+  nodeId: ""
+  compose: ""
+```
+
+`phala` provisions confidential Intel TDX CVMs through the `phala` CLI, which
+uses its own stored auth; Crabbox never holds a Phala API key. For
+repository-local config, Crabbox ignores `cli`, `nodeId`, and `compose`; set
+those through trusted user config, environment variables, or explicit flags.
+
 ### KubeVirt
 
 ```yaml

@@ -136,6 +136,7 @@ type Config struct {
 	External                      ExternalConfig
 	Namespace                     NamespaceConfig
 	NamespaceInstance             NamespaceInstanceConfig
+	Phala                         PhalaConfig
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
@@ -384,6 +385,17 @@ type NamespaceInstanceConfig struct {
 	Volumes     []string
 	WorkRoot    string
 	Bare        bool
+}
+
+// PhalaConfig configures the Phala Cloud confidential TDX CVM provider. Phala
+// authenticates through its own stored credentials (device flow or
+// PHALA_CLOUD_API_KEY), so no API key is held here.
+type PhalaConfig struct {
+	CLIPath      string
+	InstanceType string
+	WorkRoot     string
+	NodeID       string
+	Compose      string
 }
 
 type MorphConfig struct {
@@ -2049,6 +2061,11 @@ func baseConfig() Config {
 			WorkRoot: "/work/crabbox",
 			Bare:     true,
 		},
+		Phala: PhalaConfig{
+			CLIPath:      "phala",
+			InstanceType: "tdx.small",
+			WorkRoot:     "/work/crabbox",
+		},
 		Morph: MorphConfig{
 			APIURL:         "https://cloud.morph.so",
 			SSHGatewayHost: "ssh.cloud.morph.so",
@@ -2344,6 +2361,7 @@ type fileConfig struct {
 	External                 *fileExternalConfig                 `yaml:"external,omitempty"`
 	Namespace                *fileNamespaceConfig                `yaml:"namespace,omitempty"`
 	NamespaceInstance        *fileNamespaceInstanceConfig        `yaml:"namespaceInstance,omitempty"`
+	Phala                    *filePhalaConfig                    `yaml:"phala,omitempty"`
 	Morph                    *fileMorphConfig                    `yaml:"morph,omitempty"`
 	Daytona                  *fileDaytonaConfig                  `yaml:"daytona,omitempty"`
 	E2B                      *fileE2BConfig                      `yaml:"e2b,omitempty"`
@@ -2703,6 +2721,14 @@ type fileNamespaceInstanceConfig struct {
 	Volumes     []string `yaml:"volumes,omitempty"`
 	WorkRoot    string   `yaml:"workRoot,omitempty"`
 	Bare        *bool    `yaml:"bare,omitempty"`
+}
+
+type filePhalaConfig struct {
+	CLIPath      string `yaml:"cli,omitempty"`
+	InstanceType string `yaml:"instanceType,omitempty"`
+	WorkRoot     string `yaml:"workRoot,omitempty"`
+	NodeID       string `yaml:"nodeId,omitempty"`
+	Compose      string `yaml:"compose,omitempty"`
 }
 
 type fileMorphConfig struct {
@@ -4329,6 +4355,25 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.NamespaceInstance.Bare != nil {
 			cfg.NamespaceInstance.Bare = *file.NamespaceInstance.Bare
+		}
+	}
+	if file.Phala != nil {
+		if trusted {
+			if file.Phala.CLIPath != "" {
+				cfg.Phala.CLIPath = expandUserPath(file.Phala.CLIPath)
+			}
+			if file.Phala.NodeID != "" {
+				cfg.Phala.NodeID = file.Phala.NodeID
+			}
+			if file.Phala.Compose != "" {
+				cfg.Phala.Compose = expandUserPath(file.Phala.Compose)
+			}
+		}
+		if file.Phala.InstanceType != "" {
+			cfg.Phala.InstanceType = file.Phala.InstanceType
+		}
+		if file.Phala.WorkRoot != "" {
+			cfg.Phala.WorkRoot = file.Phala.WorkRoot
 		}
 	}
 	if file.Morph != nil {
@@ -6035,6 +6080,11 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_BARE"); ok {
 		cfg.NamespaceInstance.Bare = value
 	}
+	cfg.Phala.CLIPath = expandUserPath(getenv("CRABBOX_PHALA_CLI", cfg.Phala.CLIPath))
+	cfg.Phala.InstanceType = getenv("CRABBOX_PHALA_INSTANCE_TYPE", cfg.Phala.InstanceType)
+	cfg.Phala.WorkRoot = getenv("CRABBOX_PHALA_WORK_ROOT", cfg.Phala.WorkRoot)
+	cfg.Phala.NodeID = getenv("CRABBOX_PHALA_NODE_ID", cfg.Phala.NodeID)
+	cfg.Phala.Compose = expandUserPath(getenv("CRABBOX_PHALA_COMPOSE", cfg.Phala.Compose))
 	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
 	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
 	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)

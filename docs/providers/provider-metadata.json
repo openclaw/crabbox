@@ -559,6 +559,20 @@
     "caveat": "Requires prepared Parallels source VMs and SSH",
     "docs": "parallels.md"
   },
+  "phala": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Phala Cloud confidential Intel TDX CVM",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Phala phala CLI",
+    "cleanup": "CVM delete",
+    "bestFit": "Short-lived confidential Linux compute over SSH",
+    "caveat": "Requires the phala CLI and its stored auth; attestation not yet verified",
+    "docs": "phala.md"
+  },
   "proxmox": {
     "status": "built-in",
     "category": "self-hosted-virtualization",

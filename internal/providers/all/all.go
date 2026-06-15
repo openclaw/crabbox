@@ -41,6 +41,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/opensandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/ovh"
 	_ "github.com/openclaw/crabbox/internal/providers/parallels"
+	_ "github.com/openclaw/crabbox/internal/providers/phala"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/railway"
 	_ "github.com/openclaw/crabbox/internal/providers/runpod"
