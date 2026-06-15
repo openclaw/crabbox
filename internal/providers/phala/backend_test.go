@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -200,6 +202,66 @@ func TestCreateBuildsPhalaDeployArguments(t *testing.T) {
 	// The API key must never be passed as a CLI flag; phala uses stored auth.
 	if strings.Contains(got, "--api-token") || strings.Contains(got, "--api-key") {
 		t.Fatalf("deploy leaked an API key flag: %q", got)
+	}
+}
+
+func TestCreateAlwaysSuppliesComposeFlag(t *testing.T) {
+	// The Phala deploy handler refuses to provision a CVM in non-interactive mode
+	// without a Compose file, so deploy must always carry --compose: the
+	// configured path when present, else the embedded default written into the
+	// per-lease temp dir.
+	for _, test := range []struct {
+		name    string
+		compose string
+	}{
+		{name: "configured compose", compose: "/srv/compose.yml"},
+		{name: "default compose", compose: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"id":"cvm-test"}`}}}
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.Phala.Compose = test.compose
+			applyDefaults(&cfg)
+			b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			pubKey := filepath.Join(t.TempDir(), "id_ed25519.pub")
+			if _, err := b.create(context.Background(), cfg, pubKey, map[string]string{
+				"crabbox":  "true",
+				"lease":    "cbx_abcdef123456",
+				"provider": providerName,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			args := runner.calls[0].args
+			composePath := ""
+			for i, arg := range args {
+				if arg == "--compose" && i+1 < len(args) {
+					composePath = args[i+1]
+					break
+				}
+			}
+			if composePath == "" {
+				t.Fatalf("deploy argv missing --compose <path>: %q", strings.Join(args, " "))
+			}
+			if test.compose != "" {
+				if composePath != test.compose {
+					t.Fatalf("compose path=%q want configured %q", composePath, test.compose)
+				}
+				return
+			}
+			// The default compose must be materialized on disk and parse as the
+			// minimal long-lived SSH-lease box.
+			data, err := os.ReadFile(composePath)
+			if err != nil {
+				t.Fatalf("read default compose %q: %v", composePath, err)
+			}
+			body := string(data)
+			for _, want := range []string{"services:", "image: debian:stable-slim", "sleep", "infinity"} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("default compose missing %q:\n%s", want, body)
+				}
+			}
+		})
 	}
 }
 

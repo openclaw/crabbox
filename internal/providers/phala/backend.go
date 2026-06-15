@@ -2,11 +2,13 @@ package phala
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,20 @@ import (
 )
 
 const providerName = "phala"
+
+// defaultComposeYAML is the Compose file crabbox supplies when the lease has no
+// configured compose. The Phala CLI v1.1.19 deploy handler refuses to provision
+// a CVM in non-interactive mode without a Compose file, so a confidential
+// SSH-lease box needs a minimal long-lived service: a small base image whose
+// container stays alive so the dstack dev OS keeps the CVM running while crabbox
+// drives it over SSH.
+//
+//go:embed default-compose.yml
+var defaultComposeYAML string
+
+// defaultComposeFileName is the basename written into the per-lease temp dir for
+// the embedded default compose.
+const defaultComposeFileName = "crabbox-default-compose.yml"
 
 const phalaRollbackTimeout = 30 * time.Second
 const phalaAmbiguousCreateRecoveryGrace = 5 * time.Minute
@@ -503,9 +519,15 @@ func (b *backend) create(ctx context.Context, cfg core.Config, publicKeyPath str
 	if nodeID := strings.TrimSpace(cfg.Phala.NodeID); nodeID != "" {
 		args = append(args, "--node-id", nodeID)
 	}
-	if compose := strings.TrimSpace(cfg.Phala.Compose); compose != "" {
-		args = append(args, "--compose", compose)
+	// The Phala CLI deploy handler requires a Compose file before it provisions a
+	// CVM in non-interactive mode. Use the configured compose when present, else
+	// materialize the embedded default into the per-lease temp dir so deploy
+	// always carries --compose.
+	compose, err := composeFileForDeploy(cfg, publicKeyPath)
+	if err != nil {
+		return "", err
 	}
+	args = append(args, "--compose", compose)
 	result, err := b.phala(ctx, cfg, args, b.rt.Stderr)
 	if err != nil {
 		if ambiguousPhalaCreateOutcome(result, err) {
@@ -551,6 +573,31 @@ func parseDeployID(stdout string) (string, error) {
 		}
 	}
 	return "", core.Exit(5, "phala deploy output did not include a CVM identifier")
+}
+
+// composeFileForDeploy resolves the Compose file path passed to `phala deploy
+// --compose`. When the lease configures a compose path it is used verbatim;
+// otherwise the embedded default is written into the per-lease temp dir (the
+// directory that already holds the lease SSH key) so deploy never runs without a
+// Compose file. publicKeyPath is the lease public key (<dir>/id_ed25519.pub);
+// its directory is the per-lease temp dir.
+func composeFileForDeploy(cfg core.Config, publicKeyPath string) (string, error) {
+	if compose := strings.TrimSpace(cfg.Phala.Compose); compose != "" {
+		return compose, nil
+	}
+	dir := filepath.Dir(publicKeyPath)
+	if dir == "" || dir == "." {
+		var err error
+		dir, err = os.MkdirTemp("", "crabbox-phala-compose-")
+		if err != nil {
+			return "", core.Exit(2, "create phala default compose dir: %v", err)
+		}
+	}
+	path := filepath.Join(dir, defaultComposeFileName)
+	if err := os.WriteFile(path, []byte(defaultComposeYAML), 0o600); err != nil {
+		return "", core.Exit(2, "write phala default compose: %v", err)
+	}
+	return path, nil
 }
 
 func ambiguousPhalaCreateOutcome(result core.LocalCommandResult, err error) bool {

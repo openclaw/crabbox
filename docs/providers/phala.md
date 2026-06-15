@@ -32,8 +32,13 @@ crabbox stop --provider phala <lease-id-or-slug>
 ```
 
 Crabbox injects a per-lease SSH public key into the CVM at deploy time, connects
-over SSH through the Phala gateway, uses the normal SSH/rsync data plane, and
+over SSH through the Phala TLS gateway, uses the normal SSH/rsync data plane, and
 deletes the CVM on release.
+
+The Phala TLS gateway is reached with `openssl s_client`, so **`openssl` must be
+installed on the host** running Crabbox. The SSH transport tunnels through the
+gateway's TLS endpoint rather than dialing a raw TCP port (see
+[Lifecycle](#lifecycle)).
 
 ## Configuration
 
@@ -63,18 +68,32 @@ Provider flags:
 ```
 
 `--phala-node-id` pins deployments (and ownership scope) to a specific Phala
-node. `--phala-compose` deploys an optional Docker Compose file alongside the
-dev OS image. The CLI path, node id, and compose path are accepted only from
-trusted user config, environment variables, or explicit flags, not
-repository-local config. The instance type and work root may also come from
-repository config. Instance-type OS prefixes must be Linux.
+node. `--phala-compose` overrides the Docker Compose file deployed alongside the
+dev OS image. The Phala deploy handler requires a Compose file in
+non-interactive mode, so when `compose` is unset Crabbox supplies a **minimal
+default**: a `debian:stable-slim` service that stays alive (`sleep infinity`),
+keeping the confidential SSH-lease box running while Crabbox drives it over SSH.
+Set `compose` (or `--phala-compose`) to deploy your own workload instead. The
+CLI path, node id, and compose path are accepted only from trusted user config,
+environment variables, or explicit flags, not repository-local config. The
+instance type and work root may also come from repository config. Instance-type
+OS prefixes must be Linux.
 
 ## Lifecycle
 
 - Linux only; coordinator disabled; confidential TDX CVMs.
-- `phala deploy --dev-os --ssh-pubkey ... -t <type> -n <name> --wait` provisions
-  the CVM. `--dev-os` selects the dstack dev OS image, which runs `sshd` and
-  accepts the injected key.
+- `phala deploy --dev-os --ssh-pubkey ... -t <type> -n <name> --compose <file>
+  --wait` provisions the CVM. `--dev-os` selects the dstack dev OS image, which
+  runs `sshd` and accepts the injected key. `--compose` is always supplied — the
+  configured compose when set, otherwise the bundled default
+  (`debian:stable-slim` running `sleep infinity`) written to the per-lease temp
+  dir — because the deploy handler refuses to provision without one.
+- SSH reaches the CVM through the dstack TLS gateway, not a raw TCP port. The
+  gateway host is derived as `<app-id>-22.<gateway-domain>` from `phala cvms get
+  --json` (the `gateway` object's `gateway_domain` / `base_domain` and the CVM
+  `app_id`), and SSH stdio is tunneled through it with
+  `openssl s_client -connect <host>:443 -servername <host>`. `openssl` is a host
+  dependency.
 - Ownership is carried by the CVM **name** (`crabbox-<lease-id>`) and
   cross-checked against the local lease claim. Phala's deploy API exposes no
   arbitrary label facility, so the name prefix is the only on-resource owner

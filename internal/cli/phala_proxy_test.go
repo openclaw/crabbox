@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Environment keys that drive the in-test fake `phala` CLI (TestPhalaCLIHelper).
@@ -82,7 +80,7 @@ func TestPhalaCLIHelper(t *testing.T) {
 	os.Exit(code)
 }
 
-func TestResolvePhalaProxyEndpoint(t *testing.T) {
+func TestResolvePhalaProxyHostDerivesAppAndGatewayDomain(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		json    string
@@ -90,39 +88,34 @@ func TestResolvePhalaProxyEndpoint(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "flat host and explicit port",
-			json: `{"success":true,"host":"cvm-abc.dstack.example","port":2222}`,
-			want: "cvm-abc.dstack.example:2222",
+			name: "gateway object gateway_domain",
+			json: `{"success":true,"cvm":{"app_id":"app-abc","gateway":{"gateway_domain":"gw.phala.network"}}}`,
+			want: "app-abc-22.gw.phala.network",
 		},
 		{
-			name: "cvm wrapper gateway url carries host and port",
-			json: `{"success":true,"cvm":{"gateway_url":"https://gw-1.phala.network:8443"}}`,
-			want: "gw-1.phala.network:8443",
+			name: "gateway object nested base_domain",
+			json: `{"success":true,"cvm":{"app_id":"app-xyz","gateway":{"base_domain":"base.dstack.example"}}}`,
+			want: "app-xyz-22.base.dstack.example",
 		},
 		{
-			name: "gateway host:port string parsed for both host and port",
-			json: `{"cvm":{"gateway":"gw-2.phala.network:7000"}}`,
-			want: "gw-2.phala.network:7000",
+			name: "top-level app id and gateway object",
+			json: `{"success":true,"app_id":"top-app","gateway":{"gateway_domain":"top.gw.example"}}`,
+			want: "top-app-22.top.gw.example",
 		},
 		{
-			name: "domain without port defaults to 443",
-			json: `{"domain":"cvm-xyz.dstack.example"}`,
-			want: "cvm-xyz.dstack.example:443",
+			name: "camelCase appId alias",
+			json: `{"cvm":{"appId":"camel-app","gateway":{"gateway_domain":"camel.gw.example"}}}`,
+			want: "camel-app-22.camel.gw.example",
 		},
 		{
-			name: "gateway_port wins over flat port",
-			json: `{"host":"cvm.example","port":10,"gateway_port":9001}`,
-			want: "cvm.example:9001",
+			name:    "missing gateway domain is an error",
+			json:    `{"success":true,"cvm":{"app_id":"app-abc","gateway":{}}}`,
+			wantErr: "omitted the gateway domain",
 		},
 		{
-			name: "cvm wrapper merges host with top-level port",
-			json: `{"ssh_port":6001,"cvm":{"host":"merged.example"}}`,
-			want: "merged.example:6001",
-		},
-		{
-			name:    "no host fields is an error",
-			json:    `{"success":true,"port":2222}`,
-			wantErr: "omitted an SSH gateway host",
+			name:    "missing app id is an error",
+			json:    `{"success":true,"cvm":{"gateway":{"gateway_domain":"gw.phala.network"}}}`,
+			wantErr: "omitted the CVM app id",
 		},
 		{
 			name:    "non-json output is an error",
@@ -133,7 +126,7 @@ func TestResolvePhalaProxyEndpoint(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			phala, argvPath := fakePhalaCLI(t, test.json, 0)
 			var stderr bytes.Buffer
-			got, err := resolvePhalaProxyEndpoint(context.Background(), phala, "cvm-id-123", &stderr)
+			got, err := resolvePhalaProxyHost(context.Background(), phala, "cvm-id-123", &stderr)
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("err=%v want substring %q", err, test.wantErr)
@@ -144,7 +137,7 @@ func TestResolvePhalaProxyEndpoint(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if got != test.want {
-				t.Fatalf("endpoint=%q want %q", got, test.want)
+				t.Fatalf("host=%q want %q", got, test.want)
 			}
 			argv, readErr := os.ReadFile(argvPath)
 			if readErr != nil {
@@ -166,10 +159,10 @@ func TestResolvePhalaProxyEndpoint(t *testing.T) {
 	}
 }
 
-func TestResolvePhalaProxyEndpointPropagatesCLIFailureCode(t *testing.T) {
+func TestResolvePhalaProxyHostPropagatesCLIFailureCode(t *testing.T) {
 	phala, _ := fakePhalaCLI(t, "", 7)
 	var stderr bytes.Buffer
-	_, err := resolvePhalaProxyEndpoint(context.Background(), phala, "cvm-id", &stderr)
+	_, err := resolvePhalaProxyHost(context.Background(), phala, "cvm-id", &stderr)
 	if err == nil {
 		t.Fatal("expected error when phala CLI exits non-zero")
 	}
@@ -179,87 +172,111 @@ func TestResolvePhalaProxyEndpointPropagatesCLIFailureCode(t *testing.T) {
 	}
 }
 
-func TestMergePhalaProxyEndpoint(t *testing.T) {
-	primary := phalaProxyEndpoint{Gateway: "primary-gw", Port: 100}
-	fallback := phalaProxyEndpoint{
-		Gateway:     "fallback-gw",
-		GatewayHost: "fallback-host",
-		GatewayURL:  "https://fallback-url",
-		Host:        "fallback-direct-host",
-		Domain:      "fallback-domain",
-		Port:        200,
-		GatewayPort: 300,
-		SSHPort:     400,
+// TestTunnelPhalaProxyUsesOpenSSLSClient asserts the SSH transport tunnels
+// through the TLS gateway with `openssl s_client -connect <host>:443` and the
+// derived host as the SNI servername, not a raw TCP dial. A fake `openssl` on
+// PATH records its argv and echoes a response so the stdio piping is exercised.
+func TestTunnelPhalaProxyUsesOpenSSLSClient(t *testing.T) {
+	host := "app-abc-22.gw.phala.network"
+	argvPath := fakeOpenSSL(t, "remote-tail")
+	var stderr bytes.Buffer
+	output := &bytes.Buffer{}
+	err := tunnelPhalaProxy(context.Background(), host, strings.NewReader("request"), output, &stderr)
+	if err != nil {
+		t.Fatalf("tunnel error: %v", err)
 	}
-	merged := mergePhalaProxyEndpoint(primary, fallback)
-	if merged.Gateway != "primary-gw" {
-		t.Fatalf("primary gateway overwritten: %q", merged.Gateway)
+	if output.String() != "remote-tail" {
+		t.Fatalf("output=%q want remote-tail", output.String())
 	}
-	if merged.Port != 100 {
-		t.Fatalf("primary port overwritten: %d", merged.Port)
+	argv, readErr := os.ReadFile(argvPath)
+	if readErr != nil {
+		t.Fatalf("read recorded openssl argv: %v", readErr)
 	}
-	if merged.GatewayHost != "fallback-host" || merged.GatewayURL != "https://fallback-url" ||
-		merged.Host != "fallback-direct-host" || merged.Domain != "fallback-domain" {
-		t.Fatalf("blank primary fields not backfilled: %#v", merged)
+	recorded := strings.TrimSpace(string(argv))
+	for _, want := range []string{
+		"s_client",
+		"-connect " + host + ":443",
+		"-servername " + host,
+	} {
+		if !strings.Contains(recorded, want) {
+			t.Fatalf("openssl argv=%q missing %q", recorded, want)
+		}
 	}
-	if merged.GatewayPort != 300 || merged.SSHPort != 400 {
-		t.Fatalf("zero primary ports not backfilled: %#v", merged)
-	}
-
-	// A whitespace-only primary string is treated as blank and backfilled.
-	whitespace := mergePhalaProxyEndpoint(phalaProxyEndpoint{Gateway: "   "}, phalaProxyEndpoint{Gateway: "real-gw"})
-	if whitespace.Gateway != "real-gw" {
-		t.Fatalf("whitespace gateway not backfilled: %q", whitespace.Gateway)
+	// A raw TCP port other than the TLS gateway 443 must never be dialed.
+	if strings.Contains(recorded, ":22") || strings.Contains(recorded, ":2222") {
+		t.Fatalf("openssl argv dialed a raw SSH port: %q", recorded)
 	}
 }
 
-func TestPhalaGatewayHost(t *testing.T) {
-	for _, test := range []struct {
-		raw  string
-		want string
-	}{
-		{"gw.phala.network", "gw.phala.network"},
-		{"  gw.phala.network  ", "gw.phala.network"},
-		{"https://gw.phala.network", "gw.phala.network"},
-		{"http://gw.phala.network", "gw.phala.network"},
-		{"ssh://gw.phala.network", "gw.phala.network"},
-		{"https://gw.phala.network:8443", "gw.phala.network"},
-		{"gw.phala.network:8443", "gw.phala.network"},
-		{"https://gw.phala.network/path?q=1#frag", "gw.phala.network"},
-		{"gw.phala.network/cvm/abc", "gw.phala.network"},
-		{"", ""},
-		{"   ", ""},
-		// net.SplitHostPort splits on the final colon without validating the port
-		// is numeric, so a "host:garbage" form still yields the bare host.
-		{"gw.phala.network:notaport", "gw.phala.network"},
-		// A value with no host:port colon but a stray scheme-less path is trimmed
-		// at the first path separator.
-		{"gw.phala.network#frag", "gw.phala.network"},
-	} {
-		if got := phalaGatewayHost(test.raw); got != test.want {
-			t.Fatalf("phalaGatewayHost(%q)=%q want %q", test.raw, got, test.want)
-		}
+func TestTunnelPhalaProxyReturnsOnCancellation(t *testing.T) {
+	fakeOpenSSL(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stderr bytes.Buffer
+	err := tunnelPhalaProxy(ctx, "app-abc-22.gw.phala.network", strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	if err == nil || err != context.Canceled {
+		t.Fatalf("err=%v want context.Canceled", err)
 	}
 }
 
-func TestPhalaGatewayPort(t *testing.T) {
-	for _, test := range []struct {
-		raw  string
-		want int
-	}{
-		{"gw.phala.network:8443", 8443},
-		{"https://gw.phala.network:8443", 8443},
-		{"ssh://gw.phala.network:22", 22},
-		{"gw.phala.network", 0},
-		{"", 0},
-		{"   ", 0},
-		{"gw.phala.network:notaport", 0},
-		{"https://gw.phala.network/path", 0},
-	} {
-		if got := phalaGatewayPort(test.raw); got != test.want {
-			t.Fatalf("phalaGatewayPort(%q)=%d want %d", test.raw, got, test.want)
+// Environment keys for the fake `openssl` re-exec helper (TestOpenSSLHelper).
+const (
+	opensslHelperEnv    = "CRABBOX_OPENSSL_HELPER"
+	opensslHelperStdout = "CRABBOX_OPENSSL_HELPER_STDOUT"
+	opensslHelperArgv   = "CRABBOX_OPENSSL_HELPER_ARGV"
+	opensslHelperBin    = "CRABBOX_OPENSSL_HELPER_BIN"
+	opensslHelperRun    = "-test.run=^TestOpenSSLHelper$"
+)
+
+// fakeOpenSSL puts a fake `openssl` on PATH that re-execs the test binary into
+// TestOpenSSLHelper. The helper records its argv, drains stdin, and emits the
+// canned stdout. Re-execing the test binary (rather than a shell/.bat script)
+// keeps the fake robust across cmd.exe and POSIX sh quoting. Returns the argv
+// record path.
+func fakeOpenSSL(t *testing.T, stdout string) (argvPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	argvPath = filepath.Join(dir, "openssl-argv")
+	t.Setenv(opensslHelperEnv, "1")
+	t.Setenv(opensslHelperStdout, stdout)
+	t.Setenv(opensslHelperArgv, argvPath)
+	t.Setenv(opensslHelperBin, os.Args[0])
+	if runtime.GOOS == "windows" {
+		wrapper := filepath.Join(dir, "openssl.bat")
+		body := "@echo off\r\n\"%" + opensslHelperBin + "%\" " + opensslHelperRun + " %*\r\n"
+		if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		wrapper := filepath.Join(dir, "openssl")
+		body := "#!/bin/sh\nexec \"$" + opensslHelperBin + "\" " + opensslHelperRun + " \"$@\"\n"
+		if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
 		}
 	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argvPath
+}
+
+// TestOpenSSLHelper is the re-exec'd fake `openssl`, gated on opensslHelperEnv so
+// it is inert during a normal test run. Arguments after the -test.run filter are
+// the s_client invocation under test.
+func TestOpenSSLHelper(t *testing.T) {
+	if os.Getenv(opensslHelperEnv) != "1" {
+		return
+	}
+	args := os.Args[1:]
+	for len(args) > 0 && strings.HasPrefix(args[0], "-test.") {
+		args = args[1:]
+	}
+	if argvPath := os.Getenv(opensslHelperArgv); argvPath != "" {
+		_ = os.WriteFile(argvPath, []byte(strings.Join(args, " ")), 0o600)
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	if stdout := os.Getenv(opensslHelperStdout); stdout != "" {
+		_, _ = os.Stdout.WriteString(stdout)
+	}
+	os.Exit(0)
 }
 
 func TestPhalaJSONObjectPrefixDiscardsTrailingNoise(t *testing.T) {
@@ -276,107 +293,5 @@ func TestPhalaJSONObjectPrefixDiscardsTrailingNoise(t *testing.T) {
 		if got := phalaJSONObjectPrefix(test.raw); got != test.want {
 			t.Fatalf("phalaJSONObjectPrefix(%q)=%q want %q", test.raw, got, test.want)
 		}
-	}
-}
-
-// TestCopyPhalaProxyStreamsForwardsServerResponse drives the bidirectional copy
-// the way `phala proxy` uses it for an SSH transport: the client sends a request,
-// the server echoes a response and closes, and the response must reach the output
-// writer. The input is held open until the response is observed so the read side
-// completes before the write side, matching the offline gateway's request/response
-// ordering rather than racing the input-EOF teardown.
-func TestCopyPhalaProxyStreamsForwardsServerResponse(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	serverDone := make(chan error, 1)
-	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			serverDone <- acceptErr
-			return
-		}
-		defer conn.Close()
-		buf := make([]byte, len("request"))
-		if _, readErr := io.ReadFull(conn, buf); readErr != nil {
-			serverDone <- readErr
-			return
-		}
-		_, writeErr := conn.Write([]byte("remote-tail"))
-		serverDone <- writeErr
-	}()
-
-	conn, err := net.Dial("tcp", listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// input emits the request, then blocks until the server response has been
-	// copied to output, so the server-read goroutine finishes first.
-	responseSeen := make(chan struct{})
-	input := io.MultiReader(strings.NewReader("request"), readerFunc(func(p []byte) (int, error) {
-		<-responseSeen
-		return 0, io.EOF
-	}))
-	output := &notifyingWriter{notifyAt: len("remote-tail"), done: responseSeen}
-	streamDone := make(chan error, 1)
-	go func() { streamDone <- copyPhalaProxyStreams(context.Background(), conn, input, output) }()
-
-	if err := <-serverDone; err != nil {
-		t.Fatalf("server: %v", err)
-	}
-	select {
-	case streamErr := <-streamDone:
-		if streamErr != nil {
-			t.Fatalf("streamErr=%v", streamErr)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("copyPhalaProxyStreams did not return after server closed")
-	}
-	if output.buf.String() != "remote-tail" {
-		t.Fatalf("output=%q want remote-tail", output.buf.String())
-	}
-}
-
-type readerFunc func(p []byte) (int, error)
-
-func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
-
-// notifyingWriter closes done once at least notifyAt bytes have been written.
-type notifyingWriter struct {
-	buf      bytes.Buffer
-	notifyAt int
-	done     chan struct{}
-	closed   bool
-}
-
-func (w *notifyingWriter) Write(p []byte) (int, error) {
-	n, err := w.buf.Write(p)
-	if !w.closed && w.buf.Len() >= w.notifyAt {
-		w.closed = true
-		close(w.done)
-	}
-	return n, err
-}
-
-func TestCopyPhalaProxyStreamsReturnsOnCancellation(t *testing.T) {
-	client, server := net.Pipe()
-	defer server.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	input, inputWriter := io.Pipe()
-	defer inputWriter.Close()
-	done := make(chan error, 1)
-	go func() {
-		done <- copyPhalaProxyStreams(ctx, client, input, io.Discard)
-	}()
-	cancel()
-	select {
-	case err := <-done:
-		if err == nil || err != context.Canceled {
-			t.Fatalf("err=%v want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("copyPhalaProxyStreams did not return after cancellation")
 	}
 }
