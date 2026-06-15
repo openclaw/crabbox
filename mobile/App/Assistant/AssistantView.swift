@@ -12,15 +12,9 @@
 import SwiftUI
 import CrabboxKit
 
-// MARK: - Design tokens (dark theme)
-
-private enum Theme {
-    static let bg     = Color(red: 0x10/255, green: 0x10/255, blue: 0x10/255) // #101010
-    static let panel  = Color(red: 0x17/255, green: 0x17/255, blue: 0x17/255) // #171717
-    static let accent = Color(red: 0x31/255, green: 0xd0/255, blue: 0xaa/255) // #31d0aa
-    static let subtle = Color.white.opacity(0.55)
-    static let hairline = Color.white.opacity(0.08)
-}
+// Design tokens come from the shared `Theme` in Theme.swift (bg / panel /
+// accent / subtle / hairline), so the Assistant matches the rest of the app
+// and there is no duplicate `Theme` declaration within the module.
 
 struct AssistantView: View {
     @ObservedObject var store: ChatStore
