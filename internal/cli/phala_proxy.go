@@ -151,10 +151,22 @@ func tunnelPhalaProxy(ctx context.Context, host string, input io.Reader, output,
 	if _, err := exec.LookPath("openssl"); err != nil {
 		return exit(2, "phala SSH gateway requires the openssl client: %v", err)
 	}
+	// Enforce TLS server authentication. The SSH layer runs with host-key
+	// checking disabled (the dstack gateway fronts a fresh per-lease CVM whose
+	// host key is unknown), so this TLS handshake is the ONLY thing that proves
+	// we reached the genuine dstack gateway rather than a man in the middle.
+	// -verify_return_error aborts on any chain-verification failure (instead of
+	// the default of logging and proceeding), and -verify_hostname pins the leaf
+	// cert to the gateway host so a valid-chain cert for a different name cannot
+	// be substituted. The dstack gateway presents a publicly-trusted cert for
+	// <appId>-22.<gateway-domain>, so this verifies against the ambient trust
+	// store. openssl (1.0.2+/LibreSSL) is already a documented host dependency.
 	cmd := exec.CommandContext(ctx, "openssl", "s_client",
 		"-connect", host+":443",
 		"-quiet",
 		"-verify_quiet",
+		"-verify_return_error",
+		"-verify_hostname", host,
 		"-servername", host,
 	)
 	cmd.Stdin = input

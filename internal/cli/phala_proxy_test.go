@@ -197,6 +197,10 @@ func TestTunnelPhalaProxyUsesOpenSSLSClient(t *testing.T) {
 		"s_client",
 		"-connect " + host + ":443",
 		"-servername " + host,
+		// TLS is the only server authentication (SSH host-key checking is off),
+		// so a chain failure must abort and the leaf cert must match the host.
+		"-verify_return_error",
+		"-verify_hostname " + host,
 	} {
 		if !strings.Contains(recorded, want) {
 			t.Fatalf("openssl argv=%q missing %q", recorded, want)
