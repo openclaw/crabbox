@@ -15,8 +15,8 @@ func TestPhalaConfigDefaults(t *testing.T) {
 	if got.InstanceType != "tdx.small" {
 		t.Fatalf("default InstanceType=%q want tdx.small", got.InstanceType)
 	}
-	if got.WorkRoot != "/work/crabbox" {
-		t.Fatalf("default WorkRoot=%q want /work/crabbox", got.WorkRoot)
+	if got.WorkRoot != "/var/volatile/crabbox" {
+		t.Fatalf("default WorkRoot=%q want /var/volatile/crabbox", got.WorkRoot)
 	}
 	if got.NodeID != "" || got.Compose != "" {
 		t.Fatalf("unexpected non-empty default node/compose: %#v", got)

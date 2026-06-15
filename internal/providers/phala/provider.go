@@ -47,7 +47,7 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 		return core.Exit(2, "phala.workRoot must be a canonical absolute Linux path")
 	}
 	switch cleanWorkRoot {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/work":
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/var/volatile", "/work":
 		return core.Exit(2, "phala.workRoot %q is too broad; choose a dedicated subdirectory", cleanWorkRoot)
 	}
 	if compose := strings.TrimSpace(cfg.Phala.Compose); compose != "" {

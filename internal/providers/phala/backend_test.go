@@ -93,6 +93,16 @@ func TestProviderRejectsNonLinuxInstanceTypeAndUnsafeWorkRoot(t *testing.T) {
 			want: "too broad",
 		},
 		{
+			name: "bare writable mount work root",
+			cfg: func() core.Config {
+				cfg := core.BaseConfig()
+				cfg.Provider = providerName
+				cfg.Phala.WorkRoot = "/var/volatile"
+				return cfg
+			}(),
+			want: "too broad",
+		},
+		{
 			name: "compose url",
 			cfg: func() core.Config {
 				cfg := core.BaseConfig()
@@ -167,7 +177,7 @@ func TestCreateBuildsPhalaDeployArguments(t *testing.T) {
 	cfg.Phala = core.PhalaConfig{
 		CLIPath:      "/opt/phala",
 		InstanceType: "tdx.small",
-		WorkRoot:     "/work/crabbox",
+		WorkRoot:     "/var/volatile/crabbox",
 		NodeID:       "node-7",
 		Compose:      "/srv/compose.yml",
 	}
@@ -978,6 +988,31 @@ func TestPhalaToolBootstrapRequiresOnlyRsyncSyncEssentials(t *testing.T) {
 	// have a package manager.
 	if !strings.Contains(command, "apk add --no-cache git rsync tar python3") {
 		t.Fatalf("bootstrap should still opportunistically install git via apk for non-dev-os images:\n%s", command)
+	}
+}
+
+// TestDefaultWorkRootIsWritableOnDevOsGuest pins the work-root default to a
+// writable mount. The dstack --dev-os guest roots its filesystem on a read-only
+// squashfs, so the previous /work/crabbox default could not be created and the
+// sync failed live at "write sync manifests: exit status 1". /var/volatile is a
+// writable tmpfs on every dstack guest; the default must live under it (and not
+// be the bare mount, which ValidateConfig rejects as too broad).
+func TestDefaultWorkRootIsWritableOnDevOsGuest(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	if cfg.Phala.WorkRoot != "/var/volatile/crabbox" {
+		t.Fatalf("default WorkRoot = %q, want /var/volatile/crabbox", cfg.Phala.WorkRoot)
+	}
+	if cfg.WorkRoot != cfg.Phala.WorkRoot {
+		t.Fatalf("cfg.WorkRoot %q not mirrored from Phala.WorkRoot %q", cfg.WorkRoot, cfg.Phala.WorkRoot)
+	}
+	if strings.HasPrefix(cfg.Phala.WorkRoot, "/work") {
+		t.Fatalf("default WorkRoot must not sit on the read-only root: %q", cfg.Phala.WorkRoot)
+	}
+	// The default must survive its own validator.
+	if err := (Provider{}).ValidateConfig(cfg); err != nil {
+		t.Fatalf("default WorkRoot rejected by ValidateConfig: %v", err)
 	}
 }
 

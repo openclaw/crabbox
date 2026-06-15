@@ -48,7 +48,7 @@ target: linux
 phala:
   cli: phala
   instanceType: tdx.small
-  workRoot: /work/crabbox
+  workRoot: /var/volatile/crabbox
   nodeId: ""
   compose: ""
 ```

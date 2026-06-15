@@ -39,6 +39,13 @@ const phalaAmbiguousCreateRecoveryGrace = 5 * time.Minute
 // advertises. dstack provisions Intel TDX CVMs; tdx.small is the cheapest.
 const defaultInstanceType = "tdx.small"
 
+// defaultWorkRoot is the remote crabbox work root on a leased CVM. The dstack
+// --dev-os guest mounts its root as a read-only squashfs, so the work root must
+// live on a writable mount; /var/volatile is a writable tmpfs present on every
+// dstack guest. The earlier /work/crabbox default sat on the read-only root and
+// failed live at "write sync manifests: exit status 1" (the manifest mkdir).
+const defaultWorkRoot = "/var/volatile/crabbox"
+
 // crabboxCVMNamePrefix marks Phala CVMs created by crabbox. Phala's deploy CLI
 // has no arbitrary label facility, so ownership is carried by the CVM name and
 // cross-checked against the local lease claim. Underscores are not accepted in
@@ -200,7 +207,12 @@ func applyDefaults(cfg *core.Config) {
 		cfg.Phala.InstanceType = defaultInstanceType
 	}
 	if cfg.Phala.WorkRoot == "" {
-		cfg.Phala.WorkRoot = "/work/crabbox"
+		// The dstack --dev-os guest has a read-only squashfs root, so /work (and
+		// any path on /) is NOT writable. /var/volatile is a writable tmpfs mount
+		// present on every dstack guest; a dedicated subdir under it is where the
+		// rsync'd repo and run workspace live. Users who need encrypted-at-rest
+		// persistence can point --phala-work-root at /var/volatile/dstack/persistent/...
+		cfg.Phala.WorkRoot = defaultWorkRoot
 	}
 	cfg.WorkRoot = cfg.Phala.WorkRoot
 	cfg.ServerType = (Provider{}).ServerTypeForConfig(*cfg)

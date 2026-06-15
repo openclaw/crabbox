@@ -2064,7 +2064,9 @@ func baseConfig() Config {
 		Phala: PhalaConfig{
 			CLIPath:      "phala",
 			InstanceType: "tdx.small",
-			WorkRoot:     "/work/crabbox",
+			// The dstack --dev-os guest roots on a read-only squashfs; /work is not
+			// writable. /var/volatile is a writable tmpfs on every dstack guest.
+			WorkRoot: "/var/volatile/crabbox",
 		},
 		Morph: MorphConfig{
 			APIURL:         "https://cloud.morph.so",
