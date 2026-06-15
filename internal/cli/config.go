@@ -396,6 +396,11 @@ type PhalaConfig struct {
 	WorkRoot     string
 	NodeID       string
 	Compose      string
+	// Attest gates the TDX remote-attestation check the Phala backend runs after
+	// a leased CVM becomes reachable. nil means "default" (attestation ON); the
+	// backend treats nil as true. A non-nil false value (set only by the local
+	// --phala-skip-attestation flag or CRABBOX_PHALA_ATTEST=false env) opts out.
+	Attest *bool
 }
 
 type MorphConfig struct {
@@ -2731,6 +2736,7 @@ type filePhalaConfig struct {
 	WorkRoot     string `yaml:"workRoot,omitempty"`
 	NodeID       string `yaml:"nodeId,omitempty"`
 	Compose      string `yaml:"compose,omitempty"`
+	Attest       *bool  `yaml:"attest,omitempty"`
 }
 
 type fileMorphConfig struct {
@@ -4376,6 +4382,14 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Phala.WorkRoot != "" {
 			cfg.Phala.WorkRoot = file.Phala.WorkRoot
+		}
+		// attest is read from untrusted config ONLY when it tightens security
+		// (enabling the TDX attestation gate). Disabling it (attest: false)
+		// requires trusted config, the local --phala-skip-attestation flag, or the
+		// env var, so an untrusted repo config can never weaken the security gate.
+		if file.Phala.Attest != nil && (trusted || *file.Phala.Attest) {
+			value := *file.Phala.Attest
+			cfg.Phala.Attest = &value
 		}
 	}
 	if file.Morph != nil {
@@ -6087,6 +6101,9 @@ func applyEnv(cfg *Config) error {
 	cfg.Phala.WorkRoot = getenv("CRABBOX_PHALA_WORK_ROOT", cfg.Phala.WorkRoot)
 	cfg.Phala.NodeID = getenv("CRABBOX_PHALA_NODE_ID", cfg.Phala.NodeID)
 	cfg.Phala.Compose = expandUserPath(getenv("CRABBOX_PHALA_COMPOSE", cfg.Phala.Compose))
+	if value, ok := getenvBool("CRABBOX_PHALA_ATTEST"); ok {
+		cfg.Phala.Attest = &value
+	}
 	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
 	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
 	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)

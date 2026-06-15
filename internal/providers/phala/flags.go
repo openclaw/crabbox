@@ -13,6 +13,8 @@ type flagValues struct {
 	NodeID       *string
 	WorkRoot     *string
 	Compose      *string
+	Attest       *bool
+	SkipAttest   *bool
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -22,6 +24,8 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		NodeID:       fs.String("phala-node-id", defaults.Phala.NodeID, "Phala node id to pin deployments to"),
 		WorkRoot:     fs.String("phala-work-root", defaults.Phala.WorkRoot, "remote Crabbox work root"),
 		Compose:      fs.String("phala-compose", defaults.Phala.Compose, "optional Docker Compose file deployed alongside the dev OS"),
+		Attest:       fs.Bool("phala-attest", attestEnabled(defaults), "verify the leased CVM's Intel TDX remote attestation before trusting it (default true)"),
+		SkipAttest:   fs.Bool("phala-skip-attestation", false, "skip TDX remote attestation verification of the leased CVM (insecure; for diagnostics only)"),
 	}
 }
 
@@ -45,10 +49,26 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "phala-compose") {
 		cfg.Phala.Compose = *v.Compose
 	}
+	// --phala-skip-attestation is the explicit opt-out and wins over --phala-attest
+	// when both are set. Either flag, when present, pins cfg.Phala.Attest so the
+	// backend gate reads an explicit value rather than the nil "default on".
+	if core.FlagWasSet(fs, "phala-skip-attestation") && *v.SkipAttest {
+		disabled := false
+		cfg.Phala.Attest = &disabled
+	} else if core.FlagWasSet(fs, "phala-attest") {
+		value := *v.Attest
+		cfg.Phala.Attest = &value
+	}
 	if isProviderName(cfg.Provider) {
 		applyDefaults(cfg)
 	}
 	return nil
+}
+
+// attestEnabled reports the effective TDX attestation gate setting. The gate is
+// ON by default (nil config => true); only an explicit false value disables it.
+func attestEnabled(cfg core.Config) bool {
+	return cfg.Phala.Attest == nil || *cfg.Phala.Attest
 }
 
 func isProviderName(provider string) bool {

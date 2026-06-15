@@ -373,6 +373,26 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
+	// TDX attestation gate: the box is reachable, so before trusting it as a
+	// confidential CVM, prove it is a genuine Intel TDX enclave running OUR
+	// authorized code. On any failure DESTROY the just-created CVM (rollback) and
+	// refuse the lease so a non-attesting box is never leaked or trusted.
+	if attestEnabled(cfg) {
+		info, err := b.fetchAttestation(ctx, lease.SSH)
+		if err != nil {
+			return core.LeaseTarget{}, rollback(fmt.Errorf("refusing Phala lease: TDX attestation fetch failed for phala_cvm=%s: %w", id, err))
+		}
+		report, err := verifyAttestation(info, id, true)
+		if err != nil {
+			return core.LeaseTarget{}, rollback(fmt.Errorf("refusing Phala lease: TDX attestation verification failed for phala_cvm=%s: %w", id, err))
+		}
+		lease.Server.Labels["attested"] = "true"
+		lease.Server.Labels["tdx_app_id"] = report.AppID
+		lease.Server.Labels["tdx_compose_hash"] = report.ComposeHash
+		lease.Server.Labels["tdx_os_image_hash"] = report.OSImageHash
+		lease.Server.Labels["tdx_rtmr3"] = report.Rtmr3
+		fmt.Fprintf(b.rt.Stderr, "attested phala_cvm=%s app_id=%s compose_hash=%s rtmr3=%s\n", id, report.AppID, report.ComposeHash, report.Rtmr3)
+	}
 	lease.Server.Status = "ready"
 	lease.Server.Labels["state"] = "ready"
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
