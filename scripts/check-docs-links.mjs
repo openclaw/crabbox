@@ -76,7 +76,7 @@ function headingAnchors(markdown) {
 }
 
 function splitMarkdownTarget(href) {
-  const trimmed = href.replace(/\s+["'][^"']*["']\s*$/, "");
+  const trimmed = href.replace(/\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s*$/, "");
   return stripAngleBrackets(trimmed);
 }
 

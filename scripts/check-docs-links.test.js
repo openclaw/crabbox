@@ -41,7 +41,15 @@ test("docs link checker rejects missing duplicate heading anchors", (t) => {
 
 test("docs link checker accepts local links with titles and angle brackets", (t) => {
   const dir = newDocsFixture(t);
-  writeFile(path.join(dir, "README.md"), '[guide](<docs/guide.md#quoted-heading> "Guide page")\n');
+  writeFile(
+    path.join(dir, "README.md"),
+    [
+      '[guide](<docs/guide.md#quoted-heading> "Contributor\'s guide")',
+      '[guide](<docs/guide.md#quoted-heading> \'The "guide" page\')',
+      '[guide](<docs/guide.md#quoted-heading> "A \\"quoted\\" guide")',
+      "",
+    ].join("\n"),
+  );
   writeFile(path.join(dir, "docs", "guide.md"), "# Quoted Heading\n");
 
   const result = runChecker(dir);
