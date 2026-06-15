@@ -95,6 +95,9 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 	if err != nil {
 		return err
 	}
+	if err := validateGitHubLoginURL(start.URL); err != nil {
+		return exit(3, "GitHub login returned an invalid authorization URL: %v", err)
+	}
 	if canonicalBrokerURL, ok := canonicalBrokerURLFromLoginURL(start.URL); ok && !sameBrokerURL(brokerURL, canonicalBrokerURL) {
 		brokerURL = canonicalBrokerURL
 		client, err = coordinatorClientForLogin(brokerURL, provider)
@@ -104,6 +107,9 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		start, err = client.StartGitHubLogin(ctx, pollSecretHash, provider)
 		if err != nil {
 			return err
+		}
+		if err := validateGitHubLoginURL(start.URL); err != nil {
+			return exit(3, "GitHub login returned an invalid authorization URL: %v", err)
 		}
 	}
 	if noBrowser {
@@ -204,6 +210,29 @@ func coordinatorClientForLogin(brokerURL, provider string) (*CoordinatorClient, 
 		return nil, exit(2, "login requires a broker URL")
 	}
 	return coord, nil
+}
+
+func validateGitHubLoginURL(loginURL string) error {
+	u, err := url.Parse(loginURL)
+	if err != nil {
+		return fmt.Errorf("parse URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("scheme must be https")
+	}
+	if u.User != nil {
+		return fmt.Errorf("user information is not allowed")
+	}
+	if !strings.EqualFold(u.Hostname(), "github.com") || u.Port() != "" {
+		return fmt.Errorf("host must be github.com")
+	}
+	if u.EscapedPath() != "/login/oauth/authorize" {
+		return fmt.Errorf("path must be /login/oauth/authorize")
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("fragment is not allowed")
+	}
+	return nil
 }
 
 func canonicalBrokerURLFromLoginURL(loginURL string) (string, bool) {
