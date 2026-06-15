@@ -396,13 +396,19 @@ func (b *backend) fetchAttestation(ctx context.Context, target core.SSHTarget) (
 	if err != nil {
 		return dstackInfo{}, fmt.Errorf("fetch dstack attestation over SSH: %w", err)
 	}
+	return parseDstackInfo(out)
+}
+
+// parseDstackInfo decodes a dstack Tappd.Info response. The curl call may emit
+// transport noise on stderr (discarded) but the JSON object on stdout; it trims
+// to the first '{' defensively in case a shell banner precedes it, and rejects
+// an empty body. Split out from the SSH fetch so it is deterministically
+// testable.
+func parseDstackInfo(out string) (dstackInfo, error) {
 	out = strings.TrimSpace(out)
 	if out == "" {
 		return dstackInfo{}, fmt.Errorf("dstack guest agent returned no attestation Info (is %s present?)", tappdSocket)
 	}
-	// The curl call may emit transport noise on stderr (discarded) but the JSON
-	// object on stdout; trim to the first '{' defensively in case a shell banner
-	// precedes it.
 	if idx := strings.IndexByte(out, '{'); idx > 0 {
 		out = out[idx:]
 	}

@@ -41,6 +41,40 @@ func loadRealTCB(t *testing.T, info dstackInfo) tcbInfo {
 	return tcb
 }
 
+// TestParseDstackInfo covers the deterministic parsing split out of the SSH
+// fetch: a clean Info object, a leading shell banner before the JSON, and the
+// empty / non-JSON rejections.
+func TestParseDstackInfo(t *testing.T) {
+	ok := `{"app_id":"` + realExpectedAppID + `","instance_id":"ce0b","app_cert":"x","tcb_info":"{}"}`
+	for _, tc := range []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{name: "clean json", in: ok},
+		{name: "leading shell banner trimmed", in: "Warning: something\n" + ok},
+		{name: "surrounding whitespace", in: "  \n" + ok + "\n "},
+		{name: "empty body rejected", in: "   \n  ", wantErr: true},
+		{name: "non-json rejected", in: "curl: (7) Failed to connect to /var/run/tappd.sock", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info, err := parseDstackInfo(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseDstackInfo(%q) = %+v, want error", tc.in, info)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDstackInfo(%q): %v", tc.in, err)
+			}
+			if info.AppID != realExpectedAppID {
+				t.Fatalf("AppID=%q want %q", info.AppID, realExpectedAppID)
+			}
+		})
+	}
+}
+
 // TestExtractTDXQuoteFromRealAppCert pins that the quote is carved out of the
 // real app certificate's TDX extension and that it is a well-formed v4 quote
 // whose MRTD sits at offset 184 and equals tcb_info.mrtd.
