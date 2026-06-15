@@ -4205,6 +4205,11 @@ describe("fleet lease identity and idle", () => {
     expect(bootstrap).toContain("rev-parse --verify 'HEAD^{commit}'");
     expect(bootstrap).toContain(".clone.XXXXXX");
     expect(bootstrap).toContain("if ! git clone");
+    expect(bootstrap).toContain("printf '\\\\033[2J\\\\033[H'");
+    expect(bootstrap).toContain("set +e");
+    expect(bootstrap).toContain("Workspace command exited with status %s");
+    expect(bootstrap).toContain("exec bash -l");
+    expect(bootstrap).not.toContain("exec bash -lc ${shellQuote(command)}");
     expect(bootstrap).not.toContain("/crabfleet/");
   });
 

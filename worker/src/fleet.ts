@@ -11328,7 +11328,15 @@ function workspaceTerminalBootstrapCommand(workspace: WorkspaceRecord, lease: Le
   } else {
     setup.push(`mkdir -p ${shellQuote(workspaceRoot)}`);
   }
-  setup.push(`cd ${shellQuote(workspaceRoot)}`, `exec bash -lc ${shellQuote(command)}`);
+  setup.push(
+    `cd ${shellQuote(workspaceRoot)}`,
+    "printf '\\033[2J\\033[H'",
+    "set +e",
+    `bash -lc ${shellQuote(command)}`,
+    "command_status=$?",
+    "printf '\\nWorkspace command exited with status %s. The terminal remains available.\\n' \"$command_status\"",
+    "exec bash -l",
+  );
   const runner = `bash -lc ${shellQuote(setup.join("\n"))}`;
   const session = `crabbox-workspace-${workspace.id}`.slice(0, 80);
   return [
