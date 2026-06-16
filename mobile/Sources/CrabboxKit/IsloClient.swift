@@ -173,7 +173,16 @@ public actor IsloClient {
 
     private func send(_ method: String, _ path: String, json: [String: Any]? = nil, accept: String = "application/json") async throws -> Data {
         let token = try await authToken()
-        return try await rawSend(method, path, json: json, accept: accept, bearer: token)
+        do {
+            return try await rawSend(method, path, json: json, accept: accept, bearer: token)
+        } catch LLMError.http(401) {
+            // Session JWT may be stale or revoked (e.g. the API key was rotated).
+            // Drop the cache, re-exchange the key, and retry once.
+            cachedToken = nil
+            tokenExpiry = nil
+            let fresh = try await authToken()
+            return try await rawSend(method, path, json: json, accept: accept, bearer: fresh)
+        }
     }
 
     /// One HTTP round-trip. `bearer == nil` is used only by the `/auth/token`

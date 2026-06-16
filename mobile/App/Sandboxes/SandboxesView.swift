@@ -396,6 +396,15 @@ struct SandboxesView: View {
                 model: model
             )
             ticker.cancel()
+            // Don't offer the engine for chat until Ollama is actually serving the
+            // model — the bootstrap (apt + install + model pull) runs detached, so
+            // poll readiness rather than optimistically marking it ready.
+            phase = .exposing
+            var attempts = 0
+            while !(await engine.isReady()) && attempts < 90 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                attempts += 1
+            }
             engineHub.register(engine)
             lastLaunchedEngineName = engine.displayName
             phase = .ready
