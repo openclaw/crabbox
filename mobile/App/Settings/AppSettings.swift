@@ -77,6 +77,17 @@ final class AppSettings: ObservableObject {
         // Secrets are loaded from the Keychain, never from UserDefaults.
         self.crabboxToken = KeychainStore.get(.crabboxToken)
         self.isloKey = KeychainStore.get(.isloKey)
+
+        #if DEBUG
+        // DEBUG-only: allow preloading the direct-islo provider from the launch
+        // environment (SIMCTL_CHILD_CRABBOX_ISLO_KEY=…) for screenshot/demo runs.
+        // Never used in Release; the key is still mirrored into the Keychain.
+        if let injected = ProcessInfo.processInfo.environment["CRABBOX_ISLO_KEY"],
+           !injected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            self.isloEnabled = true
+            self.isloKey = injected
+        }
+        #endif
     }
 
     // MARK: - Derived state

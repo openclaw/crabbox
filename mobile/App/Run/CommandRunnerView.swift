@@ -36,6 +36,7 @@ struct CommandRunnerView: View {
     @State private var selectedTargetIDs: Set<String> = []
     @State private var distributeResults: [String: String] = [:] // id -> combined output
     @State private var isDistributing = false
+    @State private var isMapReducing = false
 
     var body: some View {
         NavigationStack {
@@ -55,6 +56,20 @@ struct CommandRunnerView: View {
             .navigationTitle("Run")
             .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        Task { await mapReduceDemo() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isMapReducing { ProgressView().tint(Theme.accent) }
+                            else { Image(systemName: "sum") }
+                            Text("Map-Reduce").font(.subheadline.weight(.semibold))
+                        }
+                        .foregroundStyle(Theme.accent)
+                    }
+                    .disabled(isMapReducing)
+                    .accessibilityLabel("Map-Reduce over islo")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showingProviderSettings = true
@@ -103,7 +118,8 @@ struct CommandRunnerView: View {
                     Text(status)
                         .font(.headline)
                         .foregroundStyle(Theme.textPrimary)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.7)
                 }
                 Spacer()
                 statusPill
@@ -195,8 +211,14 @@ struct CommandRunnerView: View {
                             }
                             .font(.subheadline)
                         } else {
-                            // Multi-select for distribution. Tap to toggle.
-                            ForEach(sandboxStore.handles, id: \.id) { h in
+                            // Multi-select for distribution. Tap to toggle. Capped so
+                            // the card stays compact when the fleet is large; the
+                            // Map-Reduce action auto-discovers running boxes anyway.
+                            if sandboxStore.handles.count > 8 {
+                                Text("showing 8 of \(sandboxStore.handles.count) — Map-Reduce auto-targets running boxes")
+                                    .font(.caption2).foregroundStyle(Theme.textMuted)
+                            }
+                            ForEach(sandboxStore.handles.prefix(8), id: \.id) { h in
                                 let isSel = selectedTargetIDs.contains(h.id)
                                 Button {
                                     if isSel { selectedTargetIDs.remove(h.id) } else { selectedTargetIDs.insert(h.id) }
@@ -222,11 +244,31 @@ struct CommandRunnerView: View {
                                     .font(.caption)
                                 Spacer()
                                 if !selectedTargetIDs.isEmpty {
-                                    Text("\(selectedTargetIDs.count) target(s) — will distribute")
+                                    Text("\(selectedTargetIDs.count) selected")
                                         .font(.caption)
                                         .foregroundStyle(Theme.accent)
                                 }
                             }
+
+                            // Map-reduce demo: shard sum(1...1000) across the selected
+                            // islo sandboxes (MAP), then aggregate on the phone (REDUCE).
+                            Button {
+                                Task { await mapReduceDemo() }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if isMapReducing { ProgressView().tint(Theme.accent) }
+                                    else { Image(systemName: "sum") }
+                                    Text(selectedTargetIDs.isEmpty ? "Map-Reduce  Σ(1…1000) over islo" : "Map-Reduce  Σ(1…1000) across \(selectedTargetIDs.count)")
+                                        .font(.footnote.weight(.semibold))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.accent.opacity(0.35), lineWidth: 1))
+                                .foregroundStyle(Theme.accent)
+                            }
+                            .disabled(isMapReducing)
+                            .padding(.top, 4)
                         }
                     }
                     .padding(8)
@@ -423,6 +465,111 @@ struct CommandRunnerView: View {
         isDistributing = false
         status = "Distributed to \(targets.count)"
         // Keep the single-run output area as aggregate; per-id also in distributeResults if UI wants tabs later.
+    }
+
+    /// Map-reduce demo: shard `Σ(1…n)` (with min/max) across the selected islo
+    /// sandboxes (MAP) via `IsloClient.exec` in parallel, then aggregate on the
+    /// phone (REDUCE). The iOS app as a command center over islo.dev.
+    @MainActor
+    private func mapReduceDemo() async {
+        guard let key = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
+              let client = IsloClient(apiKey: key, baseURL: settings.isloBaseURL) else {
+            status = "islo key missing"
+            output = "Add your islo key in provider settings to map-reduce over islo.\n"
+            showingProviderSettings = true
+            return
+        }
+
+        isMapReducing = true
+        defer { isMapReducing = false }
+        exitCode = nil
+        runningMode = .nativeCore
+        let n = 1000
+
+        // Targets: the user's explicit selection, else auto-discover running islo
+        // boxes (preferring fresh `crabbox-mapreduce-*` demo boxes) so the demo is
+        // a single tap.
+        var targets = sandboxStore.handles.filter { selectedTargetIDs.contains($0.id) }.map { $0.id }
+        if targets.isEmpty {
+            status = "Discovering running islo sandboxes…"
+            output = "$ map-reduce  Σ(1…\(n))  — discovering running islo sandboxes…\n\n"
+            let all = (try? await client.listSandboxes()) ?? []
+            let running = all.filter { $0.status == "running" }.map(\.name)
+            let demo = running.filter { $0.hasPrefix("crabbox-mapreduce") }
+            targets = (demo.isEmpty ? running : demo)
+            targets = Array(targets.prefix(4))
+        }
+        guard !targets.isEmpty else {
+            status = "No running sandboxes"
+            output = "No running islo sandboxes to map-reduce across. Launch some in the Sandboxes tab.\n"
+            return
+        }
+
+        let probeTargets = targets
+        status = "Map-reduce: probing \(probeTargets.count) sandbox(es)…"
+        output = "$ map-reduce  Σ(1…\(n))  over \(probeTargets.count) islo sandbox(es)\n\n"
+
+        // PROBE: keep only sandboxes that actually respond, so the shards cover
+        // 1…n exactly even if some selected boxes are stopped/failed.
+        var live: [String] = []
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for name in probeTargets {
+                group.addTask {
+                    let res = try? await client.exec(name: name, script: "echo ok")
+                    return (name, (res?.stdout ?? "").contains("ok"))
+                }
+            }
+            for await (name, ok) in group {
+                output += ok ? "  [probe] \(name) ✓ live\n" : "  [probe] \(name) ✗ skipped\n"
+                if ok { live.append(name) }
+            }
+        }
+        guard !live.isEmpty else {
+            output += "\n  no live sandboxes among the selection.\n"
+            status = "No live sandboxes"; exitCode = 1; return
+        }
+
+        let s = live.count
+        status = "Map-reduce across \(s) sandbox(es)…"
+        output += "\n"
+
+        // MAP: one shard per LIVE sandbox, executed in parallel over islo.
+        let shards = live.enumerated().map { (idx: $0.offset, name: $0.element) }
+        var lines: [(name: String, sum: Int, mn: Int, mx: Int)] = []
+        await withTaskGroup(of: (String, String).self) { group in
+            for shard in shards {
+                let per = n / s
+                let a = shard.idx * per + 1
+                let b = (shard.idx == s - 1) ? n : (shard.idx + 1) * per
+                let name = shard.name
+                group.addTask {
+                    let script = "seq \(a) \(b) | awk '{sum+=$1; if(mn==\"\"||$1<mn)mn=$1; if($1>mx)mx=$1} END{print sum, mn, mx}'"
+                    let res = try? await client.exec(name: name, script: script)
+                    return (name, (res?.stdout ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            }
+            for await (name, out) in group {
+                let parts = out.split(separator: " ").compactMap { Int($0) }
+                if parts.count == 3 {
+                    lines.append((name, parts[0], parts[1], parts[2]))
+                    output += "  [map] \(name) → sum=\(parts[0]) min=\(parts[1]) max=\(parts[2])\n"
+                } else {
+                    output += "  [map] \(name) → \(out.isEmpty ? "(no output)" : out)\n"
+                }
+            }
+        }
+
+        // REDUCE on the phone.
+        let total = lines.reduce(0) { $0 + $1.sum }
+        let gmin = lines.map(\.mn).min()
+        let gmax = lines.map(\.mx).max()
+        let expected = n * (n + 1) / 2
+        output += "\n  [reduce] Σ = \(total)  ·  min = \(gmin.map(String.init) ?? "—")  ·  max = \(gmax.map(String.init) ?? "—")  across \(lines.count) sandbox(es)\n"
+        let ok = total == expected && gmin == 1 && gmax == n
+        output += ok ? "  ✅ matches Σ(1…\(n)) = \(expected)\n" : "  expected Σ = \(expected)\n"
+        exitCode = ok ? 0 : 1
+        status = ok ? "✓ Σ=\(total) · \(lines.count) boxes" : "Map-reduce done"
+        runningMode = nil
     }
 
     @MainActor
