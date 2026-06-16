@@ -32,6 +32,10 @@ By default `collect` writes:
 - `webvnc-status.json` when a coordinator login is configured
 - `logs.txt` and `run.json` when `--run <run-id>` is provided
 
+The default bundle directory is private. An explicit `--output` directory keeps
+its existing sharing permissions, while retained `logs.txt` and `run.json`
+remain owner-only. Publishing is unchanged.
+
 `--all` enables `--video` and `--gif`, so the bundle also records `screen.mp4`,
 writes a `screen.contact.png` contact sheet, and produces a trimmed
 `screen.trimmed.gif`. `--gif` requires `--video` (or `--all`). Linux video uses
