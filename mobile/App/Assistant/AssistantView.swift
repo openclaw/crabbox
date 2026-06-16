@@ -151,6 +151,11 @@ struct AssistantView: View {
             // indicator appear.
             .onChange(of: store.messages.count) { _, _ in scrollToBottom(proxy) }
             .onChange(of: store.busy) { _, _ in scrollToBottom(proxy) }
+            // Swipe down over the conversation to dismiss the keyboard (iOS-native feel).
+            .scrollDismissesKeyboard(.interactively)
+            // Tap anywhere in the transcript to dismiss the keyboard.
+            .contentShape(Rectangle())
+            .onTapGesture { composerFocused = false }
         }
     }
 
@@ -199,15 +204,24 @@ struct AssistantView: View {
                     .lineLimit(1...5)
                     .textInputAutocapitalization(.sentences)
                     .focused($composerFocused)
+                    .submitLabel(.send)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(Theme.panel, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(Theme.hairline, lineWidth: 1)
+                            .stroke(composerFocused ? Theme.accent.opacity(0.45) : Theme.hairline, lineWidth: 1)
                     )
+                    .animation(.easeInOut(duration: 0.18), value: composerFocused)
                     .onSubmit(send)
+                    .toolbar {
+                        ToolbarItemGroup(placement: .keyboard) {
+                            Spacer()
+                            Button("Done") { composerFocused = false }
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
@@ -237,6 +251,10 @@ struct AssistantView: View {
         let text = draft
         guard canSend else { return }
         draft = ""
+        composerFocused = false
+        #if canImport(UIKit)
+        Theme.haptic(.light)
+        #endif
         Task { await store.send(text) }
     }
 

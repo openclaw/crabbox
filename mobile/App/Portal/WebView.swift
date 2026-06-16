@@ -171,15 +171,16 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            guard let url = navigationAction.request.url?.absoluteString else {
+            guard let requestURL = navigationAction.request.url else {
                 decisionHandler(.cancel)
                 return
             }
+            let url = requestURL.absoluteString
 
             // External schemes (mailto/tel/sms/App Store) → hand off to the OS.
             if shouldOpenExternally(url) {
                 decisionHandler(.cancel)
-                UIApplication.shared.open(URL(string: url)!)
+                UIApplication.shared.open(requestURL)
                 return
             }
 
@@ -201,9 +202,10 @@ struct WebView: UIViewRepresentable {
                      createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction,
                      windowFeatures: WKWindowFeatures) -> WKWebView? {
-            guard let url = navigationAction.request.url?.absoluteString else { return nil }
+            guard let requestURL = navigationAction.request.url else { return nil }
+            let url = requestURL.absoluteString
             if shouldOpenExternally(url) {
-                UIApplication.shared.open(URL(string: url)!)
+                UIApplication.shared.open(requestURL)
             } else if isAllowedNavigation(url, homeURL: model.state.homeURL) {
                 webView.load(navigationAction.request)
             }

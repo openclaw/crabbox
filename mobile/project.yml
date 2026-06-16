@@ -75,6 +75,12 @@ targets:
         HEADER_SEARCH_PATHS: "$(inherited) $(DERIVED_FILE_DIR)/crabboxmobile"
         LIBRARY_SEARCH_PATHS: "$(inherited) $(DERIVED_FILE_DIR)/crabboxmobile"
         SWIFT_INCLUDE_PATHS: "$(inherited) $(DERIVED_FILE_DIR)/crabboxmobile"
+        # -lresolv IS required: the Go c-archive's cgo DNS resolver references
+        # _res_9_ninit/_nclose/_nsearch, which are exported by the iOS SDK's
+        # libresolv.9.tbd (verified present on iPhoneOS.sdk). Dropping it breaks
+        # the device link ("Undefined symbols: _res_9_*"). Keeping the cgo
+        # resolver (vs a netgo pure-Go build) also keeps DNS working inside the
+        # iOS sandbox, which has no /etc/resolv.conf for the pure-Go resolver.
         OTHER_LDFLAGS: "$(inherited) -lcrabboxmobile -framework Security -framework CoreFoundation -lresolv"
         # MLX uses Metal; bound memory growth on device with these (harmless on Sim).
         ENABLE_USER_SCRIPT_SANDBOXING: NO

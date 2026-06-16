@@ -75,7 +75,22 @@ struct RootView: View {
     @StateObject private var engineHub = EngineHub()
     @StateObject private var sandboxStore = SandboxStore()
     @StateObject private var chat = ChatStore()
-    @State private var selectedTab: RootTab = .run
+    @State private var selectedTab: RootTab = RootView.initialTab()
+
+    /// DEBUG-only: lets `SIMCTL_CHILD_CRABBOX_TAB=portal` (etc.) open the app on a
+    /// specific tab — used to capture per-tab screenshots without UI automation.
+    static func initialTab() -> RootTab {
+        #if DEBUG
+        switch ProcessInfo.processInfo.environment["CRABBOX_TAB"] {
+        case "sandboxes": return .sandboxes
+        case "assistant": return .assistant
+        case "portal": return .portal
+        default: return .run
+        }
+        #else
+        return .run
+        #endif
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {

@@ -375,18 +375,21 @@ struct CommandRunnerView: View {
 
         // Capture MainActor-isolated settings on the actor before entering concurrent tasks.
         let isloKey = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let coordinator = settings.coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let coordinator = settings.coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let crabboxToken = settings.crabboxToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // Writable state/config dirs for the Go core's lease-claim system, shared
+        // by every parallel run (the claims are keyed by repo+slug, so distinct
+        // slugs below keep per-target leases separate).
+        let baseEnv = CrabboxRuntimePaths.sandboxEnvironment()
 
         await withTaskGroup(of: (String, CrabboxBinaryResult?).self) { group in
             for h in targets {
                 group.addTask {
-                    var args = baseArgs
-                    // Inject target id if not already present in the user's command line.
-                    if !args.contains("--id") && !args.contains("-id") {
-                        args = ["--id", h.id] + args
-                    }
-                    var env: [String: String] = [:]
+                    // Target a distinct lease/sandbox per selection via `--slug`
+                    // (a `run` flag, inserted AFTER the `run` token). `crabbox run`
+                    // has no `--id` flag — that belongs to `stop`/`resolve`.
+                    let args = Self.injectRunFlag(baseArgs, flag: "--slug", value: h.id)
+                    var env: [String: String] = baseEnv
                     if !isloKey.isEmpty {
                         env["ISLO_API_KEY"] = isloKey
                         env["CRABBOX_ISLO_API_KEY"] = isloKey
@@ -431,7 +434,10 @@ struct CommandRunnerView: View {
         status = "Running Go core"
         output = "$ crabbox \(args.joined(separator: " "))\n"
 
-        var env: [String: String] = [:]
+        // Pin the Go core's state/config dirs to writable sandbox paths so the
+        // islo lease-claim system (crabboxStateDir -> XDG_STATE_HOME/$HOME) works
+        // inside the iOS app container.
+        var env: [String: String] = CrabboxRuntimePaths.sandboxEnvironment()
         if let key = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
             env["ISLO_API_KEY"] = key
             env["CRABBOX_ISLO_API_KEY"] = key
@@ -582,6 +588,21 @@ struct CommandRunnerView: View {
 
     private func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    /// Inserts a `run`-scoped flag (e.g. `--slug <id>`) immediately after the
+    /// `run` subcommand token, so it lands before the `--` command separator and
+    /// is parsed as a run flag (not a global flag before the subcommand). No-ops
+    /// if the flag is already present.
+    nonisolated private static func injectRunFlag(_ args: [String], flag: String, value: String) -> [String] {
+        guard !args.contains(flag) else { return args }
+        var out = args
+        if let runIdx = out.firstIndex(of: "run") {
+            out.insert(contentsOf: [flag, value], at: runIdx + 1)
+        } else {
+            out.insert(contentsOf: [flag, value], at: min(1, out.count))
+        }
+        return out
     }
 
     private func makeWorkspaceID() -> String {
