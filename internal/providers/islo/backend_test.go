@@ -1075,19 +1075,63 @@ func TestIsloCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 	}
 }
 
-func TestIsloCreateSandboxPassesRelativeWorkdirToProvider(t *testing.T) {
+func TestIsloCreateSandboxOmitsDefaultProviderCreateFields(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{Workdir: "team/repo"}},
+		cfg: core.BaseConfig(),
 		rt:  Runtime{Stderr: io.Discard},
 	}
+	backend.cfg.Provider = isloProvider
+	backend.cfg.Islo.Workdir = "team/repo"
 	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.createRequest == nil || client.createRequest.Workdir == nil || *client.createRequest.Workdir != "team/repo" {
-		t.Fatalf("create workdir=%v", client.createRequest)
+	if client.createRequest == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	if client.createRequest.Workdir != nil {
+		t.Fatalf("default create workdir=%v, want omitted", *client.createRequest.Workdir)
+	}
+	if client.createRequest.Image != nil {
+		t.Fatalf("default create image=%v, want omitted", *client.createRequest.Image)
+	}
+	if client.createRequest.Vcpus != nil || client.createRequest.MemoryMb != nil || client.createRequest.DiskGb != nil {
+		t.Fatalf("default create sizing was sent: %#v", client.createRequest)
+	}
+}
+
+func TestIsloCreateSandboxSendsNonDefaultProviderCreateFields(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	backend := &isloBackend{
+		cfg: core.BaseConfig(),
+		rt:  Runtime{Stderr: io.Discard},
+	}
+	backend.cfg.Provider = isloProvider
+	backend.cfg.Islo.Image = "docker.io/library/custom:latest"
+	backend.cfg.Islo.VCPUs = 4
+	backend.cfg.Islo.MemoryMB = 8192
+	backend.cfg.Islo.DiskGB = 80
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.createRequest == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	if client.createRequest.Image == nil || *client.createRequest.Image != "docker.io/library/custom:latest" {
+		t.Fatalf("custom create image=%v", client.createRequest.Image)
+	}
+	if client.createRequest.Vcpus == nil || *client.createRequest.Vcpus != 4 {
+		t.Fatalf("custom create vcpus=%v", client.createRequest.Vcpus)
+	}
+	if client.createRequest.MemoryMb == nil || *client.createRequest.MemoryMb != 8192 {
+		t.Fatalf("custom create memory=%v", client.createRequest.MemoryMb)
+	}
+	if client.createRequest.DiskGb == nil || *client.createRequest.DiskGb != 80 {
+		t.Fatalf("custom create disk=%v", client.createRequest.DiskGb)
 	}
 }
 
