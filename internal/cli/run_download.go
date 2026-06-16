@@ -63,17 +63,17 @@ func preflightRunLocalOutputs(captureStdout, captureStderr string, downloads []s
 		}
 	}
 	for _, download := range parsedDownloads {
-		if err := preflightLocalOutputPath("download "+download.Remote, download.Local, true); err != nil {
+		if err := preflightLocalOutputPath("download "+download.Remote, download.Local, true, true); err != nil {
 			return err
 		}
 	}
 	if captureStdout != "" {
-		if err := preflightLocalOutputPath("capture stdout", captureStdout, false); err != nil {
+		if err := preflightLocalOutputPath("capture stdout", captureStdout, false, true); err != nil {
 			return err
 		}
 	}
 	if captureStderr != "" {
-		if err := preflightLocalOutputPath("capture stderr", captureStderr, false); err != nil {
+		if err := preflightLocalOutputPath("capture stderr", captureStderr, false, true); err != nil {
 			return err
 		}
 	}
@@ -144,14 +144,25 @@ func sameLocalOutputPath(left, right string) (bool, error) {
 	return leftAbs == rightAbs, nil
 }
 
-func preflightLocalOutputPath(label, path string, allowMissingDirs bool) error {
+func preflightLocalOutputPath(label, path string, allowMissingDirs, replaceExisting bool) error {
 	dir := filepath.Dir(path)
-	if info, err := os.Stat(path); err == nil {
+	info, err := os.Stat(path)
+	if replaceExisting {
+		info, err = os.Lstat(path)
+	}
+	if err == nil {
 		if info.IsDir() {
 			return exit(2, "%s: %s is a directory", label, path)
 		}
+		if replaceExisting {
+			if err := checkWritableDir(label, firstNonBlank(dir, ".")); err != nil {
+				return err
+			}
+			return checkPrivateRunOutputReplaceable(label, path)
+		}
 		return checkWritableFile(label, path)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return exit(2, "%s: %v", label, err)
 	}
 	if dir == "." || dir == "" {
@@ -221,15 +232,19 @@ func downloadRemoteFile(ctx context.Context, target SSHTarget, workdir, specValu
 	if err != nil {
 		return 0, spec.Local, exit(7, "download %s: decode base64: %v", spec.Remote, err)
 	}
-	if dir := filepath.Dir(spec.Local); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return 0, spec.Local, exit(2, "download %s: create %s: %v", spec.Remote, dir, err)
-		}
-	}
-	if err := os.WriteFile(spec.Local, data, 0o666); err != nil {
+	if err := writeRunDownloadFile(spec.Local, data); err != nil {
 		return 0, spec.Local, exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, err)
 	}
 	return len(data), spec.Local, nil
+}
+
+func writeRunDownloadFile(path string, data []byte) error {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := createPrivateRunOutputDir(dir); err != nil {
+			return err
+		}
+	}
+	return writePrivateRunOutputFile(path, data)
 }
 
 func remoteDownloadBase64Command(target SSHTarget, workdir, remotePath string) string {

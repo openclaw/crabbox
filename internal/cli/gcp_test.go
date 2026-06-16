@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -82,6 +83,43 @@ func TestGCPInstanceToServerHandlesNilLabels(t *testing.T) {
 	}
 }
 
+func TestIsCanonicalGCPServer(t *testing.T) {
+	leaseID := "cbx_123456abcdef"
+	slug := "blue-box"
+	canonical := Server{
+		Name: leaseProviderName(leaseID, slug),
+		Labels: map[string]string{
+			"crabbox":    "true",
+			"created_by": "crabbox",
+			"provider":   "gcp",
+			"lease":      leaseID,
+			"slug":       slug,
+		},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Server)
+		want   bool
+	}{
+		{name: "canonical", mutate: func(*Server) {}, want: true},
+		{name: "wrong name", mutate: func(server *Server) { server.Name = "crabbox-forged" }},
+		{name: "invalid lease", mutate: func(server *Server) { server.Labels["lease"] = "cbx_invalid" }},
+		{name: "missing slug", mutate: func(server *Server) { delete(server.Labels, "slug") }},
+		{name: "missing creator", mutate: func(server *Server) { delete(server.Labels, "created_by") }},
+		{name: "wrong provider", mutate: func(server *Server) { server.Labels["provider"] = "aws" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := canonical
+			server.Labels = maps.Clone(canonical.Labels)
+			test.mutate(&server)
+			if got := IsCanonicalGCPServer(server); got != test.want {
+				t.Fatalf("IsCanonicalGCPServer()=%v want %v server=%#v", got, test.want, server)
+			}
+		})
+	}
+}
+
 func TestGCPFirewallNameForNetwork(t *testing.T) {
 	cases := map[string]string{
 		"default":                                   "crabbox-ssh",
@@ -153,6 +191,12 @@ func TestGCPListCrabboxServersAggregatesZones(t *testing.T) {
 	var gotPath string
 	var gotFilter string
 	var gotPartialSuccess string
+	fallbackLeaseID := "cbx_333333333333"
+	fallbackSlug := "fallback-zone"
+	fallbackName := leaseProviderName(fallbackLeaseID, fallbackSlug)
+	otherLeaseID := "cbx_444444444444"
+	otherSlug := "other-zone"
+	otherName := leaseProviderName(otherLeaseID, otherSlug)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotFilter = r.URL.Query().Get("filter")
@@ -161,19 +205,32 @@ func TestGCPListCrabboxServersAggregatesZones(t *testing.T) {
 			"items": map[string]any{
 				"zones/europe-west2-b": map[string]any{
 					"instances": []map[string]any{{
-						"name":   "crabbox-fallback-zone",
+						"name":   fallbackName,
 						"status": "RUNNING",
-						"labels": map[string]string{"crabbox": "true", "lease": "cbx_333333333333"},
+						"labels": map[string]string{
+							"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+							"lease": fallbackLeaseID, "slug": fallbackSlug,
+						},
 						"networkInterfaces": []map[string]any{{
 							"accessConfigs": []map[string]string{{"natIP": "203.0.113.33"}},
 						}},
+					}, {
+						"name":   "crabbox-forged",
+						"status": "RUNNING",
+						"labels": map[string]string{
+							"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+							"lease": "cbx_555555555555", "slug": "forged",
+						},
 					}},
 				},
 				"zones/us-central1-a": map[string]any{
 					"instances": []map[string]any{{
-						"name":   "crabbox-other-zone",
+						"name":   otherName,
 						"status": "RUNNING",
-						"labels": map[string]string{"crabbox": "true", "lease": "cbx_444444444444"},
+						"labels": map[string]string{
+							"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+							"lease": otherLeaseID, "slug": otherSlug,
+						},
 					}},
 				},
 			},
@@ -202,10 +259,10 @@ func TestGCPListCrabboxServersAggregatesZones(t *testing.T) {
 	if len(servers) != 2 {
 		t.Fatalf("servers=%v", servers)
 	}
-	if servers[0].Name != "crabbox-fallback-zone" || servers[0].Labels["zone"] != "europe-west2-b" || servers[0].PublicNet.IPv4.IP != "203.0.113.33" {
+	if servers[0].Name != fallbackName || servers[0].Labels["zone"] != "europe-west2-b" || servers[0].PublicNet.IPv4.IP != "203.0.113.33" {
 		t.Fatalf("fallback server=%#v", servers[0])
 	}
-	if servers[1].Name != "crabbox-other-zone" || servers[1].Labels["zone"] != "us-central1-a" {
+	if servers[1].Name != otherName || servers[1].Labels["zone"] != "us-central1-a" {
 		t.Fatalf("other server=%#v", servers[1])
 	}
 

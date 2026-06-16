@@ -90,9 +90,10 @@ kinds:
 - **Leases** — managed or registered boxes with compact provider/target badges,
   state pills, the lease class, icon-only access capabilities (SSH, VNC,
   code, browser), relative time cells, and a confirmed lifecycle action for
-  sessions with manage access. The action stops and deletes the backing machine
-  for coordinator-managed leases. Runtime-adapter-managed registrations show
-  **delete workspace** and permanently delete through that adapter; other
+  sessions with manage access. Confirmations use a themed in-page HTML dialog
+  instead of a browser-native prompt. The action stops and deletes the backing
+  machine for coordinator-managed leases. Runtime-adapter-managed registrations
+  show **delete workspace** and permanently delete through that adapter; other
   registered leases show **remove registration** and warn that the external
   machine keeps running.
 - **External runners** — visibility-only rows for Blacksmith Testboxes synced
@@ -149,8 +150,9 @@ workspace rather than only removing coordinator metadata.
 not ordinary pages. VNC opens a noVNC viewer that talks to the lease's desktop
 over a WebSocket; the code path proxies code-server HTTP and WebSocket traffic
 straight through. Both remove the need for a local SSH tunnel to reach the
-desktop or editor. Mediated egress has no portal page — it is operator-driven
-and never opens an HTML view, so it lives under the ticketed
+desktop or editor. If browser clipboard permission is unavailable, WebVNC uses
+an in-page text dialog for manual paste input. Mediated egress has no portal
+page — it is operator-driven and never opens an HTML view, so it lives under the ticketed
 `/v1/leases/{id-or-slug}/egress/...` routes instead. See
 [Interactive desktop and VNC](interactive-desktop-vnc.md),
 [code command](../commands/code.md), and [Mediated egress](egress.md).

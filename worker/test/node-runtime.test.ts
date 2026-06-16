@@ -135,6 +135,8 @@ describe("NodeCoordinatorRuntime", () => {
     expect(bootstrap).toContain('workspace.command?.trim() || "exec bash -l"');
     expect(bootstrap).not.toContain("checkout -B");
     expect(bootstrap).not.toContain("fetch --depth=1");
+    expect(bootstrap).toContain("Workspace command exited with status %s");
+    expect(bootstrap).toContain("exec bash -l");
   });
 
   it("bounds terminal input by bytes and queued frame count", async () => {

@@ -306,6 +306,15 @@ interface EgressTicketRecord {
   expiresAt: string;
 }
 
+type LeaseBridgeTicketConsumption<T> =
+  | { status: "invalid" }
+  | { status: "not_found" }
+  | { status: "accepted"; ticket: T; lease: LeaseRecord };
+
+type RuntimeAdapterTicketConsumption =
+  | { status: "invalid" }
+  | { status: "accepted"; ticket: RuntimeAdapterTicketRecord };
+
 interface EgressSessionStatus {
   leaseID: string;
   sessionID: string;
@@ -642,6 +651,7 @@ export class FleetCoordinator {
   private readonly restoredLeaseBridgeSockets = new Set<WebSocket>();
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
+  private bridgeTicketQueue: Promise<void> = Promise.resolve();
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
   private providerMaintenanceQueue: Promise<void> = Promise.resolve();
@@ -1251,7 +1261,8 @@ export class FleetCoordinator {
   ): Promise<void> {
     const runID = typeof input.runID === "string" ? input.runID : "";
     const run = runID ? await this.getRun(runID) : undefined;
-    if (!run || !this.runVisibleToControl(run, attachment)) {
+    const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+    if (!run || !this.runReadableToControl(run, attachment, lease)) {
       sendControl(socket, { type: "error", code: "not_found", message: "run not found" });
       return;
     }
@@ -1745,12 +1756,18 @@ export class FleetCoordinator {
             lastProvisioningTarget = { ...target };
             await prepared.provisioning?.onTargetAttempt?.(target);
             const region = target.region;
-            if (record.provider !== "aws" || !region) {
+            if (!region) {
               return;
             }
             await this.state.runExclusive(async () => {
               const current = (await this.getLease(record.id)) ?? record;
-              await this.markAWSIngressReconcilePending({ ...current, region });
+              if (record.provider === "aws") {
+                await this.markAWSIngressReconcilePending({ ...current, region });
+              } else {
+                current.region = region;
+                current.updatedAt = new Date().toISOString();
+                await this.putLease(current);
+              }
               await this.scheduleAlarm();
             });
           },
@@ -2631,7 +2648,9 @@ export class FleetCoordinator {
     const provider = this.provider(workspace.provider, lease.region, lease.providerProject);
     let server: ProviderMachine | undefined;
     try {
-      if (lease.cloudID && provider.getServer) {
+      if (provider.recoverServer) {
+        server = await provider.recoverServer(lease);
+      } else if (lease.cloudID && provider.getServer) {
         server = await provider.getServer(lease.cloudID);
       } else if (provider.findServerByLease) {
         server = await provider.findServerByLease(lease.id);
@@ -4696,7 +4715,12 @@ export class FleetCoordinator {
         404,
       );
     }
-    return portalMacHostDetail(host, host.lease ? this.leaseBridgeStatus(host.lease) : undefined);
+    const canManage = Boolean(
+      host.lease && this.leaseManageableByRequest(host.lease, request, isAdminRequest(request)),
+    );
+    return portalMacHostDetail(host, host.lease ? this.leaseBridgeStatus(host.lease) : undefined, {
+      canManage,
+    });
   }
 
   private async portalMacHostLeaseRedirect(
@@ -4726,7 +4750,9 @@ export class FleetCoordinator {
     }
     const error = action === "vnc" ? webVNCLeaseError(lease) : codeLeaseError(lease);
     if (action === "vnc" && error === "lease was not created with desktop=true") {
-      return portalMacHostDetail(host, this.leaseBridgeStatus(lease));
+      return portalMacHostDetail(host, this.leaseBridgeStatus(lease), {
+        canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+      });
     }
     if (error) {
       return portalError(action === "vnc" ? "WebVNC unavailable" : "Code unavailable", error, 409);
@@ -4807,11 +4833,18 @@ export class FleetCoordinator {
         404,
       );
     }
-    const runs = (await this.runRecords())
-      .filter((run) => run.leaseID === lease.id && this.runVisibleToRequest(run, request))
+    const runs = await this.runRecords();
+    const leases = new Map((await this.leaseRecords()).map((record) => [record.id, record]));
+    leases.set(lease.id, lease);
+    await Promise.all(runs.map((run) => this.ensureRunLeaseAttribution(run, leases)));
+    const visibleRuns = runs
+      .filter(
+        (run) =>
+          this.runReferencesLease(run, lease.id) && this.runReadableToRequest(run, request, lease),
+      )
       .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, 12);
-    return portalLeaseDetail(lease, runs, this.leaseBridgeStatus(lease), {
+    return portalLeaseDetail(lease, visibleRuns, this.leaseBridgeStatus(lease), {
       canManage: this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
     });
   }
@@ -5373,7 +5406,8 @@ export class FleetCoordinator {
     action?: string,
   ): Promise<Response> {
     const run = await this.getRun(runID);
-    if (!run || !this.runVisibleToRequest(run, request)) {
+    const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+    if (!run || !this.runReadableToRequest(run, request, lease)) {
       return notFound();
     }
     if (request.method.toUpperCase() !== "GET") {
@@ -5408,17 +5442,17 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeWebVNCTicket(request);
-    if (!ticket) {
+    const consumed = await this.consumeWebVNCTicket(request, identifier);
+    if (consumed.status === "invalid") {
       return json(
         { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
         { status: 401 },
       );
     }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
+    if (consumed.status === "not_found") {
       return notFound();
     }
+    const { lease } = consumed;
     const error = webVNCLeaseError(lease);
     if (error) {
       return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
@@ -5511,17 +5545,17 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeEgressTicket(request);
-    if (!ticket || ticket.role !== role) {
+    const consumed = await this.consumeEgressTicket(request, identifier, role);
+    if (consumed.status === "invalid") {
       return json(
         { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
         { status: 401 },
       );
     }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
+    if (consumed.status === "not_found") {
       return notFound();
     }
+    const { lease, ticket } = consumed;
     if (lease.state !== "active") {
       return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
     }
@@ -5557,6 +5591,7 @@ export class FleetCoordinator {
     if (!lease) {
       return notFound();
     }
+    const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
     const session = this.egressSessions.get(lease.id);
     const key = session ? egressSocketKey(lease.id, session.sessionID) : undefined;
     const host = key ? this.egressHosts.get(key) : undefined;
@@ -5564,13 +5599,13 @@ export class FleetCoordinator {
     return json({
       leaseID: lease.id,
       slug: lease.slug,
-      sessionID: session?.sessionID ?? "",
-      profile: session?.profile ?? "",
-      allow: session?.allow ?? [],
+      sessionID: canManage ? (session?.sessionID ?? "") : "",
+      profile: canManage ? (session?.profile ?? "") : "",
+      allow: canManage ? (session?.allow ?? []) : [],
       hostConnected: host?.readyState === WebSocket.OPEN,
       clientConnected: client?.readyState === WebSocket.OPEN,
-      createdAt: session?.createdAt ?? "",
-      updatedAt: session?.updatedAt ?? "",
+      createdAt: canManage ? (session?.createdAt ?? "") : "",
+      updatedAt: canManage ? (session?.updatedAt ?? "") : "",
     });
   }
 
@@ -5781,13 +5816,14 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeRuntimeAdapterTicket(request);
-    if (!ticket || ticket.adapterID !== adapterID) {
+    const consumed = await this.consumeRuntimeAdapterTicket(request, adapterID);
+    if (consumed.status === "invalid") {
       return json(
         { error: "adapter_ticket_required", message: "valid runtime adapter ticket required" },
         { status: 401 },
       );
     }
+    const { ticket } = consumed;
     const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(
       runtimeAdapterIdentityKey(adapterID),
     );
@@ -6306,7 +6342,8 @@ export class FleetCoordinator {
     const controller = controllerID
       ? this.webVNCViewers.get(lease.id)?.get(controllerID)
       : undefined;
-    const command = webVNCBridgeCommand(lease);
+    const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
+    const command = canManage ? webVNCBridgeCommand(lease) : "";
     return json({
       leaseID: lease.id,
       slug: lease.slug ?? "",
@@ -6335,7 +6372,9 @@ export class FleetCoordinator {
               ? "observer slots available"
               : "bridge connected"
             : "waiting for an available WebVNC observer slot"
-        : `WebVNC daemon not running; run: ${command}`,
+        : canManage
+          ? `WebVNC daemon not running; run: ${command}`
+          : "WebVNC daemon not running; ask a lease manager to start or refresh the bridge",
     });
   }
 
@@ -6343,9 +6382,13 @@ export class FleetCoordinator {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const lease = await this.resolveLease(identifier, request, false);
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(identifier, request, admin);
     if (!lease) {
       return notFound();
+    }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     const error = webVNCLeaseError(lease);
     if (error) {
@@ -6519,17 +6562,17 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const ticket = await this.consumeCodeTicket(request);
-    if (!ticket) {
+    const consumed = await this.consumeCodeTicket(request, identifier);
+    if (consumed.status === "invalid") {
       return json(
         { error: "code_ticket_required", message: "valid code bridge ticket required" },
         { status: 401 },
       );
     }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
+    if (consumed.status === "not_found") {
       return notFound();
     }
+    const { lease } = consumed;
     const error = codeLeaseError(lease);
     if (error) {
       return json({ error: "code_unavailable", message: error }, { status: 409 });
@@ -6922,11 +6965,14 @@ export class FleetCoordinator {
     }
     const agent = this.claimIdleWebVNCAgent(lease.id);
     if (!agent) {
-      const command = webVNCBridgeCommand(lease);
+      const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
+      const command = canManage ? webVNCBridgeCommand(lease) : "";
       return json(
         {
           error: "webvnc_bridge_missing",
-          message: `No WebVNC backend is available yet; start or refresh the bridge with: ${command}`,
+          message: canManage
+            ? `No WebVNC backend is available yet; start or refresh the bridge with: ${command}`
+            : "No WebVNC backend is available yet; ask a lease manager to start or refresh the bridge.",
           command,
         },
         { status: 409 },
@@ -7097,21 +7143,28 @@ export class FleetCoordinator {
 
   private async consumeRuntimeAdapterTicket(
     request: Request,
-  ): Promise<RuntimeAdapterTicketRecord | undefined> {
+    adapterID: string,
+  ): Promise<RuntimeAdapterTicketConsumption> {
     const value = runtimeAdapterTicketFromRequest(request);
     if (!validRuntimeAdapterTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = runtimeAdapterTicketKey(value);
-    const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = runtimeAdapterTicketKey(value);
+      const ticket = await this.state.storage.get<RuntimeAdapterTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      if (ticket.adapterID !== adapterID) {
+        return { status: "invalid" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket };
+    });
   }
 
   private async cleanupExpiredRuntimeAdapterTickets(): Promise<void> {
@@ -7126,21 +7179,31 @@ export class FleetCoordinator {
     );
   }
 
-  private async consumeWebVNCTicket(request: Request): Promise<WebVNCTicketRecord | undefined> {
+  private async consumeWebVNCTicket(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
     const value = bridgeTicketFromRequest(request);
     if (!validWebVNCTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = webVNCTicketKey(value);
-    const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = webVNCTicketKey(value);
+      const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      const lease = await this.getLease(ticket.leaseID);
+      if (!lease || !identifierMatchesLease(identifier, lease)) {
+        return { status: "not_found" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket, lease };
+    });
   }
 
   private async cleanupExpiredWebVNCTickets(): Promise<void> {
@@ -7155,21 +7218,31 @@ export class FleetCoordinator {
     );
   }
 
-  private async consumeCodeTicket(request: Request): Promise<CodeTicketRecord | undefined> {
+  private async consumeCodeTicket(
+    request: Request,
+    identifier: string,
+  ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
     const value = bridgeTicketFromRequest(request);
     if (!validCodeTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = codeTicketKey(value);
-    const ticket = await this.state.storage.get<CodeTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = codeTicketKey(value);
+      const ticket = await this.state.storage.get<CodeTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      const lease = await this.getLease(ticket.leaseID);
+      if (!lease || !identifierMatchesLease(identifier, lease)) {
+        return { status: "not_found" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket, lease };
+    });
   }
 
   private async cleanupExpiredCodeTickets(): Promise<void> {
@@ -7184,21 +7257,35 @@ export class FleetCoordinator {
     );
   }
 
-  private async consumeEgressTicket(request: Request): Promise<EgressTicketRecord | undefined> {
+  private async consumeEgressTicket(
+    request: Request,
+    identifier: string,
+    role: EgressRole,
+  ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
     const value = bridgeTicketFromRequest(request);
     if (!validEgressTicket(value)) {
-      return undefined;
+      return { status: "invalid" };
     }
-    const key = egressTicketKey(value);
-    const ticket = await this.state.storage.get<EgressTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return undefined;
-    }
-    await this.state.storage.delete(key);
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      return undefined;
-    }
-    return ticket;
+    return this.withBridgeTicketLock(async () => {
+      const key = egressTicketKey(value);
+      const ticket = await this.state.storage.get<EgressTicketRecord>(key);
+      if (!ticket || ticket.ticket !== value) {
+        return { status: "invalid" };
+      }
+      if (Date.parse(ticket.expiresAt) <= Date.now()) {
+        await this.state.storage.delete(key);
+        return { status: "invalid" };
+      }
+      if (ticket.role !== role) {
+        return { status: "invalid" };
+      }
+      const lease = await this.getLease(ticket.leaseID);
+      if (!lease || !identifierMatchesLease(identifier, lease)) {
+        return { status: "not_found" };
+      }
+      await this.state.storage.delete(key);
+      return { status: "accepted", ticket, lease };
+    });
   }
 
   private async cleanupExpiredEgressTickets(): Promise<void> {
@@ -8062,8 +8149,10 @@ export class FleetCoordinator {
     const run: RunRecord = {
       id: newRunID(),
       leaseID,
+      leaseIDs: [],
       owner,
       org,
+      leaseOwners: [],
       provider: lease?.provider ?? input.provider ?? "hetzner",
       target: lease?.target ?? input.target ?? "linux",
       class: lease?.class ?? input.class ?? "",
@@ -8077,6 +8166,9 @@ export class FleetCoordinator {
       lastEventAt: now,
       eventCount: 0,
     };
+    if (lease) {
+      this.setRunLeaseAttribution(run, lease);
+    }
     const windowsMode = lease?.windowsMode ?? input.windowsMode;
     if (windowsMode) {
       run.windowsMode = windowsMode;
@@ -8111,11 +8203,13 @@ export class FleetCoordinator {
     const method = request.method.toUpperCase();
     if (method === "GET" && action === undefined) {
       const run = await this.getRun(runID);
-      return run && this.runVisibleToRequest(run, request) ? json({ run }) : notFound();
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      return run && this.runReadableToRequest(run, request, lease) ? json({ run }) : notFound();
     }
     if (method === "GET" && action === "logs") {
       const run = await this.getRun(runID);
-      if (!run || !this.runVisibleToRequest(run, request)) {
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      if (!run || !this.runReadableToRequest(run, request, lease)) {
         return notFound();
       }
       const log = await this.readRunLog(runID);
@@ -8125,7 +8219,8 @@ export class FleetCoordinator {
     }
     if (method === "GET" && action === "events") {
       const run = await this.getRun(runID);
-      if (!run || !this.runVisibleToRequest(run, request)) {
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      if (!run || !this.runReadableToRequest(run, request, lease)) {
         return notFound();
       }
       const url = new URL(request.url);
@@ -8135,10 +8230,16 @@ export class FleetCoordinator {
     }
     if (method === "POST" && action === "events") {
       const run = await this.getRun(runID);
-      if (!run || !this.runVisibleToRequest(run, request)) {
+      if (!run || !this.runWritableByRequest(run, request)) {
         return notFound();
       }
       const input = await readJson<RunEventRequest>(request);
+      if (input.leaseID && input.leaseID !== run.leaseID) {
+        const lease = validLeaseID(input.leaseID) ? await this.getLease(input.leaseID) : undefined;
+        if (!lease || !this.leaseVisibleToRequest(lease, request, isAdminRequest(request))) {
+          return notFound();
+        }
+      }
       const event = await this.appendRunEventRecord(run, input);
       return json({ event }, { status: 201 });
     }
@@ -8153,7 +8254,7 @@ export class FleetCoordinator {
 
   private async appendRunTelemetry(request: Request, runID: string): Promise<Response> {
     const run = await this.getRun(runID);
-    if (!run || !this.runVisibleToRequest(run, request)) {
+    if (!run || !this.runWritableByRequest(run, request)) {
       return notFound();
     }
     const input = await readJson<RunTelemetryRequest>(request);
@@ -8168,7 +8269,7 @@ export class FleetCoordinator {
 
   private async finishRun(request: Request, runID: string): Promise<Response> {
     const run = await this.getRun(runID);
-    if (!run || !this.runVisibleToRequest(run, request)) {
+    if (!run || !this.runWritableByRequest(run, request)) {
       return notFound();
     }
     const input = await readJson<RunFinishRequest>(request);
@@ -8255,13 +8356,14 @@ export class FleetCoordinator {
     const limit = clampLimit(url.searchParams.get("limit"), 50);
     const admin = isAdminRequest(request);
     const runs = await this.runRecords();
-    const scopedOwner = admin ? owner : requestOwner(request);
-    const scopedOrg = admin ? org : requestOrg(request, this.env);
+    const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
+    await Promise.all(runs.map((run) => this.ensureRunLeaseAttribution(run, leases)));
     return json({
       runs: runs
-        .filter((run) => !leaseID || run.leaseID === leaseID)
-        .filter((run) => !scopedOwner || run.owner === scopedOwner)
-        .filter((run) => !scopedOrg || run.org === scopedOrg)
+        .filter((run) => !leaseID || this.runReferencesLease(run, leaseID))
+        .filter((run) => admin || this.runReadableToRequest(run, request, leases.get(run.leaseID)))
+        .filter((run) => !owner || run.owner === owner)
+        .filter((run) => !org || run.org === org)
         .filter((run) => !state || run.state === state)
         .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
         .slice(0, limit),
@@ -9478,6 +9580,21 @@ export class FleetCoordinator {
     }
   }
 
+  private async withBridgeTicketLock<T>(operation: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const previous = this.bridgeTicketQueue.catch(() => {});
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.bridgeTicketQueue = previous.then(() => next);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   private async withAWSIngressOperationLock<T>(operation: () => Promise<T>): Promise<T> {
     let release!: () => void;
     const previous = this.awsIngressBarrier.catch(() => {});
@@ -9612,20 +9729,99 @@ export class FleetCoordinator {
     return undefined;
   }
 
-  private runVisibleToRequest(run: RunRecord, request: Request): boolean {
+  private runWritableByRequest(run: RunRecord, request: Request): boolean {
     return (
       isAdminRequest(request) ||
       (run.owner === requestOwner(request) && run.org === requestOrg(request, this.env))
     );
   }
 
-  private runVisibleToControl(
+  private runReadableToRequest(run: RunRecord, request: Request, lease?: LeaseRecord): boolean {
+    if (this.runWritableByRequest(run, request)) {
+      return true;
+    }
+    const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
+    return (
+      run.leaseOwners?.some(
+        (attribution) => attribution.owner === owner && attribution.org === org,
+      ) ||
+      (!run.leaseOwners?.length && lease?.owner === owner && lease.org === org)
+    );
+  }
+
+  private runReadableToControl(
     run: RunRecord,
     attachment: Extract<BridgeAttachment, { kind: "control" }>,
+    lease?: LeaseRecord,
   ): boolean {
     return Boolean(
-      attachment.admin || (run.owner === attachment.owner && run.org === attachment.org),
+      attachment.admin ||
+      (run.owner === attachment.owner && run.org === attachment.org) ||
+      run.leaseOwners?.some(
+        (attribution) =>
+          attribution.owner === attachment.owner && attribution.org === attachment.org,
+      ) ||
+      (!run.leaseOwners?.length &&
+        lease?.owner === attachment.owner &&
+        lease.org === attachment.org),
     );
+  }
+
+  private setRunLeaseAttribution(run: RunRecord, lease: LeaseRecord): void {
+    if (!run.leaseIDs?.includes(lease.id)) {
+      run.leaseIDs = [...(run.leaseIDs ?? []), lease.id];
+    }
+    if (
+      !run.leaseOwners?.some(
+        (attribution) => attribution.owner === lease.owner && attribution.org === lease.org,
+      )
+    ) {
+      run.leaseOwners = [...(run.leaseOwners ?? []), { owner: lease.owner, org: lease.org }];
+    }
+  }
+
+  private runReferencesLease(run: RunRecord, leaseID: string): boolean {
+    return run.leaseID === leaseID || run.leaseIDs?.includes(leaseID) === true;
+  }
+
+  private async ensureRunLeaseAttribution(
+    run: RunRecord,
+    knownLeases?: Map<string, LeaseRecord>,
+  ): Promise<LeaseRecord | undefined> {
+    if (run.leaseIDs !== undefined && run.leaseOwners !== undefined) {
+      return undefined;
+    }
+    const events = await this.state.storage.list<RunEventRecord>({
+      prefix: runEventPrefix(run.id),
+    });
+    const leaseIDs = new Set(
+      [...events.values()]
+        .toSorted((a, b) => a.seq - b.seq)
+        .map((event) => event.leaseID)
+        .filter((leaseID): leaseID is string => Boolean(leaseID && validLeaseID(leaseID))),
+    );
+    if (validLeaseID(run.leaseID)) {
+      leaseIDs.add(run.leaseID);
+    }
+    const ids = [...leaseIDs];
+    const leases = knownLeases
+      ? ids.map((leaseID) => knownLeases.get(leaseID))
+      : await Promise.all(ids.map((leaseID) => this.getLease(leaseID)));
+    run.leaseIDs = ids;
+    run.leaseOwners = [];
+    let currentLease: LeaseRecord | undefined;
+    for (const [index, lease] of leases.entries()) {
+      if (!lease) {
+        continue;
+      }
+      this.setRunLeaseAttribution(run, lease);
+      if (ids[index] === run.leaseID) {
+        currentLease = lease;
+      }
+    }
+    await this.putRun(run);
+    return currentLease;
   }
 
   private leaseVisibleToControl(
@@ -9709,7 +9905,17 @@ export class FleetCoordinator {
     const now = new Date().toISOString();
     const seq = (run.eventCount ?? 0) + 1;
     const event = boundedRunEvent(run.id, seq, now, input);
+    const previousLeaseID = run.leaseID;
     applyRunEventSummary(run, event);
+    if (
+      validLeaseID(run.leaseID) &&
+      (run.leaseID !== previousLeaseID || !run.leaseIDs?.includes(run.leaseID))
+    ) {
+      const lease = await this.getLease(run.leaseID);
+      if (lease) {
+        this.setRunLeaseAttribution(run, lease);
+      }
+    }
     run.eventCount = seq;
     run.lastEventAt = now;
     await this.state.storage.put(runEventKey(run.id, seq), event);
@@ -9736,7 +9942,11 @@ export class FleetCoordinator {
         continue;
       }
       const after = attachment.subscriptions?.[run.id];
-      if (after === undefined || after >= event.seq || !this.runVisibleToControl(run, attachment)) {
+      if (
+        after === undefined ||
+        after >= event.seq ||
+        !this.runReadableToControl(run, attachment)
+      ) {
         continue;
       }
       attachment.subscriptions = { ...attachment.subscriptions, [run.id]: event.seq };
@@ -11257,7 +11467,15 @@ function workspaceTerminalBootstrapCommand(workspace: WorkspaceRecord, lease: Le
   } else {
     setup.push(`mkdir -p ${shellQuote(workspaceRoot)}`);
   }
-  setup.push(`cd ${shellQuote(workspaceRoot)}`, `exec bash -lc ${shellQuote(command)}`);
+  setup.push(
+    `cd ${shellQuote(workspaceRoot)}`,
+    "printf '\\033[2J\\033[H'",
+    "set +e",
+    `bash -lc ${shellQuote(command)}`,
+    "command_status=$?",
+    "printf '\\nWorkspace command exited with status %s. The terminal remains available.\\n' \"$command_status\"",
+    "exec bash -l",
+  );
   const runner = `bash -lc ${shellQuote(setup.join("\n"))}`;
   const session = `crabbox-workspace-${workspace.id}`.slice(0, 80);
   return [
@@ -13504,6 +13722,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   findServerByLease?(leaseID: string): Promise<ProviderMachine | undefined>;
   getServer?(id: string): Promise<ProviderMachine>;
   prepareLeaseConfig?(
@@ -13854,6 +14073,14 @@ class GCPProvider implements CloudProvider {
     return this.client.listCrabboxServers();
   }
 
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
+  }
+
+  recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return this.client.recoverServerForLease(lease.id, lease.slug);
+  }
+
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
@@ -13866,18 +14093,26 @@ class GCPProvider implements CloudProvider {
     };
   }
 
+  prepareLeaseCreate(
+    config: ReturnType<typeof leaseConfig>,
+    lease: LeaseRecord,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    return Promise.resolve({ config, lease, provisioning: {} });
+  }
+
   createServerWithFallback(
     config: ReturnType<typeof leaseConfig>,
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: ProviderProvisioningContext,
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    return this.client.createServerWithFallback(config, leaseID, slug, owner);
+    return this.client.createServerWithFallback(config, leaseID, slug, owner, provisioning);
   }
 
   deleteServer(id: string): Promise<void> {

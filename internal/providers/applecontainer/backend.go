@@ -49,7 +49,7 @@ func applyDefaults(cfg *core.Config) {
 		cfg.AppleContainer.CLIPath = "container"
 	}
 	if cfg.AppleContainer.Image == "" {
-		cfg.AppleContainer.Image = "debian:bookworm"
+		cfg.AppleContainer.Image = core.BaseConfig().AppleContainer.Image
 	}
 	if cfg.AppleContainer.User == "" {
 		cfg.AppleContainer.User = "crabbox"

@@ -65,9 +65,12 @@ by coordinator config:
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes.
 
-User tokens can only see and mutate leases, runs, logs, and usage for their own
-`owner`/`org` identity. See [auth and admin](features/auth-admin.md) and
-[broker auth routing](features/broker-auth-routing.md) for the full flow.
+User tokens can only mutate leases, runs, and usage for their own `owner`/`org`
+identity. Lease owners also have read-only audit access to run history, logs,
+events, telemetry, and live event subscriptions for work recorded against
+their leases, including runs that later replace the active backing lease. See
+[auth and admin](features/auth-admin.md) and [broker auth
+routing](features/broker-auth-routing.md) for the full flow.
 
 ### Cloudflare Access (optional defense-in-depth)
 
@@ -119,7 +122,7 @@ and provider ingress rules.
 There are three effective roles:
 
 ```text
-user        acquire/heartbeat/release own leases; read own leases/runs/logs/usage
+user        acquire/heartbeat/release own leases; read own and owned-lease run audit data
 operator    shared automation identity via a shared bearer token
 admin       view all leases/runs/pool/usage; drain/delete machines; image lifecycle
 ```

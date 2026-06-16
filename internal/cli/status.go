@@ -271,23 +271,31 @@ func (a App) resolveLoginTargetWithRequestConfig(ctx context.Context, cfg *Confi
 }
 
 func (a App) resolveSSHTargetWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest, allowLoginOnly bool) (Server, SSHTarget, string, error) {
-	if cfg == nil {
-		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
-	}
-	if err := autoRouteExternalLeaseForConfig(cfg, req.ID); err != nil {
-		return Server{}, SSHTarget{}, "", err
-	}
-	backend, err := loadBackend(*cfg, runtimeForApp(a))
+	lease, err := a.resolveSSHLeaseWithRequestConfig(ctx, cfg, req, allowLoginOnly)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
+	return lease.Server, lease.SSH, lease.LeaseID, nil
+}
+
+func (a App) resolveSSHLeaseWithRequestConfig(ctx context.Context, cfg *Config, req ResolveRequest, allowLoginOnly bool) (LeaseTarget, error) {
+	if cfg == nil {
+		return LeaseTarget{}, exit(2, "lease target config is required")
+	}
+	if err := autoRouteExternalLeaseForConfig(cfg, req.ID); err != nil {
+		return LeaseTarget{}, err
+	}
+	backend, err := loadBackend(*cfg, runtimeForApp(a))
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	sshBackend, ok := backend.(SSHLoginBackend)
 	if !ok {
-		return Server{}, SSHTarget{}, "", exit(2, "provider=%s does not expose an SSH target", backend.Spec().Name)
+		return LeaseTarget{}, exit(2, "provider=%s does not expose an SSH target", backend.Spec().Name)
 	}
 	if !allowLoginOnly {
 		if _, ok := backend.(SSHLeaseBackend); !ok {
-			return Server{}, SSHTarget{}, "", exit(2, "provider=%s exposes SSH login only, not a Crabbox-managed SSH lease", backend.Spec().Name)
+			return LeaseTarget{}, exit(2, "provider=%s exposes SSH login only, not a Crabbox-managed SSH lease", backend.Spec().Name)
 		}
 	}
 	req.Options = leaseOptionsFromConfig(*cfg)
@@ -302,10 +310,10 @@ func (a App) resolveSSHTargetWithRequestConfig(ctx context.Context, cfg *Config,
 		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, req)
 	}
 	if err != nil {
-		return Server{}, SSHTarget{}, "", err
+		return LeaseTarget{}, err
 	}
 	applyResolvedLeaseConfig(cfg, lease.Server, &lease.SSH)
-	return lease.Server, lease.SSH, lease.LeaseID, nil
+	return lease, nil
 }
 
 func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req ResolveRequest) (LeaseTarget, error) {

@@ -325,6 +325,14 @@ func testControllerService(t *testing.T, runner controllerWorkspaceRunner, maxCo
 	}
 }
 
+func setControllerStateSaver(service *controllerService, saver func(string, controllerState) error) {
+	service.sideEffectGate.Lock()
+	defer service.sideEffectGate.Unlock()
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.saveState = saver
+}
+
 func TestControllerRejectsProviderWithoutExplicitFixedLeaseIDContract(t *testing.T) {
 	runner := newFakeControllerWorkspaceRunner()
 	runner.idempotentFixedLeaseID = false
@@ -2805,7 +2813,7 @@ func TestControllerTerminalTransitionWriteFailureRevokesDesktopBeforeProvider(t 
 		t.Fatal("terminal revocation intent was cleared while stopping state was not durable")
 	}
 
-	service.saveState = saveControllerState
+	setControllerStateSaver(service, saveControllerState)
 	service.reconcileReady(current)
 	persisted, _ := service.workspace(record.Request.ID)
 	if persisted.Status != "stopping" {
@@ -2839,7 +2847,7 @@ func TestControllerEnqueuesDesktopRevocationWhenPendingStateWriteFails(t *testin
 	if record.LocalCleanupPending || !service.hasLocalCleanupRetry(record.Request.ID) {
 		t.Fatalf("failed state write did not retain memory-backed cleanup retry: %#v", record)
 	}
-	service.saveState = originalSave
+	setControllerStateSaver(service, originalSave)
 	runner.mu.Lock()
 	runner.localStopErr = nil
 	runner.mu.Unlock()

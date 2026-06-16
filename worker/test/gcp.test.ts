@@ -9,10 +9,12 @@ import {
   isFallbackProvisioningError,
   operationDone,
 } from "../src/gcp";
+import { leaseProviderName } from "../src/slug";
 import type { Env, ProviderMachine } from "../src/types";
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("gcp provider", () => {
@@ -151,9 +153,27 @@ describe("gcp provider", () => {
             instances: [
               {
                 id: "1",
-                name: "crabbox-a",
+                name: leaseProviderName("cbx_000000000001", "alpha"),
                 machineType: "zones/us-central1-a/machineTypes/e2-micro",
-                labels: { crabbox: "true" },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "gcp",
+                  lease: "cbx_000000000001",
+                  slug: "alpha",
+                },
+              },
+              {
+                id: "forged",
+                name: "crabbox-wrong-deterministic-name",
+                machineType: "zones/us-central1-a/machineTypes/e2-micro",
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "gcp",
+                  lease: "cbx_000000000099",
+                  slug: "forged",
+                },
               },
             ],
           },
@@ -161,10 +181,16 @@ describe("gcp provider", () => {
             instances: [
               {
                 id: "2",
-                name: "crabbox-b",
+                name: leaseProviderName("cbx_000000000002", "bravo"),
                 zone: "projects/default-project/zones/europe-west2-b",
                 machineType: "zones/europe-west2-b/machineTypes/c4-standard-32",
-                labels: { crabbox: "true" },
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "gcp",
+                  lease: "cbx_000000000002",
+                  slug: "bravo",
+                },
               },
             ],
           },
@@ -174,9 +200,176 @@ describe("gcp provider", () => {
 
     const servers = await client.listCrabboxServers();
     expect(servers.map((server) => [server.name, server.region])).toEqual([
-      ["crabbox-a", "us-central1-a"],
-      ["crabbox-b", "europe-west2-b"],
+      [leaseProviderName("cbx_000000000001", "alpha"), "us-central1-a"],
+      [leaseProviderName("cbx_000000000002", "bravo"), "europe-west2-b"],
     ]);
+  });
+
+  it("recovers a lease only through its deterministic canonical instance", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    let leaseLabel = "cbx_abcdef123456";
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe(
+        "/compute/v1/projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster-c80c2195",
+      );
+      return Response.json({
+        id: "1",
+        name: "crabbox-blue-lobster-c80c2195",
+        machineType: "zones/us-central1-a/machineTypes/e2-micro",
+        labels: {
+          crabbox: "true",
+          created_by: "crabbox",
+          provider: "gcp",
+          lease: leaseLabel,
+          slug: "blue-lobster",
+        },
+      });
+    };
+
+    await expect(
+      client.recoverServerForLease("cbx_abcdef123456", "blue-lobster"),
+    ).resolves.toMatchObject({
+      name: "crabbox-blue-lobster-c80c2195",
+      labels: { lease: "cbx_abcdef123456" },
+    });
+    leaseLabel = "cbx_000000000001";
+    await expect(
+      client.recoverServerForLease("cbx_abcdef123456", "blue-lobster"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("recovers pre-upgrade fallback-zone instances by exact canonical name", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    const expectedName = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith(`/instances/${expectedName}`)) {
+        return new Response("not found", { status: 404 });
+      }
+      expect(url.pathname).toBe("/compute/v1/projects/default-project/aggregated/instances");
+      return Response.json({
+        items: {
+          "zones/us-central1-b": {
+            instances: [
+              {
+                id: "1",
+                name: expectedName,
+                zone: "projects/default-project/zones/us-central1-b",
+                machineType: "zones/us-central1-b/machineTypes/e2-micro",
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  provider: "gcp",
+                  lease: "cbx_abcdef123456",
+                  slug: "blue-lobster",
+                },
+              },
+            ],
+          },
+        },
+      });
+    };
+
+    await expect(
+      client.recoverServerForLease("cbx_abcdef123456", "blue-lobster"),
+    ).resolves.toMatchObject({
+      name: expectedName,
+      region: "us-central1-b",
+    });
+  });
+
+  it("rejects ambiguous exact-name fallback-zone recovery", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    const leaseID = "cbx_abcdef123456";
+    const slug = "blue-lobster";
+    const expectedName = leaseProviderName(leaseID, slug);
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith(`/instances/${expectedName}`)) {
+        return new Response("not found", { status: 404 });
+      }
+      const instance = (zone: string) => ({
+        id: zone,
+        name: expectedName,
+        zone: `projects/default-project/zones/${zone}`,
+        machineType: `zones/${zone}/machineTypes/e2-micro`,
+        labels: {
+          crabbox: "true",
+          created_by: "crabbox",
+          provider: "gcp",
+          lease: leaseID,
+          slug,
+        },
+      });
+      return Response.json({
+        items: {
+          "zones/us-central1-b": { instances: [instance("us-central1-b")] },
+          "zones/us-central1-c": { instances: [instance("us-central1-c")] },
+        },
+      });
+    };
+
+    await expect(client.recoverServerForLease(leaseID, slug)).rejects.toThrow(
+      "ambiguous GCP recovery",
+    );
+  });
+
+  it("publishes each fallback zone before creating an instance", async () => {
+    const client = new GCPClient(env);
+    const attemptedZones: string[] = [];
+    const createCalls: string[] = [];
+    vi.spyOn(GCPClient.prototype, "createServer").mockImplementation(async (config) => {
+      createCalls.push(config.gcpZone);
+      if (config.gcpZone === "us-central1-a") {
+        throw new Error("ZONE_RESOURCE_POOL_EXHAUSTED");
+      }
+      return {
+        provider: "gcp",
+        id: 1,
+        cloudID: "crabbox-blue-lobster-c80c2195",
+        name: "crabbox-blue-lobster-c80c2195",
+        status: "running",
+        serverType: config.serverType,
+        region: config.gcpZone,
+        host: "192.0.2.10",
+        labels: {},
+      };
+    });
+
+    await client.createServerWithFallback(
+      leaseConfig({
+        provider: "gcp",
+        gcpZone: "us-central1-a",
+        capacity: { availabilityZones: ["us-central1-b"] },
+        serverType: "e2-micro",
+        serverTypeExplicit: true,
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "blue-lobster",
+      "alice@example.com",
+      {
+        async onTargetAttempt(target) {
+          attemptedZones.push(target.region ?? "");
+        },
+      },
+    );
+
+    expect(attemptedZones).toEqual(["us-central1-a", "us-central1-b"]);
+    expect(createCalls).toEqual(["us-central1-a", "us-central1-b"]);
   });
 
   it("creates and deletes machine images through Compute Engine", async () => {

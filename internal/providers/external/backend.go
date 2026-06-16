@@ -222,6 +222,9 @@ func (e acquireCleanupError) As(target any) bool {
 }
 
 func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if req.RejectAuthSecret && b.cfg.External.Connection.SSH.AuthSecret {
+		return core.LeaseTarget{}, core.Exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
+	}
 	id := req.ID
 	var desired *desiredLease
 	var claimedLease *protocolLease
@@ -312,6 +315,9 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	}
 	if err := core.ValidateLeaseTargetProviderIdentity(lease, req.ExpectedProviderIdentity); err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if req.RejectAuthSecret && lease.SSH.AuthSecret {
+		return core.LeaseTarget{}, core.Exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
 	}
 	if req.ReleaseOnly {
 		return lease, nil

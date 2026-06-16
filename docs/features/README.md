@@ -21,6 +21,8 @@ Read when:
 
 ## Coordinator and brokered fleet
 
+- [Runtime adapter stack](runtime-adapter-stack.md): compose `adapter serve`,
+  `adapter ingress`, and `adapter connect` behind a fleet UI.
 - [Coordinator](coordinator.md): shared broker behavior across Cloudflare
   Durable Object and Node.js/PostgreSQL runtimes.
 - [Portable coordinator](portable-coordinator.md): deploy and operate the Node/PostgreSQL runtime on a conventional container platform.

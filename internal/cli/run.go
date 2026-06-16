@@ -328,7 +328,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	if strings.TrimSpace(*leaseOutput) != "" {
-		if err := preflightLocalOutputPath("lease output", strings.TrimSpace(*leaseOutput), false); err != nil {
+		if err := preflightLocalOutputPath("lease output", strings.TrimSpace(*leaseOutput), false, false); err != nil {
 			return err
 		}
 	}
@@ -350,7 +350,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 				return exit(2, "proof template %q is not configured for profile %q", strings.TrimSpace(*proofTemplate), cfg.Profile)
 			}
 		}
-		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true); err != nil {
+		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true, true); err != nil {
 			return err
 		}
 	}
@@ -624,6 +624,11 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			if lease.Coordinator != nil {
+				coord = lease.Coordinator
+				useCoordinator = true
+				recorder.UseCoordinator(coord)
+			}
 			applyResolvedLeaseConfig(&cfg, server, &target)
 			if borrowedPool != nil {
 				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
@@ -920,6 +925,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		acquired = true
 		coord = newLease.Coordinator
 		useCoordinator = coord != nil
+		recorder.UseCoordinator(coord)
 		applyResolvedServerConfig(&cfg, server)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err

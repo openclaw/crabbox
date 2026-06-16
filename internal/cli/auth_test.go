@@ -655,6 +655,80 @@ func TestCanonicalBrokerURLFromLoginURL(t *testing.T) {
 	}
 }
 
+func TestValidateGitHubLoginURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "valid", value: "https://github.com/login/oauth/authorize?client_id=test&state=test"},
+		{name: "case insensitive host", value: "https://GitHub.com/login/oauth/authorize?state=test"},
+		{name: "http", value: "http://github.com/login/oauth/authorize?state=test", wantErr: true},
+		{name: "other host", value: "https://github.example.com/login/oauth/authorize?state=test", wantErr: true},
+		{name: "host suffix", value: "https://github.com.example.com/login/oauth/authorize?state=test", wantErr: true},
+		{name: "userinfo", value: "https://github.com@evil.example/login/oauth/authorize?state=test", wantErr: true},
+		{name: "custom port", value: "https://github.com:443/login/oauth/authorize?state=test", wantErr: true},
+		{name: "wrong path", value: "https://github.com/login?state=test", wantErr: true},
+		{name: "escaped path", value: "https://github.com/login/oauth/%61uthorize?state=test", wantErr: true},
+		{name: "fragment", value: "https://github.com/login/oauth/authorize?state=test#fragment", wantErr: true},
+		{name: "custom scheme", value: "itms-services://github.com/login/oauth/authorize", wantErr: true},
+		{name: "local file", value: "file:///tmp/login.html", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateGitHubLoginURL(test.value)
+			if test.wantErr && err == nil {
+				t.Fatal("expected error")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestGitHubLoginRejectsInvalidAuthorizationURL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+
+	var pollCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/github/start":
+			_ = json.NewEncoder(w).Encode(CoordinatorGitHubLoginStart{
+				LoginID:   "login_test",
+				URL:       "file:///tmp/fake-login.html",
+				ExpiresAt: time.Now().Add(time.Minute).Format(time.RFC3339),
+			})
+		case "/v1/auth/github/poll":
+			pollCount++
+			http.Error(w, "unexpected poll", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.login(context.Background(), []string{"--url", server.URL, "--no-browser"})
+	if err == nil || !strings.Contains(err.Error(), "invalid authorization URL") {
+		t.Fatalf("error=%v", err)
+	}
+	if pollCount != 0 {
+		t.Fatalf("poll count=%d want 0", pollCount)
+	}
+	if strings.Contains(stderr.String(), "file:///") {
+		t.Fatalf("stderr exposed rejected URL: %q", stderr.String())
+	}
+}
+
 func githubAuthorizeURLForTest(base string) string {
 	return "https://github.com/login/oauth/authorize?redirect_uri=" + url.QueryEscape(base+"/v1/auth/github/callback") + "&state=test"
 }

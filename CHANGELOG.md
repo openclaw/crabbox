@@ -2,13 +2,35 @@
 
 ## Unreleased
 
+### Fixed
+
+- Restricted Crabbox-managed Windows credential files to the managed user, Administrators, and SYSTEM without changing desktop credential consumers. Thanks @coygeek.
+- Created default artifact bundles and retained run logs/metadata with private local permissions while preserving explicit shared-output directories. Thanks @coygeek.
+
+## 0.32.0 - 2026-06-15
+
 ### Added
 
+- Documented the end-to-end runtime adapter topology, trust boundaries, request paths, startup order, and failure signals.
+- Added `crabbox connect <lease-id-or-slug>` to open an interactive SSH session to key-, certificate-, and proxy-authenticated provider targets while keeping `crabbox ssh` as the print-only command surface for token-as-username providers.
+- Added `crabbox adapter ingress` as a provider-neutral authenticated HTTP and WebSocket bridge for loopback fleet services.
 - Added JSON API initiation of generation-fenced runtime-adapter workspace deletion through explicit registered lease release.
 - Added reusable Cloudflare container run-session handles with exact cleanup commands for `--keep --lease-output`. Thanks @zozo123.
 
 ### Fixed
 
+- Pinned GitHub Actions workflow dependencies to reviewed immutable commits and added CI enforcement against mutable references. Thanks @coygeek.
+- Hardened XCP-Ng repository config so it cannot override trusted provider credentials. Thanks @coygeek.
+- Replaced browser-native portal confirmation and clipboard prompts with themed, keyboard-accessible HTML dialogs.
+- Hardened GCP operator inventory and workspace recovery by requiring deterministic Crabbox instance names plus canonical provider labels before accepting resources. Thanks @coygeek.
+- Hardened shared-lease run auditability by preserving actor attribution while granting lease owners read-only access to runs, logs, events, telemetry, and portal history. Thanks @coygeek.
+- Pinned shipped runtime container base images to reviewed multi-platform digests and enforced the pins in CI. Thanks @coygeek.
+- Redacted manage-only WebVNC bridge commands and egress session details from `use` share viewers. Thanks @coygeek.
+- Created run downloads, captures, proofs, and failure bundles with private POSIX permissions. Thanks @coygeek.
+- Rejected broker-supplied GitHub login URLs that do not use the expected HTTPS GitHub authorization endpoint.
+- Preserved single-use bridge tickets when presented to the wrong lease, role, or runtime-adapter endpoint. Thanks @coygeek.
+- Required lease manage access before resetting another operator's WebVNC bridge. Thanks @coygeek.
+- Aligned the `apple-container` provider fallback image with the portable OS default while preserving explicit image choices. Thanks @coygeek.
 - Fixed `apple-container` inventory parsing for Apple container 1.0 object-form status and nested network addresses. Thanks @coygeek.
 - Added a dedicated route-scoped service credential for Crabfleet workspace lifecycle requests without granting general coordinator access.
 - Kept accepted workspace creates successful when post-persist prewarm maintenance is temporarily unavailable.

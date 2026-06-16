@@ -3914,14 +3914,14 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	}
 	if file.XCPNg != nil {
 		// Project config is repository-controlled. Do not let it redirect
-		// inherited user or environment credentials to another XAPI endpoint.
+		// or replace inherited user or environment XAPI credentials.
 		if trusted && file.XCPNg.APIURL != "" {
 			cfg.XCPNg.APIURL = file.XCPNg.APIURL
 		}
-		if file.XCPNg.Username != "" {
+		if trusted && file.XCPNg.Username != "" {
 			cfg.XCPNg.Username = file.XCPNg.Username
 		}
-		if file.XCPNg.Password != "" {
+		if trusted && file.XCPNg.Password != "" {
 			cfg.XCPNg.Password = file.XCPNg.Password
 		}
 		if file.XCPNg.Template != "" {

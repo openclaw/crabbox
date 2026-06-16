@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-const { spawn, spawnSync } = require("node:child_process");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
-const repoRoot = path.resolve(__dirname, "..");
+const repoRoot = path.resolve(import.meta.dirname, "..");
 const bin = process.env.CRABBOX_BIN || path.join(repoRoot, "bin", process.platform === "win32" ? "crabbox.exe" : "crabbox");
 const token = process.env.CRABBOX_CODESANDBOX_API_KEY || process.env.CSB_API_KEY || "";
 const slug = `codesandbox-smoke-${timestamp()}-${process.pid}`;
@@ -347,8 +348,8 @@ class SmokeError extends Error {
   }
 }
 
-module.exports = { classify };
+export { classify };
 
-if (require.main === module) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }
