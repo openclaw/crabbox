@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Restricted Crabbox-managed Windows credential files to the managed user, Administrators, and SYSTEM without changing desktop credential consumers. Thanks @coygeek.
 - Created default artifact bundles and retained run logs/metadata with private local permissions while preserving explicit shared-output directories. Thanks @coygeek.
 
 ## 0.32.0 - 2026-06-15
