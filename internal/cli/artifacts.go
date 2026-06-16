@@ -162,10 +162,11 @@ func (a App) artifactsCollect(ctx context.Context, args []string) error {
 		return err
 	}
 	dir := strings.TrimSpace(*output)
+	explicitOutput := dir != ""
 	if dir == "" {
 		dir = defaultArtifactBundleDir(leaseID, serverSlug(server))
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := ensureArtifactBundleDir(dir, explicitOutput); err != nil {
 		return exit(2, "create artifact directory: %v", err)
 	}
 
@@ -616,6 +617,13 @@ func defaultArtifactBundleDir(leaseID, slug string) string {
 	return filepath.Join("artifacts", normalizeLeaseSlug(name))
 }
 
+func ensureArtifactBundleDir(path string, explicitOutput bool) error {
+	if explicitOutput {
+		return os.MkdirAll(path, 0o755)
+	}
+	return ensurePrivateRunOutputDir(path)
+}
+
 func writeJSONFile(path string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -623,6 +631,18 @@ func writeJSONFile(path string, value any) error {
 	}
 	data = append(data, '\n')
 	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return exit(2, "write %s: %v", path, err)
+	}
+	return nil
+}
+
+func writePrivateArtifactJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return exit(2, "encode %s: %v", path, err)
+	}
+	data = append(data, '\n')
+	if err := writePrivateRunOutputFile(path, data); err != nil {
 		return exit(2, "write %s: %v", path, err)
 	}
 	return nil
@@ -715,10 +735,10 @@ func writeArtifactRunLogs(ctx context.Context, runID, dir string) (string, strin
 	}
 	logPath := filepath.Join(dir, "logs.txt")
 	runPath := filepath.Join(dir, "run.json")
-	if err := os.WriteFile(logPath, []byte(logText), 0o644); err != nil {
+	if err := writePrivateRunOutputFile(logPath, []byte(logText)); err != nil {
 		return "", "", exit(2, "write logs artifact: %v", err)
 	}
-	if err := writeJSONFile(runPath, run); err != nil {
+	if err := writePrivateArtifactJSONFile(runPath, run); err != nil {
 		return "", "", err
 	}
 	return logPath, runPath, nil

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Created default artifact bundles and retained run logs/metadata with private local permissions while preserving explicit shared-output directories. Thanks @coygeek.
+
 ## 0.32.0 - 2026-06-15
 
 ### Added

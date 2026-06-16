@@ -142,6 +142,30 @@ func TestPrivateRunOutputPermissionsUnderPermissiveUmask(t *testing.T) {
 	assertRunOutputMode(t, filepath.Dir(proofPath), privateRunOutputDirMode)
 	assertRunOutputMode(t, proofPath, privateRunOutputFileMode)
 
+	artifactDir := filepath.Join(root, "artifacts", "private-bundle")
+	if err := ensureArtifactBundleDir(artifactDir, false); err != nil {
+		t.Fatal(err)
+	}
+	explicitArtifactDir := filepath.Join(root, "shared-artifacts")
+	if err := os.MkdirAll(explicitArtifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureArtifactBundleDir(explicitArtifactDir, true); err != nil {
+		t.Fatal(err)
+	}
+	artifactJSONPath := filepath.Join(artifactDir, "run.json")
+	if err := writePrivateArtifactJSONFile(artifactJSONPath, map[string]string{"state": "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	artifactLogPath := filepath.Join(artifactDir, "logs.txt")
+	if err := writePrivateRunOutputFile(artifactLogPath, []byte("retained output")); err != nil {
+		t.Fatal(err)
+	}
+	assertRunOutputMode(t, artifactDir, privateRunOutputDirMode)
+	assertRunOutputMode(t, explicitArtifactDir, 0o755)
+	assertRunOutputMode(t, artifactJSONPath, privateRunOutputFileMode)
+	assertRunOutputMode(t, artifactLogPath, privateRunOutputFileMode)
+
 	t.Chdir(root)
 	if err := os.Mkdir(".crabbox", 0o700); err != nil {
 		t.Fatal(err)
