@@ -35,9 +35,8 @@ Crabbox injects a per-lease SSH public key into the CVM at deploy time, connects
 over SSH through the Phala TLS gateway, uses the normal SSH/rsync data plane, and
 deletes the CVM on release.
 
-The Phala TLS gateway is reached with `openssl s_client`, so **`openssl` must be
-installed on the host** running Crabbox. The SSH transport tunnels through the
-gateway's TLS endpoint rather than dialing a raw TCP port (see
+The SSH transport uses Crabbox's native TLS client to tunnel through the
+gateway's authenticated TLS endpoint rather than dialing a raw TCP port (see
 [Lifecycle](#lifecycle)).
 
 ## Configuration
@@ -72,13 +71,14 @@ Provider flags:
 node. `--phala-compose` overrides the Docker Compose file deployed alongside the
 dev OS image. The Phala deploy handler requires a Compose file in
 non-interactive mode, so when `compose` is unset Crabbox supplies a **minimal
-default**: a `debian:stable-slim` service that stays alive (`sleep infinity`),
-keeping the confidential SSH-lease box running while Crabbox drives it over SSH.
-Set `compose` (or `--phala-compose`) to deploy your own workload instead. The
-CLI path, node id, and compose path are accepted only from trusted user config,
-environment variables, or explicit flags, not repository-local config. The
-instance type and work root may also come from repository config. Instance-type
-OS prefixes must be Linux.
+default**: a digest-pinned `debian:stable-slim` service that stays alive (`sleep
+infinity`), keeping the confidential SSH-lease box running while Crabbox drives
+it over SSH. Set `compose` (or `--phala-compose`) to deploy your own workload
+instead. Attestation binds the exact Compose text; custom image references must
+use digests when image-byte immutability matters. The CLI path, node id, and
+compose path are accepted only from trusted user config, environment variables,
+or explicit flags, not repository-local config. The instance type and work root
+may also come from repository config. Instance-type OS prefixes must be Linux.
 
 ## Lifecycle
 
@@ -87,14 +87,14 @@ OS prefixes must be Linux.
   --wait` provisions the CVM. `--dev-os` selects the dstack dev OS image, which
   runs `sshd` and accepts the injected key. `--compose` is always supplied — the
   configured compose when set, otherwise the bundled default
-  (`debian:stable-slim` running `sleep infinity`) written to the per-lease temp
-  dir — because the deploy handler refuses to provision without one.
+  (digest-pinned `debian:stable-slim` running `sleep infinity`) written to the
+  per-lease temp dir — because the deploy handler refuses to provision without
+  one.
 - SSH reaches the CVM through the dstack TLS gateway, not a raw TCP port. The
   gateway host is derived as `<app-id>-22.<gateway-domain>` from `phala cvms get
   --json` (the `gateway` object's `gateway_domain` / `base_domain` and the CVM
-  `app_id`), and SSH stdio is tunneled through it with
-  `openssl s_client -connect <host>:443 -servername <host>`. `openssl` is a host
-  dependency.
+  `app_id`), and SSH stdio is tunneled through it with native TLS chain and
+  hostname verification.
 - Ownership is carried by the CVM **name** (`crabbox-<lease-id>`) and
   cross-checked against the local lease claim. Phala's deploy API exposes no
   arbitrary label facility, so the name prefix is the only on-resource owner
@@ -109,18 +109,22 @@ duration deadline.
 
 ## Attestation (verified by default)
 
-Before the lease is trusted, `acquire` verifies a genuine Intel TDX attestation
-that binds the CVM to the exact code Crabbox deployed. After the box is
+Before the lease is trusted, `acquire` verifies an Intel TDX attestation that
+binds the CVM to the exact Compose manifest Crabbox deployed. After the box is
 reachable it fetches the dstack guest-agent attestation over SSH
 (`/var/run/tappd.sock` → `Tappd.Info` → `app_cert` + `tcb_info`) and checks,
 against the app id of the CVM it just created:
 
 - **RTMR replay** — RTMR0..3 must equal the SHA-384 fold of the `tcb_info` event
-  log (the measurement is genuine; a tampered event breaks it);
+  log (a tampered event breaks the replay);
 - **quote ↔ measurement** — the Intel TDX quote embedded in `app_cert` (X.509
   extension OID `1.3.6.1.4.1.62397.1.1`) must carry the same MRTD/RTMRs;
 - **DCAP signature** — the quote must chain to the Intel SGX/TDX Root CA
-  (`go-tdx-guest`), proving genuine Intel silicon;
+  (`go-tdx-guest`) and pass certificate-revocation checks, proving genuine,
+  non-revoked Intel silicon;
+- **Compose binding** — `app_compose` must hash to the measured RTMR3
+  `compose-hash`, and its `docker_compose_file` must exactly equal the manifest
+  passed to `phala deploy`;
 - **identity binding** — the RTMR3 event log's `app-id` must equal the deployed
   CVM's app id.
 
@@ -128,7 +132,7 @@ On failure the just-created CVM is destroyed and the lease is refused; on succes
 the verified `app-id`/`compose-hash`/`rtmr3` are recorded in the lease labels
 (`attested=true`). The gate is **on by default**; pass `--phala-skip-attestation`
 (or `attest: false` in trusted config / `CRABBOX_PHALA_ATTEST=false`) to opt out.
-Verification is pure Go; the DCAP step reaches Intel PCS at runtime, so `openssl`
-and outbound network to Intel's provisioning service are host dependencies.
+Verification is pure Go; the DCAP step reaches Intel PCS at runtime, so outbound
+network to Intel's provisioning service is a host dependency.
 
 See the [Phala Cloud CLI reference](https://docs.phala.com/phala-cloud/references/phala-cli).

@@ -41,6 +41,21 @@ func loadRealTCB(t *testing.T, info dstackInfo) tcbInfo {
 	return tcb
 }
 
+func loadRealCompose(t *testing.T, info dstackInfo) string {
+	t.Helper()
+	tcb := loadRealTCB(t, info)
+	var app struct {
+		DockerComposeFile string `json:"docker_compose_file"`
+	}
+	if err := json.Unmarshal([]byte(tcb.AppCompose), &app); err != nil {
+		t.Fatalf("parse app_compose: %v", err)
+	}
+	if app.DockerComposeFile == "" {
+		t.Fatal("real app_compose has no docker_compose_file")
+	}
+	return app.DockerComposeFile
+}
+
 // TestParseDstackInfo covers the deterministic parsing split out of the SSH
 // fetch: a clean Info object, a leading shell banner before the JSON, and the
 // empty / non-JSON rejections.
@@ -98,8 +113,8 @@ func TestExtractTDXQuoteFromRealAppCert(t *testing.T) {
 	}
 }
 
-// TestReplayRTMRMatchesRealHardware is the genuineness proof: all four RTMRs
-// replayed from the real event log must equal the values recorded in tcb_info.
+// TestReplayRTMRMatchesRealHardware checks all four RTMRs replayed from the real
+// event log equal the values recorded in tcb_info.
 func TestReplayRTMRMatchesRealHardware(t *testing.T) {
 	info := loadRealInfo(t)
 	tcb := loadRealTCB(t, info)
@@ -193,8 +208,9 @@ func TestQuoteRTMRsMatchTcbInfo(t *testing.T) {
 // rejected.
 func TestVerifyAttestationBindsExpectedAppID(t *testing.T) {
 	info := loadRealInfo(t)
+	expectedCompose := loadRealCompose(t, info)
 
-	report, err := verifyAttestation(info, realExpectedAppID, false)
+	report, err := verifyAttestation(info, realExpectedAppID, expectedCompose, false)
 	if err != nil {
 		t.Fatalf("verifyAttestation: %v", err)
 	}
@@ -224,8 +240,63 @@ func TestVerifyAttestationBindsExpectedAppID(t *testing.T) {
 	}
 
 	// A wrong expected app id must be refused.
-	if _, err := verifyAttestation(info, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", false); err == nil {
+	if _, err := verifyAttestation(info, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", expectedCompose, false); err == nil {
 		t.Fatal("verifyAttestation accepted a wrong expected app id")
+	}
+}
+
+func TestVerifyAttestationBindsExactCompose(t *testing.T) {
+	info := loadRealInfo(t)
+	expectedCompose := loadRealCompose(t, info)
+
+	if _, err := verifyAttestation(info, realExpectedAppID, expectedCompose+"\n# changed", false); err == nil {
+		t.Fatal("verifyAttestation accepted a different expected Compose manifest")
+	} else if !strings.Contains(err.Error(), "does not match the manifest passed to phala deploy") {
+		t.Fatalf("wrong Compose error = %v", err)
+	}
+
+	tcb := loadRealTCB(t, info)
+	var app map[string]any
+	if err := json.Unmarshal([]byte(tcb.AppCompose), &app); err != nil {
+		t.Fatal(err)
+	}
+	app["docker_compose_file"] = expectedCompose + "\n# tampered"
+	tamperedApp, err := json.Marshal(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcb.AppCompose = string(tamperedApp)
+	tamperedTCB, err := json.Marshal(tcb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.TCBInfo = string(tamperedTCB)
+	if _, err := verifyAttestation(info, realExpectedAppID, expectedCompose, false); err == nil {
+		t.Fatal("verifyAttestation accepted app_compose whose content no longer matched its measured hash")
+	} else if !strings.Contains(err.Error(), "app_compose hash") {
+		t.Fatalf("tampered app_compose error = %v", err)
+	}
+}
+
+func TestVerifyAttestationRejectsComposeHashEventMismatch(t *testing.T) {
+	info := loadRealInfo(t)
+	expectedCompose := loadRealCompose(t, info)
+	tcb := loadRealTCB(t, info)
+	for i := range tcb.EventLog {
+		if tcb.EventLog[i].IMR == 3 && tcb.EventLog[i].Event == "compose-hash" {
+			tcb.EventLog[i].EventPayload = strings.Repeat("0", 64)
+			break
+		}
+	}
+	tamperedTCB, err := json.Marshal(tcb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.TCBInfo = string(tamperedTCB)
+	if _, err := verifyAttestation(info, realExpectedAppID, expectedCompose, false); err == nil {
+		t.Fatal("verifyAttestation accepted a mismatched RTMR3 compose-hash payload")
+	} else if !strings.Contains(err.Error(), "RTMR3 compose-hash") {
+		t.Fatalf("compose-hash event error = %v", err)
 	}
 }
 
@@ -259,7 +330,7 @@ func TestVerifyAttestationRejectsTamperedMeasurement(t *testing.T) {
 	}
 	info.TCBInfo = string(tampered)
 
-	if _, err := verifyAttestation(info, realExpectedAppID, false); err == nil {
+	if _, err := verifyAttestation(info, realExpectedAppID, loadRealCompose(t, info), false); err == nil {
 		t.Fatal("verifyAttestation accepted a tampered measurement")
 	} else if !strings.Contains(err.Error(), "RTMR") {
 		t.Fatalf("expected an RTMR replay mismatch error, got: %v", err)

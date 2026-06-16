@@ -267,7 +267,7 @@ func TestCreateAlwaysSuppliesComposeFlag(t *testing.T) {
 				t.Fatalf("read default compose %q: %v", composePath, err)
 			}
 			body := string(data)
-			for _, want := range []string{"services:", "image: debian:stable-slim", "sleep", "infinity"} {
+			for _, want := range []string{"services:", "image: debian:stable-slim@sha256:f35eebaec00d2be9d1d3144156ce24c4b98d84d12376666a5c45e059b4a8d363", "sleep", "infinity"} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("default compose missing %q:\n%s", want, body)
 				}
@@ -775,6 +775,54 @@ func TestReleaseRefusesNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	}
 }
 
+func TestReleaseRefusesClaimCloudIDMismatchBeforeLookup(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	claimPhalaLease(t, cfg, leaseID, "claimed-cvm")
+	runner := &fakeRunner{}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  core.Server{CloudID: "different-cvm"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "points to claimed-cvm") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("claim mismatch issued provider calls: %#v", runner.calls)
+	}
+}
+
+func TestValidateDestroyAllowsAmbiguousRecoveryClaimWithoutCloudID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	server := core.Server{
+		Provider: providerName,
+		Labels: map[string]string{
+			"crabbox":    "true",
+			"created_by": "crabbox",
+			"lease":      leaseID,
+			"provider":   providerName,
+			"recovery":   "ambiguous-create",
+		},
+	}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, leaseID, cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"app_id":"recovered-cvm","name":"crabbox-cbx-abcdef123456","status":"running"}`}}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	present, err := b.validateDestroyTarget(context.Background(), cfg, "recovered-cvm", leaseID)
+	if err != nil || !present {
+		t.Fatalf("present=%t err=%v", present, err)
+	}
+}
+
 func TestReleaseSkipsDeleteWhenCVMMissingFromInventory(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	// The claim exists but the CVM is gone: real `cvms get` for a missing CVM
@@ -872,6 +920,31 @@ func TestReleaseRetainsClaimOnTransientNotFound(t *testing.T) {
 	}
 	if len(claims) != 1 || claims[0].LeaseID != leaseID {
 		t.Fatalf("claim was dropped on a transient not-found: claims=%#v", claims)
+	}
+}
+
+func TestReleaseRetainsClaimOnSuccessfulEmptyGetOutput(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	claimPhalaLease(t, cfg, leaseID, "live-cvm")
+	runner := &fakeRunner{results: []core.LocalCommandResult{{}}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+		LeaseID: leaseID,
+		Server:  core.Server{CloudID: "live-cvm"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "produced no JSON output") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, resolveErr := resolvePhalaClaim(leaseID, cfg)
+	if resolveErr != nil || !ok || claim.CloudID != "live-cvm" {
+		t.Fatalf("claim not retained: claim=%#v ok=%t err=%v", claim, ok, resolveErr)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("successful empty get should not delete: calls=%#v", runner.calls)
 	}
 }
 
@@ -1129,6 +1202,25 @@ func TestCleanupTransitionsAndRemovesClaim(t *testing.T) {
 		strings.Join(runner.calls[1].args, " ") != "cvms get --cvm-id expired-cvm --json" ||
 		strings.Join(runner.calls[2].args, " ") != "cvms delete --cvm-id expired-cvm --force" {
 		t.Fatalf("calls=%#v", runner.calls)
+	}
+}
+
+func TestCleanupRetainsClaimsOnSuccessfulEmptyListOutput(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	claimPhalaLease(t, cfg, leaseID, "live-cvm")
+	runner := &fakeRunner{results: []core.LocalCommandResult{{}}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "produced no JSON output") {
+		t.Fatalf("err=%v", err)
+	}
+	claim, ok, resolveErr := resolvePhalaClaim(leaseID, cfg)
+	if resolveErr != nil || !ok || claim.CloudID != "live-cvm" {
+		t.Fatalf("claim not retained: claim=%#v ok=%t err=%v", claim, ok, resolveErr)
 	}
 }
 
@@ -1412,6 +1504,12 @@ func TestDestroyOnlySuppressesExplicitMissingCVMResponse(t *testing.T) {
 			result: core.LocalCommandResult{Stderr: "Error: no such cvm: missing-cvm"},
 			err:    errors.New("exit status 1"),
 		},
+		{
+			name:    "generic resource does not exist is not a missing CVM",
+			result:  core.LocalCommandResult{Stderr: "Error: organization does not exist"},
+			err:     errors.New("exit status 1"),
+			wantErr: true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &fakeRunner{
@@ -1479,7 +1577,6 @@ func TestCreateParsesRealHardwareDeployStdout(t *testing.T) {
 	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: realDeployStdout}}}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.Phala.Compose = "/srv/compose.yml"
 	applyDefaults(&cfg)
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 	id, err := b.create(context.Background(), cfg, "/tmp/id.pub", map[string]string{
@@ -1639,9 +1736,9 @@ func TestGetInstanceParsesRealCVMSGetShapes(t *testing.T) {
 	})
 }
 
-// TestListSkipsItemMissingName proves listInstances skips (rather than crashes
-// on or surfaces) a list item with no name and no usable handle.
-func TestListSkipsItemMissingName(t *testing.T) {
+// TestListRejectsItemMissingIdentifier ensures a malformed successful inventory
+// cannot be mistaken for a complete list and trigger missing-claim reaping.
+func TestListRejectsItemMissingIdentifier(t *testing.T) {
 	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[
 		{"status":"running"},
 		{"appId":"keeper","cvmName":"crabbox-cbx-abcdef123456","status":"running"}
@@ -1650,12 +1747,10 @@ func TestListSkipsItemMissingName(t *testing.T) {
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
-	items, err := b.listInstances(context.Background())
-	if err != nil {
-		t.Fatalf("listInstances crashed on a nameless item: %v", err)
-	}
-	if len(items) != 1 || items[0].cloudID() != "keeper" {
-		t.Fatalf("items=%#v want only the named keeper", items)
+	if _, err := b.listInstances(context.Background()); err == nil {
+		t.Fatal("listInstances accepted an item without a CVM identifier")
+	} else if !strings.Contains(err.Error(), "item 0 did not include a CVM identifier") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -1873,7 +1968,6 @@ func TestAcquireHappyPath(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.Phala.Compose = "/srv/compose.yml"
 	applyDefaults(&cfg)
 	// Acquire's CLI sequence (the fakeRunner is shared across every b.phala call):
 	//   1. listInstances            -> `cvms list --json`           (no owned CVMs)
@@ -1990,7 +2084,6 @@ func TestAcquireRollbackDestroysLeakedCVM(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.Phala.Compose = "/srv/compose.yml"
 	applyDefaults(&cfg)
 	listAfterCreate := `{"success":true,"items":[{"appId":"` + acquireAppID + `","cvmName":"crabbox-cbx-acquire000000","status":"running"}]}`
 	runner := &fakeRunner{results: []core.LocalCommandResult{

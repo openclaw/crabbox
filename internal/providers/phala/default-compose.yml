@@ -1,5 +1,5 @@
 services:
   crabbox:
-    image: debian:stable-slim
+    image: debian:stable-slim@sha256:f35eebaec00d2be9d1d3144156ce24c4b98d84d12376666a5c45e059b4a8d363
     restart: unless-stopped
     command: ["sleep", "infinity"]

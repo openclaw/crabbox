@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -172,115 +173,62 @@ func TestResolvePhalaProxyHostPropagatesCLIFailureCode(t *testing.T) {
 	}
 }
 
-// TestTunnelPhalaProxyUsesOpenSSLSClient asserts the SSH transport tunnels
-// through the TLS gateway with `openssl s_client -connect <host>:443` and the
-// derived host as the SNI servername, not a raw TCP dial. A fake `openssl` on
-// PATH records its argv and echoes a response so the stdio piping is exercised.
-func TestTunnelPhalaProxyUsesOpenSSLSClient(t *testing.T) {
+func TestTunnelPhalaProxyStreamsThroughTLSConnection(t *testing.T) {
 	host := "app-abc-22.gw.phala.network"
-	argvPath := fakeOpenSSL(t, "remote-tail")
-	var stderr bytes.Buffer
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+	})
+	dial := func(_ context.Context, network, address string) (net.Conn, error) {
+		if network != "tcp" || address != host+":443" {
+			t.Fatalf("dial network=%q address=%q", network, address)
+		}
+		return client, nil
+	}
+	go func() {
+		request := make([]byte, len("request"))
+		_, _ = io.ReadFull(server, request)
+		if string(request) != "request" {
+			t.Errorf("gateway request=%q", request)
+		}
+		_, _ = server.Write([]byte("remote-tail"))
+		_ = server.Close()
+	}()
 	output := &bytes.Buffer{}
-	err := tunnelPhalaProxy(context.Background(), host, strings.NewReader("request"), output, &stderr)
+	err := tunnelPhalaProxyWithDialer(context.Background(), host, strings.NewReader("request"), output, dial)
 	if err != nil {
 		t.Fatalf("tunnel error: %v", err)
 	}
 	if output.String() != "remote-tail" {
 		t.Fatalf("output=%q want remote-tail", output.String())
 	}
-	argv, readErr := os.ReadFile(argvPath)
-	if readErr != nil {
-		t.Fatalf("read recorded openssl argv: %v", readErr)
+}
+
+func TestPhalaTLSConfigVerifiesGatewayHostname(t *testing.T) {
+	const host = "app-abc-22.gw.phala.network"
+	config := phalaTLSConfig(host)
+	if config.ServerName != host {
+		t.Fatalf("ServerName=%q want %q", config.ServerName, host)
 	}
-	recorded := strings.TrimSpace(string(argv))
-	for _, want := range []string{
-		"s_client",
-		"-connect " + host + ":443",
-		"-servername " + host,
-		// TLS is the only server authentication (SSH host-key checking is off),
-		// so a chain failure must abort and the leaf cert must match the host.
-		"-verify_return_error",
-		"-verify_hostname " + host,
-	} {
-		if !strings.Contains(recorded, want) {
-			t.Fatalf("openssl argv=%q missing %q", recorded, want)
-		}
+	if config.InsecureSkipVerify {
+		t.Fatal("Phala TLS config disabled certificate verification")
 	}
-	// A raw TCP port other than the TLS gateway 443 must never be dialed.
-	if strings.Contains(recorded, ":22") || strings.Contains(recorded, ":2222") {
-		t.Fatalf("openssl argv dialed a raw SSH port: %q", recorded)
+	if config.MinVersion < 0x0303 {
+		t.Fatalf("MinVersion=%x want TLS 1.2+", config.MinVersion)
 	}
 }
 
 func TestTunnelPhalaProxyReturnsOnCancellation(t *testing.T) {
-	fakeOpenSSL(t, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	var stderr bytes.Buffer
-	err := tunnelPhalaProxy(ctx, "app-abc-22.gw.phala.network", strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return nil, ctx.Err()
+	}
+	err := tunnelPhalaProxyWithDialer(ctx, "app-abc-22.gw.phala.network", strings.NewReader(""), &bytes.Buffer{}, dial)
 	if err == nil || err != context.Canceled {
 		t.Fatalf("err=%v want context.Canceled", err)
 	}
-}
-
-// Environment keys for the fake `openssl` re-exec helper (TestOpenSSLHelper).
-const (
-	opensslHelperEnv    = "CRABBOX_OPENSSL_HELPER"
-	opensslHelperStdout = "CRABBOX_OPENSSL_HELPER_STDOUT"
-	opensslHelperArgv   = "CRABBOX_OPENSSL_HELPER_ARGV"
-	opensslHelperBin    = "CRABBOX_OPENSSL_HELPER_BIN"
-	opensslHelperRun    = "-test.run=^TestOpenSSLHelper$"
-)
-
-// fakeOpenSSL puts a fake `openssl` on PATH that re-execs the test binary into
-// TestOpenSSLHelper. The helper records its argv, drains stdin, and emits the
-// canned stdout. Re-execing the test binary (rather than a shell/.bat script)
-// keeps the fake robust across cmd.exe and POSIX sh quoting. Returns the argv
-// record path.
-func fakeOpenSSL(t *testing.T, stdout string) (argvPath string) {
-	t.Helper()
-	dir := t.TempDir()
-	argvPath = filepath.Join(dir, "openssl-argv")
-	t.Setenv(opensslHelperEnv, "1")
-	t.Setenv(opensslHelperStdout, stdout)
-	t.Setenv(opensslHelperArgv, argvPath)
-	t.Setenv(opensslHelperBin, os.Args[0])
-	if runtime.GOOS == "windows" {
-		wrapper := filepath.Join(dir, "openssl.bat")
-		body := "@echo off\r\n\"%" + opensslHelperBin + "%\" " + opensslHelperRun + " %*\r\n"
-		if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		wrapper := filepath.Join(dir, "openssl")
-		body := "#!/bin/sh\nexec \"$" + opensslHelperBin + "\" " + opensslHelperRun + " \"$@\"\n"
-		if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return argvPath
-}
-
-// TestOpenSSLHelper is the re-exec'd fake `openssl`, gated on opensslHelperEnv so
-// it is inert during a normal test run. Arguments after the -test.run filter are
-// the s_client invocation under test.
-func TestOpenSSLHelper(t *testing.T) {
-	if os.Getenv(opensslHelperEnv) != "1" {
-		return
-	}
-	args := os.Args[1:]
-	for len(args) > 0 && strings.HasPrefix(args[0], "-test.") {
-		args = args[1:]
-	}
-	if argvPath := os.Getenv(opensslHelperArgv); argvPath != "" {
-		_ = os.WriteFile(argvPath, []byte(strings.Join(args, " ")), 0o600)
-	}
-	_, _ = io.Copy(io.Discard, os.Stdin)
-	if stdout := os.Getenv(opensslHelperStdout); stdout != "" {
-		_, _ = os.Stdout.WriteString(stdout)
-	}
-	os.Exit(0)
 }
 
 // TestPhalaProxyResolvesHostViaCVMSGetWithoutCachedFlag preserves the existing
@@ -289,9 +237,13 @@ func TestOpenSSLHelper(t *testing.T) {
 func TestPhalaProxyResolvesHostViaCVMSGetWithoutCachedFlag(t *testing.T) {
 	const getStdout = `{"success":true,"app_id":"app-abc","gateway":{"gateway_domain":"gw.phala.network"}}`
 	phala, argvPath := fakePhalaCLI(t, getStdout, 0)
-	opensslArgv := fakeOpenSSL(t, "remote-tail")
+	var tunneledHost string
+	tunnel := func(_ context.Context, host string, _ io.Reader, _ io.Writer) error {
+		tunneledHost = host
+		return nil
+	}
 	app := App{Stdout: io.Discard, Stderr: io.Discard, Stdin: strings.NewReader("request")}
-	if err := app.phalaProxy(context.Background(), []string{"--phala", phala, "cvm-id-123"}); err != nil {
+	if err := app.phalaProxyWithTunnel(context.Background(), []string{"--phala", phala, "cvm-id-123"}, tunnel); err != nil {
 		t.Fatalf("phalaProxy failed: %v", err)
 	}
 	// The cvms-get lookup MUST run to resolve the host.
@@ -302,27 +254,28 @@ func TestPhalaProxyResolvesHostViaCVMSGetWithoutCachedFlag(t *testing.T) {
 	if strings.TrimSpace(string(argv)) != "cvms get --cvm-id cvm-id-123 --json" {
 		t.Fatalf("phala argv=%q", strings.TrimSpace(string(argv)))
 	}
-	openssl, err := os.ReadFile(opensslArgv)
-	if err != nil {
-		t.Fatalf("openssl was not invoked: %v", err)
-	}
-	if !strings.Contains(string(openssl), "-connect app-abc-22.gw.phala.network:443") {
-		t.Fatalf("openssl argv=%q did not tunnel to the resolved host", string(openssl))
+	if tunneledHost != "app-abc-22.gw.phala.network" {
+		t.Fatalf("tunnel host=%q", tunneledHost)
 	}
 }
 
 // TestPhalaProxyUsesCachedGatewayHostWithoutCVMSGet proves the cached
 // --gateway-host short-circuits the per-connection `phala cvms get` lookup
 // entirely: the fake phala CLI is never invoked (its argv record is never
-// written) and openssl tunnels straight to the supplied host.
+// written) and the TLS tunnel connects straight to the supplied host.
 func TestPhalaProxyUsesCachedGatewayHostWithoutCVMSGet(t *testing.T) {
 	const host = "b60d1f55-22.dstack-pha-prod5.phala.network"
 	// A fake phala that would exit non-zero AND record its argv if ever called.
 	phala, argvPath := fakePhalaCLI(t, "should-not-be-called", 9)
-	opensslArgv := fakeOpenSSL(t, "remote-tail")
+	var tunneledHost string
+	tunnel := func(_ context.Context, gotHost string, _ io.Reader, output io.Writer) error {
+		tunneledHost = gotHost
+		_, err := io.WriteString(output, "remote-tail")
+		return err
+	}
 	output := &bytes.Buffer{}
 	app := App{Stdout: output, Stderr: io.Discard, Stdin: strings.NewReader("request")}
-	if err := app.phalaProxy(context.Background(), []string{"--phala", phala, "--gateway-host", host, "cvm-id-123"}); err != nil {
+	if err := app.phalaProxyWithTunnel(context.Background(), []string{"--phala", phala, "--gateway-host", host, "cvm-id-123"}, tunnel); err != nil {
 		t.Fatalf("phalaProxy with cached host failed: %v", err)
 	}
 	// The phala CLI must NOT have been invoked: its argv record stays absent.
@@ -330,15 +283,8 @@ func TestPhalaProxyUsesCachedGatewayHostWithoutCVMSGet(t *testing.T) {
 		recorded, _ := os.ReadFile(argvPath)
 		t.Fatalf("phala cvms get was invoked despite cached --gateway-host: argv=%q", string(recorded))
 	}
-	openssl, err := os.ReadFile(opensslArgv)
-	if err != nil {
-		t.Fatalf("openssl was not invoked: %v", err)
-	}
-	recorded := string(openssl)
-	for _, want := range []string{"-connect " + host + ":443", "-servername " + host} {
-		if !strings.Contains(recorded, want) {
-			t.Fatalf("openssl argv=%q missing %q", recorded, want)
-		}
+	if tunneledHost != host {
+		t.Fatalf("tunnel host=%q want %q", tunneledHost, host)
 	}
 	if output.String() != "remote-tail" {
 		t.Fatalf("output=%q want remote-tail", output.String())

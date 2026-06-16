@@ -281,7 +281,15 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, b.now())
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s instance_type=%s keep=%v\n", providerName, leaseID, slug, cfg.ServerType, req.Keep)
-	id, err := b.create(ctx, cfg, keyPath+".pub", labels)
+	composePath, err := composeFileForDeploy(cfg, keyPath+".pub")
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	expectedCompose, err := os.ReadFile(composePath)
+	if err != nil {
+		return core.LeaseTarget{}, core.Exit(2, "read Phala compose %q: %v", composePath, err)
+	}
+	id, err := b.createWithCompose(ctx, cfg, keyPath+".pub", labels, composePath)
 	if err != nil {
 		var ambiguous *ambiguousPhalaCreateError
 		if errors.As(err, &ambiguous) {
@@ -382,7 +390,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		if err != nil {
 			return core.LeaseTarget{}, rollback(fmt.Errorf("refusing Phala lease: TDX attestation fetch failed for phala_cvm=%s: %w", id, err))
 		}
-		report, err := verifyAttestation(info, id, true)
+		report, err := verifyAttestation(info, id, string(expectedCompose), true)
 		if err != nil {
 			return core.LeaseTarget{}, rollback(fmt.Errorf("refusing Phala lease: TDX attestation verification failed for phala_cvm=%s: %w", id, err))
 		}
@@ -702,6 +710,14 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 }
 
 func (b *backend) create(ctx context.Context, cfg core.Config, publicKeyPath string, labels map[string]string) (string, error) {
+	compose, err := composeFileForDeploy(cfg, publicKeyPath)
+	if err != nil {
+		return "", err
+	}
+	return b.createWithCompose(ctx, cfg, publicKeyPath, labels, compose)
+}
+
+func (b *backend) createWithCompose(ctx context.Context, cfg core.Config, publicKeyPath string, labels map[string]string, compose string) (string, error) {
 	leaseID := labels["lease"]
 	name := phalaCVMName(leaseID)
 	// --dev-os boots the dstack dev OS image which runs sshd and accepts the
@@ -715,14 +731,6 @@ func (b *backend) create(ctx context.Context, cfg core.Config, publicKeyPath str
 	}
 	if nodeID := strings.TrimSpace(cfg.Phala.NodeID); nodeID != "" {
 		args = append(args, "--node-id", nodeID)
-	}
-	// The Phala CLI deploy handler requires a Compose file before it provisions a
-	// CVM in non-interactive mode. Use the configured compose when present, else
-	// materialize the embedded default into the per-lease temp dir so deploy
-	// always carries --compose.
-	compose, err := composeFileForDeploy(cfg, publicKeyPath)
-	if err != nil {
-		return "", err
 	}
 	args = append(args, "--compose", compose)
 	result, err := b.phala(ctx, cfg, args, b.rt.Stderr)
@@ -845,19 +853,19 @@ func (b *backend) listInstances(ctx context.Context) ([]instance, error) {
 	}
 	payload := jsonObjectPrefix(result.Stdout)
 	if payload == "" {
-		return nil, nil
+		return nil, core.Exit(5, "phala cvms list produced no JSON output")
 	}
 	var output listOutput
 	if err := json.Unmarshal([]byte(payload), &output); err != nil {
 		return nil, core.Exit(5, "parse phala cvms list output: %v", err)
 	}
-	// crabbox ownership is derived from the CVM name prefix (crabbox-<lease>), so
-	// a list item with no name can never be owned and would also have no usable
-	// handle. Skip such items defensively rather than surfacing a blank instance.
+	if !output.Success {
+		return nil, core.Exit(5, "phala cvms list reported an unsuccessful response")
+	}
 	items := make([]instance, 0, len(output.Items))
-	for _, item := range output.Items {
-		if strings.TrimSpace(item.Name) == "" && item.cloudID() == "" {
-			continue
+	for i, item := range output.Items {
+		if item.cloudID() == "" {
+			return nil, core.Exit(5, "phala cvms list item %d did not include a CVM identifier", i)
 		}
 		item.Labels = phalaLabels(item, cfg)
 		items = append(items, item)
@@ -1351,7 +1359,6 @@ func missingCVMResponse(stdout, stderr string) bool {
 		"no such cvm",
 		"cvm does not exist",
 		"could not find cvm",
-		"does not exist",
 	} {
 		if strings.Contains(detail, phrase) {
 			return true
@@ -1401,7 +1408,7 @@ func (b *backend) getInstance(ctx context.Context, id string) (instance, bool, e
 	}
 	payload := jsonObjectPrefix(result.Stdout)
 	if payload == "" {
-		return instance{}, false, nil
+		return instance{}, false, core.Exit(5, "phala cvms get produced no JSON output")
 	}
 	// `cvms get` returns the CVM either as a flat object or nested under a cvm
 	// key; deployOutput's decoder already merges both, ranking the nested object
@@ -1410,12 +1417,15 @@ func (b *backend) getInstance(ctx context.Context, id string) (instance, bool, e
 	if err := json.Unmarshal([]byte(payload), &output); err != nil {
 		return instance{}, false, core.Exit(5, "parse phala cvms get output: %v", err)
 	}
+	if !output.Success {
+		return instance{}, false, core.Exit(5, "phala cvms get reported an unsuccessful response")
+	}
 	item := output.Top
 	if output.CVM != nil && output.CVM.cloudID() != "" {
 		item = *output.CVM
 	}
 	if item.cloudID() == "" {
-		return instance{}, false, nil
+		return instance{}, false, core.Exit(5, "phala cvms get output did not include a CVM identifier")
 	}
 	item.Labels = phalaLabels(item, cfg)
 	return item, true, nil
@@ -1534,10 +1544,16 @@ func (b *backend) resolveGatewayHost(ctx context.Context, id string) (string, er
 func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id, leaseID string) (bool, error) {
 	// Phala has no server-side ownership label: the local lease claim is the
 	// destructive-op authority, so require a matching claim before any CLI call.
-	if _, ok, err := resolvePhalaClaim(leaseID, cfg); err != nil {
+	claim, ok, err := resolvePhalaClaim(leaseID, cfg)
+	if err != nil {
 		return false, err
-	} else if !ok {
+	}
+	if !ok {
 		return false, core.Exit(4, "refusing to destroy Phala CVM %s: no local claim for lease %s", id, leaseID)
+	}
+	claimedID := firstNonBlank(claim.CloudID, claim.Labels["phala_cvm"])
+	if claimedID != "" && strings.TrimSpace(claimedID) != strings.TrimSpace(id) {
+		return false, core.Exit(4, "refusing to destroy Phala CVM %s: local claim for lease %s points to %s", id, leaseID, claimedID)
 	}
 	// Source the CVM (and its name) from `cvms get`, not `cvms list`: real
 	// `cvms list` omits the name, so the name-based ownership corroboration below

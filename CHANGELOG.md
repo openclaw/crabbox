@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added the Phala confidential Intel TDX CVM provider with default-on hardware attestation, exact Compose binding, TLS-authenticated SSH, and fail-closed claim-backed lifecycle cleanup. Thanks @anagnorisis2peripeteia.
+
 - Added JSON API initiation of generation-fenced runtime-adapter workspace deletion through explicit registered lease release.
 
 ## 0.31.0 - 2026-06-14

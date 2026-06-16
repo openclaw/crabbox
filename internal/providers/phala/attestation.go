@@ -1,7 +1,9 @@
 package phala
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/asn1"
@@ -64,6 +66,7 @@ type tcbInfo struct {
 	MRAggregated string       `json:"mr_aggregated"`
 	OSImageHash  string       `json:"os_image_hash"`
 	ComposeHash  string       `json:"compose_hash"`
+	AppCompose   string       `json:"app_compose"`
 	DeviceID     string       `json:"device_id"`
 	EventLog     []eventEntry `json:"event_log"`
 }
@@ -110,7 +113,7 @@ type AttestationReport struct {
 // extractTDXQuote parses the app TLS certificate chain, finds the dstack TDX
 // quote extension (OID 1.3.6.1.4.1.62397.1.1), and carves the raw TDX quote out
 // of the (possibly DER-OCTET-STRING-wrapped) extension value by locating the TDX
-// quote header. The header is: version uint16-LE in {4,5}, att_key_type uint16-LE
+// quote header. The header is: version uint16-LE == 4, att_key_type uint16-LE
 // in {2,3}, tee_type uint32-LE == 0x81. Scanning for that pattern is robust to
 // the one or two layers of OCTET STRING DER prefix that wrap the quote.
 func extractTDXQuote(appCertPEM string) ([]byte, error) {
@@ -162,13 +165,13 @@ func findTDXQuoteExtension(appCertPEM string) ([]byte, error) {
 }
 
 // carveTDXQuote locates the raw TDX quote inside the extension value by scanning
-// for the TDX v4/v5 header byte pattern. The dstack agent wraps the quote in one
+// for the TDX v4 header byte pattern. The dstack agent wraps the quote in one
 // or two layers of DER OCTET STRING, so the quote does not begin at offset 0.
 func carveTDXQuote(ext []byte) ([]byte, error) {
 	// The header is 8 bytes: version(2,LE) att_key_type(2,LE) tee_type(4,LE).
 	for off := 0; off+8 <= len(ext); off++ {
 		version := uint16(ext[off]) | uint16(ext[off+1])<<8
-		if version != 4 && version != 5 {
+		if version != 4 {
 			continue
 		}
 		attKeyType := uint16(ext[off+2]) | uint16(ext[off+3])<<8
@@ -185,7 +188,7 @@ func carveTDXQuote(ext []byte) ([]byte, error) {
 		}
 		return quote, nil
 	}
-	return nil, fmt.Errorf("phala attestation: no TDX quote header (version{4,5}/att_key_type{2,3}/tee_type=0x81) found in %d-byte extension value", len(ext))
+	return nil, fmt.Errorf("phala attestation: no supported TDX quote header (version=4/att_key_type{2,3}/tee_type=0x81) found in %d-byte extension value", len(ext))
 }
 
 // replayRTMR recomputes RTMR register imr by folding every event_log entry with
@@ -239,28 +242,31 @@ func normalizeAppID(id string) string {
 // response and returns the verified identity. It performs, in order:
 //
 //  2. parse the inner tcb_info JSON string;
-//  3. replay all four RTMRs from the event log and assert they equal tcb_info
-//     (genuineness of the measured boot);
+//  3. replay all four RTMRs from the event log and assert they equal tcb_info;
 //  4. extract the raw TDX quote from the app TLS certificate;
 //  5. (if dcap) DCAP-verify the quote's signature chains to the Intel SGX/TDX
 //     root CA, then assert the SIGNED quote's MRTD and RTMRs equal the replayed
 //     tcb_info values (links the signature to the measurement);
-//  6. bind identity: assert the RTMR3 app-id event equals expectedAppID.
+//  6. bind the attested app_compose to its measured compose-hash and to the
+//     exact Compose text passed to phala deploy;
+//  7. bind identity: assert the RTMR3 app-id event equals expectedAppID.
 //
 // expectedAppID is the app id of the CVM crabbox just created; it proves the
-// genuine, measured enclave is OUR deployment rather than some other attested
-// box. dcap drives whether the network DCAP signature verification runs (it
-// reaches Intel PCS), so callers can run the offline genuineness + binding
+// attested enclave is the requested CVM rather than some other attested box.
+// expectedCompose binds that CVM to the exact deployment manifest Crabbox
+// supplied. dcap drives whether the network DCAP signature verification runs
+// (it reaches Intel PCS), so callers can run the offline measurement + binding
 // checks deterministically and gate the network check separately.
-func verifyAttestation(info dstackInfo, expectedAppID string, dcap bool) (AttestationReport, error) {
+func verifyAttestation(info dstackInfo, expectedAppID, expectedCompose string, dcap bool) (AttestationReport, error) {
 	// Step 2: parse the inner tcb_info JSON string.
 	tcb, err := parseTCBInfo(info.TCBInfo)
 	if err != nil {
 		return AttestationReport{}, err
 	}
 
-	// Step 3: replay all four RTMRs and assert they match tcb_info. This is the
-	// genuineness proof: any tampered event digest changes the replayed RTMR.
+	// Step 3: replay all four RTMRs and assert they match tcb_info. Any tampered
+	// event digest changes the replayed RTMR; the signed quote check below binds
+	// those replayed values to the hardware report.
 	for i := 0; i < 4; i++ {
 		replayed := replayRTMR(tcb.EventLog, i)
 		if replayed == nil {
@@ -289,6 +295,11 @@ func verifyAttestation(info dstackInfo, expectedAppID string, dcap bool) (Attest
 		return AttestationReport{}, err
 	}
 
+	composeHash, err := verifyComposeBinding(tcb, expectedCompose)
+	if err != nil {
+		return AttestationReport{}, err
+	}
+
 	dcapVerified := false
 	if dcap {
 		// Step 5: DCAP signature verification -- proves genuine Intel silicon by
@@ -300,7 +311,7 @@ func verifyAttestation(info dstackInfo, expectedAppID string, dcap bool) (Attest
 		dcapVerified = true
 	}
 
-	// Step 6: identity binding -- the RTMR3 app-id event must equal the app id of
+	// Step 7: identity binding -- the RTMR3 app-id event must equal the app id of
 	// the CVM crabbox created. Without this, a genuine-and-measured but UNRELATED
 	// attested box would pass.
 	appIDEvent := rtmr3Event(tcb.EventLog, "app-id")
@@ -313,13 +324,78 @@ func verifyAttestation(info dstackInfo, expectedAppID string, dcap bool) (Attest
 
 	report := AttestationReport{
 		AppID:        appIDEvent,
-		ComposeHash:  rtmr3Event(tcb.EventLog, "compose-hash"),
+		ComposeHash:  composeHash,
 		OSImageHash:  rtmr3Event(tcb.EventLog, "os-image-hash"),
 		MrKms:        rtmr3Event(tcb.EventLog, "mr-kms"),
 		Rtmr3:        strings.ToLower(strings.TrimSpace(tcb.RTMR3)),
 		DCAPVerified: dcapVerified,
 	}
 	return report, nil
+}
+
+func verifyComposeBinding(tcb tcbInfo, expectedCompose string) (string, error) {
+	raw := strings.TrimSpace(tcb.AppCompose)
+	if raw == "" {
+		return "", fmt.Errorf("phala attestation: tcb_info carried empty app_compose")
+	}
+	var app any
+	if err := json.Unmarshal([]byte(raw), &app); err != nil {
+		return "", fmt.Errorf("phala attestation: parse app_compose JSON: %w", err)
+	}
+	var canonical bytes.Buffer
+	encoder := json.NewEncoder(&canonical)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(app); err != nil {
+		return "", fmt.Errorf("phala attestation: canonicalize app_compose JSON: %w", err)
+	}
+	canonicalBytes := bytes.TrimSuffix(canonical.Bytes(), []byte("\n"))
+	appHashBytes := sha256.Sum256(canonicalBytes)
+	appHash := hex.EncodeToString(appHashBytes[:])
+
+	tcbHash, err := normalizedSHA256(tcb.ComposeHash)
+	if err != nil {
+		return "", fmt.Errorf("phala attestation: invalid tcb_info compose_hash: %w", err)
+	}
+	if appHash != tcbHash {
+		return "", fmt.Errorf("phala attestation: app_compose hash %s does not match tcb_info compose_hash %s", appHash, tcbHash)
+	}
+	eventHash, err := normalizedSHA256(rtmr3Event(tcb.EventLog, "compose-hash"))
+	if err != nil {
+		return "", fmt.Errorf("phala attestation: invalid RTMR3 compose-hash event: %w", err)
+	}
+	if eventHash != tcbHash {
+		return "", fmt.Errorf("phala attestation: RTMR3 compose-hash %s does not match tcb_info compose_hash %s", eventHash, tcbHash)
+	}
+
+	appObject, ok := app.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("phala attestation: app_compose must be a JSON object")
+	}
+	attestedCompose, ok := appObject["docker_compose_file"].(string)
+	if !ok {
+		return "", fmt.Errorf("phala attestation: app_compose has no docker_compose_file string")
+	}
+	if attestedCompose != expectedCompose {
+		expectedHash := sha256.Sum256([]byte(expectedCompose))
+		attestedHash := sha256.Sum256([]byte(attestedCompose))
+		return "", fmt.Errorf(
+			"phala attestation: attested Docker Compose does not match the manifest passed to phala deploy (expected sha256 %x, attested sha256 %x)",
+			expectedHash,
+			attestedHash,
+		)
+	}
+	return tcbHash, nil
+}
+
+func normalizedSHA256(value string) (string, error) {
+	value = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), "0x")
+	if len(value) != sha256.Size*2 {
+		return "", fmt.Errorf("want %d hex characters, got %d", sha256.Size*2, len(value))
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 // parseTCBInfo decodes the inner tcb_info JSON string carried by dstackInfo.
@@ -385,6 +461,7 @@ func dcapVerifyQuote(quote []byte) error {
 	}
 	opts := verify.DefaultOptions()
 	opts.GetCollateral = true
+	opts.CheckRevocations = true
 	return verify.TdxQuote(proto, opts)
 }
 

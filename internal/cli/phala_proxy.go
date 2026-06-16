@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
 	"io"
+	"net"
 	"os/exec"
 	"strings"
 )
@@ -14,7 +16,7 @@ import (
 // CVM. dstack fronts each CVM's sshd behind a TLS gateway: SSH for app <appId>
 // is reached at host `<appId>-22.<gateway-domain>` over TLS on :443, where the
 // gateway domain comes from gateway_domain (or the nested base_domain). crabbox
-// tunnels SSH stdio through that TLS endpoint with `openssl s_client`.
+// tunnels SSH stdio through that TLS endpoint with Go's TLS client.
 type phalaGateway struct {
 	GatewayDomain string `json:"gateway_domain"`
 	BaseDomain    string `json:"base_domain"`
@@ -69,6 +71,10 @@ type phalaCVMGetOutput struct {
 }
 
 func (a App) phalaProxy(ctx context.Context, args []string) error {
+	return a.phalaProxyWithTunnel(ctx, args, tunnelPhalaProxy)
+}
+
+func (a App) phalaProxyWithTunnel(ctx context.Context, args []string, tunnel func(context.Context, string, io.Reader, io.Writer) error) error {
 	fs := flag.NewFlagSet("__phala-proxy", flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	phala := fs.String("phala", "phala", "phala CLI path")
@@ -95,7 +101,7 @@ func (a App) phalaProxy(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	return tunnelPhalaProxy(ctx, host, a.input(), a.Stdout, a.Stderr)
+	return tunnel(ctx, host, a.input(), a.Stdout)
 }
 
 // resolvePhalaProxyHost queries `phala cvms get --json` and derives the TLS SSH
@@ -142,46 +148,70 @@ func cvmGetGatewayDomain(cvm *phalaCVM) string {
 	return cvm.gatewayDomain()
 }
 
-// tunnelPhalaProxy pipes SSH stdio through the Phala TLS gateway using
-// `openssl s_client`. dstack terminates the gateway with TLS on :443 and routes
-// by SNI, so the servername must match the derived host. The connection carries
-// raw SSH bytes once the TLS session is up; openssl is therefore a host
-// dependency for this provider.
-func tunnelPhalaProxy(ctx context.Context, host string, input io.Reader, output, stderr io.Writer) error {
-	if _, err := exec.LookPath("openssl"); err != nil {
-		return exit(2, "phala SSH gateway requires the openssl client: %v", err)
+type phalaTLSDialFunc func(context.Context, string, string) (net.Conn, error)
+
+// tunnelPhalaProxy pipes SSH stdio through the Phala TLS gateway. dstack
+// terminates the gateway with TLS on :443 and routes by SNI, so the server name
+// must match the derived host. Go's TLS client verifies both the public CA chain
+// and the hostname before any SSH bytes are exchanged.
+func tunnelPhalaProxy(ctx context.Context, host string, input io.Reader, output io.Writer) error {
+	config := phalaTLSConfig(host)
+	dialer := &tls.Dialer{Config: config}
+	return tunnelPhalaProxyWithDialer(ctx, host, input, output, dialer.DialContext)
+}
+
+func phalaTLSConfig(host string) *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: host,
 	}
-	// Enforce TLS server authentication. The SSH layer runs with host-key
-	// checking disabled (the dstack gateway fronts a fresh per-lease CVM whose
-	// host key is unknown), so this TLS handshake is the ONLY thing that proves
-	// we reached the genuine dstack gateway rather than a man in the middle.
-	// -verify_return_error aborts on any chain-verification failure (instead of
-	// the default of logging and proceeding), and -verify_hostname pins the leaf
-	// cert to the gateway host so a valid-chain cert for a different name cannot
-	// be substituted. The dstack gateway presents a publicly-trusted cert for
-	// <appId>-22.<gateway-domain>, so this verifies against the ambient trust
-	// store. openssl (1.0.2+/LibreSSL) is already a documented host dependency.
-	cmd := exec.CommandContext(ctx, "openssl", "s_client",
-		"-connect", host+":443",
-		"-quiet",
-		"-verify_quiet",
-		"-verify_return_error",
-		"-verify_hostname", host,
-		"-servername", host,
-	)
-	cmd.Stdin = input
-	cmd.Stdout = output
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
+}
+
+func tunnelPhalaProxyWithDialer(ctx context.Context, host string, input io.Reader, output io.Writer, dial phalaTLSDialFunc) error {
+	conn, err := dial(ctx, "tcp", net.JoinHostPort(host, "443"))
+	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if errors.Is(err, context.Canceled) {
-			return context.Canceled
-		}
-		return exit(exitCode(err), "tunnel Phala SSH gateway %s via openssl s_client: %v", host, err)
+		return exit(1, "connect Phala SSH TLS gateway %s: %v", host, err)
 	}
-	return nil
+	defer conn.Close()
+
+	type copyResult struct {
+		direction string
+		err       error
+	}
+	results := make(chan copyResult, 2)
+	go func() {
+		_, copyErr := io.Copy(conn, input)
+		if closeWriter, ok := conn.(interface{ CloseWrite() error }); ok {
+			copyErr = errors.Join(copyErr, closeWriter.CloseWrite())
+		}
+		results <- copyResult{direction: "upload", err: copyErr}
+	}()
+	go func() {
+		_, copyErr := io.Copy(output, conn)
+		results <- copyResult{direction: "download", err: copyErr}
+	}()
+
+	uploadDone := false
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case result := <-results:
+			if result.direction == "upload" && result.err == nil {
+				uploadDone = true
+				continue
+			}
+			if result.err != nil && !errors.Is(result.err, net.ErrClosed) {
+				return exit(1, "tunnel Phala SSH gateway %s %s: %v", host, result.direction, result.err)
+			}
+			if result.direction == "download" || uploadDone {
+				return nil
+			}
+		}
+	}
 }
 
 // phalaJSONObjectPrefix mirrors the provider-side prefix scanner: it returns the
