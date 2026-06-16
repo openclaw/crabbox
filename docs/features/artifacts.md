@@ -50,8 +50,10 @@ logs and test reports that back it.
 ## `artifacts collect`
 
 `crabbox artifacts collect --id <lease-id-or-slug>` writes a bundle directory.
-By default it lands in `artifacts/<slug>` (override with `--output <dir>`) and
-contains:
+By default it lands in a private `artifacts/<slug>` directory. An explicit
+`--output <dir>` preserves that directory's sharing permissions, while retained
+`logs.txt` and `run.json` remain owner-only. Publishing still uploads the
+selected files normally. The bundle contains:
 
 - `metadata.json`: Crabbox version, lease id, slug, provider, network, target
   OS, optional run id, and capture time.

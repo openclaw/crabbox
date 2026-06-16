@@ -300,8 +300,18 @@ env -u CRABBOX_COORDINATOR -u CRABBOX_COORDINATOR_TOKEN \
 ```
 
 Cleanup lists Crabbox-labeled instances across the project's visible zones using
-aggregated instance listing with partial success enabled, then deletes expired or
-released leases in the zone recorded on each VM. Brokered cleanup is
+aggregated instance listing with partial success enabled. Inventory accepts only
+deterministically named instances with the canonical `crabbox`, `created_by`,
+`provider`, and valid lease labels, then deletes expired or released leases in
+the zone recorded on each VM. Brokered workspace recovery first resolves the
+exact deterministic instance name in the lease's recorded project and zone. A
+zonal miss falls back to cross-zone inventory for that exact name so interrupted
+pre-upgrade fallback creates remain recoverable. Both paths check the same
+canonical labels; neither adopts the first project-wide lease-label match, and
+duplicate exact-name matches fail as ambiguous. These checks are
+defense-in-depth against accidental or ambiguous resource adoption. GCP labels
+are operator metadata, not an authorization boundary against another principal
+that can already mutate instances in the same project. Brokered cleanup is
 coordinator-owned; direct cleanup is best-effort label cleanup.
 
 Three independent safety nets enforce expiry:

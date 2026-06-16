@@ -112,6 +112,7 @@ Pick whichever matches your intent:
   [Concepts and glossary](concepts.md).
 - **Get the mental model:** [Vision](vision.md),
   [Architecture](architecture.md), [Orchestrator](orchestrator.md),
+  [Runtime adapter stack](features/runtime-adapter-stack.md),
   [Broker auth and routing](features/broker-auth-routing.md),
   [Coordinator](features/coordinator.md),
   [Bring your own infrastructure](features/bring-your-own-infrastructure.md).
@@ -126,6 +127,7 @@ Pick whichever matches your intent:
   [Actions hydration](features/actions-hydration.md),
   [Capsules](features/capsules.md), [Checkpoints](features/checkpoints.md),
   [Browser portal](features/portal.md),
+  [Runtime adapter stack](features/runtime-adapter-stack.md),
   [Capabilities](features/capabilities.md),
   [Interactive desktop and VNC](features/interactive-desktop-vnc.md),
   [Telemetry](features/telemetry.md), [Sync](features/sync.md).

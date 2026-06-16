@@ -3109,6 +3109,48 @@ describe("fleet lease identity and idle", () => {
     expect(providerReleases).toBe(1);
   });
 
+  it("keeps accepted workspace creates successful when post-persist maintenance fails", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test",
+      },
+    );
+    const maintenance = fleet as unknown as {
+      maintainWorkspacePrewarm: () => Promise<void>;
+    };
+    vi.spyOn(maintenance, "maintainWorkspacePrewarm").mockRejectedValueOnce(
+      new Error("maintenance error code=10000"),
+    );
+
+    const created = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          id: "fleet-maintenance-failure",
+          runtime: "crabbox",
+          ttlSeconds: 1800,
+          idleTimeoutSeconds: 360,
+          capabilities: { desktop: false },
+        },
+      }),
+    );
+
+    expect(created.status).toBe(202);
+    await expect(created.json()).resolves.toMatchObject({
+      id: "fleet-maintenance-failure",
+      status: "provisioning",
+    });
+    expect(
+      storage.value("workspace:example-org:alice%40example.com:fleet-maintenance-failure"),
+    ).toBeDefined();
+  });
+
   it("keeps an organization-wide workspace spare while demand is active", async () => {
     type StoredWorkspace = {
       id: string;
@@ -4163,6 +4205,11 @@ describe("fleet lease identity and idle", () => {
     expect(bootstrap).toContain("rev-parse --verify 'HEAD^{commit}'");
     expect(bootstrap).toContain(".clone.XXXXXX");
     expect(bootstrap).toContain("if ! git clone");
+    expect(bootstrap).toContain("printf '\\\\033[2J\\\\033[H'");
+    expect(bootstrap).toContain("set +e");
+    expect(bootstrap).toContain("Workspace command exited with status %s");
+    expect(bootstrap).toContain("exec bash -l");
+    expect(bootstrap).not.toContain("exec bash -lc ${shellQuote(command)}");
     expect(bootstrap).not.toContain("/crabfleet/");
   });
 
@@ -4644,6 +4691,155 @@ describe("fleet lease identity and idle", () => {
       status: "stopped",
     });
     expect(providerReleases).toBe(1);
+  });
+
+  it("uses provider-owned GCP recovery instead of project-wide label inventory", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    let inventoryCalls = 0;
+    let recoveryCalls = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onList: () => {
+          inventoryCalls += 1;
+          return [
+            {
+              provider: "gcp",
+              id: 999,
+              cloudID: "foreign-instance",
+              name: "foreign-instance",
+              status: "running",
+              serverType: "e2-micro",
+              host: "192.0.2.99",
+              labels: { crabbox: "true", lease: leaseID },
+            },
+          ];
+        },
+        onRecoverServer: (lease) => {
+          recoveryCalls += 1;
+          expect(lease.id).toBe(leaseID);
+          expect(lease.slug).toBe("fleet-is-gcp-recovery");
+          return {
+            provider: "gcp",
+            id: 123,
+            cloudID: "crabbox-fleet-is-gcp-recovery-c80c2195",
+            name: "crabbox-fleet-is-gcp-recovery-c80c2195",
+            status: "running",
+            serverType: "e2-micro",
+            region: "us-central1-a",
+            host: "192.0.2.10",
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "gcp",
+              lease: leaseID,
+            },
+          };
+        },
+      }),
+    });
+    const now = new Date().toISOString();
+    storage.seed("workspace:example-org:alice%40example.com:fleet-is-gcp-recovery", {
+      id: "fleet-is-gcp-recovery",
+      leaseID,
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      provider: "gcp",
+      class: "standard",
+      desktop: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      provisionClaim: "expired-claim",
+      provisionClaimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+    });
+    storage.seed(`lease:${leaseID}`, {
+      id: leaseID,
+      slug: "fleet-is-gcp-recovery",
+      workspaceID: "fleet-is-gcp-recovery",
+      provider: "gcp",
+      providerProject: "proj",
+      region: "us-central1-a",
+      target: "linux",
+      desktop: false,
+      browser: false,
+      code: false,
+      cloudID: "stale-cloud-id",
+      owner: "alice@example.com",
+      org: "example-org",
+      profile: "default",
+      class: "standard",
+      serverType: "e2-micro",
+      requestedServerType: "e2-micro",
+      serverID: 0,
+      serverName: "",
+      providerKey: "workspace-test",
+      host: "",
+      sshUser: "root",
+      sshPort: "22",
+      workRoot: "/workspaces/crabbox",
+      keep: false,
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 360,
+      estimatedHourlyUSD: 0,
+      maxEstimatedUSD: 0,
+      state: "provisioning",
+      provisioningRequestStartedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      lastTouchedAt: now,
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    } as LeaseRecord);
+
+    await fleet.alarm();
+
+    expect(recoveryCalls).toBe(1);
+    expect(inventoryCalls).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "active",
+      cloudID: "crabbox-fleet-is-gcp-recovery-c80c2195",
+      host: "192.0.2.10",
+    });
+  });
+
+  it("persists the active GCP fallback zone before provider mutation", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-a" });
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
+          throw new Error("capacity unavailable");
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      region: "us-central1-b",
+    });
   });
 
   it("fails deterministic workspace provisioning errors without waiting for the lease TTL", async () => {
@@ -10781,6 +10977,9 @@ describe("fleet lease identity and idle", () => {
         hostId: "h-000000000001",
         cloudID: "i-000000000099",
         region: "eu-west-1",
+        owner: "alice@example.com",
+        org: "example-org",
+        share: { users: { "friend@example.com": "use" } },
         createdAt: "2026-05-17T00:10:00.000Z",
         updatedAt: "2026-05-17T00:20:00.000Z",
         lastTouchedAt: "2026-05-17T00:20:00.000Z",
@@ -10800,6 +10999,8 @@ describe("fleet lease identity and idle", () => {
         hostId: "h-000000000002",
         cloudID: "i-000000000100",
         region: "eu-west-1",
+        owner: "alice@example.com",
+        org: "example-org",
         createdAt: "2026-05-17T00:30:00.000Z",
         updatedAt: "2026-05-17T00:40:00.000Z",
         lastTouchedAt: "2026-05-17T00:40:00.000Z",
@@ -10819,8 +11020,8 @@ describe("fleet lease identity and idle", () => {
     const response = await fleet.fetch(
       request("GET", "/portal", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10848,8 +11049,8 @@ describe("fleet lease identity and idle", () => {
     const detail = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10859,12 +11060,30 @@ describe("fleet lease identity and idle", () => {
     expect(detailBody).toContain("attached lease");
     expect(detailBody).toContain("mac-mini / cbx_000000000099");
     expect(detailBody).toContain("/portal/leases/cbx_000000000099/vnc");
+    expect(detailBody).toContain(
+      "crabbox webvnc --provider aws --target macos --id mac-mini --open",
+    );
+
+    const friendDetail = await fleet.fetch(
+      request("GET", "/portal/hosts/aws/h-000000000001", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(friendDetail.status).toBe(200);
+    const friendDetailBody = await friendDetail.text();
+    expect(friendDetailBody).toContain("mac-mini / cbx_000000000099");
+    expect(friendDetailBody).not.toContain(
+      "crabbox webvnc --provider aws --target macos --id mac-mini --open",
+    );
 
     const vnc = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10874,8 +11093,8 @@ describe("fleet lease identity and idle", () => {
     const enablePage = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000002", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10887,8 +11106,8 @@ describe("fleet lease identity and idle", () => {
     const macVNC = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000002/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10898,8 +11117,8 @@ describe("fleet lease identity and idle", () => {
     const enabled = await fleet.fetch(
       request("POST", "/portal/hosts/aws/h-000000000002/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10910,8 +11129,8 @@ describe("fleet lease identity and idle", () => {
     const startPage = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000003/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
@@ -10932,8 +11151,8 @@ describe("fleet lease identity and idle", () => {
     const idlePost = await fleet.fetch(
       request("POST", "/portal/hosts/aws/h-000000000003/vnc", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
         body: {},
       }),
@@ -11338,7 +11557,7 @@ describe("fleet lease identity and idle", () => {
     expect(body).toContain("/portal/runs/run_000000000001/logs");
     expect(body).toContain("/portal/runs/run_000000000001/events");
     expect(body).toContain("/portal/leases/cbx_000000000001/release");
-    expect(body).not.toContain("run_000000000002");
+    expect(body).toContain("run_000000000002");
 
     const logs = await fleet.fetch(
       request("GET", "/portal/runs/run_000000000001/logs", { headers }),
@@ -11493,6 +11712,145 @@ describe("fleet lease identity and idle", () => {
     expect(missingTicket.status).toBe(401);
   });
 
+  it("keeps bridge tickets usable after endpoint binding mismatches", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = testLease({
+      id: "cbx_000000000001",
+      slug: "bound-lease",
+      owner: "owner@example.com",
+      org: "example-org",
+      desktop: true,
+      code: true,
+      state: "active",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const webVNCTicket = `wvnc_${"a".repeat(32)}`;
+    const codeTicket = `code_${"b".repeat(32)}`;
+    const egressTicket = `egress_${"c".repeat(32)}`;
+    const adapterTicket = `adapter_${"d".repeat(32)}`;
+    storage.seed(`webvnc-ticket:${webVNCTicket}`, {
+      ticket: webVNCTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`code-ticket:${codeTicket}`, {
+      ticket: codeTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`egress-ticket:${egressTicket}`, {
+      ticket: egressTicket,
+      leaseID: lease.id,
+      owner: lease.owner,
+      org: lease.org,
+      role: "host",
+      sessionID: "egress_bound1",
+      createdAt,
+      expiresAt,
+    });
+    storage.seed(`runtime-adapter-ticket:${adapterTicket}`, {
+      ticket: adapterTicket,
+      adapterID: "bound-adapter",
+      owner: lease.owner,
+      org: lease.org,
+      createdAt,
+      expiresAt,
+    });
+
+    const bridgeRequest = (path: string, ticket: string) =>
+      request("GET", path, {
+        headers: {
+          authorization: `Bearer ${ticket}`,
+          upgrade: "websocket",
+        },
+      });
+
+    const wrongWebVNCLease = await fleet.fetch(
+      bridgeRequest("/v1/leases/other-lease/webvnc/agent", webVNCTicket),
+    );
+    expect(wrongWebVNCLease.status).toBe(404);
+    expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeDefined();
+
+    const wrongCodeLease = await fleet.fetch(
+      bridgeRequest("/v1/leases/other-lease/code/agent", codeTicket),
+    );
+    expect(wrongCodeLease.status).toBe(404);
+    expect(storage.value(`code-ticket:${codeTicket}`)).toBeDefined();
+
+    const wrongEgressRole = await fleet.fetch(
+      bridgeRequest(`/v1/leases/${lease.id}/egress/client`, egressTicket),
+    );
+    expect(wrongEgressRole.status).toBe(401);
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeDefined();
+
+    const wrongEgressLease = await fleet.fetch(
+      bridgeRequest("/v1/leases/other-lease/egress/host", egressTicket),
+    );
+    expect(wrongEgressLease.status).toBe(404);
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeDefined();
+
+    const wrongAdapter = await fleet.fetch(
+      bridgeRequest("/v1/adapters/other-adapter/agent", adapterTicket),
+    );
+    expect(wrongAdapter.status).toBe(401);
+    expect(storage.value(`runtime-adapter-ticket:${adapterTicket}`)).toBeDefined();
+
+    const consumers = fleet as unknown as {
+      consumeWebVNCTicket(request: Request, identifier: string): Promise<{ status: string }>;
+      consumeCodeTicket(request: Request, identifier: string): Promise<{ status: string }>;
+      consumeEgressTicket(
+        request: Request,
+        identifier: string,
+        role: "host" | "client",
+      ): Promise<{ status: string }>;
+      consumeRuntimeAdapterTicket(request: Request, adapterID: string): Promise<{ status: string }>;
+    };
+
+    await expect(
+      consumers.consumeWebVNCTicket(
+        bridgeRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeCodeTicket(
+        bridgeRequest(`/v1/leases/${lease.id}/code/agent`, codeTicket),
+        lease.id,
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`code-ticket:${codeTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeEgressTicket(
+        bridgeRequest(`/v1/leases/${lease.id}/egress/host`, egressTicket),
+        lease.id,
+        "host",
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`egress-ticket:${egressTicket}`)).toBeUndefined();
+
+    await expect(
+      consumers.consumeRuntimeAdapterTicket(
+        bridgeRequest("/v1/adapters/bound-adapter/agent", adapterTicket),
+        "bound-adapter",
+      ),
+    ).resolves.toMatchObject({ status: "accepted" });
+    expect(storage.value(`runtime-adapter-ticket:${adapterTicket}`)).toBeUndefined();
+  });
+
   it("stops code bridge polling after terminal status responses", async () => {
     const page = await portalCode(
       testLease({
@@ -11572,16 +11930,23 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
     const headers = {
-      "x-crabbox-owner": "peter@example.com",
-      "x-crabbox-org": "openclaw",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
     };
     storage.seed(
       "lease:cbx_000000000001",
       testLease({
         id: "cbx_000000000001",
         slug: "blue-lobster",
-        owner: "peter@example.com",
-        org: "openclaw",
+        owner: "alice@example.com",
+        org: "example-org",
+        share: {
+          users: {
+            "viewer@example.com": "use",
+            "manager@example.com": "manage",
+          },
+          org: "use",
+        },
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
@@ -11639,6 +12004,9 @@ describe("fleet lease identity and idle", () => {
     expect(status.status).toBe(200);
     await expect(status.json()).resolves.toMatchObject({
       leaseID: "cbx_000000000001",
+      sessionID: "egress_camel123",
+      profile: "discord",
+      allow: ["discord.com"],
       hostConnected: false,
       clientConnected: false,
     });
@@ -11652,6 +12020,53 @@ describe("fleet lease identity and idle", () => {
     expect(portalBody).toContain("discord · discord.com");
     expect(portalBody).toContain("crabbox egress status --id blue-lobster");
     expect(portalBody).toContain("crabbox egress stop --id blue-lobster");
+
+    const viewerHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const viewerStatus = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/egress/status", {
+        headers: viewerHeaders,
+      }),
+    );
+    expect(viewerStatus.status).toBe(200);
+    await expect(viewerStatus.json()).resolves.toMatchObject({
+      leaseID: "cbx_000000000001",
+      sessionID: "",
+      profile: "",
+      allow: [],
+      hostConnected: false,
+      clientConnected: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+
+    const viewerPortal = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster", { headers: viewerHeaders }),
+    );
+    expect(viewerPortal.status).toBe(200);
+    const viewerPortalBody = await viewerPortal.text();
+    expect(viewerPortalBody).toContain("<strong>egress</strong><small>waiting for host</small>");
+    expect(viewerPortalBody).toContain('<span class="muted">active</span>');
+    expect(viewerPortalBody).not.toContain("discord · discord.com");
+    expect(viewerPortalBody).not.toContain("*.discordcdn.com");
+    expect(viewerPortalBody).not.toContain("crabbox egress status --id blue-lobster");
+    expect(viewerPortalBody).not.toContain("crabbox egress stop --id blue-lobster");
+
+    const managerStatus = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/egress/status", {
+        headers: {
+          "x-crabbox-owner": "manager@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    await expect(managerStatus.json()).resolves.toMatchObject({
+      sessionID: "egress_camel123",
+      profile: "discord",
+      allow: ["discord.com"],
+    });
 
     const missingTicket = await fleet.fetch(
       request("GET", "/v1/leases/blue-lobster/egress/host", {
@@ -11726,20 +12141,88 @@ describe("fleet lease identity and idle", () => {
     ).toBe(true);
   });
 
+  it("requires manage access to reset a WebVNC bridge", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "shared-desktop",
+        owner: "owner@example.com",
+        org: "example-org",
+        desktop: true,
+        share: {
+          users: {
+            "viewer@example.com": "use",
+            "manager@example.com": "manage",
+          },
+          org: "use",
+        },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const resetAs = (owner: string, org: string, admin = false) =>
+      fleet.fetch(
+        request("POST", "/v1/leases/shared-desktop/webvnc/reset", {
+          headers: {
+            "x-crabbox-owner": owner,
+            "x-crabbox-org": org,
+            ...(admin ? { "x-crabbox-admin": "true" } : {}),
+          },
+          body: {},
+        }),
+      );
+
+    const directUse = await resetAs("viewer@example.com", "example-org");
+    expect(directUse.status).toBe(403);
+    await expect(directUse.json()).resolves.toEqual({
+      error: "forbidden",
+      message: "lease manage access required",
+    });
+
+    const orgUse = await resetAs("org-viewer@example.com", "example-org");
+    expect(orgUse.status).toBe(403);
+    await expect(orgUse.json()).resolves.toEqual({
+      error: "forbidden",
+      message: "lease manage access required",
+    });
+
+    const status = await fleet.fetch(
+      request("GET", "/v1/leases/shared-desktop/webvnc/status", {
+        headers: {
+          "x-crabbox-owner": "owner@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    await expect(status.json()).resolves.toMatchObject({ events: [] });
+
+    const manager = await resetAs("manager@example.com", "example-org");
+    expect(manager.status).toBe(200);
+
+    const owner = await resetAs("owner@example.com", "example-org");
+    expect(owner.status).toBe(200);
+
+    const admin = await resetAs("admin@example.com", "other-org", true);
+    expect(admin.status).toBe(200);
+  });
+
   it("serves WebVNC pages only for desktop leases and requires an agent upgrade", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
     const headers = {
-      "x-crabbox-owner": "peter@example.com",
-      "x-crabbox-org": "openclaw",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
     };
     storage.seed(
       "lease:cbx_000000000001",
       testLease({
         id: "cbx_000000000001",
         slug: "blue-lobster",
-        owner: "peter@example.com",
-        org: "openclaw",
+        owner: "alice@example.com",
+        org: "example-org",
         desktop: true,
         share: {
           users: {
@@ -11756,8 +12239,8 @@ describe("fleet lease identity and idle", () => {
       testLease({
         id: "cbx_000000000002",
         slug: "plain-lobster",
-        owner: "peter@example.com",
-        org: "openclaw",
+        owner: "alice@example.com",
+        org: "example-org",
         desktop: false,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
@@ -11803,6 +12286,10 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("rfb.qualityLevel = 6");
     expect(pageBody).toContain("MetaLeft");
     expect(pageBody).toContain("ControlLeft");
+    expect(pageBody).toContain("window.crabboxDialog?.prompt(");
+    expect(pageBody).toContain("Clipboard access is unavailable.");
+    expect(pageBody).toContain('document.body.dataset.portalDialogOpen === "true"');
+    expect(pageBody).not.toContain("window.prompt(");
     expect(pageBody).toContain("position:sticky");
     expect(pageBody).toContain('data-provider="hetzner"');
     expect(pageBody).toContain('data-target="linux"');
@@ -11856,12 +12343,17 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/portal/leases/blue-lobster/vnc", {
         headers: {
           "x-crabbox-owner": "friend@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
       }),
     );
     expect(friendPage.status).toBe(200);
     const friendPageBody = await friendPage.text();
+    expect(friendPageBody).not.toContain(
+      "crabbox webvnc --provider hetzner --target linux --id blue-lobster --open",
+    );
+    expect(friendPageBody).not.toContain('id="vnc-bridge-cmd"');
+    expect(friendPageBody).not.toContain('id="vnc-copy"');
     expect(friendPageBody).not.toContain('<button id="vnc-share"');
     expect(friendPageBody).not.toContain('<dialog id="vnc-share-dialog"');
     expect(friendPageBody).not.toContain("People with access");
@@ -11869,6 +12361,51 @@ describe("fleet lease identity and idle", () => {
     expect(friendPageBody).not.toContain("friend@example.com");
     expect(friendPageBody).not.toContain("teammate@example.com");
     expect(friendPageBody).not.toContain('"org":"use"');
+
+    const managerPage = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/vnc", {
+        headers: {
+          "x-crabbox-owner": "teammate@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(managerPage.status).toBe(200);
+    expect(await managerPage.text()).toContain(
+      "crabbox webvnc --provider hetzner --target linux --id blue-lobster --open",
+    );
+
+    const friendStatus = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/vnc/status", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(friendStatus.status).toBe(200);
+    await expect(friendStatus.json()).resolves.toMatchObject({
+      leaseID: "cbx_000000000001",
+      command: "",
+      message: "WebVNC daemon not running; ask a lease manager to start or refresh the bridge",
+    });
+
+    const friendViewer = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/vnc/viewer", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+          upgrade: "websocket",
+        },
+      }),
+    );
+    expect(friendViewer.status).toBe(409);
+    await expect(friendViewer.json()).resolves.toEqual({
+      error: "webvnc_bridge_missing",
+      message:
+        "No WebVNC backend is available yet; ask a lease manager to start or refresh the bridge.",
+      command: "",
+    });
 
     const status = await fleet.fetch(
       request("GET", "/portal/leases/blue-lobster/vnc/status", { headers }),
@@ -11998,7 +12535,7 @@ describe("fleet lease identity and idle", () => {
     );
     const observerTheme = await fleet.fetch(
       request("POST", "/portal/leases/blue-lobster/vnc/theme", {
-        headers: { "x-crabbox-owner": "friend@example.com", "x-crabbox-org": "openclaw" },
+        headers: { "x-crabbox-owner": "friend@example.com", "x-crabbox-org": "example-org" },
         body: { theme: "dark", viewerID: "viewer_observer1" },
       }),
     );
@@ -14246,6 +14783,345 @@ describe("fleet run history", () => {
     ]);
   });
 
+  it("gives lease owners read-only audit access to shared-user runs", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const actorHeaders = {
+      "x-crabbox-owner": "bob@example.com",
+      "x-crabbox-org": "elsewhere",
+    };
+    const strangerHeaders = {
+      "x-crabbox-owner": "stranger@example.com",
+      "x-crabbox-org": "elsewhere",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        share: { users: { "bob@example.com": "use" } },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        owner: "charlie@example.com",
+        org: "another-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000003",
+      testLease({
+        id: "cbx_000000000003",
+        owner: "bob@example.com",
+        org: "elsewhere",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers: actorHeaders,
+        body: {
+          leaseID: "cbx_000000000001",
+          command: ["pnpm", "test"],
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { run } = (await create.json()) as { run: RunRecord };
+    expect(run).toMatchObject({
+      owner: "bob@example.com",
+      org: "elsewhere",
+      leaseIDs: ["cbx_000000000001"],
+      leaseOwners: [{ owner: "alice@example.com", org: "example-org" }],
+    });
+
+    const reattribute = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        headers: actorHeaders,
+        body: {
+          type: "lease.created",
+          leaseID: "cbx_000000000002",
+        },
+      }),
+    );
+    expect(reattribute.status).toBe(404);
+
+    const listed = await fleet.fetch(
+      request("GET", "/v1/runs?leaseID=cbx_000000000001", { headers: ownerHeaders }),
+    );
+    await expect(listed.json()).resolves.toMatchObject({
+      runs: [
+        {
+          id: run.id,
+          owner: "bob@example.com",
+          leaseOwners: [{ owner: "alice@example.com", org: "example-org" }],
+        },
+      ],
+    });
+
+    const ownerRead = await fleet.fetch(
+      request("GET", `/v1/runs/${run.id}`, { headers: ownerHeaders }),
+    );
+    expect(ownerRead.status).toBe(200);
+    const ownerEvents = await fleet.fetch(
+      request("GET", `/v1/runs/${run.id}/events`, { headers: ownerHeaders }),
+    );
+    expect(ownerEvents.status).toBe(200);
+
+    const deniedMutations = await Promise.all(
+      (
+        [
+          ["events", { type: "stdout", stream: "stdout", data: "forged\n" }],
+          [
+            "telemetry",
+            {
+              telemetry: {
+                capturedAt: "2026-05-01T00:00:10Z",
+                source: "ssh-linux",
+                load1: 1,
+              },
+            },
+          ],
+          ["finish", { exitCode: 0, log: "forged\n" }],
+        ] as const
+      ).map(([action, body]) =>
+        fleet.fetch(
+          request("POST", `/v1/runs/${run.id}/${action}`, {
+            headers: ownerHeaders,
+            body,
+          }),
+        ),
+      ),
+    );
+    for (const response of deniedMutations) {
+      expect(response.status).toBe(404);
+    }
+
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID: "owner-audit",
+      owner: "alice@example.com",
+      org: "example-org",
+      subscriptions: {},
+    });
+    (
+      fleet as unknown as {
+        controlSockets: Map<string, WebSocket>;
+      }
+    ).controlSockets.set("owner-audit", socket as unknown as WebSocket);
+    await fleet.webSocketMessage(
+      socket as unknown as WebSocket,
+      JSON.stringify({ type: "subscribe_run", runID: run.id, after: 0 }),
+    );
+    expect(socket.sentJSON()[0]).toMatchObject({
+      type: "run_events",
+      runID: run.id,
+      events: [{ type: "run.started" }],
+    });
+
+    const replacement = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        headers: actorHeaders,
+        body: {
+          type: "lease.created",
+          leaseID: "cbx_000000000003",
+        },
+      }),
+    );
+    expect(replacement.status).toBe(201);
+    expect(socket.sentJSON()[1]).toMatchObject({
+      type: "run_events",
+      runID: run.id,
+      events: [{ type: "lease.created", leaseID: "cbx_000000000003" }],
+    });
+    const originalLeaseHistory = await fleet.fetch(
+      request("GET", "/v1/runs?leaseID=cbx_000000000001", { headers: ownerHeaders }),
+    );
+    await expect(originalLeaseHistory.json()).resolves.toMatchObject({
+      runs: [{ id: run.id, leaseID: "cbx_000000000003" }],
+    });
+    expect(
+      (await fleet.fetch(request("GET", `/v1/runs/${run.id}`, { headers: ownerHeaders }))).status,
+    ).toBe(200);
+
+    const stdout = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        headers: actorHeaders,
+        body: { type: "stdout", stream: "stdout", data: "ok\n" },
+      }),
+    );
+    expect(stdout.status).toBe(201);
+    expect(socket.sentJSON()[2]).toMatchObject({
+      type: "run_events",
+      runID: run.id,
+      events: [{ type: "stdout", data: "ok\n" }],
+    });
+
+    const telemetry = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/telemetry`, {
+        headers: actorHeaders,
+        body: {
+          telemetry: {
+            capturedAt: "2026-05-01T00:00:10Z",
+            source: "ssh-linux",
+            load1: 0.5,
+          },
+        },
+      }),
+    );
+    expect(telemetry.status).toBe(200);
+
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers: actorHeaders,
+        body: { exitCode: 0, log: "ok\n" },
+      }),
+    );
+    expect(finish.status).toBe(200);
+
+    const ownerLogs = await fleet.fetch(
+      request("GET", `/v1/runs/${run.id}/logs`, { headers: ownerHeaders }),
+    );
+    expect(ownerLogs.status).toBe(200);
+    expect(await ownerLogs.text()).toBe("ok\n");
+
+    const leasePage = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster", { headers: ownerHeaders }),
+    );
+    expect(leasePage.status).toBe(200);
+    expect(await leasePage.text()).toContain(run.id);
+    expect(
+      (await fleet.fetch(request("GET", `/portal/runs/${run.id}`, { headers: ownerHeaders })))
+        .status,
+    ).toBe(200);
+
+    const strangerList = await fleet.fetch(
+      request("GET", "/v1/runs?leaseID=cbx_000000000001", {
+        headers: strangerHeaders,
+      }),
+    );
+    await expect(strangerList.json()).resolves.toEqual({ runs: [] });
+    expect(
+      (await fleet.fetch(request("GET", `/v1/runs/${run.id}`, { headers: strangerHeaders })))
+        .status,
+    ).toBe(404);
+  });
+
+  it("reconstructs backing lease audit access for legacy runs", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const ownerHeaders = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "alice@example.com",
+        org: "example-org",
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        owner: "bob@example.com",
+        org: "elsewhere",
+      }),
+    );
+    storage.seed(
+      "run:run_000000000001",
+      testRun({
+        id: "run_000000000001",
+        leaseID: "cbx_000000000002",
+        owner: "bob@example.com",
+        org: "elsewhere",
+        eventCount: 2,
+      }),
+    );
+    storage.seed("runevent:run_000000000001:000000000001", {
+      runID: "run_000000000001",
+      seq: 1,
+      type: "lease.created",
+      leaseID: "cbx_000000000001",
+      createdAt: "2026-05-01T00:00:01.000Z",
+    });
+    storage.seed("runevent:run_000000000001:000000000002", {
+      runID: "run_000000000001",
+      seq: 2,
+      type: "lease.created",
+      leaseID: "cbx_000000000002",
+      createdAt: "2026-05-01T00:00:02.000Z",
+    });
+
+    const listed = await fleet.fetch(
+      request("GET", "/v1/runs?leaseID=cbx_000000000001", { headers: ownerHeaders }),
+    );
+    await expect(listed.json()).resolves.toMatchObject({
+      runs: [{ id: "run_000000000001" }],
+    });
+    expect(
+      (await fleet.fetch(request("GET", "/v1/runs/run_000000000001", { headers: ownerHeaders })))
+        .status,
+    ).toBe(200);
+    expect(storage.value<RunRecord>("run:run_000000000001")).toMatchObject({
+      leaseIDs: ["cbx_000000000001", "cbx_000000000002"],
+      leaseOwners: [
+        { owner: "alice@example.com", org: "example-org" },
+        { owner: "bob@example.com", org: "elsewhere" },
+      ],
+    });
+  });
+
+  it("lets admins record a replacement lease outside their owner scope", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "alice@example.com",
+        org: "example-org",
+      }),
+    );
+    storage.seed(
+      "run:run_000000000001",
+      testRun({
+        id: "run_000000000001",
+        leaseID: "",
+        leaseIDs: [],
+        owner: "bob@example.com",
+        org: "elsewhere",
+        leaseOwners: [],
+      }),
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/runs/run_000000000001/events", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { type: "lease.created", leaseID: "cbx_000000000001" },
+      }),
+    );
+    expect(response.status).toBe(201);
+    expect(storage.value<RunRecord>("run:run_000000000001")).toMatchObject({
+      leaseID: "cbx_000000000001",
+      leaseIDs: ["cbx_000000000001"],
+      leaseOwners: [{ owner: "alice@example.com", org: "example-org" }],
+    });
+  });
+
   it("streams run events and lease heartbeats over a control websocket", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -15704,6 +16580,9 @@ function fakeProvider(
           lease: LeaseRecord;
         }
       | undefined;
+    onRecoverServer?: (
+      lease: LeaseRecord,
+    ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
   } = {},
   onDelete?: (id: string) => Promise<void>,
   onGet?: (id: string) => Promise<ProviderMachine> | ProviderMachine,
@@ -15719,6 +16598,13 @@ function fakeProvider(
       }
       return result.servers ?? [];
     },
+    ...(result.onRecoverServer
+      ? {
+          async recoverServer(lease: LeaseRecord) {
+            return await result.onRecoverServer?.(lease);
+          },
+        }
+      : {}),
     async findServerByLease(leaseID: string) {
       const servers = result.onList ? await result.onList() : (result.servers ?? []);
       return servers.find((server) => server.labels?.["lease"] === leaseID);

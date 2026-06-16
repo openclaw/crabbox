@@ -171,10 +171,15 @@ if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
 }
 Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
 Set-Content -NoNewline -Encoding ASCII -Path $usernamePath -Value $user
+$userSID = (Get-LocalUser -Name $user).SID.Value
+$credentialPaths = @($passwordPath)
 if ($passwordMirrorPath) {
   Set-Content -NoNewline -Encoding ASCII -Path $passwordMirrorPath -Value $userPassword
+  $credentialPaths += $passwordMirrorPath
 }
-$userSID = (Get-LocalUser -Name $user).SID.Value
+foreach ($credentialPath in $credentialPaths) {
+  icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+}
 icacls.exe $workRoot /grant "*${userSID}:(OI)(CI)F" | Out-Null
 $userSSHDir = Join-Path (Join-Path "C:\Users" $user) ".ssh"
 $userAuthorizedKeys = Join-Path $userSSHDir "authorized_keys"

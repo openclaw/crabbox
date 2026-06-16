@@ -169,6 +169,16 @@ docker run --rm -p 8080:8080 \
   crabbox-coordinator:local
 ```
 
+The checked-in runtime Dockerfiles keep readable base-image tags but pin them to
+multi-platform manifest digests. When refreshing a base image, resolve the
+current manifest-list digest, update the tag and digest together, build the
+affected image, and run the repository check:
+
+```sh
+docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'
+node scripts/check-docker-base-images.mjs
+```
+
 The service creates PostgreSQL schemas `crabbox` and `crabbox_jobs`. Use
 `GET /v1/health` for liveness and `GET /v1/ready` for database readiness.
 `SIGTERM` and `SIGINT` stop new requests, drain active HTTP/WebSocket and

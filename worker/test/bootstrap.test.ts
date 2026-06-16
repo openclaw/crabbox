@@ -493,10 +493,18 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("Start-Service -Name tvnserver");
     expect(got).toContain("New-CrabboxPassword");
     expect(got).toContain("${userSID}:F");
+    expect(got).toContain("$credentialPaths = @($passwordPath)");
+    expect(got).toContain("$credentialPaths += $passwordMirrorPath");
+    expect(got).toContain(
+      'icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"',
+    );
     expect(got).toContain("C:\\ProgramData\\crabbox\\windows.username");
     expect(got).toContain("AutoAdminLogon");
     expect(got).toContain("Restart-Computer -Force");
     expect(got).toContain("exit 0");
+    expect(got.indexOf("$credentialPaths += $passwordMirrorPath")).toBeLessThan(
+      got.indexOf("foreach ($credentialPath in $credentialPaths)"),
+    );
     const setupIndex = got.indexOf(
       "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
     );
@@ -515,6 +523,10 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("OpenSSH-Win64.zip");
     expect(got).toContain("Git-2.52.0-64-bit.exe");
     expect(got).toContain("$passwordPath = $windowsPasswordPath");
+    expect(got).toContain("$credentialPaths = @($passwordPath)");
+    expect(got).toContain(
+      'icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"',
+    );
     expect(got).toContain("Restart-Service sshd -Force");
     expect(got).toContain("Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath");
     const setupIndex = got.indexOf(
@@ -528,6 +540,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("CrabboxUserVNC");
     expect(got).not.toContain("AutoAdminLogon");
     expect(got).not.toContain("Restart-Computer -Force");
+    expect(got).not.toContain("*S-1-5-32-545:");
+    expect(got).not.toContain("Authenticated Users");
   });
 
   it("builds Windows WSL2 bootstrap without desktop/VNC", () => {

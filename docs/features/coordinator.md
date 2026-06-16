@@ -296,7 +296,10 @@ directly against the runner over SSH:
 
 Read back with `GET /v1/runs`, `/v1/runs/{id}`, `/logs`, and `/events`. The
 `/v1/control` websocket lets clients subscribe to live run events and send lease
-heartbeats.
+heartbeats. A run keeps its initiating actor in `owner`/`org` plus every backing
+lease identity used by replacement flows. Each backing lease owner can read and
+subscribe for audit purposes, while only the actor or an admin can append
+events or telemetry and finish the run.
 
 ## CLI responsibilities
 

@@ -386,35 +386,42 @@ type CoordinatorRunResponse struct {
 	Run CoordinatorRun `json:"run"`
 }
 
+type CoordinatorRunLeaseOwner struct {
+	Owner string `json:"owner"`
+	Org   string `json:"org"`
+}
+
 type CoordinatorRun struct {
-	ID           string               `json:"id"`
-	LeaseID      string               `json:"leaseID"`
-	Slug         string               `json:"slug,omitempty"`
-	Owner        string               `json:"owner"`
-	Org          string               `json:"org"`
-	Provider     string               `json:"provider"`
-	TargetOS     string               `json:"target,omitempty"`
-	WindowsMode  string               `json:"windowsMode,omitempty"`
-	Class        string               `json:"class"`
-	ServerType   string               `json:"serverType"`
-	Command      []string             `json:"command"`
-	Label        string               `json:"label,omitempty"`
-	State        string               `json:"state"`
-	Phase        string               `json:"phase,omitempty"`
-	ExitCode     *int                 `json:"exitCode,omitempty"`
-	SyncMs       int64                `json:"syncMs,omitempty"`
-	CommandMs    int64                `json:"commandMs,omitempty"`
-	DurationMs   int64                `json:"durationMs,omitempty"`
-	LogBytes     int64                `json:"logBytes"`
-	LogTruncated bool                 `json:"logTruncated"`
-	BlockedStage string               `json:"blockedStage,omitempty"`
-	RetryLikely  string               `json:"retryLikely,omitempty"`
-	Results      *TestResultSummary   `json:"results,omitempty"`
-	Telemetry    *RunTelemetrySummary `json:"telemetry,omitempty"`
-	StartedAt    string               `json:"startedAt"`
-	LastEventAt  string               `json:"lastEventAt,omitempty"`
-	EventCount   int                  `json:"eventCount,omitempty"`
-	EndedAt      string               `json:"endedAt,omitempty"`
+	ID           string                     `json:"id"`
+	LeaseID      string                     `json:"leaseID"`
+	LeaseIDs     []string                   `json:"leaseIDs,omitempty"`
+	Slug         string                     `json:"slug,omitempty"`
+	Owner        string                     `json:"owner"`
+	Org          string                     `json:"org"`
+	LeaseOwners  []CoordinatorRunLeaseOwner `json:"leaseOwners,omitempty"`
+	Provider     string                     `json:"provider"`
+	TargetOS     string                     `json:"target,omitempty"`
+	WindowsMode  string                     `json:"windowsMode,omitempty"`
+	Class        string                     `json:"class"`
+	ServerType   string                     `json:"serverType"`
+	Command      []string                   `json:"command"`
+	Label        string                     `json:"label,omitempty"`
+	State        string                     `json:"state"`
+	Phase        string                     `json:"phase,omitempty"`
+	ExitCode     *int                       `json:"exitCode,omitempty"`
+	SyncMs       int64                      `json:"syncMs,omitempty"`
+	CommandMs    int64                      `json:"commandMs,omitempty"`
+	DurationMs   int64                      `json:"durationMs,omitempty"`
+	LogBytes     int64                      `json:"logBytes"`
+	LogTruncated bool                       `json:"logTruncated"`
+	BlockedStage string                     `json:"blockedStage,omitempty"`
+	RetryLikely  string                     `json:"retryLikely,omitempty"`
+	Results      *TestResultSummary         `json:"results,omitempty"`
+	Telemetry    *RunTelemetrySummary       `json:"telemetry,omitempty"`
+	StartedAt    string                     `json:"startedAt"`
+	LastEventAt  string                     `json:"lastEventAt,omitempty"`
+	EventCount   int                        `json:"eventCount,omitempty"`
+	EndedAt      string                     `json:"endedAt,omitempty"`
 }
 
 type CoordinatorRunEventsResponse struct {

@@ -2,9 +2,10 @@ import {
   authenticateRequest,
   requestWithAuthContext,
   requestWithoutProxySecret,
+  type AuthContext,
   type AuthRequestContext,
 } from "./auth";
-import { json } from "./http";
+import { bearerToken, json } from "./http";
 import type { Env } from "./types";
 
 export type CoordinatorFetch = (request: Request) => Promise<Response>;
@@ -64,6 +65,13 @@ export async function prepareCoordinatorRequest(
   ) {
     return { request: requestWithoutProxySecret(request), authenticated: false };
   }
+  const runtimeAdapterAuth = runtimeAdapterServiceAuth(request, env, url);
+  if (runtimeAdapterAuth) {
+    return {
+      request: requestWithAuthContext(requestWithoutProxySecret(request), runtimeAdapterAuth),
+      authenticated: true,
+    };
+  }
   const portal = url.pathname.startsWith("/portal");
   const authRequest = portal ? requestWithPortalCookie(request) : request;
   const auth = await authenticateRequest(authRequest, env, authContext);
@@ -117,6 +125,27 @@ function isRuntimeAdapterAgentUpgrade(request: Request, url: URL): boolean {
     request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
     /^\/v1\/adapters\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\/agent$/.test(url.pathname)
   );
+}
+
+function runtimeAdapterServiceAuth(
+  request: Request,
+  env: Pick<Env, "CRABBOX_RUNTIME_ADAPTER_TOKEN" | "CRABBOX_DEFAULT_ORG">,
+  url: URL,
+): AuthContext | undefined {
+  if (url.pathname !== "/v1/workspaces" && !url.pathname.startsWith("/v1/workspaces/")) {
+    return undefined;
+  }
+  const expected = env.CRABBOX_RUNTIME_ADAPTER_TOKEN?.trim();
+  if (!expected || bearerToken(request) !== expected) {
+    return undefined;
+  }
+  return {
+    authorized: true,
+    admin: false,
+    auth: "bearer",
+    owner: "service@openclaw.org",
+    org: env.CRABBOX_DEFAULT_ORG ?? "openclaw",
+  };
 }
 
 function canonicalPortalRedirect(request: Request, env: Env, url: URL): Response | undefined {

@@ -53,6 +53,13 @@ func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, c
 	return rec
 }
 
+func (r *runRecorder) UseCoordinator(coord *CoordinatorClient) {
+	if r == nil || coord == nil {
+		return
+	}
+	r.coord = coord
+}
+
 func (r *runRecorder) Event(kind, phase, message string) {
 	if r == nil || r.runID == "" || (r.finished && kind != "lease.released") {
 		return

@@ -126,24 +126,38 @@ func TestGCPAcquireCleansUpCreatedServerOnFallbackClientFailure(t *testing.T) {
 func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := t.TempDir()
-	if err := core.ClaimLeaseForRepoProviderScope("cbx_expired", "expired-box", "gcp", "project:project-a", repo, time.Minute, false); err != nil {
+	expiredLeaseID := "cbx_111111111111"
+	staleLeaseID := "cbx_222222222222"
+	otherProjectLeaseID := "cbx_333333333333"
+	if err := core.ClaimLeaseForRepoProviderScope(expiredLeaseID, "expired-box", "gcp", "project:project-a", repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.ClaimLeaseForRepoProviderScope("cbx_stale", "stale-box", "gcp", "project:project-a", repo, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScope(staleLeaseID, "stale-box", "gcp", "project:project-a", repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.ClaimLeaseForRepoProviderScope("cbx_other_project", "other-box", "gcp", "project:project-b", repo, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScope(otherProjectLeaseID, "other-box", "gcp", "project:project-b", repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeGCPDoctorClient{servers: []Server{{
-		CloudID: "crabbox-expired",
-		Name:    "crabbox-expired",
-		Labels: map[string]string{
-			"lease":      "cbx_expired",
-			"state":      "ready",
-			"expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
+	fake := &fakeGCPDoctorClient{servers: []Server{
+		{
+			CloudID: core.LeaseProviderName(expiredLeaseID, "expired-box"),
+			Name:    core.LeaseProviderName(expiredLeaseID, "expired-box"),
+			Labels: map[string]string{
+				"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+				"lease": expiredLeaseID, "slug": "expired-box",
+				"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
+			},
 		},
-	}}}
+		{
+			CloudID: "crabbox-forged",
+			Name:    "crabbox-forged",
+			Labels: map[string]string{
+				"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+				"lease": "cbx_444444444444", "slug": "forged",
+				"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
+			},
+		},
+	}}
 	old := newGCPClient
 	newGCPClient = func(context.Context, Config) (gcpClient, error) {
 		return fake, nil
@@ -159,10 +173,10 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 	if err := cleaner.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.deleted) != 1 {
-		t.Fatalf("deleted=%v want one deleted server", fake.deleted)
+	if len(fake.deleted) != 1 || fake.deleted[0] != core.LeaseProviderName(expiredLeaseID, "expired-box") {
+		t.Fatalf("deleted=%v want canonical expired server", fake.deleted)
 	}
-	for _, leaseID := range []string{"cbx_expired", "cbx_stale"} {
+	for _, leaseID := range []string{expiredLeaseID, staleLeaseID} {
 		claim, err := core.ReadLeaseClaim(leaseID)
 		if err != nil {
 			t.Fatal(err)
@@ -171,7 +185,7 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 			t.Fatalf("claim %s still present: %#v", leaseID, claim)
 		}
 	}
-	claim, err := core.ReadLeaseClaim("cbx_other_project")
+	claim, err := core.ReadLeaseClaim(otherProjectLeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,13 +193,29 @@ func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 		t.Fatal("other project claim was removed")
 	}
 	out := stderr.String()
-	if !strings.Contains(out, "delete server id=crabbox-expired") || !strings.Contains(out, "remove stale claim lease=cbx_stale") {
+	if !strings.Contains(out, "delete server id="+core.LeaseProviderName(expiredLeaseID, "expired-box")) ||
+		!strings.Contains(out, "remove stale claim lease="+staleLeaseID) {
 		t.Fatalf("cleanup output=%q", out)
 	}
 }
 
 func TestGCPDoctorListsInventoryOnly(t *testing.T) {
-	fake := &fakeGCPDoctorClient{servers: []Server{{CloudID: "crabbox-one"}, {CloudID: "crabbox-two"}}}
+	server := func(leaseID, slug string) Server {
+		name := core.LeaseProviderName(leaseID, slug)
+		return Server{
+			CloudID: name,
+			Name:    name,
+			Labels: map[string]string{
+				"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
+				"lease": leaseID, "slug": slug,
+			},
+		}
+	}
+	fake := &fakeGCPDoctorClient{servers: []Server{
+		server("cbx_555555555555", "one"),
+		server("cbx_666666666666", "two"),
+		{CloudID: "crabbox-forged", Name: "crabbox-forged", Labels: map[string]string{"crabbox": "true"}},
+	}}
 	old := newGCPClient
 	newGCPClient = func(context.Context, Config) (gcpClient, error) {
 		return fake, nil

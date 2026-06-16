@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26-bookworm AS runner-build
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26-bookworm@sha256:5f68ec6805843bd3981a951ffada82a26a0bd2631045c8f7dba483fa868f5ec5 AS runner-build
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -6,9 +6,9 @@ WORKDIR /src
 COPY cloudflare-container-runner/go.mod cloudflare-container-runner/main.go ./
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/crabbox-cloudflare-container-runner .
 
-FROM docker.io/library/golang:1.26-bookworm AS go-runtime
+FROM docker.io/library/golang:1.26-bookworm@sha256:5f68ec6805843bd3981a951ffada82a26a0bd2631045c8f7dba483fa868f5ec5 AS go-runtime
 
-FROM docker.io/library/node:24-bookworm
+FROM docker.io/library/node:24-bookworm@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0efa6badd7
 
 ARG TARGETARCH=amd64
 ARG GH_VERSION=2.92.0

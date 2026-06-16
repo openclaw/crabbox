@@ -4,6 +4,9 @@
 It does not open a connection itself — it prints the command so you can copy it,
 pipe it, or wrap it in your own tooling.
 
+Use [`crabbox connect`](connect.md) when you want Crabbox to open the
+interactive SSH session directly.
+
 ```sh
 crabbox ssh --id swift-crab
 crabbox ssh --id swift-crab --network tailscale
@@ -83,6 +86,7 @@ capabilities.
 ## See also
 
 - [`crabbox warmup`](warmup.md) — lease a box and wait until it is ready.
+- [`crabbox connect`](connect.md) — open an interactive SSH session directly.
 - [`crabbox status`](status.md) / [`crabbox inspect`](inspect.md) — check lease
   state and connection details.
 - [`crabbox vnc`](vnc.md) / [`crabbox code`](code.md) — other access bridges for

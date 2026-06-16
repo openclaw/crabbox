@@ -38,8 +38,10 @@ are rejected `401 unauthorized`. The Node runtime can instead accept an
 explicitly configured trusted reverse-proxy identity from allowlisted peer
 CIDRs. The generally unauthenticated routes are `GET /v1/health`, the GitHub
 login/OAuth and portal login/logout routes, and bridge agent upgrades that use
-short-lived tickets. Authentication is resolved in `worker/src/auth.ts` in this
-precedence:
+short-lived tickets. The `/v1/workspaces` route tree also accepts the dedicated
+`CRABBOX_RUNTIME_ADAPTER_TOKEN` as a non-admin `service@openclaw.org` identity;
+that credential is rejected from every other coordinator route. Normal
+authentication is resolved in `worker/src/auth.ts` in this precedence:
 
 1. **Admin token** — the request token equals the coordinator secret
    `CRABBOX_ADMIN_TOKEN`. Grants admin scope.
@@ -63,9 +65,12 @@ by coordinator config:
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes.
 
-User tokens can only see and mutate leases, runs, logs, and usage for their own
-`owner`/`org` identity. See [auth and admin](features/auth-admin.md) and
-[broker auth routing](features/broker-auth-routing.md) for the full flow.
+User tokens can only mutate leases, runs, and usage for their own `owner`/`org`
+identity. Lease owners also have read-only audit access to run history, logs,
+events, telemetry, and live event subscriptions for work recorded against
+their leases, including runs that later replace the active backing lease. See
+[auth and admin](features/auth-admin.md) and [broker auth
+routing](features/broker-auth-routing.md) for the full flow.
 
 ### Cloudflare Access (optional defense-in-depth)
 
@@ -117,7 +122,7 @@ and provider ingress rules.
 There are three effective roles:
 
 ```text
-user        acquire/heartbeat/release own leases; read own leases/runs/logs/usage
+user        acquire/heartbeat/release own leases; read own and owned-lease run audit data
 operator    shared automation identity via a shared bearer token
 admin       view all leases/runs/pool/usage; drain/delete machines; image lifecycle
 ```
@@ -170,6 +175,8 @@ Inject these as Cloudflare Worker secrets or Node service secrets, never in the
 repo:
 
 - `CRABBOX_ADMIN_TOKEN` — admin and image-lifecycle routes.
+- `CRABBOX_RUNTIME_ADAPTER_TOKEN` — route-scoped service access to the
+  `/v1/workspaces` lifecycle API only.
 - `CRABBOX_SHARED_TOKEN` — trusted operator automation; also the fallback
   signing key when `CRABBOX_SESSION_SECRET` is unset.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,

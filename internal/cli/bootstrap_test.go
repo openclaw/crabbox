@@ -546,6 +546,9 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"Stop-Service -Name tvnserver",
 		"New-CrabboxPassword",
 		"${userSID}:F",
+		"$credentialPaths = @($passwordPath)",
+		"$credentialPaths += $passwordMirrorPath",
+		`icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"`,
 		`C:\ProgramData\crabbox\vnc.password`,
 		`C:\ProgramData\crabbox\windows.username`,
 		"AutoAdminLogon",
@@ -564,6 +567,11 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	if strings.Contains(got, "Start-Service -Name tvnserver") {
 		t.Fatalf("windows user data should not start service-session VNC")
 	}
+	mirrorIndex := strings.Index(got, "$credentialPaths += $passwordMirrorPath")
+	aclIndex := strings.Index(got, "foreach ($credentialPath in $credentialPaths)")
+	if mirrorIndex < 0 || aclIndex < 0 || mirrorIndex > aclIndex {
+		t.Fatalf("windows password mirror must be included before credential ACL hardening")
+	}
 }
 
 func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
@@ -577,6 +585,8 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		"OpenSSH-Win64.zip",
 		"Git-2.52.0-64-bit.exe",
 		"$passwordPath = $windowsPasswordPath",
+		"$credentialPaths = @($passwordPath)",
+		`icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"`,
 		"Restart-Service sshd -Force",
 		"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
 	} {
@@ -598,6 +608,8 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		"CrabboxUserVNC",
 		"AutoAdminLogon",
 		"Restart-Computer -Force",
+		"*S-1-5-32-545:",
+		"Authenticated Users",
 	} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("windows core bootstrap should not include %q", notWant)

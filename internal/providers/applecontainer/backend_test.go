@@ -149,14 +149,28 @@ func TestAliasDoesNotCollideWithLocalContainer(t *testing.T) {
 
 func TestApplyDefaults(t *testing.T) {
 	cfg := core.BaseConfig()
+	wantImage := cfg.AppleContainer.Image
 	cfg.Provider = providerName
 	cfg.AppleContainer = core.AppleContainerConfig{}
 	applyDefaults(&cfg)
-	if cfg.AppleContainer.CLIPath != "container" || cfg.AppleContainer.Image != "debian:bookworm" || cfg.AppleContainer.User != "crabbox" || cfg.AppleContainer.WorkRoot != "/work/crabbox" {
+	if cfg.AppleContainer.CLIPath != "container" || cfg.AppleContainer.Image != wantImage || cfg.AppleContainer.User != "crabbox" || cfg.AppleContainer.WorkRoot != "/work/crabbox" {
 		t.Fatalf("defaults not applied: %#v", cfg.AppleContainer)
 	}
 	if cfg.SSHUser != "crabbox" || cfg.SSHPort != sshPort || cfg.WorkRoot != "/work/crabbox" {
 		t.Fatalf("derived ssh fields wrong: user=%s port=%s work=%s", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
+	}
+}
+
+func TestApplyDefaultsPreservesExplicitImage(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AppleContainer.Image = "example-org/custom:tag"
+	applyDefaults(&cfg)
+	if cfg.AppleContainer.Image != "example-org/custom:tag" {
+		t.Fatalf("explicit image was overwritten: %q", cfg.AppleContainer.Image)
+	}
+	if cfg.ServerType != "example-org/custom:tag" {
+		t.Fatalf("server type=%q want explicit image", cfg.ServerType)
 	}
 }
 
@@ -401,6 +415,37 @@ func TestListContainersFiltersByLabel(t *testing.T) {
 	}
 }
 
+func TestListContainersParsesObjectStatusNetworks(t *testing.T) {
+	lsJSON := `[{
+		"status":{
+			"state":"running",
+			"networks":[{"address":"192.168.64.21/24","gateway":"192.168.64.1"}]
+		},
+		"configuration":{
+			"id":"crabbox-object-status",
+			"image":{"reference":"debian:bookworm"},
+			"labels":{"crabbox":"true","provider":"apple-container","lease":"cbx_456","slug":"object-status","state":"ready","ssh_user":"runner","work_root":"/work/crabbox","image":"debian:bookworm"}
+		}
+	}]`
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{
+			commandKey([]string{"ls", "--all", "--format", "json"}): {Stdout: lsJSON},
+		},
+	}
+	b := testBackend(runner)
+	containers, err := b.listContainers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(containers) != 1 {
+		t.Fatalf("containers=%d want 1", len(containers))
+	}
+	v := b.serverFromContainer(containers[0], b.configForRun())
+	if v.CloudID != "crabbox-object-status" || v.Status != "ready" || v.PublicNet.IPv4.IP != "192.168.64.21" {
+		t.Fatalf("unexpected view: %#v", v)
+	}
+}
+
 func TestResolveAndSSHTarget(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -456,7 +501,7 @@ func TestPrepareLeaseRequiresNetworkAddress(t *testing.T) {
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
 	cfg := b.configForRun()
 	c := inspectContainer{
-		Status:        "running",
+		Status:        inspectStatus{State: "running"},
 		Configuration: inspectConfiguration{ID: "crabbox-noip", Labels: map[string]string{"crabbox": "true", "provider": providerName, "ssh_user": "runner", "work_root": "/work/crabbox"}},
 	}
 	if _, err := b.prepareLease(context.Background(), cfg, c, "cbx_x", "x", false); err == nil {
@@ -475,7 +520,7 @@ func TestWaitForNetworkAddressPollsInspect(t *testing.T) {
 	}
 	b := testBackend(runner)
 	start := inspectContainer{
-		Status:        "running",
+		Status:        inspectStatus{State: "running"},
 		Configuration: inspectConfiguration{ID: "crabbox-wait", Labels: map[string]string{"crabbox": "true", "provider": providerName}},
 	}
 	c, err := b.waitForNetworkAddress(context.Background(), "crabbox-wait", start, 2*time.Second)
@@ -494,7 +539,7 @@ func TestWaitForNetworkAddressPollsInspect(t *testing.T) {
 func TestWaitForNetworkAddressStopsOnExitedContainer(t *testing.T) {
 	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
 	start := inspectContainer{
-		Status:        "stopped",
+		Status:        inspectStatus{State: "stopped"},
 		Configuration: inspectConfiguration{ID: "crabbox-exited", Labels: map[string]string{"crabbox": "true", "provider": providerName}},
 	}
 	if _, err := b.waitForNetworkAddress(context.Background(), "crabbox-exited", start, time.Minute); err == nil || !strings.Contains(err.Error(), "stopped before a network address") {
@@ -652,17 +697,32 @@ func TestConfigureRejectsTailscaleAndNonLinux(t *testing.T) {
 }
 
 func TestInspectIPStripsCIDR(t *testing.T) {
-	c := inspectContainer{Networks: []inspectNetwork{{Address: "192.168.64.42/24"}}}
-	if got := c.ip(); got != "192.168.64.42" {
-		t.Fatalf("ip=%q want 192.168.64.42", got)
-	}
-	bare := inspectContainer{Networks: []inspectNetwork{{Address: "10.0.0.5"}}}
-	if got := bare.ip(); got != "10.0.0.5" {
-		t.Fatalf("ip=%q want 10.0.0.5", got)
-	}
-	current := inspectContainer{Networks: []inspectNetwork{{IPv4Address: "192.168.64.4/24"}}}
-	if got := current.ip(); got != "192.168.64.4" {
-		t.Fatalf("ip=%q want 192.168.64.4", got)
+	for name, tc := range map[string]struct {
+		container inspectContainer
+		want      string
+	}{
+		"top-level address": {
+			container: inspectContainer{Networks: []inspectNetwork{{Address: "192.168.64.42/24"}}},
+			want:      "192.168.64.42",
+		},
+		"bare address": {
+			container: inspectContainer{Networks: []inspectNetwork{{Address: "10.0.0.5"}}},
+			want:      "10.0.0.5",
+		},
+		"ipv4 address": {
+			container: inspectContainer{Networks: []inspectNetwork{{IPv4Address: "192.168.64.4/24"}}},
+			want:      "192.168.64.4",
+		},
+		"status networks": {
+			container: inspectContainer{Status: inspectStatus{Networks: []inspectNetwork{{Address: "192.168.64.55/24"}}}},
+			want:      "192.168.64.55",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := tc.container.ip(); got != tc.want {
+				t.Fatalf("ip=%q want %s", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -673,6 +733,36 @@ func TestDecodeInspectToleratesStringImage(t *testing.T) {
 	}
 	if len(containers) != 1 || containers[0].image() != "alpine:3" {
 		t.Fatalf("decoded=%#v", containers)
+	}
+}
+
+func TestDecodeInspectToleratesObjectStatus(t *testing.T) {
+	containers, err := decodeInspect([]byte(`[{
+		"status":{
+			"state":"running",
+			"networks":[{"address":"192.168.64.12/24","gateway":"192.168.64.1"}]
+		},
+		"configuration":{
+			"id":"crabbox-one",
+			"image":{"reference":"debian:bookworm"},
+			"labels":{"crabbox":"true","provider":"apple-container"}
+		}
+	}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(containers) != 1 {
+		t.Fatalf("containers=%d want 1", len(containers))
+	}
+	c := containers[0]
+	if got := c.status(); got != "running" {
+		t.Fatalf("status=%q want running", got)
+	}
+	if got := c.ip(); got != "192.168.64.12" {
+		t.Fatalf("ip=%q want 192.168.64.12", got)
+	}
+	if got := c.image(); got != "debian:bookworm" {
+		t.Fatalf("image=%q want debian:bookworm", got)
 	}
 }
 

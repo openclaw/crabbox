@@ -22,6 +22,8 @@ ports; they run module source through the Cloudflare Workers runtime.
 - **Targets:** Linux only.
 - **Supported commands:** `run`, `warmup`, `status`, `stop`, `list`, `doctor`,
   and local-claim `cleanup`.
+- **Run sessions:** `run --keep --lease-output <path>` writes a reusable lease
+  handle with an exact cleanup command.
 - **Sync:** archive upload/extract (gzipped tar), not rsync.
 - **Coordinator:** never brokered — this provider always runs direct from the
   CLI against its own Worker runner, independent of any `CRABBOX_COORDINATOR`
@@ -191,10 +193,12 @@ or reuse the same container, then stop it explicitly:
 crabbox run \
   --provider cloudflare \
   --keep \
+  --lease-output /tmp/cloudflare-session.json \
   --no-sync \
   --shell \
   -- 'uname -a; command -v go node pnpm gh'
 
+cat /tmp/cloudflare-session.json
 crabbox stop --provider cloudflare <lease-id-or-slug>
 ```
 

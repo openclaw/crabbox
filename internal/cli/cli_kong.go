@@ -45,6 +45,7 @@ type crabboxKongCLI struct {
 	Capsule    capsuleKongCmd    `cmd:"" help:"Capture and replay lightweight failure capsules."`
 	Checkpoint checkpointKongCmd `cmd:"" help:"Create, restore, and fork VM or workspace checkpoints."`
 	Ssh        sshKongCmd        `cmd:"" name:"ssh" passthrough:"" help:"Print the SSH command for a lease."`
+	Connect    connectKongCmd    `cmd:"" passthrough:"" help:"Open an interactive SSH session to a lease."`
 	Vnc        vncKongCmd        `cmd:"" name:"vnc" passthrough:"" help:"Print or open VNC connection details for a desktop lease."`
 	Webvnc     webvncKongCmd     `cmd:"" name:"webvnc" passthrough:"" help:"Open a desktop lease or local VNC tunnel in a browser."`
 	Code       codeKongCmd       `cmd:"" passthrough:"" help:"Bridge a code lease into the authenticated web portal."`
@@ -208,6 +209,9 @@ type usageKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type sshKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type connectKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type vncKongCmd struct {
@@ -490,9 +494,13 @@ type configSetBrokerKongCmd struct {
 type adapterKongCmd struct {
 	Serve   controllerServeKongCmd `cmd:"" passthrough:"" help:"Serve the authenticated workspace lifecycle API."`
 	Connect adapterConnectKongCmd  `cmd:"" passthrough:"" help:"Connect a local Unix-socket runtime adapter to the configured coordinator."`
+	Ingress adapterIngressKongCmd  `cmd:"" passthrough:"" help:"Serve an authenticated ingress for a loopback adapter or fleet service."`
 	State   controllerStateKongCmd `cmd:"" help:"Inspect adapter state without lifecycle side effects."`
 }
 type adapterConnectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adapterIngressKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type controllerServeKongCmd struct {
@@ -585,6 +593,7 @@ func (c *shareKongCmd) Run(ctx context.Context, app App) error     { return app.
 func (c *unshareKongCmd) Run(ctx context.Context, app App) error   { return app.unshare(ctx, c.Args) }
 func (c *usageKongCmd) Run(ctx context.Context, app App) error     { return app.usage(ctx, c.Args) }
 func (c *sshKongCmd) Run(ctx context.Context, app App) error       { return app.ssh(ctx, c.Args) }
+func (c *connectKongCmd) Run(ctx context.Context, app App) error   { return app.connect(ctx, c.Args) }
 func (c *vncKongCmd) Run(ctx context.Context, app App) error       { return app.vnc(ctx, c.Args) }
 func (c *webvncKongCmd) Run(ctx context.Context, app App) error    { return app.webvnc(ctx, c.Args) }
 func (c *codeKongCmd) Run(ctx context.Context, app App) error      { return app.webCode(ctx, c.Args) }
@@ -786,6 +795,10 @@ func (c *controllerStateValidateKongCmd) Run(app App) error {
 
 func (c *adapterConnectKongCmd) Run(ctx context.Context, app App) error {
 	return app.adapterConnect(ctx, stripKongCommandPath(c.Args, "adapter", "connect"))
+}
+
+func (c *adapterIngressKongCmd) Run(ctx context.Context, app App) error {
+	return app.adapterIngress(ctx, stripKongCommandPath(c.Args, "adapter", "ingress"))
 }
 
 func (c *azureLoginKongCmd) Run(ctx context.Context, app App) error {

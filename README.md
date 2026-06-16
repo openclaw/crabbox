@@ -121,6 +121,7 @@ crabbox job run full-ci
 crabbox warmup                                       # prints cbx_... + a slug
 crabbox prewarm                                      # lease + Actions hydration
 crabbox run --id blue-lobster -- pnpm test:changed
+crabbox connect blue-lobster                         # open an interactive SSH session
 crabbox ssh --id blue-lobster
 crabbox stop blue-lobster
 ```

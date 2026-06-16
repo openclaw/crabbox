@@ -161,6 +161,9 @@ func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (
 }
 
 func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	if req.RejectAuthSecret {
+		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
+	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return LeaseTarget{}, err
