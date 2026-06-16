@@ -5034,7 +5034,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		// something an untrusted checkout can request via .crabbox.yaml.
 	}
 	if file.AppleContainer != nil {
-		if file.AppleContainer.CLIPath != "" {
+		if trusted && file.AppleContainer.CLIPath != "" {
 			cfg.AppleContainer.CLIPath = file.AppleContainer.CLIPath
 		}
 		if file.AppleContainer.Image != "" {
@@ -5053,7 +5053,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.AppleContainer.Memory != "" {
 			cfg.AppleContainer.Memory = file.AppleContainer.Memory
 		}
-		if len(file.AppleContainer.ExtraRunArgs) > 0 {
+		if trusted && len(file.AppleContainer.ExtraRunArgs) > 0 {
 			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
 		}
 	}
@@ -5198,10 +5198,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.HyperV.Switch != "" {
 			cfg.HyperV.Switch = file.HyperV.Switch
 		}
-		if file.HyperV.GuestPassword != "" {
+		if trusted && file.HyperV.GuestPassword != "" {
 			cfg.HyperV.GuestPassword = file.HyperV.GuestPassword
 		}
-		if file.HyperV.InitPassword != nil {
+		if trusted && file.HyperV.InitPassword != nil {
 			cfg.HyperV.InitPassword = *file.HyperV.InitPassword
 		}
 	}

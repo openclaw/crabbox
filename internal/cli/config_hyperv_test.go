@@ -39,6 +39,41 @@ func TestApplyFileHyperVConfig(t *testing.T) {
 	}
 }
 
+func TestApplyFileHyperVUntrustedConfigCannotSetCredentialFields(t *testing.T) {
+	explicitFalse := false
+	cfg := baseConfig()
+	cfg.HyperV.GuestPassword = "trusted-secret"
+	cfg.HyperV.InitPassword = true
+
+	err := applyFileConfigWithTrust(&cfg, fileConfig{
+		HyperV: &fileHyperVConfig{
+			Image:         `D:\images\repo.vhdx`,
+			User:          "RepoUser",
+			WorkRoot:      `D:\repo-work`,
+			CPUs:          4,
+			Memory:        2048,
+			Switch:        "Repo Switch",
+			GuestPassword: "repo-secret",
+			InitPassword:  &explicitFalse,
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.HyperV.GuestPassword != "trusted-secret" || !cfg.HyperV.InitPassword {
+		t.Fatalf("untrusted Hyper-V credential settings applied: %#v", cfg.HyperV)
+	}
+	if cfg.HyperV.Image != `D:\images\repo.vhdx` ||
+		cfg.HyperV.User != "RepoUser" ||
+		cfg.HyperV.WorkRoot != `D:\repo-work` ||
+		cfg.HyperV.CPUs != 4 ||
+		cfg.HyperV.Memory != 2048 ||
+		cfg.HyperV.Switch != "Repo Switch" {
+		t.Fatalf("safe Hyper-V project settings not applied: %#v", cfg.HyperV)
+	}
+}
+
 // initPassword is a *bool in the file config so an absent key must leave the
 // existing value alone while an explicit false must still win.
 func TestApplyFileHyperVInitPasswordTriState(t *testing.T) {

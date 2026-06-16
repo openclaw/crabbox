@@ -2008,6 +2008,41 @@ func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestAppleContainerUntrustedConfigCannotRedirectRuntime(t *testing.T) {
+	cfg := baseConfig()
+	cfg.AppleContainer.CLIPath = "/trusted/bin/container"
+	cfg.AppleContainer.ExtraRunArgs = []string{"--dns", "9.9.9.9"}
+
+	err := applyFileConfigWithTrust(&cfg, fileConfig{
+		AppleContainer: &fileAppleContainerConfig{
+			CLIPath:      "/repo/bin/container-wrapper",
+			Image:        "example-org/repo:latest",
+			User:         "runner",
+			WorkRoot:     "/work/repo",
+			CPUs:         3,
+			Memory:       "6g",
+			ExtraRunArgs: []string{"--mount", "type=virtiofs,source=$HOME,target=/host"},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.AppleContainer.CLIPath != "/trusted/bin/container" ||
+		len(cfg.AppleContainer.ExtraRunArgs) != 2 ||
+		cfg.AppleContainer.ExtraRunArgs[0] != "--dns" ||
+		cfg.AppleContainer.ExtraRunArgs[1] != "9.9.9.9" {
+		t.Fatalf("untrusted Apple Container runtime controls applied: %#v", cfg.AppleContainer)
+	}
+	if cfg.AppleContainer.Image != "example-org/repo:latest" ||
+		cfg.AppleContainer.User != "runner" ||
+		cfg.AppleContainer.WorkRoot != "/work/repo" ||
+		cfg.AppleContainer.CPUs != 3 ||
+		cfg.AppleContainer.Memory != "6g" {
+		t.Fatalf("safe Apple Container project settings not applied: %#v", cfg.AppleContainer)
+	}
+}
+
 func TestAppleVZConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
