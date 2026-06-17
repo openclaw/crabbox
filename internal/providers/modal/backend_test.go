@@ -37,6 +37,9 @@ func TestProviderSpec(t *testing.T) {
 	if !hasFeature(spec.Features, core.FeatureArchiveSync) {
 		t.Fatalf("features=%#v want archive sync", spec.Features)
 	}
+	if !hasFeature(spec.Features, core.FeatureRunSession) {
+		t.Fatalf("features=%#v want run session", spec.Features)
+	}
 	if hasFeature(spec.Features, core.FeatureURLBridge) {
 		t.Fatalf("features=%#v should not advertise unsupported URL bridge", spec.Features)
 	}
@@ -196,6 +199,35 @@ func TestRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{}
+	withFakeModalAPI(t, fake)
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"true"},
+		Keep:    true,
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil {
+		t.Fatal("missing session handle")
+	}
+	got := result.Session
+	if got.Provider != providerName || got.LeaseID == "" || got.Slug == "" || got.Reused || !got.Kept {
+		t.Fatalf("session=%#v", got)
+	}
+	if got.CleanupCommand != "crabbox stop --provider modal --id "+shellQuote(got.LeaseID) {
+		t.Fatalf("cleanup command=%q", got.CleanupCommand)
+	}
+	if containsVerb(fake.verbs, "terminate") {
+		t.Fatalf("terminate called despite kept sandbox: %v", fake.verbs)
+	}
+}
+
 func TestRunByRemoteIdentifierEnforcesRepoClaim(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -340,6 +372,9 @@ func TestKeepOnFailureRetainsSandbox(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("missing keep-on-failure hint: %s", stderr.String())
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("session=%#v", result.Session)
 	}
 }
 
