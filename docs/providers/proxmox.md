@@ -79,11 +79,11 @@ CRABBOX_PROXMOX_USER=crabbox \
 ./scripts/proxmox-build-template.sh
 ```
 
-The helper downloads the public Ubuntu Noble cloud image, optionally verifies
-`CRABBOX_PROXMOX_IMAGE_SHA256`, customizes a local copy, imports it into the
-selected storage, attaches a cloud-init drive, and converts the VM to a
-template. It does not use Proxmox API tokens, Crabbox coordinator tokens, or
-lease SSH keys, and it bakes no secrets into the image.
+The helper downloads a pinned Ubuntu Noble release image, verifies its built-in
+SHA256 before conversion, customizes a local copy, imports it into the selected
+storage, attaches a cloud-init drive, and converts the VM to a template. It does
+not use Proxmox API tokens, Crabbox coordinator tokens, or lease SSH keys, and it
+bakes no secrets into the image.
 
 If the target VMID already exists, the helper stops before changing it. Set
 `CRABBOX_PROXMOX_REPLACE_TEMPLATE=1` only when you intentionally want to destroy
@@ -97,8 +97,8 @@ CRABBOX_PROXMOX_TEMPLATE_NAME      template name (default: crabbox-ubuntu-2404)
 CRABBOX_PROXMOX_STORAGE            target storage (default: local-lvm)
 CRABBOX_PROXMOX_BRIDGE             network bridge (default: vmbr0)
 CRABBOX_PROXMOX_USER               cloud-init user (default: crabbox)
-CRABBOX_PROXMOX_IMAGE_URL          cloud image URL (default: Ubuntu Noble cloudimg)
-CRABBOX_PROXMOX_IMAGE_SHA256       optional expected image sha256
+CRABBOX_PROXMOX_IMAGE_URL          custom cloud image URL
+CRABBOX_PROXMOX_IMAGE_SHA256       expected image sha256; required with a custom URL
 CRABBOX_PROXMOX_CORES              template vCPU count (default: 2)
 CRABBOX_PROXMOX_MEMORY_MB          template memory in MiB (default: 4096)
 CRABBOX_PROXMOX_DISK_SIZE          root disk size, qm syntax (default: 32G)
@@ -107,6 +107,12 @@ CRABBOX_PROXMOX_REPLACE_TEMPLATE   destroy an existing VM/template first when 1
 
 It requires Proxmox's `qm` and `pvesm` commands plus `qemu-img`,
 `virt-customize`, and either `curl` or `wget`.
+
+To update the built-in image, choose a dated directory under Ubuntu's
+`https://cloud-images.ubuntu.com/releases/noble/` index, then update
+`default_image_url` and `default_image_sha256` together from that directory's
+signed `SHA256SUMS`. Do not point the built-in default at `current` or `release`;
+those aliases change without a repository review.
 
 The resulting Crabbox config looks like:
 

@@ -16,7 +16,7 @@ Environment:
   CRABBOX_PROXMOX_BRIDGE             Network bridge (default: vmbr0)
   CRABBOX_PROXMOX_USER               Cloud-init user Crabbox configures (default: crabbox)
   CRABBOX_PROXMOX_IMAGE_URL          Cloud image URL
-  CRABBOX_PROXMOX_IMAGE_SHA256       Optional expected image sha256
+  CRABBOX_PROXMOX_IMAGE_SHA256       Expected image sha256; required with a custom URL
   CRABBOX_PROXMOX_CORES              Template vCPU count (default: 2)
   CRABBOX_PROXMOX_MEMORY_MB          Template memory in MiB (default: 4096)
   CRABBOX_PROXMOX_DISK_SIZE          Final root disk size, qm syntax (default: 32G)
@@ -37,8 +37,15 @@ template_name="${CRABBOX_PROXMOX_TEMPLATE_NAME:-crabbox-ubuntu-2404}"
 storage="${CRABBOX_PROXMOX_STORAGE:-local-lvm}"
 bridge="${CRABBOX_PROXMOX_BRIDGE:-vmbr0}"
 vm_user="${CRABBOX_PROXMOX_USER:-crabbox}"
-image_url="${CRABBOX_PROXMOX_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
-image_sha256="${CRABBOX_PROXMOX_IMAGE_SHA256:-}"
+# Ubuntu Noble released image serial and digest from its signed SHA256SUMS.
+default_image_url="https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-amd64.img"
+default_image_sha256="53fdde898feed8b027d94baa9cfe8229867f330a1d9c49dc7d84465ee7f229f7"
+image_url="${CRABBOX_PROXMOX_IMAGE_URL:-$default_image_url}"
+if [[ -n "${CRABBOX_PROXMOX_IMAGE_URL:-}" ]]; then
+  image_sha256="${CRABBOX_PROXMOX_IMAGE_SHA256:-}"
+else
+  image_sha256="${CRABBOX_PROXMOX_IMAGE_SHA256:-$default_image_sha256}"
+fi
 cores="${CRABBOX_PROXMOX_CORES:-2}"
 memory_mb="${CRABBOX_PROXMOX_MEMORY_MB:-4096}"
 disk_size="${CRABBOX_PROXMOX_DISK_SIZE:-32G}"
@@ -77,6 +84,7 @@ fi
 is_uint "$template_id" || die "CRABBOX_PROXMOX_TEMPLATE_ID must be numeric"
 is_uint "$cores" || die "CRABBOX_PROXMOX_CORES must be numeric"
 is_uint "$memory_mb" || die "CRABBOX_PROXMOX_MEMORY_MB must be numeric"
+[[ "$image_sha256" =~ ^[a-fA-F0-9]{64}$ ]] || die "CRABBOX_PROXMOX_IMAGE_SHA256 must be a 64-character hex digest and is required with CRABBOX_PROXMOX_IMAGE_URL"
 
 need_cmd qm
 need_cmd pvesm
@@ -115,9 +123,7 @@ custom_image="$workdir/${template_name}.qcow2"
 printf 'downloading %s\n' "$image_url" >&2
 fetch_image "$image_url" "$source_image"
 
-if [[ -n "$image_sha256" ]]; then
-  printf '%s  %s\n' "$image_sha256" "$source_image" | sha256sum -c -
-fi
+printf '%s  %s\n' "$image_sha256" "$source_image" | sha256sum -c -
 
 printf 'customizing image packages and services\n' >&2
 qemu-img convert -O qcow2 "$source_image" "$custom_image"
