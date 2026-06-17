@@ -898,8 +898,9 @@ defaults to `https://api.islo.dev`). No Crabbox rsync, `--sync-only`, `--checksu
 desktop/browser, Actions runner, or coordinator.
 
 The remaining sandbox/proof adapters (Modal, E2B, Tensorlake, Upstash, Cloudflare,
-Azure dynamic sessions, W&B) follow the Islo pattern: delegated-run, Linux-only,
-with a feature subset of archive-sync/url-bridge as appropriate.
+Cloudflare Sandbox, Azure dynamic sessions, W&B) follow the Islo pattern:
+delegated-run, Linux-only, with a feature subset of archive-sync/url-bridge as
+appropriate.
 
 ## Migration Ledger
 

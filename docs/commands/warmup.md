@@ -199,6 +199,16 @@ loader readiness or `crabbox run --script <file>` to load code. The provider
 does not start a Linux machine and does not support Actions runner registration,
 SSH, desktop, browser, code-server, ports, `--class`, or `--type`.
 
+### cloudflare-sandbox
+
+`--provider cloudflare-sandbox` creates a Cloudflare-managed Linux sandbox
+through the configured Sandbox bridge and keeps it until explicit `stop`.
+Warmed sandboxes use `cfsbx_...` local claims and can be reused by Crabbox slug
+or lease ID. The provider is delegated-run only: it supports archive sync and
+command execution through the bridge, but not SSH, Tailscale, browser, desktop,
+code-server, URL sessions, storage mounts, checkpoints, or Actions runner
+hydration.
+
 ### aws — macOS
 
 `--provider aws --target macos --desktop` launches an EC2 Mac instance on an

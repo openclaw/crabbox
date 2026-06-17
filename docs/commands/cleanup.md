@@ -48,6 +48,10 @@ What cleanup does depends on the selected provider:
   the loader and removes only stale local claims whose loader metadata is
   missing or terminal. It does not enumerate or delete every Dynamic Worker in
   the Cloudflare account.
+- **`cloudflare-sandbox`** sweeps only local `cfsbx_...` claims in the active
+  provider scope. It deletes idle-expired Crabbox-owned sandboxes and keeps
+  missing-or-inaccessible claims unless
+  `--cloudflare-sandbox-forget-missing` is explicit.
 - Providers that have nothing to sweep return an error rather than acting. For
   example `provider=ssh` (static / bring-your-own hosts) reports:
 
@@ -119,7 +123,7 @@ namespace ssh cleanup no crabbox files found
 ## Flags
 
 ```text
---provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|cloudflare-dynamic-workers|multipass|vercel-sandbox
+--provider hetzner|aws|azure|gcp|proxmox|xcp-ng|hostinger|namespace-devbox|cloudflare|cloudflare-dynamic-workers|cloudflare-sandbox|multipass|vercel-sandbox
                                                                        provider to sweep (default from config)
 --dry-run                                                              print decisions without making provider calls
 ```

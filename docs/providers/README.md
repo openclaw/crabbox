@@ -41,9 +41,10 @@ SSH-lease providers further differ by how they reach the cloud:
   tart, and `hyperv` creates local Windows VMs through Microsoft Hyper-V.
 - **Delegated sandbox** — managed sandbox/proof runners that execute remotely
   without an SSH lease (e.g. `e2b`, `modal`, `islo`, `cloudflare`,
-  `azure-dynamic-sessions`, `docker-sandbox`, `smolvm`). `anthropic-sandbox-runtime` is
-  the local macOS/Linux delegated-run exception: Anthropic's `srt` executes on
-  the current machine while still owning sync/run policy end to end.
+  `cloudflare-sandbox`, `azure-dynamic-sessions`, `docker-sandbox`, `smolvm`).
+  `anthropic-sandbox-runtime` is the local macOS/Linux delegated-run exception:
+  Anthropic's `srt` executes on the current machine while still owning sync/run
+  policy end to end.
   `windows-sandbox` is the local Windows delegated-run exception.
 
 Select a provider per command with `--provider <name>` (env `CRABBOX_PROVIDER`),
@@ -82,6 +83,7 @@ Access terms:
 | [blacksmith-testbox](blacksmith-testbox.md) (`blacksmith`) | built-in; `delegated-run` · ci-proof-runner | No SSH; `provider-owned` · direct only; features: `cache-volume`, `run-proof`, `run-session`, `run-artifacts` | `linux`; Blacksmith Testbox runner | `provider-managed`; GPU: no | Blacksmith; provider session cleanup | CI reproduction with proof and reusable sessions | Execution and artifacts follow the Testbox contract |
 | [cloudflare](cloudflare.md) (`cf`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Cloudflare Container | `cloud`; GPU: no | Cloudflare Worker; container delete | Fast delegated Linux container execution | Requires Worker deployment and container availability |
 | [cloudflare-dynamic-workers](cloudflare-dynamic-workers.md) (`cf-dynamic`, `cfdw`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `cleanup`, `module-run`, `run-session` | `worker-runtime`; Cloudflare Dynamic Worker | `cloud`; GPU: no | Cloudflare loader Worker; terminal metadata and local claim removal | Hosted Worker module execution | No shell, SSH, or filesystem sync; Dynamic Workers must be enabled |
+| [cloudflare-sandbox](cloudflare-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; Cloudflare Sandbox bridge | `cloud`; GPU: no | Cloudflare Sandbox bridge; sandbox delete | Cloudflare Sandbox Linux command execution through a bridge | Requires a configured bridge URL; no SSH, browser, Tailscale, URL sessions, mounts, or checkpoints |
 | [codesandbox](codesandbox.md) (`csb`, `code-sandbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `pause-resume`, `run-session` | `linux`; CodeSandbox SDK sandbox | `provider-managed`; GPU: no | CodeSandbox; sandbox delete | Managed CodeSandbox Linux development environments | Requires env-only SDK auth and a local Node bridge |
 | [daytona](daytona.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `archive-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Daytona sandbox | `provider-managed`; GPU: unknown | Daytona; sandbox delete | Managed development sandbox with delegated archive sync and execution | SSH access is short-lived; run and sync use Daytona toolbox APIs |
 | [digitalocean](digitalocean.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; DigitalOcean Droplet | `cloud`; GPU: optional | Crabbox; Droplet and key delete | Simple direct Linux VM | Direct-only; no coordinator scheduling |
@@ -139,10 +141,11 @@ Access terms:
   (`provider: azure`) and the delegated `azure-dynamic-sessions` provider
   (Azure Container Apps dynamic sessions). They share the `azure` family but are
   distinct adapters.
-- The Cloudflare family ships two delegated backends: `cloudflare` for
-  Cloudflare Containers and Linux commands, and `cloudflare-dynamic-workers` for
-  Worker-runtime module execution. They are separate providers with separate
-  runner configs and token env vars.
+- The Cloudflare family ships three delegated backends: `cloudflare` for
+  Cloudflare Containers and Linux commands, `cloudflare-dynamic-workers` for
+  Worker-runtime module execution, and `cloudflare-sandbox` for Cloudflare
+  Sandbox bridge-backed Linux command execution. They are separate providers
+  with separate runner configs and token env vars.
 - Tensorlake is Crabbox's Firecracker-backed delegated provider; Crabbox does
   not provision raw Firecracker instances directly.
 - Docker Sandbox is a delegated-run provider driven by the standalone `sbx`

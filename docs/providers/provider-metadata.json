@@ -167,6 +167,20 @@
     "caveat": "No shell, SSH, or filesystem sync; Dynamic Workers must be enabled",
     "docs": "cloudflare-dynamic-workers.md"
   },
+  "cloudflare-sandbox": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Cloudflare Sandbox bridge",
+    "location": "cloud",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "no",
+    "lifecycle": "Cloudflare Sandbox bridge",
+    "cleanup": "sandbox delete",
+    "bestFit": "Cloudflare Sandbox Linux command execution through a bridge",
+    "caveat": "Requires a configured bridge URL; no SSH, browser, Tailscale, URL sessions, mounts, or checkpoints",
+    "docs": "cloudflare-sandbox.md"
+  },
   "codesandbox": {
     "status": "built-in",
     "category": "delegated-sandbox",

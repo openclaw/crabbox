@@ -54,6 +54,10 @@ Crabbox lease ID and local slug:
   slug, deletes loader metadata for that run, and removes the local claim.
   Stable and explicit Worker cache IDs are not lifecycle IDs. If the loader
   already reports `not found`, Crabbox removes the stale local claim.
+- `cloudflare-sandbox` — accepts a Crabbox-created local slug or `cfsbx_...`
+  lease ID, verifies ownership metadata, deletes the Cloudflare Sandbox through
+  the configured bridge, and removes the local claim. Missing remote sandboxes
+  preserve the claim unless `--cloudflare-sandbox-forget-missing` is explicit.
 - `docker-sandbox` — accepts only a Crabbox lease ID or local slug backed by a
   `provider=docker-sandbox` local claim, then removes the sandbox with
   `sbx rm --force`. This is destructive cleanup, not Docker Sandbox pause, and
@@ -126,6 +130,8 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 --hostinger-release-action stop          Hostinger release action; only stop is supported
 --azure-dynamic-sessions-endpoint <url>  Azure Container Apps Dynamic Sessions endpoint
 --cloudflare-dynamic-workers-url <url>   Cloudflare Dynamic Workers loader URL
+--cloudflare-sandbox-url <url>           Cloudflare Sandbox bridge URL
+--cloudflare-sandbox-forget-missing      forget a local claim when the bridge reports the sandbox missing
 ```
 
 Run `crabbox stop --help` for the full, provider-aware flag list, and

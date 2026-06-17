@@ -243,6 +243,7 @@ internal/providers/opensandbox          # OpenSandbox delegated backend
 internal/providers/tensorlake           # Tensorlake delegated backend
 internal/providers/upstashbox           # Upstash Box delegated backend
 internal/providers/cloudflare           # Cloudflare Containers delegated backend
+internal/providers/cloudflaresandbox    # Cloudflare Sandbox bridge delegated backend
 internal/providers/wandb                # Weights & Biases delegated backend
 ```
 

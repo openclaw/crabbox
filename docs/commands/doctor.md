@@ -73,6 +73,10 @@ Provider readiness validates the selected provider without creating a lease.
   token against the runner readiness API. Cloudflare Dynamic Workers validate
   loader readiness, bearer auth, the Dynamic Workers loader binding, default
   egress, and runtime compatibility metadata without creating a Dynamic Worker.
+  Cloudflare Sandbox validates the configured bridge URL, bridge health, and
+  OpenAPI document without creating a sandbox; when no bridge URL is configured
+  it exits clearly with the missing `cloudflareSandbox.url` /
+  `CRABBOX_CLOUDFLARE_SANDBOX_URL` requirement.
   Vercel Sandbox checks the SDK bridge
   contract, local `sandbox` CLI, read-only `sandbox list --all --limit 1`
   auth/inventory access, project scoping readiness, and local `vsbx_...`

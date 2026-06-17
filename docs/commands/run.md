@@ -73,10 +73,11 @@ with `--keep` to write a small JSON lease handle for orchestrators.
 
 Most providers connect over SSH and Crabbox owns sync and command transport.
 Delegated providers (for example Blacksmith Testbox, Daytona, Islo, Azure
-Dynamic Sessions, Cloudflare Dynamic Workers, E2B, Superserve, OpenSandbox, and
-Vercel Sandbox) own command transport themselves: Crabbox sends either checkout
-content or module source through the provider's APIs, runs through the provider,
-and prints `sync=delegated` in the final timing summary where a sync phase exists. These
+Dynamic Sessions, Cloudflare Dynamic Workers, Cloudflare Sandbox, E2B,
+Superserve, OpenSandbox, and Vercel Sandbox) own command transport themselves:
+Crabbox sends either checkout content or module source through the provider's
+APIs, runs through the provider, and prints `sync=delegated` in the final timing
+summary where a sync phase exists. These
 providers reject the SSH-run-only features `--capture-stdout`,
 `--capture-stderr`, `--capture-on-fail`, `--script`, `--script-stdin`, and
 `--fresh-pr` unless a delegated adapter advertises the matching capability.
@@ -94,6 +95,12 @@ bridge request body and strips Vercel provider auth variables from
 `--allow-env` forwarding. Use Crabbox env forwarding for live secrets; raw
 `sandbox --env key=value` places values on argv and is only suitable for manual
 non-secret debugging.
+
+Cloudflare Sandbox forwards non-auth command environment values through the
+bridge request body and strips Cloudflare provider auth variables from
+`--allow-env` forwarding. Its client accepts either server-sent exec output or a
+buffered JSON exec result, and archive sync is proofed through fake bridge tests
+rather than live Cloudflare writes in the default test suite.
 
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
