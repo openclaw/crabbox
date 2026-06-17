@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestParseE2BProcessStream(t *testing.T) {
@@ -126,6 +128,12 @@ func TestE2BWarmupRejectsUnsafeUserBeforeClient(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "E2B_API_KEY") {
 		t.Fatalf("validated user after client setup: %v", err)
+	}
+}
+
+func TestProviderSpecAdvertisesRunSession(t *testing.T) {
+	if !(Provider{}).Spec().Features.Has(core.FeatureRunSession) {
+		t.Fatalf("features=%#v want run session", Provider{}.Spec().Features)
 	}
 }
 
@@ -475,6 +483,76 @@ func TestE2BCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
 	}
 }
 
+func TestE2BRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{
+		cfg: Config{
+			IdleTimeout: 30 * time.Minute,
+			TTL:         2 * time.Minute,
+			E2B:         E2BConfig{APIKey: "test", Workdir: "repo"},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"true"},
+		Keep:    true,
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil {
+		t.Fatal("missing session handle")
+	}
+	got := result.Session
+	if got.Provider != e2bProvider || got.LeaseID == "" || got.Slug == "" || got.Reused || !got.Kept {
+		t.Fatalf("session=%#v", got)
+	}
+	if got.CleanupCommand != "crabbox stop --provider e2b --id "+shellQuote(got.LeaseID) {
+		t.Fatalf("cleanup command=%q", got.CleanupCommand)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("deleteIDs=%#v, want kept sandbox", client.deleteIDs)
+	}
+}
+
+func TestE2BRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{processCodes: []int{0, 7}}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{
+		cfg: Config{
+			IdleTimeout: 30 * time.Minute,
+			TTL:         2 * time.Minute,
+			E2B:         E2BConfig{APIKey: "test", Workdir: "repo"},
+		},
+		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:          Repo{Name: "repo", Root: t.TempDir()},
+		Command:       []string{"false"},
+		KeepOnFailure: true,
+		NoSync:        true,
+	})
+	var ee ExitError
+	if !errors.As(err, &ee) || ee.Code != 7 {
+		t.Fatalf("err=%v want ExitError code 7", err)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("deleteIDs=%#v, want kept sandbox", client.deleteIDs)
+	}
+}
+
 func TestE2BSandboxToServerUsesMetadata(t *testing.T) {
 	server := e2bSandboxToServer(e2bSandbox{
 		SandboxID:  "sbx_1",
@@ -536,6 +614,12 @@ type fakeE2BSyncClient struct {
 	uploadPath        string
 	uploaded          bytes.Buffer
 	processCodes      []int
+}
+
+func swapNewE2BClient(fake e2bAPI) func() {
+	prev := newE2BClient
+	newE2BClient = func(Config, Runtime) (e2bAPI, error) { return fake, nil }
+	return func() { newE2BClient = prev }
 }
 
 func (f *fakeE2BSyncClient) CreateSandbox(_ context.Context, req e2bCreateSandboxRequest) (e2bSandbox, error) {

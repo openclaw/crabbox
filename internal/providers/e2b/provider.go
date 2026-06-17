@@ -21,7 +21,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "e2b",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureURLBridge},
+		Features:    core.FeatureSet{core.FeatureURLBridge, core.FeatureRunSession},
 		Coordinator: core.CoordinatorNever,
 	}
 }
