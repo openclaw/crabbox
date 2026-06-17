@@ -116,7 +116,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 	}
 	shouldStop := acquired && !req.Keep
-	if shouldStop && sandboxID != "" {
+	if shouldStop {
 		defer func() {
 			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
 				if result.ExitCode == 0 {
@@ -163,9 +163,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if leaseID != "" {
 		metadata["crabbox.lease"] = leaseID
 	}
+	keepSandbox := req.Keep || req.KeepOnFailure || !acquired
 	workspaceRun, err := api.CreateWorkspaceRun(ctx, createWorkspaceRunRequest{
 		Command:   commandText,
-		Keep:      req.Keep,
+		Keep:      keepSandbox,
 		Metadata:  metadata,
 		ProjectID: strings.TrimSpace(b.cfg.Crownest.ProjectID),
 		SandboxID: sandboxID,
@@ -224,7 +225,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		LeaseID:        leaseID,
 		Slug:           slug,
 		Reused:         !acquired,
-		Kept:           req.Keep,
+		Kept:           req.Keep || !acquired,
 		CleanupCommand: "crabbox stop " + shellQuote(blank(slug, leaseID)),
 	}
 	commandStart := b.now()
@@ -272,6 +273,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	fmt.Fprintf(b.rt.Stderr, "crownest run summary sync=%s command=%s total=%s exit=%d\n",
 		syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+	if result.ExitCode != 0 {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		if result.Session != nil {
+			result.Session.Kept = !shouldStop
+		}
+	}
 	if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
 		if result.ExitCode == 0 {
 			result.ExitCode = 1
@@ -307,7 +314,6 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, exit(5, "crownest workspace run failed reason=%s class=%s", blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
 	}
 	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("crownest run exited %d", result.ExitCode)}
 	}
 	return result, nil

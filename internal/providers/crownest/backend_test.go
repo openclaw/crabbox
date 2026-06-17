@@ -113,14 +113,132 @@ func TestRunCancelsWorkspaceRunWhenLocalContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestRunReusesClaimWithoutDeletingSandbox(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig()
+	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev", startSandboxID: "sbx_reused"}
+	leaseID := leasePrefix + "sbx_reused"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "kept", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		ID:      "kept",
+		Command: []string{"pnpm", "test"},
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if !api.created.Keep || api.created.SandboxID != "sbx_reused" {
+		t.Fatalf("create request=%#v, want kept reused sandbox", api.created)
+	}
+	if api.deletedSandboxID != "" {
+		t.Fatalf("deleted reused sandbox %q", api.deletedSandboxID)
+	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+}
+
+func TestRunCleansUpCreatedSandboxAfterArchiveSetupFailure(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{
+		baseURL:         "https://api.crownest.dev",
+		createSandboxID: "sbx_created",
+		transferErr:     errors.New("transfer failed"),
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "transfer failed") {
+		t.Fatalf("err=%v, want transfer failure", err)
+	}
+	if api.deletedSandboxID != "sbx_created" {
+		t.Fatalf("deletedSandboxID=%q, want created sandbox cleanup", api.deletedSandboxID)
+	}
+}
+
+func TestRunKeepOnFailureRetainsCreatedSandbox(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{
+		baseURL:        "https://api.crownest.dev",
+		startSandboxID: "sbx_failed",
+		stream: func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(strings.Join([]string{
+				`data: {"type":"terminal","seq":1,"workspaceRun":{"id":"wsr_123","status":"failed","failureReason":"command_exit","failureClass":"user_command","sandboxId":"sbx_failed","exitCode":7}}`,
+				"",
+			}, "\n"))), nil
+		},
+	}
+	var stderr bytes.Buffer
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:          Repo{Root: repoRoot, Name: "demo"},
+		Command:       []string{"false"},
+		KeepOnFailure: true,
+	})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%v, want exit 7", err)
+	}
+	if api.deletedSandboxID != "" {
+		t.Fatalf("deletedSandboxID=%q, want retained sandbox", api.deletedSandboxID)
+	}
+	if !api.created.Keep {
+		t.Fatalf("create request=%#v, want keepSandbox for keep-on-failure", api.created)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want kept session after failure", result.Session)
+	}
+	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != result.LeaseID {
+		t.Fatalf("claim=%#v err=%v, want retained claim", claim, err)
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure") {
+		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+}
+
 type fakeCrownestClient struct {
 	baseURL          string
 	created          createWorkspaceRunRequest
+	createSandboxID  string
 	finalized        finalizeArchiveRequest
 	uploadBytes      int
 	started          bool
+	startSandboxID   string
 	deletedSandboxID string
 	canceledRunID    string
+	transferErr      error
 	stream           func() (io.ReadCloser, error)
 }
 
@@ -141,10 +259,13 @@ func (f *fakeCrownestClient) DeleteSandbox(_ context.Context, id string) error {
 
 func (f *fakeCrownestClient) CreateWorkspaceRun(_ context.Context, req createWorkspaceRunRequest, _ string) (workspaceRun, error) {
 	f.created = req
-	return workspaceRun{ID: "wsr_123", Status: "awaiting_archive"}, nil
+	return workspaceRun{ID: "wsr_123", Status: "awaiting_archive", SandboxID: f.createSandboxID}, nil
 }
 
 func (f *fakeCrownestClient) CreateArchiveTransfer(_ context.Context, id string, _ createArchiveTransferRequest, _ string) (archiveTransfer, error) {
+	if f.transferErr != nil {
+		return archiveTransfer{}, f.transferErr
+	}
 	return archiveTransfer{ID: "upl_123", Method: "PUT", UploadURL: "/upload", MaxSizeBytes: 1 << 30, WorkspaceRunID: id}, nil
 }
 
@@ -164,7 +285,8 @@ func (f *fakeCrownestClient) FinalizeArchive(_ context.Context, _ string, req fi
 
 func (f *fakeCrownestClient) StartWorkspaceRun(context.Context, string, string) (workspaceRun, error) {
 	f.started = true
-	return workspaceRun{ID: "wsr_123", Status: "running", SandboxID: "sbx_123"}, nil
+	sandboxID := blank(f.startSandboxID, "sbx_123")
+	return workspaceRun{ID: "wsr_123", Status: "running", SandboxID: sandboxID}, nil
 }
 
 func (f *fakeCrownestClient) CancelWorkspaceRun(_ context.Context, id string, _ string) (workspaceRun, error) {
