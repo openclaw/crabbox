@@ -75,6 +75,36 @@ func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestNebiusRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("nebius")
+	if err != nil {
+		t.Fatalf("ProviderFor(nebius): %v", err)
+	}
+	if provider.Name() != "nebius" {
+		t.Fatalf("ProviderFor(nebius).Name=%q", provider.Name())
+	}
+	if _, ok := provider.(core.DoctorProvider); !ok {
+		t.Fatal("nebius provider does not expose doctor")
+	}
+	spec := provider.Spec()
+	if spec.Family != "nebius" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("nebius spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("nebius targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("nebius features=%v missing %s", spec.Features, feature)
+		}
+	}
+	for _, alias := range []string{"nebius-ai", "nebius-compute", "nb"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "nebius" {
+			t.Fatalf("%q alias unexpectedly resolves to nebius", alias)
+		}
+	}
+}
+
 func TestAgentSandboxRegistersWithoutAliases(t *testing.T) {
 	provider, err := core.ProviderFor("agent-sandbox")
 	if err != nil {

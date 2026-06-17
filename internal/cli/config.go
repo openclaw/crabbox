@@ -103,6 +103,7 @@ type Config struct {
 	Linode                        LinodeConfig
 	linodeImageExplicit           bool
 	linodeTypeExplicit            bool
+	Nebius                        NebiusConfig
 	OVH                           OVHConfig
 	ovhImageExplicit              bool
 	Incus                         IncusConfig
@@ -241,6 +242,25 @@ type LinodeConfig struct {
 	Type       string
 	FirewallID string
 	SSHCIDRs   []string
+}
+
+// NebiusConfig is intentionally non-secret. Authentication stays in the
+// Nebius CLI profile store and is never accepted as Crabbox config or argv.
+type NebiusConfig struct {
+	CLI              string
+	Profile          string
+	ParentID         string
+	SubnetID         string
+	Platform         string
+	Preset           string
+	ImageFamily      string
+	DiskType         string
+	DiskSizeGiB      int
+	User             string
+	PublicIP         string
+	SecurityGroupIDs []string
+	ServiceAccountID string
+	RecoveryPolicy   string
 }
 
 // OVHConfig contains non-secret OVHcloud Public Cloud settings. OVH
@@ -1382,6 +1402,60 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "nebius" {
+		if cfg.Nebius.CLI == "" {
+			cfg.Nebius.CLI = "nebius"
+		}
+		if cfg.Nebius.Platform == "" {
+			cfg.Nebius.Platform = "cpu-d3"
+		}
+		if cfg.Nebius.Preset == "" {
+			cfg.Nebius.Preset = "4vcpu-16gb"
+		}
+		if cfg.Nebius.ImageFamily == "" {
+			cfg.Nebius.ImageFamily = "ubuntu24.04-driverless"
+		}
+		if cfg.Nebius.DiskType == "" {
+			cfg.Nebius.DiskType = "network_ssd"
+		}
+		if cfg.Nebius.DiskSizeGiB == 0 {
+			cfg.Nebius.DiskSizeGiB = 50
+		}
+		if cfg.Nebius.User == "" {
+			cfg.Nebius.User = "crabbox"
+		}
+		if cfg.Nebius.PublicIP == "" {
+			cfg.Nebius.PublicIP = "dynamic"
+		}
+		if cfg.Nebius.RecoveryPolicy == "" {
+			cfg.Nebius.RecoveryPolicy = "fail"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = cfg.Nebius.User
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = baseConfig().SSHPort
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "ovh" {
 		if cfg.OVH.Endpoint == "" {
 			cfg.OVH.Endpoint = "https://api.us.ovhcloud.com/1.0"
@@ -2093,6 +2167,17 @@ func baseConfig() Config {
 			Target:        "container",
 			WorkRoot:      "/tmp/crabbox",
 		},
+		Nebius: NebiusConfig{
+			CLI:            "nebius",
+			Platform:       "cpu-d3",
+			Preset:         "4vcpu-16gb",
+			ImageFamily:    "ubuntu24.04-driverless",
+			DiskType:       "network_ssd",
+			DiskSizeGiB:    50,
+			User:           "crabbox",
+			PublicIP:       "dynamic",
+			RecoveryPolicy: "fail",
+		},
 		Hostinger: HostingerConfig{
 			APIURL:         "https://developers.hostinger.com",
 			HostnamePrefix: "crabbox",
@@ -2323,6 +2408,7 @@ type fileConfig struct {
 	Hetzner                  *fileHetznerConfig                  `yaml:"hetzner,omitempty"`
 	DigitalOcean             *fileDigitalOceanConfig             `yaml:"digitalocean,omitempty"`
 	Linode                   *fileLinodeConfig                   `yaml:"linode,omitempty"`
+	Nebius                   *fileNebiusConfig                   `yaml:"nebius,omitempty"`
 	OVH                      *fileOVHConfig                      `yaml:"ovh,omitempty"`
 	AWS                      *fileAWSConfig                      `yaml:"aws,omitempty"`
 	Azure                    *fileAzureConfig                    `yaml:"azure,omitempty"`
@@ -2433,6 +2519,23 @@ type fileLinodeConfig struct {
 	Type       string   `yaml:"type,omitempty"`
 	FirewallID string   `yaml:"firewall,omitempty"`
 	SSHCIDRs   []string `yaml:"sshCIDRs,omitempty"`
+}
+
+type fileNebiusConfig struct {
+	CLI              string   `yaml:"cli,omitempty"`
+	Profile          string   `yaml:"profile,omitempty"`
+	ParentID         string   `yaml:"parentId,omitempty"`
+	SubnetID         string   `yaml:"subnetId,omitempty"`
+	Platform         string   `yaml:"platform,omitempty"`
+	Preset           string   `yaml:"preset,omitempty"`
+	ImageFamily      string   `yaml:"imageFamily,omitempty"`
+	DiskType         string   `yaml:"diskType,omitempty"`
+	DiskSizeGiB      int      `yaml:"diskSizeGiB,omitempty"`
+	User             string   `yaml:"user,omitempty"`
+	PublicIP         string   `yaml:"publicIP,omitempty"`
+	SecurityGroupIDs []string `yaml:"securityGroupIds,omitempty"`
+	ServiceAccountID string   `yaml:"serviceAccountId,omitempty"`
+	RecoveryPolicy   string   `yaml:"recoveryPolicy,omitempty"`
 }
 
 type fileOVHConfig struct {
@@ -3673,6 +3776,50 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if len(file.Linode.SSHCIDRs) > 0 {
 			cfg.Linode.SSHCIDRs = file.Linode.SSHCIDRs
+		}
+	}
+	if file.Nebius != nil {
+		if trusted && file.Nebius.CLI != "" {
+			cfg.Nebius.CLI = file.Nebius.CLI
+		}
+		if file.Nebius.Profile != "" {
+			cfg.Nebius.Profile = file.Nebius.Profile
+		}
+		if file.Nebius.ParentID != "" {
+			cfg.Nebius.ParentID = file.Nebius.ParentID
+		}
+		if file.Nebius.SubnetID != "" {
+			cfg.Nebius.SubnetID = file.Nebius.SubnetID
+		}
+		if file.Nebius.Platform != "" {
+			cfg.Nebius.Platform = file.Nebius.Platform
+		}
+		if file.Nebius.Preset != "" {
+			cfg.Nebius.Preset = file.Nebius.Preset
+		}
+		if file.Nebius.ImageFamily != "" {
+			cfg.Nebius.ImageFamily = file.Nebius.ImageFamily
+		}
+		if file.Nebius.DiskType != "" {
+			cfg.Nebius.DiskType = file.Nebius.DiskType
+		}
+		if file.Nebius.DiskSizeGiB > 0 {
+			cfg.Nebius.DiskSizeGiB = file.Nebius.DiskSizeGiB
+		}
+		if file.Nebius.User != "" {
+			cfg.Nebius.User = file.Nebius.User
+		}
+		if file.Nebius.PublicIP != "" {
+			cfg.Nebius.PublicIP = file.Nebius.PublicIP
+		}
+		if len(file.Nebius.SecurityGroupIDs) > 0 {
+			cfg.Nebius.SecurityGroupIDs = file.Nebius.SecurityGroupIDs
+		}
+		if file.Nebius.ServiceAccountID != "" {
+			cfg.Nebius.ServiceAccountID = file.Nebius.ServiceAccountID
+		}
+		if file.Nebius.RecoveryPolicy != "" {
+			cfg.Nebius.RecoveryPolicy = file.Nebius.RecoveryPolicy
 		}
 	}
 	if file.OVH != nil {
@@ -5828,6 +5975,22 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); cidrs != "" {
 		cfg.Linode.SSHCIDRs = splitCommaList(cidrs)
 	}
+	cfg.Nebius.CLI = getenv("CRABBOX_NEBIUS_CLI", cfg.Nebius.CLI)
+	cfg.Nebius.Profile = getenv("CRABBOX_NEBIUS_PROFILE", cfg.Nebius.Profile)
+	cfg.Nebius.ParentID = getenv("CRABBOX_NEBIUS_PARENT_ID", cfg.Nebius.ParentID)
+	cfg.Nebius.SubnetID = getenv("CRABBOX_NEBIUS_SUBNET_ID", cfg.Nebius.SubnetID)
+	cfg.Nebius.Platform = getenv("CRABBOX_NEBIUS_PLATFORM", cfg.Nebius.Platform)
+	cfg.Nebius.Preset = getenv("CRABBOX_NEBIUS_PRESET", cfg.Nebius.Preset)
+	cfg.Nebius.ImageFamily = getenv("CRABBOX_NEBIUS_IMAGE_FAMILY", cfg.Nebius.ImageFamily)
+	cfg.Nebius.DiskType = getenv("CRABBOX_NEBIUS_DISK_TYPE", cfg.Nebius.DiskType)
+	cfg.Nebius.DiskSizeGiB = getenvInt("CRABBOX_NEBIUS_DISK_SIZE_GIB", cfg.Nebius.DiskSizeGiB)
+	cfg.Nebius.User = getenv("CRABBOX_NEBIUS_USER", cfg.Nebius.User)
+	cfg.Nebius.PublicIP = getenv("CRABBOX_NEBIUS_PUBLIC_IP", cfg.Nebius.PublicIP)
+	if groups := os.Getenv("CRABBOX_NEBIUS_SECURITY_GROUP_IDS"); groups != "" {
+		cfg.Nebius.SecurityGroupIDs = splitCommaList(groups)
+	}
+	cfg.Nebius.ServiceAccountID = getenv("CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID", cfg.Nebius.ServiceAccountID)
+	cfg.Nebius.RecoveryPolicy = getenv("CRABBOX_NEBIUS_RECOVERY_POLICY", cfg.Nebius.RecoveryPolicy)
 	cfg.OVH.Endpoint = getenv("OVH_ENDPOINT", cfg.OVH.Endpoint)
 	cfg.OVH.ProjectID = getenv("CRABBOX_OVH_PROJECT_ID", cfg.OVH.ProjectID)
 	cfg.OVH.Region = getenv("CRABBOX_OVH_REGION", cfg.OVH.Region)
