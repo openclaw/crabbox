@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Pinned and verified the default Proxmox template cloud image before conversion, while preserving custom image URLs with a required matching SHA256.
 - Kept Code, WebVNC, and Egress bridge tickets out of WebSocket URLs while preserving ordinary coordinator authentication, older-coordinator bearer retries, and legacy-client compatibility.
 - Added opt-in per-lease Code portal origins with one-time viewer bootstrap and lease-scoped browser sessions, isolating proxied workspace content from coordinator and other lease origins without changing existing Code URLs. Thanks @coygeek.
 - Source-bound broker and direct-provider credentials to repository-configured endpoints, while preserving same-source custom deployments and explicit environment or CLI overrides.
