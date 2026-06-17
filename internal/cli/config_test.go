@@ -3296,6 +3296,100 @@ func TestRepoConfigCannotOverrideFreestyleAPIURL(t *testing.T) {
 	}
 }
 
+func TestRepoConfigCannotOverrideE2BOrSpritesCredentialDestinations(t *testing.T) {
+	userPath := setupIsolatedConfigRepo(t)
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte(`e2b:
+  apiUrl: https://trusted-e2b.example.test
+  domain: trusted-e2b.example.test
+sprites:
+  apiUrl: https://trusted-sprites.example.test
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("E2B_API_KEY", "e2b-env-secret")
+	t.Setenv("SPRITES_TOKEN", "sprites-env-secret")
+	if err := os.WriteFile(".crabbox.yaml", []byte(`e2b:
+  apiUrl: https://attacker-e2b.example.test
+  domain: attacker-e2b.example.test
+  template: repo-template
+  workdir: repo-workdir
+  user: repo-user
+sprites:
+  apiUrl: https://attacker-sprites.example.test
+  workRoot: /repo/sprites
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.E2B.APIKey != "e2b-env-secret" {
+		t.Fatalf("E2B.APIKey=%q, want env secret applied", cfg.E2B.APIKey)
+	}
+	if cfg.E2B.APIURL != "https://trusted-e2b.example.test" || cfg.E2B.Domain != "trusted-e2b.example.test" {
+		t.Fatalf("repo-local config redirected E2B credential destination: %#v", cfg.E2B)
+	}
+	if cfg.E2B.Template != "repo-template" || cfg.E2B.Workdir != "repo-workdir" || cfg.E2B.User != "repo-user" {
+		t.Fatalf("repo-local safe E2B settings not applied: %#v", cfg.E2B)
+	}
+	if cfg.Sprites.Token != "sprites-env-secret" {
+		t.Fatalf("Sprites.Token=%q, want env secret applied", cfg.Sprites.Token)
+	}
+	if cfg.Sprites.APIURL != "https://trusted-sprites.example.test" {
+		t.Fatalf("repo-local config redirected Sprites credential destination: %#v", cfg.Sprites)
+	}
+	if cfg.Sprites.WorkRoot != "/repo/sprites" {
+		t.Fatalf("repo-local safe Sprites settings not applied: %#v", cfg.Sprites)
+	}
+}
+
+func TestEnvCanOverrideE2BAndSpritesCredentialDestinations(t *testing.T) {
+	setupIsolatedConfigRepo(t)
+	t.Setenv("CRABBOX_E2B_API_KEY", "e2b-env-secret")
+	t.Setenv("CRABBOX_E2B_API_URL", "https://env-e2b.example.test")
+	t.Setenv("CRABBOX_E2B_DOMAIN", "env-e2b.example.test")
+	t.Setenv("CRABBOX_SPRITES_TOKEN", "sprites-env-secret")
+	t.Setenv("CRABBOX_SPRITES_API_URL", "https://env-sprites.example.test")
+	if err := os.WriteFile("crabbox.yaml", []byte(`e2b:
+  apiUrl: https://attacker-e2b.example.test
+  domain: attacker-e2b.example.test
+sprites:
+  apiUrl: https://attacker-sprites.example.test
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.E2B.APIKey != "e2b-env-secret" || cfg.E2B.APIURL != "https://env-e2b.example.test" || cfg.E2B.Domain != "env-e2b.example.test" {
+		t.Fatalf("env did not control E2B credential destination: %#v", cfg.E2B)
+	}
+	if cfg.Sprites.Token != "sprites-env-secret" || cfg.Sprites.APIURL != "https://env-sprites.example.test" {
+		t.Fatalf("env did not control Sprites credential destination: %#v", cfg.Sprites)
+	}
+}
+
+func setupIsolatedConfigRepo(t *testing.T) string {
+	t.Helper()
+	clearConfigEnv(t)
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_DEFAULT_CLASS", "")
+	t.Chdir(repo)
+	return userConfigPath()
+}
+
 func TestCacheVolumesOmittedKeepsInheritedConfig(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

@@ -4379,10 +4379,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.E2B != nil {
-		if file.E2B.APIURL != "" {
+		if trusted && file.E2B.APIURL != "" {
 			cfg.E2B.APIURL = file.E2B.APIURL
 		}
-		if file.E2B.Domain != "" {
+		if trusted && file.E2B.Domain != "" {
 			cfg.E2B.Domain = file.E2B.Domain
 		}
 		if file.E2B.Template != "" {
@@ -4994,7 +4994,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.Sprites != nil {
-		if file.Sprites.APIURL != "" {
+		if trusted && file.Sprites.APIURL != "" {
 			cfg.Sprites.APIURL = file.Sprites.APIURL
 		}
 		if file.Sprites.WorkRoot != "" {
