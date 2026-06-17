@@ -169,6 +169,19 @@ external:
         DEVBOX_TOKEN: "{{env.DEVBOX_TOKEN}}"
 ```
 
+Declarative lifecycle subprocesses do not inherit the caller's complete
+environment. Crabbox starts each lifecycle child with a small safe base copied
+from the current process (`HOME`, `LANG`, `PATH`, `TEMP`, `TMP`, `TMPDIR`,
+`TZ`, and `LC_*` variables), then overlays that operation's `env:` map. If an
+existing helper relies on other ambient values such as `AWS_PROFILE`,
+`AWS_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`, `KUBECONFIG`, `SSH_AUTH_SOCK`,
+provider-specific config paths, or custom tool variables, migrate them into
+the relevant `lifecycle.<operation>.env` map before upgrading. Repeat the
+entry for every operation that needs it (`acquire`, `resolve`, `list`,
+`release`, `touch`, or `cleanup`); environment entries are per-operation, not
+global. Prefer `{{env.NAME}}` values so the variable stays in the child
+environment and out of argv.
+
 For non-secret environment-backed arguments, set `allowEnvArgv: true` on that
 operation. For non-secret environment-backed resource names, also set
 `connection.allowEnvResourceName: true`; Crabbox records that provenance so a

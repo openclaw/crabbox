@@ -153,6 +153,10 @@ Handling rules:
   allow a variable for a Docker Sandbox run, Docker Sandbox receives that value
   through its `sbx exec --env-file` path even though Crabbox keeps the value out
   of local process arguments.
+- Declarative external-provider lifecycle helpers receive only a safe base
+  environment plus variables listed in `lifecycle.<operation>.env`; add any
+  required provider profiles, SDK config paths, sockets, or custom helper
+  variables there instead of relying on ambient inheritance.
 - User config files are written `0600`. `crabbox doctor` flags any local config
   whose permissions are broader, because broker tokens may live there.
 
