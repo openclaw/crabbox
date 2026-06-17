@@ -1,7 +1,6 @@
 package scaleway
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -162,11 +161,4 @@ func sanitizeSDKError(err error) string {
 		}
 	}
 	return message
-}
-
-func ensureClientUsableForPlan02(_ context.Context, client Client) error {
-	if client == nil || client.Instance() == nil || client.IAM() == nil || client.Marketplace() == nil {
-		return core.Exit(2, "scaleway client seam is incomplete")
-	}
-	return nil
 }
