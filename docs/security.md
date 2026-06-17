@@ -315,10 +315,14 @@ running/provisioning machines after an extra stale-safety window. When a
 coordinator is configured, provider-side cleanup is disabled — the coordinator
 scheduler owns brokered cleanup.
 
-The brokered AWS orphan sweep treats live coordinator lease state as the
-authority and only acts on provider tags after a matching active lease is absent
-or points at a different cloud instance. It skips `keep=true` resources and
-applies a grace window before acting on missing labels or stale lease mappings.
+Brokered cloud orphan sweeps treat coordinator lease state as the authority.
+Provider tags discover candidates and explain why they look stale, but do not
+authorize a destructive action. Automatic AWS or Azure deletion requires an
+exact retained coordinator lease binding for the same provider resource and
+region; EC2 Mac host release likewise requires an exact retained host binding.
+Tag-only and legacy candidates remain report-only. Sweeps skip `keep=true`
+resources and apply a grace window before reporting missing labels or stale
+lease mappings.
 
 Release is idempotent, and delete tolerates already-deleted provider resources.
 

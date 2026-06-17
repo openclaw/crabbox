@@ -166,9 +166,10 @@ present, the Fleet Durable Object alarm periodically scans `CRABBOX_AWS_REGION`
 plus `CRABBOX_CAPACITY_REGIONS` for Crabbox-tagged EC2 instances; the Worker cron
 handler bootstraps the alarm for idle fleets after a deploy or config change. The
 sweep uses equivalent pg-boss scheduling and reconciliation on Node/PostgreSQL. The
-sweep only terminates confirmed orphan candidates when
-`CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1`; otherwise it stores the latest report for
-admin inspection. Tune cadence and grace with
+sweep only terminates candidates with an exact retained coordinator lease
+binding when `CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1`; provider tags alone remain
+report-only. Otherwise it stores the latest report for admin inspection. Tune
+cadence and grace with
 `CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS` and
 `CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS`.
 

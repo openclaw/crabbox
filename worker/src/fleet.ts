@@ -554,6 +554,8 @@ interface CloudOrphanSweepCandidate {
   createdAt?: string;
   expiresAt?: string;
   activeCloudID?: string;
+  ownership: "coordinator-lease" | "provider-tags-only";
+  ownershipLeaseID?: string;
   action: "reported" | "terminated" | "terminate_failed";
   error?: string;
 }
@@ -570,6 +572,8 @@ interface AWSMacHostSweepCandidate {
   allocationTime?: string;
   activeLeaseID?: string;
   reason: string;
+  ownership: "coordinator-lease" | "provider-tags-only";
+  ownershipLeaseID?: string;
   action: "reported" | "released" | "release_failed";
   error?: string;
 }
@@ -9393,11 +9397,11 @@ export class FleetCoordinator {
       ...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values(),
     ]);
     const now = Date.now();
-    const activeAWSLeases = leases.filter(
-      (lease) =>
-        lease.provider === "aws" &&
-        !isRegisteredLease(lease) &&
-        leaseOwnsCloudResourceDuringSweep(lease, now),
+    const awsLeases = leases.filter(
+      (lease) => lease.provider === "aws" && !isRegisteredLease(lease),
+    );
+    const activeAWSLeases = awsLeases.filter((lease) =>
+      leaseOwnsCloudResourceDuringSweep(lease, now),
     );
     const activeLeases = new Map(activeAWSLeases.map((lease) => [lease.id, lease]));
     const activeCloudIDs = new Set(activeAWSLeases.map((lease) => lease.cloudID).filter(Boolean));
@@ -9422,7 +9426,15 @@ export class FleetCoordinator {
           if (!candidate) {
             continue;
           }
-          if (config.deleteEnabled) {
+          const ownershipLease = cloudOrphanSweepOwnershipLease(
+            machine,
+            awsLeases,
+            "aws",
+            region,
+            now,
+          );
+          recordCloudOrphanSweepOwnership(candidate, ownershipLease);
+          if (config.deleteEnabled && ownershipLease) {
             try {
               // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
               await this.provider("aws", region).deleteServer(
@@ -9454,7 +9466,9 @@ export class FleetCoordinator {
             if (!candidate) {
               continue;
             }
-            if (config.deleteEnabled) {
+            const ownershipLease = awsMacHostSweepOwnershipLease(host, awsLeases, region, now);
+            recordAWSMacHostSweepOwnership(candidate, ownershipLease);
+            if (config.deleteEnabled && ownershipLease) {
               try {
                 // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the host.
                 await client.releaseMacHost(host.id);
@@ -9620,7 +9634,15 @@ export class FleetCoordinator {
           if (!candidate) {
             continue;
           }
-          if (config.deleteEnabled) {
+          const ownershipLease = cloudOrphanSweepOwnershipLease(
+            machine,
+            leases,
+            "azure",
+            candidateRegion,
+            now,
+          );
+          recordCloudOrphanSweepOwnership(candidate, ownershipLease);
+          if (config.deleteEnabled && ownershipLease) {
             try {
               // oxlint-disable-next-line eslint/no-await-in-loop -- delete failures must stay attached to the candidate.
               await this.provider("azure", candidateRegion).deleteServer(
@@ -14006,6 +14028,7 @@ function cloudOrphanSweepCandidate(
     status: machine.status,
     serverType: machine.serverType,
     reason,
+    ownership: "provider-tags-only",
     action: "reported",
   };
   if (machine.host) {
@@ -14030,6 +14053,37 @@ function cloudOrphanSweepCandidate(
     candidate.activeCloudID = activeLease.cloudID;
   }
   return candidate;
+}
+
+function cloudOrphanSweepOwnershipLease(
+  machine: ProviderMachine,
+  leases: LeaseRecord[],
+  provider: "aws" | "azure",
+  region: string,
+  now: number,
+): LeaseRecord | undefined {
+  const cloudID = machine.cloudID || machine.name || String(machine.id);
+  return leases.find(
+    (lease) =>
+      lease.provider === provider &&
+      !isRegisteredLease(lease) &&
+      lease.cloudID === cloudID &&
+      lease.region === region &&
+      !lease.keep &&
+      lease.releaseDeletesServer !== false &&
+      !leaseOwnsCloudResourceDuringSweep(lease, now),
+  );
+}
+
+function recordCloudOrphanSweepOwnership(
+  candidate: CloudOrphanSweepCandidate,
+  lease: LeaseRecord | undefined,
+): void {
+  if (!lease) {
+    return;
+  }
+  candidate.ownership = "coordinator-lease";
+  candidate.ownershipLeaseID = lease.id;
 }
 
 function leaseOwnsCloudResourceDuringSweep(lease: LeaseRecord, now: number): boolean {
@@ -14074,8 +14128,35 @@ function awsMacHostSweepCandidate(
     availabilityZone: host.availabilityZone,
     allocationTime: new Date(allocationTime).toISOString(),
     reason: "stale-pending-mac-host",
+    ownership: "provider-tags-only",
     action: "reported",
   };
+}
+
+function awsMacHostSweepOwnershipLease(
+  host: AWSMacHost,
+  leases: LeaseRecord[],
+  region: string,
+  now: number,
+): LeaseRecord | undefined {
+  return leases.find(
+    (lease) =>
+      leaseHostID(lease) === host.id &&
+      lease.region === region &&
+      !lease.keep &&
+      !leaseOwnsCloudResourceDuringSweep(lease, now),
+  );
+}
+
+function recordAWSMacHostSweepOwnership(
+  candidate: AWSMacHostSweepCandidate,
+  lease: LeaseRecord | undefined,
+): void {
+  if (!lease) {
+    return;
+  }
+  candidate.ownership = "coordinator-lease";
+  candidate.ownershipLeaseID = lease.id;
 }
 
 function parseProviderLabelTime(value: string | undefined): number {

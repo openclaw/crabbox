@@ -130,8 +130,8 @@ exist. On success the lease moves to `expired`.
 
 Maintenance runs at the earliest active-lease expiry or AWS orphan-sweep time.
 The orphan sweep (report or delete mode, gated by
-`CRABBOX_AWS_ORPHAN_SWEEP_*`) terminates untracked instances and releases idle
-Mac dedicated hosts.
+`CRABBOX_AWS_ORPHAN_SWEEP_*`) reports untracked instances and releases or
+terminates only exact resources retained in coordinator lease state.
 
 Direct cleanup only deletes machines that are clearly safe:
 
