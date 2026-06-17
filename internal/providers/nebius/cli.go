@@ -495,7 +495,3 @@ func isJSON(output string) bool {
 func validationError(format string, args ...any) error {
 	return exit(2, format, args...)
 }
-
-func notImplemented(action string) error {
-	return errors.New("provider=nebius " + action + " is not implemented until Nebius lifecycle support lands")
-}

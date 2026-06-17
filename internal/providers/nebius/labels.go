@@ -3,7 +3,6 @@ package nebius
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"strings"
 	"time"
 
@@ -107,16 +106,4 @@ func normalizeNebiusLabelValue(value string) string {
 		value = value[:256]
 	}
 	return value
-}
-
-func labelsContainNebiusOwnership(labels map[string]string, cfg Config) bool {
-	return validateNebiusOwnership(labels, cfg) == nil
-}
-
-func ownershipDebug(labels map[string]string, cfg Config) string {
-	err := validateNebiusOwnership(labels, cfg)
-	if err == nil {
-		return "owned"
-	}
-	return fmt.Sprint(err)
 }
