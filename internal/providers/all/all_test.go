@@ -119,6 +119,34 @@ func TestSuperserveRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestScalewayRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("scaleway")
+	if err != nil {
+		t.Fatalf("ProviderFor(scaleway): %v", err)
+	}
+	if provider.Name() != "scaleway" {
+		t.Fatalf("ProviderFor(scaleway).Name=%q", provider.Name())
+	}
+	if provider.Aliases() != nil {
+		t.Fatalf("scaleway aliases=%v, want none", provider.Aliases())
+	}
+	spec := provider.Spec()
+	if spec.Kind != core.ProviderKindSSHLease || spec.Family != "scaleway" || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("scaleway spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("scaleway targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("scaleway features=%v missing %s", spec.Features, feature)
+		}
+	}
+	if _, ok := provider.(core.DoctorProvider); !ok {
+		t.Fatal("scaleway does not expose doctor")
+	}
+}
+
 func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
 	for _, name := range []string{"namespace-instance", "namespace-compute"} {
 		provider, err := core.ProviderFor(name)
