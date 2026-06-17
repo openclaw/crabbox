@@ -78,7 +78,7 @@ localContainer:
   cpus: 0                  # CPU limit; 0 leaves the runtime default
   memory: ""               # memory limit, e.g. 8g
   network: bridge          # container network
-  dockerSocket: false      # mount the host Docker-compatible socket into the lease
+  dockerSocket: false      # trusted user/explicit config only; repo-local values are ignored
 ```
 
 Defaults applied when unset: `runtime=docker`, `image=debian:bookworm`,
@@ -112,7 +112,10 @@ ownership under those paths. System paths such as `/etc`, `/usr`, `/var`,
 **Security:** This flag is CLI-only. It is intentionally not loaded from
 repo-local `.crabbox.yaml` because bind mounts expose host paths and must
 be an explicit operator action, not something an untrusted checkout can
-request.
+request. Socket pass-through follows the same trust boundary: repo-local
+`localContainer.dockerSocket` values are ignored, so use trusted user config,
+`CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=1`, or
+`--local-container-docker-socket` when a workflow needs the host Docker API.
 
 Environment overrides:
 
@@ -138,13 +141,17 @@ Crabbox connects to the published SSH port from the local machine.
 
 ### Socket pass-through
 
-Set `localContainer.dockerSocket: true` or
-`CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=1` when commands inside the lease need to
-run `docker`. Crabbox mounts the active local Unix Docker-compatible socket into
-the container at `/var/run/docker.sock`, so in-lease `docker` commands run
-against the host engine. For Podman, point `DOCKER_HOST` at the Podman socket,
-for example `unix://$XDG_RUNTIME_DIR/podman/podman.sock`. Remote TCP hosts are
-rejected in this mode. Basic Podman leases do not require socket pass-through.
+Set `--local-container-docker-socket`,
+`CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=1`, or
+`localContainer.dockerSocket: true` in trusted user config when commands inside
+the lease need to run `docker`. Repo-local `crabbox.yaml` and `.crabbox.yaml`
+values for this setting are intentionally ignored because they would let an
+untrusted checkout request host socket access. When enabled, Crabbox mounts the
+active local Unix Docker-compatible socket into the container at
+`/var/run/docker.sock`, so in-lease `docker` commands run against the host
+engine. For Podman, point `DOCKER_HOST` at the Podman socket, for example
+`unix://$XDG_RUNTIME_DIR/podman/podman.sock`. Remote TCP hosts are rejected in
+this mode. Basic Podman leases do not require socket pass-through.
 
 When the socket is enabled and no work root is explicitly configured, Crabbox
 uses a host-visible cache work root so nested Docker bind mounts can see the

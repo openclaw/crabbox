@@ -534,7 +534,7 @@ localContainer:
   cpus: 0
   memory: ""
   network: bridge
-  dockerSocket: false
+  dockerSocket: false      # trusted user/explicit config only; repo-local values are ignored
 ```
 
 `provider: docker`, `provider: container`, and `provider: local-docker` are
@@ -542,9 +542,13 @@ aliases for `local-container`. The backend uses Docker-compatible CLI commands,
 so Docker Desktop, OrbStack, Colima, Podman, and similar local runtimes work.
 Crabbox detects an installed `docker` or `podman` CLI and uses that runtime; if
 both are present, `docker` is selected unless `localContainer.runtime` is set
-explicitly. Set `dockerSocket: true` only when commands inside the lease must
-use the host Docker-compatible API; Crabbox then mounts the active local Unix
-socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
+explicitly. Set `dockerSocket: true` in trusted user config only when commands
+inside the lease must use the host Docker-compatible API; repo-local
+`crabbox.yaml` and `.crabbox.yaml` values are ignored. Operators can also enable
+socket pass-through with `CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=1` or
+`--local-container-docker-socket`. When enabled, Crabbox mounts the active local
+Unix socket from `DOCKER_HOST` or the Docker context and rejects remote TCP
+contexts.
 With the socket enabled and no explicit work root, Crabbox chooses a host-visible
 cache work root so nested bind mounts can see the synced checkout.
 
