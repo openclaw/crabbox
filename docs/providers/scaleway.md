@@ -33,8 +33,7 @@ resources:
 crabbox doctor --provider scaleway
 ```
 
-The provider is registered for the normal SSH-lease command surface, but live
-lifecycle methods are not implemented in this branch yet:
+The provider is registered for the normal SSH-lease command surface:
 
 ```sh
 crabbox warmup --provider scaleway --class standard
@@ -195,21 +194,62 @@ inspection; do not treat manual cleanup as Crabbox lifecycle proof.
 
 ## Guarded Live Smoke
 
-The guarded opt-in command name is:
+The guarded opt-in command builds `bin/crabbox`, verifies the current Scaleway
+Crabbox inventory is empty, creates a short-lived `DEV1-S` lease by default,
+waits for readiness, runs `echo ok`, verifies the active lease appears in
+`list --json`, stops it, runs `cleanup --dry-run`, and verifies the final
+inventory is empty.
+
+Run it only when live Scaleway credentials, IDs, region, zone, and quota are
+available:
 
 ```sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=scaleway scripts/live-scaleway-smoke.sh
 ```
 
+Required environment:
+
+```text
+CRABBOX_LIVE=1
+CRABBOX_LIVE_PROVIDERS=scaleway
+SCW_ACCESS_KEY
+SCW_SECRET_KEY
+SCW_DEFAULT_ORGANIZATION_ID or CRABBOX_SCALEWAY_ORGANIZATION_ID
+SCW_DEFAULT_PROJECT_ID or CRABBOX_SCALEWAY_PROJECT_ID
+SCW_DEFAULT_REGION or CRABBOX_SCALEWAY_REGION
+SCW_DEFAULT_ZONE or CRABBOX_SCALEWAY_ZONE
+```
+
+Optional smoke defaults:
+
+```text
+CRABBOX_SCALEWAY_TYPE=DEV1-S
+CRABBOX_SCALEWAY_IMAGE=ubuntu_noble
+CRABBOX_SCALEWAY_CLEANUP_ATTEMPTS=65
+```
+
 Expected classifications:
 
 ```text
-classification=live_scaleway_smoke_passed
-classification=environment_blocked
+classification=environment_blocked reason=CRABBOX_LIVE_not_enabled
+classification=environment_blocked reason=scaleway_not_selected
+classification=environment_blocked reason=SCW_ACCESS_KEY_missing
+classification=environment_blocked reason=SCW_SECRET_KEY_missing
+classification=environment_blocked reason=SCW_DEFAULT_ORGANIZATION_ID_missing
+classification=environment_blocked reason=SCW_DEFAULT_PROJECT_ID_missing
 classification=quota_blocked
 classification=validation_failed
 classification=cleanup_failed
+classification=live_scaleway_smoke_passed
 ```
+
+`environment_blocked` means local live gates, credentials, IDs, region, or zone
+are unavailable. `quota_blocked` means Scaleway rejected the create path with
+quota, capacity, rate-limit, or account-limit language. `validation_failed`
+means the smoke's safety checks failed, such as non-empty initial inventory or
+unexpected list JSON. `cleanup_failed` means the targeted stop retry loop could
+not prove cleanup. The script redacts the configured Scaleway access and secret
+keys from captured command output before printing.
 
 ## Capabilities
 
