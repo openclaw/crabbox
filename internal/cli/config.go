@@ -173,6 +173,7 @@ type Config struct {
 	CodeSandbox                   CodeSandboxConfig
 	OpenSandbox                   OpenSandboxConfig
 	VercelSandbox                 VercelSandboxConfig
+	CloudflareSandbox             CloudflareSandboxConfig
 	Superserve                    SuperserveConfig
 	DockerSandbox                 DockerSandboxConfig
 	AnthropicSRT                  AnthropicSRTConfig
@@ -710,6 +711,17 @@ type VercelSandboxConfig struct {
 	NetworkAllow    []string
 	NetworkDeny     []string
 	Ports           []string
+	ForgetMissing   bool
+}
+
+// CloudflareSandboxConfig configures the delegated Cloudflare Sandbox bridge
+// provider. The token may be loaded from trusted user config or environment,
+// but it is never exposed as a CLI flag and must be redacted in display output.
+type CloudflareSandboxConfig struct {
+	BridgeURL       string
+	Token           string
+	Workdir         string
+	ExecTimeoutSecs int
 	ForgetMissing   bool
 }
 
@@ -2388,6 +2400,10 @@ func baseConfig() Config {
 			ExecTimeoutSecs: 600,
 			NetworkPolicy:   "default",
 		},
+		CloudflareSandbox: CloudflareSandboxConfig{
+			Workdir:         "/workspace/crabbox",
+			ExecTimeoutSecs: 600,
+		},
 		Superserve: SuperserveConfig{
 			BaseURL:         "https://api.superserve.ai",
 			Template:        "superserve/base",
@@ -2594,6 +2610,7 @@ type fileConfig struct {
 	CodeSandbox              *fileCodeSandboxConfig              `yaml:"codeSandbox,omitempty"`
 	OpenSandbox              *fileOpenSandboxConfig              `yaml:"openSandbox,omitempty"`
 	VercelSandbox            *fileVercelSandboxConfig            `yaml:"vercelSandbox,omitempty"`
+	CloudflareSandbox        *fileCloudflareSandboxConfig        `yaml:"cloudflareSandbox,omitempty"`
 	Superserve               *fileSuperserveConfig               `yaml:"superserve,omitempty"`
 	DockerSandbox            *fileDockerSandboxConfig            `yaml:"dockerSandbox,omitempty"`
 	AnthropicSRT             *fileAnthropicSRTConfig             `yaml:"anthropicSandboxRuntime,omitempty"`
@@ -3184,6 +3201,15 @@ type fileVercelSandboxConfig struct {
 	ForgetMissing   *bool     `yaml:"forgetMissing,omitempty"`
 }
 
+type fileCloudflareSandboxConfig struct {
+	BridgeURL       *string `yaml:"bridgeUrl,omitempty"`
+	URL             *string `yaml:"url,omitempty"`
+	Token           *string `yaml:"token,omitempty"`
+	Workdir         *string `yaml:"workdir,omitempty"`
+	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
+	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
+}
+
 type fileSuperserveConfig struct {
 	BaseURL         string   `yaml:"baseUrl,omitempty"`
 	Template        *string  `yaml:"template,omitempty"`
@@ -3281,6 +3307,36 @@ func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig, source c
 	if file.Workdir != "" {
 		cfg.Cloudflare.Workdir = file.Workdir
 	}
+}
+
+func applyCloudflareSandboxFileConfig(cfg *Config, file *fileCloudflareSandboxConfig, trusted bool) error {
+	if file == nil {
+		return nil
+	}
+	if trusted {
+		if file.BridgeURL != nil {
+			cfg.CloudflareSandbox.BridgeURL = *file.BridgeURL
+		}
+		if file.URL != nil {
+			cfg.CloudflareSandbox.BridgeURL = *file.URL
+		}
+		if file.Token != nil {
+			cfg.CloudflareSandbox.Token = *file.Token
+		}
+	}
+	if file.Workdir != nil {
+		cfg.CloudflareSandbox.Workdir = *file.Workdir
+	}
+	if file.ExecTimeoutSecs != nil {
+		if *file.ExecTimeoutSecs < 0 {
+			return exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
+		}
+		cfg.CloudflareSandbox.ExecTimeoutSecs = *file.ExecTimeoutSecs
+	}
+	if file.ForgetMissing != nil {
+		cfg.CloudflareSandbox.ForgetMissing = *file.ForgetMissing
+	}
+	return nil
 }
 
 func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDynamicWorkersConfig, trusted bool) {
@@ -5412,6 +5468,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	applyCloudflareFileConfig(cfg, file.Cloudflare, credentialSource)
+	if err := applyCloudflareSandboxFileConfig(cfg, file.CloudflareSandbox, trusted); err != nil {
+		return err
+	}
 	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
 	if file.Semaphore != nil {
 		if file.Semaphore.Host != "" {
@@ -6874,6 +6933,16 @@ func applyEnv(cfg *Config) error {
 	}
 	if v, ok := getenvBool("CRABBOX_VERCEL_SANDBOX_FORGET_MISSING"); ok {
 		cfg.VercelSandbox.ForgetMissing = v
+	}
+	cfg.CloudflareSandbox.BridgeURL = getenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", cfg.CloudflareSandbox.BridgeURL)
+	cfg.CloudflareSandbox.Token = getenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", cfg.CloudflareSandbox.Token)
+	cfg.CloudflareSandbox.Workdir = getenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", cfg.CloudflareSandbox.Workdir)
+	cfg.CloudflareSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", cfg.CloudflareSandbox.ExecTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	if v, ok := getenvBool("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING"); ok {
+		cfg.CloudflareSandbox.ForgetMissing = v
 	}
 	cfg.Superserve.BaseURL = getenv("CRABBOX_SUPERSERVE_BASE_URL", getenv("SUPERSERVE_BASE_URL", cfg.Superserve.BaseURL))
 	cfg.Superserve.Template = getenv("CRABBOX_SUPERSERVE_TEMPLATE", cfg.Superserve.Template)

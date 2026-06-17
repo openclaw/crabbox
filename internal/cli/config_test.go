@@ -3089,6 +3089,59 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
+func TestCloudflareSandboxConfigDefaultsYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.CloudflareSandbox.Workdir != "/workspace/crabbox" || cfg.CloudflareSandbox.ExecTimeoutSecs != 600 {
+		t.Fatalf("unexpected cloudflare-sandbox defaults: %#v", cfg.CloudflareSandbox)
+	}
+
+	var file fileConfig
+	yamlText := strings.Join([]string{
+		"cloudflareSandbox:",
+		"  url: https://bridge.example.test",
+		"  token: trusted-token",
+		"  workdir: /workspace/app",
+		"  execTimeoutSecs: 60",
+		"  forgetMissing: true",
+	}, "\n")
+	if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareSandbox.BridgeURL != "https://bridge.example.test" || cfg.CloudflareSandbox.Token != "trusted-token" || cfg.CloudflareSandbox.Workdir != "/workspace/app" || cfg.CloudflareSandbox.ExecTimeoutSecs != 60 || !cfg.CloudflareSandbox.ForgetMissing {
+		t.Fatalf("trusted cloudflare-sandbox YAML config not applied: %#v", cfg.CloudflareSandbox)
+	}
+
+	var untrusted fileConfig
+	if err := yaml.Unmarshal([]byte("cloudflareSandbox:\n  bridgeUrl: https://repo.example.test\n  token: repo-token\n  workdir: /workspace/repo\n  execTimeoutSecs: 30\n"), &untrusted); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, untrusted, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareSandbox.BridgeURL != "https://bridge.example.test" || cfg.CloudflareSandbox.Token != "trusted-token" {
+		t.Fatalf("untrusted config overrode trusted URL/token: %#v", cfg.CloudflareSandbox)
+	}
+	if cfg.CloudflareSandbox.Workdir != "/workspace/repo" || cfg.CloudflareSandbox.ExecTimeoutSecs != 30 {
+		t.Fatalf("untrusted non-secret config not applied: %#v", cfg.CloudflareSandbox)
+	}
+
+	t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", "http://localhost:8787")
+	t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", "env-token")
+	t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", "/workspace/env")
+	t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", "90")
+	t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareSandbox.BridgeURL != "http://localhost:8787" || cfg.CloudflareSandbox.Token != "env-token" || cfg.CloudflareSandbox.Workdir != "/workspace/env" || cfg.CloudflareSandbox.ExecTimeoutSecs != 90 || cfg.CloudflareSandbox.ForgetMissing {
+		t.Fatalf("cloudflare-sandbox env config not applied: %#v", cfg.CloudflareSandbox)
+	}
+}
+
 func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
