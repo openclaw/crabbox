@@ -65,10 +65,10 @@ authentication is resolved in `worker/src/auth.ts` in this precedence:
    non-admin shared identity for automation.
 3. **Signed user token** — a `cbxu_`-prefixed token issued by GitHub browser
    login. It is an HMAC-SHA256 signature (verified in constant time) over a
-   base64url payload signed with `CRABBOX_SESSION_SECRET` (falling back to
-   `CRABBOX_SHARED_TOKEN`). The payload carries `owner`, `org`, and GitHub
-   `login`, has a default 180-day expiry, and is rejected if it carries an
-   `admin` claim — browser login can never mint admin tokens.
+   base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
+   must differ from `CRABBOX_SHARED_TOKEN`. The payload carries `owner`, `org`,
+   and GitHub `login`, has a default 180-day expiry, and is rejected if it
+   carries an `admin` claim — browser login can never mint admin tokens.
 
 ### GitHub browser login
 
@@ -198,10 +198,11 @@ repo:
 - `CRABBOX_ADMIN_TOKEN` — admin and image-lifecycle routes.
 - `CRABBOX_RUNTIME_ADAPTER_TOKEN` — route-scoped service access to the
   `/v1/workspaces` lifecycle API only.
-- `CRABBOX_SHARED_TOKEN` — trusted operator automation; also the fallback
-  signing key when `CRABBOX_SESSION_SECRET` is unset.
+- `CRABBOX_SHARED_TOKEN` — trusted operator automation only.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing.
+  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing. The
+  session secret is required, must be independent from the shared token, and
+  should be rotated separately.
 - `CRABBOX_GITHUB_ADMIN_OWNERS`, `CRABBOX_GITHUB_ADMIN_LOGINS` — optional
   comma-separated GitHub verified emails and logins whose user tokens become
   admin at request time; set these per deployment, not in the reusable repo
@@ -212,6 +213,11 @@ repo:
   and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` — brokered artifact publishing.
   Scope these to the artifact bucket/prefix and use them only to sign
   short-lived upload/read URLs.
+
+Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
+user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
+`cbxu_` tokens from the old key stop authenticating, so users must run
+`crabbox login` again. Direct shared-token automation is unaffected.
 
 Coordinator config values (not secret material):
 

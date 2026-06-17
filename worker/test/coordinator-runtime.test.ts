@@ -196,6 +196,7 @@ describe("coordinator runtimes", () => {
       CRABBOX_GITHUB_CLIENT_ID: "github-client",
       CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
       CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
     } as Env;
     const start = await runtime.runExclusive(() =>
       githubAuthRoute(

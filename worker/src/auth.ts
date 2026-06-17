@@ -232,11 +232,23 @@ function decodeUserTokenPayload(token: string): Partial<UserTokenPayload> {
 }
 
 function sessionSecret(env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">): string {
-  const secret = env.CRABBOX_SESSION_SECRET || env.CRABBOX_SHARED_TOKEN;
-  if (!secret) {
-    throw new Error("CRABBOX_SESSION_SECRET or CRABBOX_SHARED_TOKEN is required");
+  const error = userTokenSigningConfigurationError(env);
+  if (error) {
+    throw new Error(error);
   }
-  return secret;
+  return env.CRABBOX_SESSION_SECRET!;
+}
+
+export function userTokenSigningConfigurationError(
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+): string | undefined {
+  if (!env.CRABBOX_SESSION_SECRET) {
+    return "CRABBOX_SESSION_SECRET is required for signed user tokens";
+  }
+  if (env.CRABBOX_SHARED_TOKEN && env.CRABBOX_SESSION_SECRET === env.CRABBOX_SHARED_TOKEN) {
+    return "CRABBOX_SESSION_SECRET must differ from CRABBOX_SHARED_TOKEN";
+  }
+  return undefined;
 }
 
 interface AccessIdentity {

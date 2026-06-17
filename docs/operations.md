@@ -221,7 +221,7 @@ CRABBOX_WORKSPACE_CLASS           optional workspace machine class; default stan
 CRABBOX_WORKSPACE_PREWARM_COUNT   optional ready spares per active organization; default 0, maximum 4
 CRABBOX_GITHUB_CLIENT_ID          required for browser login
 CRABBOX_GITHUB_CLIENT_SECRET      required for browser login
-CRABBOX_SESSION_SECRET            required for browser login
+CRABBOX_SESSION_SECRET            required for browser login; must differ from CRABBOX_SHARED_TOKEN
 CRABBOX_CODE_ORIGIN_TEMPLATE      optional per-lease Code origin isolation
 CRABBOX_GITHUB_ALLOWED_ORG or CRABBOX_GITHUB_ALLOWED_ORGS
 CRABBOX_GITHUB_ALLOWED_TEAMS      optional

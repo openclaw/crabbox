@@ -16349,6 +16349,7 @@ describe("fleet identity", () => {
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "session-secret",
       } as Env,
     );
     const pollSecret = "local-poll-secret";
@@ -16378,6 +16379,60 @@ describe("fleet identity", () => {
     );
     expect(poll.status).toBe(200);
     await expect(poll.json()).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("reports missing signing material before GitHub login starts", async () => {
+    const storage = new MemoryStorage();
+    const fleet = new FleetDurableObject(
+      { storage } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SHARED_TOKEN: "shared",
+      } as Env,
+    );
+
+    const start = await fleet.fetch(
+      request("POST", "/v1/auth/github/start", {
+        body: { pollSecretHash: await sha256HexForTest("local-poll-secret") },
+      }),
+    );
+    expect(start.status).toBe(503);
+    await expect(start.json()).resolves.toMatchObject({
+      error: "github_session_secret_invalid",
+      message: "CRABBOX_SESSION_SECRET is required for signed user tokens",
+    });
+
+    const portal = await fleet.fetch(request("GET", "/portal/login"));
+    expect(portal.status).toBe(503);
+    expect(await portal.text()).toContain(
+      "CRABBOX_SESSION_SECRET is required for signed user tokens",
+    );
+  });
+
+  it("rejects a shared token reused as GitHub signing material", async () => {
+    const fleet = new FleetDurableObject(
+      { storage: new MemoryStorage() } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "shared",
+      } as Env,
+    );
+
+    const start = await fleet.fetch(
+      request("POST", "/v1/auth/github/start", {
+        body: { pollSecretHash: await sha256HexForTest("local-poll-secret") },
+      }),
+    );
+    expect(start.status).toBe(503);
+    await expect(start.json()).resolves.toMatchObject({
+      error: "github_session_secret_invalid",
+      message: "CRABBOX_SESSION_SECRET must differ from CRABBOX_SHARED_TOKEN",
+    });
   });
 
   it("sets a portal session cookie after GitHub login", async () => {
@@ -16430,6 +16485,7 @@ describe("fleet identity", () => {
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "session-secret",
       } as Env,
     );
     storage.seed("oauth:login_old", {
