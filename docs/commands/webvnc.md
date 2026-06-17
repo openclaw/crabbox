@@ -46,9 +46,9 @@ nonce, recorded in its identity, rather than the adapter owner token. After
 the SSH tunnel opens, Crabbox
 proves that the exact expected SSH process owns the local listener before
 retrieving a VNC credential, completes a noVNC WebSocket and VNC password
-challenge, and rechecks ownership before printing any credential-bearing
-viewer URL. A missing/zero expected PID, unrelated listener, or unauthenticated
-endpoint never receives a password probe or URL.
+challenge, and rechecks ownership before printing the portal URL and separate
+credential lines. A missing/zero expected PID, unrelated listener, or
+unauthenticated endpoint never receives a password probe or portal URL.
 
 The data path is:
 
@@ -73,7 +73,7 @@ The local `crabbox webvnc` process is not just a launcher; it is the live
 bridge between the browser and the SSH-tunneled VNC socket. Keep it running
 while the browser tab is open. If the browser tab reloads or drops, the bridge
 re-registers so the portal retry can reconnect. If the SSH tunnel process
-exits, the foreground bridge exits instead of leaving a stale viewer URL; a
+exits, the foreground bridge exits instead of leaving a stale portal URL; a
 background supervisor observes that exit and starts a freshly resolved bridge.
 
 ### Existing local VNC tunnel
@@ -199,7 +199,7 @@ The reservation is a bound loopback datagram socket, so it has no replaceable
 filesystem pathname. macOS bridges claim a second reservation for their
 internal SSH-tunnel port before that tunnel starts; foreground macOS bridges
 also claim their browser-facing port before beginning SSH setup.
-The supervisor cannot start the credential-bearing bridge until its private
+The supervisor cannot start the VNC credential bridge until its private
 identity file is flushed and installed; loss of the starting process before
 that handshake closes the launch gate instead of leaving an untracked daemon.
 Ordinary manual and automatically registered daemon children keep their normal
@@ -216,7 +216,7 @@ also receives and validates the adapter's full persisted lease, attempt,
 slug, resource, and provider-scope identity. Direct-SSH status checks the exact
 listener owner before credential retrieval and immediately before and after its
 VNC authentication probe; without a positive expected owner PID it reports no
-credential or viewer URL.
+credential or portal URL.
 Adapter lifecycle
 reconciliation remains their sole owner.
 
