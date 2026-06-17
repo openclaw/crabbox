@@ -55,6 +55,24 @@ health payload). When
 origin (for example a `*.workers.dev` preview URL), the Worker redirects to
 the canonical host first.
 
+Deployments can isolate lease-controlled code-server content from the
+coordinator and from other leases by setting
+`CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com` and routing
+`*.code.example.com` to the same coordinator. The existing
+`/portal/leases/{id-or-slug}/code/` URL remains the entrypoint: after normal
+portal authorization it redirects through a one-use, short-lived viewer ticket
+to an opaque per-lease hostname. That hostname receives only an HttpOnly,
+path-scoped Code viewer session; it never receives `crabbox_session` and cannot
+use the Code session on other portal routes or lease origins. The ingress must
+provide wildcard TLS and WebSocket routing for the template.
+Proxied responses may set only code-server's `vscode-tkn` cookie; Crabbox removes
+domain scope and confines it to that lease's Code path.
+
+The setting is opt-in because Crabbox cannot provision an operator's wildcard
+DNS, certificate, or ingress route. When the setting is absent or invalid, Code
+keeps its existing same-origin behavior for compatibility; operators who share
+a coordinator between people should configure the isolated origin.
+
 ## Authentication and scope
 
 Portal pages use a browser session cookie (`crabbox_session`) minted after a

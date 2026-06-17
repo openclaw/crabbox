@@ -3,7 +3,7 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
-import { isAdminRequest, sha256Hex } from "./auth";
+import { isAdminRequest, requestWithAuthContext, sha256Hex, type AuthContext } from "./auth";
 import {
   EC2SpotClient,
   awsConfiguredSecurityGroupID,
@@ -17,6 +17,11 @@ import {
   type AWSMacHost,
 } from "./aws";
 import { AzureClient, azureRegionCandidates, type AzureDeferredCleanupRequest } from "./azure";
+import {
+  codeOriginForLease,
+  codeProxyRequestBodyBytes,
+  isIsolatedCodeRequest,
+} from "./code-origin";
 import {
   awsPromotedAMIConfigKey,
   azureLocationFor,
@@ -134,6 +139,8 @@ const maxRunTelemetrySamples = 60;
 const maxExternalRunnerSyncItems = 200;
 const webVNCTicketTTLSeconds = 120;
 const codeTicketTTLSeconds = 120;
+const codeViewerTicketTTLSeconds = 120;
+const codeViewerSessionTTLSeconds = 8 * 60 * 60;
 const egressTicketTTLSeconds = 120;
 const runtimeAdapterTicketTTLSeconds = 120;
 const runtimeAdapterDeleteRetryBaseMs = 5_000;
@@ -158,7 +165,6 @@ const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
-const maxCodeRequestBytes = 10 * 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -206,6 +212,32 @@ interface CodeTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface CodeViewerTicketRecord {
+  ticket: string;
+  leaseID: string;
+  auth: AuthContext["auth"];
+  admin: boolean;
+  owner: string;
+  org: string;
+  login?: string;
+  returnTo: string;
+  viewerExpiresAt?: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface CodeViewerSessionRecord {
+  session: string;
+  leaseID: string;
+  auth: AuthContext["auth"];
+  admin: boolean;
+  owner: string;
+  org: string;
+  login?: string;
   createdAt: string;
   expiresAt: string;
 }
@@ -6592,7 +6624,32 @@ export class FleetCoordinator {
     identifier: string,
     _rest: string[],
   ): Promise<Response> {
-    const lease = await this.resolvePortalLease(identifier, request);
+    const isolated = await isIsolatedCodeRequest(request, this.env);
+    if (isolated && _rest.length === 1 && _rest[0] === "__crabbox_bootstrap") {
+      return await this.bootstrapCodeViewer(request, identifier);
+    }
+    let authorizedRequest = request;
+    if (isolated) {
+      const session = await this.codeViewerSession(request, identifier);
+      if (!session) {
+        return this.codeViewerAuthenticationRequired(request, identifier);
+      }
+      if (!isolatedCodeRequestOriginAllowed(request)) {
+        return json(
+          { error: "code_viewer_origin_forbidden", message: "Code viewer origin mismatch" },
+          { status: 403 },
+        );
+      }
+      authorizedRequest = requestWithAuthContext(request, {
+        authorized: true,
+        admin: session.admin,
+        auth: session.auth,
+        owner: session.owner,
+        org: session.org,
+        ...(session.login ? { login: session.login } : {}),
+      });
+    }
+    const lease = await this.resolvePortalLease(identifier, authorizedRequest);
     if (!lease) {
       return portalError(
         "Lease not found",
@@ -6608,13 +6665,191 @@ export class FleetCoordinator {
     if (request.method.toUpperCase() === "GET" && _rest.length === 1 && _rest[0] === "health") {
       return this.codePortalHealth(lease, agent);
     }
+    const isolatedOrigin = await codeOriginForLease(this.env, lease.id);
+    if (!isolated && isolatedOrigin && new URL(request.url).origin !== isolatedOrigin) {
+      return await this.redirectCodeViewer(request, lease, isolatedOrigin);
+    }
     if (!agent || agent.readyState !== WebSocket.OPEN) {
       return portalCode(lease);
     }
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      return this.codeViewerWebSocket(request, lease, agent);
+      return this.codeViewerWebSocket(authorizedRequest, lease, agent);
     }
-    return await this.codeProxyHTTP(request, lease, agent);
+    return await this.codeProxyHTTP(authorizedRequest, lease, agent);
+  }
+
+  private async redirectCodeViewer(
+    request: Request,
+    lease: LeaseRecord,
+    isolatedOrigin: string,
+  ): Promise<Response> {
+    await this.cleanupExpiredCodeViewerAuth();
+    const now = new Date();
+    const ticket: CodeViewerTicketRecord = {
+      ticket: newCodeViewerTicket(),
+      leaseID: lease.id,
+      auth: requestAuthType(request),
+      admin: isAdminRequest(request),
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+      returnTo: canonicalCodeReturnTo(request, lease.id),
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + codeViewerTicketTTLSeconds * 1000).toISOString(),
+    };
+    const login = request.headers.get("x-crabbox-github-login")?.trim();
+    if (login) {
+      ticket.login = login;
+    }
+    const tokenExpiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim();
+    if (tokenExpiresAt && Number.isFinite(Date.parse(tokenExpiresAt))) {
+      ticket.viewerExpiresAt = new Date(tokenExpiresAt).toISOString();
+    }
+    await this.state.storage.put(codeViewerTicketKey(ticket.ticket), ticket);
+    const location = new URL(
+      `/portal/leases/${encodeURIComponent(lease.id)}/code/__crabbox_bootstrap`,
+      isolatedOrigin,
+    );
+    location.searchParams.set("ticket", ticket.ticket);
+    return new Response(null, {
+      status: 302,
+      headers: {
+        "cache-control": "no-store",
+        location: location.toString(),
+        "referrer-policy": "no-referrer",
+      },
+    });
+  }
+
+  private async bootstrapCodeViewer(request: Request, leaseID: string): Promise<Response> {
+    const value = new URL(request.url).searchParams.get("ticket") ?? "";
+    const ticket = await this.consumeCodeViewerTicket(value, leaseID);
+    if (!ticket) {
+      return json(
+        { error: "code_viewer_ticket_required", message: "valid Code viewer ticket required" },
+        { status: 401, headers: { "cache-control": "no-store" } },
+      );
+    }
+    const now = new Date();
+    const defaultExpiresAt = now.getTime() + codeViewerSessionTTLSeconds * 1000;
+    const tokenExpiresAt = Date.parse(ticket.viewerExpiresAt ?? "");
+    const expiresAt = Number.isFinite(tokenExpiresAt)
+      ? Math.min(defaultExpiresAt, tokenExpiresAt)
+      : defaultExpiresAt;
+    const session: CodeViewerSessionRecord = {
+      session: newCodeViewerSession(),
+      leaseID: ticket.leaseID,
+      auth: ticket.auth,
+      admin: ticket.admin,
+      owner: ticket.owner,
+      org: ticket.org,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+    if (ticket.login) {
+      session.login = ticket.login;
+    }
+    await this.state.storage.put(codeViewerSessionKey(session.session), session);
+    return new Response(null, {
+      status: 303,
+      headers: {
+        "cache-control": "no-store",
+        location: ticket.returnTo,
+        "referrer-policy": "no-referrer",
+        "set-cookie": codeViewerSessionCookie(
+          session,
+          Math.max(0, Math.floor((expiresAt - now.getTime()) / 1000)),
+        ),
+      },
+    });
+  }
+
+  private async codeViewerSession(
+    request: Request,
+    leaseID: string,
+  ): Promise<CodeViewerSessionRecord | undefined> {
+    const value = cookieValue(request.headers.get("cookie") ?? "", "crabbox_code_session");
+    if (!validCodeViewerSession(value)) {
+      return undefined;
+    }
+    const session = await this.state.storage.get<CodeViewerSessionRecord>(
+      codeViewerSessionKey(value),
+    );
+    if (
+      !session ||
+      session.session !== value ||
+      session.leaseID !== leaseID ||
+      Date.parse(session.expiresAt) <= Date.now()
+    ) {
+      if (session) {
+        await this.state.storage.delete(codeViewerSessionKey(value));
+      }
+      return undefined;
+    }
+    return session;
+  }
+
+  private codeViewerAuthenticationRequired(request: Request, leaseID: string): Response {
+    if (
+      request.method.toUpperCase() === "GET" &&
+      request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
+      this.env.CRABBOX_PUBLIC_URL
+    ) {
+      const location = new URL(
+        `/portal/leases/${encodeURIComponent(leaseID)}/code/`,
+        this.env.CRABBOX_PUBLIC_URL,
+      );
+      return new Response(null, {
+        status: 302,
+        headers: { "cache-control": "no-store", location: location.toString() },
+      });
+    }
+    return json(
+      { error: "code_viewer_session_required", message: "Code viewer session required" },
+      { status: 401, headers: { "cache-control": "no-store" } },
+    );
+  }
+
+  private async consumeCodeViewerTicket(
+    value: string,
+    leaseID: string,
+  ): Promise<CodeViewerTicketRecord | undefined> {
+    if (!validCodeViewerTicket(value)) {
+      return undefined;
+    }
+    return await this.withBridgeTicketLock(async () => {
+      const key = codeViewerTicketKey(value);
+      const ticket = await this.state.storage.get<CodeViewerTicketRecord>(key);
+      if (
+        !ticket ||
+        ticket.ticket !== value ||
+        ticket.leaseID !== leaseID ||
+        Date.parse(ticket.expiresAt) <= Date.now() ||
+        (ticket.viewerExpiresAt !== undefined && Date.parse(ticket.viewerExpiresAt) <= Date.now())
+      ) {
+        if (ticket) {
+          await this.state.storage.delete(key);
+        }
+        return undefined;
+      }
+      await this.state.storage.delete(key);
+      return ticket;
+    });
+  }
+
+  private async cleanupExpiredCodeViewerAuth(): Promise<void> {
+    const now = Date.now();
+    await Promise.all(
+      [codeViewerTicketPrefix(), codeViewerSessionPrefix()].map(async (prefix) => {
+        const records = await this.state.storage.list<
+          CodeViewerTicketRecord | CodeViewerSessionRecord
+        >({ prefix });
+        await Promise.all(
+          [...records.entries()]
+            .filter(([, record]) => Date.parse(record.expiresAt) <= now)
+            .map(([key]) => this.state.storage.delete(key)),
+        );
+      }),
+    );
   }
 
   private codePortalHealth(lease: LeaseRecord, agent: WebSocket | undefined): Response {
@@ -6638,7 +6873,7 @@ export class FleetCoordinator {
     agent: WebSocket,
   ): Promise<Response> {
     const bodyBytes = new Uint8Array(await request.arrayBuffer());
-    if (bodyBytes.byteLength > maxCodeRequestBytes) {
+    if (bodyBytes.byteLength > codeProxyRequestBodyBytes) {
       return json({ error: "request_too_large" }, { status: 413 });
     }
     const id = crypto.randomUUID();
@@ -6669,7 +6904,10 @@ export class FleetCoordinator {
     }
     return new Response(response.body ? base64ToBytes(response.body) : null, {
       status: response.status || 502,
-      headers: codeResponseHeaders(response.headers ?? {}),
+      headers: codeResponseHeaders(response.headers ?? {}, {
+        cookiePath: codeResponseCookiePath(request, lease.id),
+        secure: new URL(request.url).protocol === "https:",
+      }),
     });
   }
 
@@ -10748,6 +10986,22 @@ function codeTicketKey(ticket: string): string {
   return `${codeTicketPrefix()}${ticket}`;
 }
 
+function codeViewerTicketPrefix(): string {
+  return "code-viewer-ticket:";
+}
+
+function codeViewerTicketKey(ticket: string): string {
+  return `${codeViewerTicketPrefix()}${ticket}`;
+}
+
+function codeViewerSessionPrefix(): string {
+  return "code-viewer-session:";
+}
+
+function codeViewerSessionKey(session: string): string {
+  return `${codeViewerSessionPrefix()}${session}`;
+}
+
 function egressTicketPrefix(): string {
   return "egress-ticket:";
 }
@@ -11601,6 +11855,20 @@ function newRuntimeAdapterTicket(): string {
   return `adapter_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function newCodeViewerTicket(): string {
+  return randomHexToken("code_view_");
+}
+
+function newCodeViewerSession(): string {
+  return randomHexToken("code_session_");
+}
+
+function randomHexToken(prefix: string): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `${prefix}${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
 function newEgressSessionID(): string {
   const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
@@ -11687,6 +11955,68 @@ function webVNCViewerLabel(owner: string): string {
 
 function validCodeTicket(value: string | undefined): value is string {
   return typeof value === "string" && /^code_[a-f0-9]{32}$/.test(value);
+}
+
+function validCodeViewerTicket(value: string | undefined): value is string {
+  return typeof value === "string" && /^code_view_[a-f0-9]{32}$/.test(value);
+}
+
+function validCodeViewerSession(value: string | undefined): value is string {
+  return typeof value === "string" && /^code_session_[a-f0-9]{32}$/.test(value);
+}
+
+function canonicalCodeReturnTo(request: Request, leaseID: string): string {
+  const url = new URL(request.url);
+  const match = /^\/portal\/leases\/[^/]+\/code(.*)$/.exec(url.pathname);
+  const suffix = match?.[1] ?? "/";
+  return `/portal/leases/${encodeURIComponent(leaseID)}/code${suffix}${url.search}`;
+}
+
+function requestAuthType(request: Request): AuthContext["auth"] {
+  const auth = request.headers.get("x-crabbox-auth");
+  return auth === "bearer" || auth === "github" || auth === "proxy" ? auth : "github";
+}
+
+function isolatedCodeRequestOriginAllowed(request: Request): boolean {
+  const requestOrigin = new URL(request.url).origin;
+  const origin = request.headers.get("origin")?.trim();
+  if (origin) {
+    try {
+      return new URL(origin).origin === requestOrigin;
+    } catch {
+      return false;
+    }
+  }
+  const method = request.method.toUpperCase();
+  return (
+    (method === "GET" && request.headers.get("upgrade")?.toLowerCase() !== "websocket") ||
+    method === "HEAD"
+  );
+}
+
+function cookieValue(header: string, name: string): string {
+  for (const part of header.split(";")) {
+    const [key, ...value] = part.trim().split("=");
+    if (key === name) {
+      try {
+        return decodeURIComponent(value.join("="));
+      } catch {
+        return "";
+      }
+    }
+  }
+  return "";
+}
+
+function codeViewerSessionCookie(session: CodeViewerSessionRecord, maxAgeSeconds: number): string {
+  return [
+    `crabbox_code_session=${encodeURIComponent(session.session)}`,
+    `Path=/portal/leases/${encodeURIComponent(session.leaseID)}/code/`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    `Max-Age=${Math.max(0, Math.trunc(maxAgeSeconds))}`,
+  ].join("; ");
 }
 
 export function bridgeTicketFromRequest(request: Request): string {
@@ -12190,15 +12520,26 @@ const codePortalContentSecurityPolicy = [
   "worker-src 'self' data: blob:",
 ].join("; ");
 
-export function codeResponseHeaders(values: Record<string, string>): Headers {
+export function codeResponseHeaders(
+  values: Record<string, string>,
+  cookie: { cookiePath: string; secure: boolean } = { cookiePath: "/", secure: true },
+): Headers {
   const headers = new Headers();
   for (const [key, value] of Object.entries(values)) {
     const lower = key.toLowerCase();
+    if (lower === "set-cookie") {
+      const sanitized = codeResponseCookie(value, cookie);
+      if (sanitized) {
+        headers.set("set-cookie", sanitized);
+      }
+      continue;
+    }
     if (
       lower === "connection" ||
       lower === "content-security-policy" ||
       lower === "content-encoding" ||
       lower === "content-length" ||
+      lower === "service-worker-allowed" ||
       lower === "transfer-encoding" ||
       lower === "upgrade"
     ) {
@@ -12211,6 +12552,28 @@ export function codeResponseHeaders(values: Record<string, string>): Headers {
   }
   headers.set("content-security-policy", codePortalContentSecurityPolicy);
   return headers;
+}
+
+export function codeResponseCookiePath(request: Request, leaseID: string): string {
+  const match = /^(\/portal\/leases\/[^/]+\/code)(?:\/|$)/.exec(new URL(request.url).pathname);
+  return match?.[1] ? `${match[1]}/` : `/portal/leases/${encodeURIComponent(leaseID)}/code/`;
+}
+
+function codeResponseCookie(
+  value: string,
+  options: { cookiePath: string; secure: boolean },
+): string | undefined {
+  const pair = value.split(";", 1)[0]?.trim();
+  if (!pair || !pair.toLowerCase().startsWith("vscode-tkn=")) {
+    return undefined;
+  }
+  return [
+    pair,
+    `Path=${options.cookiePath}`,
+    "HttpOnly",
+    ...(options.secure ? ["Secure"] : []),
+    "SameSite=Lax",
+  ].join("; ");
 }
 
 function bridgeAttachment(value: unknown): BridgeAttachment | undefined {

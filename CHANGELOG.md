@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Added opt-in per-lease Code portal origins with one-time viewer bootstrap and lease-scoped browser sessions, isolating proxied workspace content from coordinator and other lease origins without changing existing Code URLs. Thanks @coygeek.
 - Source-bound broker and direct-provider credentials to repository-configured endpoints, while preserving same-source custom deployments and explicit environment or CLI overrides.
 - Restricted Crabbox-managed Windows credential files to the managed user, Administrators, and SYSTEM without changing desktop credential consumers. Thanks @coygeek.
 - Created default artifact bundles and retained run logs/metadata with private local permissions while preserving explicit shared-output directories. Thanks @coygeek.

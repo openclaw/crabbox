@@ -5,13 +5,14 @@ import {
   type AuthContext,
   type AuthRequestContext,
 } from "./auth";
+import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin";
 import { bearerToken, json } from "./http";
 import type { Env } from "./types";
 
 export type CoordinatorFetch = (request: Request) => Promise<Response>;
 export type PreparedCoordinatorRequest =
   | { response: Response; authenticated: false }
-  | { request: Request; authenticated: boolean };
+  | { request: Request; authenticated: boolean; bodyLimit?: number };
 
 export async function routeCoordinatorRequest(
   request: Request,
@@ -41,7 +42,8 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
-  const canonicalPortal = canonicalPortalRedirect(request, env, url);
+  const isolatedCode = await isIsolatedCodeRequest(request, env);
+  const canonicalPortal = canonicalPortalRedirect(request, env, url, isolatedCode);
   if (canonicalPortal) {
     return { response: canonicalPortal, authenticated: false };
   }
@@ -55,6 +57,13 @@ export async function prepareCoordinatorRequest(
     return {
       response: json({ error: "not_found" }, { status: 404 }),
       authenticated: false,
+    };
+  }
+  if (isolatedCode) {
+    return {
+      request: requestWithoutProxySecret(request),
+      authenticated: false,
+      bodyLimit: codeProxyRequestBodyBytes,
     };
   }
   if (
@@ -148,11 +157,17 @@ function runtimeAdapterServiceAuth(
   };
 }
 
-function canonicalPortalRedirect(request: Request, env: Env, url: URL): Response | undefined {
+function canonicalPortalRedirect(
+  request: Request,
+  env: Env,
+  url: URL,
+  isolatedCode: boolean,
+): Response | undefined {
   if (
     request.method !== "GET" ||
     request.headers.get("upgrade")?.toLowerCase() === "websocket" ||
     !url.pathname.startsWith("/portal") ||
+    isolatedCode ||
     !env.CRABBOX_PUBLIC_URL
   ) {
     return undefined;

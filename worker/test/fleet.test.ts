@@ -17,6 +17,7 @@ import {
   bridgeTicketFromRequest,
   boundedSocketReason,
   codeForwardHeaders,
+  codeResponseCookiePath,
   codeResponseHeaders,
   flushPendingWebVNC,
   forwardOrBufferWebVNC,
@@ -11712,6 +11713,126 @@ describe("fleet lease identity and idle", () => {
     expect(missingTicket.status).toBe(401);
   });
 
+  it("bootstraps a one-time lease-scoped Code session on an isolated origin", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+    };
+    const fleet = testFleet(storage, {}, env);
+    const leaseID = "cbx_000000000001";
+    const tokenExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const headers = {
+      "x-crabbox-auth": "github",
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+      "x-crabbox-github-login": "peter",
+      "x-crabbox-token-expires-at": tokenExpiresAt,
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "peter@example.com",
+        org: "openclaw",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const coordinatorHealth = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/code/health", { headers }),
+    );
+    expect(coordinatorHealth.status).toBe(200);
+    await expect(coordinatorHealth.json()).resolves.toMatchObject({
+      lease: { id: leaseID, code: true },
+      code: { agentConnected: false },
+    });
+
+    const redirect = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/code/?folder=%2Fwork%2Frepo", { headers }),
+    );
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get("cache-control")).toBe("no-store");
+    expect(redirect.headers.get("referrer-policy")).toBe("no-referrer");
+    const bootstrapURL = new URL(redirect.headers.get("location") || "");
+    expect(bootstrapURL.hostname).toMatch(/^cbx-[a-f0-9]{32}\.code\.example\.test$/);
+    expect(bootstrapURL.pathname).toBe(`/portal/leases/${leaseID}/code/__crabbox_bootstrap`);
+    expect(bootstrapURL.searchParams.get("ticket")).toMatch(/^code_view_[a-f0-9]{32}$/);
+
+    const bootstrap = await fleet.fetch(new Request(bootstrapURL));
+    expect(bootstrap.status).toBe(303);
+    expect(bootstrap.headers.get("location")).toBe(
+      `/portal/leases/${leaseID}/code/?folder=%2Fwork%2Frepo`,
+    );
+    const cookie = bootstrap.headers.get("set-cookie") || "";
+    expect(cookie).toContain("crabbox_code_session=code_session_");
+    expect(cookie).toContain(`Path=/portal/leases/${leaseID}/code/`);
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
+    const maxAge = Number.parseInt(/Max-Age=(\d+)/.exec(cookie)?.[1] || "", 10);
+    expect(maxAge).toBeGreaterThanOrEqual(295);
+    expect(maxAge).toBeLessThanOrEqual(300);
+
+    const replay = await fleet.fetch(new Request(bootstrapURL));
+    expect(replay.status).toBe(401);
+
+    const page = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}${bootstrap.headers.get("location")}`, {
+        headers: { cookie: cookie.split(";", 1)[0] || "" },
+      }),
+    );
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("crabbox code --id blue-lobster --open");
+
+    const sessionCookie = cookie.split(";", 1)[0] || "";
+    const crossOriginPost = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/api/save`, {
+        method: "POST",
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://other-lease.code.example.test",
+        },
+      }),
+    );
+    expect(crossOriginPost.status).toBe(403);
+
+    const crossOriginWebSocket = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/websocket`, {
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://other-lease.code.example.test",
+          upgrade: "websocket",
+        },
+      }),
+    );
+    expect(crossOriginWebSocket.status).toBe(403);
+
+    const sameOriginPost = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/api/save`, {
+        method: "POST",
+        headers: { cookie: sessionCookie, origin: bootstrapURL.origin },
+      }),
+    );
+    expect(sameOriginPost.status).not.toBe(403);
+
+    const missingSession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/health`),
+    );
+    expect(missingSession.status).toBe(302);
+    expect(missingSession.headers.get("location")).toBe(
+      `https://crabbox.test/portal/leases/${leaseID}/code/`,
+    );
+
+    const malformedSession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/health`, {
+        headers: { cookie: "crabbox_code_session=%ZZ" },
+      }),
+    );
+    expect(malformedSession.status).toBe(302);
+  });
+
   it("keeps bridge tickets usable after endpoint binding mismatches", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -11897,12 +12018,17 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("uses a VS Code-compatible CSP for code proxy responses", () => {
-    const headers = codeResponseHeaders({
-      "content-security-policy": "default-src 'none'; script-src 'self'",
-      "content-length": "123",
-      "content-type": "text/html",
-      "cache-control": "public, max-age=31536000",
-    });
+    const headers = codeResponseHeaders(
+      {
+        "content-security-policy": "default-src 'none'; script-src 'self'",
+        "content-length": "123",
+        "content-type": "text/html",
+        "cache-control": "public, max-age=31536000",
+        "service-worker-allowed": "/",
+        "set-cookie": "vscode-tkn=remote-token; Domain=example.test; Path=/",
+      },
+      { cookiePath: "/portal/leases/cbx_000000000001/code/", secure: true },
+    );
 
     const csp = headers.get("content-security-policy") || "";
     expect(csp).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:");
@@ -11911,6 +12037,28 @@ describe("fleet lease identity and idle", () => {
     expect(headers.get("content-length")).toBeNull();
     expect(headers.get("content-type")).toBe("text/html");
     expect(headers.get("cache-control")).toBe("no-store, no-transform");
+    expect(headers.get("service-worker-allowed")).toBeNull();
+    expect(headers.get("set-cookie")).toBe(
+      "vscode-tkn=remote-token; Path=/portal/leases/cbx_000000000001/code/; HttpOnly; Secure; SameSite=Lax",
+    );
+    expect(
+      codeResponseHeaders({ "set-cookie": "crabbox_session=attacker; Path=/" }).get("set-cookie"),
+    ).toBeNull();
+  });
+
+  it("scopes the VS Code token cookie to the active ID or slug Code path", () => {
+    expect(
+      codeResponseCookiePath(
+        new Request("https://broker.example.test/portal/leases/blue-lobster/code/api"),
+        "cbx_000000000001",
+      ),
+    ).toBe("/portal/leases/blue-lobster/code/");
+    expect(
+      codeResponseCookiePath(
+        new Request("https://broker.example.test/portal/leases/cbx_000000000001/code"),
+        "cbx_000000000001",
+      ),
+    ).toBe("/portal/leases/cbx_000000000001/code/");
   });
 
   it("forwards only the VS Code token cookie to code-server", () => {

@@ -20,6 +20,19 @@ A deployment needs one canonical HTTPS origin:
 https://broker.example.com                       # public CLI + browser-login route
 ```
 
+For Code portal origin isolation, the same coordinator can also receive a
+wildcard route configured through:
+
+```text
+CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com
+https://*.code.example.com                       # same service; wildcard TLS + WebSockets
+```
+
+The `{lease}` label is replaced with an opaque stable hash, not a lease ID or
+slug. The canonical portal authorizes the initial Code URL and issues a
+single-use bootstrap; the per-lease origin then uses only a lease-scoped Code
+session. It does not accept the portal cookie as coordinator authority.
+
 A Cloudflare deployment may additionally publish the same Worker on:
 
 ```text

@@ -40,6 +40,13 @@ per-tenant isolation is not the current security boundary. Local providers and
 portal bridges are development execution surfaces, not a uniform sandbox for
 hostile project configuration or mutually adversarial workloads.
 
+For cooperative shared portals, configure the optional per-lease
+`CRABBOX_CODE_ORIGIN_TEMPLATE` described in [Browser portal](features/portal.md).
+It keeps lease-controlled code-server HTML and JavaScript off the coordinator
+origin and off other leases' browser origins without changing the normal Code
+entry URL. This is defense-in-depth for supported sharing and admin inspection;
+it does not turn the broker into a hostile multitenant sandbox.
+
 ## Authentication
 
 Every non-health route normally requires a Bearer token; requests without one
