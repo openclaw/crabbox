@@ -331,56 +331,65 @@ func TestAcquireRollsBackCreatedInstanceWhenOnAcquiredFails(t *testing.T) {
 
 func TestReleaseCleansLocalClaimWhenInstanceAlreadyAbsent(t *testing.T) {
 	cfg := testConfig()
-	labels := nebiusLeaseLabels(cfg, "cbx_deadbeef1234", "gone", "ready", false, time.Unix(1000, 0))
-	api := &fakeNebiusAPI{getErr: errors.New("instance vm-gone not found")}
+	leaseID := "cbx_absent123456"
+	slug := "gone-absent"
+	cloudID := "vm-gone-absent"
+	labels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", false, time.Unix(1000, 0))
+	api := &fakeNebiusAPI{getErr: errors.New("instance " + cloudID + " not found")}
 	b := newTestBackend(t, api)
-	server := Server{Provider: providerName, CloudID: "vm-gone", Name: "gone", Labels: labels}
+	server := Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
 	server.PublicNet.IPv4.IP = "203.0.113.10"
-	if err := core.ClaimLeaseTargetForRepoConfig("cbx_deadbeef1234", "gone", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: server}}); err != nil {
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("delete called despite confirmed absence: %v", api.deletedIDs)
 	}
-	if _, ok, err := core.ResolveLeaseClaimForProvider("gone", providerName); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || ok {
 		t.Fatalf("claim still present ok=%v err=%v", ok, err)
 	}
 }
 
 func TestReleaseDoesNotCleanClaimOnUnrelatedNotFound(t *testing.T) {
 	cfg := testConfig()
-	labels := nebiusLeaseLabels(cfg, "cbx_deadbeef1234", "gone", "ready", false, time.Unix(1000, 0))
+	leaseID := "cbx_unrelated123"
+	slug := "gone-unrelated"
+	cloudID := "vm-gone-unrelated"
+	labels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", false, time.Unix(1000, 0))
 	api := &fakeNebiusAPI{getErr: errors.New("profile production not found")}
 	b := newTestBackend(t, api)
-	server := Server{Provider: providerName, CloudID: "vm-gone", Name: "gone", Labels: labels}
-	if err := core.ClaimLeaseTargetForRepoConfig("cbx_deadbeef1234", "gone", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+	server := Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: server}}); err == nil {
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err == nil {
 		t.Fatal("ReleaseLease cleaned state after unrelated not-found error")
 	}
-	if _, ok, err := core.ResolveLeaseClaimForProvider("gone", providerName); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || !ok {
 		t.Fatalf("claim removed after unrelated not-found ok=%v err=%v", ok, err)
 	}
 }
 
 func TestResolveReleaseOnlyFindsClaimByCloudID(t *testing.T) {
 	cfg := testConfig()
-	labels := nebiusLeaseLabels(cfg, "cbx_deadbeef1234", "gone", "ready", false, time.Unix(1000, 0))
+	leaseID := "cbx_resolve12345"
+	slug := "gone-resolve"
+	cloudID := "vm-gone-resolve"
+	labels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", false, time.Unix(1000, 0))
 	api := &fakeNebiusAPI{}
 	b := newTestBackend(t, api)
-	server := Server{Provider: providerName, CloudID: "vm-gone", Name: "gone", Labels: labels}
-	if err := core.ClaimLeaseTargetForRepoConfig("cbx_deadbeef1234", "gone", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+	server := Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "vm-gone", ReleaseOnly: true})
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: cloudID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.LeaseID != "cbx_deadbeef1234" || lease.Server.CloudID != "vm-gone" {
+	if lease.LeaseID != leaseID || lease.Server.CloudID != cloudID {
 		t.Fatalf("lease=%#v", lease)
 	}
 }
