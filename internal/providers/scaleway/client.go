@@ -29,7 +29,10 @@ type InstanceAPI interface {
 	ListServers(req *instance.ListServersRequest, opts ...scw.RequestOption) (*instance.ListServersResponse, error)
 	GetServer(req *instance.GetServerRequest, opts ...scw.RequestOption) (*instance.GetServerResponse, error)
 	CreateServer(req *instance.CreateServerRequest, opts ...scw.RequestOption) (*instance.CreateServerResponse, error)
+	UpdateServer(req *instance.UpdateServerRequest, opts ...scw.RequestOption) (*instance.UpdateServerResponse, error)
 	DeleteServer(req *instance.DeleteServerRequest, opts ...scw.RequestOption) error
+	SetServerUserData(req *instance.SetServerUserDataRequest, opts ...scw.RequestOption) error
+	ServerAction(req *instance.ServerActionRequest, opts ...scw.RequestOption) (*instance.ServerActionResponse, error)
 }
 
 type IAMAPI interface {
