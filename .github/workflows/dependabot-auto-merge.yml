@@ -1,30 +1,84 @@
 name: Dependabot Auto Merge
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_run: # zizmor: ignore[dangerous-triggers] Trusted CI completion only reads live PR/run metadata before a SHA-pinned merge.
+    workflows: ["CI"]
+    types: [completed]
 
 permissions:
   contents: write
-  pull-requests: write
+  actions: read
+  pull-requests: read
 
 concurrency:
-  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: dependabot-auto-merge-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
 
 jobs:
-  enable:
+  merge:
     if: >-
-      github.event.pull_request.user.login == 'dependabot[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
-      - name: Enable squash auto-merge
+      - name: Merge verified Dependabot update
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          if gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null' | grep -qx true; then
+          set -euo pipefail
+
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "No pull request is associated with this CI run."
             exit 0
           fi
-          gh pr merge "$PR_URL" --auto --squash --delete-branch
+
+          pr_json="$(
+            gh pr view "$PR_NUMBER" --repo "$REPOSITORY" \
+              --json author,baseRefName,headRefOid,headRepository,isDraft,state
+          )"
+          if ! jq -e \
+            --arg sha "$HEAD_SHA" \
+            --arg repository "$REPOSITORY" \
+            '
+              .state == "OPEN" and
+              .isDraft == false and
+              .author.login == "dependabot[bot]" and
+              .baseRefName == "main" and
+              .headRefOid == $sha and
+              .headRepository.nameWithOwner == $repository
+            ' <<<"$pr_json" >/dev/null; then
+            echo "Skipping PR #$PR_NUMBER: it is not the current same-repository Dependabot update."
+            exit 0
+          fi
+
+          for _ in {1..90}; do
+            codeql_json="$(
+              gh run list --repo "$REPOSITORY" \
+                --workflow CodeQL \
+                --commit "$HEAD_SHA" \
+                --limit 1 \
+                --json status,conclusion
+            )"
+            codeql_status="$(jq -r '.[0].status // empty' <<<"$codeql_json")"
+            codeql_conclusion="$(jq -r '.[0].conclusion // empty' <<<"$codeql_json")"
+            if [ "$codeql_status" = "completed" ]; then
+              if [ "$codeql_conclusion" = "success" ]; then
+                break
+              fi
+              echo "CodeQL concluded with ${codeql_conclusion:-an unknown result}; refusing to merge."
+              exit 1
+            fi
+            sleep 20
+          done
+
+          if [ "${codeql_conclusion:-}" != "success" ]; then
+            echo "Timed out waiting for CodeQL on $HEAD_SHA."
+            exit 1
+          fi
+
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" \
+            --squash --delete-branch --match-head-commit "$HEAD_SHA"
