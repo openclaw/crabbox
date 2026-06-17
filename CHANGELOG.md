@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Verified the pinned GitHub CLI release artifacts before installing them in the default Cloudflare sandbox image and preserved true AMD64/ARM64 target selection during cross-platform builds.
 - Pinned and verified the default Proxmox template cloud image before conversion, while preserving custom image URLs with a required matching SHA256.
 - Kept Code, WebVNC, and Egress bridge tickets out of WebSocket URLs while preserving ordinary coordinator authentication, older-coordinator bearer retries, and legacy-client compatibility.
 - Added opt-in per-lease Code portal origins with one-time viewer bootstrap and lease-scoped browser sessions, isolating proxied workspace content from coordinator and other lease origins without changing existing Code URLs. Thanks @coygeek.
