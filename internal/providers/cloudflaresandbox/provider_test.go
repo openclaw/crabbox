@@ -126,6 +126,8 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 	}{
 		{name: "relative workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "workspace" }, wantErr: "workdir must be absolute"},
 		{name: "broad workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "/workspace" }, wantErr: "too broad"},
+		{name: "outside workspace workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "/etc/crabbox" }, wantErr: "must be under /workspace/<dedicated-subdir>"},
+		{name: "workspace traversal workdir", mutate: func(cfg *Config) { cfg.CloudflareSandbox.Workdir = "/workspace/../etc/crabbox" }, wantErr: "must be under /workspace/<dedicated-subdir>"},
 		{name: "negative exec timeout", mutate: func(cfg *Config) { cfg.CloudflareSandbox.ExecTimeoutSecs = -1 }, wantErr: "execTimeoutSecs must be non-negative"},
 	}
 	for _, tt := range tests {

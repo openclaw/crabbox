@@ -17,28 +17,40 @@ import (
 )
 
 type lifecycleFakeClient struct {
-	sandboxes map[string]sandboxSummary
-	nextID    int
-	calls     []string
-	uploads   []string
-	execs     []execRequest
-	deleteErr error
-	execErr   error
-	exitCode  int
-	stdout    string
-	stderr    string
-	creates   []createSandboxRequest
+	sandboxes          map[string]sandboxSummary
+	nextID             int
+	calls              []string
+	uploads            []string
+	execs              []execRequest
+	deleteErr          error
+	execErr            error
+	exitCode           int
+	stdout             string
+	stderr             string
+	creates            []createSandboxRequest
+	generateIDs        bool
+	healthOK           bool
+	omitCreateMetadata bool
+	dropMetadata       bool
+	openAPIErr         error
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
-	return &lifecycleFakeClient{sandboxes: map[string]sandboxSummary{}}
+	return &lifecycleFakeClient{sandboxes: map[string]sandboxSummary{}, healthOK: true}
 }
 
 func (f *lifecycleFakeClient) Health(context.Context) (healthResponse, error) {
-	return healthResponse{OK: true}, nil
+	status := "ready"
+	if !f.healthOK {
+		status = "degraded"
+	}
+	return healthResponse{OK: f.healthOK, Status: status}, nil
 }
 
 func (f *lifecycleFakeClient) OpenAPI(context.Context) (openAPIResponse, error) {
+	if f.openAPIErr != nil {
+		return openAPIResponse{}, f.openAPIErr
+	}
 	var out openAPIResponse
 	out.Info.Title = "fake"
 	return out, nil
@@ -61,12 +73,19 @@ func (f *lifecycleFakeClient) CreateSandbox(_ context.Context, req createSandbox
 	f.calls = append(f.calls, "create")
 	f.creates = append(f.creates, req)
 	id := strings.TrimSpace(req.Name)
-	if id == "" {
+	if id == "" || f.generateIDs {
 		f.nextID++
 		id = "cf-sandbox-" + string(rune('a'+f.nextID-1))
 	}
-	sb := sandboxSummary{ID: id, Name: req.Name, Status: "running", Metadata: cloneMap(req.Metadata)}
+	metadata := cloneMap(req.Metadata)
+	if f.dropMetadata {
+		metadata = nil
+	}
+	sb := sandboxSummary{ID: id, Name: req.Name, Status: "running", Metadata: metadata}
 	f.sandboxes[id] = sb
+	if f.omitCreateMetadata {
+		sb.Metadata = nil
+	}
 	return sb, nil
 }
 
@@ -154,6 +173,133 @@ func TestWarmupCreatesOwnedClaim(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "provider=cloudflare-sandbox") || strings.Contains(stdout.String(), "secret") {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestCreateMetadataRedactsRemoteURLCredentials(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	repo := Repo{
+		Name:      "my-app",
+		Root:      "/repo",
+		RemoteURL: "https://oauth2:secret-token@github.com/openclaw/crabbox.git",
+	}
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, Keep: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.creates) != 1 {
+		t.Fatalf("creates=%#v", fake.creates)
+	}
+	repoMetadata := fake.creates[0].Metadata[metadataRepoKey]
+	if repoMetadata != "https://github.com/openclaw/crabbox.git" {
+		t.Fatalf("metadata repo=%q", repoMetadata)
+	}
+	if strings.Contains(repoMetadata, "secret-token") || strings.Contains(repoMetadata, "oauth2") {
+		t.Fatalf("metadata leaked credentials: %q", repoMetadata)
+	}
+}
+
+func TestDoctorFailsUnhealthyBridgeResponse(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.healthOK = false
+	backend := testBackend(fake, io.Discard, io.Discard)
+	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("doctor status=%q checks=%#v", result.Status, result.Checks)
+	}
+	if len(result.Checks) == 0 || result.Checks[0].Check != "health" || result.Checks[0].Status != "failed" {
+		t.Fatalf("checks=%#v", result.Checks)
+	}
+}
+
+func TestDoctorFailsWhenOpenAPIReadinessFails(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.openAPIErr = errors.New("401 Unauthorized")
+	backend := testBackend(fake, io.Discard, io.Discard)
+	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("doctor status=%q checks=%#v", result.Status, result.Checks)
+	}
+	if len(result.Checks) < 2 || result.Checks[1].Check != "openapi" || result.Checks[1].Status != "failed" {
+		t.Fatalf("checks=%#v", result.Checks)
+	}
+}
+
+func TestWarmupAcceptsGeneratedSandboxIDWithEchoedMetadata(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	fake := newLifecycleFakeClient()
+	fake.generateIDs = true
+	backend := testBackend(fake, &stdout, &stderr)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.creates) != 1 {
+		t.Fatalf("creates=%#v", fake.creates)
+	}
+	leaseID := fake.creates[0].Metadata[metadataClaimKey]
+	if leaseID == "" {
+		t.Fatalf("request metadata=%#v", fake.creates[0].Metadata)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CloudID != "cf-sandbox-a" {
+		t.Fatalf("claim CloudID=%q want generated sandbox id", claim.CloudID)
+	}
+	status, err := backend.Status(context.Background(), StatusRequest{ID: claim.Slug})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ID != leaseID || status.ServerID != claim.CloudID {
+		t.Fatalf("status=%#v claim=%#v", status, claim)
+	}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].CloudID != claim.CloudID || views[0].Labels["lease"] != leaseID {
+		t.Fatalf("views=%#v claim=%#v", views, claim)
+	}
+}
+
+func TestWarmupVerifiesOwnershipMetadataWhenCreateOmitsIt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	fake.omitCreateMetadata = true
+	backend := testBackend(fake, io.Discard, io.Discard)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(fake.calls, "get:"+fake.creates[0].Name) {
+		t.Fatalf("calls=%#v, want create metadata verification fetch", fake.calls)
+	}
+	leaseID := fake.creates[0].Metadata[metadataClaimKey]
+	if _, err := readLeaseClaim(leaseID); err != nil {
+		t.Fatalf("claim not created after verified metadata fetch: %v", err)
+	}
+}
+
+func TestWarmupRejectsCreateWhenRemoteMetadataMissing(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	fake.omitCreateMetadata = true
+	fake.dropMetadata = true
+	backend := testBackend(fake, io.Discard, io.Discard)
+	err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "ownership metadata") {
+		t.Fatalf("err=%v, want ownership metadata failure", err)
+	}
+	if len(fake.sandboxes) != 0 {
+		t.Fatalf("sandbox not cleaned after metadata verification failure: %#v", fake.sandboxes)
 	}
 }
 
@@ -247,6 +393,34 @@ func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	}
 }
 
+func TestStopHonorsLeaseOperationLock(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+		t.Fatal(err)
+	}
+	var leaseID string
+	for id := range fake.sandboxes {
+		leaseID = leasePrefix + id
+	}
+	unlock, err := lockCloudflareSandboxLeaseOperation(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err = backend.Stop(ctx, StopRequest{ID: leaseID})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop err=%v, want context deadline", err)
+	}
+	if len(fake.sandboxes) != 1 {
+		t.Fatalf("stop deleted sandbox while lock was held: %#v", fake.sandboxes)
+	}
+}
+
 func TestCleanupPreservesMissingClaimUnlessForgetMissing(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
@@ -292,6 +466,10 @@ func TestRunForwardsAllowedEnvOffArgvAndStripsProviderSecrets(t *testing.T) {
 			"PUBLIC_VALUE":                     "visible",
 			"CRABBOX_CLOUDFLARE_SANDBOX_TOKEN": secretValue,
 			"CLOUDFLARE_API_TOKEN":             "another-secret",
+			"CLOUDFLARE_API_KEY":               "legacy-secret",
+			"CLOUDFLARE_EMAIL":                 "user@example.test",
+			"CF_API_KEY":                       "cf-legacy-secret",
+			"CF_API_EMAIL":                     "cf-user@example.test",
 		},
 	})
 	if err != nil {
@@ -306,6 +484,11 @@ func TestRunForwardsAllowedEnvOffArgvAndStripsProviderSecrets(t *testing.T) {
 	}
 	if _, ok := last.Env["CRABBOX_CLOUDFLARE_SANDBOX_TOKEN"]; ok {
 		t.Fatalf("provider secret forwarded to command env: %#v", last.Env)
+	}
+	for _, name := range []string{"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CLOUDFLARE_EMAIL", "CF_API_KEY", "CF_API_EMAIL"} {
+		if _, ok := last.Env[name]; ok {
+			t.Fatalf("provider credential %s forwarded to command env: %#v", name, last.Env)
+		}
 	}
 	if strings.Contains(strings.Join(fake.calls, " "), secretValue) {
 		t.Fatalf("secret leaked through fake call log: %v", fake.calls)

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -52,12 +53,14 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	health, err := api.Health(ctx)
 	if err != nil {
 		checks = append(checks, DoctorCheck{Status: "failed", Check: "health", Message: redactSecrets(err.Error()), Details: map[string]string{"mutation": "false"}})
+	} else if !health.OK {
+		checks = append(checks, DoctorCheck{Status: "failed", Check: "health", Message: fmt.Sprintf("bridge=unhealthy status=%s ok=false mutation=false", blank(health.Status, "-")), Details: map[string]string{"mutation": "false"}})
 	} else {
 		checks = append(checks, DoctorCheck{Status: "ok", Check: "health", Message: fmt.Sprintf("bridge=ready ok=%t mutation=false", health.OK), Details: map[string]string{"mutation": "false"}})
 	}
 	openapi, err := api.OpenAPI(ctx)
 	if err != nil {
-		checks = append(checks, DoctorCheck{Status: "warning", Check: "openapi", Message: redactSecrets(err.Error()), Details: map[string]string{"mutation": "false"}})
+		checks = append(checks, DoctorCheck{Status: "failed", Check: "openapi", Message: redactSecrets(err.Error()), Details: map[string]string{"mutation": "false"}})
 	} else {
 		checks = append(checks, DoctorCheck{Status: "ok", Check: "openapi", Message: fmt.Sprintf("openapi=ready title=%s mutation=false", blank(openapi.Info.Title, "-")), Details: map[string]string{"mutation": "false"}})
 	}
@@ -139,6 +142,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 	} else {
 		leaseID, sandboxID, slug, err = b.resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
+		if err != nil {
+			return RunResult{}, err
+		}
+		unlockOperation, err = lockCloudflareSandboxLeaseOperation(ctx, leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		leaseID, sandboxID, slug, err = b.resolveLeaseID(leaseID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -323,6 +334,7 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 		if claim.LeaseID == "" || claim.Provider != providerName {
 			continue
 		}
+		sb.ID = claimSandboxID(claim)
 		if err := b.validateClaimScope(claim); err != nil {
 			return nil, err
 		}
@@ -423,6 +435,15 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	unlockOperation, err := lockCloudflareSandboxLeaseOperation(ctx, leaseID)
+	if err != nil {
+		return err
+	}
+	defer unlockOperation()
+	leaseID, sandboxID, _, err = b.resolveLeaseID(leaseID, "", false, 0)
+	if err != nil {
+		return err
+	}
 	if _, err := b.verifyClaim(ctx, api, leaseID, sandboxID); err != nil {
 		if !isCloudflareSandboxNotFound(err) || !b.cfg.CloudflareSandbox.ForgetMissing {
 			return err
@@ -468,55 +489,77 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if listed.Provider != providerName || !b.claimMatchesActiveScope(listed) {
 			continue
 		}
-		claim, err := readLeaseClaim(listed.LeaseID)
+		action, err := func() (string, error) {
+			claim, err := readLeaseClaim(listed.LeaseID)
+			if err != nil {
+				return "", err
+			}
+			if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
+				return "skip", nil
+			}
+			unlockOperation, err := lockCloudflareSandboxLeaseOperation(ctx, claim.LeaseID)
+			if err != nil {
+				return "", err
+			}
+			defer unlockOperation()
+			claim, err = readLeaseClaim(listed.LeaseID)
+			if err != nil {
+				return "", err
+			}
+			if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
+				return "skip", nil
+			}
+			checked++
+			sandboxID := claimSandboxID(claim)
+			sb, getErr := api.GetSandbox(ctx, sandboxID)
+			if getErr != nil {
+				if !isCloudflareSandboxNotFound(getErr) {
+					return "", getErr
+				}
+				if !b.cfg.CloudflareSandbox.ForgetMissing {
+					fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set cloudflareSandbox.forgetMissing to remove the claim\n", sandboxID, claim.LeaseID)
+					return "skip", nil
+				}
+				if req.DryRun {
+					fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+					return "skip", nil
+				}
+				if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+					return "", err
+				}
+				fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+				return "claim-removed", nil
+			}
+			due, reason := claimCleanupDue(claim, now)
+			if !due {
+				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+				return "skip", nil
+			}
+			if err := validateSandboxOwnership(claim, sb); err != nil {
+				return "", err
+			}
+			if req.DryRun {
+				fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+				return "skip", nil
+			}
+			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isCloudflareSandboxNotFound(err) {
+				return "", err
+			}
+			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+				return "", err
+			}
+			fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+			return "removed", nil
+		}()
 		if err != nil {
 			return err
 		}
-		if claim.LeaseID == "" || claim.Provider != providerName || !b.claimMatchesActiveScope(claim) {
-			continue
-		}
-		checked++
-		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
-		sb, getErr := api.GetSandbox(ctx, sandboxID)
-		if getErr != nil {
-			if !isCloudflareSandboxNotFound(getErr) {
-				return getErr
-			}
-			if !b.cfg.CloudflareSandbox.ForgetMissing {
-				fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=missing-or-inaccessible; set cloudflareSandbox.forgetMissing to remove the claim\n", sandboxID, claim.LeaseID)
-				continue
-			}
-			if req.DryRun {
-				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
-				continue
-			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return err
-			}
-			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, blank(claim.Slug, "-"))
+		switch action {
+		case "claim-removed":
 			claimsRemoved++
-			continue
+		case "removed":
+			removed++
 		}
-		due, reason := claimCleanupDue(claim, now)
-		if !due {
-			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			continue
-		}
-		if err := validateSandboxOwnership(claim, sb); err != nil {
-			return err
-		}
-		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-			continue
-		}
-		if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isCloudflareSandboxNotFound(err) {
-			return err
-		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-			return err
-		}
-		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
-		removed++
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, checked)
@@ -550,13 +593,17 @@ func (b *backend) createSandbox(ctx context.Context, api bridgeClient, repo Repo
 	if sb.ID == "" {
 		return "", "", "", nil, b.cleanupCreateFailure(ctx, api, "", exit(5, "cloudflare-sandbox create returned no sandbox id"))
 	}
-	if sb.Metadata == nil {
-		sb.Metadata = metadata
+	if !sandboxHasOwnershipMetadata(sb, metadata) {
+		remote, err := api.GetSandbox(ctx, sb.ID)
+		if err != nil {
+			return "", "", "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		}
+		if remote.ID == "" {
+			remote.ID = sb.ID
+		}
+		sb = remote
 	}
-	if sb.ID != name && sb.Metadata[metadataClaimKey] != leasePrefix+sb.ID {
-		return "", "", "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, exit(5, "cloudflare-sandbox create returned id %q but bridge did not persist matching ownership metadata", sb.ID))
-	}
-	if sb.ID != name {
+	if returnedLeaseID := strings.TrimSpace(sb.Metadata[metadataClaimKey]); returnedLeaseID == leasePrefix+sb.ID {
 		leaseID = leasePrefix + sb.ID
 		slug, err = allocateClaimLeaseSlug(leaseID, requestedSlug)
 		if err != nil {
@@ -566,7 +613,14 @@ func (b *backend) createSandbox(ctx context.Context, api bridgeClient, repo Repo
 	if err := validateSandboxOwnership(LeaseClaim{LeaseID: leaseID, Provider: providerName, ProviderScope: providerScope}, sb); err != nil {
 		return "", "", "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, providerScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, providerScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim, Server{
+		CloudID:  sb.ID,
+		Provider: providerName,
+		Labels: map[string]string{
+			"provider": providerName,
+			"slug":     slug,
+		},
+	}); err != nil {
 		return "", "", "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, func() {}, nil
@@ -576,7 +630,7 @@ func (b *backend) ownershipMetadata(providerScope, leaseID, slug string, repo Re
 	out := map[string]string{
 		metadataProviderKey: providerName,
 		metadataScopeKey:    providerScope,
-		metadataRepoKey:     repoScope(repo),
+		metadataRepoKey:     bridgeMetadataRepoScope(repo),
 	}
 	if leaseID != "" {
 		out[metadataClaimKey] = leaseID
@@ -585,6 +639,12 @@ func (b *backend) ownershipMetadata(providerScope, leaseID, slug string, repo Re
 		out[metadataSlugKey] = slug
 	}
 	return out
+}
+
+func sandboxHasOwnershipMetadata(sb sandboxSummary, metadata map[string]string) bool {
+	return sb.Metadata[metadataProviderKey] == metadata[metadataProviderKey] &&
+		sb.Metadata[metadataScopeKey] == metadata[metadataScopeKey] &&
+		sb.Metadata[metadataClaimKey] == metadata[metadataClaimKey]
 }
 
 func (b *backend) serverFromSandbox(claim LeaseClaim, sb sandboxSummary) Server {
@@ -671,7 +731,14 @@ func (b *backend) finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim
 	if strings.TrimSpace(slug) == "" {
 		slug = newLeaseSlug(claim.LeaseID)
 	}
-	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
+	return claim.LeaseID, claimSandboxID(claim), slug, nil
+}
+
+func claimSandboxID(claim LeaseClaim) string {
+	if id := strings.TrimSpace(claim.CloudID); id != "" {
+		return id
+	}
+	return strings.TrimPrefix(claim.LeaseID, leasePrefix)
 }
 
 func (b *backend) newClaimScope() (string, error) {
@@ -844,6 +911,16 @@ func repoScope(repo Repo) string {
 	return strings.TrimSpace(repo.Name)
 }
 
+func bridgeMetadataRepoScope(repo Repo) string {
+	scope := repoScope(repo)
+	parsed, err := url.Parse(scope)
+	if err != nil || parsed.User == nil || parsed.Scheme == "" || parsed.Host == "" {
+		return scope
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
 func newSandboxName(repo Repo) string {
 	source := repo.Name
 	if strings.TrimSpace(source) == "" {
@@ -905,11 +982,7 @@ func (e *cloudflareSandboxNotFoundError) Unwrap() error { return e.err }
 
 func isCloudflareSandboxNotFound(err error) bool {
 	var notFound *cloudflareSandboxNotFoundError
-	if errors.As(err, &notFound) {
-		return true
-	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "not found") || strings.Contains(text, "404")
+	return errors.As(err, &notFound)
 }
 
 func aggregateStatus(checks []DoctorCheck) string {
