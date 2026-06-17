@@ -997,6 +997,9 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	fmt.Fprintf(a.Stdout, "webvnc: %s\n", portal)
 	if strings.TrimSpace(password) != "" {
 		fmt.Fprintf(a.Stdout, "password: %s\n", strings.TrimSpace(password))
+		if strings.TrimSpace(username) != "" {
+			fmt.Fprintf(a.Stdout, "username: %s\n", strings.TrimSpace(username))
+		}
 	}
 	fmt.Fprintf(a.Stdout, "fallback: %s\n", nativeVNCOpenCommand(cfg, target, leaseID))
 	return nil
@@ -2806,7 +2809,7 @@ func (a App) directSSHWebVNCReset(ctx context.Context, cfg Config, id string, op
 	return nil
 }
 
-func directSSHWebVNCURL(localPort, password string) string {
+func directSSHWebVNCURL(localPort, _ string) string {
 	values := url.Values{}
 	values.Set("host", "127.0.0.1")
 	values.Set("port", localPort)
@@ -2815,9 +2818,6 @@ func directSSHWebVNCURL(localPort, password string) string {
 	values.Set("resize", "scale")
 	values.Set("compression", "0")
 	values.Set("quality", "6")
-	if strings.TrimSpace(password) != "" {
-		values.Set("password", strings.TrimSpace(password))
-	}
 	return "http://127.0.0.1:" + localPort + "/vnc.html?" + values.Encode()
 }
 
@@ -3749,7 +3749,7 @@ type webVNCPortalOptions struct {
 	TakeControl bool
 }
 
-func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPortalOptions) string {
+func webVNCPortalURL(base, leaseID, _, _ string, opts ...webVNCPortalOptions) string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return base
@@ -3762,17 +3762,9 @@ func webVNCPortalURL(base, leaseID, username, password string, opts ...webVNCPor
 	for _, opt := range opts {
 		takeControl = takeControl || opt.TakeControl
 	}
-	if strings.TrimSpace(username) != "" || strings.TrimSpace(password) != "" || takeControl {
+	if takeControl {
 		values := url.Values{}
-		if strings.TrimSpace(username) != "" {
-			values.Set("username", strings.TrimSpace(username))
-		}
-		if strings.TrimSpace(password) != "" {
-			values.Set("password", strings.TrimSpace(password))
-		}
-		if takeControl {
-			values.Set("control", "take")
-		}
+		values.Set("control", "take")
 		u.RawFragment = values.Encode()
 		if fragment, err := url.PathUnescape(u.RawFragment); err == nil {
 			u.Fragment = fragment

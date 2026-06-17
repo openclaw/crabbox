@@ -103,7 +103,7 @@ func (r *shutdownAwareControllerRunner) Stop(ctx context.Context, _ string, _ co
 func newFakeControllerWorkspaceRunner() *fakeControllerWorkspaceRunner {
 	return &fakeControllerWorkspaceRunner{
 		ready:                  map[string]StatusView{},
-		desktopURL:             "https://portal.example.test/desktop#password=secret",
+		desktopURL:             "https://portal.example.test/desktop#control=take",
 		providerRoute:          "external",
 		providerScope:          "test-provider-scope",
 		idempotentFixedLeaseID: true,

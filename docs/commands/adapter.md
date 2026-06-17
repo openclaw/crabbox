@@ -381,11 +381,11 @@ without receiving or yielding a VNC credential. It then obtains the current port
 `crabbox webvnc status` and returns:
 
 ```json
-{"url":"https://broker.example.test/portal/leases/cbx_.../vnc#password=..."}
+{"url":"https://broker.example.test/portal/leases/cbx_.../vnc"}
 ```
 
-The credential-bearing URL is returned only by this endpoint and is never
-persisted or included in normal workspace responses. Returned URLs must use HTTPS;
+The portal URL is returned only by this endpoint and is never persisted or
+included in normal workspace responses. Returned URLs must use HTTPS;
 plain HTTP is accepted only for literal loopback hosts. `--vnc-url-template` can
 replace the returned URL only after live bridge verification succeeds. URL
 templates support `{workspaceId}`, `{leaseId}`, and `{slug}`, follow the same

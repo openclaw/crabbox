@@ -2884,6 +2884,9 @@ func validateControllerConnectionURL(value string) error {
 	if u.User != nil {
 		return fmt.Errorf("desktop connection URL must not contain user information")
 	}
+	if urlContainsCredentialParams(u) {
+		return fmt.Errorf("desktop connection URL must not contain credentials")
+	}
 	if u.Scheme == "https" {
 		return nil
 	}
@@ -2892,6 +2895,26 @@ func validateControllerConnectionURL(value string) error {
 		return nil
 	}
 	return fmt.Errorf("desktop connection URL must use HTTPS or loopback HTTP")
+}
+
+func urlContainsCredentialParams(u *url.URL) bool {
+	fragment := u.RawFragment
+	if fragment == "" && u.Fragment != "" {
+		fragment = u.EscapedFragment()
+	}
+	for _, values := range []string{u.RawQuery, fragment} {
+		if values == "" {
+			continue
+		}
+		params, err := url.ParseQuery(values)
+		if err != nil {
+			continue
+		}
+		if params.Has("username") || params.Has("password") {
+			return true
+		}
+	}
+	return false
 }
 
 func expandControllerURLTemplate(value string, record controllerWorkspaceRecord) string {

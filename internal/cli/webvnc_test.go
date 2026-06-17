@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,13 +42,13 @@ func TestWebVNCURLs(t *testing.T) {
 	if got := webVNCAgentURLWithTicketAndCapabilities("https://broker.example.com", "cbx_abcdef123456", "wvnc_abc", "desktop_theme"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/webvnc/agent?capabilities=desktop_theme&ticket=wvnc_abc" {
 		t.Fatalf("agent capability fallback URL=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=secret+value" {
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc" {
 		t.Fatalf("portal URL=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "ec2-user", "secret value"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=secret+value&username=ec2-user" {
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "ec2-user", "secret value"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc" {
 		t.Fatalf("portal URL=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "Cb1!abc"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=Cb1%21abc" {
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "Cb1!abc"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc" {
 		t.Fatalf("portal URL=%q", got)
 	}
 	if got := webVNCPortalURL("https://broker.example.com/#stale", "cbx_abcdef123456", "", ""); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc" {
@@ -58,25 +57,14 @@ func TestWebVNCURLs(t *testing.T) {
 	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take" {
 		t.Fatalf("portal URL with control=%q", got)
 	}
-	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take&password=secret+value" {
+	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value", webVNCPortalOptions{TakeControl: true}); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#control=take" {
 		t.Fatalf("portal URL with password and control=%q", got)
 	}
 	got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "JVS/yMb%2B")
-	if got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=JVS%2FyMb%252B" {
+	if got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc" {
 		t.Fatalf("portal URL with escaped password=%q", got)
 	}
-	fragment, ok := strings.CutPrefix(got, "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#")
-	if !ok {
-		t.Fatalf("portal URL missing expected fragment: %q", got)
-	}
-	values, err := url.ParseQuery(fragment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if values.Get("password") != "JVS/yMb%2B" {
-		t.Fatalf("decoded portal password=%q", values.Get("password"))
-	}
-	if got := directSSHWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&password=p%2Ba+ss&path=websockify&port=5901&quality=6&resize=scale" {
+	if got := directSSHWebVNCURL("5901", "p+a ss"); got != "http://127.0.0.1:5901/vnc.html?autoconnect=1&compression=0&host=127.0.0.1&path=websockify&port=5901&quality=6&resize=scale" {
 		t.Fatalf("local container WebVNC URL=%q", got)
 	}
 	if !isLocalContainerProvider("docker") || !isLocalContainerProvider("local-container") {
@@ -90,6 +78,41 @@ func TestWebVNCURLs(t *testing.T) {
 	if supportsDirectSSHWebVNC("static") || supportsDirectSSHWebVNC("aws") {
 		t.Fatal("static and coordinator-backed providers should not use direct SSH WebVNC")
 	}
+}
+
+func TestWebVNCOpenURLAndOutputKeepCredentialsOutOfURL(t *testing.T) {
+	const password = "secret value"
+	const username = "ec2-user"
+	portal := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", username, password, webVNCPortalOptions{TakeControl: true})
+	if strings.Contains(portal, "password=") || strings.Contains(portal, password) || strings.Contains(portal, "username=") || strings.Contains(portal, username) {
+		t.Fatalf("portal URL leaked credentials: %q", portal)
+	}
+	if !strings.Contains(portal, "#control=take") {
+		t.Fatalf("portal URL lost non-secret control fragment: %q", portal)
+	}
+	_, args := openURLCommand(portal)
+	if strings.Contains(strings.Join(args, " "), "password=") || strings.Contains(strings.Join(args, " "), password) || strings.Contains(strings.Join(args, " "), username) {
+		t.Fatalf("open URL args leaked credentials: %#v", args)
+	}
+	direct := directSSHWebVNCURL("5901", password)
+	if strings.Contains(direct, "password=") || strings.Contains(direct, password) {
+		t.Fatalf("direct WebVNC URL leaked credentials: %q", direct)
+	}
+	output := fmt.Sprintf("webvnc: %s\npassword: %s\nusername: %s\nopened: %s\n", portal, password, username, portal)
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, "webvnc: ") && !strings.HasPrefix(line, "opened: ") {
+			continue
+		}
+		if strings.Contains(line, "password=") || strings.Contains(line, password) || strings.Contains(line, "username=") || strings.Contains(line, username) {
+			t.Fatalf("output URL leaked credentials: %q", output)
+		}
+	}
+	if !strings.Contains(output, "password: "+password) || !strings.Contains(output, "username: "+username) {
+		t.Fatalf("credential lines missing from output: %q", output)
+	}
+	t.Logf("portal/open URL: %s", portal)
+	t.Logf("direct WebVNC URL: %s", direct)
+	t.Logf("separate credential lines: password: %s; username: %s", password, username)
 }
 
 func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {

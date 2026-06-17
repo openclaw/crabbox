@@ -12267,8 +12267,8 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("saveShare");
     expect(pageBody).toContain("teammate@example.com");
     expect(pageBody).toContain("shareableWebVNCURL");
-    expect(pageBody).toContain('linkFragment.set("username", username)');
-    expect(pageBody).toContain('linkFragment.set("password", password)');
+    expect(pageBody).not.toContain('linkFragment.set("username", username)');
+    expect(pageBody).not.toContain('linkFragment.set("password", password)');
     expect(pageBody).toContain("await refreshShareState()");
     expect(pageBody).toContain("writeClipboardText(shareableWebVNCURL())");
     expect(pageBody).toContain('document.getElementById("vnc-share")');
@@ -12325,15 +12325,20 @@ describe("fleet lease identity and idle", () => {
     expect(pageBody).toContain("rfb.viewOnly = !controlling");
     expect(pageBody).toContain("state?.terminal");
     expect(pageBody).toContain("stopPolling(state.message");
-    expect(pageBody).toContain('fragment.get("username")');
+    expect(pageBody).toContain('fragment.delete("username")');
+    expect(pageBody).toContain('fragment.delete("password")');
     expect(pageBody).toContain('types.includes("username")');
-    expect(pageBody).toContain("VNC credentials missing; open WebVNC from crabbox webvnc status");
     expect(pageBody).toContain(
-      "VNC authentication failed; reopen WebVNC from crabbox webvnc status",
+      "VNC credentials missing; enter the credentials printed by crabbox webvnc status",
     );
     expect(pageBody).toContain(
-      "VNC authentication timed out; reopen WebVNC from crabbox webvnc status",
+      "VNC authentication failed; check the credentials printed by crabbox webvnc status",
     );
+    expect(pageBody).toContain(
+      "VNC authentication timed out; check the credentials printed by crabbox webvnc status",
+    );
+    expect(pageBody).toContain("promptVNCCredential");
+    expect(pageBody).toContain("window.crabboxDialog?.prompt(");
     expect(pageBody).toContain("credentialsSent = true");
     expect(pageBody).not.toContain('window.prompt("VNC username")');
     expect(pageBody).not.toContain('window.prompt("VNC password")');

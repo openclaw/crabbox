@@ -592,8 +592,8 @@ func TestControllerTrackedChildParentHelper(t *testing.T) {
 }
 
 func TestControllerWebVNCURLParser(t *testing.T) {
-	output := "vnc target: reachable 127.0.0.1:5900 managed=true\nportal bridge: connected=true\nwebvnc: https://portal.example.test/vnc#password=secret\npassword: secret\n"
-	if got := controllerWebVNCURL(output); got != "https://portal.example.test/vnc#password=secret" {
+	output := "vnc target: reachable 127.0.0.1:5900 managed=true\nportal bridge: connected=true\nwebvnc: https://portal.example.test/vnc\npassword: secret\n"
+	if got := controllerWebVNCURL(output); got != "https://portal.example.test/vnc" {
 		t.Fatalf("URL=%q", got)
 	}
 	if got := controllerWebVNCURL("webvnc: run crabbox webvnc --id demo\n"); got != "" {
@@ -613,7 +613,7 @@ func TestControllerWebVNCReadyParser(t *testing.T) {
 	for _, output := range []string{
 		"portal bridge: connected=true\n",
 		"vnc target: reachable 127.0.0.1:5900 managed=true\nportal bridge: connected=false\n",
-		"vnc target: reachable 127.0.0.1:5900 managed=true\ndirect ssh webvnc: unauthenticated (wrong password)\nwebvnc: http://127.0.0.1:5942/vnc.html?password=secret\n",
+		"vnc target: reachable 127.0.0.1:5900 managed=true\ndirect ssh webvnc: unauthenticated (wrong password)\nwebvnc: http://127.0.0.1:5942/vnc.html\n",
 		"vnc target: unreachable 127.0.0.1:5900\nwebvnc: https://portal.example.test/vnc\n",
 	} {
 		if controllerWebVNCReady(output) {
@@ -1477,7 +1477,7 @@ if [ "$1 $2 $3" = 'webvnc daemon status' ]; then
   printf 'webvnc daemon: pid=DAEMON_PID log=/tmp/bridge.log\nwebvnc daemon: controller-owned=true no-provider-side-effects=true owner-match=true\nwebvnc daemon: command=/bin/sh -c crabbox-webvnc --no-provider-side-effects=true --local-port DIRECT_PORT\n'
 fi
 if [ "$1 $2" = 'webvnc status' ]; then
-  printf 'vnc target: reachable 127.0.0.1:5900 managed=false\ndirect ssh webvnc: running\nwebvnc: http://127.0.0.1:DIRECT_PORT/vnc.html?password=secret\n'
+  printf 'vnc target: reachable 127.0.0.1:5900 managed=false\ndirect ssh webvnc: running\nwebvnc: http://127.0.0.1:DIRECT_PORT/vnc.html\npassword: secret\n'
 fi
 `)
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
@@ -1566,8 +1566,9 @@ func stopControllerListenerHelper(cmd *exec.Cmd) {
 
 func TestValidateControllerConnectionURL(t *testing.T) {
 	for _, value := range []string{
-		"https://portal.example.test/vnc#password=secret",
+		"https://portal.example.test/vnc#control=take",
 		"http://127.0.0.1:6080/vnc.html",
+		"http://127.0.0.1:6080/vnc.html?autoconnect=1&path=websockify",
 		"http://localhost:6080/vnc.html",
 		"http://[::1]:6080/vnc.html",
 	} {
@@ -1575,7 +1576,14 @@ func TestValidateControllerConnectionURL(t *testing.T) {
 			t.Fatalf("URL %q rejected: %v", value, err)
 		}
 	}
-	for _, value := range []string{"http://example.test/vnc", "file:///tmp/viewer.html", "https://user:secret@example.test/vnc"} {
+	for _, value := range []string{
+		"http://example.test/vnc",
+		"file:///tmp/viewer.html",
+		"https://user:secret@example.test/vnc",
+		"https://portal.example.test/vnc#password=secret",
+		"https://portal.example.test/vnc#username=admin",
+		"http://127.0.0.1:6080/vnc.html?password=secret",
+	} {
 		if err := validateControllerConnectionURL(value); err == nil {
 			t.Fatalf("URL %q accepted", value)
 		}

@@ -1140,19 +1140,45 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       statusURL.searchParams.set("viewer", viewerID);
       const fragment = new URLSearchParams(window.location.hash.slice(1));
       const target = ${JSON.stringify(target)};
-      const username = fragment.get("username") || "";
-      const password = fragment.get("password") || "";
+      const credentialFragmentPresent = fragment.has("username") || fragment.has("password");
+      fragment.delete("username");
+      fragment.delete("password");
+      let username = "";
+      let password = "";
       const takeControlOnConnect = fragment.get("control") === "take";
+      if (credentialFragmentPresent) {
+        try {
+          const cleanURL = new URL(window.location.href);
+          cleanURL.hash = fragment.toString();
+          window.history.replaceState(null, "", cleanURL);
+        } catch (_) {}
+      }
       const bridgeMissingMessage = ${JSON.stringify(bridgeMissingMessage)};
-      const credentials = {};
-      if (username) credentials.username = username;
-      if (password) credentials.password = password;
-      const options = Object.keys(credentials).length ? { credentials } : {};
-      const missingVNCCredentialMessage = "VNC credentials missing; open WebVNC from crabbox webvnc status";
-      const failedVNCCredentialMessage = "VNC authentication failed; reopen WebVNC from crabbox webvnc status";
+      const missingVNCCredentialMessage = "VNC credentials missing; enter the credentials printed by crabbox webvnc status";
+      const failedVNCCredentialMessage = "VNC authentication failed; check the credentials printed by crabbox webvnc status";
       function setStatus(value, tone = "") {
         status.textContent = value;
         status.dataset.tone = tone;
+      }
+      function viewerOptions() {
+        const credentials = {};
+        if (username) credentials.username = username;
+        if (password) credentials.password = password;
+        return Object.keys(credentials).length ? { credentials } : {};
+      }
+      async function promptVNCCredential(kind) {
+        if (kind === "username" && username) return username;
+        if (kind === "password" && password) return password;
+        const label = kind === "username" ? "VNC username" : "VNC password";
+        const value = await window.crabboxDialog?.prompt(
+          "Enter the " + label.toLowerCase() + " printed by crabbox webvnc status.",
+          { title: "VNC credentials", label, confirmLabel: "connect" },
+        );
+        const credential = String(value || "").trim();
+        if (!credential) return "";
+        if (kind === "username") username = credential;
+        else password = credential;
+        return credential;
       }
       let rfb;
       let retryTimer;
@@ -1376,13 +1402,9 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             scheduleRetry(state.message || "waiting for an available WebVNC observer slot");
             return;
           }
-          if (target === "macos" && !password) {
-            stopPolling(missingVNCCredentialMessage);
-            return;
-          }
           setStatus(retryAttempt ? "bridge connected; opening viewer" : "connecting");
           clearDesktopThemeSyncState();
-          rfb = new RFB(screen, wsURL.toString(), options);
+          rfb = new RFB(screen, wsURL.toString(), viewerOptions());
           rfb.showDotCursor = true;
           rfb.focusOnClick = true;
           rfb.scaleViewport = true;
@@ -1421,33 +1443,36 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
             connected = false;
             clearDesktopThemeSyncState();
             if (!wasConnected && (authenticationFailed || credentialsSent)) {
-              stopPolling(authenticationFailed ? failedVNCCredentialMessage : "VNC authentication timed out; reopen WebVNC from crabbox webvnc status");
+              stopPolling(authenticationFailed ? failedVNCCredentialMessage : "VNC authentication timed out; check the credentials printed by crabbox webvnc status");
               return;
             }
             scheduleRetry(wasConnected ? "VNC bridge disconnected" : "waiting for VNC bridge");
           });
-          rfb.addEventListener("credentialsrequired", (event) => {
+          rfb.addEventListener("credentialsrequired", async (event) => {
             const types = event.detail?.types || ["password"];
             const values = {};
             if (types.includes("username")) {
-              if (!username) {
+              const promptedUsername = await promptVNCCredential("username");
+              if (!promptedUsername) {
                 stopPolling(missingVNCCredentialMessage);
                 return;
               }
-              values.username = username;
+              values.username = promptedUsername;
             }
             if (types.includes("password")) {
-              if (!password) {
+              const promptedPassword = await promptVNCCredential("password");
+              if (!promptedPassword) {
                 stopPolling(missingVNCCredentialMessage);
                 return;
               }
-              values.password = password;
+              values.password = promptedPassword;
             }
             credentialsSent = true;
             rfb.sendCredentials(values);
           });
           rfb.addEventListener("securityfailure", () => {
             authenticationFailed = true;
+            password = "";
             stopPolling(failedVNCCredentialMessage);
           });
         } catch (error) {
@@ -1512,8 +1537,7 @@ export function portalVNC(lease: LeaseRecord, options: { canManage?: boolean } =
       function shareableWebVNCURL() {
         const url = new URL(window.location.href);
         const linkFragment = new URLSearchParams();
-        if (username) linkFragment.set("username", username);
-        if (password) linkFragment.set("password", password);
+        if (takeControlOnConnect) linkFragment.set("control", "take");
         url.hash = linkFragment.toString();
         return url.toString();
       }

@@ -93,8 +93,8 @@ local-to-portal path.
   `crabbox webvnc` process keeps the SSH tunnel open, connects to the
   coordinator with a one-use bridge ticket, and the authenticated portal serves
   bundled noVNC. The portal never connects to the runner directly, so the local
-  bridge must keep running. `--open` preloads the VNC password into the local
-  browser fragment.
+  bridge must keep running. `--open` opens the portal URL without embedding the
+  VNC password; the portal prompts for credentials when noVNC requires them.
 - `crabbox vnc` is for a native VNC client: when WebVNC status or reset reports
   the portal path is unhealthy, or when you need a native client feature.
 

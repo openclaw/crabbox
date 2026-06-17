@@ -239,7 +239,8 @@ ssh tunnel: ssh ... -o GatewayPorts=no -L 127.0.0.1:5901:127.0.0.1:5900 ...
 portal bridge: connected=true viewers=2 observers=1 slots=2
 portal controller: alice
 event: 2026-05-07T12:00:00Z bridge_connected
-webvnc: https://broker.example.com/portal/leases/cbx_.../vnc#password=...
+webvnc: https://broker.example.com/portal/leases/cbx_.../vnc
+password: ...
 fallback: crabbox vnc --provider aws --target linux --network tailscale --id cbx_... --open
 ```
 
@@ -273,12 +274,10 @@ instead of granting general passwordless sudo.
 ## Portal and passwords
 
 `--open` opens the portal page after the bridge starts. When the VNC password is
-available, the command also places it in the URL fragment for the local browser
-tab and prints it on stdout. URL fragments are not sent to the coordinator, and
-Crabbox preserves special characters such as `!` when building the fragment. For
-macOS targets the lease username is also surfaced. If the portal login flow
-redirects first, the page may still prompt for the VNC password; use the
-password printed by the command. If an old tab is retrying with a stale
+available, the command prints it separately from the portal URL. The URL opened
+in the local browser does not include the password or username; the portal
+prompts for credentials when noVNC requires them. For macOS targets the lease
+username is also surfaced. If an old tab is retrying with a stale credential
 fragment, close it before opening the new bridge URL.
 
 The portal page may show `WebVNC daemon not running` or `waiting for VNC bridge`
@@ -290,8 +289,9 @@ crabbox webvnc --id <lease-id-or-slug>
 ```
 
 For human demos, prefer WebVNC over native VNC because `crabbox webvnc --open`
-preloads the per-lease password in the local browser URL fragment. Use native
-VNC only as the fallback printed by `webvnc status` or `webvnc reset`.
+uses the authenticated portal and keeps the per-lease password out of browser
+URLs. Use native VNC only as the fallback printed by `webvnc status` or
+`webvnc reset`.
 
 The WebVNC toolbar includes clipboard controls. The paste control reads the
 local browser clipboard, sends it through noVNC, then sends the target paste
@@ -389,8 +389,8 @@ If WebVNC remains unreliable, use the exact native fallback command printed by
 VNC authentication fails
 
 Use the password printed by `crabbox webvnc`. With `--open`, the command tries
-to pass the password in the browser URL fragment, but a portal login redirect
-can lose that fragment before noVNC sees it.
+to open the portal URL without embedding the password; enter the printed
+credential when the portal asks for it.
 
 ## Related docs
 
