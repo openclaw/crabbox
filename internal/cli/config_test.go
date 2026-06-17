@@ -3436,6 +3436,20 @@ func TestSuperserveConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
 	}
 }
 
+func TestCrownestConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
+	cfg := baseConfig()
+	if cfg.Crownest.APIURL != "https://api.crownest.dev" || cfg.Crownest.Template != "python-node" || cfg.Crownest.TimeoutSecs != 600 {
+		t.Fatalf("unexpected crownest defaults: %#v", cfg.Crownest)
+	}
+	fieldName := "API" + "Key"
+	if _, ok := reflect.TypeOf(CrownestConfig{}).FieldByName(fieldName); ok {
+		t.Fatal("provider config must not persist API keys")
+	}
+	if _, ok := reflect.TypeOf(fileCrownestConfig{}).FieldByName(fieldName); ok {
+		t.Fatal("file config must not accept API keys")
+	}
+}
+
 func TestSuperserveRepoConfigCannotSetBaseURL(t *testing.T) {
 	cfg := baseConfig()
 	var file fileConfig

@@ -201,6 +201,35 @@ func TestScalewayRegistersWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestCrownestRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("crownest")
+	if err != nil {
+		t.Fatalf("ProviderFor(crownest): %v", err)
+	}
+	if provider.Name() != "crownest" {
+		t.Fatalf("ProviderFor(crownest).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever || len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("crownest spec=%#v", spec)
+	}
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("crownest features=%v missing %s", spec.Features, feature)
+		}
+	}
+	for _, feature := range []core.Feature{core.FeatureRunArtifacts, core.FeatureRunDownloads, core.FeatureRunProof, core.FeatureSSH} {
+		if spec.Features.Has(feature) {
+			t.Fatalf("crownest features=%v should not include %s", spec.Features, feature)
+		}
+	}
+	for _, alias := range []string{"cn", "crow", "nest"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "crownest" {
+			t.Fatalf("%q alias unexpectedly resolves to crownest", alias)
+		}
+	}
+}
+
 func TestNamespaceInstanceRegistersWithoutAliasCollision(t *testing.T) {
 	for _, name := range []string{"namespace-instance", "namespace-compute"} {
 		provider, err := core.ProviderFor(name)
@@ -1140,6 +1169,7 @@ func allBuiltInProviderNames() []string {
 		"cloudflare-sandbox",
 		"codesandbox",
 		"coder",
+		"crownest",
 		"daytona",
 		"digitalocean",
 		"docker-sandbox",

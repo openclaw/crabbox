@@ -109,6 +109,8 @@ Delegated-run providers (no SSH lease):
   `internal/providers/blacksmith`, `internal/providers/wandb`
 - Superserve delegated lifecycle, archive sync, data-plane file upload, exec,
   and live smoke: `internal/providers/superserve`, `scripts/live-superserve-smoke.sh`
+- Crownest Workspace Runs delegated lifecycle, archive-transfer upload, SSE
+  event streaming, and local claims: `internal/providers/crownest`
 - Anthropic Sandbox Runtime live local enforcement smoke: `scripts/live-anthropic-sandbox-runtime-smoke.sh`
 - Azure Container Apps dynamic sessions (shares the `azure` family, but
   delegated-run): `internal/providers/azuredynamicsessions`, runner image `worker/azure-dynamic-sessions.Dockerfile`

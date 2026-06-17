@@ -1,0 +1,215 @@
+package crownest
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	api := &fakeCrownestClient{baseURL: "https://api.crownest.dev"}
+	var stdout, stderr bytes.Buffer
+	cfg := testConfig()
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt: Runtime{
+			Stdout: &stdout,
+			Stderr: &stderr,
+		},
+		newClient: func(Config, Runtime) (client, error) { return api, nil },
+	}
+
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit=%d", result.ExitCode)
+	}
+	if !strings.Contains(stdout.String(), "ok\n") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	if !strings.Contains(result.CommandText, "pnpm") || !strings.Contains(result.CommandText, "test") {
+		t.Fatalf("command=%q", result.CommandText)
+	}
+	if api.created.Command != result.CommandText || api.created.Template != "python-node" || api.created.Keep {
+		t.Fatalf("create request=%#v", api.created)
+	}
+	if api.uploadBytes == 0 || api.finalized.UploadID != "upl_123" || !api.started || api.deletedSandboxID != "sbx_123" {
+		t.Fatalf("fake api state upload=%d finalized=%#v started=%v deleted=%q", api.uploadBytes, api.finalized, api.started, api.deletedSandboxID)
+	}
+	if result.Session == nil || result.Session.Provider != providerName || result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if strings.Contains(stderr.String(), "cn_test") {
+		t.Fatalf("stderr leaked secret: %q", stderr.String())
+	}
+}
+
+func TestRunRejectsWorkspaceEnvUntilCrownestSupportsIt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return &fakeCrownestClient{baseURL: "https://api.crownest.dev"}, nil
+		},
+	}
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: tempGitRepo(t), Name: "demo"},
+		Command: []string{"printenv", "FOO"},
+		Env:     map[string]string{"FOO": "bar"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support command environment forwarding") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunCancelsWorkspaceRunWhenLocalContextIsCanceled(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	api := &fakeCrownestClient{
+		baseURL: "https://api.crownest.dev",
+		stream: func() (io.ReadCloser, error) {
+			cancel()
+			return nil, context.Canceled
+		},
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	_, err := b.Run(ctx, RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+		Keep:    true,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+	if api.canceledRunID != "wsr_123" {
+		t.Fatalf("canceledRunID=%q", api.canceledRunID)
+	}
+}
+
+type fakeCrownestClient struct {
+	baseURL          string
+	created          createWorkspaceRunRequest
+	finalized        finalizeArchiveRequest
+	uploadBytes      int
+	started          bool
+	deletedSandboxID string
+	canceledRunID    string
+	stream           func() (io.ReadCloser, error)
+}
+
+func (f *fakeCrownestClient) BaseURL() string { return f.baseURL }
+
+func (f *fakeCrownestClient) CreateSandbox(context.Context, createSandboxRequest) (sandbox, error) {
+	return sandbox{ID: "sbx_123", Status: "running"}, nil
+}
+
+func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error) {
+	return sandbox{ID: "sbx_123", Status: "running"}, nil
+}
+
+func (f *fakeCrownestClient) DeleteSandbox(_ context.Context, id string) error {
+	f.deletedSandboxID = id
+	return nil
+}
+
+func (f *fakeCrownestClient) CreateWorkspaceRun(_ context.Context, req createWorkspaceRunRequest, _ string) (workspaceRun, error) {
+	f.created = req
+	return workspaceRun{ID: "wsr_123", Status: "awaiting_archive"}, nil
+}
+
+func (f *fakeCrownestClient) CreateArchiveTransfer(_ context.Context, id string, _ createArchiveTransferRequest, _ string) (archiveTransfer, error) {
+	return archiveTransfer{ID: "upl_123", Method: "PUT", UploadURL: "/upload", MaxSizeBytes: 1 << 30, WorkspaceRunID: id}, nil
+}
+
+func (f *fakeCrownestClient) UploadArchive(_ context.Context, _ archiveTransfer, body io.Reader) error {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	f.uploadBytes = len(data)
+	return nil
+}
+
+func (f *fakeCrownestClient) FinalizeArchive(_ context.Context, _ string, req finalizeArchiveRequest, _ string) (workspaceRun, error) {
+	f.finalized = req
+	return workspaceRun{ID: "wsr_123", Status: "archive_uploaded"}, nil
+}
+
+func (f *fakeCrownestClient) StartWorkspaceRun(context.Context, string, string) (workspaceRun, error) {
+	f.started = true
+	return workspaceRun{ID: "wsr_123", Status: "running", SandboxID: "sbx_123"}, nil
+}
+
+func (f *fakeCrownestClient) CancelWorkspaceRun(_ context.Context, id string, _ string) (workspaceRun, error) {
+	f.canceledRunID = id
+	return workspaceRun{ID: "wsr_123", Status: "canceled"}, nil
+}
+
+func (f *fakeCrownestClient) GetWorkspaceRun(context.Context, string) (workspaceRun, error) {
+	code := 0
+	return workspaceRun{ID: "wsr_123", Status: "succeeded", SandboxID: "sbx_123", ExitCode: &code}, nil
+}
+
+func (f *fakeCrownestClient) StreamWorkspaceRunEvents(context.Context, string, int64) (io.ReadCloser, error) {
+	if f.stream != nil {
+		return f.stream()
+	}
+	return io.NopCloser(strings.NewReader(strings.Join([]string{
+		`data: {"type":"stdout","seq":1,"data":"ok\n"}`,
+		"",
+		`data: {"type":"terminal","seq":2,"workspaceRun":{"id":"wsr_123","status":"succeeded","sandboxId":"sbx_123","exitCode":0}}`,
+		"",
+	}, "\n"))), nil
+}
+
+func (f *fakeCrownestClient) Probe(context.Context) error { return nil }
+
+func tempGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"scripts":{"test":"echo ok"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "package.json")
+	runGit(t, dir, "commit", "-m", "init")
+	return dir
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
