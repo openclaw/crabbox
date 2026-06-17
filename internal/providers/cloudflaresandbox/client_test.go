@@ -2,6 +2,7 @@ package cloudflaresandbox
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -79,6 +80,17 @@ func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 			writeTestJSON(w, []map[string]any{{"id": "sb_123", "status": "running"}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/exec":
 			writeTestJSON(w, map[string]any{"stdout": "ok\n", "exitCode": 0})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/files/write":
+			if r.URL.Query().Get("path") != "/tmp/archive.tgz" {
+				t.Fatalf("upload path query=%q", r.URL.RawQuery)
+			}
+			if r.Header.Get("Content-Type") != "application/octet-stream" {
+				t.Fatalf("upload content-type=%q", r.Header.Get("Content-Type"))
+			}
+			if string(body) != "archive" {
+				t.Fatalf("upload body=%q", body)
+			}
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/persist":
 			writeTestJSON(w, map[string]any{"id": "persist_123"})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/hydrate":
@@ -119,6 +131,9 @@ func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 	if stdout.String() != "ok\n" {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
+	if err := api.UploadFile(context.Background(), "sb_123", "/tmp/archive.tgz", strings.NewReader("archive")); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := api.Persist(context.Background(), "sb_123", persistRequest{Path: "/workspace"}); err != nil {
 		t.Fatal(err)
 	}
@@ -131,8 +146,43 @@ func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 	if err := api.DeleteSandbox(context.Background(), "sb_123"); err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 9 {
+	if len(paths) != 10 {
 		t.Fatalf("paths=%#v", paths)
+	}
+}
+
+func TestBridgeClientExecParsesSSEOutputBeforeExit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sandboxes/sb_123/exec" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "event: stdout\n")
+		_, _ = io.WriteString(w, `data: {"chunk":"`+base64.StdEncoding.EncodeToString([]byte("early\n"))+`"}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		_, _ = io.WriteString(w, "event: stderr\n")
+		_, _ = io.WriteString(w, `data: {"chunk":"`+base64.StdEncoding.EncodeToString([]byte("warn\n"))+`"}`+"\n\n")
+		_, _ = io.WriteString(w, "event: exit\n")
+		_, _ = io.WriteString(w, `data: {"exitCode":7}`+"\n\n")
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.CloudflareSandbox.BridgeURL = server.URL
+	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	result, err := api.Exec(context.Background(), "sb_123", execRequest{Command: "test"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 7 || stdout.String() != "early\n" || stderr.String() != "warn\n" {
+		t.Fatalf("result=%#v stdout=%q stderr=%q", result, stdout.String(), stderr.String())
 	}
 }
 

@@ -1,9 +1,12 @@
 package cloudflaresandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +24,7 @@ type bridgeClient interface {
 	ListRunning(context.Context) ([]sandboxSummary, error)
 	DeleteSandbox(context.Context, string) error
 	Exec(context.Context, string, execRequest, io.Writer, io.Writer) (execResult, error)
+	UploadFile(context.Context, string, string, io.Reader) error
 	Persist(context.Context, string, persistRequest) (persistResponse, error)
 	Hydrate(context.Context, string, hydrateRequest) error
 	WarmPool(context.Context) (warmPoolResponse, error)
@@ -70,6 +74,10 @@ type execResult struct {
 	Stdout   string `json:"stdout,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
 	ExitCode int    `json:"exitCode"`
+}
+
+type writeFileResponse struct {
+	OK bool `json:"ok,omitempty"`
 }
 
 type persistRequest struct {
@@ -163,8 +171,27 @@ func (c *client) DeleteSandbox(ctx context.Context, id string) error {
 }
 
 func (c *client) Exec(ctx context.Context, id string, req execRequest, stdout, stderr io.Writer) (execResult, error) {
+	resp, err := c.doRequest(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(id)+"/exec", true, req, "application/json")
+	if err != nil {
+		return execResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return execResult{}, fmt.Errorf("%s POST /v1/sandboxes/%s/exec failed: %s: %s", providerName, url.PathEscape(id), resp.Status, c.redact(string(data)))
+	}
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		return c.parseExecSSE(resp.Body, stdout, stderr)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if readErr != nil {
+		return execResult{}, fmt.Errorf("%s read exec response: %w", providerName, readErr)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return execResult{}, errors.New("cloudflare-sandbox exec returned empty response")
+	}
 	var out execResult
-	if err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(id)+"/exec", true, req, &out); err != nil {
+	if err := json.Unmarshal(data, &out); err != nil {
 		return execResult{}, err
 	}
 	if stdout != nil && out.Stdout != "" {
@@ -174,6 +201,154 @@ func (c *client) Exec(ctx context.Context, id string, req execRequest, stdout, s
 		_, _ = io.WriteString(stderr, out.Stderr)
 	}
 	return out, nil
+}
+
+type execSSEData struct {
+	Type     string `json:"type,omitempty"`
+	Stream   string `json:"stream,omitempty"`
+	Chunk    string `json:"chunk,omitempty"`
+	Data     string `json:"data,omitempty"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	ExitCode *int   `json:"exitCode,omitempty"`
+	Message  string `json:"message,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execResult, error) {
+	var result execResult
+	sawExit := false
+	eventType := ""
+	var dataLines []string
+	flush := func() error {
+		if len(dataLines) == 0 {
+			eventType = ""
+			return nil
+		}
+		data := strings.Join(dataLines, "\n")
+		dataLines = nil
+		ev := strings.TrimSpace(eventType)
+		eventType = ""
+		var frame execSSEData
+		if err := json.Unmarshal([]byte(data), &frame); err != nil {
+			return fmt.Errorf("decode cloudflare-sandbox exec SSE event: %w", err)
+		}
+		kind := strings.ToLower(blank(frame.Type, ev))
+		stream := strings.ToLower(frame.Stream)
+		switch kind {
+		case "stdout", "stderr", "output":
+			payload := firstNonEmpty(frame.Chunk, frame.Data, frame.Stdout, frame.Stderr)
+			decoded, err := decodeMaybeBase64(payload)
+			if err != nil {
+				return err
+			}
+			if stream == "" {
+				if kind == "stderr" || frame.Stderr != "" {
+					stream = "stderr"
+				} else {
+					stream = "stdout"
+				}
+			}
+			if stream == "stderr" {
+				result.Stderr += decoded
+				if stderr != nil {
+					_, err = io.WriteString(stderr, decoded)
+				}
+			} else {
+				result.Stdout += decoded
+				if stdout != nil {
+					_, err = io.WriteString(stdout, decoded)
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("write cloudflare-sandbox %s: %w", stream, err)
+			}
+		case "exit", "result", "complete", "done":
+			if frame.ExitCode == nil {
+				return errors.New("cloudflare-sandbox exec SSE exit event missing exitCode")
+			}
+			result.ExitCode = *frame.ExitCode
+			sawExit = true
+		case "error":
+			msg := firstNonEmpty(frame.Error, frame.Message, data)
+			return fmt.Errorf("cloudflare-sandbox exec error: %s", c.redact(msg))
+		default:
+			return fmt.Errorf("unsupported cloudflare-sandbox exec SSE event %q", kind)
+		}
+		return nil
+	}
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if err := flush(); err != nil {
+				return execResult{}, err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimPrefix(value, " ")
+		switch key {
+		case "event":
+			eventType = value
+		case "data":
+			dataLines = append(dataLines, value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return execResult{}, fmt.Errorf("read cloudflare-sandbox exec SSE: %w", err)
+	}
+	if err := flush(); err != nil {
+		return execResult{}, err
+	}
+	if !sawExit {
+		return execResult{}, errors.New("cloudflare-sandbox exec SSE returned no exit event")
+	}
+	return result, nil
+}
+
+func decodeMaybeBase64(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err == nil {
+		return string(decoded), nil
+	}
+	return value, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (c *client) UploadFile(ctx context.Context, id, remotePath string, content io.Reader) error {
+	route := "/v1/sandboxes/" + url.PathEscape(id) + "/files/write?path=" + url.QueryEscape(remotePath) + "&encoding=raw"
+	resp, err := c.doRequest(ctx, http.MethodPost, route, true, content, "application/octet-stream")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return fmt.Errorf("%s read %s: %w", providerName, route, readErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s POST %s failed: %s: %s", providerName, route, resp.Status, c.redact(string(data)))
+	}
+	return nil
 }
 
 func (c *client) Persist(ctx context.Context, id string, req persistRequest) (persistResponse, error) {
@@ -197,28 +372,9 @@ func (c *client) WarmPool(ctx context.Context) (warmPoolResponse, error) {
 }
 
 func (c *client) do(ctx context.Context, method, route string, authenticated bool, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("%s encode %s: %w", providerName, route, err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, joinURLPath(c.baseURL, route), reader)
+	resp, err := c.doRequest(ctx, method, route, authenticated, body, "application/json")
 	if err != nil {
-		return fmt.Errorf("%s request %s: %w", providerName, route, err)
-	}
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if authenticated && c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s %s: %s", providerName, method, route, c.redact(err.Error()))
+		return err
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -237,12 +393,49 @@ func (c *client) do(ctx context.Context, method, route string, authenticated boo
 	return nil
 }
 
+func (c *client) doRequest(ctx context.Context, method, route string, authenticated bool, body any, contentType string) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		if existing, ok := body.(io.Reader); ok {
+			reader = existing
+		} else {
+			data, err := json.Marshal(body)
+			if err != nil {
+				return nil, fmt.Errorf("%s encode %s: %w", providerName, route, err)
+			}
+			reader = bytes.NewReader(data)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, method, joinURLPath(c.baseURL, route), reader)
+	if err != nil {
+		return nil, fmt.Errorf("%s request %s: %w", providerName, route, err)
+	}
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if body != nil && contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if authenticated && c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s %s: %s", providerName, method, route, c.redact(err.Error()))
+	}
+	return resp, nil
+}
+
 func joinURLPath(base, route string) string {
 	parsed, err := url.Parse(base)
 	if err != nil {
 		return base + route
 	}
-	parsed.Path = path.Join(parsed.Path, route)
+	routeURL, err := url.Parse(route)
+	if err == nil {
+		parsed.Path = path.Join(parsed.Path, routeURL.Path)
+		parsed.RawQuery = routeURL.RawQuery
+	} else {
+		parsed.Path = path.Join(parsed.Path, route)
+	}
 	return parsed.String()
 }
 

@@ -1,7 +1,6 @@
 package cloudflaresandbox
 
 import (
-	"context"
 	"flag"
 	"strings"
 	"testing"
@@ -141,7 +140,7 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 	}
 }
 
-func TestConfigureReturnsFoundationBackendWithUnsupportedRuntime(t *testing.T) {
+func TestConfigureReturnsRuntimeBackends(t *testing.T) {
 	provider := Provider{}
 	cfg := testConfig()
 	configured, err := provider.Configure(cfg, Runtime{})
@@ -152,15 +151,15 @@ func TestConfigureReturnsFoundationBackendWithUnsupportedRuntime(t *testing.T) {
 	if !ok {
 		t.Fatalf("configured backend does not implement DelegatedRunBackend: %T", configured)
 	}
-	if _, err := delegated.Run(context.Background(), RunRequest{}); err == nil || !strings.Contains(err.Error(), "Plan 02") {
-		t.Fatalf("Run err=%v, want Plan 02 unsupported stub", err)
+	if delegated == nil {
+		t.Fatal("delegated backend nil")
 	}
 	cleanup, ok := configured.(core.CleanupBackend)
 	if !ok {
 		t.Fatalf("configured backend does not implement CleanupBackend: %T", configured)
 	}
-	if err := cleanup.Cleanup(context.Background(), CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "Plan 02") {
-		t.Fatalf("Cleanup err=%v, want Plan 02 unsupported stub", err)
+	if cleanup == nil {
+		t.Fatal("cleanup backend nil")
 	}
 }
 
