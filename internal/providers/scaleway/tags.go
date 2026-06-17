@@ -48,6 +48,7 @@ func tagLabelKeys() []string {
 		"profile", "market", "desktop", "desktop_env", "browser", "code", "pond", "crabbox_exposed_ports",
 		"tailscale", "tailscale_state", "tailscale_hostname", "tailscale_tags", "tailscale_ipv4", "tailscale_fqdn", "tailscale_error",
 		"tailscale_exit_node", "tailscale_exit_node_allow_lan_access",
+		"recovery", "scaleway_project", "scaleway_organization", "scaleway_region", "scaleway_zone", "scaleway_ssh_key_id", "scaleway_ssh_key_name",
 	}
 }
 

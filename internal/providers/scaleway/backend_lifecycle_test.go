@@ -1,0 +1,478 @@
+package scaleway
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	iam "github.com/scaleway/scaleway-sdk-go/api/iam/v1alpha1"
+	instance "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
+	marketplace "github.com/scaleway/scaleway-sdk-go/api/marketplace/v2"
+	"github.com/scaleway/scaleway-sdk-go/scw"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
+
+func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	var observed core.LeaseTarget
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "blue-box",
+		OnAcquired: func(target core.LeaseTarget) error {
+			observed = target
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if lease.LeaseID == "" || lease.Server.CloudID == "" || lease.SSH.Host != "203.0.113.10" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if observed.Server.CloudID != lease.Server.CloudID || observed.LeaseID != lease.LeaseID || observed.SSH.Host != lease.SSH.Host {
+		t.Fatalf("OnAcquired observed=%#v lease=%#v", observed, lease)
+	}
+	if len(fake.keys) != 1 {
+		t.Fatalf("created keys=%#v", fake.keys)
+	}
+	if fake.lastCreate == nil || fake.lastCreate.DynamicIPRequired == nil || !*fake.lastCreate.DynamicIPRequired {
+		t.Fatalf("create request did not request dynamic IP: %#v", fake.lastCreate)
+	}
+	if fake.lastCreate.Project == nil || *fake.lastCreate.Project != "project-1" || fake.lastCreate.Zone != scw.Zone("fr-par-1") {
+		t.Fatalf("create project/zone=%#v", fake.lastCreate)
+	}
+	if fake.lastCreate.SecurityGroup == nil || *fake.lastCreate.SecurityGroup != "sg-1" {
+		t.Fatalf("security group=%#v", fake.lastCreate.SecurityGroup)
+	}
+	if fake.lastListOptions == 0 {
+		t.Fatal("inventory list did not request all pages")
+	}
+	if !strings.Contains(fake.userData, "ssh_authorized_keys") {
+		t.Fatalf("cloud-init user data missing ssh keys: %s", fake.userData)
+	}
+	if !fake.poweredOn {
+		t.Fatal("server was not powered on after cloud-init user data was set")
+	}
+	if got := labelsFromTags(fake.server.Tags); got["state"] != "ready" || got["scaleway_project"] != "project-1" || got["scaleway_ssh_key_id"] == "" {
+		t.Fatalf("ready tags labels=%#v tags=%v", got, fake.server.Tags)
+	}
+
+	list, err := backend.List(context.Background(), core.ListRequest{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].CloudID != fake.server.ID {
+		t.Fatalf("list=%#v", list)
+	}
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue-box"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if resolved.LeaseID != lease.LeaseID || resolved.Server.CloudID != fake.server.ID {
+		t.Fatalf("resolved=%#v", resolved)
+	}
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "running", IdleTimeout: 4 * time.Hour})
+	if err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	if touched.Labels["state"] != "running" {
+		t.Fatalf("touch labels=%#v", touched.Labels)
+	}
+	if touched.Labels["idle_timeout_secs"] != "14400" {
+		t.Fatalf("touch did not persist idle timeout override: %#v", touched.Labels)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	if !fake.deletedServer || !fake.deletedKey {
+		t.Fatalf("deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName); err != nil || ok {
+		t.Fatalf("claim after release ok=%t err=%v", ok, err)
+	}
+}
+
+func TestScalewayAcquireOnAcquiredErrorRollsBack(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "reject",
+		OnAcquired: func(core.LeaseTarget) error {
+			return errors.New("controller rejected identity")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "controller rejected identity") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if !fake.deletedServer || !fake.deletedKey {
+		t.Fatalf("rollback deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("rollback should remove recovery claim after cleanup: %#v", claims)
+	}
+}
+
+func TestScalewayAcquireRejectsUnsupportedSSHCIDRs(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	backend.cfg.Scaleway.SSHCIDRs = []string{"203.0.113.0/24"}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cidrs"})
+	if err == nil || !strings.Contains(err.Error(), "does not yet manage security-group SSH CIDRs") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if fake.lastCreate != nil {
+		t.Fatalf("server was created despite unsupported CIDRs: %#v", fake.lastCreate)
+	}
+}
+
+func TestScalewayCleanupSkipsForeignAndDeletesExpiredOwned(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	now := backend.clockNow()
+	ownedLabels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_owned", "owned", providerName, "", false, now.Add(-3*time.Hour))
+	ownedLabels["scaleway_project"] = "project-1"
+	ownedLabels["scaleway_zone"] = "fr-par-1"
+	ownedLabels["scaleway_ssh_key_id"] = "key-owned"
+	fake.servers = []*instance.Server{
+		testServer("srv-owned", "crabbox-cbx-owned", tagsFromLabels(ownedLabels), "203.0.113.11"),
+		testServer("srv-foreign", "foreign", []string{"crabbox", "crabbox:provider:other"}, "203.0.113.12"),
+	}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if !fake.deletedServer {
+		t.Fatal("owned expired server was not deleted")
+	}
+	if fake.deletedServerID != "srv-owned" {
+		t.Fatalf("deleted server id=%q", fake.deletedServerID)
+	}
+}
+
+func TestScalewayCleanupRefusesMismatchedProject(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	labels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_bad", "bad", providerName, "", false, backend.clockNow().Add(-3*time.Hour))
+	labels["scaleway_project"] = "other-project"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.servers = []*instance.Server{testServer("srv-bad", "crabbox-cbx-bad", tagsFromLabels(labels), "203.0.113.13")}
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("mismatched project should be skipped as foreign ownership, got: %v", err)
+	}
+	if fake.deletedServer {
+		t.Fatal("mismatched project server was deleted")
+	}
+}
+
+func TestScalewayAmbiguousCreatePersistsRecoveryClaim(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	fake.createErr = context.DeadlineExceeded
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous"})
+	if err == nil {
+		t.Fatal("Acquire unexpectedly succeeded")
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claims=%#v", claims)
+	}
+	if claims[0].Provider != providerName || claims[0].Labels["recovery"] != "ambiguous-create" || claims[0].Labels["scaleway_ssh_key_name"] == "" || claims[0].Labels["scaleway_ssh_key_id"] == "" {
+		t.Fatalf("claim=%#v", claims[0])
+	}
+	if fake.deletedKey {
+		t.Fatal("ambiguous create must retain the managed Scaleway SSH key for recovery")
+	}
+}
+
+func TestScalewayReleaseRetainsIdentitylessRecoveryClaim(t *testing.T) {
+	backend, _ := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	labels := core.DirectLeaseLabels(cfg, "cbx_recover", "recover", providerName, "", false, backend.clockNow())
+	labels["recovery"] = "ambiguous-create"
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	server := core.Server{Provider: providerName, Name: "recover", Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig("cbx_recover", "recover", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_recover", Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "claim retained") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_recover", providerName); claimErr != nil || !ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestScalewayReleaseCleansClaimAndKeyWhenServerAlreadyDeleted(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	fake.deleteErr = &scw.ResourceNotFoundError{}
+	cfg := backend.cfgForRun()
+	labels := core.DirectLeaseLabels(cfg, "cbx_gone", "gone", providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-gone"
+	server := core.Server{Provider: providerName, CloudID: "srv-gone", Name: "gone", Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig("cbx_gone", "gone", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_gone", Server: server}}); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	if !fake.deletedKey {
+		t.Fatal("release did not delete managed SSH key after server not found")
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("cbx_gone", providerName); claimErr != nil || ok {
+		t.Fatalf("claim after stale release ok=%t err=%v", ok, claimErr)
+	}
+}
+
+func TestScalewayReleaseOnlyRefusesLiveServerWithChangedTags(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	labels := core.DirectLeaseLabels(cfg, "cbx_stale", "stale", providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	labels["scaleway_ssh_key_id"] = "key-stale"
+	claimServer := core.Server{Provider: providerName, CloudID: "srv-stale", Name: "stale", Labels: labels}
+	if err := core.ClaimLeaseTargetForConfig("cbx_stale", "stale", cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	fake.server = testServer("srv-stale", "changed", []string{"foreign"}, "203.0.113.20")
+	_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stale", ReleaseOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "non-Crabbox Scaleway") {
+		t.Fatalf("Resolve release-only err=%v", err)
+	}
+}
+
+func TestScalewayDoctorReportsInventoryAndMissingAuth(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	labels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_doc", "doc", providerName, "", false, backend.clockNow())
+	labels["scaleway_project"] = "project-1"
+	labels["scaleway_zone"] = "fr-par-1"
+	fake.servers = []*instance.Server{testServer("srv-doc", "crabbox-cbx-doc", tagsFromLabels(labels), "203.0.113.14")}
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if result.Status != "ok" || !strings.Contains(result.Message, "leases=1") || strings.Contains(result.Message, "secret") {
+		t.Fatalf("doctor=%#v", result)
+	}
+	if fake.lastConfig.Scaleway.Zone != "fr-par-1" {
+		t.Fatalf("doctor did not use default-normalized config: %#v", fake.lastConfig.Scaleway)
+	}
+
+	backend.newClient = func(core.Config, core.Runtime) (Client, error) {
+		return nil, core.Exit(3, "SCW_SECRET_KEY or Scaleway SDK secret_key is required")
+	}
+	result, err = backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatalf("Doctor missing auth: %v", err)
+	}
+	if result.Status != "failed" || !strings.Contains(result.Message, "SCW_SECRET_KEY") {
+		t.Fatalf("missing auth doctor=%#v", result)
+	}
+}
+
+func newTestBackend(t *testing.T) (*Backend, *fakeScalewayClient) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := newFakeScalewayClient()
+	cfg := core.Config{
+		Provider: providerName,
+		TargetOS: core.TargetLinux,
+		SSHUser:  "root",
+		SSHPort:  "22",
+		WorkRoot: "/work/crabbox",
+		Class:    "standard",
+		Scaleway: core.ScalewayConfig{
+			Region:        "fr-par",
+			Zone:          "fr-par-1",
+			Image:         "ubuntu_noble",
+			Type:          "DEV1-S",
+			ProjectID:     "project-1",
+			SecurityGroup: "sg-1",
+		},
+	}
+	backend := &Backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(core.Config, core.Runtime) (Client, error) {
+			return fake, nil
+		},
+		waitSSH: func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil },
+		now:     func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+	}
+	backend.newClient = func(cfg core.Config, rt core.Runtime) (Client, error) {
+		fake.lastConfig = cfg
+		return fake, nil
+	}
+	return backend, fake
+}
+
+type fakeScalewayClient struct {
+	instance *fakeInstanceAPI
+	iam      *fakeIAMAPI
+	market   *fakeMarketplaceAPI
+
+	servers         []*instance.Server
+	server          *instance.Server
+	keys            []*iam.SSHKey
+	lastCreate      *instance.CreateServerRequest
+	lastListOptions int
+	lastConfig      core.Config
+	userData        string
+	deletedServer   bool
+	deletedServerID string
+	deletedKey      bool
+	poweredOn       bool
+	createErr       error
+	deleteErr       error
+}
+
+func newFakeScalewayClient() *fakeScalewayClient {
+	f := &fakeScalewayClient{}
+	f.instance = &fakeInstanceAPI{f: f}
+	f.iam = &fakeIAMAPI{f: f}
+	f.market = &fakeMarketplaceAPI{}
+	return f
+}
+
+func (f *fakeScalewayClient) Instance() InstanceAPI       { return f.instance }
+func (f *fakeScalewayClient) IAM() IAMAPI                 { return f.iam }
+func (f *fakeScalewayClient) Marketplace() MarketplaceAPI { return f.market }
+func (f *fakeScalewayClient) ProjectID() string           { return "project-1" }
+func (f *fakeScalewayClient) OrganizationID() string      { return "org-1" }
+func (f *fakeScalewayClient) Region() string              { return "fr-par" }
+func (f *fakeScalewayClient) Zone() string                { return "fr-par-1" }
+
+type fakeInstanceAPI struct{ f *fakeScalewayClient }
+
+func (api *fakeInstanceAPI) ListServers(req *instance.ListServersRequest, opts ...scw.RequestOption) (*instance.ListServersResponse, error) {
+	api.f.lastListOptions = len(opts)
+	if api.f.servers != nil {
+		return &instance.ListServersResponse{Servers: api.f.servers}, nil
+	}
+	if api.f.server == nil {
+		return &instance.ListServersResponse{}, nil
+	}
+	return &instance.ListServersResponse{Servers: []*instance.Server{api.f.server}}, nil
+}
+
+func (api *fakeInstanceAPI) GetServer(req *instance.GetServerRequest, _ ...scw.RequestOption) (*instance.GetServerResponse, error) {
+	for _, server := range append(api.f.servers, api.f.server) {
+		if server != nil && server.ID == req.ServerID {
+			return &instance.GetServerResponse{Server: server}, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+
+func (api *fakeInstanceAPI) CreateServer(req *instance.CreateServerRequest, _ ...scw.RequestOption) (*instance.CreateServerResponse, error) {
+	api.f.lastCreate = req
+	if api.f.createErr != nil {
+		return nil, api.f.createErr
+	}
+	api.f.server = testServer("srv-1", req.Name, req.Tags, "203.0.113.10")
+	api.f.server.CommercialType = req.CommercialType
+	return &instance.CreateServerResponse{Server: api.f.server}, nil
+}
+
+func (api *fakeInstanceAPI) UpdateServer(req *instance.UpdateServerRequest, _ ...scw.RequestOption) (*instance.UpdateServerResponse, error) {
+	server := api.f.server
+	if server == nil {
+		for _, candidate := range api.f.servers {
+			if candidate.ID == req.ServerID {
+				server = candidate
+				break
+			}
+		}
+	}
+	if server == nil {
+		return nil, errors.New("not found")
+	}
+	if req.Tags != nil {
+		server.Tags = *req.Tags
+	}
+	return &instance.UpdateServerResponse{Server: server}, nil
+}
+
+func (api *fakeInstanceAPI) DeleteServer(req *instance.DeleteServerRequest, _ ...scw.RequestOption) error {
+	api.f.deletedServer = true
+	api.f.deletedServerID = req.ServerID
+	if api.f.deleteErr != nil {
+		return api.f.deleteErr
+	}
+	return nil
+}
+
+func (api *fakeInstanceAPI) SetServerUserData(req *instance.SetServerUserDataRequest, _ ...scw.RequestOption) error {
+	data, err := io.ReadAll(req.Content)
+	if err != nil {
+		return err
+	}
+	api.f.userData = string(data)
+	return nil
+}
+
+func (api *fakeInstanceAPI) ServerAction(req *instance.ServerActionRequest, _ ...scw.RequestOption) (*instance.ServerActionResponse, error) {
+	if req.Action == instance.ServerActionPoweron {
+		api.f.poweredOn = true
+	}
+	return &instance.ServerActionResponse{}, nil
+}
+
+type fakeIAMAPI struct{ f *fakeScalewayClient }
+
+func (api *fakeIAMAPI) ListSSHKeys(req *iam.ListSSHKeysRequest, _ ...scw.RequestOption) (*iam.ListSSHKeysResponse, error) {
+	return &iam.ListSSHKeysResponse{SSHKeys: api.f.keys}, nil
+}
+func (api *fakeIAMAPI) GetSSHKey(req *iam.GetSSHKeyRequest, _ ...scw.RequestOption) (*iam.SSHKey, error) {
+	for _, key := range api.f.keys {
+		if key.ID == req.SSHKeyID {
+			return key, nil
+		}
+	}
+	return nil, errors.New("not found")
+}
+func (api *fakeIAMAPI) CreateSSHKey(req *iam.CreateSSHKeyRequest, _ ...scw.RequestOption) (*iam.SSHKey, error) {
+	key := &iam.SSHKey{ID: "key-1", Name: req.Name, PublicKey: req.PublicKey, ProjectID: req.ProjectID}
+	api.f.keys = append(api.f.keys, key)
+	return key, nil
+}
+func (api *fakeIAMAPI) DeleteSSHKey(req *iam.DeleteSSHKeyRequest, _ ...scw.RequestOption) error {
+	api.f.deletedKey = true
+	return nil
+}
+
+type fakeMarketplaceAPI struct{}
+
+func (api *fakeMarketplaceAPI) GetLocalImageByLabel(req *marketplace.GetLocalImageByLabelRequest, _ ...scw.RequestOption) (*marketplace.LocalImage, error) {
+	if req.ImageLabel == "ubuntu_noble" && req.Zone == scw.Zone("fr-par-1") && strings.EqualFold(req.CommercialType, "DEV1-S") {
+		return &marketplace.LocalImage{ID: "image-1", Label: req.ImageLabel, Zone: req.Zone, CompatibleCommercialTypes: []string{"DEV1-S"}}, nil
+	}
+	return nil, errors.New("no image")
+}
+
+func testServer(id, name string, tags []string, publicIP string) *instance.Server {
+	return &instance.Server{
+		ID:             id,
+		Name:           name,
+		Project:        "project-1",
+		Organization:   "org-1",
+		Zone:           scw.Zone("fr-par-1"),
+		State:          instance.ServerStateRunning,
+		CommercialType: "DEV1-S",
+		Tags:           append([]string(nil), tags...),
+		PublicIP:       &instance.ServerIP{Address: net.ParseIP(publicIP), Dynamic: true},
+	}
+}
