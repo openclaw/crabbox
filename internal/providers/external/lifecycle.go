@@ -701,15 +701,15 @@ func expandLifecycleValueTracked(value string, templateCtx lifecycleTemplateCont
 }
 
 func expandLifecycleEnv(env map[string]string, templateCtx lifecycleTemplateContext) ([]string, error) {
+	expanded := make([]string, 0, len(env))
 	if len(env) == 0 {
-		return nil, nil
+		return expanded, nil
 	}
 	keys := make([]string, 0, len(env))
 	for name := range env {
 		keys = append(keys, name)
 	}
 	sort.Strings(keys)
-	expanded := append([]string(nil), os.Environ()...)
 	for _, name := range keys {
 		if !lifecycleEnvNamePattern.MatchString(name) {
 			return nil, fmt.Errorf("invalid environment variable name %q", name)

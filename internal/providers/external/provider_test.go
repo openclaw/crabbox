@@ -1197,6 +1197,7 @@ func TestDeclarativeLifecycleExpandsExplicitEnvironmentPlaceholder(t *testing.T)
 
 func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing.T) {
 	t.Setenv("DEVBOX_TOKEN", "super-secret-token")
+	t.Setenv("GITHUB_TOKEN", "ambient-secret-token")
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
@@ -1233,11 +1234,87 @@ func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing
 	if strings.Contains(gotArgv, "super-secret-token") {
 		t.Fatalf("secret leaked through argv: %q", gotArgv)
 	}
+	if len(runner.requests[0].Env) != 2 {
+		t.Fatalf("env=%#v, want only configured lifecycle entries", runner.requests[0].Env)
+	}
 	if !envContains(runner.requests[0].Env, "DEVBOX_TOKEN=super-secret-token") {
 		t.Fatal("env missing DEVBOX_TOKEN entry")
 	}
 	if !envContains(runner.requests[0].Env, "DEVBOX_NAME=devbox-fast-coral") {
 		t.Fatal("env missing DEVBOX_NAME entry")
+	}
+	if envContains(runner.requests[0].Env, "GITHUB_TOKEN=ambient-secret-token") {
+		t.Fatalf("env inherited unrelated ambient secret: %#v", runner.requests[0].Env)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleExecDoesNotInheritAmbientEnvWhenUnset(t *testing.T) {
+	t.Setenv("CRABBOX_AMBIENT_SECRET", "ambient-secret-token")
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Argv:   []string{os.Args[0], "-test.run=TestExternalLifecycleEnvHelperProcess", "--"},
+				Output: lifecycleOutputJSONLease,
+			},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+		},
+	}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: processRunner{}}}
+	response, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Lease == nil {
+		t.Fatalf("response=%#v", response)
+	}
+	if got := response.Lease.Labels["ambientSecret"]; got != "" {
+		t.Fatalf("lifecycle child inherited ambient secret %q", got)
+	}
+	if got := response.Lease.Labels["configuredToken"]; got != "" {
+		t.Fatalf("lifecycle child received unexpected configured token %q", got)
+	}
+}
+
+func TestInvokeDeclarativeLifecycleExecPassesOnlyConfiguredEnv(t *testing.T) {
+	t.Setenv("CRABBOX_AMBIENT_SECRET", "ambient-secret-token")
+	t.Setenv("DEVBOX_TOKEN", "configured-token")
+	cfg := core.BaseConfig()
+	cfg.External = core.ExternalConfig{
+		Lifecycle: core.ExternalLifecycleConfig{
+			Acquire: core.ExternalLifecycleOperation{
+				Argv: []string{os.Args[0], "-test.run=TestExternalLifecycleEnvHelperProcess", "--"},
+				Env: map[string]string{
+					"DEVBOX_TOKEN": "{{env.DEVBOX_TOKEN}}",
+				},
+				Output: lifecycleOutputJSONLease,
+			},
+		},
+		Connection: core.ExternalConnectionConfig{
+			SSH: core.ExternalSSHConnectionConfig{User: "developer", Host: "{{name}}"},
+		},
+	}
+	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: processRunner{}}}
+	response, err := backend.invokeLifecycle(context.Background(), protocolRequest{
+		Operation: "acquire",
+		Desired:   &desiredLease{LeaseID: "cbx_abcdef123456", Slug: "fast-coral", Name: "devbox-fast-coral"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Lease == nil {
+		t.Fatalf("response=%#v", response)
+	}
+	if got := response.Lease.Labels["configuredToken"]; got != "configured-token" {
+		t.Fatalf("configured lifecycle env=%q, want configured-token", got)
+	}
+	if got := response.Lease.Labels["ambientSecret"]; got != "" {
+		t.Fatalf("lifecycle child inherited ambient secret %q", got)
 	}
 }
 
@@ -3234,6 +3311,30 @@ func TestExternalProviderHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestExternalLifecycleEnvHelperProcess(t *testing.T) {
+	if !strings.Contains(strings.Join(os.Args, " "), "TestExternalLifecycleEnvHelperProcess") {
+		return
+	}
+	labels := map[string]string{}
+	if value := os.Getenv("CRABBOX_AMBIENT_SECRET"); value != "" {
+		labels["ambientSecret"] = value
+	}
+	if value := os.Getenv("DEVBOX_TOKEN"); value != "" {
+		labels["configuredToken"] = value
+	}
+	lease := protocolLease{
+		LeaseID: "cbx_abcdef123456",
+		Slug:    "env-proof",
+		Name:    "env-proof",
+		CloudID: "env-proof-cloud",
+		Labels:  labels,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(lease); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
 type recordingRunner struct {
 	name     string
 	args     []string
@@ -3315,6 +3416,8 @@ type processRunner struct{}
 
 func (processRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
+	cmd.Env = req.Env
+	cmd.Dir = req.Dir
 	cmd.Stdin = req.Stdin
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
