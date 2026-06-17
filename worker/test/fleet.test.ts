@@ -6317,7 +6317,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBeGreaterThan(Date.now());
   });
 
-  it("terminates AWS orphan sweep candidates only when delete is enabled", async () => {
+  it("keeps tag-only AWS orphan sweep candidates report-only in delete mode", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
@@ -6360,15 +6360,119 @@ describe("fleet lease identity and idle", () => {
       terminated: number;
       candidates: Array<Record<string, unknown>>;
     }>("aws-orphan-sweep:last");
-    expect(deleted).toEqual(["i-orphan"]);
-    expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
-    expect(sweep?.candidates[0]).toMatchObject({ action: "terminated" });
+    expect(deleted).toEqual([]);
+    expect(sweep).toMatchObject({ mode: "delete", terminated: 0 });
+    expect(sweep?.candidates[0]).toMatchObject({
+      cloudID: "i-orphan",
+      ownership: "provider-tags-only",
+      action: "reported",
+    });
   });
 
-  it("terminates Azure orphan sweep candidates only when delete is enabled", async () => {
+  it("terminates AWS orphan sweep candidates with exact coordinator ownership", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "aws",
+        cloudID: "i-orphan",
+        region: "eu-west-1",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000774",
+      testLease({
+        id: "cbx_000000000774",
+        provider: "aws",
+        cloudID: "i-wrong-region",
+        region: "us-east-1",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(
+          undefined,
+          {
+            provider: "aws",
+            servers: [
+              testMachine({
+                cloudID: "i-orphan",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                cloudID: "i-wrong-region",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_000000000774",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+            ],
+          },
+          async (id) => {
+            deleted.push(id);
+          },
+        ),
+      },
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    const sweep = storage.value<{
+      mode: string;
+      terminated: number;
+      candidates: Array<Record<string, unknown>>;
+    }>("aws-orphan-sweep:last");
+    expect(deleted).toEqual(["i-orphan"]);
+    expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
+    expect(sweep?.candidates[0]).toMatchObject({
+      cloudID: "i-orphan",
+      ownership: "coordinator-lease",
+      ownershipLeaseID: "cbx_000000000776",
+      action: "terminated",
+    });
+    expect(sweep?.candidates[1]).toMatchObject({
+      cloudID: "i-wrong-region",
+      ownership: "provider-tags-only",
+      action: "reported",
+    });
+  });
+
+  it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "azure",
+        cloudID: "vm-orphan",
+        region: "westus2",
+        state: "expired",
+        keep: false,
+      }),
+    );
     storage.seed(
       "lease:cbx_000000000777",
       testLease({
@@ -6443,6 +6547,18 @@ describe("fleet lease identity and idle", () => {
                 labels: {
                   crabbox: "true",
                   keep: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-tag-only",
+                region: "westus2",
+                name: "vm-tag-only",
+                labels: {
+                  crabbox: "true",
                   lease: "cbx_missing",
                   created_at: oldSeconds,
                   expires_at: oldSeconds,
@@ -6525,7 +6641,15 @@ describe("fleet lease identity and idle", () => {
         region: "westus2",
         leaseID: "cbx_missing",
         reason: "expired-provider-tag",
+        ownership: "coordinator-lease",
+        ownershipLeaseID: "cbx_000000000776",
         action: "terminated",
+      }),
+      expect.objectContaining({
+        cloudID: "vm-tag-only",
+        region: "westus2",
+        ownership: "provider-tags-only",
+        action: "reported",
       }),
     ]);
   });
@@ -6534,6 +6658,18 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const actions: string[] = [];
     let releaseHostID = "";
+    storage.seed(
+      "lease:cbx_000000000775",
+      testLease({
+        id: "cbx_000000000775",
+        provider: "aws",
+        cloudID: "i-terminated",
+        region: "eu-west-1",
+        hostID: "h-stale",
+        state: "expired",
+        keep: false,
+      }),
+    );
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
       async (input, init) => {
         const params = new URLSearchParams(await requestBodyForTest(input, init));
@@ -6591,7 +6727,64 @@ describe("fleet lease identity and idle", () => {
     expect(sweep?.macHostCandidates[0]).toMatchObject({
       hostID: "h-stale",
       reason: "stale-pending-mac-host",
+      ownership: "coordinator-lease",
+      ownershipLeaseID: "cbx_000000000775",
       action: "released",
+    });
+  });
+
+  it("keeps tag-only EC2 Mac hosts report-only in release mode", async () => {
+    const storage = new MemoryStorage();
+    const actions: string[] = [];
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async (input, init) => {
+        const params = new URLSearchParams(await requestBodyForTest(input, init));
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <DescribeHostsResponse>
+            <hostSet>
+              <item>
+                <hostId>h-tag-only</hostId>
+                <hostState>pending</hostState>
+                <availabilityZone>eu-west-1a</availabilityZone>
+                <autoPlacement>off</autoPlacement>
+                <allocationTime>2026-05-01T00:00:00Z</allocationTime>
+                <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+                <tagSet><item><key>crabbox</key><value>true</value></item></tagSet>
+              </item>
+            </hostSet>
+          </DescribeHostsResponse>`);
+        }
+        return ec2XMLResponse("<ErrorResponse />", 500);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws", servers: [] }) },
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE: "1",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    await fleet.alarm();
+
+    const sweep = storage.value<{
+      macHostsReleased: number;
+      macHostCandidates: Array<Record<string, unknown>>;
+    }>("aws-orphan-sweep:last");
+    expect(actions).toEqual(["DescribeHosts"]);
+    expect(sweep?.macHostsReleased).toBe(0);
+    expect(sweep?.macHostCandidates[0]).toMatchObject({
+      hostID: "h-tag-only",
+      ownership: "provider-tags-only",
+      action: "reported",
     });
   });
 

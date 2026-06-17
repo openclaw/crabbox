@@ -341,7 +341,7 @@ CRABBOX_AWS_INSTANCE_PROFILE
 CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS                     # comma-separated SSH source CIDRs
 CRABBOX_AWS_ORPHAN_SWEEP_ENABLED         # defaults on when AWS broker credentials exist
-CRABBOX_AWS_ORPHAN_SWEEP_DELETE          # set 1 to terminate confirmed orphan instances
+CRABBOX_AWS_ORPHAN_SWEEP_DELETE          # set 1 to terminate coordinator-owned orphan instances
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS
 CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS
 ```

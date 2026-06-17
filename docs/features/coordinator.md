@@ -273,8 +273,9 @@ request 404s or 401s.
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`
 (state `expired`), retrying after ~5 minutes on failure, and an AWS orphan sweep
-(report or delete, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*`) terminates untracked
-instances and releases idle Mac dedicated hosts. The next alarm is scheduled for
+(report or delete, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*`) reports untracked
+instances and deletes or releases only resources with exact retained coordinator
+bindings. The next alarm is scheduled for
 the soonest upcoming expiry or sweep time.
 
 Lease responses carry the canonical `cbx_...` ID, the friendly slug when present,

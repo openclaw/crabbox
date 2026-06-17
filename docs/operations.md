@@ -248,7 +248,7 @@ CRABBOX_ARTIFACTS_SESSION_TOKEN   optional
 CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS optional
 CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS    optional
 CRABBOX_AWS_ORPHAN_SWEEP_ENABLED  optional; defaults on when AWS broker credentials exist
-CRABBOX_AWS_ORPHAN_SWEEP_DELETE   optional; set 1 to terminate confirmed orphan EC2 instances
+CRABBOX_AWS_ORPHAN_SWEEP_DELETE   optional; set 1 to terminate coordinator-owned orphan EC2 instances
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
 CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 Mac hosts during orphan sweep
@@ -411,7 +411,7 @@ lease tags with active coordinator leases. Active matching leases always win,
 because provider `expires_at` tags are written at launch and can be older than a
 heartbeat-extended lease.
 
-The sweep reports a candidate when an instance is past its provider `expires_at` tag, has no active lease, is missing a lease label, or points at an active lease whose current cloud ID differs. It skips `keep=true` instances and applies the grace window before acting on missing or mismatched lease state. Set `CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1` to terminate confirmed candidates automatically. With `CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE=1` also set, the same sweep releases Crabbox-tagged EC2 Mac Dedicated Hosts that have stayed in `pending` for at least one hour and are not attached to an active lease.
+The sweep reports a candidate when an instance is past its provider `expires_at` tag, has no active lease, is missing a lease label, or points at an active lease whose current cloud ID differs. It skips `keep=true` instances and applies the grace window before reporting missing or mismatched lease state. Provider tags are discovery metadata, not deletion authority. Set `CRABBOX_AWS_ORPHAN_SWEEP_DELETE=1` to terminate candidates only when an exact retained coordinator lease binds the same instance and region; tag-only and legacy candidates remain report-only. With `CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE=1` also set, the same rule permits release of a stale pending EC2 Mac Dedicated Host only when a retained coordinator lease binds that exact host.
 
 Trusted admins can inspect or trigger the sweep:
 
