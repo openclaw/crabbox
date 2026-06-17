@@ -95,7 +95,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (target L
 		}
 		claimErr := b.persistRecoveryClaim(leaseID, slug, created.ID, cfg, req.Repo.Root, labels, req.Reclaim)
 		cleanupCtx := context.WithoutCancel(ctx)
-		if cleanupErr := client.DeleteInstance(cleanupCtx, created.ID); cleanupErr != nil && !isNebiusNotFound(cleanupErr) {
+		if cleanupErr := client.DeleteInstance(cleanupCtx, created.ID); cleanupErr != nil && !isNebiusInstanceNotFound(cleanupErr, created.ID) {
 			err = fmt.Errorf("%v; nebius rollback failed: %w", err, errors.Join(claimErr, cleanupErr))
 			return
 		}
@@ -290,7 +290,7 @@ func (b *backend) deleteServer(ctx context.Context, _ Config, server Server) err
 			if liveServer.Labels["lease"] != server.Labels["lease"] || liveServer.Labels["slug"] != server.Labels["slug"] {
 				return core.Exit(3, "nebius live ownership changed for instance %s; refusing release", server.DisplayID())
 			}
-		} else if !isNebiusNotFound(err) {
+		} else if !isNebiusInstanceNotFound(err, server.CloudID) {
 			return err
 		} else {
 			confirmedAbsent = true
@@ -298,7 +298,7 @@ func (b *backend) deleteServer(ctx context.Context, _ Config, server Server) err
 	}
 	if !confirmedAbsent {
 		if err := client.DeleteInstance(ctx, server.CloudID); err != nil {
-			if isNebiusNotFound(err) {
+			if isNebiusInstanceNotFound(err, server.CloudID) {
 				confirmedAbsent = true
 			} else if isIndeterminateNebiusError(err) {
 				return err
@@ -357,12 +357,20 @@ func isIndeterminateNebiusError(err error) bool {
 	return strings.Contains(text, "timeout") || strings.Contains(text, "connection reset") || strings.Contains(text, "context deadline") || strings.Contains(text, "lost")
 }
 
-func isNebiusNotFound(err error) bool {
+func isNebiusInstanceNotFound(err error, id string) bool {
 	if err == nil {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "not found") || strings.Contains(text, "404")
+	hasNotFound := strings.Contains(text, "not found") || strings.Contains(text, "404")
+	if !hasNotFound {
+		return false
+	}
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id != "" && strings.Contains(text, id) {
+		return true
+	}
+	return strings.Contains(text, "instance not found")
 }
 
 func nebiusServerType(cfg Config) string {
@@ -488,14 +496,18 @@ func (b *backend) checkImage(ctx context.Context, client cliRunner) DoctorCheck 
 	if err != nil {
 		return doctorCheck("image", "error", err.Error(), map[string]string{"imageFamily": imageFamily})
 	}
-	if !isJSON(result.Stdout) {
-		return doctorCheck("image", "error", "image list did not return JSON", map[string]string{"imageFamily": imageFamily})
+	ok, err := containsIDOrName(result.Stdout, imageFamily)
+	if err != nil {
+		return doctorCheck("image", "error", "image list did not return expected JSON", map[string]string{"imageFamily": imageFamily})
+	}
+	if !ok {
+		return doctorCheck("image", "error", "configured image family not found", map[string]string{"imageFamily": imageFamily})
 	}
 	return doctorCheck("image", "ok", "image family readable", map[string]string{"imageFamily": imageFamily})
 }
 
 func (b *backend) checkJSON(ctx context.Context, client cliRunner) DoctorCheck {
-	result, err := client.run(ctx, "config", "get", "parent-id", "--format", "json")
+	result, err := client.run(ctx, "config", "profile", "list", "--format", "json")
 	if err != nil {
 		return doctorCheck("json", "error", err.Error(), nil)
 	}

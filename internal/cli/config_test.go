@@ -1588,11 +1588,15 @@ func TestNebiusConfigFileEnvAndDefaults(t *testing.T) {
 func TestNebiusUntrustedConfigCannotRedirectCLI(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Nebius.CLI = "/trusted/nebius"
+	cfg.Nebius.Profile = "trusted-profile"
+	cfg.Nebius.ServiceAccountID = "trusted-service-account"
 	file := fileConfig{
 		Nebius: &fileNebiusConfig{
-			CLI:      "/tmp/untrusted-nebius",
-			ParentID: "project-repo",
-			SubnetID: "subnet-repo",
+			CLI:              "/tmp/untrusted-nebius",
+			Profile:          "untrusted-profile",
+			ParentID:         "project-repo",
+			SubnetID:         "subnet-repo",
+			ServiceAccountID: "untrusted-service-account",
 		},
 	}
 	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
@@ -1600,6 +1604,12 @@ func TestNebiusUntrustedConfigCannotRedirectCLI(t *testing.T) {
 	}
 	if cfg.Nebius.CLI != "/trusted/nebius" {
 		t.Fatalf("untrusted CLI override applied: %q", cfg.Nebius.CLI)
+	}
+	if cfg.Nebius.Profile != "trusted-profile" {
+		t.Fatalf("untrusted profile override applied: %q", cfg.Nebius.Profile)
+	}
+	if cfg.Nebius.ServiceAccountID != "trusted-service-account" {
+		t.Fatalf("untrusted service account override applied: %q", cfg.Nebius.ServiceAccountID)
 	}
 	if cfg.Nebius.ParentID != "project-repo" || cfg.Nebius.SubnetID != "subnet-repo" {
 		t.Fatalf("safe untrusted nebius settings not applied: %#v", cfg.Nebius)

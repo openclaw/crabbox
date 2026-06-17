@@ -42,7 +42,7 @@ func (f *fakeNebiusAPI) GetInstance(_ context.Context, id string) (nebiusInstanc
 	if f.waited.ID == id {
 		return f.waited, nil
 	}
-	return nebiusInstance{}, errors.New("not found")
+	return nebiusInstance{}, errors.New("instance " + id + " not found")
 }
 
 func (f *fakeNebiusAPI) CreateInstance(_ context.Context, req nebiusCreateRequest) (nebiusInstance, error) {
@@ -127,13 +127,16 @@ func TestCommandConstructionUsesManagedDiskPublicIPLabelsAndNoSecrets(t *testing
 		if strings.Contains(joined, "osb_") || strings.Contains(joined, "private_key") {
 			return LocalCommandResult{}, errors.New("secret-like value passed on argv")
 		}
-		if !strings.Contains(joined, "--network-interface subnet-id=subnet-123,public-ip-address={}") {
+		if !strings.Contains(joined, "--network-interfaces") || !strings.Contains(joined, `"subnet_id":"subnet-123"`) || !strings.Contains(joined, `"public_ip_address":{}`) {
 			return LocalCommandResult{}, errors.New("missing dynamic public IP network interface: " + joined)
 		}
-		if !strings.Contains(joined, "--boot-disk-image-family ubuntu24.04-driverless") || !strings.Contains(joined, "--boot-disk-type network_ssd") {
+		if !strings.Contains(joined, "--boot-disk-managed-disk-source-image-family-image-family ubuntu24.04-driverless") ||
+			!strings.Contains(joined, "--boot-disk-managed-disk-source-image-family-parent-id project-123") ||
+			!strings.Contains(joined, "--boot-disk-managed-disk-type network_ssd") ||
+			!strings.Contains(joined, "--boot-disk-managed-disk-size-gibibytes 50") {
 			return LocalCommandResult{}, errors.New("missing managed boot disk args: " + joined)
 		}
-		if !strings.Contains(joined, "--label crabbox_provider=nebius") || !strings.Contains(joined, "--label crabbox_scope=") {
+		if !strings.Contains(joined, "--labels ") || !strings.Contains(joined, "crabbox_provider=nebius") || !strings.Contains(joined, "crabbox_scope=") {
 			return LocalCommandResult{}, errors.New("missing ownership labels: " + joined)
 		}
 		return LocalCommandResult{Stdout: `{"metadata":{"id":"vm-1","name":"cbx-demo","labels":{"crabbox":"true"}},"status":{"state":"RUNNING","network_interfaces":[{"public_ip_address":{"address":"203.0.113.10/32"}}]}}`}, nil
@@ -329,7 +332,7 @@ func TestAcquireRollsBackCreatedInstanceWhenOnAcquiredFails(t *testing.T) {
 func TestReleaseCleansLocalClaimWhenInstanceAlreadyAbsent(t *testing.T) {
 	cfg := testConfig()
 	labels := nebiusLeaseLabels(cfg, "cbx_deadbeef1234", "gone", "ready", false, time.Unix(1000, 0))
-	api := &fakeNebiusAPI{getErr: errors.New("not found")}
+	api := &fakeNebiusAPI{getErr: errors.New("instance vm-gone not found")}
 	b := newTestBackend(t, api)
 	server := Server{Provider: providerName, CloudID: "vm-gone", Name: "gone", Labels: labels}
 	server.PublicNet.IPv4.IP = "203.0.113.10"
@@ -344,6 +347,23 @@ func TestReleaseCleansLocalClaimWhenInstanceAlreadyAbsent(t *testing.T) {
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider("gone", providerName); err != nil || ok {
 		t.Fatalf("claim still present ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReleaseDoesNotCleanClaimOnUnrelatedNotFound(t *testing.T) {
+	cfg := testConfig()
+	labels := nebiusLeaseLabels(cfg, "cbx_deadbeef1234", "gone", "ready", false, time.Unix(1000, 0))
+	api := &fakeNebiusAPI{getErr: errors.New("profile production not found")}
+	b := newTestBackend(t, api)
+	server := Server{Provider: providerName, CloudID: "vm-gone", Name: "gone", Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_deadbeef1234", "gone", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: server}}); err == nil {
+		t.Fatal("ReleaseLease cleaned state after unrelated not-found error")
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("gone", providerName); err != nil || !ok {
+		t.Fatalf("claim removed after unrelated not-found ok=%v err=%v", ok, err)
 	}
 }
 
@@ -415,6 +435,15 @@ func TestClassifyNebiusIndeterminateErrors(t *testing.T) {
 	}
 	if isIndeterminateNebiusError(errors.New("validation failed")) {
 		t.Fatal("validation error classified indeterminate")
+	}
+}
+
+func TestClassifyNebiusInstanceNotFoundRequiresInstanceEvidence(t *testing.T) {
+	if !isNebiusInstanceNotFound(errors.New("instance vm-gone not found"), "vm-gone") {
+		t.Fatal("instance-specific not found was not classified")
+	}
+	if isNebiusInstanceNotFound(errors.New("profile production not found"), "vm-gone") {
+		t.Fatal("unrelated not found classified as instance absence")
 	}
 }
 

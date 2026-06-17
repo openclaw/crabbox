@@ -3782,7 +3782,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if trusted && file.Nebius.CLI != "" {
 			cfg.Nebius.CLI = file.Nebius.CLI
 		}
-		if file.Nebius.Profile != "" {
+		if trusted && file.Nebius.Profile != "" {
 			cfg.Nebius.Profile = file.Nebius.Profile
 		}
 		if file.Nebius.ParentID != "" {
@@ -3815,7 +3815,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if len(file.Nebius.SecurityGroupIDs) > 0 {
 			cfg.Nebius.SecurityGroupIDs = file.Nebius.SecurityGroupIDs
 		}
-		if file.Nebius.ServiceAccountID != "" {
+		if trusted && file.Nebius.ServiceAccountID != "" {
 			cfg.Nebius.ServiceAccountID = file.Nebius.ServiceAccountID
 		}
 		if file.Nebius.RecoveryPolicy != "" {

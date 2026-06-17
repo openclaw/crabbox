@@ -143,23 +143,19 @@ func (c *nebiusClient) CreateInstance(ctx context.Context, req nebiusCreateReque
 		"--name", req.Name,
 		"--resources-platform", c.cfg.Platform,
 		"--resources-preset", c.cfg.Preset,
-		"--boot-disk-image-family", c.cfg.ImageFamily,
-		"--boot-disk-type", c.cfg.DiskType,
-		"--boot-disk-size-gib", strconv.Itoa(c.cfg.DiskSizeGiB),
+		"--boot-disk-managed-disk-source-image-family-image-family", c.cfg.ImageFamily,
+		"--boot-disk-managed-disk-source-image-family-parent-id", c.cfg.ParentID,
+		"--boot-disk-managed-disk-type", c.cfg.DiskType,
+		"--boot-disk-managed-disk-size-gibibytes", strconv.Itoa(c.cfg.DiskSizeGiB),
 		"--cloud-init-user-data", path,
-		"--network-interface", renderNetworkInterface(c.cfg),
+		"--network-interfaces", renderNetworkInterfaces(c.cfg),
 		"--recovery-policy", firstNonBlank(c.cfg.RecoveryPolicy, "fail"),
-	}
-	for _, sg := range c.cfg.SecurityGroupIDs {
-		if strings.TrimSpace(sg) != "" {
-			args = append(args, "--network-interface-security-group-id", strings.TrimSpace(sg))
-		}
 	}
 	if strings.TrimSpace(c.cfg.ServiceAccountID) != "" {
 		args = append(args, "--service-account-id", strings.TrimSpace(c.cfg.ServiceAccountID))
 	}
-	for _, label := range renderLabelArgs(req.Labels) {
-		args = append(args, "--label", label)
+	if labels := renderLabels(req.Labels); labels != "" {
+		args = append(args, "--labels", labels)
 	}
 	args = append(args, "--format", "json")
 	result, err := c.cli.run(ctx, args...)
@@ -191,8 +187,8 @@ func (c *nebiusClient) WaitInstance(ctx context.Context, id string) (nebiusInsta
 
 func (c *nebiusClient) UpdateLabels(ctx context.Context, id string, labels map[string]string) error {
 	args := []string{"compute", "instance", "update", id}
-	for _, label := range renderLabelArgs(labels) {
-		args = append(args, "--label", label)
+	if labelsArg := renderLabels(labels); labelsArg != "" {
+		args = append(args, "--labels-add", labelsArg)
 	}
 	args = append(args, "--format", "json")
 	_, err := c.cli.run(ctx, args...)
@@ -207,22 +203,6 @@ func (c *nebiusClient) DeleteInstance(ctx context.Context, id string) error {
 	return err
 }
 
-func stringField(object map[string]any, names ...string) string {
-	for _, name := range names {
-		if value, ok := object[name]; ok {
-			switch typed := value.(type) {
-			case string:
-				if strings.TrimSpace(typed) != "" {
-					return typed
-				}
-			case json.Number:
-				return typed.String()
-			}
-		}
-	}
-	return ""
-}
-
 func containsIDOrName(output, want string) (bool, error) {
 	want = strings.TrimSpace(want)
 	if want == "" {
@@ -234,14 +214,27 @@ func containsIDOrName(output, want string) (bool, error) {
 		if objectErr != nil {
 			return false, err
 		}
-		items = []map[string]any{object}
+		if nested, ok := arrayField(object, "items", "instances"); ok {
+			items = nested
+		} else {
+			items = []map[string]any{object}
+		}
 	}
 	for _, item := range items {
-		if stringField(item, "id", "metadata.id") == want || stringField(item, "name", "family") == want {
+		if hasStringField(item, want, "id", "metadata.id", "name", "metadata.name", "family", "metadata.family", "spec.family") {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func hasStringField(object map[string]any, want string, paths ...string) bool {
+	for _, path := range paths {
+		if stringFromAny(pathValue(object, path)) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func parseNebiusInstances(output string) ([]nebiusInstance, error) {
@@ -340,15 +333,32 @@ func cleanIP(value string) string {
 	return strings.TrimSpace(value)
 }
 
-func renderNetworkInterface(cfg NebiusConfig) string {
-	parts := []string{"subnet-id=" + strings.TrimSpace(cfg.SubnetID)}
-	if !strings.EqualFold(strings.TrimSpace(cfg.PublicIP), "none") {
-		parts = append(parts, "public-ip-address={}")
+func renderNetworkInterfaces(cfg NebiusConfig) string {
+	item := map[string]any{
+		"name":       "eth0",
+		"subnet_id":  strings.TrimSpace(cfg.SubnetID),
+		"ip_address": map[string]any{},
 	}
-	return strings.Join(parts, ",")
+	if !strings.EqualFold(strings.TrimSpace(cfg.PublicIP), "none") {
+		item["public_ip_address"] = map[string]any{}
+	}
+	securityGroups := make([]map[string]string, 0, len(cfg.SecurityGroupIDs))
+	for _, sg := range cfg.SecurityGroupIDs {
+		if sg = strings.TrimSpace(sg); sg != "" {
+			securityGroups = append(securityGroups, map[string]string{"id": sg})
+		}
+	}
+	if len(securityGroups) > 0 {
+		item["security_groups"] = securityGroups
+	}
+	data, err := json.Marshal([]map[string]any{item})
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
 }
 
-func renderLabelArgs(labels map[string]string) []string {
+func renderLabels(labels map[string]string) string {
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
@@ -360,7 +370,7 @@ func renderLabelArgs(labels map[string]string) []string {
 			out = append(out, key+"="+labels[key])
 		}
 	}
-	return out
+	return strings.Join(out, ",")
 }
 
 func normalizeNebiusState(state string) string {

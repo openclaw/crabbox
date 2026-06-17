@@ -134,6 +134,18 @@ func TestParseHelpers(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("containsIDOrName object ok=%v err=%v", ok, err)
 	}
+	ok, err = containsIDOrName(`{"metadata":{"id":"subnet-123","name":"default"}}`, "subnet-123")
+	if err != nil || !ok {
+		t.Fatalf("containsIDOrName metadata.id ok=%v err=%v", ok, err)
+	}
+	ok, err = containsIDOrName(`{"items":[{"metadata":{"name":"cpu-d3"}}]}`, "cpu-d3")
+	if err != nil || !ok {
+		t.Fatalf("containsIDOrName wrapped metadata.name ok=%v err=%v", ok, err)
+	}
+	ok, err = containsIDOrName(`{"items":[{"metadata":{"id":"image-opaque"},"spec":{"family":"ubuntu24.04-driverless"}}]}`, "ubuntu24.04-driverless")
+	if err != nil || !ok {
+		t.Fatalf("containsIDOrName later family ok=%v err=%v", ok, err)
+	}
 	if _, err := containsIDOrName(`not-json`, "x"); err == nil {
 		t.Fatal("malformed JSON accepted")
 	}
@@ -168,8 +180,6 @@ func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
 			return LocalCommandResult{Stdout: `[{"id":"cpu-d3"}]`}, nil
 		case "--profile sandbox compute image list --family ubuntu24.04-driverless --format json":
 			return LocalCommandResult{Stdout: `[{"family":"ubuntu24.04-driverless"}]`}, nil
-		case "--profile sandbox config get parent-id --format json":
-			return LocalCommandResult{Stdout: `{"parent-id":"project-123"}`}, nil
 		default:
 			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}
@@ -188,4 +198,43 @@ func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
 	if len(runner.calls) != 7 {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
+}
+
+func TestDoctorRejectsMissingImageFamily(t *testing.T) {
+	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		joined := strings.Join(req.Args, " ")
+		switch joined {
+		case "--profile sandbox --version":
+			return LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
+		case "--profile sandbox config profile list --format json":
+			return LocalCommandResult{Stdout: `[{"name":"sandbox","active":true}]`}, nil
+		case "--profile sandbox iam project get project-123 --format json":
+			return LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
+		case "--profile sandbox vpc subnet list --parent-id project-123 --format json":
+			return LocalCommandResult{Stdout: `[{"metadata":{"id":"subnet-123"}}]`}, nil
+		case "--profile sandbox compute platform list --format json":
+			return LocalCommandResult{Stdout: `[{"metadata":{"id":"cpu-d3"}}]`}, nil
+		case "--profile sandbox compute image list --family ubuntu24.04-driverless --format json":
+			return LocalCommandResult{Stdout: `[]`}, nil
+		default:
+			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
+		}
+	}}
+	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Exec: runner}).(*backend)
+	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "error" {
+		t.Fatalf("status=%q checks=%#v", result.Status, result.Checks)
+	}
+	for _, check := range result.Checks {
+		if check.Check == "image" {
+			if check.Status != "error" || !strings.Contains(check.Message, "configured image family not found") {
+				t.Fatalf("image check=%#v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing image check: %#v", result.Checks)
 }
