@@ -97,10 +97,13 @@ wrote /home/alice/.config/crabbox/config.yaml broker=https://broker.example.com 
 
 ## Where secrets belong
 
-Store broker tokens, Cloudflare runner tokens, and Access secrets in user
-config or environment variables, never in repo-local `crabbox.yaml` /
-`.crabbox.yaml`. The user config file is written with `0600` permissions, and
-`crabbox doctor` flags it when the permissions are broader than that.
+Prefer user config, environment variables, or a credential manager for broker
+tokens, provider tokens, and Access secrets. Repository config is trusted
+project automation and may intentionally define a complete custom
+endpoint-and-credential pair, but Crabbox refuses to combine a
+repository-defined destination with an inherited credential. The user config
+file is written with `0600` permissions, and `crabbox doctor` flags it when the
+permissions are broader than that.
 
 ## Repo-local config
 

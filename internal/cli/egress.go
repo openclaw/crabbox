@@ -313,6 +313,7 @@ func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinato
 	cfg.Provider = provider
 	if strings.TrimSpace(coordinatorURL) != "" {
 		cfg.Coordinator = strings.TrimRight(strings.TrimSpace(coordinatorURL), "/")
+		markCoordinatorDestinationExplicit(&cfg)
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -750,6 +751,7 @@ func egressCoordinatorNeedsAccess(access AccessConfig) bool {
 func egressStartCoordinatorConfig(cfg Config, coordinatorURL string) (Config, error) {
 	if override := strings.TrimSpace(coordinatorURL); override != "" {
 		cfg.Coordinator = strings.TrimRight(override, "/")
+		markCoordinatorDestinationExplicit(&cfg)
 		cfg.Access = AccessConfig{}
 		return cfg, nil
 	}

@@ -105,6 +105,9 @@ func NewTenkiBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 	if err := validateTenkiOptions(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateNativeCredentialDestination(cfg); err != nil {
+		return nil, err
+	}
 	cfg.Provider = tenkiProvider
 	cfg.TargetOS = targetLinux
 	cfg.SSHUser = "tenki"

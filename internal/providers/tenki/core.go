@@ -81,6 +81,10 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 	return core.UpdateLeaseClaimEndpoint(leaseID, server, target)
 }
 
+func validateNativeCredentialDestination(cfg Config) error {
+	return core.ValidateNativeCredentialDestination(cfg, tenkiProvider)
+}
+
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }

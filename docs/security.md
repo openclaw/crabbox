@@ -99,8 +99,10 @@ the Worker strips caller-supplied `cf-access-authenticated-user-email` and
 
 The local service-token credentials `CRABBOX_ACCESS_CLIENT_ID` and
 `CRABBOX_ACCESS_CLIENT_SECRET` only satisfy the Access edge; they authorize no
-Crabbox action by themselves. Store them in user config or env, never in repo
-config.
+Crabbox action by themselves. Prefer user config or env. If a trusted
+repository intentionally defines both a custom broker URL and matching Access
+credentials, Crabbox treats them as one source; it will not send inherited
+Access credentials to a repository-defined broker URL.
 
 ### Trusted reverse proxy identity
 

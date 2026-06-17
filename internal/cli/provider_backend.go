@@ -983,6 +983,7 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	after, err := ProviderFor(cfg.Provider)
 	if err != nil || after.Name() == before {
 		if err == nil {
+			markCredentialDestinationFlagSources(cfg, fs)
 			applyCloudflareDynamicWorkersRepositoryCaps(cfg)
 		}
 		return err
@@ -991,11 +992,15 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	if err := after.ApplyFlags(cfg, fs, values[after.Name()]); err != nil {
 		return err
 	}
+	markCredentialDestinationFlagSources(cfg, fs)
 	applyCloudflareDynamicWorkersRepositoryCaps(cfg)
 	return nil
 }
 
 func validateProviderConfig(cfg Config) error {
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		return err
+	}
 	provider, err := ProviderFor(cfg.Provider)
 	if err != nil {
 		return err
@@ -1185,6 +1190,9 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backend, error) {
 	cfg.Provider = provider.Name()
 	applySingleProviderTargetDefault(cfg)
+	if err := validateProviderConfig(*cfg); err != nil {
+		return nil, err
+	}
 	return provider.Configure(*cfg, rt)
 }
 

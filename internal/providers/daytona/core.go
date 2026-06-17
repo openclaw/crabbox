@@ -194,3 +194,7 @@ func summarizeJSON(data []byte) string {
 func baseConfig() Config {
 	return core.BaseConfig()
 }
+
+func validateNativeCredentialDestination(cfg Config) error {
+	return core.ValidateNativeCredentialDestination(cfg, daytonaProvider)
+}

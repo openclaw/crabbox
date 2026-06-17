@@ -49,6 +49,7 @@ type Config struct {
 	CoordToken                    string
 	CoordTokenCommand             []string
 	CoordAdminToken               string
+	credentialProvenance          credentialDestinationProvenance
 	HostID                        string
 	Access                        AccessConfig
 	Location                      string
@@ -1214,6 +1215,7 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	applyCloudflareDynamicWorkersRepositoryCaps(&cfg)
 	if coordinator = strings.TrimSpace(coordinator); coordinator != "" {
 		cfg.Coordinator = coordinator
+		markCoordinatorDestinationExplicit(&cfg)
 	}
 	if provider = strings.TrimSpace(provider); provider != "" {
 		cfg.Provider = provider
@@ -2990,15 +2992,17 @@ type fileCloudflareDynamicWorkersConfig struct {
 	Metadata           map[string]string `yaml:"metadata,omitempty"`
 }
 
-func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig) {
+func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig, source credentialValueSource) {
 	if file == nil {
 		return
 	}
 	if file.APIURL != "" {
 		cfg.Cloudflare.APIURL = file.APIURL
+		cfg.credentialProvenance.cloudflareAPIURL = source
 	}
 	if file.Token != "" {
 		cfg.Cloudflare.Token = file.Token
+		cfg.credentialProvenance.cloudflareToken = source
 	}
 	if file.Workdir != "" {
 		cfg.Cloudflare.Workdir = file.Workdir
@@ -3534,6 +3538,7 @@ func trustedConfigPath(path string) bool {
 }
 
 func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
+	credentialSource := credentialSourceForFile(trusted)
 	if file.Profile != "" {
 		cfg.Profile = file.Profile
 	}
@@ -3589,9 +3594,11 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	}
 	if file.Coordinator != "" {
 		cfg.Coordinator = file.Coordinator
+		cfg.credentialProvenance.coordinator = credentialSource
 	}
 	if file.CoordinatorToken != "" {
 		cfg.CoordToken = file.CoordinatorToken
+		cfg.credentialProvenance.coordToken = credentialSource
 	}
 	if file.HostID != "" {
 		cfg.HostID = file.HostID
@@ -3599,9 +3606,11 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Broker != nil {
 		if file.Broker.URL != "" {
 			cfg.Coordinator = file.Broker.URL
+			cfg.credentialProvenance.coordinator = credentialSource
 		}
 		if file.Broker.Token != "" {
 			cfg.CoordToken = file.Broker.Token
+			cfg.credentialProvenance.coordToken = credentialSource
 		}
 		if file.Broker.Mode != "" {
 			cfg.BrokerMode = BrokerMode(file.Broker.Mode)
@@ -3611,6 +3620,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Broker.AdminToken != "" {
 			cfg.CoordAdminToken = file.Broker.AdminToken
+			cfg.credentialProvenance.coordAdminToken = credentialSource
 		}
 		if file.Broker.Provider != "" {
 			cfg.Provider = file.Broker.Provider
@@ -3619,12 +3629,15 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Broker.Access != nil {
 			if file.Broker.Access.ClientID != "" {
 				cfg.Access.ClientID = file.Broker.Access.ClientID
+				cfg.credentialProvenance.accessClientID = credentialSource
 			}
 			if file.Broker.Access.ClientSecret != "" {
 				cfg.Access.ClientSecret = file.Broker.Access.ClientSecret
+				cfg.credentialProvenance.accessClientSecret = credentialSource
 			}
 			if file.Broker.Access.Token != "" {
 				cfg.Access.Token = file.Broker.Access.Token
+				cfg.credentialProvenance.accessToken = credentialSource
 			}
 		}
 	}
@@ -3877,12 +3890,15 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Proxmox != nil {
 		if file.Proxmox.APIURL != "" {
 			cfg.Proxmox.APIURL = file.Proxmox.APIURL
+			cfg.credentialProvenance.proxmoxAPIURL = credentialSource
 		}
 		if file.Proxmox.TokenID != "" {
 			cfg.Proxmox.TokenID = file.Proxmox.TokenID
+			cfg.credentialProvenance.proxmoxTokenID = credentialSource
 		}
 		if file.Proxmox.TokenSecret != "" {
 			cfg.Proxmox.TokenSecret = file.Proxmox.TokenSecret
+			cfg.credentialProvenance.proxmoxTokenSecret = credentialSource
 		}
 		if file.Proxmox.Node != "" {
 			cfg.Proxmox.Node = file.Proxmox.Node
@@ -3910,6 +3926,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Proxmox.InsecureTLS != nil {
 			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
+			cfg.credentialProvenance.proxmoxInsecureTLS = credentialSource
 		}
 	}
 	if file.XCPNg != nil {
@@ -4334,15 +4351,18 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Morph != nil {
 		if file.Morph.APIKey != "" {
 			cfg.Morph.APIKey = file.Morph.APIKey
+			cfg.credentialProvenance.morphAPIKey = credentialSource
 		}
 		if file.Morph.APIURL != "" {
 			cfg.Morph.APIURL = file.Morph.APIURL
+			cfg.credentialProvenance.morphAPIURL = credentialSource
 		}
 		if file.Morph.Snapshot != "" {
 			cfg.Morph.Snapshot = file.Morph.Snapshot
 		}
 		if file.Morph.SSHGatewayHost != "" {
 			cfg.Morph.SSHGatewayHost = file.Morph.SSHGatewayHost
+			cfg.credentialProvenance.morphSSHGatewayHost = credentialSource
 		}
 		if file.Morph.WorkRoot != "" {
 			cfg.Morph.WorkRoot = file.Morph.WorkRoot
@@ -4358,6 +4378,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Daytona != nil {
 		if file.Daytona.APIURL != "" {
 			cfg.Daytona.APIURL = file.Daytona.APIURL
+			cfg.credentialProvenance.daytonaAPIURL = credentialSource
 		}
 		if file.Daytona.Snapshot != "" {
 			cfg.Daytona.Snapshot = file.Daytona.Snapshot
@@ -4373,6 +4394,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Daytona.SSHGatewayHost != "" {
 			cfg.Daytona.SSHGatewayHost = file.Daytona.SSHGatewayHost
+			cfg.credentialProvenance.daytonaSSHGateway = credentialSource
 		}
 		if file.Daytona.SSHAccessMinutes > 0 {
 			cfg.Daytona.SSHAccessMinutes = file.Daytona.SSHAccessMinutes
@@ -4381,9 +4403,11 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.E2B != nil {
 		if file.E2B.APIURL != "" {
 			cfg.E2B.APIURL = file.E2B.APIURL
+			cfg.credentialProvenance.e2bAPIURL = credentialSource
 		}
 		if file.E2B.Domain != "" {
 			cfg.E2B.Domain = file.E2B.Domain
+			cfg.credentialProvenance.e2bDomain = credentialSource
 		}
 		if file.E2B.Template != "" {
 			cfg.E2B.Template = file.E2B.Template
@@ -4427,6 +4451,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Railway != nil {
 		if file.Railway.APIURL != "" {
 			cfg.Railway.APIURL = file.Railway.APIURL
+			cfg.credentialProvenance.railwayAPIURL = credentialSource
 		}
 		if file.Railway.ProjectID != "" {
 			cfg.Railway.ProjectID = file.Railway.ProjectID
@@ -4438,6 +4463,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Runpod != nil {
 		if file.Runpod.APIURL != "" {
 			cfg.Runpod.APIURL = file.Runpod.APIURL
+			cfg.credentialProvenance.runpodAPIURL = credentialSource
 		}
 		if file.Runpod.CloudType != "" {
 			cfg.Runpod.CloudType = file.Runpod.CloudType
@@ -4553,6 +4579,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Islo != nil {
 		if file.Islo.BaseURL != "" {
 			cfg.Islo.BaseURL = file.Islo.BaseURL
+			cfg.credentialProvenance.isloBaseURL = credentialSource
 		}
 		if file.Islo.Image != "" {
 			cfg.Islo.Image = file.Islo.Image
@@ -4597,9 +4624,11 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Tenki.Endpoint != "" {
 			cfg.Tenki.Endpoint = file.Tenki.Endpoint
+			cfg.credentialProvenance.tenkiEndpoint = credentialSource
 		}
 		if file.Tenki.Gateway != "" {
 			cfg.Tenki.Gateway = file.Tenki.Gateway
+			cfg.credentialProvenance.tenkiGateway = credentialSource
 		}
 		if file.Tenki.Workspace != "" {
 			cfg.Tenki.Workspace = file.Tenki.Workspace
@@ -4629,6 +4658,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Tensorlake != nil {
 		if file.Tensorlake.APIURL != "" {
 			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
+			cfg.credentialProvenance.tensorlakeAPIURL = credentialSource
 		}
 		if file.Tensorlake.CLIPath != "" {
 			cfg.Tensorlake.CLIPath = file.Tensorlake.CLIPath
@@ -4923,6 +4953,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.UpstashBox != nil {
 		if file.UpstashBox.BaseURL != "" {
 			cfg.UpstashBox.BaseURL = file.UpstashBox.BaseURL
+			cfg.credentialProvenance.upstashBoxBaseURL = credentialSource
 		}
 		if file.UpstashBox.Runtime != "" {
 			cfg.UpstashBox.Runtime = file.UpstashBox.Runtime
@@ -4940,6 +4971,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Smolvm != nil {
 		if file.Smolvm.BaseURL != "" {
 			cfg.Smolvm.BaseURL = file.Smolvm.BaseURL
+			cfg.credentialProvenance.smolvmBaseURL = credentialSource
 		}
 		if file.Smolvm.Image != "" {
 			cfg.Smolvm.Image = file.Smolvm.Image
@@ -4963,6 +4995,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
 			cfg.AsciiBox.BaseURL = file.AsciiBox.BaseURL
+			cfg.credentialProvenance.asciiBoxBaseURL = credentialSource
 		}
 		if file.AsciiBox.CLIPath != "" {
 			cfg.AsciiBox.CLIPath = file.AsciiBox.CLIPath
@@ -4971,14 +5004,16 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.AsciiBox.Workdir = file.AsciiBox.Workdir
 		}
 	}
-	applyCloudflareFileConfig(cfg, file.Cloudflare)
+	applyCloudflareFileConfig(cfg, file.Cloudflare, credentialSource)
 	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
 	if file.Semaphore != nil {
 		if file.Semaphore.Host != "" {
 			cfg.Semaphore.Host = file.Semaphore.Host
+			cfg.credentialProvenance.semaphoreHost = credentialSource
 		}
 		if file.Semaphore.Token != "" {
 			cfg.Semaphore.Token = file.Semaphore.Token
+			cfg.credentialProvenance.semaphoreToken = credentialSource
 		}
 		if file.Semaphore.Project != "" {
 			cfg.Semaphore.Project = file.Semaphore.Project
@@ -4996,6 +5031,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Sprites != nil {
 		if file.Sprites.APIURL != "" {
 			cfg.Sprites.APIURL = file.Sprites.APIURL
+			cfg.credentialProvenance.spritesAPIURL = credentialSource
 		}
 		if file.Sprites.WorkRoot != "" {
 			cfg.Sprites.WorkRoot = file.Sprites.WorkRoot
@@ -5668,12 +5704,18 @@ func applyEnv(cfg *Config) error {
 		cfg.ServerTypeExplicit = true
 	}
 	cfg.ServerType = getenv("CRABBOX_SERVER_TYPE", cfg.ServerType)
-	cfg.Coordinator = getenv("CRABBOX_COORDINATOR", cfg.Coordinator)
+	if value := os.Getenv("CRABBOX_COORDINATOR"); value != "" {
+		cfg.Coordinator = value
+		cfg.credentialProvenance.coordinator = credentialSourceEnvironment
+	}
 	cfg.BrokerMode = BrokerMode(getenv("CRABBOX_COORDINATOR_MODE", string(cfg.BrokerMode)))
 	if value, ok := getenvBool("CRABBOX_COORDINATOR_AUTO_WEBVNC"); ok {
 		cfg.BrokerAutoWebVNC = value
 	}
-	cfg.CoordToken = getenv("CRABBOX_COORDINATOR_TOKEN", cfg.CoordToken)
+	if value := os.Getenv("CRABBOX_COORDINATOR_TOKEN"); value != "" {
+		cfg.CoordToken = value
+		cfg.credentialProvenance.coordToken = credentialSourceEnvironment
+	}
 	if raw := strings.TrimSpace(os.Getenv("CRABBOX_COORDINATOR_TOKEN_COMMAND")); raw != "" {
 		var command []string
 		if err := json.Unmarshal([]byte(raw), &command); err != nil {
@@ -5688,12 +5730,25 @@ func applyEnv(cfg *Config) error {
 			}
 		}
 		cfg.CoordTokenCommand = append([]string(nil), command...)
+		cfg.credentialProvenance.coordTokenCommand = credentialSourceEnvironment
 	}
-	cfg.CoordAdminToken = getenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", getenv("CRABBOX_ADMIN_TOKEN", cfg.CoordAdminToken))
+	if value, ok := firstNonEmptyEnv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "CRABBOX_ADMIN_TOKEN"); ok {
+		cfg.CoordAdminToken = value
+		cfg.credentialProvenance.coordAdminToken = credentialSourceEnvironment
+	}
 	cfg.HostID = getenv("CRABBOX_HOST_ID", cfg.HostID)
-	cfg.Access.ClientID = getenv("CRABBOX_ACCESS_CLIENT_ID", getenv("CF_ACCESS_CLIENT_ID", cfg.Access.ClientID))
-	cfg.Access.ClientSecret = getenv("CRABBOX_ACCESS_CLIENT_SECRET", getenv("CF_ACCESS_CLIENT_SECRET", cfg.Access.ClientSecret))
-	cfg.Access.Token = getenv("CRABBOX_ACCESS_TOKEN", getenv("CF_ACCESS_TOKEN", cfg.Access.Token))
+	if value, ok := firstNonEmptyEnv("CRABBOX_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_ID"); ok {
+		cfg.Access.ClientID = value
+		cfg.credentialProvenance.accessClientID = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ACCESS_CLIENT_SECRET", "CF_ACCESS_CLIENT_SECRET"); ok {
+		cfg.Access.ClientSecret = value
+		cfg.credentialProvenance.accessClientSecret = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ACCESS_TOKEN", "CF_ACCESS_TOKEN"); ok {
+		cfg.Access.Token = value
+		cfg.credentialProvenance.accessToken = credentialSourceEnvironment
+	}
 	if location := os.Getenv("CRABBOX_HETZNER_LOCATION"); location != "" {
 		cfg.Location = location
 		cfg.locationExplicit = true
@@ -5836,9 +5891,18 @@ func applyEnv(cfg *Config) error {
 		cfg.ovhImageExplicit = true
 	}
 	cfg.OVH.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.OVH.Flavor)
-	cfg.Proxmox.APIURL = getenv("CRABBOX_PROXMOX_API_URL", cfg.Proxmox.APIURL)
-	cfg.Proxmox.TokenID = getenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)
-	cfg.Proxmox.TokenSecret = getenv("CRABBOX_PROXMOX_TOKEN_SECRET", cfg.Proxmox.TokenSecret)
+	if value := os.Getenv("CRABBOX_PROXMOX_API_URL"); value != "" {
+		cfg.Proxmox.APIURL = value
+		cfg.credentialProvenance.proxmoxAPIURL = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_PROXMOX_TOKEN_ID"); value != "" {
+		cfg.Proxmox.TokenID = value
+		cfg.credentialProvenance.proxmoxTokenID = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_PROXMOX_TOKEN_SECRET"); value != "" {
+		cfg.Proxmox.TokenSecret = value
+		cfg.credentialProvenance.proxmoxTokenSecret = credentialSourceEnvironment
+	}
 	cfg.Proxmox.Node = getenv("CRABBOX_PROXMOX_NODE", cfg.Proxmox.Node)
 	cfg.Proxmox.TemplateID = getenvInt("CRABBOX_PROXMOX_TEMPLATE_ID", cfg.Proxmox.TemplateID)
 	cfg.Proxmox.Storage = getenv("CRABBOX_PROXMOX_STORAGE", cfg.Proxmox.Storage)
@@ -5851,6 +5915,7 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := getenvBool("CRABBOX_PROXMOX_INSECURE_TLS"); ok {
 		cfg.Proxmox.InsecureTLS = value
+		cfg.credentialProvenance.proxmoxInsecureTLS = credentialSourceEnvironment
 	}
 	cfg.XCPNg.APIURL = getenv("CRABBOX_XCP_NG_API_URL", cfg.XCPNg.APIURL)
 	cfg.XCPNg.Username = getenv("CRABBOX_XCP_NG_USERNAME", cfg.XCPNg.Username)
@@ -6035,10 +6100,19 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_NAMESPACE_INSTANCE_BARE"); ok {
 		cfg.NamespaceInstance.Bare = value
 	}
-	cfg.Morph.APIKey = getenv("CRABBOX_MORPH_API_KEY", getenv("MORPH_API_KEY", cfg.Morph.APIKey))
-	cfg.Morph.APIURL = getenv("CRABBOX_MORPH_API_URL", cfg.Morph.APIURL)
+	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_API_KEY", "MORPH_API_KEY"); ok {
+		cfg.Morph.APIKey = value
+		cfg.credentialProvenance.morphAPIKey = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_MORPH_API_URL"); value != "" {
+		cfg.Morph.APIURL = value
+		cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
+	}
 	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
-	cfg.Morph.SSHGatewayHost = getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST", cfg.Morph.SSHGatewayHost)
+	if value := os.Getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST"); value != "" {
+		cfg.Morph.SSHGatewayHost = value
+		cfg.credentialProvenance.morphSSHGatewayHost = credentialSourceEnvironment
+	}
 	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
 	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
 		cfg.Morph.DeleteOnRelease = value
@@ -6047,19 +6121,40 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
 		cfg.Morph.WakeOnSSH = value
 	}
-	cfg.Daytona.APIKey = getenv("CRABBOX_DAYTONA_API_KEY", getenv("DAYTONA_API_KEY", cfg.Daytona.APIKey))
-	cfg.Daytona.JWTToken = getenv("CRABBOX_DAYTONA_JWT_TOKEN", getenv("DAYTONA_JWT_TOKEN", cfg.Daytona.JWTToken))
+	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_KEY", "DAYTONA_API_KEY"); ok {
+		cfg.Daytona.APIKey = value
+		cfg.credentialProvenance.daytonaAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_JWT_TOKEN", "DAYTONA_JWT_TOKEN"); ok {
+		cfg.Daytona.JWTToken = value
+		cfg.credentialProvenance.daytonaJWTToken = credentialSourceEnvironment
+	}
 	cfg.Daytona.OrganizationID = getenv("CRABBOX_DAYTONA_ORGANIZATION_ID", getenv("DAYTONA_ORGANIZATION_ID", cfg.Daytona.OrganizationID))
-	cfg.Daytona.APIURL = getenv("CRABBOX_DAYTONA_API_URL", getenv("DAYTONA_API_URL", cfg.Daytona.APIURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_URL", "DAYTONA_API_URL"); ok {
+		cfg.Daytona.APIURL = value
+		cfg.credentialProvenance.daytonaAPIURL = credentialSourceEnvironment
+	}
 	cfg.Daytona.Snapshot = getenv("CRABBOX_DAYTONA_SNAPSHOT", getenv("DAYTONA_SNAPSHOT", cfg.Daytona.Snapshot))
 	cfg.Daytona.Target = getenv("CRABBOX_DAYTONA_TARGET", getenv("DAYTONA_TARGET", cfg.Daytona.Target))
 	cfg.Daytona.User = getenv("CRABBOX_DAYTONA_USER", cfg.Daytona.User)
 	cfg.Daytona.WorkRoot = getenv("CRABBOX_DAYTONA_WORK_ROOT", cfg.Daytona.WorkRoot)
-	cfg.Daytona.SSHGatewayHost = getenv("CRABBOX_DAYTONA_SSH_GATEWAY_HOST", cfg.Daytona.SSHGatewayHost)
+	if value := os.Getenv("CRABBOX_DAYTONA_SSH_GATEWAY_HOST"); value != "" {
+		cfg.Daytona.SSHGatewayHost = value
+		cfg.credentialProvenance.daytonaSSHGateway = credentialSourceEnvironment
+	}
 	cfg.Daytona.SSHAccessMinutes = getenvInt("CRABBOX_DAYTONA_SSH_ACCESS_MINUTES", cfg.Daytona.SSHAccessMinutes)
-	cfg.E2B.APIKey = getenv("CRABBOX_E2B_API_KEY", getenv("E2B_API_KEY", cfg.E2B.APIKey))
-	cfg.E2B.APIURL = getenv("CRABBOX_E2B_API_URL", getenv("E2B_API_URL", cfg.E2B.APIURL))
-	cfg.E2B.Domain = getenv("CRABBOX_E2B_DOMAIN", getenv("E2B_DOMAIN", cfg.E2B.Domain))
+	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_KEY", "E2B_API_KEY"); ok {
+		cfg.E2B.APIKey = value
+		cfg.credentialProvenance.e2bAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_URL", "E2B_API_URL"); ok {
+		cfg.E2B.APIURL = value
+		cfg.credentialProvenance.e2bAPIURL = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_DOMAIN", "E2B_DOMAIN"); ok {
+		cfg.E2B.Domain = value
+		cfg.credentialProvenance.e2bDomain = credentialSourceEnvironment
+	}
 	cfg.E2B.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.E2B.Template)
 	cfg.E2B.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.E2B.Workdir)
 	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
@@ -6074,12 +6169,24 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
 		cfg.ExeDev.NoEmail = value
 	}
-	cfg.Railway.APIToken = getenv("CRABBOX_RAILWAY_API_TOKEN", getenv("RAILWAY_API_TOKEN", cfg.Railway.APIToken))
-	cfg.Railway.APIURL = getenv("CRABBOX_RAILWAY_API_URL", getenv("RAILWAY_API_URL", cfg.Railway.APIURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_TOKEN", "RAILWAY_API_TOKEN"); ok {
+		cfg.Railway.APIToken = value
+		cfg.credentialProvenance.railwayAPIToken = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_URL", "RAILWAY_API_URL"); ok {
+		cfg.Railway.APIURL = value
+		cfg.credentialProvenance.railwayAPIURL = credentialSourceEnvironment
+	}
 	cfg.Railway.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.Railway.ProjectID))
 	cfg.Railway.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.Railway.EnvironmentID))
-	cfg.Runpod.APIKey = getenv("CRABBOX_RUNPOD_API_KEY", getenv("RUNPOD_API_KEY", cfg.Runpod.APIKey))
-	cfg.Runpod.APIURL = getenv("CRABBOX_RUNPOD_API_URL", getenv("RUNPOD_API_URL", cfg.Runpod.APIURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_KEY", "RUNPOD_API_KEY"); ok {
+		cfg.Runpod.APIKey = value
+		cfg.credentialProvenance.runpodAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_URL", "RUNPOD_API_URL"); ok {
+		cfg.Runpod.APIURL = value
+		cfg.credentialProvenance.runpodAPIURL = credentialSourceEnvironment
+	}
 	cfg.Runpod.CloudType = getenv("CRABBOX_RUNPOD_CLOUD_TYPE", getenv("RUNPOD_CLOUD_TYPE", cfg.Runpod.CloudType))
 	cfg.Runpod.InstanceID = getenv("CRABBOX_RUNPOD_INSTANCE_ID", getenv("RUNPOD_INSTANCE_ID", cfg.Runpod.InstanceID))
 	cfg.Runpod.Image = getenv("CRABBOX_RUNPOD_IMAGE", getenv("RUNPOD_IMAGE", cfg.Runpod.Image))
@@ -6129,8 +6236,14 @@ func applyEnv(cfg *Config) error {
 	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)
 	cfg.Wandb.DefaultImage = getenv("CRABBOX_WANDB_DEFAULT_IMAGE", getenv("WANDB_DEFAULT_IMAGE", cfg.Wandb.DefaultImage))
 	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
-	cfg.Islo.APIKey = getenv("CRABBOX_ISLO_API_KEY", getenv("ISLO_API_KEY", cfg.Islo.APIKey))
-	cfg.Islo.BaseURL = getenv("CRABBOX_ISLO_BASE_URL", getenv("ISLO_BASE_URL", cfg.Islo.BaseURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_ISLO_API_KEY", "ISLO_API_KEY"); ok {
+		cfg.Islo.APIKey = value
+		cfg.credentialProvenance.isloAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ISLO_BASE_URL", "ISLO_BASE_URL"); ok {
+		cfg.Islo.BaseURL = value
+		cfg.credentialProvenance.isloBaseURL = credentialSourceEnvironment
+	}
 	if image := os.Getenv("CRABBOX_ISLO_IMAGE"); image != "" {
 		cfg.Islo.Image = image
 		cfg.isloImageExplicit = true
@@ -6147,8 +6260,14 @@ func applyEnv(cfg *Config) error {
 	cfg.Freestyle.VCPUs = getenvInt("CRABBOX_FREESTYLE_VCPUS", cfg.Freestyle.VCPUs)
 	cfg.Freestyle.MemoryGB = getenvInt("CRABBOX_FREESTYLE_MEMORY_GB", cfg.Freestyle.MemoryGB)
 	cfg.Tenki.CLIPath = getenv("CRABBOX_TENKI_CLI", getenv("TENKI_CLI", cfg.Tenki.CLIPath))
-	cfg.Tenki.Endpoint = getenv("CRABBOX_TENKI_ENDPOINT", getenv("TENKI_ENDPOINT", cfg.Tenki.Endpoint))
-	cfg.Tenki.Gateway = getenv("CRABBOX_TENKI_GATEWAY", getenv("TENKI_GATEWAY", cfg.Tenki.Gateway))
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENKI_ENDPOINT", "TENKI_ENDPOINT"); ok {
+		cfg.Tenki.Endpoint = value
+		cfg.credentialProvenance.tenkiEndpoint = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENKI_GATEWAY", "TENKI_GATEWAY"); ok {
+		cfg.Tenki.Gateway = value
+		cfg.credentialProvenance.tenkiGateway = credentialSourceEnvironment
+	}
 	cfg.Tenki.Workspace = getenv("CRABBOX_TENKI_WORKSPACE", cfg.Tenki.Workspace)
 	cfg.Tenki.Project = getenv("CRABBOX_TENKI_PROJECT", cfg.Tenki.Project)
 	cfg.Tenki.Image = getenv("CRABBOX_TENKI_IMAGE", cfg.Tenki.Image)
@@ -6157,8 +6276,14 @@ func applyEnv(cfg *Config) error {
 	cfg.Tenki.CPUs = getenvInt("CRABBOX_TENKI_CPUS", cfg.Tenki.CPUs)
 	cfg.Tenki.MemoryMB = getenvInt("CRABBOX_TENKI_MEMORY_MB", cfg.Tenki.MemoryMB)
 	cfg.Tenki.DiskGB = getenvInt("CRABBOX_TENKI_DISK_GB", cfg.Tenki.DiskGB)
-	cfg.Tensorlake.APIKey = getenv("CRABBOX_TENSORLAKE_API_KEY", getenv("TENSORLAKE_API_KEY", cfg.Tensorlake.APIKey))
-	cfg.Tensorlake.APIURL = getenv("CRABBOX_TENSORLAKE_API_URL", getenv("TENSORLAKE_API_URL", cfg.Tensorlake.APIURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_KEY", "TENSORLAKE_API_KEY"); ok {
+		cfg.Tensorlake.APIKey = value
+		cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_URL", "TENSORLAKE_API_URL"); ok {
+		cfg.Tensorlake.APIURL = value
+		cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceEnvironment
+	}
 	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)
 	cfg.Tensorlake.Image = getenv("CRABBOX_TENSORLAKE_IMAGE", cfg.Tensorlake.Image)
 	cfg.Tensorlake.Snapshot = getenv("CRABBOX_TENSORLAKE_SNAPSHOT", cfg.Tensorlake.Snapshot)
@@ -6314,16 +6439,28 @@ func applyEnv(cfg *Config) error {
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
 	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
 	cfg.Modal.Python = getenv("CRABBOX_MODAL_PYTHON", cfg.Modal.Python)
-	cfg.UpstashBox.APIKey = getenv("CRABBOX_UPSTASH_BOX_API_KEY", getenv("UPSTASH_BOX_API_KEY", cfg.UpstashBox.APIKey))
-	cfg.UpstashBox.BaseURL = getenv("CRABBOX_UPSTASH_BOX_BASE_URL", getenv("UPSTASH_BOX_BASE_URL", cfg.UpstashBox.BaseURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_API_KEY", "UPSTASH_BOX_API_KEY"); ok {
+		cfg.UpstashBox.APIKey = value
+		cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_BASE_URL", "UPSTASH_BOX_BASE_URL"); ok {
+		cfg.UpstashBox.BaseURL = value
+		cfg.credentialProvenance.upstashBoxBaseURL = credentialSourceEnvironment
+	}
 	cfg.UpstashBox.Runtime = getenv("CRABBOX_UPSTASH_BOX_RUNTIME", cfg.UpstashBox.Runtime)
 	cfg.UpstashBox.Size = getenv("CRABBOX_UPSTASH_BOX_SIZE", cfg.UpstashBox.Size)
 	cfg.UpstashBox.Workdir = getenv("CRABBOX_UPSTASH_BOX_WORKDIR", cfg.UpstashBox.Workdir)
 	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
 		cfg.UpstashBox.KeepAlive = value
 	}
-	cfg.Smolvm.APIKey = getenv("CRABBOX_SMOLVM_API_KEY", getenv("SMOLMACHINES_API_KEY", getenv("SMK_API_KEY", cfg.Smolvm.APIKey)))
-	cfg.Smolvm.BaseURL = getenv("CRABBOX_SMOLVM_BASE_URL", cfg.Smolvm.BaseURL)
+	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
+		cfg.Smolvm.APIKey = value
+		cfg.credentialProvenance.smolvmAPIKey = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_SMOLVM_BASE_URL"); value != "" {
+		cfg.Smolvm.BaseURL = value
+		cfg.credentialProvenance.smolvmBaseURL = credentialSourceEnvironment
+	}
 	cfg.Smolvm.Image = getenv("CRABBOX_SMOLVM_IMAGE", cfg.Smolvm.Image)
 	cfg.Smolvm.Workdir = getenv("CRABBOX_SMOLVM_WORKDIR", cfg.Smolvm.Workdir)
 	cfg.Smolvm.CPUs = getenvInt("CRABBOX_SMOLVM_CPUS", cfg.Smolvm.CPUs)
@@ -6332,12 +6469,24 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
 		cfg.Smolvm.Keep = value
 	}
-	cfg.AsciiBox.APIKey = getenv("CRABBOX_ASCII_BOX_API_KEY", getenv("ASCII_BOX_API_KEY", cfg.AsciiBox.APIKey))
-	cfg.AsciiBox.BaseURL = getenv("CRABBOX_ASCII_BOX_BASE_URL", getenv("ASCII_BOX_BASE_URL", cfg.AsciiBox.BaseURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_ASCII_BOX_API_KEY", "ASCII_BOX_API_KEY"); ok {
+		cfg.AsciiBox.APIKey = value
+		cfg.credentialProvenance.asciiBoxAPIKey = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ASCII_BOX_BASE_URL", "ASCII_BOX_BASE_URL"); ok {
+		cfg.AsciiBox.BaseURL = value
+		cfg.credentialProvenance.asciiBoxBaseURL = credentialSourceEnvironment
+	}
 	cfg.AsciiBox.CLIPath = getenv("CRABBOX_ASCII_BOX_CLI", getenv("BOX_CLI", cfg.AsciiBox.CLIPath))
 	cfg.AsciiBox.Workdir = getenv("CRABBOX_ASCII_BOX_WORKDIR", cfg.AsciiBox.Workdir)
-	cfg.Cloudflare.APIURL = getenv("CRABBOX_CLOUDFLARE_RUNNER_URL", cfg.Cloudflare.APIURL)
-	cfg.Cloudflare.Token = getenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", cfg.Cloudflare.Token)
+	if value := os.Getenv("CRABBOX_CLOUDFLARE_RUNNER_URL"); value != "" {
+		cfg.Cloudflare.APIURL = value
+		cfg.credentialProvenance.cloudflareAPIURL = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN"); value != "" {
+		cfg.Cloudflare.Token = value
+		cfg.credentialProvenance.cloudflareToken = credentialSourceEnvironment
+	}
 	cfg.Cloudflare.Workdir = getenv("CRABBOX_CLOUDFLARE_WORKDIR", cfg.Cloudflare.Workdir)
 	cfg.CloudflareDynamicWorkers.LoaderURL = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL", cfg.CloudflareDynamicWorkers.LoaderURL))
 	cfg.CloudflareDynamicWorkers.Token = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN", cfg.CloudflareDynamicWorkers.Token)
@@ -6350,14 +6499,26 @@ func applyEnv(cfg *Config) error {
 	cfg.CloudflareDynamicWorkers.CPUMs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", cfg.CloudflareDynamicWorkers.CPUMs)
 	cfg.CloudflareDynamicWorkers.Subrequests = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", cfg.CloudflareDynamicWorkers.Subrequests)
 	cfg.CloudflareDynamicWorkers.TimeoutSecs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", cfg.CloudflareDynamicWorkers.TimeoutSecs)
-	cfg.Semaphore.Host = getenv("CRABBOX_SEMAPHORE_HOST", getenv("SEMAPHORE_HOST", cfg.Semaphore.Host))
-	cfg.Semaphore.Token = getenv("CRABBOX_SEMAPHORE_TOKEN", getenv("SEMAPHORE_API_TOKEN", cfg.Semaphore.Token))
+	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_HOST", "SEMAPHORE_HOST"); ok {
+		cfg.Semaphore.Host = value
+		cfg.credentialProvenance.semaphoreHost = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_TOKEN", "SEMAPHORE_API_TOKEN"); ok {
+		cfg.Semaphore.Token = value
+		cfg.credentialProvenance.semaphoreToken = credentialSourceEnvironment
+	}
 	cfg.Semaphore.Project = getenv("CRABBOX_SEMAPHORE_PROJECT", getenv("SEMAPHORE_PROJECT", cfg.Semaphore.Project))
 	cfg.Semaphore.Machine = getenv("CRABBOX_SEMAPHORE_MACHINE", cfg.Semaphore.Machine)
 	cfg.Semaphore.OSImage = getenv("CRABBOX_SEMAPHORE_OS_IMAGE", cfg.Semaphore.OSImage)
 	cfg.Semaphore.IdleTimeout = getenv("CRABBOX_SEMAPHORE_IDLE_TIMEOUT", cfg.Semaphore.IdleTimeout)
-	cfg.Sprites.Token = getenv("CRABBOX_SPRITES_TOKEN", getenv("SPRITES_TOKEN", getenv("SPRITE_TOKEN", getenv("SETUP_SPRITE_TOKEN", cfg.Sprites.Token))))
-	cfg.Sprites.APIURL = getenv("CRABBOX_SPRITES_API_URL", getenv("SPRITES_API_URL", cfg.Sprites.APIURL))
+	if value, ok := firstNonEmptyEnv("CRABBOX_SPRITES_TOKEN", "SPRITES_TOKEN", "SPRITE_TOKEN", "SETUP_SPRITE_TOKEN"); ok {
+		cfg.Sprites.Token = value
+		cfg.credentialProvenance.spritesToken = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_SPRITES_API_URL", "SPRITES_API_URL"); ok {
+		cfg.Sprites.APIURL = value
+		cfg.credentialProvenance.spritesAPIURL = credentialSourceEnvironment
+	}
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
 	if runtimeName := os.Getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME"); runtimeName != "" {
 		cfg.LocalContainer.Runtime = runtimeName

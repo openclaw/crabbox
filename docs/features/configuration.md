@@ -18,6 +18,13 @@ configuration before running Crabbox. User config and environment variables
 remain the appropriate sources for operator credentials and machine-specific
 policy.
 
+When repository config supplies a credential destination such as a broker,
+provider API, sandbox domain, or SSH gateway, Crabbox source-binds credentials
+to that layer. A destination and credential intentionally defined by the same
+repository remain valid. An inherited user-config or environment credential is
+not sent to a repository-defined destination unless the operator explicitly
+overrides that destination through its environment variable or CLI flag.
+
 ## Precedence
 
 ```text
@@ -1092,7 +1099,7 @@ MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
 
 | Setting | User config | Repo config | Profile | Notes |
 |:--------|:------------|:------------|:--------|:------|
-| `broker.url` and `broker.token` | yes | no | no | Per-machine identity. |
+| `broker.url` and `broker.token` | yes | yes | no | Prefer user config; repo endpoint/auth must come from the same source or be explicitly approved. |
 | `provider`, `class`, `architecture`, `serverType` | optional default | yes | yes | Per-repo defaults; profiles for lanes. |
 | `sync.exclude`, `sync.fingerprint`, `sync.baseRef` | no | yes | yes | Lives with the repo. |
 | `env.allow` | no | yes | yes | Repo decides what is safe to forward. |
