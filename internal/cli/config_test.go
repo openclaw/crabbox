@@ -4493,6 +4493,92 @@ localContainer:
 	}
 }
 
+func TestRepoConfigDoesNotApplyLocalContainerDockerSocket(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	for _, name := range []string{"crabbox.yaml", ".crabbox.yaml"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			if err := os.WriteFile(name, []byte(`
+provider: local-container
+localContainer:
+  dockerSocket: true
+`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Provider != "local-container" {
+				t.Fatalf("repo config was not loaded: provider=%q", cfg.Provider)
+			}
+			if cfg.LocalContainer.DockerSocket {
+				t.Fatal("repo config enabled local-container docker socket")
+			}
+		})
+	}
+}
+
+func TestTrustedConfigCanEnableLocalContainerDockerSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		explicit bool
+	}{
+		{name: "user config"},
+		{name: "explicit config", explicit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			cfgPath := userConfigPath()
+			if tc.explicit {
+				cfgPath = filepath.Join(home, "trusted-crabbox.yaml")
+				t.Setenv("CRABBOX_CONFIG", cfgPath)
+			}
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, []byte(`
+provider: local-container
+localContainer:
+  dockerSocket: true
+`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.LocalContainer.DockerSocket {
+				t.Fatal("trusted config did not enable local-container docker socket")
+			}
+		})
+	}
+}
+
+func TestLocalContainerDockerSocketEnvStillApplies(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET", "true")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.LocalContainer.DockerSocket {
+		t.Fatal("env did not enable local-container docker socket")
+	}
+}
+
 func TestPortableOSDefaultsRespectTargetAlias(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

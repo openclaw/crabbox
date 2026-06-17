@@ -5025,13 +5025,13 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.LocalContainer.Network != "" {
 			cfg.LocalContainer.Network = file.LocalContainer.Network
 		}
-		if file.LocalContainer.DockerSocket != nil {
+		if trusted && file.LocalContainer.DockerSocket != nil {
 			cfg.LocalContainer.DockerSocket = *file.LocalContainer.DockerSocket
 		}
-		// NOTE: localContainer.volumes is intentionally NOT loaded from
-		// repo-local config files. Bind mounts expose host paths and must
-		// be an explicit CLI action (--local-container-volume), not
-		// something an untrusted checkout can request via .crabbox.yaml.
+		// NOTE: localContainer.dockerSocket and localContainer.volumes are
+		// intentionally NOT loaded from repo-local config files. Host-exposing
+		// mounts must be an explicit operator action, not something an
+		// untrusted checkout can request via .crabbox.yaml.
 	}
 	if file.AppleContainer != nil {
 		if file.AppleContainer.CLIPath != "" {
