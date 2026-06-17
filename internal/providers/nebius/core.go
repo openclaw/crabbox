@@ -25,6 +25,7 @@ type LeaseTarget = core.LeaseTarget
 type Server = core.Server
 type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
+type SSHTarget = core.SSHTarget
 
 const (
 	providerName = "nebius"

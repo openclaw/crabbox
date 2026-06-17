@@ -65,9 +65,8 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	if strings.TrimSpace(neb.CLI) == "" {
 		return exit(2, "nebius.cli is required")
 	}
-	switch strings.ToLower(strings.TrimSpace(neb.User)) {
-	case "root", "admin":
-		return exit(2, "nebius.user must not be root or admin")
+	if err := validateNebiusUser(neb.User); err != nil {
+		return err
 	}
 	if neb.DiskSizeGiB <= 0 {
 		return exit(2, "nebius.diskSizeGiB must be positive")

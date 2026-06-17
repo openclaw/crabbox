@@ -5,8 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type cliRunner struct {
@@ -21,8 +26,42 @@ type cliResult struct {
 
 var tokenLikePattern = regexp.MustCompile(`(?i)(osb_|ncp_|iam_token|oauth[_-]?token|access[_-]?token|refresh[_-]?token|private[_-]?key|BEGIN [A-Z ]*PRIVATE KEY)[A-Za-z0-9._:/+=@ -]*`)
 
+type nebiusAPI interface {
+	ListInstances(context.Context) ([]nebiusInstance, error)
+	GetInstance(context.Context, string) (nebiusInstance, error)
+	CreateInstance(context.Context, nebiusCreateRequest) (nebiusInstance, error)
+	WaitInstance(context.Context, string) (nebiusInstance, error)
+	UpdateLabels(context.Context, string, map[string]string) error
+	DeleteInstance(context.Context, string) error
+}
+
+type nebiusClient struct {
+	cfg NebiusConfig
+	cli cliRunner
+}
+
+type nebiusCreateRequest struct {
+	Name      string
+	Labels    map[string]string
+	UserData  string
+	PublicKey string
+}
+
+type nebiusInstance struct {
+	ID       string
+	Name     string
+	Status   string
+	Labels   map[string]string
+	PublicIP string
+	Raw      map[string]any
+}
+
 func newCLIRunner(cfg NebiusConfig, rt Runtime) cliRunner {
 	return cliRunner{cfg: cfg, rt: rt}
+}
+
+func newNebiusClient(cfg NebiusConfig, rt Runtime) *nebiusClient {
+	return &nebiusClient{cfg: cfg, cli: newCLIRunner(cfg, rt)}
 }
 
 func (c cliRunner) run(ctx context.Context, args ...string) (cliResult, error) {
@@ -66,6 +105,108 @@ func parseJSONArray(output string) ([]map[string]any, error) {
 	return objects, nil
 }
 
+func (c *nebiusClient) ListInstances(ctx context.Context) ([]nebiusInstance, error) {
+	result, err := c.cli.run(ctx, "compute", "instance", "list", "--parent-id", c.cfg.ParentID, "--format", "json")
+	if err != nil {
+		return nil, err
+	}
+	return parseNebiusInstances(result.Stdout)
+}
+
+func (c *nebiusClient) GetInstance(ctx context.Context, id string) (nebiusInstance, error) {
+	result, err := c.cli.run(ctx, "compute", "instance", "get", id, "--format", "json")
+	if err != nil {
+		return nebiusInstance{}, err
+	}
+	return parseNebiusInstance(result.Stdout)
+}
+
+func (c *nebiusClient) CreateInstance(ctx context.Context, req nebiusCreateRequest) (nebiusInstance, error) {
+	tmp, err := os.CreateTemp("", "crabbox-nebius-cloud-init-*.yaml")
+	if err != nil {
+		return nebiusInstance{}, err
+	}
+	path := tmp.Name()
+	if _, err := tmp.WriteString(req.UserData); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(path)
+		return nebiusInstance{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(path)
+		return nebiusInstance{}, err
+	}
+	defer os.Remove(path)
+	args := []string{
+		"compute", "instance", "create",
+		"--parent-id", c.cfg.ParentID,
+		"--name", req.Name,
+		"--resources-platform", c.cfg.Platform,
+		"--resources-preset", c.cfg.Preset,
+		"--boot-disk-image-family", c.cfg.ImageFamily,
+		"--boot-disk-type", c.cfg.DiskType,
+		"--boot-disk-size-gib", strconv.Itoa(c.cfg.DiskSizeGiB),
+		"--cloud-init-user-data", path,
+		"--network-interface", renderNetworkInterface(c.cfg),
+		"--recovery-policy", firstNonBlank(c.cfg.RecoveryPolicy, "fail"),
+	}
+	for _, sg := range c.cfg.SecurityGroupIDs {
+		if strings.TrimSpace(sg) != "" {
+			args = append(args, "--network-interface-security-group-id", strings.TrimSpace(sg))
+		}
+	}
+	if strings.TrimSpace(c.cfg.ServiceAccountID) != "" {
+		args = append(args, "--service-account-id", strings.TrimSpace(c.cfg.ServiceAccountID))
+	}
+	for _, label := range renderLabelArgs(req.Labels) {
+		args = append(args, "--label", label)
+	}
+	args = append(args, "--format", "json")
+	result, err := c.cli.run(ctx, args...)
+	if err != nil {
+		return nebiusInstance{}, err
+	}
+	return parseNebiusInstance(result.Stdout)
+}
+
+func (c *nebiusClient) WaitInstance(ctx context.Context, id string) (nebiusInstance, error) {
+	var last nebiusInstance
+	for attempt := 0; attempt < 60; attempt++ {
+		item, err := c.GetInstance(ctx, id)
+		if err != nil {
+			return nebiusInstance{}, err
+		}
+		last = item
+		if item.PublicIP != "" && instanceRunning(item.Status) {
+			return item, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nebiusInstance{}, context.Cause(ctx)
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return last, fmt.Errorf("timeout waiting for nebius instance %s public IP/readiness", id)
+}
+
+func (c *nebiusClient) UpdateLabels(ctx context.Context, id string, labels map[string]string) error {
+	args := []string{"compute", "instance", "update", id}
+	for _, label := range renderLabelArgs(labels) {
+		args = append(args, "--label", label)
+	}
+	args = append(args, "--format", "json")
+	_, err := c.cli.run(ctx, args...)
+	return err
+}
+
+func (c *nebiusClient) DeleteInstance(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return validationError("nebius instance id is required for delete")
+	}
+	_, err := c.cli.run(ctx, "compute", "instance", "delete", id, "--quiet", "--format", "json")
+	return err
+}
+
 func stringField(object map[string]any, names ...string) string {
 	for _, name := range names {
 		if value, ok := object[name]; ok {
@@ -101,6 +242,225 @@ func containsIDOrName(output, want string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func parseNebiusInstances(output string) ([]nebiusInstance, error) {
+	items, err := parseJSONArray(output)
+	if err != nil {
+		object, objectErr := parseJSONObject(output)
+		if objectErr != nil {
+			return nil, err
+		}
+		if nested, ok := arrayField(object, "items", "instances"); ok {
+			items = nested
+		} else {
+			items = []map[string]any{object}
+		}
+	}
+	out := make([]nebiusInstance, 0, len(items))
+	for _, item := range items {
+		out = append(out, instanceFromObject(item))
+	}
+	return out, nil
+}
+
+func parseNebiusInstance(output string) (nebiusInstance, error) {
+	object, err := parseJSONObject(output)
+	if err != nil {
+		items, itemsErr := parseJSONArray(output)
+		if itemsErr != nil {
+			return nebiusInstance{}, err
+		}
+		if len(items) == 0 {
+			return nebiusInstance{}, errors.New("empty nebius instance response")
+		}
+		object = items[0]
+	}
+	return instanceFromObject(object), nil
+}
+
+func instanceFromObject(object map[string]any) nebiusInstance {
+	labels := mapFromAny(firstPath(object, "metadata.labels", "labels", "metadataLabels"))
+	return nebiusInstance{
+		ID:       stringFromAny(firstPath(object, "metadata.id", "id")),
+		Name:     stringFromAny(firstPath(object, "metadata.name", "name")),
+		Status:   stringFromAny(firstPath(object, "status.state", "status", "state")),
+		Labels:   labels,
+		PublicIP: extractNebiusPublicIP(object),
+		Raw:      object,
+	}
+}
+
+func serverFromInstance(item nebiusInstance, cfg Config) Server {
+	labels := make(map[string]string, len(item.Labels))
+	for key, value := range item.Labels {
+		labels[key] = value
+	}
+	server := Server{
+		CloudID:  item.ID,
+		Provider: providerName,
+		Name:     firstNonBlank(item.Name, labels["slug"]),
+		Status:   normalizeNebiusState(item.Status),
+		Labels:   labels,
+	}
+	server.PublicNet.IPv4.IP = item.PublicIP
+	server.ServerType.Name = nebiusServerType(cfg)
+	return server
+}
+
+func extractNebiusPublicIP(object map[string]any) string {
+	for _, path := range []string{
+		"status.network_interfaces.0.public_ip_address.address",
+		"status.networkInterfaces.0.publicIpAddress.address",
+		"network_interfaces.0.public_ip_address.address",
+		"networkInterfaces.0.publicIpAddress.address",
+		"public_ip_address.address",
+		"publicIpAddress.address",
+		"public_ip",
+		"publicIP",
+	} {
+		if ip := cleanIP(stringFromAny(pathValue(object, path))); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func cleanIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if ip, _, err := net.ParseCIDR(value); err == nil {
+		return ip.String()
+	}
+	if strings.Contains(value, "/") {
+		value, _, _ = strings.Cut(value, "/")
+	}
+	return strings.TrimSpace(value)
+}
+
+func renderNetworkInterface(cfg NebiusConfig) string {
+	parts := []string{"subnet-id=" + strings.TrimSpace(cfg.SubnetID)}
+	if !strings.EqualFold(strings.TrimSpace(cfg.PublicIP), "none") {
+		parts = append(parts, "public-ip-address={}")
+	}
+	return strings.Join(parts, ",")
+}
+
+func renderLabelArgs(labels map[string]string) []string {
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(labels[key]) != "" {
+			out = append(out, key+"="+labels[key])
+		}
+	}
+	return out
+}
+
+func normalizeNebiusState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "running", "ready":
+		return "ready"
+	case "creating", "provisioning", "starting":
+		return "provisioning"
+	case "stopped":
+		return "stopped"
+	case "deleting":
+		return "deleting"
+	default:
+		return strings.ToLower(strings.TrimSpace(state))
+	}
+}
+
+func instanceRunning(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "running", "ready":
+		return true
+	default:
+		return false
+	}
+}
+
+func arrayField(object map[string]any, names ...string) ([]map[string]any, bool) {
+	for _, name := range names {
+		value, ok := object[name]
+		if !ok {
+			continue
+		}
+		raw, ok := value.([]any)
+		if !ok {
+			continue
+		}
+		out := make([]map[string]any, 0, len(raw))
+		for _, item := range raw {
+			if obj, ok := item.(map[string]any); ok {
+				out = append(out, obj)
+			}
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+func firstPath(object map[string]any, paths ...string) any {
+	for _, path := range paths {
+		if value := pathValue(object, path); value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func pathValue(object map[string]any, path string) any {
+	var current any = object
+	for _, part := range strings.Split(path, ".") {
+		switch typed := current.(type) {
+		case map[string]any:
+			current = typed[part]
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(typed) {
+				return nil
+			}
+			current = typed[index]
+		default:
+			return nil
+		}
+	}
+	return current
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return typed.String()
+	case float64:
+		return strconv.FormatInt(int64(typed), 10)
+	default:
+		return ""
+	}
+}
+
+func mapFromAny(value any) map[string]string {
+	out := map[string]string{}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return out
+	}
+	for key, raw := range object {
+		if value := stringFromAny(raw); value != "" {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func redactNebiusText(text string) string {
