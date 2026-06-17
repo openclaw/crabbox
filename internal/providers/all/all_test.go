@@ -269,6 +269,46 @@ func TestCloudflareDynamicWorkersRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestCloudflareSandboxRegistersWithoutAliasCollision(t *testing.T) {
+	provider, err := core.ProviderFor("cloudflare-sandbox")
+	if err != nil {
+		t.Fatalf("ProviderFor(cloudflare-sandbox): %v", err)
+	}
+	if provider.Name() != "cloudflare-sandbox" {
+		t.Fatalf("ProviderFor(cloudflare-sandbox).Name=%q", provider.Name())
+	}
+	if _, ok := provider.(core.DoctorProvider); !ok {
+		t.Fatalf("ProviderFor(cloudflare-sandbox) does not expose doctor")
+	}
+	spec := provider.Spec()
+	if spec.Family != "cloudflare" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("cloudflare-sandbox spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("cloudflare-sandbox targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("cloudflare-sandbox features=%v missing %s", spec.Features, feature)
+		}
+	}
+	for _, alias := range []string{"cloudflare", "cf", "cloudflare-dynamic-workers", "cf-dynamic", "cfdw", "sandbox"} {
+		got, err := core.ProviderFor(alias)
+		if err == nil && got.Name() == "cloudflare-sandbox" {
+			t.Fatalf("%q alias unexpectedly resolves to cloudflare-sandbox", alias)
+		}
+	}
+	if provider := mustProvider(t, "cloudflare"); provider.Name() != "cloudflare" {
+		t.Fatalf("cloudflare resolved to %q; sandbox must not replace Cloudflare Containers", provider.Name())
+	}
+	if provider := mustProvider(t, "cf"); provider.Name() != "cloudflare" {
+		t.Fatalf("cf alias resolved to %q; sandbox must not steal it", provider.Name())
+	}
+	if provider := mustProvider(t, "cloudflare-dynamic-workers"); provider.Name() != "cloudflare-dynamic-workers" {
+		t.Fatalf("cloudflare-dynamic-workers resolved to %q; sandbox must not replace Dynamic Workers", provider.Name())
+	}
+}
+
 func TestCodeSandboxRegistersCanonicalAndAliases(t *testing.T) {
 	for _, name := range []string{"codesandbox", "csb", "code-sandbox"} {
 		provider, err := core.ProviderFor(name)

@@ -438,6 +438,65 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 	}
 }
 
+func TestConfigShowRedactsCloudflareSandbox(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	if err := os.WriteFile(configPath, []byte(`provider: aws
+cloudflareSandbox:
+  url: https://user:pass@bridge.example.test?token=query-secret#fragment-secret
+  token: secret-token
+  workdir: /workspace/test
+  execTimeoutSecs: 90
+  forgetMissing: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	for _, secret := range []string{"secret-token", "user:pass", "query-secret", "fragment-secret"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config show leaked %q: %q", secret, text)
+		}
+	}
+	if !strings.Contains(text, "cloudflare_sandbox url=https://<redacted>@bridge.example.test workdir=/workspace/test exec_timeout_secs=90 forget_missing=true auth=configured") {
+		t.Fatalf("config show missing cloudflare-sandbox summary: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		CloudflareSandbox struct {
+			URL             string `json:"url"`
+			Auth            string `json:"auth"`
+			Workdir         string `json:"workdir"`
+			ExecTimeoutSecs int    `json:"execTimeoutSecs"`
+			ForgetMissing   bool   `json:"forgetMissing"`
+		} `json:"cloudflareSandbox"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CloudflareSandbox.URL != "https://<redacted>@bridge.example.test" || got.CloudflareSandbox.Auth != "configured" || got.CloudflareSandbox.Workdir != "/workspace/test" || got.CloudflareSandbox.ExecTimeoutSecs != 90 || !got.CloudflareSandbox.ForgetMissing {
+		t.Fatalf("json cloudflare-sandbox=%#v", got.CloudflareSandbox)
+	}
+	for _, secret := range []string{"secret-token", "user:pass", "query-secret", "fragment-secret"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show json leaked %q: %q", secret, stdout.String())
+		}
+	}
+}
+
 func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
