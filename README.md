@@ -23,6 +23,23 @@ owns provider credentials and lease state, and a managed or delegated runner.
 Run the coordinator on Cloudflare Workers with a Durable Object, or as a
 Node.js service backed by PostgreSQL.
 
+## Trust model
+
+Crabbox is a developer execution tool, not a hostile multi-tenant platform or a
+uniform security sandbox. It assumes the local OS user, repository
+configuration, configured project tooling, and authenticated coordinator
+operators are trusted. Repository configuration is executable project
+automation: it can run local helpers, select runtimes, mount host resources,
+and control development infrastructure. Review unfamiliar repositories before
+running Crabbox.
+
+The optional coordinator is intended for a cooperative trusted team. Its
+authentication, ownership, and sharing controls prevent unauthorized access
+and accidental cross-owner operations, but do not provide isolation between
+mutually adversarial tenants. See the [Security Policy](SECURITY.md) for the
+supported boundary and [Operational security](docs/security.md) for deployment
+guidance.
+
 ## How it works
 
 ```text
@@ -267,11 +284,11 @@ and authoring guide.
 - **Stable timing records.** `--timing-json` on `run`, `warmup`, `prewarm`, and
   `actions hydrate` gives scripts one machine-readable sync/command/total
   timing schema across providers.
-- **Hardened coordinator auth.** GitHub browser login, owner-scoped leases,
+- **Coordinator access controls.** GitHub browser login, owner-scoped leases,
   admin-only routes, optional GitHub team allowlists, Cloudflare Access JWT
   verification, and service-token support keep normal use and operator
   automation separate. See [Auth and admin](docs/features/auth-admin.md) and
-  [Security](docs/security.md).
+  the [Security Policy](SECURITY.md).
 
 ## Machine classes
 
@@ -501,7 +518,7 @@ Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment liv
 - **Interactive QA:** [Interactive Desktop and VNC](docs/features/interactive-desktop-vnc.md), [Artifacts](docs/features/artifacts.md), [Portal](docs/features/portal.md)
 - **Integrate infrastructure:** [Bring Your Own Infrastructure](docs/features/bring-your-own-infrastructure.md), [Portable Coordinator](docs/features/portable-coordinator.md), [External Provider](docs/providers/external.md)
 - **Operate it:** [Operations](docs/operations.md), [Observability](docs/observability.md), [Troubleshooting](docs/troubleshooting.md), [Performance](docs/performance.md)
-- **Set it up or audit it:** [Infrastructure](docs/infrastructure.md), [Security](docs/security.md), [Getting Started](docs/getting-started.md), [Source Map](docs/source-map.md)
+- **Set it up or audit it:** [Infrastructure](docs/infrastructure.md), [Security Policy](SECURITY.md), [Operational Security](docs/security.md), [Getting Started](docs/getting-started.md), [Source Map](docs/source-map.md)
 - **Changes:** [CHANGELOG.md](CHANGELOG.md)
 
 The GitHub Pages site at <https://openclaw.github.io/crabbox/> is generated from

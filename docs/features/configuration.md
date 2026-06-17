@@ -11,6 +11,13 @@ Crabbox configuration is layered. The CLI loads values from several sources and
 merges them in a deterministic order. Every source is optional - the binary
 boots with sane defaults for everything.
 
+Repository configuration is executable project automation, comparable to a
+Makefile, package script, or CI workflow. It may select providers, helper
+commands, runtimes, images, and runtime arguments. Review unfamiliar repository
+configuration before running Crabbox. User config and environment variables
+remain the appropriate sources for operator credentials and machine-specific
+policy.
+
 ## Precedence
 
 ```text

@@ -1,7 +1,11 @@
-# Security
+# Operational Security
 
 Read this when you are standing up a shared broker, deciding what secrets to
 forward, or reasoning about who can reach a leased box.
+
+The root [Security Policy](https://github.com/openclaw/crabbox/blob/main/SECURITY.md)
+defines the supported security boundary and reporting scope. This guide covers
+deployment and operational hardening within that boundary.
 
 Crabbox spans three trust layers, and each owns a different part of the security
 posture:
@@ -22,6 +26,9 @@ and explicitly forwarded environment values.
 Crabbox is built for trusted operators on a shared team, not for arbitrary
 untrusted tenants. Assume:
 
+- The local OS user and configured provider tooling are trusted.
+- Repository configuration is executable project automation and must be
+  reviewed like a Makefile, package script, or CI workflow.
 - Operators can run arbitrary commands on the boxes they lease.
 - A box may observe any local environment value the CLI forwards to it.
 - Operators are trusted not to attack each other deliberately.
@@ -29,7 +36,9 @@ untrusted tenants. Assume:
 
 Do not place mutually untrusted tenants on the same broker, in the same
 [pond](features/pond.md), or behind a single shared token. Per-lease and
-per-tenant isolation is not the current security boundary.
+per-tenant isolation is not the current security boundary. Local providers and
+portal bridges are development execution surfaces, not a uniform sandbox for
+hostile project configuration or mutually adversarial workloads.
 
 ## Authentication
 
@@ -139,8 +148,11 @@ closed for non-health routes.
 
 ## Secrets
 
-There is no central project secret store. Secrets stay on the operator's
-machine and are forwarded to a box only when explicitly allowed.
+There is no central project secret store. Remote command environment values
+stay on the operator's machine unless explicitly allowed for forwarding.
+Local helper processes, including External provider lifecycle commands, inherit
+the Crabbox process environment unless their own runtime provides stronger
+isolation.
 
 Handling rules:
 
@@ -271,8 +283,11 @@ Crabbox-managed VNC to public interfaces or to the Tailscale `100.x` interface.
 
 ## Cleanup
 
-Cleanup is security-sensitive: a leaked box keeps spending money and stays
-reachable. See [lifecycle and cleanup](features/lifecycle-cleanup.md).
+Cleanup is operationally important for cost control and stale resource
+management. Missing reconciliation or provider coverage is normally
+reliability hardening. Deleting a resource that Crabbox cannot strongly
+identify as its own crosses a safety boundary. See
+[lifecycle and cleanup](features/lifecycle-cleanup.md).
 
 Layered protections:
 

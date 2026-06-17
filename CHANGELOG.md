@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Defined Crabbox's supported single-user and cooperative-team security boundary, clarified repository configuration as trusted project automation, and separated vulnerability reporting from compatibility-preserving hardening.
+
 ### Fixed
 
 - Restricted Crabbox-managed Windows credential files to the managed user, Administrators, and SYSTEM without changing desktop credential consumers. Thanks @coygeek.
