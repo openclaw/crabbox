@@ -11724,9 +11724,9 @@ describe("fleet lease identity and idle", () => {
     const tokenExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     const headers = {
       "x-crabbox-auth": "github",
-      "x-crabbox-owner": "peter@example.com",
-      "x-crabbox-org": "openclaw",
-      "x-crabbox-github-login": "peter",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+      "x-crabbox-github-login": "alice",
       "x-crabbox-token-expires-at": tokenExpiresAt,
     };
     storage.seed(
@@ -11734,8 +11734,8 @@ describe("fleet lease identity and idle", () => {
       testLease({
         id: leaseID,
         slug: "blue-lobster",
-        owner: "peter@example.com",
-        org: "openclaw",
+        owner: "alice@example.com",
+        org: "example-org",
         code: true,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
