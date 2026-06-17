@@ -103,10 +103,10 @@ func TestApplyFlags(t *testing.T) {
 }
 
 func TestValidateConfigRejectsReservedUsers(t *testing.T) {
-	for _, user := range []string{"root", "admin"} {
+	for _, user := range []string{"root", "admin", "alice\n  - name: root", "Alice", "bad user", "1alice"} {
 		cfg := testConfig()
 		cfg.Nebius.User = user
-		if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "must not be root or admin") {
+		if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "nebius.user must") {
 			t.Fatalf("ValidateConfig(%q) err=%v", user, err)
 		}
 	}
