@@ -15,6 +15,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var digitalOcean *providerMatrixEntry
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
+	var nebius *providerMatrixEntry
 	var moduleRuntime *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
@@ -31,6 +32,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "linode" {
 			linode = &entries[i]
+		}
+		if entries[i].Provider == "nebius" {
+			nebius = &entries[i]
 		}
 		if entries[i].Provider == "module-runtime-test" {
 			moduleRuntime = &entries[i]
@@ -50,6 +54,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if linode == nil {
 		t.Fatal("linode provider not found")
+	}
+	if nebius == nil {
+		t.Fatal("nebius provider not found")
 	}
 	if aws.Kind != ProviderKindSSHLease {
 		t.Fatalf("aws kind=%q", aws.Kind)
@@ -85,6 +92,15 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsString(linode.Targets, targetLinux) {
 		t.Fatalf("linode targets=%v", linode.Targets)
+	}
+	if nebius.Kind != ProviderKindSSHLease || nebius.Family != "nebius" || nebius.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("nebius kind/family/coordinator=%q/%q/%q", nebius.Kind, nebius.Family, nebius.Coordinator)
+	}
+	if !containsString(nebius.Targets, targetLinux) {
+		t.Fatalf("nebius targets=%v", nebius.Targets)
+	}
+	if !containsFeature(nebius.Features, FeatureSSH) || !containsFeature(nebius.Features, FeatureCrabboxSync) || !containsFeature(nebius.Features, FeatureCleanup) {
+		t.Fatalf("nebius features=%v", nebius.Features)
 	}
 	if moduleRuntime == nil {
 		t.Fatal("module-runtime-test provider not found")
