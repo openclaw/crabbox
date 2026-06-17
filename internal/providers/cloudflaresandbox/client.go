@@ -133,7 +133,7 @@ func (c *client) OpenAPI(ctx context.Context) (openAPIResponse, error) {
 
 func (c *client) CreateSandbox(ctx context.Context, req createSandboxRequest) (sandboxSummary, error) {
 	var out sandboxSummary
-	if err := c.do(ctx, http.MethodPost, "/v1/sandboxes", true, req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/sandbox", true, req, &out); err != nil {
 		return sandboxSummary{}, err
 	}
 	return out, nil
@@ -141,7 +141,7 @@ func (c *client) CreateSandbox(ctx context.Context, req createSandboxRequest) (s
 
 func (c *client) GetSandbox(ctx context.Context, id string) (sandboxSummary, error) {
 	var out sandboxSummary
-	if err := c.do(ctx, http.MethodGet, "/v1/sandboxes/"+url.PathEscape(id), true, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/sandbox/"+url.PathEscape(id), true, nil, &out); err != nil {
 		return sandboxSummary{}, err
 	}
 	if out.ID == "" {
@@ -152,7 +152,7 @@ func (c *client) GetSandbox(ctx context.Context, id string) (sandboxSummary, err
 
 func (c *client) ListSandboxes(ctx context.Context) ([]sandboxSummary, error) {
 	var out []sandboxSummary
-	if err := c.do(ctx, http.MethodGet, "/v1/sandboxes", true, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/sandbox", true, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -160,25 +160,25 @@ func (c *client) ListSandboxes(ctx context.Context) ([]sandboxSummary, error) {
 
 func (c *client) ListRunning(ctx context.Context) ([]sandboxSummary, error) {
 	var out []sandboxSummary
-	if err := c.do(ctx, http.MethodGet, "/v1/sandboxes/running", true, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/sandbox/running", true, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
 func (c *client) DeleteSandbox(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/sandboxes/"+url.PathEscape(id), true, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/v1/sandbox/"+url.PathEscape(id), true, nil, nil)
 }
 
 func (c *client) Exec(ctx context.Context, id string, req execRequest, stdout, stderr io.Writer) (execResult, error) {
-	resp, err := c.doRequest(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(id)+"/exec", true, req, "application/json")
+	resp, err := c.doRequest(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/exec", true, req, "application/json")
 	if err != nil {
 		return execResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return execResult{}, fmt.Errorf("%s POST /v1/sandboxes/%s/exec failed: %s: %s", providerName, url.PathEscape(id), resp.Status, c.redact(string(data)))
+		return execResult{}, fmt.Errorf("%s POST /v1/sandbox/%s/exec failed: %s: %s", providerName, url.PathEscape(id), resp.Status, c.redact(string(data)))
 	}
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		return c.parseExecSSE(resp.Body, stdout, stderr)
@@ -206,6 +206,7 @@ func (c *client) Exec(ctx context.Context, id string, req execRequest, stdout, s
 type execSSEData struct {
 	Type     string `json:"type,omitempty"`
 	Stream   string `json:"stream,omitempty"`
+	Encoding string `json:"encoding,omitempty"`
 	Chunk    string `json:"chunk,omitempty"`
 	Data     string `json:"data,omitempty"`
 	Stdout   string `json:"stdout,omitempty"`
@@ -238,7 +239,7 @@ func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execRes
 		switch kind {
 		case "stdout", "stderr", "output":
 			payload := firstNonEmpty(frame.Chunk, frame.Data, frame.Stdout, frame.Stderr)
-			decoded, err := decodeMaybeBase64(payload)
+			decoded, err := decodeSSEPayload(payload, frame.Encoding)
 			if err != nil {
 				return err
 			}
@@ -314,15 +315,18 @@ func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execRes
 	return result, nil
 }
 
-func decodeMaybeBase64(value string) (string, error) {
+func decodeSSEPayload(value, encoding string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
-	decoded, err := base64.StdEncoding.DecodeString(value)
-	if err == nil {
-		return string(decoded), nil
+	if !strings.EqualFold(strings.TrimSpace(encoding), "base64") {
+		return value, nil
 	}
-	return value, nil
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return "", fmt.Errorf("decode cloudflare-sandbox exec SSE base64 payload: %w", err)
+	}
+	return string(decoded), nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -335,7 +339,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (c *client) UploadFile(ctx context.Context, id, remotePath string, content io.Reader) error {
-	route := "/v1/sandboxes/" + url.PathEscape(id) + "/files/write?path=" + url.QueryEscape(remotePath) + "&encoding=raw"
+	route := "/v1/sandbox/" + url.PathEscape(id) + "/files/write?path=" + url.QueryEscape(remotePath) + "&encoding=raw"
 	resp, err := c.doRequest(ctx, http.MethodPost, route, true, content, "application/octet-stream")
 	if err != nil {
 		return err
@@ -353,14 +357,14 @@ func (c *client) UploadFile(ctx context.Context, id, remotePath string, content 
 
 func (c *client) Persist(ctx context.Context, id string, req persistRequest) (persistResponse, error) {
 	var out persistResponse
-	if err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(id)+"/persist", true, req, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/persist", true, req, &out); err != nil {
 		return persistResponse{}, err
 	}
 	return out, nil
 }
 
 func (c *client) Hydrate(ctx context.Context, id string, req hydrateRequest) error {
-	return c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(id)+"/hydrate", true, req, nil)
+	return c.do(ctx, http.MethodPost, "/v1/sandbox/"+url.PathEscape(id)+"/hydrate", true, req, nil)
 }
 
 func (c *client) WarmPool(ctx context.Context) (warmPoolResponse, error) {
@@ -382,7 +386,7 @@ func (c *client) do(ctx context.Context, method, route string, authenticated boo
 		return fmt.Errorf("%s read %s %s: %w", providerName, method, route, readErr)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s %s failed: %s: %s", providerName, method, route, resp.Status, c.redact(string(data)))
+		return c.responseError(method, route, resp, data)
 	}
 	if out == nil || len(bytes.TrimSpace(data)) == 0 {
 		return nil
@@ -391,6 +395,14 @@ func (c *client) do(ctx context.Context, method, route string, authenticated boo
 		return fmt.Errorf("%s decode %s %s: %w", providerName, method, route, err)
 	}
 	return nil
+}
+
+func (c *client) responseError(method, route string, resp *http.Response, data []byte) error {
+	err := fmt.Errorf("%s %s %s failed: %s: %s", providerName, method, route, resp.Status, c.redact(string(data)))
+	if resp.StatusCode == http.StatusNotFound {
+		return &cloudflareSandboxNotFoundError{err: err}
+	}
+	return err
 }
 
 func (c *client) doRequest(ctx context.Context, method, route string, authenticated bool, body any, contentType string) (*http.Response, error) {

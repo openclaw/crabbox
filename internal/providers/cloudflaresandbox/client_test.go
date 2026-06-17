@@ -61,6 +61,32 @@ func TestBridgeClientHealthOpenAPIAuthAndNonMutatingDoctorRoutes(t *testing.T) {
 	}
 }
 
+func TestBridgeClientClassifiesOnlyHTTP404AsNotFound(t *testing.T) {
+	status := http.StatusNotFound
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/sandbox/missing" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"error":"token not found"}`)
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.CloudflareSandbox.BridgeURL = server.URL
+	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.GetSandbox(context.Background(), "missing"); !isCloudflareSandboxNotFound(err) {
+		t.Fatalf("404 err=%v, want typed not found", err)
+	}
+	status = http.StatusUnauthorized
+	if _, err := api.GetSandbox(context.Background(), "missing"); err == nil || isCloudflareSandboxNotFound(err) {
+		t.Fatalf("401 err=%v, want non-not-found error", err)
+	}
+}
+
 func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,17 +96,17 @@ func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 			t.Fatalf("%s %s Authorization=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
 		}
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandbox":
 			writeTestJSON(w, map[string]any{"id": "sb_123", "status": "running"})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb_123":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandbox/sb_123":
 			writeTestJSON(w, map[string]any{"id": "sb_123", "status": "running"})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandbox":
 			writeTestJSON(w, []map[string]any{{"id": "sb_123"}})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/running":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandbox/running":
 			writeTestJSON(w, []map[string]any{{"id": "sb_123", "status": "running"}})
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/exec":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandbox/sb_123/exec":
 			writeTestJSON(w, map[string]any{"stdout": "ok\n", "exitCode": 0})
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/files/write":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandbox/sb_123/files/write":
 			if r.URL.Query().Get("path") != "/tmp/archive.tgz" {
 				t.Fatalf("upload path query=%q", r.URL.RawQuery)
 			}
@@ -91,13 +117,13 @@ func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 				t.Fatalf("upload body=%q", body)
 			}
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/persist":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandbox/sb_123/persist":
 			writeTestJSON(w, map[string]any{"id": "persist_123"})
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sb_123/hydrate":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandbox/sb_123/hydrate":
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/warm-pool":
 			writeTestJSON(w, map[string]any{"ready": 1, "total": 2})
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb_123":
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandbox/sb_123":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -153,18 +179,18 @@ func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 
 func TestBridgeClientExecParsesSSEOutputBeforeExit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/sandboxes/sb_123/exec" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sandbox/sb_123/exec" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, _ := w.(http.Flusher)
 		_, _ = io.WriteString(w, "event: stdout\n")
-		_, _ = io.WriteString(w, `data: {"chunk":"`+base64.StdEncoding.EncodeToString([]byte("early\n"))+`"}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"encoding":"base64","chunk":"`+base64.StdEncoding.EncodeToString([]byte("early\n"))+`"}`+"\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
 		_, _ = io.WriteString(w, "event: stderr\n")
-		_, _ = io.WriteString(w, `data: {"chunk":"`+base64.StdEncoding.EncodeToString([]byte("warn\n"))+`"}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"encoding":"base64","chunk":"`+base64.StdEncoding.EncodeToString([]byte("warn\n"))+`"}`+"\n\n")
 		_, _ = io.WriteString(w, "event: exit\n")
 		_, _ = io.WriteString(w, `data: {"exitCode":7}`+"\n\n")
 	}))
@@ -182,6 +208,37 @@ func TestBridgeClientExecParsesSSEOutputBeforeExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.ExitCode != 7 || stdout.String() != "early\n" || stderr.String() != "warn\n" {
+		t.Fatalf("result=%#v stdout=%q stderr=%q", result, stdout.String(), stderr.String())
+	}
+}
+
+func TestBridgeClientExecLeavesPlainSSEChunksUntouched(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sandbox/sb_123/exec" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: stdout\n")
+		_, _ = io.WriteString(w, `data: {"chunk":"test"}`+"\n\n")
+		_, _ = io.WriteString(w, "event: stderr\n")
+		_, _ = io.WriteString(w, `data: {"chunk":"done"}`+"\n\n")
+		_, _ = io.WriteString(w, "event: exit\n")
+		_, _ = io.WriteString(w, `data: {"exitCode":0}`+"\n\n")
+	}))
+	defer server.Close()
+
+	cfg := testConfig()
+	cfg.CloudflareSandbox.BridgeURL = server.URL
+	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	result, err := api.Exec(context.Background(), "sb_123", execRequest{Command: "test"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || stdout.String() != "test" || stderr.String() != "done" {
 		t.Fatalf("result=%#v stdout=%q stderr=%q", result, stdout.String(), stderr.String())
 	}
 }

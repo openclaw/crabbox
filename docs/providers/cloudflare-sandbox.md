@@ -33,11 +33,11 @@ Crabbox calls:
 
 - `GET /health`
 - `GET /v1/openapi.json`
-- `POST /v1/sandboxes`
-- `GET /v1/sandboxes`
-- `GET /v1/sandboxes/{id}`
-- `DELETE /v1/sandboxes/{id}`
-- `POST /v1/sandboxes/{id}/exec`
+- `POST /v1/sandbox`
+- `GET /v1/sandbox`
+- `GET /v1/sandbox/{id}`
+- `DELETE /v1/sandbox/{id}`
+- `POST /v1/sandbox/{id}/exec`
 - file upload support for delegated archive sync
 
 Point Crabbox at that bridge through trusted config or environment. Keep bridge
@@ -75,6 +75,10 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 CF_API_TOKEN
 CF_ACCOUNT_ID
+CLOUDFLARE_API_KEY
+CLOUDFLARE_EMAIL
+CF_API_KEY
+CF_API_EMAIL
 ```
 
 ## Commands

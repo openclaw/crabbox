@@ -75,9 +75,11 @@ func cloudflareSandboxWorkdir(cfg Config) (string, error) {
 		return "", exit(2, "%s workdir must be absolute", providerName)
 	}
 	clean := path.Clean(workdir)
-	switch clean {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
+	if clean == "/workspace" {
 		return "", exit(2, "%s workdir %q is too broad; choose a dedicated subdirectory", providerName, clean)
+	}
+	if !strings.HasPrefix(clean, "/workspace/") {
+		return "", exit(2, "%s workdir %q must be under /workspace/<dedicated-subdir>", providerName, clean)
 	}
 	return clean, nil
 }
