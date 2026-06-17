@@ -12020,20 +12020,27 @@ function codeViewerSessionCookie(session: CodeViewerSessionRecord, maxAgeSeconds
 }
 
 export function bridgeTicketFromRequest(request: Request): string {
-  const queryTicket = new URL(request.url).searchParams.get("ticket") ?? "";
-  if (
-    validWebVNCTicket(queryTicket) ||
-    validCodeTicket(queryTicket) ||
-    validEgressTicket(queryTicket)
-  ) {
-    return queryTicket;
+  const upgradeTicket = request.headers.get("x-crabbox-bridge-ticket")?.trim() ?? "";
+  if (validBridgeTicket(upgradeTicket)) {
+    return upgradeTicket;
   }
   const auth = request.headers.get("authorization")?.trim() ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(auth);
-  if (match?.[1]) {
-    return match[1].trim();
+  const bearerTicket = match?.[1]?.trim() ?? "";
+  if (validBridgeTicket(bearerTicket)) {
+    return bearerTicket;
   }
-  return queryTicket;
+  // Legacy clients sent tickets in the request target. Keep accepting them for
+  // compatibility, but current clients use the dedicated upgrade header.
+  const queryTicket = new URL(request.url).searchParams.get("ticket") ?? "";
+  if (validBridgeTicket(queryTicket)) {
+    return queryTicket;
+  }
+  return upgradeTicket || bearerTicket || queryTicket;
+}
+
+function validBridgeTicket(value: string): boolean {
+  return validWebVNCTicket(value) || validCodeTicket(value) || validEgressTicket(value);
 }
 
 function validEgressTicket(value: string | undefined): value is string {

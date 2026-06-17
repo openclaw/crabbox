@@ -137,9 +137,10 @@ WebVNC keeps the same security boundary as `crabbox vnc`:
 - The cloud provider does not open public VNC ingress.
 - The coordinator authenticates the browser through portal auth, and the bridge
   through a single-use short-lived ticket. The CLI sends the ticket as an
-  `Authorization: Bearer ...` header so it stays out of WebSocket URLs and
-  proxy/access logs; the coordinator falls back to a `?ticket=` query string for
-  older CLIs.
+  `X-Crabbox-Bridge-Ticket` WebSocket upgrade header so it stays out of
+  WebSocket URLs while leaving ordinary coordinator authentication intact. A
+  bearer-header retry supports older coordinators; query tickets remain accepted
+  only for older CLIs.
 - The noVNC client is served from the coordinator origin, not a third-party CDN.
 - The local `crabbox webvnc` process must keep running while the browser uses
   the desktop.

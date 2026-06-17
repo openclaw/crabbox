@@ -37,12 +37,6 @@ func TestWebVNCURLs(t *testing.T) {
 	if got := webVNCAgentURLWithCapabilities("https://broker.example.com", "cbx_abcdef123456", "desktop_theme"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/webvnc/agent?capabilities=desktop_theme" {
 		t.Fatalf("agent capability URL=%q", got)
 	}
-	if got := webVNCAgentURLWithTicket("https://broker.example.com", "cbx_abcdef123456", "wvnc_abc"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/webvnc/agent?ticket=wvnc_abc" {
-		t.Fatalf("agent fallback URL=%q", got)
-	}
-	if got := webVNCAgentURLWithTicketAndCapabilities("https://broker.example.com", "cbx_abcdef123456", "wvnc_abc", "desktop_theme"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/webvnc/agent?capabilities=desktop_theme&ticket=wvnc_abc" {
-		t.Fatalf("agent capability fallback URL=%q", got)
-	}
 	if got := webVNCPortalURL("https://broker.example.com/", "cbx_abcdef123456", "", "secret value"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/vnc#password=secret+value" {
 		t.Fatalf("portal URL=%q", got)
 	}
@@ -779,8 +773,11 @@ func TestConnectWebVNCBridgeRegistersAgentBeforeServe(t *testing.T) {
 			if got := r.URL.Query().Get("ticket"); got != "" {
 				t.Errorf("query ticket=%q", got)
 			}
-			if got := r.Header.Get("Authorization"); got != "Bearer wvnc_abcdef1234567890abcdef1234567890" {
+			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 				t.Errorf("bridge authorization=%q", got)
+			}
+			if got := r.Header.Get("X-Crabbox-Bridge-Ticket"); got != "wvnc_abcdef1234567890abcdef1234567890" {
+				t.Errorf("bridge ticket=%q", got)
 			}
 			conn, err := websocket.Accept(w, r, nil)
 			if err != nil {
@@ -971,19 +968,19 @@ func TestWebVNCObserverSlotsExhausted(t *testing.T) {
 	}
 }
 
-func TestRetryBridgeTicketInQuery(t *testing.T) {
+func TestRetryBridgeTicketInAuthorization(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusUnauthorized,
 		Body:       io.NopCloser(strings.NewReader("old broker needs query ticket")),
 	}
-	if !retryBridgeTicketInQuery(resp, errors.New("websocket rejected")) {
-		t.Fatal("expected unauthorized websocket response to retry with query ticket")
+	if !retryBridgeTicketInAuthorization(resp, errors.New("websocket rejected")) {
+		t.Fatal("expected unauthorized websocket response to retry with bearer ticket")
 	}
-	if !retryBridgeTicketInQuery(&http.Response{StatusCode: http.StatusForbidden}, errors.New("forbidden")) {
-		t.Fatal("expected upstream auth rejection to retry with query ticket")
+	if !retryBridgeTicketInAuthorization(&http.Response{StatusCode: http.StatusForbidden}, errors.New("forbidden")) {
+		t.Fatal("expected upstream auth rejection to retry with bearer ticket")
 	}
-	if retryBridgeTicketInQuery(resp, nil) {
-		t.Fatal("successful dial should not retry with query ticket")
+	if retryBridgeTicketInAuthorization(resp, nil) {
+		t.Fatal("successful dial should not retry with bearer ticket")
 	}
 }
 

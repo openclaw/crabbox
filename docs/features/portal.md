@@ -175,8 +175,10 @@ page — it is operator-driven and never opens an HTML view, so it lives under t
 [Interactive desktop and VNC](interactive-desktop-vnc.md),
 [code command](../commands/code.md), and [Mediated egress](egress.md).
 
-Bridge tickets travel as `Authorization: Bearer ...` headers on the agent
-WebSocket upgrade, with a `?ticket=` query-string fallback for older CLIs.
+Current clients send bridge tickets in an `X-Crabbox-Bridge-Ticket` WebSocket
+upgrade header, with a bearer-header retry for older coordinators. Coordinators
+still accept query tickets from older CLIs, but current clients never place
+bridge credentials in request URLs.
 
 ## Run detail `/portal/runs/{run-id}`
 

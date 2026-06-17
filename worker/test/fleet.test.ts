@@ -11995,7 +11995,33 @@ describe("fleet lease identity and idle", () => {
     expect(runtime.timers).toEqual([]);
   });
 
-  it("prefers valid query bridge tickets over unrelated bearer authorization", () => {
+  it("prefers dedicated upgrade bridge tickets over bearer and legacy query credentials", () => {
+    const upgradeTicket = `code_${"c".repeat(32)}`;
+    const queryTicket = `code_${"a".repeat(32)}`;
+    expect(
+      bridgeTicketFromRequest(
+        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${queryTicket}`, {
+          headers: {
+            authorization: `Bearer code_${"b".repeat(32)}`,
+            "x-crabbox-bridge-ticket": upgradeTicket,
+          },
+        }),
+      ),
+    ).toBe(upgradeTicket);
+  });
+
+  it("prefers bearer bridge tickets over legacy query credentials", () => {
+    const headerTicket = `code_${"b".repeat(32)}`;
+    expect(
+      bridgeTicketFromRequest(
+        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=code_${"a".repeat(32)}`, {
+          headers: { authorization: `Bearer ${headerTicket}` },
+        }),
+      ),
+    ).toBe(headerTicket);
+  });
+
+  it("accepts legacy query bridge tickets with unrelated proxy authorization", () => {
     const queryTicket = `code_${"a".repeat(32)}`;
     expect(
       bridgeTicketFromRequest(
@@ -12004,17 +12030,6 @@ describe("fleet lease identity and idle", () => {
         }),
       ),
     ).toBe(queryTicket);
-  });
-
-  it("uses bearer bridge tickets when the query value is absent or invalid", () => {
-    const headerTicket = `code_${"b".repeat(32)}`;
-    expect(
-      bridgeTicketFromRequest(
-        request("GET", "/v1/leases/blue-lobster/code/agent?ticket=invalid", {
-          headers: { authorization: `Bearer ${headerTicket}` },
-        }),
-      ),
-    ).toBe(headerTicket);
   });
 
   it("uses a VS Code-compatible CSP for code proxy responses", () => {
