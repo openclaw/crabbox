@@ -701,10 +701,7 @@ func expandLifecycleValueTracked(value string, templateCtx lifecycleTemplateCont
 }
 
 func expandLifecycleEnv(env map[string]string, templateCtx lifecycleTemplateContext) ([]string, error) {
-	expanded := make([]string, 0, len(env))
-	if len(env) == 0 {
-		return expanded, nil
-	}
+	expanded := lifecycleBaseEnv(os.Environ())
 	keys := make([]string, 0, len(env))
 	for name := range env {
 		keys = append(keys, name)
@@ -721,7 +718,48 @@ func expandLifecycleEnv(env map[string]string, templateCtx lifecycleTemplateCont
 		if strings.ContainsRune(value, '\x00') {
 			return nil, fmt.Errorf("%s contains a NUL byte", name)
 		}
-		expanded = append(expanded, name+"="+value)
+		expanded = appendOrReplaceLifecycleEnv(expanded, name, value)
 	}
 	return expanded, nil
+}
+
+func lifecycleBaseEnv(environ []string) []string {
+	values := map[string]string{}
+	names := make([]string, 0, len(environ))
+	for _, item := range environ {
+		name, value, ok := strings.Cut(item, "=")
+		if !ok || name == "" || !lifecycleBaseEnvNameAllowed(name) {
+			continue
+		}
+		if _, exists := values[name]; !exists {
+			names = append(names, name)
+		}
+		values[name] = value
+	}
+	sort.Strings(names)
+	base := make([]string, 0, len(names))
+	for _, name := range names {
+		base = append(base, name+"="+values[name])
+	}
+	return base
+}
+
+func lifecycleBaseEnvNameAllowed(name string) bool {
+	switch name {
+	case "HOME", "LANG", "PATH", "TEMP", "TMP", "TMPDIR", "TZ":
+		return true
+	default:
+		return strings.HasPrefix(name, "LC_")
+	}
+}
+
+func appendOrReplaceLifecycleEnv(env []string, name, value string) []string {
+	prefix := name + "="
+	for index, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			env[index] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }

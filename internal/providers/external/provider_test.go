@@ -1198,6 +1198,7 @@ func TestDeclarativeLifecycleExpandsExplicitEnvironmentPlaceholder(t *testing.T)
 func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing.T) {
 	t.Setenv("DEVBOX_TOKEN", "super-secret-token")
 	t.Setenv("GITHUB_TOKEN", "ambient-secret-token")
+	t.Setenv("PATH", "/usr/bin")
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
@@ -1234,14 +1235,14 @@ func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing
 	if strings.Contains(gotArgv, "super-secret-token") {
 		t.Fatalf("secret leaked through argv: %q", gotArgv)
 	}
-	if len(runner.requests[0].Env) != 2 {
-		t.Fatalf("env=%#v, want only configured lifecycle entries", runner.requests[0].Env)
-	}
 	if !envContains(runner.requests[0].Env, "DEVBOX_TOKEN=super-secret-token") {
 		t.Fatal("env missing DEVBOX_TOKEN entry")
 	}
 	if !envContains(runner.requests[0].Env, "DEVBOX_NAME=devbox-fast-coral") {
 		t.Fatal("env missing DEVBOX_NAME entry")
+	}
+	if !envContains(runner.requests[0].Env, "PATH=/usr/bin") {
+		t.Fatalf("env missing safe PATH base: %#v", runner.requests[0].Env)
 	}
 	if envContains(runner.requests[0].Env, "GITHUB_TOKEN=ambient-secret-token") {
 		t.Fatalf("env inherited unrelated ambient secret: %#v", runner.requests[0].Env)
@@ -1250,6 +1251,7 @@ func TestInvokeDeclarativeLifecyclePassesSecretEnvWithoutArgvExposure(t *testing
 
 func TestInvokeDeclarativeLifecycleExecDoesNotInheritAmbientEnvWhenUnset(t *testing.T) {
 	t.Setenv("CRABBOX_AMBIENT_SECRET", "ambient-secret-token")
+	t.Setenv("PATH", "/usr/bin")
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
@@ -1279,11 +1281,15 @@ func TestInvokeDeclarativeLifecycleExecDoesNotInheritAmbientEnvWhenUnset(t *test
 	if got := response.Lease.Labels["configuredToken"]; got != "" {
 		t.Fatalf("lifecycle child received unexpected configured token %q", got)
 	}
+	if got := response.Lease.Labels["path"]; got != "/usr/bin" {
+		t.Fatalf("lifecycle child PATH=%q, want safe base env", got)
+	}
 }
 
 func TestInvokeDeclarativeLifecycleExecPassesOnlyConfiguredEnv(t *testing.T) {
 	t.Setenv("CRABBOX_AMBIENT_SECRET", "ambient-secret-token")
 	t.Setenv("DEVBOX_TOKEN", "configured-token")
+	t.Setenv("PATH", "/usr/bin")
 	cfg := core.BaseConfig()
 	cfg.External = core.ExternalConfig{
 		Lifecycle: core.ExternalLifecycleConfig{
@@ -1315,6 +1321,9 @@ func TestInvokeDeclarativeLifecycleExecPassesOnlyConfiguredEnv(t *testing.T) {
 	}
 	if got := response.Lease.Labels["ambientSecret"]; got != "" {
 		t.Fatalf("lifecycle child inherited ambient secret %q", got)
+	}
+	if got := response.Lease.Labels["path"]; got != "/usr/bin" {
+		t.Fatalf("lifecycle child PATH=%q, want safe base env", got)
 	}
 }
 
@@ -3321,6 +3330,9 @@ func TestExternalLifecycleEnvHelperProcess(t *testing.T) {
 	}
 	if value := os.Getenv("DEVBOX_TOKEN"); value != "" {
 		labels["configuredToken"] = value
+	}
+	if value := os.Getenv("PATH"); value != "" {
+		labels["path"] = value
 	}
 	lease := protocolLease{
 		LeaseID: "cbx_abcdef123456",
