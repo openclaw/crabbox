@@ -43,3 +43,7 @@ History uses Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.
 Tenki provider SSH uses `tenki sandbox ssh-proxy` with Tenki-managed key/cert files under `~/.config/tenki`; do not use Crabbox per-lease keys for gateway auth.
 OpenComputer provider auth: Crabbox reads the API key from `CRABBOX_OPENCOMPUTER_API_KEY`/`OPENCOMPUTER_API_KEY` or the `oc` CLI config (`~/.oc/config.json`) and sends it only in the `X-API-Key` header — never persist `osb_` keys in Crabbox config or place them on argv.
+
+## Mac resource pressure
+
+If work changes local process/session/tooling behavior, read `~/Projects/personal/mac-resource-ops/VISION.md` and `~/Projects/personal/mac-resource-ops/docs/resource-graph.md` first. Prefer bounded commands, lazy loading, explicit cleanup paths, and crabbox/offload for heavy loops. Do not leave new persistent local pressure undocumented.
