@@ -67,6 +67,7 @@ func (f *fakeNebiusAPI) DeleteInstance(_ context.Context, id string) error {
 func newTestBackend(t *testing.T, api *fakeNebiusAPI) *backend {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := testConfig()
 	cfg.IdleTimeout = time.Hour
 	cfg.TTL = 2 * time.Hour
