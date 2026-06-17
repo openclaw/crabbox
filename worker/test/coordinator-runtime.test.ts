@@ -39,6 +39,10 @@ class MemoryStorage implements CoordinatorStorage {
         .map(([key, value]) => [key, value as T]),
     );
   }
+
+  value<T>(key: string): T | undefined {
+    return this.values.get(key) as T | undefined;
+  }
 }
 
 class MemoryRuntime implements CoordinatorRuntime {
@@ -148,6 +152,11 @@ describe("coordinator runtimes", () => {
     expect(runtime.upgradeOptions).toEqual({ maxPayload: runtimeAdapterRelayFrameLimit });
     expect(runtime.acceptedTags).toEqual(["adapter:example-adapter", "runtime-adapter-agent"]);
     expect(runtime.acceptedAttachment).toMatchObject({ desktopTimeoutMs: 180_000 });
+    expect(runtime.storage.value("runtime-adapter-identity:example-adapter")).toMatchObject({
+      claimVersion: 1,
+      claimState: "confirmed",
+      confirmedAt: expect.any(String),
+    });
   });
 
   it("keeps provider-backed portal requests outside the lifecycle queue", () => {

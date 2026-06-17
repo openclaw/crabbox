@@ -141,9 +141,14 @@ WebVNC/share operation still requires the record to exist.
 
 Runtime adapters connect outbound to `/agent`, so their local lifecycle service
 does not need an inbound public route. The coordinator issues a short-lived,
-single-use ticket after normal owner authentication. The first ticket safely
-claims the adapter ID for that owner and organization; lease registration
-rejects unclaimed IDs and claims owned by another identity. The relay permits
+single-use ticket after normal owner authentication. The first ticket for a new
+adapter ID creates a ten-minute provisional owner/org claim. Agent connection or
+successful registered lease binding confirms it as durable. An expired
+provisional claim can be recovered by another normally authenticated owner only
+when no connected agent, pending relay request, unexpired ticket, live registered
+lease, or pending workspace deletion still uses it. Existing and confirmed
+claims remain durable. Lease registration rejects unclaimed IDs and claims owned
+by another identity. The relay permits
 only the versioned workspace create, inspect, delete, and desktop-connection
 methods. Public proxy `DELETE` requests are rejected; destructive dispatch must
 go through a registered lease release so the coordinator can fence its immutable

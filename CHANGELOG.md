@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Made new runtime-adapter ticket claims provisional until agent connection or lease registration, allowing authenticated recovery of expired inactive first claims while preserving all existing and confirmed adapter IDs.
 - Separated shared automation tokens from signed user-token keys, preserving shared-token-only automation while requiring distinct session signing material for GitHub login.
 - Required retained coordinator ownership records before orphan sweeps delete AWS or Azure machines or release EC2 Mac hosts, while keeping tag-only and legacy candidates visible in reports.
 - Verified the pinned GitHub CLI release artifacts before installing them in the default Cloudflare sandbox image and preserved true AMD64/ARM64 target selection during cross-platform builds.

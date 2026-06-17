@@ -362,6 +362,14 @@ describe("runtime adapter relay", () => {
       adapterID: "example-adapter",
       ticket: expect.stringMatching(/^adapter_[a-f0-9]{32}$/),
     });
+    expect(storage.value("runtime-adapter-identity:example-adapter")).toMatchObject({
+      adapterID: "example-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      claimVersion: 1,
+      claimState: "provisional",
+      claimExpiresAt: expect.any(String),
+    });
     const conflictingTicket = await fleet.fetch(
       request("POST", "/v1/adapters/example-adapter/ticket", {
         headers: {
@@ -661,6 +669,142 @@ describe("runtime adapter relay", () => {
       }),
     );
     expect(relayState.runtimeAdapterPending.size).toBe(0);
+  });
+
+  it("recovers only inactive expired provisional runtime adapter claims", async () => {
+    const challengerHeaders = {
+      "x-crabbox-owner": "mallory@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const claim = (fleet: FleetDurableObject, adapterID: string) =>
+      fleet.fetch(
+        request("POST", `/v1/adapters/${adapterID}/ticket`, {
+          headers: challengerHeaders,
+          body: {},
+        }),
+      );
+    const expectConflict = async (fleet: FleetDurableObject, adapterID: string) => {
+      const response = await claim(fleet, adapterID);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "adapter_id_conflict" });
+    };
+
+    const recoverableStorage = new MemoryStorage();
+    recoverableStorage.seed(
+      "runtime-adapter-identity:recoverable-adapter",
+      expiredRuntimeAdapterClaim("recoverable-adapter"),
+    );
+    const recovered = await claim(testFleet(recoverableStorage), "recoverable-adapter");
+    expect(recovered.status).toBe(200);
+    expect(recoverableStorage.value("runtime-adapter-identity:recoverable-adapter")).toMatchObject({
+      owner: "mallory@example.com",
+      org: "example-org",
+      claimVersion: 1,
+      claimState: "provisional",
+      claimExpiresAt: expect.any(String),
+    });
+
+    const durableStorage = new MemoryStorage();
+    durableStorage.seed("runtime-adapter-identity:legacy-adapter", {
+      adapterID: "legacy-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    durableStorage.seed("runtime-adapter-identity:confirmed-adapter", {
+      ...expiredRuntimeAdapterClaim("confirmed-adapter"),
+      claimState: "confirmed",
+      confirmedAt: "2026-06-01T00:01:00.000Z",
+    });
+    durableStorage.seed("runtime-adapter-identity:fresh-adapter", {
+      ...expiredRuntimeAdapterClaim("fresh-adapter"),
+      claimExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const durableFleet = testFleet(durableStorage);
+    await expectConflict(durableFleet, "legacy-adapter");
+    await expectConflict(durableFleet, "confirmed-adapter");
+    await expectConflict(durableFleet, "fresh-adapter");
+
+    const ticketStorage = new MemoryStorage();
+    ticketStorage.seed(
+      "runtime-adapter-identity:ticketed-adapter",
+      expiredRuntimeAdapterClaim("ticketed-adapter"),
+    );
+    ticketStorage.seed("runtime-adapter-ticket:adapter_00000000000000000000000000000000", {
+      ticket: "adapter_00000000000000000000000000000000",
+      adapterID: "ticketed-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await expectConflict(testFleet(ticketStorage), "ticketed-adapter");
+
+    const leaseStorage = new MemoryStorage();
+    leaseStorage.seed(
+      "runtime-adapter-identity:leased-adapter",
+      expiredRuntimeAdapterClaim("leased-adapter"),
+    );
+    const lease = testLease({
+      id: "cbx_000000000099",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      runtimeAdapterID: "leased-adapter",
+      runtimeAdapterWorkspaceID: "leased-workspace",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    leaseStorage.seed(`lease:${lease.id}`, lease);
+    await expectConflict(testFleet(leaseStorage), "leased-adapter");
+
+    const deletingStorage = new MemoryStorage();
+    deletingStorage.seed(
+      "runtime-adapter-identity:deleting-adapter",
+      expiredRuntimeAdapterClaim("deleting-adapter"),
+    );
+    const deletingLease = testLease({
+      id: "cbx_000000000098",
+      provider: "external",
+      lifecycle: "registered",
+      state: "released",
+      owner: "alice@example.com",
+      org: "example-org",
+      runtimeAdapterID: "deleting-adapter",
+      runtimeAdapterWorkspaceID: "deleting-workspace",
+      runtimeAdapterDeleteRequestedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    deletingStorage.seed(`lease:${deletingLease.id}`, deletingLease);
+    await expectConflict(testFleet(deletingStorage), "deleting-adapter");
+
+    const connectedStorage = new MemoryStorage();
+    connectedStorage.seed(
+      "runtime-adapter-identity:connected-adapter",
+      expiredRuntimeAdapterClaim("connected-adapter"),
+    );
+    const connectedFleet = testFleet(connectedStorage);
+    const relayState = connectedFleet as unknown as {
+      runtimeAdapterAgents: Map<string, WebSocket>;
+    };
+    relayState.runtimeAdapterAgents.set(
+      "connected-adapter",
+      new FakeWebSocket() as unknown as WebSocket,
+    );
+    await expectConflict(connectedFleet, "connected-adapter");
+
+    const pendingStorage = new MemoryStorage();
+    pendingStorage.seed(
+      "runtime-adapter-identity:pending-adapter",
+      expiredRuntimeAdapterClaim("pending-adapter"),
+    );
+    const pendingFleet = testFleet(pendingStorage);
+    const pendingState = pendingFleet as unknown as {
+      runtimeAdapterPending: Map<string, { adapterID: string }>;
+    };
+    pendingState.runtimeAdapterPending.set("pending-request", { adapterID: "pending-adapter" });
+    await expectConflict(pendingFleet, "pending-adapter");
   });
 
   it("isolates ordinary relay capacity by owner while preserving delete capacity", async () => {
@@ -5746,6 +5890,11 @@ describe("fleet lease identity and idle", () => {
         runtimeAdapterWorkspaceID: "example-workspace-96",
         runtimeAdapterRegistrationID: "registration-generation-96",
       },
+    });
+    expect(storage.value("runtime-adapter-identity:example-adapter")).toMatchObject({
+      claimVersion: 1,
+      claimState: "confirmed",
+      confirmedAt: expect.any(String),
     });
 
     const duplicateBinding = await fleet.fetch(
@@ -16911,6 +17060,18 @@ function testFleet(
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
   );
+}
+
+function expiredRuntimeAdapterClaim(adapterID: string) {
+  return {
+    adapterID,
+    owner: "alice@example.com",
+    org: "example-org",
+    createdAt: "2026-06-01T00:00:00.000Z",
+    claimVersion: 1,
+    claimState: "provisional",
+    claimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+  };
 }
 
 function fakeProvider(

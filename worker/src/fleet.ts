@@ -143,6 +143,7 @@ const codeViewerTicketTTLSeconds = 120;
 const codeViewerSessionTTLSeconds = 8 * 60 * 60;
 const egressTicketTTLSeconds = 120;
 const runtimeAdapterTicketTTLSeconds = 120;
+const runtimeAdapterProvisionalClaimTTLSeconds = 10 * 60;
 const runtimeAdapterDeleteRetryBaseMs = 5_000;
 const runtimeAdapterDeleteRetryMaxMs = 60_000;
 const runtimeAdapterDeleteDispatchGraceMs = 1_000;
@@ -257,6 +258,10 @@ interface RuntimeAdapterIdentityRecord {
   owner: string;
   org: string;
   createdAt: string;
+  claimVersion?: 1;
+  claimState?: "provisional" | "confirmed";
+  claimExpiresAt?: string;
+  confirmedAt?: string;
 }
 
 interface RuntimeAdapterPendingRequest {
@@ -3675,6 +3680,7 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
+    let runtimeAdapterIdentity: RuntimeAdapterIdentityRecord | undefined;
     if (effectiveRuntimeAdapterID && effectiveRuntimeAdapterWorkspaceID) {
       const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(
         runtimeAdapterIdentityKey(effectiveRuntimeAdapterID),
@@ -3701,6 +3707,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
+      runtimeAdapterIdentity = identity;
     }
 
     const leases = await this.leaseRecords();
@@ -3817,6 +3824,9 @@ export class FleetCoordinator {
       clearRuntimeAdapterDeleteMetadata(record);
     }
     await this.putLease(record);
+    if (runtimeAdapterIdentity) {
+      await this.confirmRuntimeAdapterIdentity(runtimeAdapterIdentity, nowISO);
+    }
     await this.scheduleAlarm();
     return json({ lease: record }, { status: existing ? 200 : 201 });
   }
@@ -5802,28 +5812,49 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const identityKey = runtimeAdapterIdentityKey(adapterID);
-    const identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(identityKey);
+    await this.cleanupExpiredRuntimeAdapterTickets();
+    const now = new Date();
+    let identity = await this.state.storage.get<RuntimeAdapterIdentityRecord>(identityKey);
     if (
       identity &&
       (identity.adapterID !== adapterID || identity.owner !== owner || identity.org !== org)
     ) {
-      return json(
-        {
-          error: "adapter_id_conflict",
-          message: "runtime adapter id belongs to another owner or organization",
-        },
-        { status: 409 },
-      );
+      if (!(await this.runtimeAdapterIdentityReclaimable(identity, adapterID, now.getTime()))) {
+        return json(
+          {
+            error: "adapter_id_conflict",
+            message: "runtime adapter id belongs to another owner or organization",
+          },
+          { status: 409 },
+        );
+      }
+      identity = undefined;
     }
-    await this.cleanupExpiredRuntimeAdapterTickets();
-    const now = new Date();
     if (!identity) {
-      await this.state.storage.put<RuntimeAdapterIdentityRecord>(identityKey, {
+      identity = {
         adapterID,
         owner,
         org,
         createdAt: now.toISOString(),
-      });
+        claimVersion: 1,
+        claimState: "provisional",
+        claimExpiresAt: new Date(
+          now.getTime() + runtimeAdapterProvisionalClaimTTLSeconds * 1000,
+        ).toISOString(),
+      };
+      await this.state.storage.put<RuntimeAdapterIdentityRecord>(identityKey, identity);
+    } else if (
+      identity.claimVersion === 1 &&
+      identity.claimState === "provisional" &&
+      !identity.confirmedAt
+    ) {
+      identity = {
+        ...identity,
+        claimExpiresAt: new Date(
+          now.getTime() + runtimeAdapterProvisionalClaimTTLSeconds * 1000,
+        ).toISOString(),
+      };
+      await this.state.storage.put<RuntimeAdapterIdentityRecord>(identityKey, identity);
     }
     const ticket: RuntimeAdapterTicketRecord = {
       ticket: newRuntimeAdapterTicket(),
@@ -5877,6 +5908,7 @@ export class FleetCoordinator {
         { status: 401 },
       );
     }
+    await this.confirmRuntimeAdapterIdentity(identity, new Date().toISOString());
     const upgrade = this.state.createWebSocketUpgrade({
       maxPayload: runtimeAdapterRelayFrameLimit,
     });
@@ -7419,6 +7451,63 @@ export class FleetCoordinator {
         .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
         .map(([key]) => this.state.storage.delete(key)),
     );
+  }
+
+  private async runtimeAdapterIdentityReclaimable(
+    identity: RuntimeAdapterIdentityRecord,
+    adapterID: string,
+    now: number,
+  ): Promise<boolean> {
+    if (
+      identity.adapterID !== adapterID ||
+      identity.claimVersion !== 1 ||
+      identity.claimState !== "provisional" ||
+      identity.confirmedAt !== undefined ||
+      !Number.isFinite(Date.parse(identity.claimExpiresAt ?? "")) ||
+      Date.parse(identity.claimExpiresAt ?? "") > now ||
+      this.runtimeAdapterAgents.has(adapterID) ||
+      [...this.runtimeAdapterPending.values()].some((pending) => pending.adapterID === adapterID)
+    ) {
+      return false;
+    }
+    const [tickets, leases] = await Promise.all([
+      this.state.storage.list<RuntimeAdapterTicketRecord>({
+        prefix: runtimeAdapterTicketPrefix(),
+      }),
+      this.leaseRecords(),
+    ]);
+    if (
+      [...tickets.values()].some(
+        (ticket) => ticket.adapterID === adapterID && Date.parse(ticket.expiresAt) > now,
+      )
+    ) {
+      return false;
+    }
+    return !leases.some(
+      (lease) =>
+        lease.runtimeAdapterID === adapterID &&
+        (leaseIsLive(lease) || Boolean(lease.runtimeAdapterDeleteRequestedAt)),
+    );
+  }
+
+  private async confirmRuntimeAdapterIdentity(
+    identity: RuntimeAdapterIdentityRecord,
+    confirmedAt: string,
+  ): Promise<void> {
+    if (
+      identity.claimVersion !== 1 ||
+      identity.claimState !== "provisional" ||
+      identity.confirmedAt !== undefined
+    ) {
+      return;
+    }
+    const confirmed: RuntimeAdapterIdentityRecord = {
+      ...identity,
+      claimState: "confirmed",
+      confirmedAt,
+    };
+    delete confirmed.claimExpiresAt;
+    await this.state.storage.put(runtimeAdapterIdentityKey(identity.adapterID), confirmed);
   }
 
   private async consumeWebVNCTicket(
