@@ -132,6 +132,15 @@ func TestReplayRTMRMatchesRealHardware(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeEventDigestsMatchesRealHardware(t *testing.T) {
+	info := loadRealInfo(t)
+	tcb := loadRealTCB(t, info)
+
+	if err := validateRuntimeEventDigests(tcb.EventLog); err != nil {
+		t.Fatalf("validateRuntimeEventDigests: %v", err)
+	}
+}
+
 // TestReplayRTMRMutationBreaks confirms the replay is a real integrity check:
 // mutating any single event digest in an RTMR's chain changes the replayed
 // value so it no longer matches tcb_info.
@@ -295,8 +304,52 @@ func TestVerifyAttestationRejectsComposeHashEventMismatch(t *testing.T) {
 	info.TCBInfo = string(tamperedTCB)
 	if _, err := verifyAttestation(info, realExpectedAppID, expectedCompose, false); err == nil {
 		t.Fatal("verifyAttestation accepted a mismatched RTMR3 compose-hash payload")
-	} else if !strings.Contains(err.Error(), "RTMR3 compose-hash") {
+	} else if !strings.Contains(err.Error(), "digest does not bind") {
 		t.Fatalf("compose-hash event error = %v", err)
+	}
+}
+
+func TestVerifyAttestationRejectsTamperedRuntimeEventPayload(t *testing.T) {
+	info := loadRealInfo(t)
+	tcb := loadRealTCB(t, info)
+	for i := range tcb.EventLog {
+		if tcb.EventLog[i].IMR == 3 && tcb.EventLog[i].Event == "app-id" {
+			tcb.EventLog[i].EventPayload = strings.Repeat("0", 40)
+			break
+		}
+	}
+	tamperedTCB, err := json.Marshal(tcb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.TCBInfo = string(tamperedTCB)
+
+	if _, err := verifyAttestation(info, realExpectedAppID, loadRealCompose(t, info), false); err == nil {
+		t.Fatal("verifyAttestation accepted an app-id payload not bound by its replayed digest")
+	} else if !strings.Contains(err.Error(), "digest does not bind") {
+		t.Fatalf("tampered app-id error = %v", err)
+	}
+}
+
+func TestVerifyAttestationRejectsNonRuntimeIdentityEvent(t *testing.T) {
+	info := loadRealInfo(t)
+	tcb := loadRealTCB(t, info)
+	for i := range tcb.EventLog {
+		if tcb.EventLog[i].IMR == 3 && tcb.EventLog[i].Event == "app-id" {
+			tcb.EventLog[i].EventType = 0
+			break
+		}
+	}
+	tamperedTCB, err := json.Marshal(tcb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info.TCBInfo = string(tamperedTCB)
+
+	if _, err := verifyAttestation(info, realExpectedAppID, loadRealCompose(t, info), false); err == nil {
+		t.Fatal("verifyAttestation accepted identity from a non-runtime event")
+	} else if !strings.Contains(err.Error(), "no RTMR3 app-id event") {
+		t.Fatalf("non-runtime app-id error = %v", err)
 	}
 }
 
@@ -332,8 +385,8 @@ func TestVerifyAttestationRejectsTamperedMeasurement(t *testing.T) {
 
 	if _, err := verifyAttestation(info, realExpectedAppID, loadRealCompose(t, info), false); err == nil {
 		t.Fatal("verifyAttestation accepted a tampered measurement")
-	} else if !strings.Contains(err.Error(), "RTMR") {
-		t.Fatalf("expected an RTMR replay mismatch error, got: %v", err)
+	} else if !strings.Contains(err.Error(), "RTMR3 runtime event") {
+		t.Fatalf("expected an RTMR3 event integrity error, got: %v", err)
 	}
 }
 

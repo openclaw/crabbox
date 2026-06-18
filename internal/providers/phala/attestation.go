@@ -7,6 +7,7 @@ import (
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -33,6 +34,9 @@ const (
 	tdxMeasurementLen = 48
 	// tdxTeeType is the tee_type discriminator for Intel TDX in the quote header.
 	tdxTeeType = 0x81
+	// dstackRuntimeEventType identifies runtime events whose digest binds the
+	// event name and payload into RTMR3.
+	dstackRuntimeEventType = 0x08000001
 	// tappdInfoEndpoint is the dstack guest agent prpc endpoint that returns the
 	// CVM identity + attestation bundle.
 	tappdInfoEndpoint = "http://localhost/prpc/Tappd.Info"
@@ -218,11 +222,43 @@ func replayRTMR(events []eventEntry, imr int) []byte {
 	return acc
 }
 
+// validateRuntimeEventDigests binds each Dstack RTMR3 event payload to the
+// digest that is replayed into the hardware-signed register. event_payload is
+// hex-encoded in Tappd.Info, while the digest covers its decoded bytes.
+func validateRuntimeEventDigests(events []eventEntry) error {
+	for i, e := range events {
+		if e.IMR != 3 || e.EventType != dstackRuntimeEventType {
+			continue
+		}
+		payload, err := hex.DecodeString(strings.TrimSpace(e.EventPayload))
+		if err != nil {
+			return fmt.Errorf("phala attestation: RTMR3 runtime event %d (%q) has a non-hex payload: %w", i, e.Event, err)
+		}
+		digest, err := hex.DecodeString(strings.TrimSpace(e.Digest))
+		if err != nil || len(digest) != tdxMeasurementLen {
+			return fmt.Errorf("phala attestation: RTMR3 runtime event %d (%q) has an invalid SHA-384 digest", i, e.Event)
+		}
+
+		var eventType [4]byte
+		binary.LittleEndian.PutUint32(eventType[:], e.EventType)
+		h := sha512.New384()
+		h.Write(eventType[:])
+		h.Write([]byte(":"))
+		h.Write([]byte(e.Event))
+		h.Write([]byte(":"))
+		h.Write(payload)
+		if !bytes.Equal(h.Sum(nil), digest) {
+			return fmt.Errorf("phala attestation: RTMR3 runtime event %d (%q) digest does not bind its name and payload", i, e.Event)
+		}
+	}
+	return nil
+}
+
 // rtmr3Event returns the event_payload of the named RTMR3 event (e.g. "app-id",
 // "compose-hash"), or "" if absent.
 func rtmr3Event(events []eventEntry, name string) string {
 	for _, e := range events {
-		if e.IMR == 3 && e.Event == name {
+		if e.IMR == 3 && e.EventType == dstackRuntimeEventType && e.Event == name {
 			return strings.TrimSpace(e.EventPayload)
 		}
 	}
@@ -242,14 +278,15 @@ func normalizeAppID(id string) string {
 // response and returns the verified identity. It performs, in order:
 //
 //  2. parse the inner tcb_info JSON string;
-//  3. replay all four RTMRs from the event log and assert they equal tcb_info;
-//  4. extract the raw TDX quote from the app TLS certificate;
-//  5. (if dcap) DCAP-verify the quote's signature chains to the Intel SGX/TDX
+//  3. verify each runtime event digest binds its event name and payload;
+//  4. replay all four RTMRs from the event log and assert they equal tcb_info;
+//  5. extract the raw TDX quote from the app TLS certificate;
+//  6. (if dcap) DCAP-verify the quote's signature chains to the Intel SGX/TDX
 //     root CA, then assert the SIGNED quote's MRTD and RTMRs equal the replayed
 //     tcb_info values (links the signature to the measurement);
-//  6. bind the attested app_compose to its measured compose-hash and to the
+//  7. bind the attested app_compose to its measured compose-hash and to the
 //     exact Compose text passed to phala deploy;
-//  7. bind identity: assert the RTMR3 app-id event equals expectedAppID.
+//  8. bind identity: assert the RTMR3 app-id event equals expectedAppID.
 //
 // expectedAppID is the app id of the CVM crabbox just created; it proves the
 // attested enclave is the requested CVM rather than some other attested box.
@@ -264,7 +301,13 @@ func verifyAttestation(info dstackInfo, expectedAppID, expectedCompose string, d
 		return AttestationReport{}, err
 	}
 
-	// Step 3: replay all four RTMRs and assert they match tcb_info. Any tampered
+	// Step 3: prove that the event payloads consumed below produced the digests
+	// replayed into RTMR3. Replaying stored digests alone does not bind payloads.
+	if err := validateRuntimeEventDigests(tcb.EventLog); err != nil {
+		return AttestationReport{}, err
+	}
+
+	// Step 4: replay all four RTMRs and assert they match tcb_info. Any tampered
 	// event digest changes the replayed RTMR; the signed quote check below binds
 	// those replayed values to the hardware report.
 	for i := 0; i < 4; i++ {
@@ -278,7 +321,7 @@ func verifyAttestation(info dstackInfo, expectedAppID, expectedCompose string, d
 		}
 	}
 
-	// Step 4: extract the raw TDX quote from the app certificate.
+	// Step 5: extract the raw TDX quote from the app certificate.
 	quote, err := extractTDXQuote(info.AppCert)
 	if err != nil {
 		return AttestationReport{}, err
@@ -302,7 +345,7 @@ func verifyAttestation(info dstackInfo, expectedAppID, expectedCompose string, d
 
 	dcapVerified := false
 	if dcap {
-		// Step 5: DCAP signature verification -- proves genuine Intel silicon by
+		// Step 6: DCAP signature verification -- proves genuine Intel silicon by
 		// chaining the quote signature to the Intel SGX/TDX Root CA. GetCollateral
 		// fetches the verification collateral from Intel PCS over the network.
 		if err := dcapVerifyQuote(quote); err != nil {
@@ -311,7 +354,7 @@ func verifyAttestation(info dstackInfo, expectedAppID, expectedCompose string, d
 		dcapVerified = true
 	}
 
-	// Step 7: identity binding -- the RTMR3 app-id event must equal the app id of
+	// Step 8: identity binding -- the RTMR3 app-id event must equal the app id of
 	// the CVM crabbox created. Without this, a genuine-and-measured but UNRELATED
 	// attested box would pass.
 	appIDEvent := rtmr3Event(tcb.EventLog, "app-id")
