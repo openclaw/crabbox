@@ -1245,7 +1245,7 @@ func (testE2BProvider) Spec() ProviderSpec {
 		Name:        "e2b",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureURLBridge},
+		Features:    FeatureSet{FeatureURLBridge, FeatureRunSession},
 		Coordinator: CoordinatorNever,
 	}
 }
@@ -1283,7 +1283,24 @@ func (testE2BProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	return nil
 }
 func (p testE2BProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDelegatedBackend{spec: p.Spec()}, nil
+	return testE2BBackend{testDelegatedBackend{spec: p.Spec()}}, nil
+}
+
+type testE2BBackend struct{ testDelegatedBackend }
+
+func (b testE2BBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	result, err := b.testDelegatedBackend.Run(ctx, req)
+	if err != nil {
+		return result, err
+	}
+	result.Session = &RunSessionHandle{
+		Provider:       "e2b",
+		LeaseID:        result.LeaseID,
+		Slug:           result.Slug,
+		Kept:           req.Keep,
+		CleanupCommand: "crabbox stop --provider e2b --id " + result.LeaseID,
+	}
+	return result, nil
 }
 
 type testModalProvider struct{}

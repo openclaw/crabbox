@@ -507,7 +507,6 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "daytona require artifact", provider: "daytona", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "daytona delegates run execution; --require-artifact is not supported"},
 		{name: "islo unsafe require artifact", provider: "islo", args: []string{"--require-artifact", "../manifest.json"}, want: "--require-artifact contains unsupported characters or non-relative path"},
 		{name: "e2b require artifact", provider: "e2b", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "e2b delegates run execution; --require-artifact is not supported"},
-		{name: "e2b lease output", provider: "e2b", args: []string{"--lease-output", "session.json"}, want: "--lease-output is not supported for provider=e2b yet"},
 		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
 		{name: "daytona script", provider: "daytona", args: []string{"--script", "testdata/missing.sh"}, want: "daytona delegates run execution; --script is not supported"},
 		{name: "e2b fresh pr", provider: "e2b", args: []string{"--fresh-pr", "example-org/my-app#1"}, want: "e2b delegates sync; --fresh-pr is not supported"},
@@ -528,6 +527,27 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 				t.Fatalf("message=%q want %q", exitErr.Message, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunCommandAcceptsE2BLeaseOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.runCommand(t.Context(), []string{"--provider", "e2b", "--keep", "--lease-output", path, "--", "true"}); err != nil {
+		t.Fatalf("runCommand: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read lease output: %v", err)
+	}
+	var session RunSessionHandle
+	if err := json.Unmarshal(data, &session); err != nil {
+		t.Fatalf("parse lease output: %v", err)
+	}
+	if session.Provider != "e2b" || session.LeaseID != "tbx_test" || !session.Kept || session.CleanupCommand == "" {
+		t.Fatalf("session=%#v", session)
 	}
 }
 
