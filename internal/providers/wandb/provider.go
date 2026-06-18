@@ -21,7 +21,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "wandb",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    nil,
+		Features:    core.FeatureSet{core.FeatureRunSession},
 		Coordinator: core.CoordinatorNever,
 	}
 }

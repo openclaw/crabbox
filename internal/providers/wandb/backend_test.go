@@ -258,6 +258,12 @@ func newWandbBackendForTest(api wandbAPI) *wandbBackend {
 	}
 }
 
+func TestWandbProviderAdvertisesRunSession(t *testing.T) {
+	if !(Provider{}).Spec().Features.Has("run-session") {
+		t.Fatalf("features=%#v want run session", Provider{}.Spec().Features)
+	}
+}
+
 func TestWandbRunHappyPathAcquireExecStop(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{
@@ -271,6 +277,12 @@ func TestWandbRunHappyPathAcquireExecStop(t *testing.T) {
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("exit = %d, want 0", result.ExitCode)
+	}
+	if result.Session == nil {
+		t.Fatal("missing session handle")
+	}
+	if got := result.Session; got.Provider != providerName || got.LeaseID != "sb-abc" || got.Slug != "sb-abc" || got.Reused || got.Kept || got.CleanupCommand != "crabbox stop --provider wandb --id 'sb-abc'" {
+		t.Fatalf("session = %#v", got)
 	}
 	if api.acquireReq.Image != "ubuntu:24.04" {
 		t.Fatalf("Acquire image = %q, want ubuntu:24.04", api.acquireReq.Image)
@@ -325,13 +337,20 @@ func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "fake")
 	api := &fakeWandbAPI{execCode: 0}
 	backend := newWandbBackendForTest(api)
-	if _, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		ID:      "sb-supplied",
 		NoSync:  true,
 		Command: []string{"echo"},
 		Env:     map[string]string{"CI": "true"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Run err: %v", err)
+	}
+	if result.Session == nil {
+		t.Fatal("missing session handle")
+	}
+	if got := result.Session; got.LeaseID != "sb-supplied" || got.Slug != "sb-supplied" || !got.Reused || !got.Kept || got.CleanupCommand != "crabbox stop --provider wandb --id 'sb-supplied'" {
+		t.Fatalf("session = %#v", got)
 	}
 	if api.acquireReq.Image != "" {
 		t.Fatalf("Acquire should not be called when --id is supplied; got %#v", api.acquireReq)
@@ -469,6 +488,17 @@ func TestWandbKeepOnFailureRetainsSandbox(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("missing keep-on-failure hint: %s", stderr.String())
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session = %#v, want kept failure handle", result.Session)
+	}
+}
+
+func TestWandbCleanupCommandQuotesSandboxID(t *testing.T) {
+	got := wandbCleanupCommand("sb-'quoted")
+	want := `crabbox stop --provider wandb --id 'sb-'\''quoted'`
+	if got != want {
+		t.Fatalf("cleanup command = %q, want %q", got, want)
 	}
 }
 
