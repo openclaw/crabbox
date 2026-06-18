@@ -1080,7 +1080,7 @@ func TestResolveStatusOnlyReadyProbeSkipsBootstrap(t *testing.T) {
 		t.Fatalf("status lease ProxyCommand missing cached gateway host: %q", lease.SSH.ProxyCommand)
 	}
 	// Only the `cvms list` from resolve() ran; no per-connection `cvms get`.
-	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms list --json" {
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms list --page 1 --page-size 100 --json" {
 		t.Fatalf("status path issued unexpected CLI calls: %#v", runner.calls)
 	}
 
@@ -1282,6 +1282,31 @@ func TestCleanupRetainsClaimsOnSuccessfulEmptyListOutput(t *testing.T) {
 	}
 }
 
+func TestCleanupRetainsClaimForCVMOnSecondPage(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	leaseID := "cbx_abcdef123456"
+	claimPhalaLease(t, cfg, leaseID, "live-cvm")
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"total":2,"items":[{"appId":"foreign","cvmName":"foreign-cvm","status":"running"}]}`},
+		{Stdout: `{"success":true,"total":2,"items":[{"appId":"live-cvm","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`},
+	}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, ok, err := resolvePhalaClaim(leaseID, cfg)
+	if err != nil || !ok || claim.CloudID != "live-cvm" {
+		t.Fatalf("claim not retained: claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("cleanup issued commands beyond the two inventory pages: calls=%#v", runner.calls)
+	}
+}
+
 func TestCleanupSkipsNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
@@ -1298,7 +1323,7 @@ func TestCleanupSkipsNamePrefixedCVMWithoutLocalClaim(t *testing.T) {
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms list --json" {
+	if len(runner.calls) != 1 || strings.Join(runner.calls[0].args, " ") != "cvms list --page 1 --page-size 100 --json" {
 		t.Fatalf("issued more than the inventory list (possible delete): calls=%#v", runner.calls)
 	}
 }
@@ -1708,6 +1733,54 @@ func TestListParsesRealCamelCaseListPayload(t *testing.T) {
 	}
 }
 
+func TestListInstancesPaginatesAllCVMs(t *testing.T) {
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"total":2,"items":[{"appId":"first","cvmName":"crabbox-cbx-first000000","status":"running"}]}`},
+		{Stdout: `{"success":true,"total":2,"items":[{"appId":"second","cvmName":"crabbox-cbx-second00000","status":"running"}]}`},
+	}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+
+	items, err := b.listInstances(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].cloudID() != "first" || items[1].cloudID() != "second" {
+		t.Fatalf("items=%#v", items)
+	}
+	wantCalls := []string{
+		"cvms list --page 1 --page-size 100 --json",
+		"cvms list --page 2 --page-size 100 --json",
+	}
+	if len(runner.calls) != len(wantCalls) {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+	for i, want := range wantCalls {
+		if got := strings.Join(runner.calls[i].args, " "); got != want {
+			t.Fatalf("call %d=%q want %q", i, got, want)
+		}
+	}
+}
+
+func TestListInstancesRejectsIncompletePagination(t *testing.T) {
+	runner := &fakeRunner{results: []core.LocalCommandResult{
+		{Stdout: `{"success":true,"total":2,"items":[{"appId":"first","cvmName":"crabbox-cbx-first000000","status":"running"}]}`},
+		{Stdout: `{"success":true,"total":2,"items":[]}`},
+	}}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+
+	if _, err := b.listInstances(context.Background()); err == nil {
+		t.Fatal("listInstances accepted an inventory that ended before its reported total")
+	} else if !strings.Contains(err.Error(), "ended after 1 of 2 reported items") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 // TestInstanceUnmarshalAcceptsBothCaseStyles asserts the tolerant decoder reads
 // both the snake_case (`cvms get`) and camelCase (`cvms list`) spelling of
 // every identifier, accepting appId OR app_id et al.
@@ -2028,10 +2101,10 @@ func TestAcquireHappyPath(t *testing.T) {
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
 	// Acquire's CLI sequence (the fakeRunner is shared across every b.phala call):
-	//   1. listInstances            -> `cvms list --json`           (no owned CVMs)
+	//   1. listInstances            -> `cvms list --page 1 ...`      (no owned CVMs)
 	//   2. create                   -> `deploy --json ...`          (app_id=acq...)
 	//   3. resolveGatewayHost(id)   -> `cvms get --cvm-id <id> --json`
-	//   4. findInstance(id)         -> `cvms list --json`           (the new CVM)
+	//   4. findInstance(id)         -> `cvms list --page 1 ...`      (the new CVM)
 	//   5. prepareSSH               -> WaitForSSHReady fails (cancelled ctx)
 	//   6. rollback -> destroy      -> `cvms delete --cvm-id <id> --force`
 	listAfterCreate := `{"success":true,"items":[{"appId":"` + acquireAppID + `","cvmName":"crabbox-cbx-acquire000000","status":"running"}]}`
@@ -2055,10 +2128,10 @@ func TestAcquireHappyPath(t *testing.T) {
 	// The four pre-SSH calls ran in order, proving create+gateway+findInstance
 	// threaded the canonical app_id through.
 	wantPreSSH := []string{
-		"cvms list --json",
+		"cvms list --page 1 --page-size 100 --json",
 		"deploy --json", // prefix-checked below
 		"cvms get --cvm-id " + acquireAppID + " --json",
-		"cvms list --json",
+		"cvms list --page 1 --page-size 100 --json",
 	}
 	if len(runner.calls) < 4 {
 		t.Fatalf("Acquire did not reach the SSH boundary: calls=%#v", runner.calls)

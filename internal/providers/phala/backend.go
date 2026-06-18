@@ -34,6 +34,7 @@ const defaultComposeFileName = "crabbox-default-compose.yml"
 
 const phalaRollbackTimeout = 30 * time.Second
 const phalaAmbiguousCreateRecoveryGrace = 5 * time.Minute
+const phalaListPageSize = 100
 
 // defaultInstanceType is the smallest confidential TDX shape Phala Cloud
 // advertises. dstack provisions Intel TDX CVMs; tdx.small is the cheapest.
@@ -153,6 +154,7 @@ func (i instance) matchesID(identifier string) bool {
 // array.
 type listOutput struct {
 	Success bool       `json:"success"`
+	Total   *int       `json:"total"`
 	Items   []instance `json:"items"`
 }
 
@@ -843,34 +845,71 @@ func ambiguousPhalaCreateOutcome(result core.LocalCommandResult, err error) bool
 
 func (b *backend) listInstances(ctx context.Context) ([]instance, error) {
 	cfg := b.configForRun()
-	// `phala cvms list` accepts no node flag (only --cvm-id/--page/--page-size/
-	// --search), so node-scoping is applied client-side via nodeMatchesScope in
-	// owned() rather than passed to the CLI.
-	args := []string{"cvms", "list", "--json"}
-	result, err := b.phala(ctx, cfg, args, nil)
-	if err != nil {
-		return nil, commandError("phala cvms list", result, err)
-	}
-	payload := jsonObjectPrefix(result.Stdout)
-	if payload == "" {
-		return nil, core.Exit(5, "phala cvms list produced no JSON output")
-	}
-	var output listOutput
-	if err := json.Unmarshal([]byte(payload), &output); err != nil {
-		return nil, core.Exit(5, "parse phala cvms list output: %v", err)
-	}
-	if !output.Success {
-		return nil, core.Exit(5, "phala cvms list reported an unsuccessful response")
-	}
-	items := make([]instance, 0, len(output.Items))
-	for i, item := range output.Items {
-		if item.cloudID() == "" {
-			return nil, core.Exit(5, "phala cvms list item %d did not include a CVM identifier", i)
+	// Fetch the complete account inventory; provider/node ownership scope is
+	// applied client-side by owned(). Cleanup must never reason from one page.
+	items := make([]instance, 0)
+	seen := make(map[string]struct{})
+	expectedTotal := -1
+	for page := 1; ; page++ {
+		args := []string{"cvms", "list", "--page", strconv.Itoa(page), "--page-size", strconv.Itoa(phalaListPageSize), "--json"}
+		result, err := b.phala(ctx, cfg, args, nil)
+		if err != nil {
+			return nil, commandError("phala cvms list", result, err)
 		}
-		item.Labels = phalaLabels(item, cfg)
-		items = append(items, item)
+		payload := jsonObjectPrefix(result.Stdout)
+		if payload == "" {
+			return nil, core.Exit(5, "phala cvms list page %d produced no JSON output", page)
+		}
+		var output listOutput
+		if err := json.Unmarshal([]byte(payload), &output); err != nil {
+			return nil, core.Exit(5, "parse phala cvms list page %d output: %v", page, err)
+		}
+		if !output.Success {
+			return nil, core.Exit(5, "phala cvms list page %d reported an unsuccessful response", page)
+		}
+		if output.Total != nil {
+			if *output.Total < 0 {
+				return nil, core.Exit(5, "phala cvms list page %d reported an invalid total %d", page, *output.Total)
+			}
+			if expectedTotal < 0 {
+				expectedTotal = *output.Total
+			} else if *output.Total != expectedTotal {
+				return nil, core.Exit(5, "phala cvms list total changed from %d to %d while paginating", expectedTotal, *output.Total)
+			}
+		} else if expectedTotal >= 0 {
+			return nil, core.Exit(5, "phala cvms list page %d omitted the pagination total", page)
+		}
+
+		itemOffset := len(items)
+		for i, item := range output.Items {
+			id := item.cloudID()
+			if id == "" {
+				return nil, core.Exit(5, "phala cvms list item %d did not include a CVM identifier", itemOffset+i)
+			}
+			if _, ok := seen[id]; ok {
+				return nil, core.Exit(5, "phala cvms list returned duplicate CVM identifier %s while paginating", id)
+			}
+			seen[id] = struct{}{}
+			item.Labels = phalaLabels(item, cfg)
+			items = append(items, item)
+		}
+
+		if expectedTotal >= 0 {
+			if len(items) > expectedTotal {
+				return nil, core.Exit(5, "phala cvms list returned %d items, exceeding reported total %d", len(items), expectedTotal)
+			}
+			if len(items) == expectedTotal {
+				return items, nil
+			}
+			if len(output.Items) == 0 {
+				return nil, core.Exit(5, "phala cvms list pagination ended after %d of %d reported items", len(items), expectedTotal)
+			}
+			continue
+		}
+		if len(output.Items) < phalaListPageSize {
+			return items, nil
+		}
 	}
-	return items, nil
 }
 
 func (b *backend) findInstance(ctx context.Context, id string) (instance, error) {
