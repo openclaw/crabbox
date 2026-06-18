@@ -27,6 +27,7 @@ require (
 	github.com/islo-labs/go-sdk v0.0.0-20260528125833-04a38f6f507c
 	github.com/lima-vm/go-qcow2reader v0.7.1
 	github.com/lxc/incus/v7 v7.1.0
+	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36
 	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
 	github.com/zitadel/oidc/v3 v3.47.5
 	golang.org/x/crypto v0.52.0
@@ -129,4 +130,5 @@ require (
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
