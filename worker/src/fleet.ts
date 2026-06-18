@@ -13394,6 +13394,11 @@ function sanitizeLeaseTelemetry(
     telemetry.source = source.slice(0, 32);
   }
   let hasMetric = false;
+  const cpuCount = sanitizeTelemetryNumber(input.cpuCount, 1_000_000);
+  if (cpuCount !== undefined && cpuCount >= 1) {
+    telemetry.cpuCount = Math.trunc(cpuCount);
+    hasMetric = true;
+  }
   for (const [key, max] of [
     ["load1", 10_000],
     ["load5", 10_000],

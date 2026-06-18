@@ -5,7 +5,7 @@
 ### Added
 
 - Added the Phala confidential Intel TDX CVM provider with default-on hardware attestation, exact Compose binding, TLS-authenticated SSH, and fail-closed claim-backed lifecycle cleanup. Thanks @anagnorisis2peripeteia.
-
+- Added Linux CPU capacity to lease telemetry and portal status details.
 ### Changed
 
 - Defined Crabbox's supported single-user and cooperative-team security boundary, clarified repository configuration as trusted project automation, and separated vulnerability reporting from compatibility-preserving hardening.

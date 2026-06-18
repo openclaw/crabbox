@@ -2567,6 +2567,7 @@ function leaseTelemetryRows(telemetry: LeaseRecord["telemetry"]): string {
   }
   return [
     metaRow("load", telemetryLoad(telemetry)),
+    metaRow("cpu", telemetryCPUCount(telemetry.cpuCount)),
     metaRow(
       "memory",
       telemetryStorage(
@@ -2828,6 +2829,13 @@ function telemetryLoad(telemetry: LeaseRecord["telemetry"]): string | undefined 
   const load5 = telemetry.load5 === undefined ? "" : ` / ${telemetry.load5.toFixed(2)}`;
   const load15 = telemetry.load15 === undefined ? "" : ` / ${telemetry.load15.toFixed(2)}`;
   return `${telemetry.load1.toFixed(2)}${load5}${load15}`;
+}
+
+function telemetryCPUCount(count: number | undefined): string | undefined {
+  if (count === undefined) {
+    return undefined;
+  }
+  return `${count} vCPU${count === 1 ? "" : "s"}`;
 }
 
 function telemetryStorage(

@@ -276,6 +276,7 @@ export interface LeaseTelemetry {
   load1?: number;
   load5?: number;
   load15?: number;
+  cpuCount?: number;
   memoryUsedBytes?: number;
   memoryTotalBytes?: number;
   memoryPercent?: number;
