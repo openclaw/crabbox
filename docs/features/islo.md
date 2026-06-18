@@ -47,12 +47,16 @@ islo:
 ```
 
 Defaults: `baseUrl` `https://api.islo.dev`, `workdir` `crabbox`, `vcpus` `2`,
-`memoryMB` `4096`, `diskGB` `20`. The image default comes from the resolved OS
-target (the default OS `ubuntu:26.04` resolves to `docker.io/library/ubuntu:26.04`).
+`memoryMB` `4096`, `diskGB` `20`. Crabbox keeps the resolved image/capacity
+defaults in config for display and override compatibility, but omits implicit
+default `image`, `vcpus`, `memoryMB`, and `diskGB` values from sandbox creation
+so Islo can use its tenant defaults. Explicit config, environment, and flag
+values are still sent even when they equal the Crabbox defaults.
 
 `islo.workdir` is a relative directory name under `/workspace`. Absolute paths
-and `..` escapes are rejected before Crabbox prepares or syncs the workspace, so
-the working set always lands in `/workspace/<islo.workdir>`.
+and `..` escapes are rejected before sandbox creation. Crabbox applies the value
+to archive upload and command execution, so the working set still lands in
+`/workspace/<islo.workdir>` without relying on create-time workdir support.
 
 Each config key has an equivalent flag and `CRABBOX_ISLO_*` environment
 variable:

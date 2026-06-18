@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -1075,19 +1076,114 @@ func TestIsloCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 	}
 }
 
-func TestIsloCreateSandboxPassesRelativeWorkdirToProvider(t *testing.T) {
+func TestIsloCreateSandboxOmitsDefaultProviderCreateFields(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{Workdir: "team/repo"}},
+		cfg: core.BaseConfig(),
 		rt:  Runtime{Stderr: io.Discard},
 	}
+	backend.cfg.Provider = isloProvider
+	backend.cfg.Islo.Workdir = "team/repo"
 	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.createRequest == nil || client.createRequest.Workdir == nil || *client.createRequest.Workdir != "team/repo" {
-		t.Fatalf("create workdir=%v", client.createRequest)
+	if client.createRequest == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	if client.createRequest.Workdir != nil {
+		t.Fatalf("default create workdir=%v, want omitted", *client.createRequest.Workdir)
+	}
+	if client.createRequest.Image != nil {
+		t.Fatalf("default create image=%v, want omitted", *client.createRequest.Image)
+	}
+	if client.createRequest.Vcpus != nil || client.createRequest.MemoryMb != nil || client.createRequest.DiskGb != nil {
+		t.Fatalf("default create sizing was sent: %#v", client.createRequest)
+	}
+}
+
+func TestIsloCreateSandboxSendsNonDefaultProviderCreateFields(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	backend := &isloBackend{
+		cfg: core.BaseConfig(),
+		rt:  Runtime{Stderr: io.Discard},
+	}
+	backend.cfg.Provider = isloProvider
+	backend.cfg.Islo.Image = "docker.io/library/custom:latest"
+	backend.cfg.Islo.VCPUs = 4
+	backend.cfg.Islo.MemoryMB = 8192
+	backend.cfg.Islo.DiskGB = 80
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.createRequest == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	if client.createRequest.Image == nil || *client.createRequest.Image != "docker.io/library/custom:latest" {
+		t.Fatalf("custom create image=%v", client.createRequest.Image)
+	}
+	if client.createRequest.Vcpus == nil || *client.createRequest.Vcpus != 4 {
+		t.Fatalf("custom create vcpus=%v", client.createRequest.Vcpus)
+	}
+	if client.createRequest.MemoryMb == nil || *client.createRequest.MemoryMb != 8192 {
+		t.Fatalf("custom create memory=%v", client.createRequest.MemoryMb)
+	}
+	if client.createRequest.DiskGb == nil || *client.createRequest.DiskGb != 80 {
+		t.Fatalf("custom create disk=%v", client.createRequest.DiskGb)
+	}
+}
+
+func TestIsloCreateSandboxSendsExplicitDefaultProviderCreateFields(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	cfg := core.BaseConfig()
+	cfg.Provider = isloProvider
+	core.MarkIsloImageExplicit(&cfg)
+	core.MarkIsloVCPUsExplicit(&cfg)
+	core.MarkIsloMemoryMBExplicit(&cfg)
+	core.MarkIsloDiskGBExplicit(&cfg)
+	backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.createRequest == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	if client.createRequest.Image == nil || *client.createRequest.Image != cfg.Islo.Image {
+		t.Fatalf("explicit default image=%v", client.createRequest.Image)
+	}
+	if client.createRequest.Vcpus == nil || *client.createRequest.Vcpus != cfg.Islo.VCPUs {
+		t.Fatalf("explicit default vcpus=%v", client.createRequest.Vcpus)
+	}
+	if client.createRequest.MemoryMb == nil || *client.createRequest.MemoryMb != cfg.Islo.MemoryMB {
+		t.Fatalf("explicit default memory=%v", client.createRequest.MemoryMb)
+	}
+	if client.createRequest.DiskGb == nil || *client.createRequest.DiskGb != cfg.Islo.DiskGB {
+		t.Fatalf("explicit default disk=%v", client.createRequest.DiskGb)
+	}
+}
+
+func TestIsloProviderFlagsMarkDefaultCreateFieldsExplicit(t *testing.T) {
+	cfg := core.BaseConfig()
+	fs := flag.NewFlagSet("islo", flag.ContinueOnError)
+	values := RegisterIsloProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--islo-image", cfg.Islo.Image,
+		"--islo-vcpus", strconv.Itoa(cfg.Islo.VCPUs),
+		"--islo-memory-mb", strconv.Itoa(cfg.Islo.MemoryMB),
+		"--islo-disk-gb", strconv.Itoa(cfg.Islo.DiskGB),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !core.IsloImageExplicit(cfg) || !core.IsloVCPUsExplicit(cfg) || !core.IsloMemoryMBExplicit(cfg) || !core.IsloDiskGBExplicit(cfg) {
+		t.Fatalf("flag explicit markers missing: %#v", cfg)
 	}
 }
 

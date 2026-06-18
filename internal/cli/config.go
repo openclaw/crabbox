@@ -151,6 +151,9 @@ type Config struct {
 	Wandb                         WandbConfig
 	Islo                          IsloConfig
 	isloImageExplicit             bool
+	isloVCPUsExplicit             bool
+	isloMemoryMBExplicit          bool
+	isloDiskGBExplicit            bool
 	Freestyle                     FreestyleConfig
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
@@ -1728,6 +1731,34 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 
 func MarkIsloImageExplicit(cfg *Config) {
 	cfg.isloImageExplicit = true
+}
+
+func IsloImageExplicit(cfg Config) bool {
+	return cfg.isloImageExplicit
+}
+
+func MarkIsloVCPUsExplicit(cfg *Config) {
+	cfg.isloVCPUsExplicit = true
+}
+
+func IsloVCPUsExplicit(cfg Config) bool {
+	return cfg.isloVCPUsExplicit
+}
+
+func MarkIsloMemoryMBExplicit(cfg *Config) {
+	cfg.isloMemoryMBExplicit = true
+}
+
+func IsloMemoryMBExplicit(cfg Config) bool {
+	return cfg.isloMemoryMBExplicit
+}
+
+func MarkIsloDiskGBExplicit(cfg *Config) {
+	cfg.isloDiskGBExplicit = true
+}
+
+func IsloDiskGBExplicit(cfg Config) bool {
+	return cfg.isloDiskGBExplicit
 }
 
 func MarkLocalContainerImageExplicit(cfg *Config) {
@@ -4596,12 +4627,15 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Islo.VCPUs > 0 {
 			cfg.Islo.VCPUs = file.Islo.VCPUs
+			cfg.isloVCPUsExplicit = true
 		}
 		if file.Islo.MemoryMB > 0 {
 			cfg.Islo.MemoryMB = file.Islo.MemoryMB
+			cfg.isloMemoryMBExplicit = true
 		}
 		if file.Islo.DiskGB > 0 {
 			cfg.Islo.DiskGB = file.Islo.DiskGB
+			cfg.isloDiskGBExplicit = true
 		}
 	}
 	if file.Freestyle != nil {
@@ -6251,9 +6285,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Islo.Workdir = getenv("CRABBOX_ISLO_WORKDIR", cfg.Islo.Workdir)
 	cfg.Islo.GatewayProfile = getenv("CRABBOX_ISLO_GATEWAY_PROFILE", cfg.Islo.GatewayProfile)
 	cfg.Islo.SnapshotName = getenv("CRABBOX_ISLO_SNAPSHOT_NAME", cfg.Islo.SnapshotName)
-	cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
-	cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
-	cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+	if raw := os.Getenv("CRABBOX_ISLO_VCPUS"); raw != "" {
+		cfg.Islo.VCPUs = getenvInt("CRABBOX_ISLO_VCPUS", cfg.Islo.VCPUs)
+		if _, err := strconv.Atoi(raw); err == nil {
+			cfg.isloVCPUsExplicit = true
+		}
+	}
+	if raw := os.Getenv("CRABBOX_ISLO_MEMORY_MB"); raw != "" {
+		cfg.Islo.MemoryMB = getenvInt("CRABBOX_ISLO_MEMORY_MB", cfg.Islo.MemoryMB)
+		if _, err := strconv.Atoi(raw); err == nil {
+			cfg.isloMemoryMBExplicit = true
+		}
+	}
+	if raw := os.Getenv("CRABBOX_ISLO_DISK_GB"); raw != "" {
+		cfg.Islo.DiskGB = getenvInt("CRABBOX_ISLO_DISK_GB", cfg.Islo.DiskGB)
+		if _, err := strconv.Atoi(raw); err == nil {
+			cfg.isloDiskGBExplicit = true
+		}
+	}
 	cfg.Freestyle.APIKey = getenv("CRABBOX_FREESTYLE_API_KEY", getenv("FREESTYLE_API_KEY", cfg.Freestyle.APIKey))
 	cfg.Freestyle.APIURL = getenv("CRABBOX_FREESTYLE_API_URL", getenv("FREESTYLE_API_URL", cfg.Freestyle.APIURL))
 	cfg.Freestyle.Workdir = getenv("CRABBOX_FREESTYLE_WORKDIR", cfg.Freestyle.Workdir)
