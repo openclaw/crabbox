@@ -10902,6 +10902,7 @@ describe("fleet lease identity and idle", () => {
           telemetry: {
             capturedAt: "2026-05-05T01:02:03Z",
             source: "ssh-linux",
+            cpuCount: 16,
             load1: 0.42,
             memoryUsedBytes: 1024,
             memoryTotalBytes: 2048,
@@ -10918,6 +10919,7 @@ describe("fleet lease identity and idle", () => {
     expect(lease.telemetry).toMatchObject({
       capturedAt: "2026-05-05T01:02:03.000Z",
       source: "ssh-linux",
+      cpuCount: 16,
       load1: 0.42,
       memoryUsedBytes: 1024,
       memoryTotalBytes: 2048,
@@ -11754,6 +11756,7 @@ describe("fleet lease identity and idle", () => {
         telemetry: {
           capturedAt: new Date(Date.now() - 15_000).toISOString(),
           source: "ssh-linux",
+          cpuCount: 16,
           load1: 0.42,
           load5: 0.24,
           load15: 0.12,
@@ -11887,6 +11890,7 @@ describe("fleet lease identity and idle", () => {
     expect(body).toContain('data-provider="hetzner"');
     expect(body).toContain('data-target="linux"');
     expect(body).toContain("<dt>load</dt><dd>0.42 / 0.24 / 0.12</dd>");
+    expect(body).toContain("<dt>cpu</dt><dd>16 vCPUs</dd>");
     expect(body).toContain("<dt>memory</dt><dd>1.0 KiB / 2.0 KiB (50%)</dd>");
     expect(body).toContain("<dt>disk</dt><dd>1.0 GiB / 4.0 GiB (25%)</dd>");
     expect(body).toContain("<dt>uptime</dt><dd>1h</dd>");
