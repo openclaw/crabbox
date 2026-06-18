@@ -9,6 +9,53 @@ import (
 	"testing"
 )
 
+func TestFindRepoUsesOriginNameInsideLinkedWorktree(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "crabbox")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	runGit(t, root, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(root, "README.md"), "crabbox\n")
+	runGit(t, root, "add", "README.md")
+	runGit(t, root, "commit", "-m", "init")
+	runGit(t, root, "remote", "add", "origin", "https://github.com/openclaw/crabbox.git")
+
+	worktree := filepath.Join(parent, "fix-blacksmith-success-workflow-state")
+	runGit(t, root, "worktree", "add", "-b", "fix/blacksmith-success-workflow-state", worktree)
+	t.Chdir(worktree)
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRoot, err := filepath.EvalSymlinks(repo.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("repo root=%q want %q", repo.Root, worktree)
+	}
+	if repo.Name != "crabbox" {
+		t.Fatalf("repo name=%q want crabbox", repo.Name)
+	}
+}
+
+func TestRepoNameFromRootAndRemoteFallsBackToRemoteBasename(t *testing.T) {
+	if got := repoNameFromRootAndRemote("/tmp/worktrees/feature", "git@gitlab.example.com:team/project.git"); got != "project" {
+		t.Fatalf("repo name=%q want project", got)
+	}
+	if got := repoNameFromRootAndRemote("/tmp/worktrees/feature", ""); got != "feature" {
+		t.Fatalf("repo name=%q want feature", got)
+	}
+}
+
 func TestSyncManifestUsesGitFilesAndIgnoresIgnoredJunk(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
