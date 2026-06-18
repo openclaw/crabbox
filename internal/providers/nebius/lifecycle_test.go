@@ -152,7 +152,7 @@ func TestCommandConstructionUsesManagedDiskPublicIPLabelsAndNoSecrets(t *testing
 		}
 		for i, arg := range req.Args {
 			if arg == "--cloud-init-user-data" && i+1 < len(req.Args) && req.Args[i+1] != "#cloud-config\n" {
-				return LocalCommandResult{}, errors.New("cloud-init content was not passed as a JSON string")
+				return LocalCommandResult{}, errors.New("cloud-init content was not passed as a raw string")
 			}
 		}
 		if !strings.Contains(joined, "--labels ") || !strings.Contains(joined, "crabbox_provider=nebius") || !strings.Contains(joined, "crabbox_scope=") {

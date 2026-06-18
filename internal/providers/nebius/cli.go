@@ -76,12 +76,11 @@ func (c cliRunner) run(ctx context.Context, args ...string) (cliResult, error) {
 }
 
 func (c cliRunner) withProfile(args []string) []string {
-	out := make([]string, 0, len(args)+2)
-	if strings.TrimSpace(c.cfg.Profile) != "" {
-		out = append(out, "--profile", strings.TrimSpace(c.cfg.Profile))
+	profile := strings.TrimSpace(c.cfg.Profile)
+	if profile == "" {
+		return append([]string(nil), args...)
 	}
-	out = append(out, args...)
-	return out
+	return append([]string{"--profile", profile}, args...)
 }
 
 func redactNebiusArgs(args []string) []string {
