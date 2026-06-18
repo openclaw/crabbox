@@ -972,6 +972,93 @@ morph_smoke() {
   lease=""
 }
 
+orgo_smoke() {
+  need_tool curl
+  need_tool jq
+
+  local api_key="${CRABBOX_ORGO_API_KEY:-$(config_value orgo.apiKey || true)}"
+  api_key="${api_key:-${ORGO_API_KEY:-}}"
+  if [[ -z "$api_key" ]]; then
+    echo "orgo smoke requires CRABBOX_ORGO_API_KEY, ORGO_API_KEY, or orgo.apiKey" >&2
+    return 2
+  fi
+
+  local api_base="${CRABBOX_ORGO_API_BASE:-${ORGO_API_BASE_URL:-$(config_value orgo.apiBase || true)}}"
+  api_base="${api_base:-https://www.orgo.ai/api}"
+  api_base="${api_base%/}"
+  local workspace_id="${CRABBOX_ORGO_WORKSPACE_ID:-${ORGO_WORKSPACE_ID:-$(config_value orgo.workspaceID || true)}}"
+  local created_workspace=""
+  local computer_id=""
+
+  orgo_request() {
+    local method="$1"
+    local path="$2"
+    local data="${3:-}"
+    local args=(-fsS -X "$method" "$api_base$path" -H "Authorization: Bearer $api_key")
+    if [[ -n "$data" ]]; then
+      args+=(-H "Content-Type: application/json" -d "$data")
+    fi
+    curl "${args[@]}"
+  }
+
+  cleanup() {
+    trap - RETURN ERR
+    if [[ -n "$computer_id" ]]; then
+      orgo_request DELETE "/computers/$computer_id" >/dev/null || true
+      computer_id=""
+    fi
+    if [[ -n "$created_workspace" ]]; then
+      orgo_request DELETE "/workspaces/$created_workspace" >/dev/null || true
+      created_workspace=""
+    fi
+  }
+  trap cleanup RETURN ERR
+
+  local suffix="${CRABBOX_LIVE_ORGO_SUFFIX:-$(date -u +%Y%m%d%H%M%S)-$$}"
+  if [[ -z "$workspace_id" ]]; then
+    local workspace_json
+    workspace_json="$(orgo_request POST /workspaces "$(jq -n --arg name "crabbox-smoke-$suffix" '{name:$name}')")"
+    workspace_id="$(printf '%s\n' "$workspace_json" | jq -r '.id // empty')"
+    if [[ -z "$workspace_id" ]]; then
+      echo "orgo smoke could not create a workspace" >&2
+      return 1
+    fi
+    created_workspace="$workspace_id"
+  fi
+
+  local computer_json
+  computer_json="$(orgo_request POST /computers "$(jq -n \
+    --arg workspace_id "$workspace_id" \
+    --arg name "crabbox-smoke-$suffix" \
+    '{workspace_id:$workspace_id,name:$name,os:"linux",ram:4,cpu:1,disk_size_gb:8,auto_stop_minutes:15}')")"
+  computer_id="$(printf '%s\n' "$computer_json" | jq -r '.id // empty')"
+  if [[ -z "$computer_id" ]]; then
+    echo "orgo smoke could not create a computer" >&2
+    return 1
+  fi
+  printf 'orgo computer=%s workspace=%s\n' "$computer_id" "$workspace_id"
+
+  local command="${CRABBOX_LIVE_ORGO_COMMAND:-printf crabbox-orgo-ok}"
+  local bash_json
+  bash_json="$(orgo_request POST "/computers/$computer_id/bash" "$(jq -n --arg command "$command" '{command:$command}')")"
+  printf '%s\n' "$bash_json" | jq -r '
+    .stdout // .output // .result // .text // .message // empty
+  '
+  if ! printf '%s\n' "$bash_json" | jq -e '
+    tostring | contains("crabbox-orgo-ok")
+  ' >/dev/null; then
+    echo "orgo smoke command did not return crabbox-orgo-ok" >&2
+    return 1
+  fi
+
+  orgo_request DELETE "/computers/$computer_id" >/dev/null
+  computer_id=""
+  if [[ -n "$created_workspace" ]]; then
+    orgo_request DELETE "/workspaces/$created_workspace" >/dev/null
+    created_workspace=""
+  fi
+}
+
 run_coordinator_preamble() {
   run_in_repo "$cb" whoami --json
   run_in_repo "$cb" doctor
@@ -1181,6 +1268,10 @@ fi
 
 if has_provider morph; then
   morph_smoke
+fi
+
+if has_provider orgo; then
+  orgo_smoke
 fi
 
 if needs_admin_audit; then
