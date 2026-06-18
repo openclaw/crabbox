@@ -3576,3 +3576,229 @@ exit 99
   const calls = fs.existsSync(crabboxLog) ? fs.readFileSync(crabboxLog, "utf8") : "";
   assert.doesNotMatch(calls, /--provider morph/, "no morph-specific crabbox call may be issued when the snapshot is missing");
 });
+
+test("orgo live smoke creates a workspace and deletes all live resources", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-orgo-"));
+  const bin = path.join(dir, "bin");
+  const fakeCurl = path.join(bin, "curl");
+  const curlLog = path.join(dir, "curl.log");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+method=GET
+url=
+data=
+auth_header=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    -d)
+      data="$2"
+      shift 2
+      ;;
+    -H)
+      if [[ "$2" == Authorization:* ]]; then
+        auth_header="$2"
+      fi
+      shift 2
+      ;;
+    -f|-s|-S|-fsS)
+    shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+if [[ "$auth_header" != "Authorization: Bearer dummy-orgo-key" ]]; then
+  printf 'missing expected Authorization header\\n' >&2
+  exit 98
+fi
+printf '%s %s data=%s\\n' "$method" "$url" "$data" >>"\${CRABBOX_FAKE_CURL_LOG:?}"
+case "$method $url" in
+  "POST http://orgo.test/workspaces")
+    printf '{"id":"ws_test"}\\n'
+    ;;
+  "POST http://orgo.test/computers")
+    printf '{"id":"computer_test","status":"running"}\\n'
+    ;;
+  "POST http://orgo.test/computers/computer_test/bash")
+    printf '{"stdout":"crabbox-orgo-ok\\\\n","exit_code":0}\\n'
+    ;;
+  "DELETE http://orgo.test/computers/computer_test"|"DELETE http://orgo.test/workspaces/ws_test")
+    printf '{}\\n'
+    ;;
+  *)
+    printf 'unexpected curl request: %s %s\\n' "$method" "$url" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_FAKE_CURL_LOG: curlLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_ORGO_SUFFIX: "test",
+      CRABBOX_LIVE_PROVIDERS: "orgo",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_ORGO_API_BASE: "http://orgo.test",
+      ORGO_API_KEY: "dummy-orgo-key",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /orgo computer=computer_test workspace=ws_test/);
+  assert.match(result.stdout, /crabbox-orgo-ok/);
+  assert.doesNotMatch(result.stdout + result.stderr, /dummy-orgo-key/);
+
+  const curlCalls = fs.readFileSync(curlLog, "utf8");
+  assert.match(curlCalls, /POST http:\/\/orgo\.test\/workspaces data=\{\n  "name": "crabbox-smoke-test"\n\}/);
+  assert.match(curlCalls, /POST http:\/\/orgo\.test\/computers data=\{[\s\S]*"workspace_id": "ws_test"/);
+  assert.match(curlCalls, /POST http:\/\/orgo\.test\/computers\/computer_test\/bash data=\{\n  "command": "printf crabbox-orgo-ok"\n\}/);
+  assert.match(curlCalls, /^DELETE http:\/\/orgo\.test\/computers\/computer_test data=$/m);
+  assert.match(curlCalls, /^DELETE http:\/\/orgo\.test\/workspaces\/ws_test data=$/m);
+  assert.doesNotMatch(curlCalls, /dummy-orgo-key/);
+});
+
+test("orgo live smoke reuses an explicit workspace", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-orgo-workspace-"));
+  const bin = path.join(dir, "bin");
+  const config = path.join(dir, "crabbox.yaml");
+  const fakeCurl = path.join(bin, "curl");
+  const curlLog = path.join(dir, "curl.log");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    config,
+    `orgo:
+  apiKey: config-orgo-key
+`,
+    "utf8",
+  );
+
+  writeExecutable(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+method=GET
+url=
+data=
+auth_header=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    -d) data="$2"; shift 2 ;;
+    -H)
+      if [[ "$2" == Authorization:* ]]; then
+        auth_header="$2"
+      fi
+      shift 2
+      ;;
+    -f|-s|-S|-fsS) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+if [[ "$auth_header" != "Authorization: Bearer config-orgo-key" ]]; then
+  printf 'unexpected auth header: %s\\n' "$auth_header" >&2
+  exit 98
+fi
+printf '%s %s data=%s\\n' "$method" "$url" "$data" >>"\${CRABBOX_FAKE_CURL_LOG:?}"
+case "$method $url" in
+  "POST http://orgo.test/computers")
+    printf '{"id":"computer_test","status":"running"}\\n'
+    ;;
+  "POST http://orgo.test/computers/computer_test/bash")
+    printf '{"stdout":"crabbox-orgo-ok\\\\n","exit_code":0}\\n'
+    ;;
+  "DELETE http://orgo.test/computers/computer_test")
+    printf '{}\\n'
+    ;;
+  *)
+    printf 'unexpected curl request: %s %s\\n' "$method" "$url" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_CONFIG: config,
+      CRABBOX_FAKE_CURL_LOG: curlLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_ORGO_SUFFIX: "test",
+      CRABBOX_LIVE_PROVIDERS: "orgo",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_ORGO_API_BASE: "http://orgo.test",
+      ORGO_API_KEY: "wrong-env-key",
+      ORGO_WORKSPACE_ID: "ws_existing",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const curlCalls = fs.readFileSync(curlLog, "utf8");
+  assert.doesNotMatch(curlCalls, /\/workspaces/);
+  assert.match(curlCalls, /POST http:\/\/orgo\.test\/computers data=\{[\s\S]*"workspace_id": "ws_existing"/);
+  assert.match(curlCalls, /^DELETE http:\/\/orgo\.test\/computers\/computer_test data=$/m);
+});
+
+test("orgo live smoke aborts cleanly when no API key is configured", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-orgo-nokey-"));
+  const bin = path.join(dir, "bin");
+  const fakeCurl = path.join(bin, "curl");
+  const curlLog = path.join(dir, "curl.log");
+  fs.mkdirSync(bin);
+  writeExecutable(
+    fakeCurl,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_CURL_LOG:?}"
+exit 99
+`,
+  );
+
+  const env = { ...process.env };
+  delete env.CRABBOX_ORGO_API_KEY;
+  delete env.ORGO_API_KEY;
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...env,
+      PATH: `${bin}${path.delimiter}${env.PATH ?? ""}`,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_FAKE_CURL_LOG: curlLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "orgo",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /CRABBOX_ORGO_API_KEY/);
+  assert.match(result.stderr, /ORGO_API_KEY/);
+  assert.match(result.stderr, /orgo\.apiKey/);
+  const calls = fs.existsSync(curlLog) ? fs.readFileSync(curlLog, "utf8") : "";
+  assert.equal(calls, "");
+});
