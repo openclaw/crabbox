@@ -89,7 +89,7 @@ func TestClientSandboxWorkspaceRunAndArchiveFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, req := range requests {
-		if req.path != "/v1/workspace-runs/wsr_123/archive-transfer/upl_123" && req.auth != "Bearer cn_test_key" {
+		if req.auth != "Bearer cn_test_key" {
 			t.Fatalf("%s %s Authorization=%q", req.method, req.path, req.auth)
 		}
 		if strings.Contains(req.body, "cn_test_key") {

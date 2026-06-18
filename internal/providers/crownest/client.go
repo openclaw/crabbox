@@ -246,6 +246,9 @@ func (c *httpClient) UploadArchive(ctx context.Context, transfer archiveTransfer
 	for name, value := range transfer.Headers {
 		req.Header.Set(name, value)
 	}
+	if c.sameOrigin(req.URL) {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("crownest archive upload: %w", err)
@@ -256,6 +259,11 @@ func (c *httpClient) UploadArchive(ctx context.Context, transfer archiveTransfer
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+func (c *httpClient) sameOrigin(target *url.URL) bool {
+	base, err := url.Parse(c.baseURL)
+	return err == nil && sameOrigin(base, target)
 }
 
 func (c *httpClient) FinalizeArchive(ctx context.Context, workspaceRunID string, req finalizeArchiveRequest, key string) (workspaceRun, error) {
