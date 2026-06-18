@@ -140,7 +140,8 @@ The lease detail page shows:
 
 - compact provider/target badges and the lease state pill;
 - a status card with host, SSH endpoint, work root, expiry, and the latest
-  Linux telemetry sample as gauges (with sparklines and high-load /
+  Linux telemetry sample with CPU capacity and gauges (with sparklines and
+  high-load /
   high-memory / high-disk / stale-telemetry pills when thresholds are
   exceeded);
 - a bridge panel reporting connection state for the WebVNC, code-server, and

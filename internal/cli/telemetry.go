@@ -16,6 +16,7 @@ type LeaseTelemetry struct {
 	Load1            *float64 `json:"load1,omitempty"`
 	Load5            *float64 `json:"load5,omitempty"`
 	Load15           *float64 `json:"load15,omitempty"`
+	CPUCount         *int64   `json:"cpuCount,omitempty"`
 	MemoryUsedBytes  *int64   `json:"memoryUsedBytes,omitempty"`
 	MemoryTotalBytes *int64   `json:"memoryTotalBytes,omitempty"`
 	MemoryPercent    *float64 `json:"memoryPercent,omitempty"`
@@ -68,6 +69,7 @@ func collectLeaseTelemetryBestEffort(ctx context.Context, collector leaseTelemet
 
 func remoteLeaseTelemetryScript() string {
 	return `set +e
+getconf _NPROCESSORS_ONLN 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $1 > 0 {print "cpuCount="$1; exit}'
 if [ -r /proc/loadavg ]; then awk '{print "load1="$1; print "load5="$2; print "load15="$3}' /proc/loadavg; fi
 if [ -r /proc/meminfo ]; then awk '
   /^MemTotal:/ { total=$2*1024 }
@@ -103,6 +105,8 @@ func parseLeaseTelemetry(output string, capturedAt time.Time, source string) *Le
 			hasMetric = setFloat(&telemetry.Load5, raw) || hasMetric
 		case "load15":
 			hasMetric = setFloat(&telemetry.Load15, raw) || hasMetric
+		case "cpuCount":
+			hasMetric = setInt64(&telemetry.CPUCount, raw) || hasMetric
 		case "memoryUsedBytes":
 			hasMetric = setInt64(&telemetry.MemoryUsedBytes, raw) || hasMetric
 		case "memoryTotalBytes":

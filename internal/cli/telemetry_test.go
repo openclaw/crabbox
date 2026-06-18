@@ -8,6 +8,7 @@ import (
 
 func TestParseLeaseTelemetry(t *testing.T) {
 	telemetry := parseLeaseTelemetry(strings.Join([]string{
+		"cpuCount=16",
 		"load1=0.12",
 		"load5=0.34",
 		"load15=0.56",
@@ -27,6 +28,9 @@ func TestParseLeaseTelemetry(t *testing.T) {
 	}
 	if telemetry.Load1 == nil || *telemetry.Load1 != 0.12 {
 		t.Fatalf("load1=%v", telemetry.Load1)
+	}
+	if telemetry.CPUCount == nil || *telemetry.CPUCount != 16 {
+		t.Fatalf("cpuCount=%v", telemetry.CPUCount)
 	}
 	if telemetry.MemoryUsedBytes == nil || *telemetry.MemoryUsedBytes != 1073741824 {
 		t.Fatalf("memoryUsedBytes=%v", telemetry.MemoryUsedBytes)
