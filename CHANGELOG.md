@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added reusable Modal run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
 - Added Linux CPU capacity to lease telemetry and portal status details.
 
 ### Changed
