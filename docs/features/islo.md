@@ -48,9 +48,10 @@ islo:
 
 Defaults: `baseUrl` `https://api.islo.dev`, `workdir` `crabbox`, `vcpus` `2`,
 `memoryMB` `4096`, `diskGB` `20`. Crabbox keeps the resolved image/capacity
-defaults in config for display and override compatibility, but omits default
-`image`, `vcpus`, `memoryMB`, and `diskGB` values from sandbox creation so Islo
-can use its tenant defaults. Non-default values are still sent.
+defaults in config for display and override compatibility, but omits implicit
+default `image`, `vcpus`, `memoryMB`, and `diskGB` values from sandbox creation
+so Islo can use its tenant defaults. Explicit config, environment, and flag
+values are still sent even when they equal the Crabbox defaults.
 
 `islo.workdir` is a relative directory name under `/workspace`. Absolute paths
 and `..` escapes are rejected before sandbox creation. Crabbox applies the value

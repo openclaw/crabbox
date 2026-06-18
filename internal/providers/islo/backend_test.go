@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -1132,6 +1133,57 @@ func TestIsloCreateSandboxSendsNonDefaultProviderCreateFields(t *testing.T) {
 	}
 	if client.createRequest.DiskGb == nil || *client.createRequest.DiskGb != 80 {
 		t.Fatalf("custom create disk=%v", client.createRequest.DiskGb)
+	}
+}
+
+func TestIsloCreateSandboxSendsExplicitDefaultProviderCreateFields(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
+	cfg := core.BaseConfig()
+	cfg.Provider = isloProvider
+	core.MarkIsloImageExplicit(&cfg)
+	core.MarkIsloVCPUsExplicit(&cfg)
+	core.MarkIsloMemoryMBExplicit(&cfg)
+	core.MarkIsloDiskGBExplicit(&cfg)
+	backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.createRequest == nil {
+		t.Fatal("CreateSandbox was not called")
+	}
+	if client.createRequest.Image == nil || *client.createRequest.Image != cfg.Islo.Image {
+		t.Fatalf("explicit default image=%v", client.createRequest.Image)
+	}
+	if client.createRequest.Vcpus == nil || *client.createRequest.Vcpus != cfg.Islo.VCPUs {
+		t.Fatalf("explicit default vcpus=%v", client.createRequest.Vcpus)
+	}
+	if client.createRequest.MemoryMb == nil || *client.createRequest.MemoryMb != cfg.Islo.MemoryMB {
+		t.Fatalf("explicit default memory=%v", client.createRequest.MemoryMb)
+	}
+	if client.createRequest.DiskGb == nil || *client.createRequest.DiskGb != cfg.Islo.DiskGB {
+		t.Fatalf("explicit default disk=%v", client.createRequest.DiskGb)
+	}
+}
+
+func TestIsloProviderFlagsMarkDefaultCreateFieldsExplicit(t *testing.T) {
+	cfg := core.BaseConfig()
+	fs := flag.NewFlagSet("islo", flag.ContinueOnError)
+	values := RegisterIsloProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{
+		"--islo-image", cfg.Islo.Image,
+		"--islo-vcpus", strconv.Itoa(cfg.Islo.VCPUs),
+		"--islo-memory-mb", strconv.Itoa(cfg.Islo.MemoryMB),
+		"--islo-disk-gb", strconv.Itoa(cfg.Islo.DiskGB),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !core.IsloImageExplicit(cfg) || !core.IsloVCPUsExplicit(cfg) || !core.IsloMemoryMBExplicit(cfg) || !core.IsloDiskGBExplicit(cfg) {
+		t.Fatalf("flag explicit markers missing: %#v", cfg)
 	}
 }
 

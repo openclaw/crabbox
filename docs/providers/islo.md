@@ -89,10 +89,10 @@ precedence over the config file: `CRABBOX_ISLO_BASE_URL`, `CRABBOX_ISLO_IMAGE`,
 and `CRABBOX_ISLO_DISK_GB`.
 
 The resolved defaults are kept in Crabbox config for display and override
-compatibility, but the Islo create request omits default `image`, `vcpus`,
-`memoryMB`, and `diskGB` values so Islo can use the tenant's current default
-image and capacity. Crabbox sends those fields only when they differ from the
-Crabbox defaults.
+compatibility, but the Islo create request omits implicit default `image`,
+`vcpus`, `memoryMB`, and `diskGB` values so Islo can use the tenant's current
+defaults. Values explicitly supplied through config, environment, or flags are
+still sent, including values equal to the Crabbox defaults.
 
 ### Workdir resolution
 

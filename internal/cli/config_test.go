@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -387,6 +388,35 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID",
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestIsloCreateDefaultsTrackExplicitConfigAndEnvironment(t *testing.T) {
+	base := baseConfig()
+	fromFile := base
+	if err := applyFileConfig(&fromFile, fileConfig{Islo: &fileIsloConfig{
+		Image:    base.Islo.Image,
+		VCPUs:    base.Islo.VCPUs,
+		MemoryMB: base.Islo.MemoryMB,
+		DiskGB:   base.Islo.DiskGB,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if !IsloImageExplicit(fromFile) || !IsloVCPUsExplicit(fromFile) || !IsloMemoryMBExplicit(fromFile) || !IsloDiskGBExplicit(fromFile) {
+		t.Fatalf("file explicit markers missing: %#v", fromFile)
+	}
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_ISLO_IMAGE", base.Islo.Image)
+	t.Setenv("CRABBOX_ISLO_VCPUS", strconv.Itoa(base.Islo.VCPUs))
+	t.Setenv("CRABBOX_ISLO_MEMORY_MB", strconv.Itoa(base.Islo.MemoryMB))
+	t.Setenv("CRABBOX_ISLO_DISK_GB", strconv.Itoa(base.Islo.DiskGB))
+	fromEnv := base
+	if err := applyEnv(&fromEnv); err != nil {
+		t.Fatal(err)
+	}
+	if !IsloImageExplicit(fromEnv) || !IsloVCPUsExplicit(fromEnv) || !IsloMemoryMBExplicit(fromEnv) || !IsloDiskGBExplicit(fromEnv) {
+		t.Fatalf("environment explicit markers missing: %#v", fromEnv)
 	}
 }
 

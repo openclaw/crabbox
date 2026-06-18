@@ -99,12 +99,15 @@ func ApplyIsloProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "islo-vcpus") {
 		cfg.Islo.VCPUs = *v.VCPUs
+		core.MarkIsloVCPUsExplicit(cfg)
 	}
 	if flagWasSet(fs, "islo-memory-mb") {
 		cfg.Islo.MemoryMB = *v.MemoryMB
+		core.MarkIsloMemoryMBExplicit(cfg)
 	}
 	if flagWasSet(fs, "islo-disk-gb") {
 		cfg.Islo.DiskGB = *v.DiskGB
+		core.MarkIsloDiskGBExplicit(cfg)
 	}
 	return nil
 }
@@ -591,7 +594,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	name := newIsloSandboxName(repo)
 	create := &gosdk.SandboxCreate{Name: stringValue(name)}
 	base := core.BaseConfig()
-	if b.cfg.Islo.Image != "" && b.cfg.Islo.Image != base.Islo.Image {
+	if b.cfg.Islo.Image != "" && (b.cfg.Islo.Image != base.Islo.Image || core.IsloImageExplicit(b.cfg)) {
 		create.Image = stringValue(b.cfg.Islo.Image)
 	}
 	if b.cfg.Islo.GatewayProfile != "" {
@@ -600,13 +603,13 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	if b.cfg.Islo.SnapshotName != "" {
 		create.SnapshotName = stringValue(b.cfg.Islo.SnapshotName)
 	}
-	if b.cfg.Islo.VCPUs > 0 && b.cfg.Islo.VCPUs != base.Islo.VCPUs {
+	if b.cfg.Islo.VCPUs > 0 && (b.cfg.Islo.VCPUs != base.Islo.VCPUs || core.IsloVCPUsExplicit(b.cfg)) {
 		create.Vcpus = intValue(b.cfg.Islo.VCPUs)
 	}
-	if b.cfg.Islo.MemoryMB > 0 && b.cfg.Islo.MemoryMB != base.Islo.MemoryMB {
+	if b.cfg.Islo.MemoryMB > 0 && (b.cfg.Islo.MemoryMB != base.Islo.MemoryMB || core.IsloMemoryMBExplicit(b.cfg)) {
 		create.MemoryMb = intValue(b.cfg.Islo.MemoryMB)
 	}
-	if b.cfg.Islo.DiskGB > 0 && b.cfg.Islo.DiskGB != base.Islo.DiskGB {
+	if b.cfg.Islo.DiskGB > 0 && (b.cfg.Islo.DiskGB != base.Islo.DiskGB || core.IsloDiskGBExplicit(b.cfg)) {
 		create.DiskGb = intValue(b.cfg.Islo.DiskGB)
 	}
 	sandbox, err := client.CreateSandbox(ctx, create)
