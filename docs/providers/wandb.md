@@ -39,6 +39,7 @@ and the broker coordinator are not available.
 ```sh
 crabbox run    --provider wandb --no-sync -- python eval.py
 crabbox run    --provider wandb --no-sync --id swift-crab -- pnpm test
+crabbox run    --provider wandb --no-sync --keep --lease-output session.json -- true
 crabbox status --provider wandb --id swift-crab
 crabbox stop   --provider wandb swift-crab
 crabbox list   --provider wandb
@@ -49,6 +50,10 @@ Without `--id`, `run` acquires a new sandbox, runs the command, and stops the
 sandbox afterwards. With `--id <sandbox-id>` it execs into the existing
 sandbox and leaves it running. `warmup` is rejected — sandboxes are acquired
 per run, with no separate provisioning phase.
+
+`--lease-output <path>` writes a reusable session handle containing the stable
+sandbox ID and an exact cleanup command. Pair it with `--keep` when another
+process should reuse the newly acquired sandbox.
 
 ## Auth
 

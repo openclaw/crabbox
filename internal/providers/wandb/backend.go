@@ -95,6 +95,20 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			fmt.Fprintf(b.rt.Stderr, "warning: wandb stop failed for %s: %v\n", sandboxID, err)
 		}
 	}()
+	result := RunResult{
+		Session: &RunSessionHandle{
+			Provider:       providerName,
+			LeaseID:        sandboxID,
+			Slug:           sandboxID,
+			Reused:         !acquired,
+			Kept:           !shouldStop,
+			CleanupCommand: wandbCleanupCommand(sandboxID),
+		},
+	}
+	finishResult := func() RunResult {
+		result.Session.Kept = !shouldStop
+		return result
+	}
 
 	commandStarted := b.now()
 	exitCode, execErr := client.Exec(ctx, wandbExecRequest{
@@ -115,7 +129,9 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 	// Conflating them (the previous bug) made commandMs == totalMs on every
 	// fresh-sandbox run, hiding provisioning time from --timing-json users.
 	commandDuration := b.now().Sub(commandStarted)
-	result := RunResult{ExitCode: exitCode, Command: commandDuration, Total: b.now().Sub(started)}
+	result.ExitCode = exitCode
+	result.Command = commandDuration
+	result.Total = b.now().Sub(started)
 
 	// Emit timing JSON before any failure return so automation consuming
 	// `--timing-json` still gets a report when the user's command exits
@@ -129,19 +145,23 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			ExitCode:  result.ExitCode,
 			Label:     strings.TrimSpace(req.Label),
 		}); err != nil {
-			return result, err
+			return finishResult(), err
 		}
 	}
 
 	if execErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, execErr
+		return finishResult(), execErr
 	}
 	if result.ExitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s sandbox exit=%d", providerName, result.ExitCode)}
+		return finishResult(), ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s sandbox exit=%d", providerName, result.ExitCode)}
 	}
-	return result, nil
+	return finishResult(), nil
+}
+
+func wandbCleanupCommand(sandboxID string) string {
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(sandboxID))
 }
 
 func (b *wandbBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
