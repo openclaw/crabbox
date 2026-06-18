@@ -238,18 +238,17 @@ func connectCodeBridge(ctx context.Context, coord *CoordinatorClient, leaseID, h
 	if err != nil {
 		return nil, err
 	}
+	headers, err := bridgeUpgradeTicketHeaders(ctx, coord, ticket.Ticket)
+	if err != nil {
+		return nil, err
+	}
 	ws, resp, err := websocket.Dial(ctx, webCodeAgentURL(coord.BaseURL, leaseID), &websocket.DialOptions{
-		HTTPHeader: bridgeTicketHeaders(coord, ticket.Ticket),
+		HTTPHeader: headers,
 	})
-	if retryBridgeTicketInQuery(resp, err) {
-		headers, headerErr := coord.webVNCAccessHeaders(ctx)
-		if headerErr != nil {
-			err = headerErr
-		} else {
-			ws, _, err = websocket.Dial(ctx, webCodeAgentURLWithTicket(coord.BaseURL, leaseID, ticket.Ticket), &websocket.DialOptions{
-				HTTPHeader: headers,
-			})
-		}
+	if retryBridgeTicketInAuthorization(resp, err) {
+		ws, _, err = websocket.Dial(ctx, webCodeAgentURL(coord.BaseURL, leaseID), &websocket.DialOptions{
+			HTTPHeader: bridgeTicketHeaders(coord, ticket.Ticket),
+		})
 	}
 	if err != nil {
 		return nil, err
@@ -766,18 +765,6 @@ func webCodeAgentURL(base, leaseID string) string {
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/v1/leases/" + url.PathEscape(leaseID) + "/code/agent"
 	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
-}
-
-func webCodeAgentURLWithTicket(base, leaseID, ticket string) string {
-	u, err := url.Parse(webCodeAgentURL(base, leaseID))
-	if err != nil {
-		return base
-	}
-	values := url.Values{}
-	values.Set("ticket", ticket)
-	u.RawQuery = values.Encode()
 	u.Fragment = ""
 	return u.String()
 }

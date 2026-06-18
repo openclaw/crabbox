@@ -197,8 +197,8 @@ bridges:
 
 ```text
 POST /v1/leases/{leaseID}/egress/ticket
-GET  /v1/leases/{leaseID}/egress/host?ticket=...     (WebSocket upgrade)
-GET  /v1/leases/{leaseID}/egress/client?ticket=...   (WebSocket upgrade)
+GET  /v1/leases/{leaseID}/egress/host     (ticketed WebSocket upgrade)
+GET  /v1/leases/{leaseID}/egress/client   (ticketed WebSocket upgrade)
 GET  /v1/leases/{leaseID}/egress/status
 ```
 

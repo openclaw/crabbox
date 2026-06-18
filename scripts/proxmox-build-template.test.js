@@ -75,7 +75,8 @@ printf 'fake image\\n' >"$dest"
     path.join(dir, "sha256sum"),
     `#!/usr/bin/env bash
 set -euo pipefail
-printf 'sha256sum %s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+input="$(cat)"
+printf 'sha256sum %s input=%s\\n' "$*" "$input" >>"\${CRABBOX_FAKE_LOG:?}"
 if [[ "\${CRABBOX_FAKE_SHA_FAIL:-0}" == "1" ]]; then exit 1; fi
 exit 0
 `,
@@ -108,7 +109,7 @@ async function runTemplateScript(extraEnv = {}) {
     PATH: `${fake.dir}:${process.env.PATH}`,
     CRABBOX_FAKE_LOG: fake.log,
     CRABBOX_PROXMOX_ALLOW_NONROOT_FOR_TEST: "1",
-    CRABBOX_PROXMOX_IMAGE_SHA256: "unused",
+    CRABBOX_PROXMOX_IMAGE_SHA256: "a".repeat(64),
     ...extraEnv,
   };
   const result = await new Promise((resolve) => {
@@ -128,6 +129,33 @@ async function runTemplateScript(extraEnv = {}) {
   return { ...result, log };
 }
 
+test("default image uses the pinned release URL and digest", async () => {
+  const result = await runTemplateScript({
+    CRABBOX_PROXMOX_IMAGE_SHA256: "",
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(
+    result.log,
+    /curl .*https:\/\/cloud-images\.ubuntu\.com\/releases\/noble\/release-20260518\/ubuntu-24\.04-server-cloudimg-amd64\.img/,
+  );
+  assert.match(
+    result.log,
+    /sha256sum .*input=53fdde898feed8b027d94baa9cfe8229867f330a1d9c49dc7d84465ee7f229f7 /,
+  );
+});
+
+test("custom image URL requires a sha256 before download or mutation", async () => {
+  const result = await runTemplateScript({
+    CRABBOX_PROXMOX_IMAGE_URL: "https://images.example.test/custom.img",
+    CRABBOX_PROXMOX_IMAGE_SHA256: "",
+  });
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /SHA256.*required with CRABBOX_PROXMOX_IMAGE_URL/);
+  assert.equal(result.log, "");
+});
+
 test("replace mode keeps existing template when image validation fails", async () => {
   const result = await runTemplateScript({
     CRABBOX_FAKE_TEMPLATE_EXISTS: "1",
@@ -137,7 +165,21 @@ test("replace mode keeps existing template when image validation fails", async (
 
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /will be replaced after the new image is validated/);
+  assert.doesNotMatch(result.log, /qemu-img|virt-customize|qm create|qm importdisk|qm template/);
   assert.doesNotMatch(result.log, /qm destroy 9400 --purge 1/);
+});
+
+test("custom image with a matching sha256 preserves template creation", async () => {
+  const digest = "b".repeat(64);
+  const result = await runTemplateScript({
+    CRABBOX_PROXMOX_IMAGE_URL: "https://images.example.test/custom.img",
+    CRABBOX_PROXMOX_IMAGE_SHA256: digest,
+  });
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.log, /curl .*https:\/\/images\.example\.test\/custom\.img/);
+  assert.match(result.log, new RegExp(`sha256sum .*input=${digest} `));
+  assert.match(result.log, /qm template 9400/);
 });
 
 test("post-create failure destroys the partial VM", async () => {

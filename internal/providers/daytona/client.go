@@ -87,6 +87,9 @@ func daytonaAuthConfig(cfg Config) (daytonaAuth, error) {
 	if auth.APIKey == "" && auth.JWTToken != "" && auth.OrganizationID == "" {
 		return daytonaAuth{}, exit(3, "provider=daytona with DAYTONA_JWT_TOKEN requires DAYTONA_ORGANIZATION_ID")
 	}
+	if err := validateNativeCredentialDestination(cfg); err != nil {
+		return daytonaAuth{}, err
+	}
 	return auth, nil
 }
 

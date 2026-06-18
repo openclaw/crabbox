@@ -638,6 +638,9 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 	if cfg.Coordinator == "" {
 		return nil, false, nil
 	}
+	if err := validateCoordinatorCredentialDestination(cfg); err != nil {
+		return nil, true, err
+	}
 	base, err := url.Parse(cfg.Coordinator)
 	if err != nil {
 		return nil, true, exit(2, "invalid CRABBOX_COORDINATOR: %v", err)

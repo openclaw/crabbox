@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,9 +20,6 @@ func TestWebCodeURLs(t *testing.T) {
 	if got := webCodeAgentURL("https://broker.example.com", "cbx_abcdef123456"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/code/agent" {
 		t.Fatalf("agent URL=%q", got)
 	}
-	if got := webCodeAgentURLWithTicket("https://broker.example.com", "cbx_abcdef123456", "code_abc"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/code/agent?ticket=code_abc" {
-		t.Fatalf("agent fallback URL=%q", got)
-	}
 	if got := webCodePortalURL("https://broker.example.com/", "cbx_abcdef123456"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/code/" {
 		t.Fatalf("portal URL=%q", got)
 	}
@@ -30,7 +28,7 @@ func TestWebCodeURLs(t *testing.T) {
 	}
 }
 
-func TestConnectCodeBridgeSendsTicketInAuthorizationHeader(t *testing.T) {
+func TestConnectCodeBridgeSendsTicketInDedicatedHeader(t *testing.T) {
 	agentConnected := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -49,8 +47,11 @@ func TestConnectCodeBridgeSendsTicketInAuthorizationHeader(t *testing.T) {
 			if got := r.URL.Query().Get("ticket"); got != "" {
 				t.Errorf("query ticket=%q", got)
 			}
-			if got := r.Header.Get("Authorization"); got != "Bearer code_abcdef1234567890abcdef1234567890" {
+			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 				t.Errorf("bridge authorization=%q", got)
+			}
+			if got := r.Header.Get("X-Crabbox-Bridge-Ticket"); got != "code_abcdef1234567890abcdef1234567890" {
+				t.Errorf("bridge ticket=%q", got)
 			}
 			conn, err := websocket.Accept(w, r, nil)
 			if err != nil {
@@ -79,6 +80,56 @@ func TestConnectCodeBridgeSendsTicketInAuthorizationHeader(t *testing.T) {
 	case <-agentConnected:
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+}
+
+func TestConnectCodeBridgeRetriesBearerWithoutTicketURL(t *testing.T) {
+	var agentAttempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/leases/cbx_abcdef123456/code/ticket":
+			_ = json.NewEncoder(w).Encode(coordinatorCodeTicket{
+				Ticket:  "code_abcdef1234567890abcdef1234567890",
+				LeaseID: "cbx_abcdef123456",
+			})
+		case "/v1/leases/cbx_abcdef123456/code/agent":
+			attempt := agentAttempts.Add(1)
+			if got := r.URL.Query().Get("ticket"); got != "" {
+				t.Errorf("attempt %d query ticket=%q", attempt, got)
+			}
+			if attempt == 1 {
+				if got := r.Header.Get("X-Crabbox-Bridge-Ticket"); got == "" {
+					t.Error("first attempt missing dedicated bridge ticket")
+				}
+				http.Error(w, "older coordinator", http.StatusUnauthorized)
+				return
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer code_abcdef1234567890abcdef1234567890" {
+				t.Errorf("fallback authorization=%q", got)
+			}
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Errorf("websocket accept: %v", err)
+				return
+			}
+			_, _, _ = conn.Read(context.Background())
+			_ = conn.Close(websocket.StatusNormalClosure, "test done")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	coord := &CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
+	bridge, err := connectCodeBridge(ctx, coord, "cbx_abcdef123456", "127.0.0.1", "8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.Close(websocket.StatusNormalClosure, "test done")
+	if got := agentAttempts.Load(); got != 2 {
+		t.Fatalf("agent attempts=%d want 2", got)
 	}
 }
 

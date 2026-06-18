@@ -1,7 +1,11 @@
-# Security
+# Operational Security
 
 Read this when you are standing up a shared broker, deciding what secrets to
 forward, or reasoning about who can reach a leased box.
+
+The root [Security Policy](https://github.com/openclaw/crabbox/blob/main/SECURITY.md)
+defines the supported security boundary and reporting scope. This guide covers
+deployment and operational hardening within that boundary.
 
 Crabbox spans three trust layers, and each owns a different part of the security
 posture:
@@ -22,6 +26,9 @@ and explicitly forwarded environment values.
 Crabbox is built for trusted operators on a shared team, not for arbitrary
 untrusted tenants. Assume:
 
+- The local OS user and configured provider tooling are trusted.
+- Repository configuration is executable project automation and must be
+  reviewed like a Makefile, package script, or CI workflow.
 - Operators can run arbitrary commands on the boxes they lease.
 - A box may observe any local environment value the CLI forwards to it.
 - Operators are trusted not to attack each other deliberately.
@@ -29,7 +36,16 @@ untrusted tenants. Assume:
 
 Do not place mutually untrusted tenants on the same broker, in the same
 [pond](features/pond.md), or behind a single shared token. Per-lease and
-per-tenant isolation is not the current security boundary.
+per-tenant isolation is not the current security boundary. Local providers and
+portal bridges are development execution surfaces, not a uniform sandbox for
+hostile project configuration or mutually adversarial workloads.
+
+For cooperative shared portals, configure the optional per-lease
+`CRABBOX_CODE_ORIGIN_TEMPLATE` described in [Browser portal](features/portal.md).
+It keeps lease-controlled code-server HTML and JavaScript off the coordinator
+origin and off other leases' browser origins without changing the normal Code
+entry URL. This is defense-in-depth for supported sharing and admin inspection;
+it does not turn the broker into a hostile multitenant sandbox.
 
 ## Authentication
 
@@ -49,10 +65,10 @@ authentication is resolved in `worker/src/auth.ts` in this precedence:
    non-admin shared identity for automation.
 3. **Signed user token** — a `cbxu_`-prefixed token issued by GitHub browser
    login. It is an HMAC-SHA256 signature (verified in constant time) over a
-   base64url payload signed with `CRABBOX_SESSION_SECRET` (falling back to
-   `CRABBOX_SHARED_TOKEN`). The payload carries `owner`, `org`, and GitHub
-   `login`, has a default 180-day expiry, and is rejected if it carries an
-   `admin` claim — browser login can never mint admin tokens.
+   base64url payload signed with `CRABBOX_SESSION_SECRET`, which must be set and
+   must differ from `CRABBOX_SHARED_TOKEN`. The payload carries `owner`, `org`,
+   and GitHub `login`, has a default 180-day expiry, and is rejected if it
+   carries an `admin` claim — browser login can never mint admin tokens.
 
 ### GitHub browser login
 
@@ -90,8 +106,10 @@ the Worker strips caller-supplied `cf-access-authenticated-user-email` and
 
 The local service-token credentials `CRABBOX_ACCESS_CLIENT_ID` and
 `CRABBOX_ACCESS_CLIENT_SECRET` only satisfy the Access edge; they authorize no
-Crabbox action by themselves. Store them in user config or env, never in repo
-config.
+Crabbox action by themselves. Prefer user config or env. If a trusted
+repository intentionally defines both a custom broker URL and matching Access
+credentials, Crabbox treats them as one source; it will not send inherited
+Access credentials to a repository-defined broker URL.
 
 ### Trusted reverse proxy identity
 
@@ -139,8 +157,11 @@ closed for non-health routes.
 
 ## Secrets
 
-There is no central project secret store. Secrets stay on the operator's
-machine and are forwarded to a box only when explicitly allowed.
+There is no central project secret store. Remote command environment values
+stay on the operator's machine unless explicitly allowed for forwarding.
+Local helper processes, including External provider lifecycle commands, inherit
+the Crabbox process environment unless their own runtime provides stronger
+isolation.
 
 Handling rules:
 
@@ -177,10 +198,11 @@ repo:
 - `CRABBOX_ADMIN_TOKEN` — admin and image-lifecycle routes.
 - `CRABBOX_RUNTIME_ADAPTER_TOKEN` — route-scoped service access to the
   `/v1/workspaces` lifecycle API only.
-- `CRABBOX_SHARED_TOKEN` — trusted operator automation; also the fallback
-  signing key when `CRABBOX_SESSION_SECRET` is unset.
+- `CRABBOX_SHARED_TOKEN` — trusted operator automation only.
 - `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing.
+  `CRABBOX_SESSION_SECRET` — GitHub browser login and user-token signing. The
+  session secret is required, must be independent from the shared token, and
+  should be rotated separately.
 - `CRABBOX_GITHUB_ADMIN_OWNERS`, `CRABBOX_GITHUB_ADMIN_LOGINS` — optional
   comma-separated GitHub verified emails and logins whose user tokens become
   admin at request time; set these per deployment, not in the reusable repo
@@ -191,6 +213,11 @@ repo:
   and optional `CRABBOX_ARTIFACTS_SESSION_TOKEN` — brokered artifact publishing.
   Scope these to the artifact bucket/prefix and use them only to sign
   short-lived upload/read URLs.
+
+Deployments that previously relied on `CRABBOX_SHARED_TOKEN` as the implicit
+user-token signing key must configure a new `CRABBOX_SESSION_SECRET`. Existing
+`cbxu_` tokens from the old key stop authenticating, so users must run
+`crabbox login` again. Direct shared-token automation is unaffected.
 
 Coordinator config values (not secret material):
 
@@ -271,8 +298,11 @@ Crabbox-managed VNC to public interfaces or to the Tailscale `100.x` interface.
 
 ## Cleanup
 
-Cleanup is security-sensitive: a leaked box keeps spending money and stays
-reachable. See [lifecycle and cleanup](features/lifecycle-cleanup.md).
+Cleanup is operationally important for cost control and stale resource
+management. Missing reconciliation or provider coverage is normally
+reliability hardening. Deleting a resource that Crabbox cannot strongly
+identify as its own crosses a safety boundary. See
+[lifecycle and cleanup](features/lifecycle-cleanup.md).
 
 Layered protections:
 
@@ -291,10 +321,14 @@ running/provisioning machines after an extra stale-safety window. When a
 coordinator is configured, provider-side cleanup is disabled — the coordinator
 scheduler owns brokered cleanup.
 
-The brokered AWS orphan sweep treats live coordinator lease state as the
-authority and only acts on provider tags after a matching active lease is absent
-or points at a different cloud instance. It skips `keep=true` resources and
-applies a grace window before acting on missing labels or stale lease mappings.
+Brokered cloud orphan sweeps treat coordinator lease state as the authority.
+Provider tags discover candidates and explain why they look stale, but do not
+authorize a destructive action. Automatic AWS or Azure deletion requires an
+exact retained coordinator lease binding for the same provider resource and
+region; EC2 Mac host release likewise requires an exact retained host binding.
+Tag-only and legacy candidates remain report-only. Sweeps skip `keep=true`
+resources and apply a grace window before reporting missing labels or stale
+lease mappings.
 
 Release is idempotent, and delete tolerates already-deleted provider resources.
 

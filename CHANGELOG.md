@@ -2,8 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- Defined Crabbox's supported single-user and cooperative-team security boundary, clarified repository configuration as trusted project automation, and separated vulnerability reporting from compatibility-preserving hardening.
+
 ### Fixed
 
+- Made new runtime-adapter ticket claims provisional until agent connection or lease registration, allowing authenticated recovery of expired inactive first claims while preserving all existing and confirmed adapter IDs.
+- Separated shared automation tokens from signed user-token keys, preserving shared-token-only automation while requiring distinct session signing material for GitHub login.
+- Required retained coordinator ownership records before orphan sweeps delete AWS or Azure machines or release EC2 Mac hosts, while keeping tag-only and legacy candidates visible in reports.
+- Verified the pinned GitHub CLI release artifacts before installing them in the default Cloudflare sandbox image and preserved true AMD64/ARM64 target selection during cross-platform builds.
+- Pinned and verified the default Proxmox template cloud image before conversion, while preserving custom image URLs with a required matching SHA256.
+- Kept Code, WebVNC, and Egress bridge tickets out of WebSocket URLs while preserving ordinary coordinator authentication, older-coordinator bearer retries, and legacy-client compatibility.
+- Added opt-in per-lease Code portal origins with one-time viewer bootstrap and lease-scoped browser sessions, isolating proxied workspace content from coordinator and other lease origins without changing existing Code URLs. Thanks @coygeek.
+- Source-bound broker and direct-provider credentials to repository-configured endpoints, while preserving same-source custom deployments and explicit environment or CLI overrides.
 - Restricted Crabbox-managed Windows credential files to the managed user, Administrators, and SYSTEM without changing desktop credential consumers. Thanks @coygeek.
 - Created default artifact bundles and retained run logs/metadata with private local permissions while preserving explicit shared-output directories. Thanks @coygeek.
 

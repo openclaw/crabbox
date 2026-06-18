@@ -20,6 +20,19 @@ A deployment needs one canonical HTTPS origin:
 https://broker.example.com                       # public CLI + browser-login route
 ```
 
+For Code portal origin isolation, the same coordinator can also receive a
+wildcard route configured through:
+
+```text
+CRABBOX_CODE_ORIGIN_TEMPLATE=https://{lease}.code.example.com
+https://*.code.example.com                       # same service; wildcard TLS + WebSockets
+```
+
+The `{lease}` label is replaced with an opaque stable hash, not a lease ID or
+slug. The canonical portal authorizes the initial Code URL and issues a
+single-use bootstrap; the per-lease origin then uses only a lease-scoped Code
+session. It does not accept the portal cookie as coordinator authority.
+
 A Cloudflare deployment may additionally publish the same Worker on:
 
 ```text
@@ -69,8 +82,9 @@ matches the token in this precedence (`worker/src/auth.ts`):
 2. **Shared token** — equals `CRABBOX_SHARED_TOKEN`. Authorized but not admin; this is
    normal trusted automation.
 3. **Signed user token** — a token with the `cbxu_` prefix, an HMAC-SHA256 signature over a
-   base64url payload, verified with `CRABBOX_SESSION_SECRET` (falling back to
-   `CRABBOX_SHARED_TOKEN`). Minted by `crabbox login`, with a default 180-day expiry.
+   base64url payload, verified only with `CRABBOX_SESSION_SECRET`. The session
+   secret must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Minted by
+   `crabbox login`, with a default 180-day expiry.
    User tokens are non-admin unless their GitHub email or login matches
    `CRABBOX_GITHUB_ADMIN_OWNERS` or `CRABBOX_GITHUB_ADMIN_LOGINS`.
 
@@ -146,7 +160,7 @@ CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separat
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
 CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated GitHub verified emails with admin
 CRABBOX_GITHUB_ADMIN_LOGINS      # optional; comma-separated GitHub logins with admin
-CRABBOX_SESSION_SECRET           # signs user tokens; falls back to CRABBOX_SHARED_TOKEN
+CRABBOX_SESSION_SECRET           # required for user tokens; must differ from CRABBOX_SHARED_TOKEN
 CRABBOX_USER_TOKEN_TTL_SECONDS   # optional; default 15552000 (180 days), clamped to 1h-365d
 ```
 

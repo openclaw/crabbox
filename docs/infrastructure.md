@@ -158,6 +158,7 @@ Required service settings:
 DATABASE_URL                         # PostgreSQL connection string
 PORT                                 # optional; default 8080
 CRABBOX_PUBLIC_URL                   # canonical external origin
+CRABBOX_CODE_ORIGIN_TEMPLATE         # optional https://{lease}.code.example.com isolation route
 CRABBOX_SHUTDOWN_TIMEOUT_MS          # optional; default 120000
 ```
 
@@ -215,7 +216,7 @@ mechanism:
 ```text
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
-CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; falls back to CRABBOX_SHARED_TOKEN
+CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; required and distinct from CRABBOX_SHARED_TOKEN
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional: restrict to org teams (alias CRABBOX_GITHUB_ALLOWED_TEAM)
 ```
@@ -340,7 +341,7 @@ CRABBOX_AWS_INSTANCE_PROFILE
 CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS                     # comma-separated SSH source CIDRs
 CRABBOX_AWS_ORPHAN_SWEEP_ENABLED         # defaults on when AWS broker credentials exist
-CRABBOX_AWS_ORPHAN_SWEEP_DELETE          # set 1 to terminate confirmed orphan instances
+CRABBOX_AWS_ORPHAN_SWEEP_DELETE          # set 1 to terminate coordinator-owned orphan instances
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS
 CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS
 ```
@@ -627,6 +628,7 @@ CRABBOX_ACCESS_TEAM_DOMAIN, CRABBOX_ACCESS_AUD   # Cloudflare Access route
 CRABBOX_TRUSTED_USER_HEADER, CRABBOX_TRUSTED_USER_ORG
 CRABBOX_TRUSTED_PROXY_CIDRS              # Node runtime peer allowlist
 CRABBOX_PUBLIC_URL                       # canonical coordinator URL for OAuth callback
+CRABBOX_CODE_ORIGIN_TEMPLATE             # optional per-lease Code origin template
 
 # Cost / limits
 CRABBOX_MAX_ACTIVE_LEASES[_PER_OWNER|_PER_ORG]

@@ -227,9 +227,9 @@ crabbox run \
 - `list` reports local Cloudflare claims. Add `--refresh` to check runner state
   for those claims. The runner intentionally does not expose a global container
   enumeration API.
-- The default image includes Git, GitHub CLI (`gh`), `jq`, `ripgrep`, `curl`,
-  Go, Node, and `pnpm`; repo-specific dependencies still belong to the repo
-  setup command.
+- The default image includes Git, checksum-verified GitHub CLI (`gh`), `jq`,
+  `ripgrep`, `curl`, Go, Node, and `pnpm`; repo-specific dependencies still
+  belong to the repo setup command.
 - npm and pnpm caches live under `/var/cache/crabbox`
   (`NPM_CONFIG_CACHE=/var/cache/crabbox/npm`, pnpm store
   `/var/cache/crabbox/pnpm`), and the container filesystem persists while the

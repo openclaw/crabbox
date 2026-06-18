@@ -2313,18 +2313,18 @@ func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 		return nil, err
 	}
 	capabilities := webVNCBridgeCapabilities(ctx, target)
+	headers, err := bridgeUpgradeTicketHeaders(ctx, coord, ticket.Ticket)
+	if err != nil {
+		_ = tcp.Close()
+		return nil, err
+	}
 	ws, resp, err := websocket.Dial(ctx, webVNCAgentURLWithCapabilities(coord.BaseURL, leaseID, capabilities), &websocket.DialOptions{
-		HTTPHeader: bridgeTicketHeaders(coord, ticket.Ticket),
+		HTTPHeader: headers,
 	})
-	if retryBridgeTicketInQuery(resp, err) {
-		headers, headerErr := coord.webVNCAccessHeaders(ctx)
-		if headerErr != nil {
-			err = headerErr
-		} else {
-			ws, _, err = websocket.Dial(ctx, webVNCAgentURLWithTicketAndCapabilities(coord.BaseURL, leaseID, ticket.Ticket, capabilities), &websocket.DialOptions{
-				HTTPHeader: headers,
-			})
-		}
+	if retryBridgeTicketInAuthorization(resp, err) {
+		ws, _, err = websocket.Dial(ctx, webVNCAgentURLWithCapabilities(coord.BaseURL, leaseID, capabilities), &websocket.DialOptions{
+			HTTPHeader: bridgeTicketHeaders(coord, ticket.Ticket),
+		})
 	}
 	if err != nil {
 		_ = tcp.Close()
@@ -3694,7 +3694,16 @@ func bridgeTicketHeaders(coord *CoordinatorClient, ticket string) http.Header {
 	return headers
 }
 
-func retryBridgeTicketInQuery(resp *http.Response, err error) bool {
+func bridgeUpgradeTicketHeaders(ctx context.Context, coord *CoordinatorClient, ticket string) (http.Header, error) {
+	headers, err := coord.webVNCAccessHeaders(ctx)
+	if err != nil {
+		return nil, err
+	}
+	headers.Set("X-Crabbox-Bridge-Ticket", ticket)
+	return headers, nil
+}
+
+func retryBridgeTicketInAuthorization(resp *http.Response, err error) bool {
 	if err == nil || resp == nil {
 		return false
 	}
@@ -3724,22 +3733,6 @@ func webVNCAgentURLWithCapabilities(base, leaseID, capabilities string) string {
 	if strings.TrimSpace(capabilities) != "" {
 		values.Set("capabilities", capabilities)
 	}
-	u.RawQuery = values.Encode()
-	u.Fragment = ""
-	return u.String()
-}
-
-func webVNCAgentURLWithTicket(base, leaseID, ticket string) string {
-	return webVNCAgentURLWithTicketAndCapabilities(base, leaseID, ticket, "")
-}
-
-func webVNCAgentURLWithTicketAndCapabilities(base, leaseID, ticket, capabilities string) string {
-	u, err := url.Parse(webVNCAgentURLWithCapabilities(base, leaseID, capabilities))
-	if err != nil {
-		return base
-	}
-	values := u.Query()
-	values.Set("ticket", ticket)
 	u.RawQuery = values.Encode()
 	u.Fragment = ""
 	return u.String()
