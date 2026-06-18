@@ -155,6 +155,14 @@ atomically rotated token is never pinned in the relay process. Coordinator
 authentication may be a static login token or the normal shell-free
 token-command configuration.
 
+The first ticket for a previously unused adapter ID creates a ten-minute
+provisional owner/org claim. A successful agent connection or registered lease
+binding makes that claim durable. Another normally authenticated owner may
+recover an expired provisional claim only when it has no connected agent,
+pending relay request, unexpired ticket, live registered lease, or pending
+workspace deletion. Existing adapter claims created before this contract are
+treated as durable, so upgrades do not change current adapter ownership.
+
 `--local-socket` is required. It must be an absolute, clean Unix-socket path in
 an existing directory owned by the current user and not writable by group or
 others. The socket must also be owned by the current user with mode `0600`.

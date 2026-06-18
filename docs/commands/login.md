@@ -87,7 +87,8 @@ https://<your-broker-host>/v1/auth/github/callback
 
 Set the same public origin in `CRABBOX_PUBLIC_URL` on the coordinator, then deploy
 `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-`CRABBOX_SESSION_SECRET`, and the relevant `CRABBOX_GITHUB_ALLOWED_ORG(S)` or
+`CRABBOX_SESSION_SECRET` (distinct from `CRABBOX_SHARED_TOKEN`), and the relevant
+`CRABBOX_GITHUB_ALLOWED_ORG(S)` or
 `CRABBOX_GITHUB_ALLOWED_TEAMS` values. A GitHub `Invalid redirect_uri` error means
 the callback URL generated during `crabbox login` does not match one configured on
 that OAuth app.

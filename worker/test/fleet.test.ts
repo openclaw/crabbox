@@ -17,6 +17,7 @@ import {
   bridgeTicketFromRequest,
   boundedSocketReason,
   codeForwardHeaders,
+  codeResponseCookiePath,
   codeResponseHeaders,
   flushPendingWebVNC,
   forwardOrBufferWebVNC,
@@ -361,6 +362,14 @@ describe("runtime adapter relay", () => {
       adapterID: "example-adapter",
       ticket: expect.stringMatching(/^adapter_[a-f0-9]{32}$/),
     });
+    expect(storage.value("runtime-adapter-identity:example-adapter")).toMatchObject({
+      adapterID: "example-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      claimVersion: 1,
+      claimState: "provisional",
+      claimExpiresAt: expect.any(String),
+    });
     const conflictingTicket = await fleet.fetch(
       request("POST", "/v1/adapters/example-adapter/ticket", {
         headers: {
@@ -660,6 +669,142 @@ describe("runtime adapter relay", () => {
       }),
     );
     expect(relayState.runtimeAdapterPending.size).toBe(0);
+  });
+
+  it("recovers only inactive expired provisional runtime adapter claims", async () => {
+    const challengerHeaders = {
+      "x-crabbox-owner": "mallory@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const claim = (fleet: FleetDurableObject, adapterID: string) =>
+      fleet.fetch(
+        request("POST", `/v1/adapters/${adapterID}/ticket`, {
+          headers: challengerHeaders,
+          body: {},
+        }),
+      );
+    const expectConflict = async (fleet: FleetDurableObject, adapterID: string) => {
+      const response = await claim(fleet, adapterID);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "adapter_id_conflict" });
+    };
+
+    const recoverableStorage = new MemoryStorage();
+    recoverableStorage.seed(
+      "runtime-adapter-identity:recoverable-adapter",
+      expiredRuntimeAdapterClaim("recoverable-adapter"),
+    );
+    const recovered = await claim(testFleet(recoverableStorage), "recoverable-adapter");
+    expect(recovered.status).toBe(200);
+    expect(recoverableStorage.value("runtime-adapter-identity:recoverable-adapter")).toMatchObject({
+      owner: "mallory@example.com",
+      org: "example-org",
+      claimVersion: 1,
+      claimState: "provisional",
+      claimExpiresAt: expect.any(String),
+    });
+
+    const durableStorage = new MemoryStorage();
+    durableStorage.seed("runtime-adapter-identity:legacy-adapter", {
+      adapterID: "legacy-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    durableStorage.seed("runtime-adapter-identity:confirmed-adapter", {
+      ...expiredRuntimeAdapterClaim("confirmed-adapter"),
+      claimState: "confirmed",
+      confirmedAt: "2026-06-01T00:01:00.000Z",
+    });
+    durableStorage.seed("runtime-adapter-identity:fresh-adapter", {
+      ...expiredRuntimeAdapterClaim("fresh-adapter"),
+      claimExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const durableFleet = testFleet(durableStorage);
+    await expectConflict(durableFleet, "legacy-adapter");
+    await expectConflict(durableFleet, "confirmed-adapter");
+    await expectConflict(durableFleet, "fresh-adapter");
+
+    const ticketStorage = new MemoryStorage();
+    ticketStorage.seed(
+      "runtime-adapter-identity:ticketed-adapter",
+      expiredRuntimeAdapterClaim("ticketed-adapter"),
+    );
+    ticketStorage.seed("runtime-adapter-ticket:adapter_00000000000000000000000000000000", {
+      ticket: "adapter_00000000000000000000000000000000",
+      adapterID: "ticketed-adapter",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await expectConflict(testFleet(ticketStorage), "ticketed-adapter");
+
+    const leaseStorage = new MemoryStorage();
+    leaseStorage.seed(
+      "runtime-adapter-identity:leased-adapter",
+      expiredRuntimeAdapterClaim("leased-adapter"),
+    );
+    const lease = testLease({
+      id: "cbx_000000000099",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      runtimeAdapterID: "leased-adapter",
+      runtimeAdapterWorkspaceID: "leased-workspace",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    leaseStorage.seed(`lease:${lease.id}`, lease);
+    await expectConflict(testFleet(leaseStorage), "leased-adapter");
+
+    const deletingStorage = new MemoryStorage();
+    deletingStorage.seed(
+      "runtime-adapter-identity:deleting-adapter",
+      expiredRuntimeAdapterClaim("deleting-adapter"),
+    );
+    const deletingLease = testLease({
+      id: "cbx_000000000098",
+      provider: "external",
+      lifecycle: "registered",
+      state: "released",
+      owner: "alice@example.com",
+      org: "example-org",
+      runtimeAdapterID: "deleting-adapter",
+      runtimeAdapterWorkspaceID: "deleting-workspace",
+      runtimeAdapterDeleteRequestedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    deletingStorage.seed(`lease:${deletingLease.id}`, deletingLease);
+    await expectConflict(testFleet(deletingStorage), "deleting-adapter");
+
+    const connectedStorage = new MemoryStorage();
+    connectedStorage.seed(
+      "runtime-adapter-identity:connected-adapter",
+      expiredRuntimeAdapterClaim("connected-adapter"),
+    );
+    const connectedFleet = testFleet(connectedStorage);
+    const relayState = connectedFleet as unknown as {
+      runtimeAdapterAgents: Map<string, WebSocket>;
+    };
+    relayState.runtimeAdapterAgents.set(
+      "connected-adapter",
+      new FakeWebSocket() as unknown as WebSocket,
+    );
+    await expectConflict(connectedFleet, "connected-adapter");
+
+    const pendingStorage = new MemoryStorage();
+    pendingStorage.seed(
+      "runtime-adapter-identity:pending-adapter",
+      expiredRuntimeAdapterClaim("pending-adapter"),
+    );
+    const pendingFleet = testFleet(pendingStorage);
+    const pendingState = pendingFleet as unknown as {
+      runtimeAdapterPending: Map<string, { adapterID: string }>;
+    };
+    pendingState.runtimeAdapterPending.set("pending-request", { adapterID: "pending-adapter" });
+    await expectConflict(pendingFleet, "pending-adapter");
   });
 
   it("isolates ordinary relay capacity by owner while preserving delete capacity", async () => {
@@ -5746,6 +5891,11 @@ describe("fleet lease identity and idle", () => {
         runtimeAdapterRegistrationID: "registration-generation-96",
       },
     });
+    expect(storage.value("runtime-adapter-identity:example-adapter")).toMatchObject({
+      claimVersion: 1,
+      claimState: "confirmed",
+      confirmedAt: expect.any(String),
+    });
 
     const duplicateBinding = await fleet.fetch(
       request("PUT", "/v1/leases/cbx_000000000094/registration", { headers, body }),
@@ -6316,7 +6466,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBeGreaterThan(Date.now());
   });
 
-  it("terminates AWS orphan sweep candidates only when delete is enabled", async () => {
+  it("keeps tag-only AWS orphan sweep candidates report-only in delete mode", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
@@ -6359,15 +6509,119 @@ describe("fleet lease identity and idle", () => {
       terminated: number;
       candidates: Array<Record<string, unknown>>;
     }>("aws-orphan-sweep:last");
-    expect(deleted).toEqual(["i-orphan"]);
-    expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
-    expect(sweep?.candidates[0]).toMatchObject({ action: "terminated" });
+    expect(deleted).toEqual([]);
+    expect(sweep).toMatchObject({ mode: "delete", terminated: 0 });
+    expect(sweep?.candidates[0]).toMatchObject({
+      cloudID: "i-orphan",
+      ownership: "provider-tags-only",
+      action: "reported",
+    });
   });
 
-  it("terminates Azure orphan sweep candidates only when delete is enabled", async () => {
+  it("terminates AWS orphan sweep candidates with exact coordinator ownership", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "aws",
+        cloudID: "i-orphan",
+        region: "eu-west-1",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    storage.seed(
+      "lease:cbx_000000000774",
+      testLease({
+        id: "cbx_000000000774",
+        provider: "aws",
+        cloudID: "i-wrong-region",
+        region: "us-east-1",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(
+          undefined,
+          {
+            provider: "aws",
+            servers: [
+              testMachine({
+                cloudID: "i-orphan",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                cloudID: "i-wrong-region",
+                labels: {
+                  crabbox: "true",
+                  lease: "cbx_000000000774",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+            ],
+          },
+          async (id) => {
+            deleted.push(id);
+          },
+        ),
+      },
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    const sweep = storage.value<{
+      mode: string;
+      terminated: number;
+      candidates: Array<Record<string, unknown>>;
+    }>("aws-orphan-sweep:last");
+    expect(deleted).toEqual(["i-orphan"]);
+    expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
+    expect(sweep?.candidates[0]).toMatchObject({
+      cloudID: "i-orphan",
+      ownership: "coordinator-lease",
+      ownershipLeaseID: "cbx_000000000776",
+      action: "terminated",
+    });
+    expect(sweep?.candidates[1]).toMatchObject({
+      cloudID: "i-wrong-region",
+      ownership: "provider-tags-only",
+      action: "reported",
+    });
+  });
+
+  it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "azure",
+        cloudID: "vm-orphan",
+        region: "westus2",
+        state: "expired",
+        keep: false,
+      }),
+    );
     storage.seed(
       "lease:cbx_000000000777",
       testLease({
@@ -6442,6 +6696,18 @@ describe("fleet lease identity and idle", () => {
                 labels: {
                   crabbox: "true",
                   keep: "true",
+                  lease: "cbx_missing",
+                  created_at: oldSeconds,
+                  expires_at: oldSeconds,
+                },
+              }),
+              testMachine({
+                provider: "azure",
+                cloudID: "vm-tag-only",
+                region: "westus2",
+                name: "vm-tag-only",
+                labels: {
+                  crabbox: "true",
                   lease: "cbx_missing",
                   created_at: oldSeconds,
                   expires_at: oldSeconds,
@@ -6524,7 +6790,15 @@ describe("fleet lease identity and idle", () => {
         region: "westus2",
         leaseID: "cbx_missing",
         reason: "expired-provider-tag",
+        ownership: "coordinator-lease",
+        ownershipLeaseID: "cbx_000000000776",
         action: "terminated",
+      }),
+      expect.objectContaining({
+        cloudID: "vm-tag-only",
+        region: "westus2",
+        ownership: "provider-tags-only",
+        action: "reported",
       }),
     ]);
   });
@@ -6533,6 +6807,18 @@ describe("fleet lease identity and idle", () => {
     const storage = new MemoryStorage();
     const actions: string[] = [];
     let releaseHostID = "";
+    storage.seed(
+      "lease:cbx_000000000775",
+      testLease({
+        id: "cbx_000000000775",
+        provider: "aws",
+        cloudID: "i-terminated",
+        region: "eu-west-1",
+        hostID: "h-stale",
+        state: "expired",
+        keep: false,
+      }),
+    );
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
       async (input, init) => {
         const params = new URLSearchParams(await requestBodyForTest(input, init));
@@ -6590,7 +6876,64 @@ describe("fleet lease identity and idle", () => {
     expect(sweep?.macHostCandidates[0]).toMatchObject({
       hostID: "h-stale",
       reason: "stale-pending-mac-host",
+      ownership: "coordinator-lease",
+      ownershipLeaseID: "cbx_000000000775",
       action: "released",
+    });
+  });
+
+  it("keeps tag-only EC2 Mac hosts report-only in release mode", async () => {
+    const storage = new MemoryStorage();
+    const actions: string[] = [];
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async (input, init) => {
+        const params = new URLSearchParams(await requestBodyForTest(input, init));
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <DescribeHostsResponse>
+            <hostSet>
+              <item>
+                <hostId>h-tag-only</hostId>
+                <hostState>pending</hostState>
+                <availabilityZone>eu-west-1a</availabilityZone>
+                <autoPlacement>off</autoPlacement>
+                <allocationTime>2026-05-01T00:00:00Z</allocationTime>
+                <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+                <tagSet><item><key>crabbox</key><value>true</value></item></tagSet>
+              </item>
+            </hostSet>
+          </DescribeHostsResponse>`);
+        }
+        return ec2XMLResponse("<ErrorResponse />", 500);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws", servers: [] }) },
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE: "1",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    await fleet.alarm();
+
+    const sweep = storage.value<{
+      macHostsReleased: number;
+      macHostCandidates: Array<Record<string, unknown>>;
+    }>("aws-orphan-sweep:last");
+    expect(actions).toEqual(["DescribeHosts"]);
+    expect(sweep?.macHostsReleased).toBe(0);
+    expect(sweep?.macHostCandidates[0]).toMatchObject({
+      hostID: "h-tag-only",
+      ownership: "provider-tags-only",
+      action: "reported",
     });
   });
 
@@ -11712,6 +12055,126 @@ describe("fleet lease identity and idle", () => {
     expect(missingTicket.status).toBe(401);
   });
 
+  it("bootstraps a one-time lease-scoped Code session on an isolated origin", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+    };
+    const fleet = testFleet(storage, {}, env);
+    const leaseID = "cbx_000000000001";
+    const tokenExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const headers = {
+      "x-crabbox-auth": "github",
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+      "x-crabbox-github-login": "alice",
+      "x-crabbox-token-expires-at": tokenExpiresAt,
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const coordinatorHealth = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/code/health", { headers }),
+    );
+    expect(coordinatorHealth.status).toBe(200);
+    await expect(coordinatorHealth.json()).resolves.toMatchObject({
+      lease: { id: leaseID, code: true },
+      code: { agentConnected: false },
+    });
+
+    const redirect = await fleet.fetch(
+      request("GET", "/portal/leases/blue-lobster/code/?folder=%2Fwork%2Frepo", { headers }),
+    );
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get("cache-control")).toBe("no-store");
+    expect(redirect.headers.get("referrer-policy")).toBe("no-referrer");
+    const bootstrapURL = new URL(redirect.headers.get("location") || "");
+    expect(bootstrapURL.hostname).toMatch(/^cbx-[a-f0-9]{32}\.code\.example\.test$/);
+    expect(bootstrapURL.pathname).toBe(`/portal/leases/${leaseID}/code/__crabbox_bootstrap`);
+    expect(bootstrapURL.searchParams.get("ticket")).toMatch(/^code_view_[a-f0-9]{32}$/);
+
+    const bootstrap = await fleet.fetch(new Request(bootstrapURL));
+    expect(bootstrap.status).toBe(303);
+    expect(bootstrap.headers.get("location")).toBe(
+      `/portal/leases/${leaseID}/code/?folder=%2Fwork%2Frepo`,
+    );
+    const cookie = bootstrap.headers.get("set-cookie") || "";
+    expect(cookie).toContain("crabbox_code_session=code_session_");
+    expect(cookie).toContain(`Path=/portal/leases/${leaseID}/code/`);
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
+    const maxAge = Number.parseInt(/Max-Age=(\d+)/.exec(cookie)?.[1] || "", 10);
+    expect(maxAge).toBeGreaterThanOrEqual(295);
+    expect(maxAge).toBeLessThanOrEqual(300);
+
+    const replay = await fleet.fetch(new Request(bootstrapURL));
+    expect(replay.status).toBe(401);
+
+    const page = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}${bootstrap.headers.get("location")}`, {
+        headers: { cookie: cookie.split(";", 1)[0] || "" },
+      }),
+    );
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("crabbox code --id blue-lobster --open");
+
+    const sessionCookie = cookie.split(";", 1)[0] || "";
+    const crossOriginPost = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/api/save`, {
+        method: "POST",
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://other-lease.code.example.test",
+        },
+      }),
+    );
+    expect(crossOriginPost.status).toBe(403);
+
+    const crossOriginWebSocket = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/websocket`, {
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://other-lease.code.example.test",
+          upgrade: "websocket",
+        },
+      }),
+    );
+    expect(crossOriginWebSocket.status).toBe(403);
+
+    const sameOriginPost = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/api/save`, {
+        method: "POST",
+        headers: { cookie: sessionCookie, origin: bootstrapURL.origin },
+      }),
+    );
+    expect(sameOriginPost.status).not.toBe(403);
+
+    const missingSession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/health`),
+    );
+    expect(missingSession.status).toBe(302);
+    expect(missingSession.headers.get("location")).toBe(
+      `https://crabbox.test/portal/leases/${leaseID}/code/`,
+    );
+
+    const malformedSession = await fleet.fetch(
+      new Request(`${bootstrapURL.origin}/portal/leases/${leaseID}/code/health`, {
+        headers: { cookie: "crabbox_code_session=%ZZ" },
+      }),
+    );
+    expect(malformedSession.status).toBe(302);
+  });
+
   it("keeps bridge tickets usable after endpoint binding mismatches", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -11874,7 +12337,33 @@ describe("fleet lease identity and idle", () => {
     expect(runtime.timers).toEqual([]);
   });
 
-  it("prefers valid query bridge tickets over unrelated bearer authorization", () => {
+  it("prefers dedicated upgrade bridge tickets over bearer and legacy query credentials", () => {
+    const upgradeTicket = `code_${"c".repeat(32)}`;
+    const queryTicket = `code_${"a".repeat(32)}`;
+    expect(
+      bridgeTicketFromRequest(
+        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=${queryTicket}`, {
+          headers: {
+            authorization: `Bearer code_${"b".repeat(32)}`,
+            "x-crabbox-bridge-ticket": upgradeTicket,
+          },
+        }),
+      ),
+    ).toBe(upgradeTicket);
+  });
+
+  it("prefers bearer bridge tickets over legacy query credentials", () => {
+    const headerTicket = `code_${"b".repeat(32)}`;
+    expect(
+      bridgeTicketFromRequest(
+        request("GET", `/v1/leases/blue-lobster/code/agent?ticket=code_${"a".repeat(32)}`, {
+          headers: { authorization: `Bearer ${headerTicket}` },
+        }),
+      ),
+    ).toBe(headerTicket);
+  });
+
+  it("accepts legacy query bridge tickets with unrelated proxy authorization", () => {
     const queryTicket = `code_${"a".repeat(32)}`;
     expect(
       bridgeTicketFromRequest(
@@ -11885,24 +12374,18 @@ describe("fleet lease identity and idle", () => {
     ).toBe(queryTicket);
   });
 
-  it("uses bearer bridge tickets when the query value is absent or invalid", () => {
-    const headerTicket = `code_${"b".repeat(32)}`;
-    expect(
-      bridgeTicketFromRequest(
-        request("GET", "/v1/leases/blue-lobster/code/agent?ticket=invalid", {
-          headers: { authorization: `Bearer ${headerTicket}` },
-        }),
-      ),
-    ).toBe(headerTicket);
-  });
-
   it("uses a VS Code-compatible CSP for code proxy responses", () => {
-    const headers = codeResponseHeaders({
-      "content-security-policy": "default-src 'none'; script-src 'self'",
-      "content-length": "123",
-      "content-type": "text/html",
-      "cache-control": "public, max-age=31536000",
-    });
+    const headers = codeResponseHeaders(
+      {
+        "content-security-policy": "default-src 'none'; script-src 'self'",
+        "content-length": "123",
+        "content-type": "text/html",
+        "cache-control": "public, max-age=31536000",
+        "service-worker-allowed": "/",
+        "set-cookie": "vscode-tkn=remote-token; Domain=example.test; Path=/",
+      },
+      { cookiePath: "/portal/leases/cbx_000000000001/code/", secure: true },
+    );
 
     const csp = headers.get("content-security-policy") || "";
     expect(csp).toContain("script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:");
@@ -11911,6 +12394,28 @@ describe("fleet lease identity and idle", () => {
     expect(headers.get("content-length")).toBeNull();
     expect(headers.get("content-type")).toBe("text/html");
     expect(headers.get("cache-control")).toBe("no-store, no-transform");
+    expect(headers.get("service-worker-allowed")).toBeNull();
+    expect(headers.get("set-cookie")).toBe(
+      "vscode-tkn=remote-token; Path=/portal/leases/cbx_000000000001/code/; HttpOnly; Secure; SameSite=Lax",
+    );
+    expect(
+      codeResponseHeaders({ "set-cookie": "crabbox_session=attacker; Path=/" }).get("set-cookie"),
+    ).toBeNull();
+  });
+
+  it("scopes the VS Code token cookie to the active ID or slug Code path", () => {
+    expect(
+      codeResponseCookiePath(
+        new Request("https://broker.example.test/portal/leases/blue-lobster/code/api"),
+        "cbx_000000000001",
+      ),
+    ).toBe("/portal/leases/blue-lobster/code/");
+    expect(
+      codeResponseCookiePath(
+        new Request("https://broker.example.test/portal/leases/cbx_000000000001/code"),
+        "cbx_000000000001",
+      ),
+    ).toBe("/portal/leases/cbx_000000000001/code/");
   });
 
   it("forwards only the VS Code token cookie to code-server", () => {
@@ -15993,6 +16498,7 @@ describe("fleet identity", () => {
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "session-secret",
       } as Env,
     );
     const pollSecret = "local-poll-secret";
@@ -16022,6 +16528,60 @@ describe("fleet identity", () => {
     );
     expect(poll.status).toBe(200);
     await expect(poll.json()).resolves.toMatchObject({ status: "pending" });
+  });
+
+  it("reports missing signing material before GitHub login starts", async () => {
+    const storage = new MemoryStorage();
+    const fleet = new FleetDurableObject(
+      { storage } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SHARED_TOKEN: "shared",
+      } as Env,
+    );
+
+    const start = await fleet.fetch(
+      request("POST", "/v1/auth/github/start", {
+        body: { pollSecretHash: await sha256HexForTest("local-poll-secret") },
+      }),
+    );
+    expect(start.status).toBe(503);
+    await expect(start.json()).resolves.toMatchObject({
+      error: "github_session_secret_invalid",
+      message: "CRABBOX_SESSION_SECRET is required for signed user tokens",
+    });
+
+    const portal = await fleet.fetch(request("GET", "/portal/login"));
+    expect(portal.status).toBe(503);
+    expect(await portal.text()).toContain(
+      "CRABBOX_SESSION_SECRET is required for signed user tokens",
+    );
+  });
+
+  it("rejects a shared token reused as GitHub signing material", async () => {
+    const fleet = new FleetDurableObject(
+      { storage: new MemoryStorage() } as unknown as DurableObjectState,
+      {
+        CRABBOX_DEFAULT_ORG: "openclaw",
+        CRABBOX_GITHUB_CLIENT_ID: "github-client",
+        CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "shared",
+      } as Env,
+    );
+
+    const start = await fleet.fetch(
+      request("POST", "/v1/auth/github/start", {
+        body: { pollSecretHash: await sha256HexForTest("local-poll-secret") },
+      }),
+    );
+    expect(start.status).toBe(503);
+    await expect(start.json()).resolves.toMatchObject({
+      error: "github_session_secret_invalid",
+      message: "CRABBOX_SESSION_SECRET must differ from CRABBOX_SHARED_TOKEN",
+    });
   });
 
   it("sets a portal session cookie after GitHub login", async () => {
@@ -16074,6 +16634,7 @@ describe("fleet identity", () => {
         CRABBOX_GITHUB_CLIENT_ID: "github-client",
         CRABBOX_GITHUB_CLIENT_SECRET: "github-secret",
         CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SESSION_SECRET: "session-secret",
       } as Env,
     );
     storage.seed("oauth:login_old", {
@@ -16499,6 +17060,18 @@ function testFleet(
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
   );
+}
+
+function expiredRuntimeAdapterClaim(adapterID: string) {
+  return {
+    adapterID,
+    owner: "alice@example.com",
+    org: "example-org",
+    createdAt: "2026-06-01T00:00:00.000Z",
+    claimVersion: 1,
+    claimState: "provisional",
+    claimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+  };
 }
 
 function fakeProvider(

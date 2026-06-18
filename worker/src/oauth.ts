@@ -1,4 +1,9 @@
-import { issueUserToken, sha256Hex, userTokenExpiresAt } from "./auth";
+import {
+  issueUserToken,
+  sha256Hex,
+  userTokenExpiresAt,
+  userTokenSigningConfigurationError,
+} from "./auth";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
 import { errorMessage, json, readJson } from "./http";
 import type { Env, Provider } from "./types";
@@ -83,6 +88,10 @@ export async function githubPortalLogin(
   if (!clientID || !env.CRABBOX_GITHUB_CLIENT_SECRET) {
     return html("Crabbox login unavailable", "GitHub OAuth is not configured.", 503);
   }
+  const signingError = userTokenSigningConfigurationError(env);
+  if (signingError) {
+    return html("Crabbox login unavailable", signingError, 503);
+  }
   const pendingCount = await cleanupExpiredPendingOAuth(storage);
   if (pendingCount >= maxPendingOAuthLogins) {
     return html("Crabbox login busy", "Too many pending GitHub logins. Try again shortly.", 429);
@@ -120,6 +129,10 @@ async function githubAuthStart(
       { error: "github_oauth_not_configured", message: "GitHub OAuth is not configured" },
       { status: 503 },
     );
+  }
+  const signingError = userTokenSigningConfigurationError(env);
+  if (signingError) {
+    return json({ error: "github_session_secret_invalid", message: signingError }, { status: 503 });
   }
   const input = await readJson<{
     pollSecretHash?: string;
@@ -208,6 +221,11 @@ async function githubAuthCallback(
       error: error || "missing_code",
     });
     return html("Crabbox login failed", "GitHub did not authorize the login.", 400);
+  }
+  const signingError = userTokenSigningConfigurationError(env);
+  if (signingError) {
+    await finishPendingOAuth(runtime, pending.id, claim, { error: signingError });
+    return html("Crabbox login unavailable", signingError, 503);
   }
   try {
     const accessToken = await exchangeGitHubCode(code, githubRedirectURI(request, env), env);

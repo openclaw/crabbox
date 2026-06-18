@@ -109,10 +109,9 @@ ownership under those paths. System paths such as `/etc`, `/usr`, `/var`,
 `/home`, and `/tmp` are also rejected; use an application mount point such as
 `/mnt/my-app` or `/cache`.
 
-**Security:** This flag is CLI-only. It is intentionally not loaded from
-repo-local `.crabbox.yaml` because bind mounts expose host paths and must
-be an explicit operator action, not something an untrusted checkout can
-request.
+**Host access:** This flag is CLI-only. Crabbox does not load bind mounts from
+repo-local `.crabbox.yaml`; operators must name each host path explicitly on
+the command line.
 
 Environment overrides:
 
@@ -129,7 +128,7 @@ CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 
 Host bind mounts must be passed explicitly with `--local-container-volume`.
 Crabbox intentionally ignores `localContainer.volumes` from config files because
-repo-local config can come from untrusted checkouts.
+host paths are machine-specific and benefit from invocation-time review.
 
 For runtimes that use Docker contexts or Docker-compatible API sockets, the
 active socket is selected from `DOCKER_HOST` or the Docker context when socket
@@ -142,7 +141,10 @@ Set `localContainer.dockerSocket: true` or
 `CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=1` when commands inside the lease need to
 run `docker`. Crabbox mounts the active local Unix Docker-compatible socket into
 the container at `/var/run/docker.sock`, so in-lease `docker` commands run
-against the host engine. For Podman, point `DOCKER_HOST` at the Podman socket,
+against the host engine. This grants the lease the same effective authority as
+the user controlling that engine; it is not a container isolation boundary.
+Repository configuration is trusted project automation and can enable this
+mode. For Podman, point `DOCKER_HOST` at the Podman socket,
 for example `unix://$XDG_RUNTIME_DIR/podman/podman.sock`. Remote TCP hosts are
 rejected in this mode. Basic Podman leases do not require socket pass-through.
 

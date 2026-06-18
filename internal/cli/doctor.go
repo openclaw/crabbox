@@ -339,6 +339,13 @@ func (a App) doctor(ctx context.Context, args []string) error {
 
 	doctorProvider, doctorSupported := providerDef.(DoctorProvider)
 	if doctorSupported {
+		if err := validateProviderConfig(cfg); err != nil {
+			class := doctorErrorClass(err)
+			hint := doctorErrorHint(providerDef.Name(), class)
+			record("failed", "provider", fmt.Sprintf("provider=%s class=%s hint=%s %v", providerDef.Name(), class, hint, err), map[string]string{"provider": providerDef.Name(), "class": class, "hint": hint, "error": err.Error()})
+			ok = false
+			return finish()
+		}
 		doctor, err := doctorProvider.ConfigureDoctor(cfg, runtimeForApp(a))
 		if err != nil {
 			class := doctorErrorClass(err)

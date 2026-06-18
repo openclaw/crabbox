@@ -9,6 +9,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"nhooyr.io/websocket"
 )
 
 func TestEgressHostAllowedMatchesExactAndWildcards(t *testing.T) {
@@ -233,10 +236,62 @@ func TestEgressRequestHostPort(t *testing.T) {
 }
 
 func TestEgressAgentURL(t *testing.T) {
-	got := egressAgentURL("https://broker.example.com", "cbx_abcdef123456", "host", "egress_abc")
-	want := "wss://broker.example.com/v1/leases/cbx_abcdef123456/egress/host?ticket=egress_abc"
+	got := egressAgentURL("https://broker.example.com", "cbx_abcdef123456", "host")
+	want := "wss://broker.example.com/v1/leases/cbx_abcdef123456/egress/host"
 	if got != want {
 		t.Fatalf("egressAgentURL=%q want %q", got, want)
+	}
+}
+
+func TestConnectEgressBridgeSendsTicketInDedicatedHeader(t *testing.T) {
+	agentConnected := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/leases/cbx_abcdef123456/egress/host" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("ticket"); got != "" {
+			t.Errorf("query ticket=%q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer coordinator-token" {
+			t.Errorf("authorization=%q", got)
+		}
+		if got := r.Header.Get("X-Crabbox-Bridge-Ticket"); got != "egress_abcdef1234567890abcdef1234567890" {
+			t.Errorf("bridge ticket=%q", got)
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("websocket accept: %v", err)
+			return
+		}
+		close(agentConnected)
+		_, _, _ = conn.Read(context.Background())
+		_ = conn.Close(websocket.StatusNormalClosure, "test done")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	coord := &CoordinatorClient{BaseURL: server.URL, Token: "coordinator-token", Client: server.Client()}
+	bridge, err := connectEgressBridge(
+		ctx,
+		coord,
+		"cbx_abcdef123456",
+		"host",
+		"egress_abcdef1234567890abcdef1234567890",
+		"egress_session",
+		"",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.close()
+
+	select {
+	case <-agentConnected:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 }
 

@@ -70,10 +70,11 @@ lease-audit`.
 
 ### AWS orphan sweep
 
-Independent of per-lease expiry, the Worker can sweep AWS resources that no
-longer map to an active lease — terminating untracked Crabbox instances and
-releasing idle Mac dedicated hosts. It runs from the same alarm/cron, in report
-or delete mode, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*` environment variables.
+Independent of per-lease expiry, the Worker can report AWS resources that no
+longer map to an active lease. Delete mode terminates instances or releases idle
+Mac dedicated hosts only when retained coordinator state binds the exact
+resource; tag-only and legacy candidates stay report-only. It runs from the same
+alarm/cron, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*` environment variables.
 
 ## Direct-provider lifecycle
 

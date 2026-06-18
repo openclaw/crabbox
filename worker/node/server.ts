@@ -94,7 +94,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     const webRequest = await requestWithNodeBody(
       prepared.request,
       request,
-      requestBodyLimit(prepared.request, prepared.authenticated),
+      prepared.bodyLimit ?? requestBodyLimit(prepared.request, prepared.authenticated),
     );
     const result = await runFleetRequest(webRequest);
     await writeResponse(response, result);

@@ -86,7 +86,10 @@ files, or provider credentials. Keep the bearer token between the fleet UI and
 ### Outbound coordinator control
 
 1. `adapter connect` authenticates to the coordinator using normal Crabbox
-   configuration and obtains a short-lived relay ticket.
+   configuration and obtains a short-lived relay ticket. A new adapter ID starts
+   with a ten-minute provisional owner/org claim; agent connection or successful
+   lease registration makes it durable. Only expired inactive provisional claims
+   are recoverable, and existing adapter claims remain durable across upgrades.
 2. It opens an outbound WebSocket and accepts only the documented typed
    workspace operations.
 3. Each operation is forwarded through the verified, current-user-owned Unix

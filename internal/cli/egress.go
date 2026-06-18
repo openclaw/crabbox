@@ -313,6 +313,7 @@ func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinato
 	cfg.Provider = provider
 	if strings.TrimSpace(coordinatorURL) != "" {
 		cfg.Coordinator = strings.TrimRight(strings.TrimSpace(coordinatorURL), "/")
+		markCoordinatorDestinationExplicit(&cfg)
 	}
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
@@ -359,13 +360,18 @@ func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 	} else if strings.TrimSpace(sessionID) == "" {
 		sessionID = "egress_manual"
 	}
-	headers, err := coord.webVNCAccessHeaders(ctx)
+	headers, err := bridgeUpgradeTicketHeaders(ctx, coord, ticket)
 	if err != nil {
 		return nil, err
 	}
-	ws, _, err := websocket.Dial(ctx, egressAgentURL(coord.BaseURL, leaseID, role, ticket), &websocket.DialOptions{
+	ws, resp, err := websocket.Dial(ctx, egressAgentURL(coord.BaseURL, leaseID, role), &websocket.DialOptions{
 		HTTPHeader: headers,
 	})
+	if retryBridgeTicketInAuthorization(resp, err) {
+		ws, _, err = websocket.Dial(ctx, egressAgentURL(coord.BaseURL, leaseID, role), &websocket.DialOptions{
+			HTTPHeader: bridgeTicketHeaders(coord, ticket),
+		})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -750,6 +756,7 @@ func egressCoordinatorNeedsAccess(access AccessConfig) bool {
 func egressStartCoordinatorConfig(cfg Config, coordinatorURL string) (Config, error) {
 	if override := strings.TrimSpace(coordinatorURL); override != "" {
 		cfg.Coordinator = strings.TrimRight(override, "/")
+		markCoordinatorDestinationExplicit(&cfg)
 		cfg.Access = AccessConfig{}
 		return cfg, nil
 	}
@@ -759,7 +766,7 @@ func egressStartCoordinatorConfig(cfg Config, coordinatorURL string) (Config, er
 	return cfg, nil
 }
 
-func egressAgentURL(base, leaseID, role, ticket string) string {
+func egressAgentURL(base, leaseID, role string) string {
 	u, err := url.Parse(base)
 	if err != nil {
 		return base
@@ -770,9 +777,7 @@ func egressAgentURL(base, leaseID, role, ticket string) string {
 		u.Scheme = "ws"
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/v1/leases/" + url.PathEscape(leaseID) + "/egress/" + role
-	values := url.Values{}
-	values.Set("ticket", ticket)
-	u.RawQuery = values.Encode()
+	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
 }

@@ -66,9 +66,10 @@ resolved in this order (`worker/src/auth.ts`):
 2. **Shared operator token** — matches `CRABBOX_SHARED_TOKEN`. Non-admin scope,
    owner from `CRABBOX_SHARED_OWNER`.
 3. **Signed user token** — prefix `cbxu_`, an HMAC-SHA256 signature over a
-   base64url payload, keyed by `CRABBOX_SESSION_SECRET` (falling back to
-   `CRABBOX_SHARED_TOKEN`). Issued by GitHub OAuth login; default 180-day expiry.
-   Carries `owner`, `org`, and GitHub `login`.
+   base64url payload, keyed only by `CRABBOX_SESSION_SECRET`. The session secret
+   must be configured and distinct from `CRABBOX_SHARED_TOKEN`. Issued by GitHub
+   OAuth login; default 180-day expiry. Carries `owner`, `org`, and GitHub
+   `login`.
 4. **Trusted reverse-proxy identity** — opt-in through
    `CRABBOX_TRUSTED_USER_HEADER` on the Node runtime, accepted only from peers in
    `CRABBOX_TRUSTED_PROXY_CIDRS`; the authenticated ingress must also strip
@@ -140,9 +141,14 @@ WebVNC/share operation still requires the record to exist.
 
 Runtime adapters connect outbound to `/agent`, so their local lifecycle service
 does not need an inbound public route. The coordinator issues a short-lived,
-single-use ticket after normal owner authentication. The first ticket safely
-claims the adapter ID for that owner and organization; lease registration
-rejects unclaimed IDs and claims owned by another identity. The relay permits
+single-use ticket after normal owner authentication. The first ticket for a new
+adapter ID creates a ten-minute provisional owner/org claim. Agent connection or
+successful registered lease binding confirms it as durable. An expired
+provisional claim can be recovered by another normally authenticated owner only
+when no connected agent, pending relay request, unexpired ticket, live registered
+lease, or pending workspace deletion still uses it. Existing and confirmed
+claims remain durable. Lease registration rejects unclaimed IDs and claims owned
+by another identity. The relay permits
 only the versioned workspace create, inspect, delete, and desktop-connection
 methods. Public proxy `DELETE` requests are rejected; destructive dispatch must
 go through a registered lease release so the coordinator can fence its immutable
@@ -273,8 +279,9 @@ request 404s or 401s.
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`
 (state `expired`), retrying after ~5 minutes on failure, and an AWS orphan sweep
-(report or delete, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*`) terminates untracked
-instances and releases idle Mac dedicated hosts. The next alarm is scheduled for
+(report or delete, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*`) reports untracked
+instances and deletes or releases only resources with exact retained coordinator
+bindings. The next alarm is scheduled for
 the soonest upcoming expiry or sweep time.
 
 Lease responses carry the canonical `cbx_...` ID, the friendly slug when present,

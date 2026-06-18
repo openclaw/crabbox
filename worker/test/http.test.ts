@@ -7,6 +7,7 @@ import {
   issueUserToken,
   requestWithAuthContext,
 } from "../src/auth";
+import { codeOriginForLease } from "../src/code-origin";
 import { prepareCoordinatorRequest } from "../src/coordinator-entry";
 import { errorMessage, json, requestOwner } from "../src/http";
 import type { Env } from "../src/types";
@@ -21,6 +22,37 @@ function proxyIdentityRequest(secret?: string): Request {
 }
 
 describe("coordinator auth", () => {
+  it("routes only the exact per-lease Code origin without portal-cookie authority", async () => {
+    const env = {
+      CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
+      CRABBOX_PUBLIC_URL: "https://broker.example.test",
+    } as Env;
+    const leaseID = "cbx_000000000001";
+    const origin = await codeOriginForLease(env, leaseID);
+    const isolated = await prepareCoordinatorRequest(
+      new Request(`${origin}/portal/leases/${leaseID}/code/static/app.js`, {
+        headers: { cookie: "crabbox_session=must-not-authorize-code-origin" },
+      }),
+      env,
+    );
+
+    const isolatedRequest = "request" in isolated ? isolated.request : undefined;
+    expect(isolatedRequest).toBeDefined();
+    expect(isolated.authenticated).toBe(false);
+    expect("bodyLimit" in isolated ? isolated.bodyLimit : undefined).toBe(10 * 1024 * 1024);
+    expect(isolatedRequest?.headers.get("authorization")).toBeNull();
+
+    const wrongLease = await prepareCoordinatorRequest(
+      new Request(`${origin}/portal/leases/cbx_000000000002/code/`),
+      env,
+    );
+    const wrongLeaseResponse = "response" in wrongLease ? wrongLease.response : undefined;
+    expect(wrongLeaseResponse?.status).toBe(302);
+    expect(wrongLeaseResponse?.headers.get("location")).toBe(
+      "https://broker.example.test/portal/leases/cbx_000000000002/code/",
+    );
+  });
+
   it("denies requests when no shared token is configured", async () => {
     const request = new Request("https://example.test/v1/pool");
     await expect(isAuthorized(request, {})).resolves.toBe(false);
@@ -330,7 +362,11 @@ describe("coordinator auth", () => {
   });
 
   it("accepts signed GitHub user tokens without admin rights", async () => {
-    const env = { CRABBOX_SHARED_TOKEN: "shared", CRABBOX_DEFAULT_ORG: "openclaw" };
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+    };
     const token = await issueUserToken(env, {
       owner: "friend@example.com",
       org: "openclaw",
@@ -354,6 +390,7 @@ describe("coordinator auth", () => {
   it("promotes configured GitHub user tokens to admin", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
       CRABBOX_DEFAULT_ORG: "openclaw",
       CRABBOX_GITHUB_ADMIN_OWNERS: "vincentkoc@ieee.org",
       CRABBOX_GITHUB_ADMIN_LOGINS: "steipete",
@@ -393,9 +430,13 @@ describe("coordinator auth", () => {
   });
 
   it("rejects signed user tokens with admin claims", async () => {
-    const env = { CRABBOX_SHARED_TOKEN: "shared", CRABBOX_DEFAULT_ORG: "openclaw" };
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+    };
     const now = Math.floor(Date.now() / 1000);
-    const token = await signedUserToken("shared", {
+    const token = await signedUserToken("session-secret", {
       typ: "crabbox-user",
       owner: "friend@example.com",
       org: "openclaw",
@@ -417,7 +458,7 @@ describe("coordinator auth", () => {
 
   it("does not route admin-claim user tokens to the coordinator", async () => {
     const now = Math.floor(Date.now() / 1000);
-    const token = await signedUserToken("shared", {
+    const token = await signedUserToken("session-secret", {
       typ: "crabbox-user",
       owner: "friend@example.com",
       org: "openclaw",
@@ -428,6 +469,7 @@ describe("coordinator auth", () => {
     });
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
       CRABBOX_DEFAULT_ORG: "openclaw",
       FLEET: {
         idFromName: () => "default",
@@ -445,6 +487,46 @@ describe("coordinator auth", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it("rejects user tokens signed with the shared automation token", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signedUserToken("shared", {
+      typ: "crabbox-user",
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+      iat: now,
+      exp: now + 300,
+    });
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+    };
+
+    const auth = await authenticateRequest(
+      new Request("https://example.test/v1/whoami", {
+        headers: { authorization: `Bearer ${token}` },
+      }),
+      env,
+    );
+
+    expect(auth).toBeUndefined();
+  });
+
+  it("requires independent signing material when issuing user tokens", async () => {
+    const input = {
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+    };
+
+    await expect(issueUserToken({ CRABBOX_SHARED_TOKEN: "shared" }, input)).rejects.toThrow(
+      "CRABBOX_SESSION_SECRET is required",
+    );
+    await expect(
+      issueUserToken({ CRABBOX_SHARED_TOKEN: "shared", CRABBOX_SESSION_SECRET: "shared" }, input),
+    ).rejects.toThrow("CRABBOX_SESSION_SECRET must differ");
   });
 
   it("does not expose internal scheduled maintenance through public fetch", async () => {
