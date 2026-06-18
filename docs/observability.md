@@ -149,6 +149,21 @@ echo CRABBOX_PHASE:test
 pnpm test
 ```
 
+### Local benchmark ledger
+
+`--timing-record=default` and `--timing-record <path>` append the final
+`TimingReport` to a local JSONL benchmark store. The default store is
+`<CrabboxStateDir()>/timings.jsonl`, which uses `$XDG_STATE_HOME/crabbox` when
+available and otherwise falls back to the user config directory's
+`crabbox/state` directory.
+
+The ledger is explicit local state. Plain `crabbox run` does not write it.
+Recorded rows can include repo paths, remote workdirs, command display text,
+labels, artifact paths, and lease metadata because they preserve the timing
+payload. Use [`crabbox bench report`](commands/bench.md) to aggregate local
+observations, and treat insufficient sample counts as a prompt to collect more
+local evidence rather than as a provider ranking.
+
 ### Forwarding live secrets
 
 When local `CRABBOX_ENV_ALLOW` is set, `run` prints the variable names selected

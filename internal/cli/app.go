@@ -174,6 +174,7 @@ Commands:
   warmup      Lease a box and wait until it is ready
   prewarm     Lease and hydrate a reusable test-ready box
   run         Sync the repo, run a remote command, stream output
+  bench       Record and report local benchmark timings
   job         Run named repo-local Crabbox jobs
   desktop     Launch apps into a visible desktop session
   media       Create preview artifacts from recorded desktop videos
@@ -222,6 +223,9 @@ Common Flows:
   crabbox warmup
   crabbox status --id blue-lobster --wait
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
+  crabbox run --timing-record=default -- pnpm test
+  crabbox bench run --providers aws,hetzner --repeats 3 -- pnpm test
+  crabbox bench report --since 7d
   crabbox connect blue-lobster
   crabbox ssh --id blue-lobster
   crabbox ports --id blue-lobster --publish 8080
