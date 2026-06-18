@@ -5,6 +5,7 @@
 ### Added
 
 - Added the Phala confidential Intel TDX CVM provider with default-on hardware attestation, exact Compose binding, TLS-authenticated SSH, and fail-closed claim-backed lifecycle cleanup. Thanks @anagnorisis2peripeteia.
+- Added reusable Modal run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
 - Added Linux CPU capacity to lease telemetry and portal status details.
 ### Changed
 
@@ -12,6 +13,7 @@
 
 ### Fixed
 
+- Let Islo use tenant defaults for implicit sandbox image and capacity while preserving every explicit config, environment, and flag override. Thanks @zozo123.
 - Made new runtime-adapter ticket claims provisional until agent connection or lease registration, allowing authenticated recovery of expired inactive first claims while preserving all existing and confirmed adapter IDs.
 - Separated shared automation tokens from signed user-token keys, preserving shared-token-only automation while requiring distinct session signing material for GitHub login.
 - Required retained coordinator ownership records before orphan sweeps delete AWS or Azure machines or release EC2 Mac hosts, while keeping tag-only and legacy candidates visible in reports.

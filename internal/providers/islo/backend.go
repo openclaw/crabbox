@@ -99,12 +99,15 @@ func ApplyIsloProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "islo-vcpus") {
 		cfg.Islo.VCPUs = *v.VCPUs
+		core.MarkIsloVCPUsExplicit(cfg)
 	}
 	if flagWasSet(fs, "islo-memory-mb") {
 		cfg.Islo.MemoryMB = *v.MemoryMB
+		core.MarkIsloMemoryMBExplicit(cfg)
 	}
 	if flagWasSet(fs, "islo-disk-gb") {
 		cfg.Islo.DiskGB = *v.DiskGB
+		core.MarkIsloDiskGBExplicit(cfg)
 	}
 	return nil
 }
@@ -584,29 +587,31 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	if err := b.validateTailscaleConfig(); err != nil {
 		return "", "", "", err
 	}
-	workdir, err := isloRelativeWorkdir(b.cfg)
+	_, err := isloRelativeWorkdir(b.cfg)
 	if err != nil {
 		return "", "", "", err
 	}
 	name := newIsloSandboxName(repo)
 	create := &gosdk.SandboxCreate{Name: stringValue(name)}
-	if b.cfg.Islo.Image != "" {
+	base := core.BaseConfig()
+	// A non-base image can come from an explicit top-level --os selection;
+	// preserve that supported override even without an islo.image marker.
+	if b.cfg.Islo.Image != "" && (b.cfg.Islo.Image != base.Islo.Image || core.IsloImageExplicit(b.cfg)) {
 		create.Image = stringValue(b.cfg.Islo.Image)
 	}
-	create.Workdir = stringValue(workdir)
 	if b.cfg.Islo.GatewayProfile != "" {
 		create.GatewayProfile = stringValue(b.cfg.Islo.GatewayProfile)
 	}
 	if b.cfg.Islo.SnapshotName != "" {
 		create.SnapshotName = stringValue(b.cfg.Islo.SnapshotName)
 	}
-	if b.cfg.Islo.VCPUs > 0 {
+	if b.cfg.Islo.VCPUs > 0 && (b.cfg.Islo.VCPUs != base.Islo.VCPUs || core.IsloVCPUsExplicit(b.cfg)) {
 		create.Vcpus = intValue(b.cfg.Islo.VCPUs)
 	}
-	if b.cfg.Islo.MemoryMB > 0 {
+	if b.cfg.Islo.MemoryMB > 0 && (b.cfg.Islo.MemoryMB != base.Islo.MemoryMB || core.IsloMemoryMBExplicit(b.cfg)) {
 		create.MemoryMb = intValue(b.cfg.Islo.MemoryMB)
 	}
-	if b.cfg.Islo.DiskGB > 0 {
+	if b.cfg.Islo.DiskGB > 0 && (b.cfg.Islo.DiskGB != base.Islo.DiskGB || core.IsloDiskGBExplicit(b.cfg)) {
 		create.DiskGb = intValue(b.cfg.Islo.DiskGB)
 	}
 	sandbox, err := client.CreateSandbox(ctx, create)
