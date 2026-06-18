@@ -138,6 +138,24 @@ func TestClientRedactsSecretsFromErrors(t *testing.T) {
 	}
 }
 
+func TestClientKeepsRequestContextAliveUntilJSONBodyRead(t *testing.T) {
+	client := &httpClient{
+		baseURL: "https://api.crownest.dev",
+		apiKey:  "cn_test_key",
+		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				Body:       &contextCheckingBody{ctx: req.Context(), data: []byte(`{"sandbox":{"id":"sbx_123"}}`)},
+				Header:     make(http.Header),
+				Request:    req,
+				StatusCode: http.StatusOK,
+			}, nil
+		})},
+	}
+	if _, err := client.GetSandbox(context.Background(), "sbx_123"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testConfigWithURL(url string) Config {
 	cfg := testConfig()
 	cfg.Crownest.APIURL = url
@@ -148,3 +166,30 @@ func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+type contextCheckingBody struct {
+	ctx  context.Context
+	data []byte
+	done bool
+}
+
+func (b *contextCheckingBody) Read(p []byte) (int, error) {
+	if b.done {
+		return 0, io.EOF
+	}
+	select {
+	case <-b.ctx.Done():
+		return 0, b.ctx.Err()
+	default:
+	}
+	b.done = true
+	return copy(p, b.data), nil
+}
+
+func (b *contextCheckingBody) Close() error { return nil }

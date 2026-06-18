@@ -311,7 +311,7 @@ func (c *httpClient) StreamWorkspaceRunEvents(ctx context.Context, id string, af
 	if afterSeq > 0 {
 		apiPath += fmt.Sprintf("&afterSeq=%d", afterSeq)
 	}
-	resp, err := c.request(ctx, http.MethodGet, apiPath, nil, "")
+	resp, _, err := c.request(ctx, http.MethodGet, apiPath, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -323,10 +323,11 @@ func (c *httpClient) StreamWorkspaceRunEvents(ctx context.Context, id string, af
 }
 
 func (c *httpClient) doJSON(ctx context.Context, method, apiPath string, body, out any, idempotency string) (bool, error) {
-	resp, err := c.request(ctx, method, apiPath, body, idempotency)
+	resp, cancel, err := c.request(ctx, method, apiPath, body, idempotency)
 	if err != nil {
 		return false, err
 	}
+	defer cancel()
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false, c.apiError(method, apiPath, resp)
@@ -344,24 +345,25 @@ func (c *httpClient) doJSON(ctx context.Context, method, apiPath string, body, o
 	return false, nil
 }
 
-func (c *httpClient) request(ctx context.Context, method, apiPath string, body any, idempotency string) (*http.Response, error) {
+func (c *httpClient) request(ctx context.Context, method, apiPath string, body any, idempotency string) (*http.Response, func(), error) {
 	requestCtx := ctx
 	cancel := func() {}
 	if !strings.Contains(apiPath, "/events?stream=true") {
 		requestCtx, cancel = context.WithTimeout(ctx, defaultRequestTimeout)
 	}
-	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("crownest marshal %s: %w", apiPath, err)
+			cancel()
+			return nil, nil, fmt.Errorf("crownest marshal %s: %w", apiPath, err)
 		}
 		reader = bytes.NewReader(buf)
 	}
 	req, err := http.NewRequestWithContext(requestCtx, method, c.baseURL+apiPath, reader)
 	if err != nil {
-		return nil, fmt.Errorf("crownest request %s: %w", apiPath, err)
+		cancel()
+		return nil, nil, fmt.Errorf("crownest request %s: %w", apiPath, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	if body != nil {
@@ -372,9 +374,10 @@ func (c *httpClient) request(ctx context.Context, method, apiPath string, body a
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("crownest %s %s: %w", method, apiPath, err)
+		cancel()
+		return nil, nil, fmt.Errorf("crownest %s %s: %w", method, apiPath, err)
 	}
-	return resp, nil
+	return resp, cancel, nil
 }
 
 func (c *httpClient) apiError(method, apiPath string, resp *http.Response) error {
