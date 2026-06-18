@@ -773,6 +773,10 @@ func providerClaimScope(provider string, cfg Config) string {
 			parts = append(parts, "keychain:"+keychain)
 		}
 		return strings.Join(parts, "|")
+	case "phala":
+		if node := strings.TrimSpace(cfg.Phala.NodeID); node != "" {
+			return "node:" + node
+		}
 	case "proxmox":
 		endpoint := normalizedProxmoxClaimEndpoint(cfg.Proxmox.APIURL)
 		node := strings.TrimSpace(cfg.Proxmox.Node)

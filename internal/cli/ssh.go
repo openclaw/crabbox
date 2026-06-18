@@ -305,6 +305,14 @@ func RunSSHQuiet(ctx context.Context, target SSHTarget, remote string) error {
 	return runSSHQuiet(ctx, target, remote)
 }
 
+// RunSSHOutput runs remote on target and returns its trimmed stdout. It is the
+// exported entry point for provider backends (e.g. the Phala TDX attestation
+// fetch) that need to capture a remote command's stdout rather than merely
+// asserting it succeeded.
+func RunSSHOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	return runSSHOutput(ctx, target, remote)
+}
+
 func runSSHQuietWithOptions(ctx context.Context, target SSHTarget, remote, connectTimeout, connectionAttempts string) error {
 	return runSSHQuietWithOptionsResolvePort(ctx, &target, remote, connectTimeout, connectionAttempts)
 }

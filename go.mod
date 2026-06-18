@@ -23,6 +23,7 @@ require (
 	github.com/daytonaio/daytona/libs/api-client-go v0.183.0
 	github.com/daytonaio/daytona/libs/sdk-go v0.183.0
 	github.com/gofrs/flock v0.13.0
+	github.com/google/go-tdx-guest v0.3.1
 	github.com/islo-labs/go-sdk v0.0.0-20260528125833-04a38f6f507c
 	github.com/lima-vm/go-qcow2reader v0.7.1
 	github.com/lxc/incus/v7 v7.1.0
@@ -79,6 +80,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/google/logger v1.1.1 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.16 // indirect
@@ -119,6 +121,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.55.0 // indirect

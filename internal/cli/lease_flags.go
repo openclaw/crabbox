@@ -75,6 +75,9 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	prepareProviderDefaults(cfg)
 	cfg.Profile = *values.Profile
 	cfg.Class = *values.Class
+	if flagWasSet(fs, "class") {
+		MarkClassExplicit(cfg)
+	}
 	if flagWasSet(fs, "arch") {
 		arch, err := normalizeArchitecture(*values.Architecture)
 		if err != nil {
