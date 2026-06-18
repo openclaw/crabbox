@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added Linux CPU capacity to lease telemetry and portal status details.
+
 ### Changed
 
 - Defined Crabbox's supported single-user and cooperative-team security boundary, clarified repository configuration as trusted project automation, and separated vulnerability reporting from compatibility-preserving hardening.

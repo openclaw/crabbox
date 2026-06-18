@@ -18,6 +18,7 @@ For a Linux lease, the CLI runs a small read-only script over the lease's SSH
 connection whenever it already has a reason to talk to the box during a run (a
 run heartbeat or a mid-run sample). The script reads:
 
+- `cpuCount` from the number of online logical processors;
 - `load1`, `load5`, `load15` from `/proc/loadavg`;
 - `memoryTotalBytes`, `memoryUsedBytes`, `memoryPercent` derived from
   `MemTotal` and `MemAvailable` in `/proc/meminfo`;
@@ -30,6 +31,7 @@ Each sample is parsed into a `LeaseTelemetry` record:
 {
   "capturedAt": "2026-05-07T07:42:18Z",
   "source": "ssh-linux",
+  "cpuCount": 16,
   "load1": 0.42,
   "load5": 0.3,
   "load15": 0.18,
@@ -97,8 +99,9 @@ that sample was captured.
 - **`crabbox history`** appends `resources=load=0.42 mem=32% disk=20%
   mem_delta=+512.0MiB` for runs that carry telemetry. `mem_delta` is the
   difference between the `start` and `end` memory snapshots.
-- **`/portal/leases/{id-or-slug}`** renders the latest sample as health pills
-  and draws load, memory, and disk sparklines once at least two samples exist
+- **`/portal/leases/{id-or-slug}`** renders CPU capacity alongside the latest
+  load, memory, disk, uptime, and sample age; it also draws load, memory, and
+  disk sparklines once at least two samples exist
   (until then each line reads "waiting for samples"). A sample older than
   10 minutes shows a `stale <age>` pill; otherwise a `live` pill. Memory or
   disk at or above 85% adds a `memory N%` / `disk N%` pill; `load1` at or
