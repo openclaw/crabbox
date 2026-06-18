@@ -5,6 +5,7 @@
 ### Added
 
 - Added the Phala confidential Intel TDX CVM provider with default-on hardware attestation, exact Compose binding, TLS-authenticated SSH, and fail-closed claim-backed lifecycle cleanup. Thanks @anagnorisis2peripeteia.
+- Added reusable E2B run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
 - Added reusable Modal run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
 - Added Linux CPU capacity to lease telemetry and portal status details.
 ### Changed
