@@ -36,6 +36,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/mxc"
 	_ "github.com/openclaw/crabbox/internal/providers/namespace"
 	_ "github.com/openclaw/crabbox/internal/providers/namespaceinstance"
+	_ "github.com/openclaw/crabbox/internal/providers/nebius"
 	_ "github.com/openclaw/crabbox/internal/providers/nvidiabrev"
 	_ "github.com/openclaw/crabbox/internal/providers/opencomputer"
 	_ "github.com/openclaw/crabbox/internal/providers/opensandbox"

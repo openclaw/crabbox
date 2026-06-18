@@ -66,6 +66,20 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_LINODE_TYPE",
 		"CRABBOX_LINODE_FIREWALL",
 		"CRABBOX_LINODE_SSH_CIDRS",
+		"CRABBOX_NEBIUS_CLI",
+		"CRABBOX_NEBIUS_PROFILE",
+		"CRABBOX_NEBIUS_PARENT_ID",
+		"CRABBOX_NEBIUS_SUBNET_ID",
+		"CRABBOX_NEBIUS_PLATFORM",
+		"CRABBOX_NEBIUS_PRESET",
+		"CRABBOX_NEBIUS_IMAGE_FAMILY",
+		"CRABBOX_NEBIUS_DISK_TYPE",
+		"CRABBOX_NEBIUS_DISK_SIZE_GIB",
+		"CRABBOX_NEBIUS_USER",
+		"CRABBOX_NEBIUS_PUBLIC_IP",
+		"CRABBOX_NEBIUS_SECURITY_GROUP_IDS",
+		"CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID",
+		"CRABBOX_NEBIUS_RECOVERY_POLICY",
 		"OVH_ENDPOINT",
 		"OVH_APPLICATION_KEY",
 		"OVH_APPLICATION_SECRET",
@@ -1525,6 +1539,149 @@ func TestLinodeConfigFileAndEnv(t *testing.T) {
 	}
 	if got := serverTypeForConfig(cfg); got != "g6-nanode-1" {
 		t.Fatalf("serverTypeForConfig=%q", got)
+	}
+}
+
+func TestNebiusConfigFileEnvAndDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "nebius",
+		Nebius: &fileNebiusConfig{
+			CLI:              "/opt/nebius/bin/nebius",
+			Profile:          "file-profile",
+			ParentID:         "project-file",
+			SubnetID:         "subnet-file",
+			Platform:         "cpu-e2",
+			Preset:           "8vcpu-32gb",
+			ImageFamily:      "ubuntu24.04-driverless",
+			DiskType:         "network_ssd_nonreplicated",
+			DiskSizeGiB:      80,
+			User:             "builder",
+			PublicIP:         "none",
+			SecurityGroupIDs: []string{"sg-file"},
+			ServiceAccountID: "sa-file",
+			RecoveryPolicy:   "fail",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "nebius" || cfg.Nebius.CLI != "/opt/nebius/bin/nebius" || cfg.Nebius.Profile != "file-profile" || cfg.Nebius.ParentID != "project-file" || cfg.Nebius.SubnetID != "subnet-file" {
+		t.Fatalf("file nebius config not applied: %#v", cfg.Nebius)
+	}
+	if cfg.Nebius.Platform != "cpu-e2" || cfg.Nebius.Preset != "8vcpu-32gb" || cfg.Nebius.DiskSizeGiB != 80 || strings.Join(cfg.Nebius.SecurityGroupIDs, ",") != "sg-file" {
+		t.Fatalf("file nebius sizing/network config not applied: %#v", cfg.Nebius)
+	}
+
+	t.Setenv("CRABBOX_NEBIUS_CLI", "/usr/local/bin/nebius")
+	t.Setenv("CRABBOX_NEBIUS_PROFILE", "env-profile")
+	t.Setenv("CRABBOX_NEBIUS_PARENT_ID", "project-env")
+	t.Setenv("CRABBOX_NEBIUS_SUBNET_ID", "subnet-env")
+	t.Setenv("CRABBOX_NEBIUS_PLATFORM", "gpu-h100")
+	t.Setenv("CRABBOX_NEBIUS_PRESET", "1gpu-16vcpu-200gb")
+	t.Setenv("CRABBOX_NEBIUS_IMAGE_FAMILY", "ubuntu22.04-cuda")
+	t.Setenv("CRABBOX_NEBIUS_DISK_TYPE", "network_ssd")
+	t.Setenv("CRABBOX_NEBIUS_DISK_SIZE_GIB", "120")
+	t.Setenv("CRABBOX_NEBIUS_USER", "alice")
+	t.Setenv("CRABBOX_NEBIUS_PUBLIC_IP", "dynamic")
+	t.Setenv("CRABBOX_NEBIUS_SECURITY_GROUP_IDS", "sg-a, sg-b")
+	t.Setenv("CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID", "sa-env")
+	t.Setenv("CRABBOX_NEBIUS_RECOVERY_POLICY", "fail")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Nebius.CLI != "/usr/local/bin/nebius" || cfg.Nebius.Profile != "env-profile" || cfg.Nebius.ParentID != "project-env" || cfg.Nebius.SubnetID != "subnet-env" {
+		t.Fatalf("env nebius identity config not applied: %#v", cfg.Nebius)
+	}
+	if cfg.Nebius.Platform != "gpu-h100" || cfg.Nebius.Preset != "1gpu-16vcpu-200gb" || cfg.Nebius.ImageFamily != "ubuntu22.04-cuda" || cfg.Nebius.DiskSizeGiB != 120 || strings.Join(cfg.Nebius.SecurityGroupIDs, ",") != "sg-a,sg-b" {
+		t.Fatalf("env nebius sizing/network config not applied: %#v", cfg.Nebius)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	base := baseConfig()
+	if cfg.TargetOS != targetLinux || cfg.WorkRoot != defaultPOSIXWorkRoot || cfg.SSHUser != "alice" || cfg.SSHPort != base.SSHPort {
+		t.Fatalf("nebius target defaults not applied: target=%q root=%q user=%q port=%q", cfg.TargetOS, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort)
+	}
+
+	defaulted := baseConfig()
+	defaulted.Provider = "nebius"
+	defaulted.Nebius = NebiusConfig{}
+	if err := applyProviderConfigDefaults(&defaulted); err != nil {
+		t.Fatal(err)
+	}
+	if defaulted.Nebius.CLI != "nebius" || defaulted.Nebius.Platform != "cpu-d3" || defaulted.Nebius.Preset != "4vcpu-16gb" || defaulted.Nebius.ImageFamily != "ubuntu24.04-driverless" || defaulted.Nebius.DiskSizeGiB != 50 || defaulted.Nebius.PublicIP != "dynamic" {
+		t.Fatalf("nebius conservative defaults not applied: %#v", defaulted.Nebius)
+	}
+}
+
+func TestNebiusUntrustedConfigCannotRedirectCLI(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Nebius.CLI = "/trusted/nebius"
+	cfg.Nebius.Profile = "trusted-profile"
+	cfg.Nebius.ServiceAccountID = "trusted-service-account"
+	file := fileConfig{
+		Nebius: &fileNebiusConfig{
+			CLI:              "/tmp/untrusted-nebius",
+			Profile:          "untrusted-profile",
+			ParentID:         "project-repo",
+			SubnetID:         "subnet-repo",
+			ServiceAccountID: "untrusted-service-account",
+		},
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Nebius.CLI != "/trusted/nebius" {
+		t.Fatalf("untrusted CLI override applied: %q", cfg.Nebius.CLI)
+	}
+	if cfg.Nebius.Profile != "trusted-profile" {
+		t.Fatalf("untrusted profile override applied: %q", cfg.Nebius.Profile)
+	}
+	if cfg.Nebius.ServiceAccountID != "trusted-service-account" {
+		t.Fatalf("untrusted service account override applied: %q", cfg.Nebius.ServiceAccountID)
+	}
+	if cfg.Nebius.ParentID != "project-repo" || cfg.Nebius.SubnetID != "subnet-repo" {
+		t.Fatalf("safe untrusted nebius settings not applied: %#v", cfg.Nebius)
+	}
+}
+
+func TestNebiusEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "ssh"
+	t.Setenv("CRABBOX_NEBIUS_PARENT_ID", "project-env")
+	t.Setenv("CRABBOX_NEBIUS_USER", "nebius-user")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Nebius.ParentID != "project-env" || cfg.Nebius.User != "nebius-user" {
+		t.Fatalf("nebius env not stored: %#v", cfg.Nebius)
+	}
+	base := baseConfig()
+	if cfg.SSHUser != base.SSHUser || cfg.WorkRoot != base.WorkRoot || cfg.TargetOS != base.TargetOS {
+		t.Fatalf("nebius env leaked into generic config: %#v", cfg)
+	}
+}
+
+func TestNebiusDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "nebius",
+		WorkRoot: "/srv/crabbox",
+		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
+		Nebius:   &fileNebiusConfig{ParentID: "project", SubnetID: "subnet"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/srv/crabbox" || cfg.SSHUser != "alice" || cfg.SSHPort != "2200" {
+		t.Fatalf("explicit generic SSH settings not preserved: root=%q user=%q port=%q", cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort)
 	}
 }
 

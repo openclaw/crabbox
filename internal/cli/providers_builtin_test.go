@@ -14,6 +14,7 @@ func init() {
 	RegisterProvider(testHetznerProvider{})
 	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testLinodeProvider{})
+	RegisterProvider(testNebiusProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
@@ -357,6 +358,28 @@ func (testLinodeProvider) ServerTypeForConfig(cfg Config) string {
 }
 func (testLinodeProvider) ServerTypeForClass(string) string { return "g6-standard-1" }
 func (p testLinodeProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testNebiusProvider struct{}
+
+func (testNebiusProvider) Name() string      { return "nebius" }
+func (testNebiusProvider) Aliases() []string { return nil }
+func (testNebiusProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "nebius",
+		Family:      "nebius",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testNebiusProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testNebiusProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p testNebiusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

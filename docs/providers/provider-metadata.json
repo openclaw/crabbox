@@ -489,6 +489,20 @@
     "caveat": "Requires Brev CLI auth, quota, and available GPU capacity",
     "docs": "nvidia-brev.md"
   },
+  "nebius": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Nebius Compute VM",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "optional",
+    "lifecycle": "Nebius CLI",
+    "cleanup": "owned VM delete",
+    "bestFit": "Direct Linux VM lease with optional GPU selection",
+    "caveat": "Requires Nebius CLI auth, project/subnet setup, quota, and public SSH",
+    "docs": "nebius.md"
+  },
   "namespace-devbox": {
     "status": "built-in",
     "category": "direct-cloud",

@@ -170,6 +170,23 @@ func configShowView(cfg Config) map[string]any {
 			"user":          cfg.NvidiaBrev.User,
 			"workRoot":      cfg.NvidiaBrev.WorkRoot,
 		},
+		"nebius": map[string]any{
+			"cli":              cfg.Nebius.CLI,
+			"auth":             "cli",
+			"profile":          cfg.Nebius.Profile,
+			"parentId":         cfg.Nebius.ParentID,
+			"subnetId":         cfg.Nebius.SubnetID,
+			"platform":         cfg.Nebius.Platform,
+			"preset":           cfg.Nebius.Preset,
+			"imageFamily":      cfg.Nebius.ImageFamily,
+			"diskType":         cfg.Nebius.DiskType,
+			"diskSizeGiB":      cfg.Nebius.DiskSizeGiB,
+			"user":             cfg.Nebius.User,
+			"publicIP":         cfg.Nebius.PublicIP,
+			"securityGroupIds": cfg.Nebius.SecurityGroupIDs,
+			"serviceAccountId": cfg.Nebius.ServiceAccountID,
+			"recoveryPolicy":   cfg.Nebius.RecoveryPolicy,
+		},
 		"hostinger": map[string]any{
 			"apiUrl":          cfg.Hostinger.APIURL,
 			"auth":            tokenState(cfg.Hostinger.APIToken),
@@ -501,6 +518,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "linode region=%s image=%s type=%s firewall=%s ssh_cidrs=%s\n", cfg.Linode.Region, cfg.Linode.Image, cfg.Linode.Type, blank(cfg.Linode.FirewallID, "-"), blank(strings.Join(cfg.Linode.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth=cli\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
+	fmt.Fprintf(w, "nebius cli=%s profile=%s parent_id=%s subnet_id=%s platform=%s preset=%s image_family=%s disk_type=%s disk_size_gib=%d user=%s public_ip=%s security_group_ids=%s service_account_id=%s recovery_policy=%s auth=cli\n", blank(cfg.Nebius.CLI, "-"), blank(cfg.Nebius.Profile, "-"), blank(cfg.Nebius.ParentID, "-"), blank(cfg.Nebius.SubnetID, "-"), blank(cfg.Nebius.Platform, "-"), blank(cfg.Nebius.Preset, "-"), blank(cfg.Nebius.ImageFamily, "-"), blank(cfg.Nebius.DiskType, "-"), cfg.Nebius.DiskSizeGiB, blank(cfg.Nebius.User, "-"), blank(cfg.Nebius.PublicIP, "-"), blank(strings.Join(cfg.Nebius.SecurityGroupIDs, ","), "-"), blank(cfg.Nebius.ServiceAccountID, "-"), blank(cfg.Nebius.RecoveryPolicy, "-"))
 	fmt.Fprintf(w, "hostinger api_url=%s item_id=%s payment_method_id=%s template_id=%s data_center_id=%s hostname_prefix=%s user=%s work_root=%s allow_purchase=%t release_action=%s auth=%s\n", blank(cfg.Hostinger.APIURL, "-"), blank(cfg.Hostinger.ItemID, "-"), blank(cfg.Hostinger.PaymentMethodID, "-"), blank(cfg.Hostinger.TemplateID, "-"), blank(cfg.Hostinger.DataCenterID, "-"), blank(cfg.Hostinger.HostnamePrefix, "-"), blank(cfg.Hostinger.User, "-"), blank(cfg.Hostinger.WorkRoot, "-"), cfg.Hostinger.AllowPurchase, blank(cfg.Hostinger.ReleaseAction, "-"), tokenState(cfg.Hostinger.APIToken))
 	fmt.Fprintf(w, "ovh endpoint=%s project_id=%s region=%s image=%s flavor=%s auth=%s\n", blank(redactedConfigURL(cfg.OVH.Endpoint), "-"), blank(cfg.OVH.ProjectID, "-"), blank(cfg.OVH.Region, "-"), blank(cfg.OVH.Image, "-"), blank(cfg.OVH.Flavor, "-"), ovhAuthState())
 	fmt.Fprintf(w, "azure_dynamic_sessions endpoint=%s unsupported_pool=%s api_version=%s workdir=%s timeout_secs=%d\n", blank(cfg.AzureDynamicSessions.Endpoint, "-"), blank(cfg.AzureDynamicSessions.Pool, "-"), cfg.AzureDynamicSessions.APIVersion, cfg.AzureDynamicSessions.Workdir, cfg.AzureDynamicSessions.TimeoutSecs)

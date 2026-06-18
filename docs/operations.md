@@ -61,6 +61,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_L
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=kubevirt CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_KUBEVIRT_TEMPLATE=/path/to/vm.yaml scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=external CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_EXTERNAL_COMMAND=/path/to/provider scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-digitalocean-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-nebius-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -78,6 +79,11 @@ Per-provider smoke prerequisites:
 - **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
 - **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY` (from `wandb login`). `scripts/wandb-smoke.sh` is a coordinator-free, wandb-only gate.
 - **DigitalOcean** — `DIGITALOCEAN_TOKEN` with account-read, Droplet, image-read, SSH key, and tag scopes. `scripts/live-digitalocean-smoke.sh` is coordinator-free, requires an empty Crabbox-owned inventory, creates a small short-lived Droplet, verifies status and execution, and prints a final cleanup classification.
+- **Nebius** — authenticated Nebius CLI profile plus `nebius.parentId` and
+  `nebius.subnetId`. `scripts/live-nebius-smoke.sh` is coordinator-free,
+  requires explicit `CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius`, creates one
+  short-lived CPU-default VM, verifies status and `echo ok`, stops the lease,
+  runs dry-run cleanup, and prints a final classification.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 
@@ -95,6 +101,10 @@ Use `scripts/live-digitalocean-smoke.sh` for the repeatable direct DigitalOcean
 equivalent; it builds `bin/crabbox`, creates a guarded `digitalocean` scratch
 config, and verifies the Crabbox-owned inventory is empty before create and
 after stop/cleanup.
+Use `scripts/live-nebius-smoke.sh` for the repeatable direct Nebius equivalent;
+it builds or reuses `bin/crabbox`, uses the documented Nebius config and CLI
+profile, creates a unique `nebius-smoke-*` lease, and verifies the slug is absent
+after stop and dry-run cleanup.
 
 ## Deployment
 

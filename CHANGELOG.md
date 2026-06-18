@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `provider: nebius` for direct Nebius AI Cloud Linux SSH leases through the native CLI, with profile-owned authentication, managed networking and disks, and claim-backed lifecycle hardening. Thanks @coygeek.
 - Added the Phala confidential Intel TDX CVM provider with default-on hardware attestation, exact Compose binding, TLS-authenticated SSH, and fail-closed claim-backed lifecycle cleanup. Thanks @anagnorisis2peripeteia.
 - Added reusable E2B run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
 - Added reusable Modal run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.

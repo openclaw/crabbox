@@ -755,6 +755,103 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesNebiusWithoutSecretSurface(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_NEBIUS_PROFILE", "env-profile")
+	if err := os.WriteFile(configPath, []byte(`provider: nebius
+nebius:
+  cli: /usr/local/bin/nebius
+  parentId: project-123
+  subnetId: subnet-123
+  platform: cpu-d3
+  preset: 4vcpu-16gb
+  imageFamily: ubuntu24.04-driverless
+  diskType: network_ssd
+  diskSizeGiB: 50
+  user: crabbox
+  publicIP: dynamic
+  securityGroupIds: [sg-1, sg-2]
+  serviceAccountId: sa-123
+  recoveryPolicy: fail
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	want := "nebius cli=/usr/local/bin/nebius profile=env-profile parent_id=project-123 subnet_id=subnet-123 platform=cpu-d3 preset=4vcpu-16gb image_family=ubuntu24.04-driverless disk_type=network_ssd disk_size_gib=50 user=crabbox public_ip=dynamic security_group_ids=sg-1,sg-2 service_account_id=sa-123 recovery_policy=fail auth=cli"
+	if !strings.Contains(text, want) {
+		t.Fatalf("config show missing nebius summary: %q", text)
+	}
+	for _, secretFragment := range []string{"token", "api_key", "private_key", "password"} {
+		if strings.Contains(strings.ToLower(text), secretFragment) {
+			t.Fatalf("config show text exposed %q: %q", secretFragment, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Nebius struct {
+			CLI              string   `json:"cli"`
+			Auth             string   `json:"auth"`
+			Profile          string   `json:"profile"`
+			ParentID         string   `json:"parentId"`
+			SubnetID         string   `json:"subnetId"`
+			Platform         string   `json:"platform"`
+			Preset           string   `json:"preset"`
+			ImageFamily      string   `json:"imageFamily"`
+			DiskType         string   `json:"diskType"`
+			DiskSizeGiB      int      `json:"diskSizeGiB"`
+			User             string   `json:"user"`
+			PublicIP         string   `json:"publicIP"`
+			SecurityGroupIDs []string `json:"securityGroupIds"`
+			ServiceAccountID string   `json:"serviceAccountId"`
+			RecoveryPolicy   string   `json:"recoveryPolicy"`
+		} `json:"nebius"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Nebius.CLI != "/usr/local/bin/nebius" ||
+		got.Nebius.Auth != "cli" ||
+		got.Nebius.Profile != "env-profile" ||
+		got.Nebius.ParentID != "project-123" ||
+		got.Nebius.SubnetID != "subnet-123" ||
+		got.Nebius.Platform != "cpu-d3" ||
+		got.Nebius.Preset != "4vcpu-16gb" ||
+		got.Nebius.ImageFamily != "ubuntu24.04-driverless" ||
+		got.Nebius.DiskType != "network_ssd" ||
+		got.Nebius.DiskSizeGiB != 50 ||
+		got.Nebius.User != "crabbox" ||
+		got.Nebius.PublicIP != "dynamic" ||
+		strings.Join(got.Nebius.SecurityGroupIDs, ",") != "sg-1,sg-2" ||
+		got.Nebius.ServiceAccountID != "sa-123" ||
+		got.Nebius.RecoveryPolicy != "fail" {
+		t.Fatalf("unexpected nebius json: %#v", got.Nebius)
+	}
+	nebiusJSON, err := json.Marshal(got.Nebius)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secretFragment := range []string{"token", "apiKey", "privateKey", "password"} {
+		if strings.Contains(string(nebiusJSON), secretFragment) {
+			t.Fatalf("nebius config show json exposed %q: %s", secretFragment, nebiusJSON)
+		}
+	}
+}
+
 func TestConfigShowAppliesNvidiaBrevGenericWorkRoot(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "nvidia-brev"

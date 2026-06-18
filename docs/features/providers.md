@@ -222,6 +222,9 @@ list, and cleanup.
   remain outside Crabbox.
 - **namespace-devbox** — Namespace owns Devbox auth and lifecycle through the
   `devbox` CLI; Crabbox treats the prepared Devbox as a normal Linux SSH lease.
+- **nebius** — creates a Nebius Compute VM through the authenticated `nebius`
+  CLI, injects a per-lease SSH key with cloud-init, waits for dynamic public
+  IPv4 and SSH readiness, then uses normal Crabbox SSH sync/run/release.
 - **runpod** — leases a RunPod GPU pod with public SSH (no Tailscale); auth from
   `RUNPOD_API_KEY`.
 - **semaphore** — creates a standalone Semaphore job, waits for host/port metadata
