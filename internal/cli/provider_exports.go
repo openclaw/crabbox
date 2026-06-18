@@ -242,6 +242,26 @@ func OSImageWasExplicit(cfg Config) bool {
 	return cfg.osImageExplicit
 }
 
+func ClassWasExplicit(cfg Config) bool {
+	return cfg.classExplicit
+}
+
+func MarkClassExplicit(cfg *Config) {
+	cfg.classExplicit = true
+}
+
+func PhalaInstanceTypeWasExplicit(cfg Config) bool {
+	return cfg.phalaInstanceTypeExplicit
+}
+
+func MarkPhalaInstanceTypeExplicit(cfg *Config) {
+	cfg.phalaInstanceTypeExplicit = true
+}
+
+func ClearPhalaInstanceTypeExplicit(cfg *Config) {
+	cfg.phalaInstanceTypeExplicit = false
+}
+
 func SetOSImageExplicit(cfg *Config) {
 	cfg.osImageExplicit = true
 }

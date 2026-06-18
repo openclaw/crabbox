@@ -88,6 +88,14 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
+	if core.PhalaInstanceTypeWasExplicit(cfg) && cfg.Phala.InstanceType != "" {
+		return cfg.Phala.InstanceType
+	}
+	if core.ClassWasExplicit(cfg) {
+		return instanceTypeForClass(cfg.Class)
+	}
+	// Preserve Phala's inexpensive provider default when the generic Crabbox
+	// class is only the inherited global default.
 	if cfg.Phala.InstanceType != "" {
 		return cfg.Phala.InstanceType
 	}

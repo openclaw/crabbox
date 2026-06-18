@@ -38,6 +38,7 @@ type Config struct {
 	Code                          bool
 	Network                       NetworkMode
 	Class                         string
+	classExplicit                 bool
 	Pond                          string
 	ExposedPorts                  []string
 	ServerType                    string
@@ -138,6 +139,7 @@ type Config struct {
 	Namespace                     NamespaceConfig
 	NamespaceInstance             NamespaceInstanceConfig
 	Phala                         PhalaConfig
+	phalaInstanceTypeExplicit     bool
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
 	E2B                           E2BConfig
@@ -3621,6 +3623,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	}
 	if file.Class != "" {
 		cfg.Class = file.Class
+		cfg.classExplicit = true
 	}
 	if file.ServerType != "" {
 		cfg.ServerType = file.ServerType
@@ -4396,6 +4399,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Phala.InstanceType != "" {
 			cfg.Phala.InstanceType = file.Phala.InstanceType
+			cfg.phalaInstanceTypeExplicit = true
 		}
 		if file.Phala.WorkRoot != "" {
 			cfg.Phala.WorkRoot = file.Phala.WorkRoot
@@ -5760,7 +5764,10 @@ func applyEnv(cfg *Config) error {
 	if network := os.Getenv("CRABBOX_NETWORK"); network != "" {
 		cfg.Network = NetworkMode(strings.ToLower(strings.TrimSpace(network)))
 	}
-	cfg.Class = getenv("CRABBOX_DEFAULT_CLASS", cfg.Class)
+	if value := os.Getenv("CRABBOX_DEFAULT_CLASS"); value != "" {
+		cfg.Class = value
+		cfg.classExplicit = true
+	}
 	if os.Getenv("CRABBOX_SERVER_TYPE") != "" {
 		cfg.ServerTypeExplicit = true
 	}
@@ -6162,7 +6169,10 @@ func applyEnv(cfg *Config) error {
 		cfg.NamespaceInstance.Bare = value
 	}
 	cfg.Phala.CLIPath = expandUserPath(getenv("CRABBOX_PHALA_CLI", cfg.Phala.CLIPath))
-	cfg.Phala.InstanceType = getenv("CRABBOX_PHALA_INSTANCE_TYPE", cfg.Phala.InstanceType)
+	if value := os.Getenv("CRABBOX_PHALA_INSTANCE_TYPE"); value != "" {
+		cfg.Phala.InstanceType = value
+		cfg.phalaInstanceTypeExplicit = true
+	}
 	cfg.Phala.WorkRoot = getenv("CRABBOX_PHALA_WORK_ROOT", cfg.Phala.WorkRoot)
 	cfg.Phala.NodeID = getenv("CRABBOX_PHALA_NODE_ID", cfg.Phala.NodeID)
 	cfg.Phala.Compose = expandUserPath(getenv("CRABBOX_PHALA_COMPOSE", cfg.Phala.Compose))

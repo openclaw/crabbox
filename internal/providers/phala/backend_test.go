@@ -148,12 +148,65 @@ func TestInstanceTypeForClass(t *testing.T) {
 	}
 }
 
+func TestServerTypeForConfigHonorsExplicitClassAndProviderType(t *testing.T) {
+	provider := Provider{}
+	defaults := core.BaseConfig()
+	defaults.Provider = providerName
+	if got := provider.ServerTypeForConfig(defaults); got != "tdx.small" {
+		t.Fatalf("default server type=%q want tdx.small", got)
+	}
+
+	classCfg := defaults
+	classCfg.Class = "fast"
+	core.MarkClassExplicit(&classCfg)
+	if got := provider.ServerTypeForConfig(classCfg); got != "tdx.medium" {
+		t.Fatalf("explicit class server type=%q want tdx.medium", got)
+	}
+
+	providerCfg := classCfg
+	providerCfg.Phala.InstanceType = "tdx.large"
+	core.MarkPhalaInstanceTypeExplicit(&providerCfg)
+	if got := provider.ServerTypeForConfig(providerCfg); got != "tdx.large" {
+		t.Fatalf("explicit provider server type=%q want tdx.large", got)
+	}
+
+	providerCfg.ServerType = "tdx.2xlarge"
+	providerCfg.ServerTypeExplicit = true
+	if got := provider.ServerTypeForConfig(providerCfg); got != "tdx.2xlarge" {
+		t.Fatalf("explicit generic server type=%q want tdx.2xlarge", got)
+	}
+}
+
+func TestClassFlagOverridesInheritedPhalaInstanceType(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Phala.InstanceType = "tdx.large"
+	core.MarkPhalaInstanceTypeExplicit(&cfg)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	class := fs.String("class", cfg.Class, "machine class")
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--class", "fast"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Class = *class
+	core.MarkClassExplicit(&cfg)
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if got := (Provider{}).ServerTypeForConfig(cfg); got != "tdx.medium" {
+		t.Fatalf("server type=%q want tdx.medium", got)
+	}
+}
+
 func TestFlagsApplyPhalaOptions(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	class := fs.String("class", cfg.Class, "machine class")
 	values := registerFlags(fs, cfg)
 	if err := fs.Parse([]string{
+		"--class", "fast",
 		"--phala-cli", "/opt/phala",
 		"--phala-instance-type", "tdx.medium",
 		"--phala-node-id", "node-7",
@@ -161,12 +214,17 @@ func TestFlagsApplyPhalaOptions(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	cfg.Class = *class
+	core.MarkClassExplicit(&cfg)
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Phala.CLIPath != "/opt/phala" || cfg.ServerType != "tdx.medium" ||
 		cfg.Phala.NodeID != "node-7" || cfg.Phala.WorkRoot != "/workspace" {
 		t.Fatalf("cfg=%#v server_type=%q", cfg.Phala, cfg.ServerType)
+	}
+	if !core.PhalaInstanceTypeWasExplicit(cfg) {
+		t.Fatal("phala instance type flag was not marked explicit")
 	}
 }
 

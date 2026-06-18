@@ -21,11 +21,15 @@ func TestPhalaConfigDefaults(t *testing.T) {
 	if got.NodeID != "" || got.Compose != "" {
 		t.Fatalf("unexpected non-empty default node/compose: %#v", got)
 	}
+	if ClassWasExplicit(cfg) || PhalaInstanceTypeWasExplicit(cfg) {
+		t.Fatal("defaults were marked explicit")
+	}
 }
 
 func TestPhalaFileConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(`
+class: fast
 phala:
   cli: /opt/phala
   instanceType: tdx.large
@@ -49,11 +53,15 @@ phala:
 	if got.Compose == "" {
 		t.Fatalf("compose not loaded from trusted file config: %#v", got)
 	}
+	if !ClassWasExplicit(cfg) || !PhalaInstanceTypeWasExplicit(cfg) {
+		t.Fatal("file class or Phala instance type was not marked explicit")
+	}
 }
 
 func TestPhalaEnvConfig(t *testing.T) {
 	cfg := baseConfig()
 	t.Setenv("CRABBOX_PHALA_CLI", "/opt/phala-env")
+	t.Setenv("CRABBOX_DEFAULT_CLASS", "large")
 	t.Setenv("CRABBOX_PHALA_INSTANCE_TYPE", "tdx.medium")
 	t.Setenv("CRABBOX_PHALA_WORK_ROOT", "/work/env")
 	t.Setenv("CRABBOX_PHALA_NODE_ID", "node-env")
@@ -65,6 +73,9 @@ func TestPhalaEnvConfig(t *testing.T) {
 	if got.CLIPath != "/opt/phala-env" || got.InstanceType != "tdx.medium" ||
 		got.WorkRoot != "/work/env" || got.NodeID != "node-env" || got.Compose != "/etc/compose.yml" {
 		t.Fatalf("phala=%#v", got)
+	}
+	if !ClassWasExplicit(cfg) || !PhalaInstanceTypeWasExplicit(cfg) {
+		t.Fatal("environment class or Phala instance type was not marked explicit")
 	}
 }
 
