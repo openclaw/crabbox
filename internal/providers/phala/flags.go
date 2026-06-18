@@ -34,12 +34,6 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	// A command-line class overrides a provider-specific value inherited from
-	// config or environment. An explicit provider flag below remains more
-	// specific and wins when both flags are present.
-	if core.FlagWasSet(fs, "class") {
-		core.ClearPhalaInstanceTypeExplicit(cfg)
-	}
 	if core.FlagWasSet(fs, "phala-cli") {
 		cfg.Phala.CLIPath = *v.CLIPath
 	}

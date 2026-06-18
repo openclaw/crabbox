@@ -56,6 +56,9 @@ phala:
 	if !ClassWasExplicit(cfg) || !PhalaInstanceTypeWasExplicit(cfg) {
 		t.Fatal("file class or Phala instance type was not marked explicit")
 	}
+	if !PhalaInstanceTypeOverridesClass(cfg) {
+		t.Fatal("same-file Phala instance type did not override class")
+	}
 }
 
 func TestPhalaEnvConfig(t *testing.T) {
@@ -76,6 +79,27 @@ func TestPhalaEnvConfig(t *testing.T) {
 	}
 	if !ClassWasExplicit(cfg) || !PhalaInstanceTypeWasExplicit(cfg) {
 		t.Fatal("environment class or Phala instance type was not marked explicit")
+	}
+	if !PhalaInstanceTypeOverridesClass(cfg) {
+		t.Fatal("Phala environment instance type did not override environment class")
+	}
+}
+
+func TestPhalaEnvironmentClassOverridesFileInstanceType(t *testing.T) {
+	cfg := baseConfig()
+	file := fileConfig{Phala: &filePhalaConfig{InstanceType: "tdx.large"}}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_DEFAULT_CLASS", "fast")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !ClassWasExplicit(cfg) || !PhalaInstanceTypeWasExplicit(cfg) {
+		t.Fatal("expected both selectors to remain explicitly tracked")
+	}
+	if PhalaInstanceTypeOverridesClass(cfg) {
+		t.Fatal("older file Phala instance type overrode environment class")
 	}
 }
 

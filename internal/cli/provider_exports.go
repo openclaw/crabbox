@@ -243,23 +243,25 @@ func OSImageWasExplicit(cfg Config) bool {
 }
 
 func ClassWasExplicit(cfg Config) bool {
-	return cfg.classExplicit
+	return cfg.classExplicitOrder != 0
 }
 
 func MarkClassExplicit(cfg *Config) {
-	cfg.classExplicit = true
+	cfg.explicitSelectionOrder++
+	cfg.classExplicitOrder = cfg.explicitSelectionOrder
 }
 
 func PhalaInstanceTypeWasExplicit(cfg Config) bool {
-	return cfg.phalaInstanceTypeExplicit
+	return cfg.phalaInstanceTypeExplicitOrder != 0
 }
 
 func MarkPhalaInstanceTypeExplicit(cfg *Config) {
-	cfg.phalaInstanceTypeExplicit = true
+	cfg.explicitSelectionOrder++
+	cfg.phalaInstanceTypeExplicitOrder = cfg.explicitSelectionOrder
 }
 
-func ClearPhalaInstanceTypeExplicit(cfg *Config) {
-	cfg.phalaInstanceTypeExplicit = false
+func PhalaInstanceTypeOverridesClass(cfg Config) bool {
+	return cfg.phalaInstanceTypeExplicitOrder > cfg.classExplicitOrder
 }
 
 func SetOSImageExplicit(cfg *Config) {

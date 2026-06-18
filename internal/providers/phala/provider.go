@@ -88,7 +88,7 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
-	if core.PhalaInstanceTypeWasExplicit(cfg) && cfg.Phala.InstanceType != "" {
+	if core.PhalaInstanceTypeWasExplicit(cfg) && core.PhalaInstanceTypeOverridesClass(cfg) && cfg.Phala.InstanceType != "" {
 		return cfg.Phala.InstanceType
 	}
 	if core.ClassWasExplicit(cfg) {
