@@ -263,7 +263,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		}
 		claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, created.ID, publicIPv4(created), sshKey.ID, sshKey.Name, recovery, req.Keep, now)
 		if !req.Keep {
-			deleteErr := client.Instance().DeleteServer(&instance.DeleteServerRequest{Zone: scw.Zone(client.Zone()), ServerID: created.ID}, scw.WithContext(cleanupCtx))
+			deleteErr := b.deleteServerResource(cleanupCtx, client, created.ID)
 			keyErr := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: sshKey.ID}, scw.WithContext(cleanupCtx))
 			if deleteErr != nil || keyErr != nil {
 				cleanupKey = false
@@ -699,8 +699,7 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 		return core.Exit(4, "scaleway recovery claim for lease=%s has no server identity; credentials and claim retained", leaseID)
 	}
 	if server.CloudID != "" {
-		err = client.Instance().DeleteServer(&instance.DeleteServerRequest{Zone: scw.Zone(client.Zone()), ServerID: server.CloudID}, scw.WithContext(ctx))
-		if err != nil && !isScalewayNotFound(err) {
+		if err := b.deleteServerResource(ctx, client, server.CloudID); err != nil {
 			return err
 		}
 	}
@@ -717,6 +716,63 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 		core.RemoveLeaseClaim(leaseID)
 	}
 	core.RemoveStoredTestboxKey(leaseID)
+	return nil
+}
+
+func (b *Backend) deleteServerResource(ctx context.Context, client Client, serverID string) error {
+	zone := scw.Zone(client.Zone())
+	resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: zone, ServerID: serverID}, scw.WithContext(ctx))
+	if err != nil {
+		if isScalewayNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if resp == nil || resp.Server == nil {
+		return core.Exit(4, "scaleway server not found: %s", serverID)
+	}
+
+	state := resp.Server.State
+	if state != instance.ServerStateStopped && state != instance.ServerStateStoppedInPlace {
+		if state != instance.ServerStateStopping {
+			if _, err := client.Instance().ServerAction(&instance.ServerActionRequest{
+				Zone:     zone,
+				ServerID: serverID,
+				Action:   instance.ServerActionPoweroff,
+			}, scw.WithContext(ctx)); err != nil {
+				if isScalewayNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("power off Scaleway server %s before deletion: %w", serverID, err)
+			}
+		}
+
+		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		for {
+			resp, err = client.Instance().GetServer(&instance.GetServerRequest{Zone: zone, ServerID: serverID}, scw.WithContext(waitCtx))
+			if err != nil {
+				if isScalewayNotFound(err) {
+					return nil
+				}
+				return err
+			}
+			if resp != nil && resp.Server != nil && (resp.Server.State == instance.ServerStateStopped || resp.Server.State == instance.ServerStateStoppedInPlace) {
+				break
+			}
+			timer := time.NewTimer(2 * time.Second)
+			select {
+			case <-waitCtx.Done():
+				timer.Stop()
+				return fmt.Errorf("wait for Scaleway server %s to stop before deletion: %w", serverID, waitCtx.Err())
+			case <-timer.C:
+			}
+		}
+	}
+
+	if err := client.Instance().DeleteServer(&instance.DeleteServerRequest{Zone: zone, ServerID: serverID}, scw.WithContext(ctx)); err != nil && !isScalewayNotFound(err) {
+		return err
+	}
 	return nil
 }
 

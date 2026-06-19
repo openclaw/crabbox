@@ -92,6 +92,9 @@ func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
 	if !fake.deletedServer || !fake.deletedKey {
 		t.Fatalf("deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
 	}
+	if !fake.poweredOff {
+		t.Fatal("running server was not powered off before deletion")
+	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName); err != nil || ok {
 		t.Fatalf("claim after release ok=%t err=%v", ok, err)
 	}
@@ -272,7 +275,7 @@ func TestScalewayReleaseCleansIdentitylessRollbackKeyClaim(t *testing.T) {
 
 func TestScalewayReleaseCleansClaimAndKeyWhenServerAlreadyDeleted(t *testing.T) {
 	backend, fake := newTestBackend(t)
-	fake.deleteErr = &scw.ResourceNotFoundError{}
+	fake.getErr = &scw.ResourceNotFoundError{}
 	cfg := backend.cfgForRun()
 	labels := core.DirectLeaseLabels(cfg, "cbx_gone", "gone", providerName, "", false, backend.clockNow())
 	labels["scaleway_project"] = "project-1"
@@ -394,7 +397,9 @@ type fakeScalewayClient struct {
 	deletedServerID             string
 	deletedKey                  bool
 	poweredOn                   bool
+	poweredOff                  bool
 	createErr                   error
+	getErr                      error
 	deleteErr                   error
 	deleteKeyErr                error
 	createResponseWithoutServer bool
@@ -435,6 +440,9 @@ func (api *fakeInstanceAPI) GetServer(req *instance.GetServerRequest, _ ...scw.R
 			return &instance.GetServerResponse{Server: server}, nil
 		}
 	}
+	if api.f.getErr != nil {
+		return nil, api.f.getErr
+	}
 	return nil, errors.New("not found")
 }
 
@@ -471,6 +479,11 @@ func (api *fakeInstanceAPI) UpdateServer(req *instance.UpdateServerRequest, _ ..
 }
 
 func (api *fakeInstanceAPI) DeleteServer(req *instance.DeleteServerRequest, _ ...scw.RequestOption) error {
+	for _, server := range append(api.f.servers, api.f.server) {
+		if server != nil && server.ID == req.ServerID && server.State != instance.ServerStateStopped && server.State != instance.ServerStateStoppedInPlace {
+			return errors.New("precondition failed: resource is still in use, instance should be powered off")
+		}
+	}
 	api.f.deletedServer = true
 	api.f.deletedServerID = req.ServerID
 	if api.f.deleteErr != nil {
@@ -491,6 +504,14 @@ func (api *fakeInstanceAPI) SetServerUserData(req *instance.SetServerUserDataReq
 func (api *fakeInstanceAPI) ServerAction(req *instance.ServerActionRequest, _ ...scw.RequestOption) (*instance.ServerActionResponse, error) {
 	if req.Action == instance.ServerActionPoweron {
 		api.f.poweredOn = true
+	}
+	if req.Action == instance.ServerActionPoweroff {
+		api.f.poweredOff = true
+		for _, server := range append(api.f.servers, api.f.server) {
+			if server != nil && server.ID == req.ServerID {
+				server.State = instance.ServerStateStopped
+			}
+		}
 	}
 	return &instance.ServerActionResponse{}, nil
 }
