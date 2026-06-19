@@ -1,6 +1,6 @@
 ---
 name: crabbox
-description: "Use Crabbox for remote validation, fresh or warmed leases, Actions hydration, ready pools, jobs, profiles/presets, secret-safe env forwarding, desktop/WebVNC proof, artifacts, run logs/results, and lease cleanup."
+description: "Crabbox remote validation and lease workflows."
 ---
 
 # Crabbox
@@ -153,8 +153,8 @@ crabbox run --fresh-pr 123 --apply-local-patch -- pnpm test
 
 `--fresh-pr` accepts `owner/repo#number`, GitHub PR URLs, or a numeric PR from
 the current GitHub origin. Non-GitHub hosts are rejected. Fresh PR checkout is
-an SSH-run sync feature; delegated providers and native Windows targets reject
-it.
+an SSH-run sync feature; delegated providers reject it. Native Windows SSH
+targets are supported.
 
 When a warm lease smells stale, prefer `--full-resync` (alias `--fresh-sync`) to
 reset the remote workdir, skip the sync fingerprint fast path, reseed Git when
@@ -180,8 +180,7 @@ printf '%s\n' 'echo CRABBOX_PHASE:test' 'pnpm test' | crabbox run --script-stdin
 
 Native Windows targets use PowerShell and tar-based manifest sync. Prefer plain
 argv for one executable such as `dotnet test`; use `--shell` for multi-statement
-PowerShell and `--script <file.ps1>` for longer scripts. POSIX script helpers
-and fresh PR checkout are not native Windows features.
+PowerShell and `--script <file.ps1>` for longer scripts.
 
 ## Secrets And Environment Forwarding
 
@@ -193,6 +192,7 @@ explicit live-secret smoke.
 ```sh
 crabbox run --allow-env CI,NODE_OPTIONS -- pnpm test
 crabbox run \
+  --id <lease> \
   --env-from-profile ~/.project-live.profile \
   --allow-env API_TOKEN \
   --preflight \
@@ -213,8 +213,9 @@ crabbox run \
 crabbox run --id <lease> -- ./.crabbox/env/live ./scripts/live-smoke.sh
 ```
 
-The profile remains in the remote workdir until cleanup, lease reset, or
-`--full-resync`; do not persist helpers on shared or untrusted leases.
+The generated helper and matching secret profile remain in the remote workdir
+until cleanup, lease reset, or `--full-resync`; do not persist helpers on shared
+or untrusted leases.
 
 ## Profiles, Presets, Proof, And Results
 
@@ -242,7 +243,7 @@ crabbox run --preflight --preflight-tools default,uv -- node --test
 Attach structured results and proof artifacts when the command emits them:
 
 ```sh
-crabbox run --junit reports/junit.xml -- go test ./...
+crabbox run --junit reports/junit.xml -- ./scripts/test-with-junit.sh
 crabbox run --artifact-glob 'reports/**' --require-artifact reports/summary.json -- pnpm test:e2e
 crabbox run --download reports/summary.json=.crabbox/logs/summary.json -- pnpm test:e2e
 ```

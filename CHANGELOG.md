@@ -12,6 +12,7 @@
 - Added Linux CPU capacity to lease telemetry and portal status details.
 ### Changed
 
+- Refreshed the bundled Crabbox agent skill for current remote-proof, job, pool, artifact, desktop, and provider-boundary workflows. Thanks @coygeek.
 - Defined Crabbox's supported single-user and cooperative-team security boundary, clarified repository configuration as trusted project automation, and separated vulnerability reporting from compatibility-preserving hardening.
 
 ### Fixed
