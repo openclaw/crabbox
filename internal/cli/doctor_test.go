@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCoordinatorProviderReadinessSupported(t *testing.T) {
@@ -463,6 +465,56 @@ func TestDoctorBrokerAuthFailureSkipsProviderReadiness(t *testing.T) {
 	}
 }
 
+func TestDoctorBrokerAuthFailureReportsExpiredUserToken(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/v1/whoami":
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", testCrabboxUserToken(t, time.Now().Add(-time.Hour)))
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "aws", "--json"})
+	if err == nil {
+		t.Fatalf("doctor succeeded unexpectedly stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var view doctorJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+		t.Fatalf("doctor JSON invalid: %v\n%s", err, stdout.String())
+	}
+	for _, check := range view.Checks {
+		if check.Check != "broker" {
+			continue
+		}
+		if check.Details["token_state"] != "expired" {
+			t.Fatalf("token_state=%q details=%#v", check.Details["token_state"], check.Details)
+		}
+		if check.Details["token_expires"] == "" || !strings.Contains(check.Message, "token_state=expired") {
+			t.Fatalf("missing expiry detail/message: %#v", check)
+		}
+		return
+	}
+	t.Fatalf("missing broker check: %#v", view.Checks)
+}
+
 func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -504,4 +556,20 @@ func TestDoctorSkipsProviderReadinessForCoordinatorUnsupportedProvider(t *testin
 	if strings.Contains(stdout.String(), "failed  provider") {
 		t.Fatalf("unexpected provider failure: %q", stdout.String())
 	}
+}
+
+func testCrabboxUserToken(t *testing.T, expiresAt time.Time) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"typ":   "crabbox-user",
+		"owner": "alice@example.test",
+		"org":   "example-org",
+		"login": "alice",
+		"iat":   expiresAt.Add(-time.Hour).Unix(),
+		"exp":   expiresAt.Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "cbxu_" + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
 }

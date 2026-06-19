@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -263,7 +264,18 @@ func (a App) doctor(ctx context.Context, args []string) error {
 						class = "broker_auth"
 					}
 					hint := doctorErrorHint("broker", class)
-					record("failed", "broker", fmt.Sprintf("class=%s hint=%s %v", class, hint, err), map[string]string{"class": class, "hint": hint, "error": err.Error()})
+					message := fmt.Sprintf("class=%s hint=%s %v", class, hint, err)
+					details := map[string]string{"class": class, "hint": hint, "error": err.Error()}
+					if class == "broker_auth" {
+						if tokenInfo, ok := brokerTokenInfo(cfg.CoordToken, time.Now()); ok {
+							details["token_expires"] = tokenInfo.expiresAt
+							details["token_state"] = tokenInfo.state
+							if tokenInfo.state == "expired" {
+								message = fmt.Sprintf("class=%s hint=%s token_state=expired token_expires=%s %v", class, hint, tokenInfo.expiresAt, err)
+							}
+						}
+					}
+					record("failed", "broker", message, details)
 					ok = false
 					brokerOK = false
 				} else {
@@ -559,6 +571,41 @@ func doctorBrokerOKMessage(whoami CoordinatorWhoami, serverType string) string {
 		parts = append(parts, "token_expires="+whoami.TokenExpiresAt)
 	}
 	return strings.Join(parts, " ")
+}
+
+type localBrokerTokenInfo struct {
+	expiresAt string
+	state     string
+}
+
+func brokerTokenInfo(token string, now time.Time) (localBrokerTokenInfo, bool) {
+	if !strings.HasPrefix(token, "cbxu_") {
+		return localBrokerTokenInfo{}, false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(token, "cbxu_"), ".", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		return localBrokerTokenInfo{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return localBrokerTokenInfo{}, false
+	}
+	var decoded struct {
+		Type string `json:"typ"`
+		Exp  int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return localBrokerTokenInfo{}, false
+	}
+	if decoded.Type != "crabbox-user" || decoded.Exp <= 0 {
+		return localBrokerTokenInfo{}, false
+	}
+	expiresAt := time.Unix(decoded.Exp, 0).UTC()
+	state := "present"
+	if !now.Before(expiresAt) {
+		state = "expired"
+	}
+	return localBrokerTokenInfo{expiresAt: expiresAt.Format(time.RFC3339), state: state}, true
 }
 
 func doctorErrorClass(err error) string {
