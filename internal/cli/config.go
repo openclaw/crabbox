@@ -108,6 +108,11 @@ type Config struct {
 	linodeTypeExplicit            bool
 	OVH                           OVHConfig
 	ovhImageExplicit              bool
+	Scaleway                      ScalewayConfig
+	scalewayRegionExplicit        bool
+	scalewayZoneExplicit          bool
+	scalewayImageExplicit         bool
+	scalewayTypeExplicit          bool
 	Incus                         IncusConfig
 	Proxmox                       ProxmoxConfig
 	XCPNg                         XCPNgConfig
@@ -260,6 +265,20 @@ type OVHConfig struct {
 	Region    string
 	Image     string
 	Flavor    string
+}
+
+// ScalewayConfig contains non-secret Scaleway Instances settings. Scaleway
+// credentials are intentionally loaded by the provider client from the official
+// SDK environment/config surfaces and are not persisted in Crabbox config.
+type ScalewayConfig struct {
+	Region         string
+	Zone           string
+	Image          string
+	Type           string
+	ProjectID      string
+	OrganizationID string
+	SecurityGroup  string
+	SSHCIDRs       []string
 }
 
 type ActionsConfig struct {
@@ -1443,6 +1462,51 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
+	if cfg.Provider == "scaleway" {
+		if cfg.Scaleway.Region == "" {
+			cfg.Scaleway.Region = "fr-par"
+		}
+		if cfg.Scaleway.Zone == "" {
+			cfg.Scaleway.Zone = "fr-par-1"
+		}
+		if cfg.osImageExplicit && !cfg.scalewayImageExplicit {
+			if cfg.OSImage == "ubuntu:24.04" {
+				cfg.Scaleway.Image = "ubuntu_noble"
+			} else {
+				cfg.Scaleway.Image = ""
+			}
+		} else if cfg.Scaleway.Image == "" {
+			cfg.Scaleway.Image = "ubuntu_noble"
+		}
+		if cfg.Scaleway.Type == "" {
+			cfg.Scaleway.Type = "DEV1-S"
+		}
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.explicitWindowsMode != "" {
+			cfg.WindowsMode = cfg.explicitWindowsMode
+		} else {
+			cfg.WindowsMode = windowsModeNormal
+		}
+		if cfg.explicitWorkRoot != "" {
+			cfg.WorkRoot = cfg.explicitWorkRoot
+		} else {
+			cfg.WorkRoot = defaultPOSIXWorkRoot
+		}
+		if cfg.explicitSSHUser != "" {
+			cfg.SSHUser = cfg.explicitSSHUser
+		} else {
+			cfg.SSHUser = "root"
+		}
+		if cfg.explicitSSHPort != "" {
+			cfg.SSHPort = cfg.explicitSSHPort
+		} else {
+			cfg.SSHPort = "22"
+		}
+		normalizeTargetConfig(cfg)
+		return validateTargetConfig(*cfg)
+	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
@@ -2028,6 +2092,12 @@ func baseConfig() Config {
 			Image:    "Ubuntu 24.04",
 			Flavor:   "b3-8",
 		},
+		Scaleway: ScalewayConfig{
+			Region: "fr-par",
+			Zone:   "fr-par-1",
+			Image:  "ubuntu_noble",
+			Type:   "DEV1-S",
+		},
 		Incus: IncusConfig{
 			Remote:          "local",
 			Project:         "",
@@ -2384,6 +2454,7 @@ type fileConfig struct {
 	DigitalOcean             *fileDigitalOceanConfig             `yaml:"digitalocean,omitempty"`
 	Linode                   *fileLinodeConfig                   `yaml:"linode,omitempty"`
 	OVH                      *fileOVHConfig                      `yaml:"ovh,omitempty"`
+	Scaleway                 *fileScalewayConfig                 `yaml:"scaleway,omitempty"`
 	AWS                      *fileAWSConfig                      `yaml:"aws,omitempty"`
 	Azure                    *fileAzureConfig                    `yaml:"azure,omitempty"`
 	AzureDynamicSessions     *fileAzureDynamicSessionsConfig     `yaml:"azureDynamicSessions,omitempty"`
@@ -2502,6 +2573,17 @@ type fileOVHConfig struct {
 	Region    string `yaml:"region,omitempty"`
 	Image     string `yaml:"image,omitempty"`
 	Flavor    string `yaml:"flavor,omitempty"`
+}
+
+type fileScalewayConfig struct {
+	Region         string   `yaml:"region,omitempty"`
+	Zone           string   `yaml:"zone,omitempty"`
+	Image          string   `yaml:"image,omitempty"`
+	Type           string   `yaml:"type,omitempty"`
+	ProjectID      string   `yaml:"projectId,omitempty"`
+	OrganizationID string   `yaml:"organizationId,omitempty"`
+	SecurityGroup  string   `yaml:"securityGroup,omitempty"`
+	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -3775,6 +3857,36 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.OVH.Flavor = file.OVH.Flavor
 		}
 	}
+	if file.Scaleway != nil {
+		if file.Scaleway.Region != "" {
+			cfg.Scaleway.Region = file.Scaleway.Region
+			cfg.scalewayRegionExplicit = true
+		}
+		if file.Scaleway.Zone != "" {
+			cfg.Scaleway.Zone = file.Scaleway.Zone
+			cfg.scalewayZoneExplicit = true
+		}
+		if file.Scaleway.Image != "" {
+			cfg.Scaleway.Image = file.Scaleway.Image
+			cfg.scalewayImageExplicit = true
+		}
+		if file.Scaleway.Type != "" {
+			cfg.Scaleway.Type = file.Scaleway.Type
+			cfg.scalewayTypeExplicit = true
+		}
+		if file.Scaleway.ProjectID != "" {
+			cfg.Scaleway.ProjectID = file.Scaleway.ProjectID
+		}
+		if file.Scaleway.OrganizationID != "" {
+			cfg.Scaleway.OrganizationID = file.Scaleway.OrganizationID
+		}
+		if file.Scaleway.SecurityGroup != "" {
+			cfg.Scaleway.SecurityGroup = file.Scaleway.SecurityGroup
+		}
+		if len(file.Scaleway.SSHCIDRs) > 0 {
+			cfg.Scaleway.SSHCIDRs = file.Scaleway.SSHCIDRs
+		}
+	}
 	if file.AWS != nil {
 		if file.AWS.Region != "" {
 			cfg.AWSRegion = file.AWS.Region
@@ -3850,6 +3962,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.AzureDynamicSessions != nil {
 		if file.AzureDynamicSessions.Endpoint != "" {
 			cfg.AzureDynamicSessions.Endpoint = file.AzureDynamicSessions.Endpoint
+			cfg.credentialProvenance.azSessionsEndpoint = credentialSource
 		}
 		if file.AzureDynamicSessions.Pool != "" {
 			cfg.AzureDynamicSessions.Pool = file.AzureDynamicSessions.Pool
@@ -5897,7 +6010,10 @@ func applyEnv(cfg *Config) error {
 		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.AzureNetwork = getenv("CRABBOX_AZURE_NETWORK", cfg.AzureNetwork)
-	cfg.AzureDynamicSessions.Endpoint = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT", cfg.AzureDynamicSessions.Endpoint)
+	if value := os.Getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT"); value != "" {
+		cfg.AzureDynamicSessions.Endpoint = value
+		cfg.credentialProvenance.azSessionsEndpoint = credentialSourceEnvironment
+	}
 	cfg.AzureDynamicSessions.Pool = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL", cfg.AzureDynamicSessions.Pool)
 	cfg.AzureDynamicSessions.APIVersion = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION", cfg.AzureDynamicSessions.APIVersion)
 	cfg.AzureDynamicSessions.Workdir = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR", cfg.AzureDynamicSessions.Workdir)
@@ -5994,6 +6110,28 @@ func applyEnv(cfg *Config) error {
 		cfg.ovhImageExplicit = true
 	}
 	cfg.OVH.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.OVH.Flavor)
+	if region := os.Getenv("CRABBOX_SCALEWAY_REGION"); region != "" {
+		cfg.Scaleway.Region = region
+		cfg.scalewayRegionExplicit = true
+	}
+	if zone := os.Getenv("CRABBOX_SCALEWAY_ZONE"); zone != "" {
+		cfg.Scaleway.Zone = zone
+		cfg.scalewayZoneExplicit = true
+	}
+	if image := os.Getenv("CRABBOX_SCALEWAY_IMAGE"); image != "" {
+		cfg.Scaleway.Image = image
+		cfg.scalewayImageExplicit = true
+	}
+	if serverType := os.Getenv("CRABBOX_SCALEWAY_TYPE"); serverType != "" {
+		cfg.Scaleway.Type = serverType
+		cfg.scalewayTypeExplicit = true
+	}
+	cfg.Scaleway.ProjectID = getenv("CRABBOX_SCALEWAY_PROJECT_ID", cfg.Scaleway.ProjectID)
+	cfg.Scaleway.OrganizationID = getenv("CRABBOX_SCALEWAY_ORGANIZATION_ID", cfg.Scaleway.OrganizationID)
+	cfg.Scaleway.SecurityGroup = getenv("CRABBOX_SCALEWAY_SECURITY_GROUP", cfg.Scaleway.SecurityGroup)
+	if cidrs := os.Getenv("CRABBOX_SCALEWAY_SSH_CIDRS"); cidrs != "" {
+		cfg.Scaleway.SSHCIDRs = splitCommaList(cidrs)
+	}
 	if value := os.Getenv("CRABBOX_PROXMOX_API_URL"); value != "" {
 		cfg.Proxmox.APIURL = value
 		cfg.credentialProvenance.proxmoxAPIURL = credentialSourceEnvironment

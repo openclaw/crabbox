@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -582,6 +583,95 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 	}
 	if got.SSHUser != "root" || got.SSHPort != "22" || len(got.SSHFallbackPorts) != 0 {
 		t.Fatalf("unexpected digitalocean ssh json: %#v", got)
+	}
+}
+
+func TestConfigShowIncludesScalewayProviderConfigWithoutSecrets(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("SCW_ACCESS_KEY", "redaction-fixture-access")
+	t.Setenv("SCW_SECRET_KEY", "redaction-fixture-private")
+	if err := os.WriteFile(configPath, []byte("provider: scaleway\nscaleway:\n  region: fr-par\n  zone: fr-par-1\n  image: ubuntu_noble\n  type: DEV1-S\n  projectId: project-123\n  organizationId: org-123\n  securityGroup: sg-123\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "scaleway region=fr-par zone=fr-par-1 image=ubuntu_noble type=DEV1-S project_id=project-123 organization_id=org-123 security_group=sg-123 ssh_cidrs=203.0.113.0/24,2001:db8::/64 auth=configured") {
+		t.Fatalf("config show missing scaleway summary: %q", text)
+	}
+	if !strings.Contains(text, "ssh=root@<host>:22 fallback_ports=-") {
+		t.Fatalf("config show missing effective scaleway ssh defaults: %q", text)
+	}
+	for _, secret := range []string{"redaction-fixture-access", "redaction-fixture-private"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config show leaked Scaleway secret %q: %q", secret, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SSHUser  string `json:"sshUser"`
+		SSHPort  string `json:"sshPort"`
+		Scaleway struct {
+			Region         string   `json:"region"`
+			Zone           string   `json:"zone"`
+			Image          string   `json:"image"`
+			Type           string   `json:"type"`
+			ProjectID      string   `json:"projectId"`
+			OrganizationID string   `json:"organizationId"`
+			SecurityGroup  string   `json:"securityGroup"`
+			SSHCIDRs       []string `json:"sshCIDRs"`
+			Auth           string   `json:"auth"`
+		} `json:"scaleway"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Scaleway.Region != "fr-par" ||
+		got.Scaleway.Zone != "fr-par-1" ||
+		got.Scaleway.Image != "ubuntu_noble" ||
+		got.Scaleway.Type != "DEV1-S" ||
+		got.Scaleway.ProjectID != "project-123" ||
+		got.Scaleway.OrganizationID != "org-123" ||
+		got.Scaleway.SecurityGroup != "sg-123" ||
+		got.Scaleway.Auth != "configured" ||
+		strings.Join(got.Scaleway.SSHCIDRs, ",") != "203.0.113.0/24,2001:db8::/64" {
+		t.Fatalf("unexpected scaleway json: %#v", got.Scaleway)
+	}
+	if got.SSHUser != "root" || got.SSHPort != "22" {
+		t.Fatalf("unexpected scaleway ssh json: %#v", got)
+	}
+	rendered := stdout.String()
+	for _, secret := range []string{"redaction-fixture-access", "redaction-fixture-private"} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("config show json leaked Scaleway secret %q: %q", secret, rendered)
+		}
+	}
+}
+
+func TestConfigShowScalewayPartialAuth(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("SCW_ACCESS_KEY", "redaction-fixture-access")
+	cfg := Config{Provider: "scaleway"}
+	view := configShowView(cfg)["scaleway"].(map[string]any)
+	if got := view["auth"]; got != "partial" {
+		t.Fatalf("auth=%v, want partial", got)
+	}
+	rendered := fmt.Sprint(view)
+	if strings.Contains(rendered, "redaction-fixture-access") {
+		t.Fatalf("config show leaked Scaleway access key: %s", rendered)
 	}
 }
 

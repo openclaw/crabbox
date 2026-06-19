@@ -74,6 +74,22 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_OVH_REGION",
 		"CRABBOX_OVH_IMAGE",
 		"CRABBOX_OVH_FLAVOR",
+		"CRABBOX_SCALEWAY_REGION",
+		"CRABBOX_SCALEWAY_ZONE",
+		"CRABBOX_SCALEWAY_IMAGE",
+		"CRABBOX_SCALEWAY_TYPE",
+		"CRABBOX_SCALEWAY_PROJECT_ID",
+		"CRABBOX_SCALEWAY_ORGANIZATION_ID",
+		"CRABBOX_SCALEWAY_SECURITY_GROUP",
+		"CRABBOX_SCALEWAY_SSH_CIDRS",
+		"SCW_ACCESS_KEY",
+		"SCW_SECRET_KEY",
+		"SCW_DEFAULT_ORGANIZATION_ID",
+		"SCW_DEFAULT_PROJECT_ID",
+		"SCW_DEFAULT_REGION",
+		"SCW_DEFAULT_ZONE",
+		"SCW_PROFILE",
+		"SCW_CONFIG_PATH",
 		"CRABBOX_DAYTONA_API_KEY",
 		"DAYTONA_API_KEY",
 		"CRABBOX_DAYTONA_JWT_TOKEN",
@@ -1010,6 +1026,148 @@ func TestOVHConfigShowRedactsEnvCredentials(t *testing.T) {
 	t.Setenv("OVH_CONSUMER_KEY", "")
 	if got := configShowView(cfg)["ovh"].(map[string]any)["auth"]; got != "partial" {
 		t.Fatalf("partial auth=%v, want partial", got)
+	}
+}
+
+func TestScalewayConfigFileEnvAndDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if err := applyFileConfig(&cfg, fileConfig{
+		Provider: "scaleway",
+		Scaleway: &fileScalewayConfig{
+			Region:         "nl-ams",
+			Zone:           "nl-ams-1",
+			Image:          "ubuntu_jammy",
+			Type:           "DEV1-M",
+			ProjectID:      "project-file",
+			OrganizationID: "org-file",
+			SecurityGroup:  "sg-file",
+			SSHCIDRs:       []string{"203.0.113.0/24"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "scaleway" || cfg.Scaleway.Region != "nl-ams" || cfg.Scaleway.Zone != "nl-ams-1" || cfg.Scaleway.Image != "ubuntu_jammy" || cfg.Scaleway.Type != "DEV1-M" || cfg.Scaleway.ProjectID != "project-file" || cfg.Scaleway.OrganizationID != "org-file" || cfg.Scaleway.SecurityGroup != "sg-file" {
+		t.Fatalf("file scaleway config not applied: %#v", cfg.Scaleway)
+	}
+	if strings.Join(cfg.Scaleway.SSHCIDRs, ",") != "203.0.113.0/24" {
+		t.Fatalf("file scaleway ssh cidrs=%v", cfg.Scaleway.SSHCIDRs)
+	}
+	if !cfg.scalewayRegionExplicit || !cfg.scalewayZoneExplicit || !cfg.scalewayImageExplicit || !cfg.scalewayTypeExplicit {
+		t.Fatalf("file scaleway location/image/type should be explicit: region=%t zone=%t image=%t type=%t", cfg.scalewayRegionExplicit, cfg.scalewayZoneExplicit, cfg.scalewayImageExplicit, cfg.scalewayTypeExplicit)
+	}
+
+	t.Setenv("CRABBOX_SCALEWAY_REGION", "fr-par")
+	t.Setenv("CRABBOX_SCALEWAY_ZONE", "fr-par-2")
+	t.Setenv("CRABBOX_SCALEWAY_IMAGE", "ubuntu_noble")
+	t.Setenv("CRABBOX_SCALEWAY_TYPE", "DEV1-S")
+	t.Setenv("CRABBOX_SCALEWAY_PROJECT_ID", "project-env")
+	t.Setenv("CRABBOX_SCALEWAY_ORGANIZATION_ID", "org-env")
+	t.Setenv("CRABBOX_SCALEWAY_SECURITY_GROUP", "sg-env")
+	t.Setenv("CRABBOX_SCALEWAY_SSH_CIDRS", "198.51.100.0/24,2001:db8::/64")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Scaleway.Region != "fr-par" || cfg.Scaleway.Zone != "fr-par-2" || cfg.Scaleway.Image != "ubuntu_noble" || cfg.Scaleway.Type != "DEV1-S" || cfg.Scaleway.ProjectID != "project-env" || cfg.Scaleway.OrganizationID != "org-env" || cfg.Scaleway.SecurityGroup != "sg-env" {
+		t.Fatalf("env scaleway config not applied: %#v", cfg.Scaleway)
+	}
+	if strings.Join(cfg.Scaleway.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
+		t.Fatalf("env scaleway ssh cidrs=%v", cfg.Scaleway.SSHCIDRs)
+	}
+	if !cfg.scalewayRegionExplicit || !cfg.scalewayZoneExplicit {
+		t.Fatalf("env scaleway location should be explicit: region=%t zone=%t", cfg.scalewayRegionExplicit, cfg.scalewayZoneExplicit)
+	}
+
+	cfg.Scaleway = ScalewayConfig{}
+	cfg.scalewayRegionExplicit = false
+	cfg.scalewayZoneExplicit = false
+	cfg.scalewayImageExplicit = false
+	cfg.scalewayTypeExplicit = false
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatalf("applyProviderConfigDefaults err=%v", err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.Scaleway.Region != "fr-par" || cfg.Scaleway.Zone != "fr-par-1" || cfg.Scaleway.Image != "ubuntu_noble" || cfg.Scaleway.Type != "DEV1-S" || cfg.SSHUser != "root" || cfg.SSHPort != "22" || cfg.WorkRoot != defaultPOSIXWorkRoot {
+		t.Fatalf("scaleway defaults not applied: cfg=%#v scaleway=%#v", cfg, cfg.Scaleway)
+	}
+	if cfg.scalewayRegionExplicit || cfg.scalewayZoneExplicit || cfg.scalewayImageExplicit || cfg.scalewayTypeExplicit {
+		t.Fatalf("default scaleway values should not be explicit: region=%t zone=%t image=%t type=%t", cfg.scalewayRegionExplicit, cfg.scalewayZoneExplicit, cfg.scalewayImageExplicit, cfg.scalewayTypeExplicit)
+	}
+}
+
+func TestScalewayPortableOSSelection(t *testing.T) {
+	t.Run("supported selector maps to provider image", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "scaleway"
+		cfg.OSImage = "ubuntu:24.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Scaleway.Image != "ubuntu_noble" {
+			t.Fatalf("Scaleway.Image=%q", cfg.Scaleway.Image)
+		}
+	})
+
+	t.Run("unsupported selector is deferred to acquisition", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "scaleway"
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Scaleway.Image != "" {
+			t.Fatalf("Scaleway.Image=%q, want unresolved provider image", cfg.Scaleway.Image)
+		}
+	})
+
+	t.Run("provider image overrides portable selector", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "scaleway"
+		cfg.OSImage = "ubuntu:26.04"
+		cfg.osImageExplicit = true
+		cfg.Scaleway.Image = "custom-image"
+		cfg.scalewayImageExplicit = true
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Scaleway.Image != "custom-image" {
+			t.Fatalf("Scaleway.Image=%q", cfg.Scaleway.Image)
+		}
+	})
+}
+
+func TestScalewayDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "scaleway"
+	cfg.explicitWorkRoot = "/work/custom"
+	cfg.explicitSSHUser = "ubuntu"
+	cfg.explicitSSHPort = "2222"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkRoot != "/work/custom" || cfg.SSHUser != "ubuntu" || cfg.SSHPort != "2222" {
+		t.Fatalf("explicit generic values not preserved: work_root=%q ssh=%s:%s", cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort)
+	}
+}
+
+func TestScalewayEnvDoesNotMutateGenericFieldsForOtherProviders(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider = "hetzner"
+	originalLocation := cfg.Location
+	originalImage := cfg.Image
+	t.Setenv("CRABBOX_SCALEWAY_REGION", "fr-par")
+	t.Setenv("CRABBOX_SCALEWAY_IMAGE", "ubuntu_noble")
+	t.Setenv("CRABBOX_SCALEWAY_TYPE", "DEV1-S")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.Scaleway.Region != "fr-par" || cfg.Scaleway.Image != "ubuntu_noble" || cfg.Scaleway.Type != "DEV1-S" {
+		t.Fatalf("scaleway env not stored: %#v", cfg.Scaleway)
+	}
+	if cfg.Location != originalLocation || cfg.Image != originalImage {
+		t.Fatalf("scaleway env leaked into generic fields: location=%q image=%q", cfg.Location, cfg.Image)
 	}
 }
 

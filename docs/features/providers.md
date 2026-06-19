@@ -129,6 +129,12 @@ Droplet size.
 Linode maps every class to the smallest Phase 1 default size `g6-standard-1`.
 Use `--type <linode-type-slug>` when you need a different exact instance type.
 
+Scaleway maps every class to the smallest foundation default type `DEV1-S`.
+Use `--type <scaleway-commercial-type>` when you need a different exact
+Scaleway Instances commercial type. The live lifecycle backend is not
+implemented yet, so this is a config/provider contract rather than a live
+capacity fallback path in this branch.
+
 ## Brokered provider behavior
 
 ### Hetzner
@@ -229,6 +235,10 @@ list, and cleanup.
   machine image, secret context, and cache plane as Semaphore CI.
 - **sprites** — creates a sprite, installs OpenSSH and rsync inside it, and reaches
   SSH through `sprite proxy` for a fast Linux microVM on the standard SSH path.
+- **scaleway** — is registered as a direct Linux SSH-lease provider for Scaleway
+  Instances with Scaleway SDK credentials, per-lease managed IAM SSH keys,
+  cloud-init bootstrap, Crabbox-owned tags, and direct cleanup. `doctor` checks
+  SDK config and auth material discovery without creating resources.
 
 Delegated-run providers (`cloudflare`, `azure-dynamic-sessions`, `e2b`, `islo`,
 `modal`, `tensorlake`, `upstash-box`, `blacksmith-testbox`, `wandb`,

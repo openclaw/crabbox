@@ -615,6 +615,20 @@
     "caveat": "Capacity, GPU pricing, and public SSH vary",
     "docs": "runpod.md"
   },
+  "scaleway": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Scaleway Instance",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "optional",
+    "lifecycle": "Crabbox",
+    "cleanup": "instance and managed key delete",
+    "bestFit": "Direct Linux VM on Scaleway Instances",
+    "caveat": "Direct-only; security groups must already allow SSH",
+    "docs": "scaleway.md"
+  },
   "semaphore": {
     "status": "built-in",
     "category": "ci-proof-runner",

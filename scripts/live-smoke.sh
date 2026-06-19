@@ -894,6 +894,10 @@ if has_provider hetzner; then
   provider_smoke hetzner --class "${CRABBOX_LIVE_HETZNER_CLASS:-standard}" --ttl 15m --idle-timeout 2m
 fi
 
+if has_provider scaleway; then
+  "$root/scripts/live-scaleway-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi

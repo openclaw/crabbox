@@ -216,6 +216,7 @@ internal/providers/azuredynamicsessions # Azure Container Apps delegated runner
 internal/providers/gcp                  # GCP Compute Engine SSH lease backend (coordinator)
 internal/providers/hetzner              # Hetzner Cloud SSH lease backend (coordinator)
 internal/providers/linode               # Linode SSH lease backend
+internal/providers/scaleway             # Scaleway SSH lease backend
 internal/providers/proxmox              # Proxmox VE SSH lease backend
 internal/providers/parallels            # Parallels macOS VM host SSH lease backend
 internal/providers/localcontainer       # local Docker container SSH backend

@@ -7,6 +7,7 @@
 - Added the Phala confidential Intel TDX CVM provider with default-on hardware attestation, exact Compose binding, TLS-authenticated SSH, and fail-closed claim-backed lifecycle cleanup. Thanks @anagnorisis2peripeteia.
 - Added reusable E2B run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
 - Added reusable Modal run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
+- Added the Scaleway direct Linux SSH-lease provider with per-lease IAM keys, claim-backed lifecycle recovery, and guarded live smoke coverage. Thanks @coygeek.
 - Added reusable W&B run-session handles and cleanup commands for `--keep --lease-output`.
 - Added Linux CPU capacity to lease telemetry and portal status details.
 ### Changed
@@ -15,6 +16,9 @@
 
 ### Fixed
 
+- Prevented unauthenticated Cloudflare Access key fetches and bounded key-set refresh work for invalid JWT key IDs. Thanks @coygeek.
+- Blocked normalized empty-segment variants of internal coordinator routes and stripped caller-supplied internal headers before fleet dispatch. Thanks @coygeek.
+- Source-bound Azure Dynamic Sessions bearer tokens to operator-approved endpoints instead of repository-selected destinations. Thanks @coygeek.
 - Let Islo use tenant defaults for implicit sandbox image and capacity while preserving every explicit config, environment, and flag override. Thanks @zozo123.
 - Made new runtime-adapter ticket claims provisional until agent connection or lease registration, allowing authenticated recovery of expired inactive first claims while preserving all existing and confirmed adapter IDs.
 - Separated shared automation tokens from signed user-token keys, preserving shared-token-only automation while requiring distinct session signing material for GitHub login.

@@ -90,6 +90,9 @@ func (e *azureDynamicSessionsAPIError) Error() string {
 }
 
 var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Runtime) (azureDynamicSessionsAPI, error) {
+	if err := validateNativeCredentialDestination(cfg); err != nil {
+		return nil, err
+	}
 	endpoint, err := azureDynamicSessionsEndpoint(cfg)
 	if err != nil {
 		return nil, err

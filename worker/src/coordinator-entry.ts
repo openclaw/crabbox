@@ -1,12 +1,12 @@
 import {
   authenticateRequest,
   requestWithAuthContext,
-  requestWithoutProxySecret,
+  requestWithoutTrustedHeaders,
   type AuthContext,
   type AuthRequestContext,
 } from "./auth";
 import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin";
-import { bearerToken, json } from "./http";
+import { bearerToken, json, pathParts } from "./http";
 import type { Env } from "./types";
 
 export type CoordinatorFetch = (request: Request) => Promise<Response>;
@@ -48,12 +48,13 @@ export async function prepareCoordinatorRequest(
     return { response: canonicalPortal, authenticated: false };
   }
   if (url.pathname.startsWith("/v1/auth/")) {
-    return { request: requestWithoutProxySecret(request), authenticated: false };
+    return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
   if (url.pathname === "/portal/login" || url.pathname === "/portal/logout") {
-    return { request: requestWithoutProxySecret(request), authenticated: false };
+    return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
-  if (url.pathname.startsWith("/v1/internal/")) {
+  const route = pathParts(request);
+  if (route[0] === "v1" && route[1] === "internal") {
     return {
       response: json({ error: "not_found" }, { status: 404 }),
       authenticated: false,
@@ -61,7 +62,7 @@ export async function prepareCoordinatorRequest(
   }
   if (isolatedCode) {
     return {
-      request: requestWithoutProxySecret(request),
+      request: requestWithoutTrustedHeaders(request),
       authenticated: false,
       bodyLimit: codeProxyRequestBodyBytes,
     };
@@ -72,12 +73,12 @@ export async function prepareCoordinatorRequest(
     isEgressAgentUpgrade(request, url) ||
     isRuntimeAdapterAgentUpgrade(request, url)
   ) {
-    return { request: requestWithoutProxySecret(request), authenticated: false };
+    return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
   const runtimeAdapterAuth = runtimeAdapterServiceAuth(request, env, url);
   if (runtimeAdapterAuth) {
     return {
-      request: requestWithAuthContext(requestWithoutProxySecret(request), runtimeAdapterAuth),
+      request: requestWithAuthContext(requestWithoutTrustedHeaders(request), runtimeAdapterAuth),
       authenticated: true,
     };
   }
