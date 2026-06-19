@@ -4,7 +4,14 @@ import type { Env } from "./types";
 const tokenPrefix = "cbxu_";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const accessKeyCache = new Map<string, CryptoKey>();
+const accessJwtHeaderMaxChars = 2048;
+const accessJwtMaxChars = 32 * 1024;
+const accessKidMaxChars = 256;
+const accessKeySetTTLMS = 5 * 60 * 1000;
+const accessKeySetFailureTTLMS = 30 * 1000;
+const accessKeySetCacheMaxEntries = 8;
+const accessKeySetCache = new Map<string, AccessKeySetCacheEntry>();
+const accessKeySetLoads = new Map<string, Promise<AccessKeySetCacheEntry>>();
 
 export interface AuthContext {
   authorized: boolean;
@@ -51,8 +58,8 @@ export async function authenticateRequest(
 ): Promise<AuthContext | undefined> {
   const token = bearerToken(request);
   const trustedIdentity = context.trustedProxy ? trustedProxyIdentity(request, env) : undefined;
-  const accessIdentity = await verifiedAccessIdentity(request, env).catch(() => undefined);
   if (env.CRABBOX_ADMIN_TOKEN && token === env.CRABBOX_ADMIN_TOKEN) {
+    const accessIdentity = await verifiedAccessIdentity(request, env).catch(() => undefined);
     return {
       authorized: true,
       admin: true,
@@ -66,6 +73,7 @@ export async function authenticateRequest(
     };
   }
   if (env.CRABBOX_SHARED_TOKEN && token === env.CRABBOX_SHARED_TOKEN) {
+    const accessIdentity = await verifiedAccessIdentity(request, env).catch(() => undefined);
     return {
       authorized: true,
       admin: false,
@@ -330,6 +338,19 @@ interface AccessPublicJwk extends JsonWebKey {
   kid?: string;
 }
 
+interface AccessKeySetCacheEntry {
+  expiresAt: number;
+  jwks: Map<string, AccessPublicJwk>;
+  imported: Map<string, CryptoKey>;
+  invalid: Set<string>;
+  missRefreshUsed: boolean;
+}
+
+interface AccessKeySetLookup {
+  entry: AccessKeySetCacheEntry;
+  fromCache: boolean;
+}
+
 async function verifiedAccessIdentity(
   request: Request,
   env: Pick<Env, "CRABBOX_ACCESS_TEAM_DOMAIN" | "CRABBOX_ACCESS_AUD">,
@@ -340,12 +361,29 @@ async function verifiedAccessIdentity(
   if (!jwt || !teamDomain || !expectedAud) {
     return undefined;
   }
-  const [encodedHeader, encodedPayload, encodedSignature] = jwt.split(".");
-  if (!encodedHeader || !encodedPayload || !encodedSignature) {
+  if (jwt.length > accessJwtMaxChars) {
+    return undefined;
+  }
+  const parts = jwt.split(".");
+  if (parts.length !== 3) {
+    return undefined;
+  }
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  if (
+    !encodedHeader ||
+    encodedHeader.length > accessJwtHeaderMaxChars ||
+    !encodedPayload ||
+    !encodedSignature
+  ) {
     return undefined;
   }
   const header = JSON.parse(decoder.decode(base64URLDecode(encodedHeader))) as AccessJwtHeader;
-  if (header.alg !== "RS256" || !header.kid) {
+  if (
+    header.alg !== "RS256" ||
+    typeof header.kid !== "string" ||
+    header.kid.length === 0 ||
+    header.kid.length > accessKidMaxChars
+  ) {
     return undefined;
   }
   const key = await accessPublicKey(teamDomain, header.kid);
@@ -376,29 +414,121 @@ async function verifiedAccessIdentity(
 }
 
 async function accessPublicKey(teamDomain: string, kid: string): Promise<CryptoKey | undefined> {
-  const cacheKey = `${teamDomain}:${kid}`;
-  const cached = accessKeyCache.get(cacheKey);
+  const lookup = await accessKeySet(teamDomain);
+  let keySet = lookup.entry;
+  const cached = keySet.imported.get(kid);
   if (cached) {
     return cached;
   }
-  const response = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
-  if (!response.ok) {
+  if (keySet.invalid.has(kid)) {
     return undefined;
   }
-  const certs = (await response.json()) as AccessCerts;
-  const jwk = certs.keys?.find((key) => key.kid === kid);
+  let jwk = keySet.jwks.get(kid);
+  if (!jwk && lookup.fromCache && !keySet.missRefreshUsed) {
+    keySet.missRefreshUsed = true;
+    keySet = await refreshAccessKeySet(teamDomain);
+    jwk = keySet.jwks.get(kid);
+  } else if (!jwk && lookup.fromCache) {
+    const refreshing = accessKeySetLoads.get(teamDomain);
+    if (refreshing) {
+      keySet = await refreshing;
+      jwk = keySet.jwks.get(kid);
+    }
+  }
   if (!jwk) {
     return undefined;
   }
-  const key = await crypto.subtle.importKey(
-    "jwk",
-    jwk,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["verify"],
+  try {
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    keySet.imported.set(kid, key);
+    return key;
+  } catch {
+    keySet.invalid.add(kid);
+    return undefined;
+  }
+}
+
+async function accessKeySet(teamDomain: string): Promise<AccessKeySetLookup> {
+  const loading = accessKeySetLoads.get(teamDomain);
+  if (loading) {
+    return { entry: await loading, fromCache: false };
+  }
+  const now = Date.now();
+  const cached = accessKeySetCache.get(teamDomain);
+  if (cached && cached.expiresAt > now) {
+    accessKeySetCache.delete(teamDomain);
+    accessKeySetCache.set(teamDomain, cached);
+    return { entry: cached, fromCache: true };
+  }
+  accessKeySetCache.delete(teamDomain);
+  const load = fetchAccessKeySet(teamDomain).finally(() => accessKeySetLoads.delete(teamDomain));
+  accessKeySetLoads.set(teamDomain, load);
+  return { entry: await load, fromCache: false };
+}
+
+async function refreshAccessKeySet(teamDomain: string): Promise<AccessKeySetCacheEntry> {
+  const loading = accessKeySetLoads.get(teamDomain);
+  if (loading) {
+    return loading;
+  }
+  accessKeySetCache.delete(teamDomain);
+  const load = fetchAccessKeySet(teamDomain, true).finally(() =>
+    accessKeySetLoads.delete(teamDomain),
   );
-  accessKeyCache.set(cacheKey, key);
-  return key;
+  accessKeySetLoads.set(teamDomain, load);
+  return load;
+}
+
+async function fetchAccessKeySet(
+  teamDomain: string,
+  missRefreshUsed = false,
+): Promise<AccessKeySetCacheEntry> {
+  let keys: AccessPublicJwk[] = [];
+  let ttl = accessKeySetFailureTTLMS;
+  try {
+    const response = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
+    if (response.ok) {
+      const certs = (await response.json()) as AccessCerts;
+      if (Array.isArray(certs.keys)) {
+        keys = certs.keys;
+        ttl = accessKeySetTTLMS;
+      }
+    }
+  } catch {
+    // Cache fetch failures briefly so an upstream outage cannot amplify request load.
+  }
+  const entry: AccessKeySetCacheEntry = {
+    expiresAt: Date.now() + ttl,
+    jwks: new Map(
+      keys
+        .filter(
+          (key): key is AccessPublicJwk & { kid: string } =>
+            typeof key.kid === "string" &&
+            key.kid.length > 0 &&
+            key.kid.length <= accessKidMaxChars,
+        )
+        .map((key) => [key.kid, key]),
+    ),
+    imported: new Map(),
+    invalid: new Set(),
+    missRefreshUsed,
+  };
+  accessKeySetCache.delete(teamDomain);
+  accessKeySetCache.set(teamDomain, entry);
+  while (accessKeySetCache.size > accessKeySetCacheMaxEntries) {
+    const oldest = accessKeySetCache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    accessKeySetCache.delete(oldest);
+  }
+  return entry;
 }
 
 function normalizedAccessTeamDomain(value: string | undefined): string {
