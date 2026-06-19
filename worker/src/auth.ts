@@ -118,6 +118,7 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   const headers = new Headers(request.headers);
   headers.delete("cf-access-authenticated-user-email");
   headers.delete("cf-access-jwt-assertion");
+  headers.delete("x-crabbox-internal");
   headers.delete("x-crabbox-proxy-secret");
   headers.set("x-crabbox-auth", auth.auth);
   headers.set("x-crabbox-admin", auth.admin ? "true" : "false");
@@ -136,11 +137,15 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   return new Request(request, { headers });
 }
 
-export function requestWithoutProxySecret(request: Request): Request {
-  if (!request.headers.has("x-crabbox-proxy-secret")) {
+export function requestWithoutTrustedHeaders(request: Request): Request {
+  if (
+    !request.headers.has("x-crabbox-internal") &&
+    !request.headers.has("x-crabbox-proxy-secret")
+  ) {
     return request;
   }
   const headers = new Headers(request.headers);
+  headers.delete("x-crabbox-internal");
   headers.delete("x-crabbox-proxy-secret");
   return new Request(request, { headers });
 }

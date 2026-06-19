@@ -134,7 +134,7 @@ describe("coordinator auth", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("strips the reverse-proxy secret from unauthenticated pass-through routes", async () => {
+  it("strips trusted headers from unauthenticated pass-through routes", async () => {
     const requests = [
       new Request("https://example.test/v1/auth/github/callback", {
         headers: { "x-crabbox-proxy-secret": "proxy-secret" },
@@ -153,6 +153,7 @@ describe("coordinator auth", () => {
         },
       }),
     ];
+    requests.forEach((request) => request.headers.set("x-crabbox-internal", "scheduled"));
 
     const routedRequests = await Promise.all(
       requests.map(async (request) => {
@@ -165,6 +166,12 @@ describe("coordinator auth", () => {
     );
 
     expect(routedRequests.map((request) => request.headers.get("x-crabbox-proxy-secret"))).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(routedRequests.map((request) => request.headers.get("x-crabbox-internal"))).toEqual([
       null,
       null,
       null,
@@ -529,7 +536,12 @@ describe("coordinator auth", () => {
     ).rejects.toThrow("CRABBOX_SESSION_SECRET must differ");
   });
 
-  it("does not expose internal scheduled maintenance through public fetch", async () => {
+  it.each([
+    "/v1/internal/scheduled",
+    "/v1//internal/scheduled",
+    "/v1///internal/scheduled",
+    "//v1/internal/scheduled",
+  ])("does not expose internal scheduled maintenance through public fetch: %s", async (path) => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",
       CRABBOX_DEFAULT_ORG: "example-org",
@@ -542,7 +554,7 @@ describe("coordinator auth", () => {
     } as unknown as Env;
 
     const response = await coordinator.fetch(
-      new Request("https://example.test/v1/internal/scheduled", {
+      new Request(`https://example.test${path}`, {
         method: "POST",
         headers: {
           authorization: "Bearer shared",
@@ -562,6 +574,7 @@ describe("coordinator auth", () => {
       headers: {
         "cf-access-authenticated-user-email": "spoof@example.com",
         "x-crabbox-proxy-secret": "proxy-secret",
+        "x-crabbox-internal": "scheduled",
         "x-crabbox-owner": "spoof@example.com",
       },
     });
@@ -577,6 +590,7 @@ describe("coordinator auth", () => {
     expect(next.headers.get("cf-access-authenticated-user-email")).toBeNull();
     expect(next.headers.get("cf-access-jwt-assertion")).toBeNull();
     expect(next.headers.get("x-crabbox-proxy-secret")).toBeNull();
+    expect(next.headers.get("x-crabbox-internal")).toBeNull();
     expect(requestOwner(next)).toBe("friend@example.com");
     await expect(next.text()).resolves.toBe("request-body");
   });
