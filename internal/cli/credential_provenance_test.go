@@ -239,6 +239,17 @@ func TestNativeCredentialDestinationsRejectRepositoryEndpointsAtUse(t *testing.T
 		want     string
 	}{
 		{
+			name:     "azure dynamic sessions endpoint",
+			provider: "azure-dynamic-sessions",
+			cfg: Config{
+				AzureDynamicSessions: AzureDynamicSessionsConfig{Endpoint: "https://repo.example.test"},
+				credentialProvenance: credentialDestinationProvenance{
+					azSessionsEndpoint: credentialSourceRepository,
+				},
+			},
+			want: "azureDynamicSessions.endpoint",
+		},
+		{
 			name:     "daytona api",
 			provider: "daytona",
 			cfg: Config{
@@ -363,6 +374,28 @@ func TestRepositoryCredentialDestinationAllowsExplicitFlagOverride(t *testing.T)
 	}
 	if cfg.Proxmox.APIURL != "https://approved.example.test" {
 		t.Fatalf("proxmox apiUrl=%q", cfg.Proxmox.APIURL)
+	}
+}
+
+func TestAzureDynamicSessionsCredentialDestinationAllowsExplicitFlagOverride(t *testing.T) {
+	cfg := Config{
+		Provider: "azure-dynamic-sessions",
+		AzureDynamicSessions: AzureDynamicSessionsConfig{
+			Endpoint: "https://repo.pool.eastus.azurecontainerapps.io",
+		},
+		credentialProvenance: credentialDestinationProvenance{
+			azSessionsEndpoint: credentialSourceRepository,
+		},
+	}
+	fs := newFlagSet("test", io.Discard)
+	endpoint := fs.String("azure-dynamic-sessions-endpoint", cfg.AzureDynamicSessions.Endpoint, "")
+	if err := parseFlags(fs, []string{"--azure-dynamic-sessions-endpoint", "https://approved.pool.eastus.azurecontainerapps.io"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AzureDynamicSessions.Endpoint = *endpoint
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if err := ValidateNativeCredentialDestination(cfg, cfg.Provider); err != nil {
+		t.Fatalf("explicit flag override rejected: %v", err)
 	}
 }
 
@@ -500,6 +533,12 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		credentialEnv string
 		approveEnv    string
 	}{
+		{
+			name:       "azure dynamic sessions",
+			provider:   "azure-dynamic-sessions",
+			file:       fileConfig{AzureDynamicSessions: &fileAzureDynamicSessionsConfig{Endpoint: "https://repo.example.test"}},
+			approveEnv: "CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT",
+		},
 		{
 			name:          "daytona",
 			provider:      "daytona",

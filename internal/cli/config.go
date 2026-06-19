@@ -3850,6 +3850,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.AzureDynamicSessions != nil {
 		if file.AzureDynamicSessions.Endpoint != "" {
 			cfg.AzureDynamicSessions.Endpoint = file.AzureDynamicSessions.Endpoint
+			cfg.credentialProvenance.azSessionsEndpoint = credentialSource
 		}
 		if file.AzureDynamicSessions.Pool != "" {
 			cfg.AzureDynamicSessions.Pool = file.AzureDynamicSessions.Pool
@@ -5897,7 +5898,10 @@ func applyEnv(cfg *Config) error {
 		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.AzureNetwork = getenv("CRABBOX_AZURE_NETWORK", cfg.AzureNetwork)
-	cfg.AzureDynamicSessions.Endpoint = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT", cfg.AzureDynamicSessions.Endpoint)
+	if value := os.Getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT"); value != "" {
+		cfg.AzureDynamicSessions.Endpoint = value
+		cfg.credentialProvenance.azSessionsEndpoint = credentialSourceEnvironment
+	}
 	cfg.AzureDynamicSessions.Pool = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL", cfg.AzureDynamicSessions.Pool)
 	cfg.AzureDynamicSessions.APIVersion = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION", cfg.AzureDynamicSessions.APIVersion)
 	cfg.AzureDynamicSessions.Workdir = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR", cfg.AzureDynamicSessions.Workdir)
