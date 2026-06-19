@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Prevented unauthenticated Cloudflare Access key fetches and bounded key-set refresh work for invalid JWT key IDs. Thanks @coygeek.
 - Blocked normalized empty-segment variants of internal coordinator routes and stripped caller-supplied internal headers before fleet dispatch. Thanks @coygeek.
 - Source-bound Azure Dynamic Sessions bearer tokens to operator-approved endpoints instead of repository-selected destinations. Thanks @coygeek.
 - Let Islo use tenant defaults for implicit sandbox image and capacity while preserving every explicit config, environment, and flag override. Thanks @zozo123.
