@@ -192,7 +192,6 @@ explicit live-secret smoke.
 ```sh
 crabbox run --allow-env CI,NODE_OPTIONS -- pnpm test
 crabbox run \
-  --id <lease> \
   --env-from-profile ~/.project-live.profile \
   --allow-env API_TOKEN \
   --preflight \
@@ -206,6 +205,7 @@ you control:
 
 ```sh
 crabbox run \
+  --id <lease> \
   --env-from-profile ~/.project-live.profile \
   --allow-env API_TOKEN \
   --env-helper live \
