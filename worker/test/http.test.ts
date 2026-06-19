@@ -134,7 +134,7 @@ describe("coordinator auth", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("strips the reverse-proxy secret from unauthenticated pass-through routes", async () => {
+  it("strips trusted headers from unauthenticated pass-through routes", async () => {
     const requests = [
       new Request("https://example.test/v1/auth/github/callback", {
         headers: { "x-crabbox-proxy-secret": "proxy-secret" },
@@ -153,6 +153,7 @@ describe("coordinator auth", () => {
         },
       }),
     ];
+    requests.forEach((request) => request.headers.set("x-crabbox-internal", "scheduled"));
 
     const routedRequests = await Promise.all(
       requests.map(async (request) => {
@@ -165,6 +166,12 @@ describe("coordinator auth", () => {
     );
 
     expect(routedRequests.map((request) => request.headers.get("x-crabbox-proxy-secret"))).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(routedRequests.map((request) => request.headers.get("x-crabbox-internal"))).toEqual([
       null,
       null,
       null,
@@ -323,11 +330,162 @@ describe("coordinator auth", () => {
     }
   });
 
+  it("does not fetch Cloudflare Access keys before Crabbox bearer authentication", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ keys: [] }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    try {
+      const env = {
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_ACCESS_TEAM_DOMAIN: "preauth.example.cloudflareaccess.com",
+        CRABBOX_ACCESS_AUD: "access-aud",
+      };
+      await Promise.all(
+        [undefined, "Bearer wrong"].map(async (authorization) => {
+          const headers = new Headers({
+            "cf-access-jwt-assertion": accessJwtShape("unknown-kid"),
+          });
+          if (authorization) {
+            headers.set("authorization", authorization);
+          }
+          await expect(
+            authenticateRequest(new Request("https://example.test/v1/leases", { headers }), env),
+          ).resolves.toBeUndefined();
+        }),
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("bounds Cloudflare Access key fetches for unknown kids", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ keys: [] }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    try {
+      const env = {
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SHARED_OWNER: "automation@example.com",
+        CRABBOX_ACCESS_TEAM_DOMAIN: "unknown-kid.example.cloudflareaccess.com",
+        CRABBOX_ACCESS_AUD: "access-aud",
+      };
+      const authenticateKid = (kid: string) =>
+        authenticateRequest(
+          new Request("https://example.test/v1/leases", {
+            headers: {
+              authorization: "Bearer shared",
+              "cf-access-jwt-assertion": accessJwtShape(kid),
+            },
+          }),
+          env,
+        );
+      const [first, repeated, different] = await Promise.all([
+        authenticateKid("missing-one"),
+        authenticateKid("missing-one"),
+        authenticateKid("missing-two"),
+      ]);
+      expect([first?.owner, repeated?.owner, different?.owner]).toEqual([
+        "automation@example.com",
+        "automation@example.com",
+        "automation@example.com",
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("refreshes a cached Cloudflare Access key set once for key rotation", async () => {
+    const domain = "rotation.example.cloudflareaccess.com";
+    const firstKey = await accessJwt({
+      kid: "rotation-one",
+      aud: "access-aud",
+      iss: `https://${domain}`,
+      email: "first@example.com",
+    });
+    const rotatedKey = await accessJwt({
+      kid: "rotation-two",
+      aud: "access-aud",
+      iss: `https://${domain}`,
+      email: "second@example.com",
+    });
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ keys: [firstKey.publicJwk] })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ keys: [rotatedKey.publicJwk] })));
+    try {
+      const env = {
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_ACCESS_TEAM_DOMAIN: domain,
+        CRABBOX_ACCESS_AUD: "access-aud",
+      };
+      const authenticate = (jwt: string) =>
+        authenticateRequest(
+          new Request("https://example.test/v1/leases", {
+            headers: {
+              authorization: "Bearer shared",
+              "cf-access-jwt-assertion": jwt,
+            },
+          }),
+          env,
+        );
+      await expect(authenticate(firstKey.jwt)).resolves.toMatchObject({
+        owner: "first@example.com",
+      });
+      const rotated = await Promise.all([
+        authenticate(rotatedKey.jwt),
+        authenticate(rotatedKey.jwt),
+        authenticate(rotatedKey.jwt),
+      ]);
+      expect(rotated.map((auth) => auth?.owner)).toEqual([
+        "second@example.com",
+        "second@example.com",
+        "second@example.com",
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("rejects oversized Cloudflare Access key ids without fetching", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ keys: [] }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    try {
+      const auth = await authenticateRequest(
+        new Request("https://example.test/v1/leases", {
+          headers: {
+            authorization: "Bearer shared",
+            "cf-access-jwt-assertion": accessJwtShape("x".repeat(257)),
+          },
+        }),
+        {
+          CRABBOX_SHARED_TOKEN: "shared",
+          CRABBOX_SHARED_OWNER: "automation@example.com",
+          CRABBOX_ACCESS_TEAM_DOMAIN: "oversized.example.cloudflareaccess.com",
+          CRABBOX_ACCESS_AUD: "access-aud",
+        },
+      );
+      expect(auth?.owner).toBe("automation@example.com");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it("normalizes Cloudflare Access team domains before fetching certs", async () => {
     const { jwt, publicJwk } = await accessJwt({
       kid: "access-test-kid-url",
       aud: "access-aud",
-      iss: "https://team.example.cloudflareaccess.com",
+      iss: "https://team-url.example.cloudflareaccess.com",
       email: "verified@example.com",
     });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -347,14 +505,14 @@ describe("coordinator auth", () => {
         {
           CRABBOX_SHARED_TOKEN: "shared",
           CRABBOX_DEFAULT_ORG: "example-org",
-          CRABBOX_ACCESS_TEAM_DOMAIN: "https://team.example.cloudflareaccess.com/path",
+          CRABBOX_ACCESS_TEAM_DOMAIN: "https://team-url.example.cloudflareaccess.com/path",
           CRABBOX_ACCESS_AUD: "access-aud",
         },
       );
 
       expect(auth.owner).toBe("verified@example.com");
       expect(fetchMock).toHaveBeenCalledWith(
-        "https://team.example.cloudflareaccess.com/cdn-cgi/access/certs",
+        "https://team-url.example.cloudflareaccess.com/cdn-cgi/access/certs",
       );
     } finally {
       fetchMock.mockRestore();
@@ -529,7 +687,12 @@ describe("coordinator auth", () => {
     ).rejects.toThrow("CRABBOX_SESSION_SECRET must differ");
   });
 
-  it("does not expose internal scheduled maintenance through public fetch", async () => {
+  it.each([
+    "/v1/internal/scheduled",
+    "/v1//internal/scheduled",
+    "/v1///internal/scheduled",
+    "//v1/internal/scheduled",
+  ])("does not expose internal scheduled maintenance through public fetch: %s", async (path) => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",
       CRABBOX_DEFAULT_ORG: "example-org",
@@ -542,7 +705,7 @@ describe("coordinator auth", () => {
     } as unknown as Env;
 
     const response = await coordinator.fetch(
-      new Request("https://example.test/v1/internal/scheduled", {
+      new Request(`https://example.test${path}`, {
         method: "POST",
         headers: {
           authorization: "Bearer shared",
@@ -562,6 +725,7 @@ describe("coordinator auth", () => {
       headers: {
         "cf-access-authenticated-user-email": "spoof@example.com",
         "x-crabbox-proxy-secret": "proxy-secret",
+        "x-crabbox-internal": "scheduled",
         "x-crabbox-owner": "spoof@example.com",
       },
     });
@@ -577,6 +741,7 @@ describe("coordinator auth", () => {
     expect(next.headers.get("cf-access-authenticated-user-email")).toBeNull();
     expect(next.headers.get("cf-access-jwt-assertion")).toBeNull();
     expect(next.headers.get("x-crabbox-proxy-secret")).toBeNull();
+    expect(next.headers.get("x-crabbox-internal")).toBeNull();
     expect(requestOwner(next)).toBe("friend@example.com");
     await expect(next.text()).resolves.toBe("request-body");
   });
@@ -708,4 +873,12 @@ async function accessJwt(input: {
     new TextEncoder().encode(`${header}.${payload}`),
   );
   return { jwt: `${header}.${payload}.${base64URL(new Uint8Array(signature))}`, publicJwk };
+}
+
+function accessJwtShape(kid: string): string {
+  return `${encodeAccessJwtPart({ alg: "RS256", kid, typ: "JWT" })}.${encodeAccessJwtPart({})}.signature`;
+}
+
+function encodeAccessJwtPart(value: object): string {
+  return base64URL(new TextEncoder().encode(JSON.stringify(value)));
 }

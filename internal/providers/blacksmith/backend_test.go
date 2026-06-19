@@ -482,16 +482,27 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	var stderr bytes.Buffer
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
 			return LocalCommandResult{Stdout: "ready tbx_abc123\n"}, nil
+		}
+		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
+			if req.Stdout != nil {
+				_, _ = req.Stdout.Write([]byte("https://github.com/example-org/my-app/actions/runs/123456789\n"))
+			}
+			return LocalCommandResult{}, nil
 		}
 		return LocalCommandResult{}, nil
 	}}
 
 	cfg := baseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-	backend := newTestBlacksmithBackend(cfg, runner)
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+	}
 	_, err := backend.Run(context.Background(), RunRequest{
 		Repo:    Repo{Root: "/repo"},
 		Command: []string{"true"},
@@ -511,6 +522,15 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 		t.Fatal(err)
 	} else if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("key leaked after one-shot stop: %v", err)
+	}
+	for _, want := range []string{
+		"blacksmith proof note: stopped one-shot Testbox after success",
+		"backing GitHub Actions run may show a cancelled Testbox step",
+		"actions=https://github.com/example-org/my-app/actions/runs/123456789",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q in:\n%s", want, stderr.String())
+		}
 	}
 }
 

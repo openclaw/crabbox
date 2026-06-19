@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,13 +31,50 @@ func findRepo() (Repo, error) {
 		return Repo{Root: wd, Name: filepath.Base(wd)}, nil
 	}
 	root := strings.TrimSpace(string(out))
+	remoteURL := gitOutput(root, "remote", "get-url", "origin")
 	return Repo{
 		Root:      root,
-		Name:      filepath.Base(root),
-		RemoteURL: gitOutput(root, "remote", "get-url", "origin"),
+		Name:      repoNameFromRootAndRemote(root, remoteURL),
+		RemoteURL: remoteURL,
 		Head:      gitOutput(root, "rev-parse", "HEAD"),
 		BaseRef:   defaultBaseRef(root),
 	}, nil
+}
+
+func repoNameFromRootAndRemote(root, remoteURL string) string {
+	fallback := filepath.Base(root)
+	if repo, err := parseGitHubRepo(remoteURL); err == nil && repo.Name != "" {
+		return repo.Name
+	}
+	if name := repoNameFromRemoteURL(remoteURL); name != "" {
+		return name
+	}
+	return fallback
+}
+
+func repoNameFromRemoteURL(remoteURL string) string {
+	remoteURL = strings.TrimSpace(remoteURL)
+	if remoteURL == "" {
+		return ""
+	}
+	if strings.Contains(remoteURL, "://") {
+		if u, err := url.Parse(remoteURL); err == nil {
+			return cleanRemoteRepoName(path.Base(strings.Trim(u.Path, "/")))
+		}
+	}
+	remotePath := strings.TrimRight(remoteURL, "/")
+	if before, after, ok := strings.Cut(remotePath, ":"); ok && !strings.Contains(before, "/") {
+		remotePath = after
+	}
+	return cleanRemoteRepoName(path.Base(strings.Trim(remotePath, "/")))
+}
+
+func cleanRemoteRepoName(name string) string {
+	name = strings.TrimSuffix(strings.TrimSpace(name), ".git")
+	if name == "" || name == "." || name == "/" {
+		return ""
+	}
+	return name
 }
 
 func defaultExcludes() []string {
