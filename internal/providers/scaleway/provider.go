@@ -71,9 +71,11 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "scaleway-region") {
 		cfg.Scaleway.Region = *v.Region
+		core.SetScalewayRegionExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "scaleway-zone") {
 		cfg.Scaleway.Zone = *v.Zone
+		core.SetScalewayZoneExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "scaleway-image") {
 		cfg.Scaleway.Image = *v.Image
@@ -178,10 +180,10 @@ func (b *Backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 }
 
 func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (target core.LeaseTarget, err error) {
-	cfg := b.cfgForRun()
-	if err := validateFoundationConfig(cfg); err != nil {
+	if err := validateFoundationConfig(b.cfg); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	cfg := b.cfgForRun()
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return core.LeaseTarget{}, core.Exit(2, "provider=scaleway only supports target=linux")
 	}
@@ -231,15 +233,26 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	sshKey, err := client.IAM().CreateSSHKey(&iam.CreateSSHKeyRequest{Name: keyName, PublicKey: publicKey, ProjectID: client.ProjectID()}, scw.WithContext(ctx))
 	if err != nil {
 		if isAmbiguousScalewayError(err) {
-			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", "", keyName, "ambiguous-key-create", req.Keep, now); claimErr != nil {
-				return core.LeaseTarget{}, errors.Join(err, fmt.Errorf("persist Scaleway ambiguous key recovery: %w", claimErr))
+			keyID := ""
+			recovery := "ambiguous-key-create"
+			reconcileCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			reconciled, reconcileErr := b.reconcileSSHKey(reconcileCtx, client, keyName, publicKey)
+			cancel()
+			if reconciled != nil {
+				keyID = reconciled.ID
+				recovery = "rollback-key-cleanup"
+			}
+			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", keyID, keyName, recovery, req.Keep, now); claimErr != nil {
+				return core.LeaseTarget{}, errors.Join(err, reconcileErr, fmt.Errorf("persist Scaleway ambiguous key recovery: %w", claimErr))
 			}
 			cleanupKey = false
+			return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 		}
 		return core.LeaseTarget{}, err
 	}
 	var created *instance.Server
 	committed := false
+	forceRollback := false
 	defer func() {
 		if err == nil || committed {
 			return
@@ -257,12 +270,13 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			}
 			return
 		}
+		keepOnFailure := req.Keep && !forceRollback
 		recovery := "rollback-cleanup"
-		if req.Keep {
+		if keepOnFailure {
 			recovery = "kept-after-failure"
 		}
-		claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, created.ID, publicIPv4(created), sshKey.ID, sshKey.Name, recovery, req.Keep, now)
-		if !req.Keep {
+		claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, created.ID, publicIPv4(created), sshKey.ID, sshKey.Name, recovery, keepOnFailure, now)
+		if !keepOnFailure {
 			deleteErr := b.deleteServerResource(cleanupCtx, client, created.ID)
 			keyErr := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: sshKey.ID}, scw.WithContext(cleanupCtx))
 			if deleteErr != nil || keyErr != nil {
@@ -374,6 +388,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	server.Labels = readyLabels
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}); err != nil {
+			forceRollback = true
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -409,11 +424,11 @@ func (b *Backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err == nil && leaseID != "" {
 		return b.targetFromServer(ctx, client, byID[server.CloudID], req)
 	}
-	if err != nil && !req.ReleaseOnly {
-		return core.LeaseTarget{}, err
-	}
 	if item, ok := byID[strings.TrimSpace(req.ID)]; ok {
 		return b.targetFromServer(ctx, client, item, req)
+	}
+	if err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if req.ReleaseOnly {
 		return b.releaseTargetFromClaim(ctx, client, req.ID)
@@ -503,6 +518,61 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	return live, nil
 }
 
+func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseTarget, meta core.TailscaleMetadata) (core.Server, error) {
+	server := lease.Server
+	if err := validateScalewayLabels(server.Labels); err != nil {
+		return core.Server{}, err
+	}
+	if lease.LeaseID == "" || lease.LeaseID != server.Labels["lease"] {
+		return core.Server{}, core.Exit(2, "refusing to update Tailscale metadata for mismatched Scaleway lease")
+	}
+	client, err := b.newClient(b.cfgForRun(), b.rt)
+	if err != nil {
+		return core.Server{}, err
+	}
+	resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: server.CloudID}, scw.WithContext(ctx))
+	if err != nil {
+		return core.Server{}, err
+	}
+	if resp == nil || resp.Server == nil {
+		return core.Server{}, core.Exit(4, "scaleway server not found: %s", server.CloudID)
+	}
+	live := b.serverFromScaleway(resp.Server)
+	if err := b.validateLiveServer(live, server); err != nil {
+		return core.Server{}, err
+	}
+	if err := b.validateProviderIdentity(live.Labels, client); err != nil {
+		return core.Server{}, err
+	}
+	labels := live.Labels
+	applyTailscaleMetadata(labels, meta)
+	updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
+		Zone:     scw.Zone(client.Zone()),
+		ServerID: resp.Server.ID,
+		Tags:     ptrTags(replaceCrabboxTags(resp.Server.Tags, tagsFromLabels(labels))),
+	}, scw.WithContext(ctx))
+	if err != nil {
+		return core.Server{}, err
+	}
+	if updateResp != nil && updateResp.Server != nil {
+		live = b.serverFromScaleway(updateResp.Server)
+	}
+	live.Labels = labels
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil {
+		return core.Server{}, err
+	}
+	if exists {
+		if claim.Provider != providerName || claim.CloudID != server.CloudID {
+			return core.Server{}, core.Exit(2, "refusing to update Tailscale metadata from stale Scaleway claim")
+		}
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels); err != nil {
+			return core.Server{}, err
+		}
+	}
+	return live, nil
+}
+
 func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	client, err := b.newClient(b.cfgForRun(), b.rt)
 	if err != nil {
@@ -569,6 +639,32 @@ func (b *Backend) listScalewayServers(ctx context.Context, client Client) ([]*in
 		return nil, nil
 	}
 	return resp.Servers, nil
+}
+
+func (b *Backend) reconcileSSHKey(ctx context.Context, client Client, name, publicKey string) (*iam.SSHKey, error) {
+	resp, err := client.IAM().ListSSHKeys(&iam.ListSSHKeysRequest{
+		Name:      scw.StringPtr(name),
+		ProjectID: scw.StringPtr(client.ProjectID()),
+	}, scw.WithContext(ctx), scw.WithAllPages())
+	if err != nil {
+		return nil, fmt.Errorf("reconcile Scaleway SSH key create: %w", err)
+	}
+	var matches []*iam.SSHKey
+	if resp != nil {
+		for _, key := range resp.SSHKeys {
+			if key != nil && key.Name == name && key.ProjectID == client.ProjectID() && strings.TrimSpace(key.PublicKey) == strings.TrimSpace(publicKey) {
+				matches = append(matches, key)
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		return matches[0], nil
+	default:
+		return nil, core.Exit(5, "ambiguous Scaleway SSH key create: %d matching keys named %s", len(matches), name)
+	}
 }
 
 func (b *Backend) resolveImage(ctx context.Context, client Client, cfg core.Config) (string, error) {
@@ -698,12 +794,33 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 		// inventory yet. Retain its access key and claim for explicit recovery.
 		return core.Exit(4, "scaleway recovery claim for lease=%s has no server identity; credentials and claim retained", leaseID)
 	}
-	if server.CloudID != "" {
+	keyID := strings.TrimSpace(server.Labels["scaleway_ssh_key_id"])
+	resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: server.CloudID}, scw.WithContext(ctx))
+	if err != nil && !isScalewayNotFound(err) {
+		return err
+	}
+	if err == nil {
+		if resp == nil || resp.Server == nil {
+			return core.Exit(4, "scaleway server not found: %s", server.CloudID)
+		}
+		live := b.serverFromScaleway(resp.Server)
+		if err := b.validateLiveServer(live, server); err != nil {
+			return err
+		}
+		if err := b.validateProviderIdentity(live.Labels, client); err != nil {
+			return err
+		}
+		if liveKeyID := strings.TrimSpace(live.Labels["scaleway_ssh_key_id"]); liveKeyID != "" {
+			if keyID != "" && keyID != liveKeyID {
+				return core.Exit(2, "refusing to release Scaleway server %s with changed SSH key identity", server.CloudID)
+			}
+			keyID = liveKeyID
+		}
 		if err := b.deleteServerResource(ctx, client, server.CloudID); err != nil {
 			return err
 		}
 	}
-	if keyID := strings.TrimSpace(server.Labels["scaleway_ssh_key_id"]); keyID != "" {
+	if keyID != "" {
 		if err := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: keyID}, scw.WithContext(ctx)); err != nil && !isScalewayNotFound(err) {
 			return err
 		}
@@ -1018,4 +1135,36 @@ func splitCommaList(value string) []string {
 		}
 	}
 	return out
+}
+
+func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
+	if meta.Enabled {
+		labels["tailscale"] = "true"
+	}
+	if meta.Hostname != "" {
+		labels["tailscale_hostname"] = meta.Hostname
+	}
+	if meta.FQDN != "" {
+		labels["tailscale_fqdn"] = meta.FQDN
+	}
+	if meta.IPv4 != "" {
+		labels["tailscale_ipv4"] = meta.IPv4
+	}
+	if len(meta.Tags) > 0 {
+		labels["tailscale_tags"] = strings.Join(meta.Tags, ",")
+	}
+	if meta.State != "" {
+		labels["tailscale_state"] = meta.State
+	}
+	if meta.Error != "" {
+		labels["tailscale_error"] = meta.Error
+	} else {
+		delete(labels, "tailscale_error")
+	}
+	if meta.ExitNode != "" {
+		labels["tailscale_exit_node"] = meta.ExitNode
+	}
+	if meta.ExitNodeAllowLANAccess {
+		labels["tailscale_exit_node_allow_lan_access"] = "true"
+	}
 }

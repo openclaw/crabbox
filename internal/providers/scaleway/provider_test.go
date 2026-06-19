@@ -62,8 +62,8 @@ func TestProviderApplyFlags(t *testing.T) {
 	if cfg.Scaleway.Region != "nl-ams" || cfg.Scaleway.Zone != "nl-ams-1" || cfg.Scaleway.Image != "ubuntu_jammy" || cfg.Scaleway.Type != "DEV1-M" || cfg.Scaleway.ProjectID != "project-1" || cfg.Scaleway.OrganizationID != "org-1" || cfg.Scaleway.SecurityGroup != "sg-1" {
 		t.Fatalf("flags not applied: %#v", cfg.Scaleway)
 	}
-	if !core.ScalewayImageWasExplicit(cfg) || !core.ScalewayTypeWasExplicit(cfg) {
-		t.Fatal("scaleway image/type flags should mark explicit provider values")
+	if !core.ScalewayRegionWasExplicit(cfg) || !core.ScalewayZoneWasExplicit(cfg) || !core.ScalewayImageWasExplicit(cfg) || !core.ScalewayTypeWasExplicit(cfg) {
+		t.Fatal("scaleway location/image/type flags should mark explicit provider values")
 	}
 	if strings.Join(cfg.Scaleway.SSHCIDRs, ",") != "203.0.113.0/24,2001:db8::/64" {
 		t.Fatalf("ssh cidrs=%v", cfg.Scaleway.SSHCIDRs)

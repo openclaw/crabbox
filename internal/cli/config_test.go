@@ -1053,8 +1053,8 @@ func TestScalewayConfigFileEnvAndDefaults(t *testing.T) {
 	if strings.Join(cfg.Scaleway.SSHCIDRs, ",") != "203.0.113.0/24" {
 		t.Fatalf("file scaleway ssh cidrs=%v", cfg.Scaleway.SSHCIDRs)
 	}
-	if !cfg.scalewayImageExplicit || !cfg.scalewayTypeExplicit {
-		t.Fatalf("file scaleway image/type should be explicit: image=%t type=%t", cfg.scalewayImageExplicit, cfg.scalewayTypeExplicit)
+	if !cfg.scalewayRegionExplicit || !cfg.scalewayZoneExplicit || !cfg.scalewayImageExplicit || !cfg.scalewayTypeExplicit {
+		t.Fatalf("file scaleway location/image/type should be explicit: region=%t zone=%t image=%t type=%t", cfg.scalewayRegionExplicit, cfg.scalewayZoneExplicit, cfg.scalewayImageExplicit, cfg.scalewayTypeExplicit)
 	}
 
 	t.Setenv("CRABBOX_SCALEWAY_REGION", "fr-par")
@@ -1074,8 +1074,13 @@ func TestScalewayConfigFileEnvAndDefaults(t *testing.T) {
 	if strings.Join(cfg.Scaleway.SSHCIDRs, ",") != "198.51.100.0/24,2001:db8::/64" {
 		t.Fatalf("env scaleway ssh cidrs=%v", cfg.Scaleway.SSHCIDRs)
 	}
+	if !cfg.scalewayRegionExplicit || !cfg.scalewayZoneExplicit {
+		t.Fatalf("env scaleway location should be explicit: region=%t zone=%t", cfg.scalewayRegionExplicit, cfg.scalewayZoneExplicit)
+	}
 
 	cfg.Scaleway = ScalewayConfig{}
+	cfg.scalewayRegionExplicit = false
+	cfg.scalewayZoneExplicit = false
 	cfg.scalewayImageExplicit = false
 	cfg.scalewayTypeExplicit = false
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
@@ -1084,8 +1089,8 @@ func TestScalewayConfigFileEnvAndDefaults(t *testing.T) {
 	if cfg.TargetOS != targetLinux || cfg.Scaleway.Region != "fr-par" || cfg.Scaleway.Zone != "fr-par-1" || cfg.Scaleway.Image != "ubuntu_noble" || cfg.Scaleway.Type != "DEV1-S" || cfg.SSHUser != "root" || cfg.SSHPort != "22" || cfg.WorkRoot != defaultPOSIXWorkRoot {
 		t.Fatalf("scaleway defaults not applied: cfg=%#v scaleway=%#v", cfg, cfg.Scaleway)
 	}
-	if cfg.scalewayImageExplicit || cfg.scalewayTypeExplicit {
-		t.Fatalf("default scaleway image/type should not be explicit: image=%t type=%t", cfg.scalewayImageExplicit, cfg.scalewayTypeExplicit)
+	if cfg.scalewayRegionExplicit || cfg.scalewayZoneExplicit || cfg.scalewayImageExplicit || cfg.scalewayTypeExplicit {
+		t.Fatalf("default scaleway values should not be explicit: region=%t zone=%t image=%t type=%t", cfg.scalewayRegionExplicit, cfg.scalewayZoneExplicit, cfg.scalewayImageExplicit, cfg.scalewayTypeExplicit)
 	}
 }
 

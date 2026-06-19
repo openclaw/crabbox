@@ -72,6 +72,7 @@ func newClient(cfg core.Config, rt core.Runtime) (Client, error) {
 	envProfile := scw.LoadEnvProfile()
 	profile = scw.MergeProfiles(profile, envProfile)
 	applyCrabboxScalewayOverrides(profile, cfg)
+	applyScalewayLocationDefaults(profile)
 
 	accessKey := stringPtrValue(profile.AccessKey)
 	secretKey := stringPtrValue(profile.SecretKey)
@@ -131,11 +132,20 @@ func applyCrabboxScalewayOverrides(profile *scw.Profile, cfg core.Config) {
 	if value := strings.TrimSpace(cfg.Scaleway.OrganizationID); value != "" {
 		profile.DefaultOrganizationID = scw.StringPtr(value)
 	}
-	if value := strings.TrimSpace(cfg.Scaleway.Region); value != "" {
+	if value := strings.TrimSpace(cfg.Scaleway.Region); value != "" && core.ScalewayRegionWasExplicit(cfg) {
 		profile.DefaultRegion = scw.StringPtr(value)
 	}
-	if value := strings.TrimSpace(cfg.Scaleway.Zone); value != "" {
+	if value := strings.TrimSpace(cfg.Scaleway.Zone); value != "" && core.ScalewayZoneWasExplicit(cfg) {
 		profile.DefaultZone = scw.StringPtr(value)
+	}
+}
+
+func applyScalewayLocationDefaults(profile *scw.Profile) {
+	if stringPtrValue(profile.DefaultRegion) == "" {
+		profile.DefaultRegion = scw.StringPtr(defaultRegion)
+	}
+	if stringPtrValue(profile.DefaultZone) == "" {
+		profile.DefaultZone = scw.StringPtr(defaultZone)
 	}
 }
 

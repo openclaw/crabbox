@@ -7,8 +7,47 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scaleway/scaleway-sdk-go/scw"
+
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestApplyScalewayOverridesPreservesSDKLocationWithoutExplicitCrabboxValue(t *testing.T) {
+	profile := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams"), DefaultZone: scw.StringPtr("nl-ams-1")}
+	cfg := core.Config{Scaleway: core.ScalewayConfig{Region: defaultRegion, Zone: defaultZone}}
+	applyCrabboxScalewayOverrides(profile, cfg)
+	if got := stringPtrValue(profile.DefaultRegion); got != "nl-ams" {
+		t.Fatalf("region=%q", got)
+	}
+	if got := stringPtrValue(profile.DefaultZone); got != "nl-ams-1" {
+		t.Fatalf("zone=%q", got)
+	}
+}
+
+func TestApplyScalewayOverridesUsesExplicitCrabboxLocation(t *testing.T) {
+	profile := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams"), DefaultZone: scw.StringPtr("nl-ams-1")}
+	cfg := core.Config{Scaleway: core.ScalewayConfig{Region: defaultRegion, Zone: defaultZone}}
+	core.SetScalewayRegionExplicit(&cfg)
+	core.SetScalewayZoneExplicit(&cfg)
+	applyCrabboxScalewayOverrides(profile, cfg)
+	if got := stringPtrValue(profile.DefaultRegion); got != defaultRegion {
+		t.Fatalf("region=%q", got)
+	}
+	if got := stringPtrValue(profile.DefaultZone); got != defaultZone {
+		t.Fatalf("zone=%q", got)
+	}
+}
+
+func TestApplyScalewayLocationDefaultsOnlyFillsMissingSDKValues(t *testing.T) {
+	profile := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams")}
+	applyScalewayLocationDefaults(profile)
+	if got := stringPtrValue(profile.DefaultRegion); got != "nl-ams" {
+		t.Fatalf("region=%q", got)
+	}
+	if got := stringPtrValue(profile.DefaultZone); got != defaultZone {
+		t.Fatalf("zone=%q", got)
+	}
+}
 
 func TestNewClientReportsMissingAuthWithoutSecrets(t *testing.T) {
 	clearScalewayEnv(t)

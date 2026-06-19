@@ -124,6 +124,31 @@ func TestScalewayAcquireOnAcquiredErrorRollsBack(t *testing.T) {
 	}
 }
 
+func TestScalewayAcquireOnAcquiredErrorRollsBackWithKeep(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
+		RequestedSlug: "reject-kept",
+		Keep:          true,
+		OnAcquired: func(core.LeaseTarget) error {
+			return errors.New("controller rejected kept identity")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "controller rejected kept identity") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if !fake.deletedServer || !fake.deletedKey {
+		t.Fatalf("rollback deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("rollback should remove recovery claim after cleanup: %#v", claims)
+	}
+}
+
 func TestScalewayAcquireRejectsUnsupportedSSHCIDRs(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	backend.cfg.Scaleway.SSHCIDRs = []string{"203.0.113.0/24"}
@@ -133,6 +158,20 @@ func TestScalewayAcquireRejectsUnsupportedSSHCIDRs(t *testing.T) {
 	}
 	if fake.lastCreate != nil {
 		t.Fatalf("server was created despite unsupported CIDRs: %#v", fake.lastCreate)
+	}
+}
+
+func TestScalewayAcquireRejectsUnsupportedPortableOSBeforeDefaultingImage(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	backend.cfg.OSImage = "ubuntu:26.04"
+	backend.cfg.Scaleway.Image = ""
+	core.SetOSImageExplicit(&backend.cfg)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "unsupported-os"})
+	if err == nil || !strings.Contains(err.Error(), "does not support os") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	if fake.lastCreate != nil {
+		t.Fatalf("server was created despite unsupported OS: %#v", fake.lastCreate)
 	}
 }
 
@@ -191,6 +230,101 @@ func TestScalewayAmbiguousCreatePersistsRecoveryClaim(t *testing.T) {
 	}
 	if fake.deletedKey {
 		t.Fatal("ambiguous create must retain the managed Scaleway SSH key for recovery")
+	}
+}
+
+func TestScalewayAmbiguousSSHKeyCreateReconcilesCleanableKey(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	fake.createKeyErr = context.DeadlineExceeded
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := backend.acquireOnce(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "ambiguous-key"})
+	if err == nil {
+		t.Fatal("Acquire unexpectedly succeeded")
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil {
+		t.Fatal(claimErr)
+	}
+	if len(claims) != 1 || claims[0].Labels["recovery"] != "rollback-key-cleanup" || claims[0].Labels["scaleway_ssh_key_id"] == "" {
+		t.Fatalf("claims=%#v", claims)
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: claims[0].LeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatalf("Resolve recovery claim: %v", err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatalf("Release recovery claim: %v", err)
+	}
+	if !fake.deletedKey {
+		t.Fatal("release did not delete reconciled SSH key")
+	}
+}
+
+func TestScalewayReleaseOnlyPreservesAmbiguousSlugError(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	cfg := backend.cfgForRun()
+	labelsA := core.DirectLeaseLabels(cfg, "cbx_a", "duplicate", providerName, "", false, backend.clockNow())
+	labelsA["scaleway_project"] = "project-1"
+	labelsA["scaleway_zone"] = "fr-par-1"
+	labelsB := core.DirectLeaseLabels(cfg, "cbx_b", "duplicate", providerName, "", false, backend.clockNow())
+	labelsB["scaleway_project"] = "project-1"
+	labelsB["scaleway_zone"] = "fr-par-1"
+	fake.servers = []*instance.Server{
+		testServer("srv-a", "duplicate-a", tagsFromLabels(labelsA), "203.0.113.21"),
+		testServer("srv-b", "duplicate-b", tagsFromLabels(labelsB), "203.0.113.22"),
+	}
+	claimServer := backend.serverFromScaleway(fake.servers[0])
+	if err := core.ClaimLeaseTargetForConfig("cbx_a", "duplicate", cfg, claimServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "duplicate", ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "matches multiple active leases") {
+		t.Fatalf("Resolve ambiguous slug err=%v", err)
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "srv-a", ReleaseOnly: true})
+	if err != nil || lease.Server.CloudID != "srv-a" {
+		t.Fatalf("Resolve exact cloud id lease=%#v err=%v", lease, err)
+	}
+}
+
+func TestScalewayUpdateTailscaleMetadataPersistsTagsAndClaim(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "tailnet"})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	updated, err := backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{
+		Enabled:  true,
+		Hostname: "tailnet-host",
+		FQDN:     "tailnet-host.example.ts.net",
+		IPv4:     "100.64.0.42",
+		Tags:     []string{"tag:ci"},
+		State:    "ready",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTailscaleMetadata: %v", err)
+	}
+	for key, want := range map[string]string{
+		"tailscale":          "true",
+		"tailscale_hostname": "tailnet-host",
+		"tailscale_fqdn":     "tailnet-host.example.ts.net",
+		"tailscale_ipv4":     "100.64.0.42",
+		"tailscale_tags":     "tag:ci",
+		"tailscale_state":    "ready",
+	} {
+		if got := updated.Labels[key]; got != want {
+			t.Fatalf("updated label %s=%q want %q", key, got, want)
+		}
+		if got := labelsFromTags(fake.server.Tags)[key]; got != want {
+			t.Fatalf("live tag %s=%q want %q", key, got, want)
+		}
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v", ok, err)
+	}
+	if claim.Labels["tailscale_ipv4"] != "100.64.0.42" || claim.Labels["tailscale_fqdn"] != "tailnet-host.example.ts.net" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
 	}
 }
 
@@ -314,6 +448,22 @@ func TestScalewayReleaseOnlyRefusesLiveServerWithChangedTags(t *testing.T) {
 	}
 }
 
+func TestScalewayReleaseLeaseRefusesLiveServerWithChangedTags(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "changed-before-release"})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	fake.server.Tags = []string{"foreign"}
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "non-Crabbox Scaleway") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if fake.deletedServer || fake.deletedKey {
+		t.Fatalf("changed live server cleanup deleted server=%t key=%t", fake.deletedServer, fake.deletedKey)
+	}
+}
+
 func TestScalewayDoctorReportsInventoryAndMissingAuth(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	labels := core.DirectLeaseLabels(backend.cfgForRun(), "cbx_doc", "doc", providerName, "", false, backend.clockNow())
@@ -399,6 +549,7 @@ type fakeScalewayClient struct {
 	poweredOn                   bool
 	poweredOff                  bool
 	createErr                   error
+	createKeyErr                error
 	getErr                      error
 	deleteErr                   error
 	deleteKeyErr                error
@@ -532,6 +683,9 @@ func (api *fakeIAMAPI) GetSSHKey(req *iam.GetSSHKeyRequest, _ ...scw.RequestOpti
 func (api *fakeIAMAPI) CreateSSHKey(req *iam.CreateSSHKeyRequest, _ ...scw.RequestOption) (*iam.SSHKey, error) {
 	key := &iam.SSHKey{ID: "key-1", Name: req.Name, PublicKey: req.PublicKey, ProjectID: req.ProjectID}
 	api.f.keys = append(api.f.keys, key)
+	if api.f.createKeyErr != nil {
+		return nil, api.f.createKeyErr
+	}
 	return key, nil
 }
 func (api *fakeIAMAPI) DeleteSSHKey(req *iam.DeleteSSHKeyRequest, _ ...scw.RequestOption) error {

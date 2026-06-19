@@ -109,6 +109,8 @@ type Config struct {
 	OVH                           OVHConfig
 	ovhImageExplicit              bool
 	Scaleway                      ScalewayConfig
+	scalewayRegionExplicit        bool
+	scalewayZoneExplicit          bool
 	scalewayImageExplicit         bool
 	scalewayTypeExplicit          bool
 	Incus                         IncusConfig
@@ -3858,9 +3860,11 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 	if file.Scaleway != nil {
 		if file.Scaleway.Region != "" {
 			cfg.Scaleway.Region = file.Scaleway.Region
+			cfg.scalewayRegionExplicit = true
 		}
 		if file.Scaleway.Zone != "" {
 			cfg.Scaleway.Zone = file.Scaleway.Zone
+			cfg.scalewayZoneExplicit = true
 		}
 		if file.Scaleway.Image != "" {
 			cfg.Scaleway.Image = file.Scaleway.Image
@@ -6106,8 +6110,14 @@ func applyEnv(cfg *Config) error {
 		cfg.ovhImageExplicit = true
 	}
 	cfg.OVH.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.OVH.Flavor)
-	cfg.Scaleway.Region = getenv("CRABBOX_SCALEWAY_REGION", cfg.Scaleway.Region)
-	cfg.Scaleway.Zone = getenv("CRABBOX_SCALEWAY_ZONE", cfg.Scaleway.Zone)
+	if region := os.Getenv("CRABBOX_SCALEWAY_REGION"); region != "" {
+		cfg.Scaleway.Region = region
+		cfg.scalewayRegionExplicit = true
+	}
+	if zone := os.Getenv("CRABBOX_SCALEWAY_ZONE"); zone != "" {
+		cfg.Scaleway.Zone = zone
+		cfg.scalewayZoneExplicit = true
+	}
 	if image := os.Getenv("CRABBOX_SCALEWAY_IMAGE"); image != "" {
 		cfg.Scaleway.Image = image
 		cfg.scalewayImageExplicit = true

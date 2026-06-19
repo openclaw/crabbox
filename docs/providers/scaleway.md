@@ -81,6 +81,12 @@ Config keys under `scaleway:`:
 | `securityGroup` | `cfg.Scaleway.SecurityGroup` | empty | Optional existing Scaleway security group ID attached at Instance creation. Crabbox does not create or mutate security groups. |
 | `sshCIDRs` | `cfg.Scaleway.SSHCIDRs` | empty | Reserved for future security-group mutation. Non-empty values fail fast because this provider does not create ingress rules. |
 
+The active Scaleway SDK profile and `SCW_DEFAULT_REGION`/`SCW_DEFAULT_ZONE`
+select the location when Crabbox location settings are not explicit. A
+`scaleway.region`/`scaleway.zone` config value, matching `CRABBOX_SCALEWAY_*`
+environment override, or provider-specific flag takes precedence; the table
+defaults apply only when neither source selects a value.
+
 Provider-specific flags:
 
 ```text
