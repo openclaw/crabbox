@@ -3,6 +3,7 @@ import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { issueUserToken } from "../src/auth";
 import { EC2SpotClient } from "../src/aws";
 import {
   awsPromotedAMIConfigKey,
@@ -10,6 +11,7 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "../src/config";
+import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   AWSProvider,
   FleetDurableObject,
@@ -12069,6 +12071,7 @@ describe("fleet lease identity and idle", () => {
     const leaseID = "cbx_000000000001";
     const tokenExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     const headers = {
+      authorization: "Bearer portal-session-token",
       "x-crabbox-auth": "github",
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
@@ -12177,6 +12180,96 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(malformedSession.status).toBe(302);
+  });
+
+  it("revokes isolated Code viewer access end to end when the portal session logs out", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+      CRABBOX_SESSION_SECRET: "session-secret",
+    } as Env;
+    const fleet = testFleet(storage, {}, env);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      org: "example-org",
+      login: "alice",
+      ttlSeconds: 60 * 60,
+    });
+    const portalCookie = `crabbox_session=${encodeURIComponent(token)}`;
+    const throughCoordinator = async (input: Request): Promise<Response> =>
+      await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared));
+    const codeEntry = "https://crabbox.test/portal/leases/blue-lobster/code/";
+
+    const redirect = await throughCoordinator(
+      new Request(codeEntry, { headers: { cookie: portalCookie } }),
+    );
+    expect(redirect.status).toBe(302);
+    const bootstrapURL = redirect.headers.get("location") || "";
+    expect(bootstrapURL).toContain("/__crabbox_bootstrap?ticket=code_view_");
+
+    const pendingRedirect = await throughCoordinator(
+      new Request(codeEntry, { headers: { cookie: portalCookie } }),
+    );
+    const pendingBootstrapURL = pendingRedirect.headers.get("location") || "";
+    expect(pendingRedirect.status).toBe(302);
+
+    const bootstrap = await throughCoordinator(new Request(bootstrapURL));
+    expect(bootstrap.status).toBe(303);
+    const codeCookie = (bootstrap.headers.get("set-cookie") || "").split(";", 1)[0] || "";
+    const isolatedPage = new URL(bootstrap.headers.get("location") || "", bootstrapURL).toString();
+    const page = await throughCoordinator(
+      new Request(isolatedPage, { headers: { cookie: codeCookie } }),
+    );
+    expect(page.status).toBe(200);
+
+    const expiredRevocationKey = `code-viewer-session-revocation:${"f".repeat(64)}`;
+    storage.seed(expiredRevocationKey, {
+      portalSessionHash: "f".repeat(64),
+      createdAt: new Date(Date.now() - 2_000).toISOString(),
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const logout = await throughCoordinator(
+      new Request("https://crabbox.test/portal/logout", {
+        headers: { cookie: portalCookie },
+      }),
+    );
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");
+    expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(storage.value(expiredRevocationKey)).toBeUndefined();
+
+    const staleViewer = await throughCoordinator(
+      new Request(isolatedPage, { headers: { cookie: codeCookie } }),
+    );
+    expect(staleViewer.status).toBe(302);
+    expect(staleViewer.headers.get("location")).toBe(
+      `https://crabbox.test/portal/leases/${leaseID}/code/`,
+    );
+
+    const staleBootstrap = await throughCoordinator(new Request(pendingBootstrapURL));
+    expect(staleBootstrap.status).toBe(401);
+    await expect(staleBootstrap.json()).resolves.toMatchObject({
+      error: "code_viewer_session_revoked",
+    });
+
+    const stalePortalSession = await throughCoordinator(
+      new Request(codeEntry, { headers: { cookie: portalCookie } }),
+    );
+    expect(stalePortalSession.status).toBe(401);
+    expect(await stalePortalSession.text()).toContain("Log in again to open Code.");
   });
 
   it("keeps bridge tickets usable after endpoint binding mismatches", async () => {

@@ -545,6 +545,20 @@ describe("coordinator auth", () => {
     expect(auth?.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  it("issues a distinct identity for each GitHub user session", async () => {
+    const env = { CRABBOX_SESSION_SECRET: "session-secret" };
+    const input = {
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+    };
+
+    const first = await issueUserToken(env, input);
+    const second = await issueUserToken(env, input);
+
+    expect(second).not.toBe(first);
+  });
+
   it("promotes configured GitHub user tokens to admin", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",

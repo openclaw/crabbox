@@ -3,7 +3,13 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
-import { isAdminRequest, requestWithAuthContext, sha256Hex, type AuthContext } from "./auth";
+import {
+  authenticateRequest,
+  isAdminRequest,
+  requestWithAuthContext,
+  sha256Hex,
+  type AuthContext,
+} from "./auth";
 import {
   EC2SpotClient,
   awsConfiguredSecurityGroupID,
@@ -44,7 +50,7 @@ import {
   hetznerProvisioningFailureRetryable,
   sshPublicKeyIdentity,
 } from "./hetzner";
-import { errorMessage, json, pathParts, readJson, requestOwner } from "./http";
+import { bearerToken, errorMessage, json, pathParts, readJson, requestOwner } from "./http";
 import { githubAuthRoute, githubPortalLogin, githubPortalLogout } from "./oauth";
 import { defaultOSImage, normalizeOSImage } from "./os-image";
 import {
@@ -225,6 +231,7 @@ interface CodeViewerTicketRecord {
   owner: string;
   org: string;
   login?: string;
+  portalSessionHash?: string;
   returnTo: string;
   viewerExpiresAt?: string;
   createdAt: string;
@@ -239,6 +246,13 @@ interface CodeViewerSessionRecord {
   owner: string;
   org: string;
   login?: string;
+  portalSessionHash?: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+interface CodeViewerSessionRevocationRecord {
+  portalSessionHash: string;
   createdAt: string;
   expiresAt: string;
 }
@@ -735,7 +749,7 @@ export class FleetCoordinator {
         return await githubPortalLogin(request, this.state.storage, this.env);
       }
       if (method === "GET" && parts.join("/") === "portal/logout") {
-        return githubPortalLogout();
+        return await this.portalLogout(request);
       }
       if (parts[0] === "portal") {
         return await this.portalRoute(request, parts);
@@ -6721,10 +6735,22 @@ export class FleetCoordinator {
   ): Promise<Response> {
     await this.cleanupExpiredCodeViewerAuth();
     const now = new Date();
+    const auth = requestAuthType(request);
+    let portalSessionHash: string | undefined;
+    if (auth === "github") {
+      const token = bearerToken(request);
+      if (!token) {
+        return portalError("Code session ended", "Log in again to open Code.", 401);
+      }
+      portalSessionHash = await sha256Hex(token);
+      if (await this.codeViewerPortalSessionRevoked(portalSessionHash)) {
+        return portalError("Code session ended", "Log in again to open Code.", 401);
+      }
+    }
     const ticket: CodeViewerTicketRecord = {
       ticket: newCodeViewerTicket(),
       leaseID: lease.id,
-      auth: requestAuthType(request),
+      auth,
       admin: isAdminRequest(request),
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
@@ -6732,6 +6758,9 @@ export class FleetCoordinator {
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + codeViewerTicketTTLSeconds * 1000).toISOString(),
     };
+    if (portalSessionHash) {
+      ticket.portalSessionHash = portalSessionHash;
+    }
     const login = request.headers.get("x-crabbox-github-login")?.trim();
     if (login) {
       ticket.login = login;
@@ -6765,6 +6794,16 @@ export class FleetCoordinator {
         { status: 401, headers: { "cache-control": "no-store" } },
       );
     }
+    if (
+      (ticket.auth === "github" && !validPortalSessionHash(ticket.portalSessionHash)) ||
+      (ticket.portalSessionHash &&
+        (await this.codeViewerPortalSessionRevoked(ticket.portalSessionHash)))
+    ) {
+      return json(
+        { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
+        { status: 401, headers: { "cache-control": "no-store" } },
+      );
+    }
     const now = new Date();
     const defaultExpiresAt = now.getTime() + codeViewerSessionTTLSeconds * 1000;
     const tokenExpiresAt = Date.parse(ticket.viewerExpiresAt ?? "");
@@ -6783,6 +6822,9 @@ export class FleetCoordinator {
     };
     if (ticket.login) {
       session.login = ticket.login;
+    }
+    if (ticket.portalSessionHash) {
+      session.portalSessionHash = ticket.portalSessionHash;
     }
     await this.state.storage.put(codeViewerSessionKey(session.session), session);
     return new Response(null, {
@@ -6814,7 +6856,10 @@ export class FleetCoordinator {
       !session ||
       session.session !== value ||
       session.leaseID !== leaseID ||
-      Date.parse(session.expiresAt) <= Date.now()
+      Date.parse(session.expiresAt) <= Date.now() ||
+      (session.auth === "github" && !validPortalSessionHash(session.portalSessionHash)) ||
+      (session.portalSessionHash &&
+        (await this.codeViewerPortalSessionRevoked(session.portalSessionHash)))
     ) {
       if (session) {
         await this.state.storage.delete(codeViewerSessionKey(value));
@@ -6875,9 +6920,13 @@ export class FleetCoordinator {
   private async cleanupExpiredCodeViewerAuth(): Promise<void> {
     const now = Date.now();
     await Promise.all(
-      [codeViewerTicketPrefix(), codeViewerSessionPrefix()].map(async (prefix) => {
+      [
+        codeViewerTicketPrefix(),
+        codeViewerSessionPrefix(),
+        codeViewerSessionRevocationPrefix(),
+      ].map(async (prefix) => {
         const records = await this.state.storage.list<
-          CodeViewerTicketRecord | CodeViewerSessionRecord
+          CodeViewerTicketRecord | CodeViewerSessionRecord | CodeViewerSessionRevocationRecord
         >({ prefix });
         await Promise.all(
           [...records.entries()]
@@ -6886,6 +6935,47 @@ export class FleetCoordinator {
         );
       }),
     );
+  }
+
+  private async portalLogout(request: Request): Promise<Response> {
+    await this.cleanupExpiredCodeViewerAuth();
+    const token = cookieValue(request.headers.get("cookie") ?? "", "crabbox_session");
+    if (token) {
+      const headers = new Headers(request.headers);
+      headers.set("authorization", `Bearer ${token}`);
+      const auth = await authenticateRequest(new Request(request, { headers }), this.env);
+      if (auth?.auth === "github") {
+        const portalSessionHash = await sha256Hex(token);
+        const now = new Date();
+        const tokenExpiresAt = Date.parse(auth.tokenExpiresAt ?? "");
+        const revocationExpiresAt = now.getTime() + codeViewerSessionTTLSeconds * 1000;
+        const expiresAt = Number.isFinite(tokenExpiresAt)
+          ? Math.min(revocationExpiresAt, tokenExpiresAt)
+          : revocationExpiresAt;
+        await this.state.storage.put<CodeViewerSessionRevocationRecord>(
+          codeViewerSessionRevocationKey(portalSessionHash),
+          {
+            portalSessionHash,
+            createdAt: now.toISOString(),
+            expiresAt: new Date(expiresAt).toISOString(),
+          },
+        );
+      }
+    }
+    return githubPortalLogout();
+  }
+
+  private async codeViewerPortalSessionRevoked(portalSessionHash: string): Promise<boolean> {
+    const key = codeViewerSessionRevocationKey(portalSessionHash);
+    const revocation = await this.state.storage.get<CodeViewerSessionRevocationRecord>(key);
+    if (!revocation || revocation.portalSessionHash !== portalSessionHash) {
+      return false;
+    }
+    if (Date.parse(revocation.expiresAt) > Date.now()) {
+      return true;
+    }
+    await this.state.storage.delete(key);
+    return false;
   }
 
   private codePortalHealth(lease: LeaseRecord, agent: WebSocket | undefined): Response {
@@ -11113,6 +11203,14 @@ function codeViewerSessionKey(session: string): string {
   return `${codeViewerSessionPrefix()}${session}`;
 }
 
+function codeViewerSessionRevocationPrefix(): string {
+  return "code-viewer-session-revocation:";
+}
+
+function codeViewerSessionRevocationKey(portalSessionHash: string): string {
+  return `${codeViewerSessionRevocationPrefix()}${portalSessionHash}`;
+}
+
 function egressTicketPrefix(): string {
   return "egress-ticket:";
 }
@@ -12074,6 +12172,10 @@ function validCodeViewerTicket(value: string | undefined): value is string {
 
 function validCodeViewerSession(value: string | undefined): value is string {
   return typeof value === "string" && /^code_session_[a-f0-9]{32}$/.test(value);
+}
+
+function validPortalSessionHash(value: string | undefined): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 function canonicalCodeReturnTo(request: Request, leaseID: string): string {

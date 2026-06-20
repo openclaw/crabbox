@@ -29,6 +29,7 @@ export interface AuthRequestContext {
 
 interface UserTokenPayload {
   typ: "crabbox-user";
+  jti?: string;
   owner: string;
   org: string;
   login: string;
@@ -175,6 +176,7 @@ export async function issueUserToken(
   const now = Math.floor(Date.now() / 1000);
   const payload: UserTokenPayload = {
     typ: "crabbox-user",
+    jti: crypto.randomUUID(),
     owner: input.owner,
     org: input.org,
     login: input.login,
