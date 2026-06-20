@@ -626,9 +626,18 @@ type rsyncOptions struct {
 	HeartbeatInterval time.Duration
 }
 
+// defaultRsyncTimeout bounds a sync that would otherwise block forever (for
+// example an SSH transport that can never reach the target). It is a generous
+// backstop, not a tight deadline: real source syncs finish well inside it, and
+// hitting it surfaces rsync's actionable timeout error instead of hanging.
+const defaultRsyncTimeout = 30 * time.Minute
+
 func normalizeRsyncOptions(opts rsyncOptions) rsyncOptions {
 	if opts.NoTimes {
 		opts.Checksum = true
+	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = defaultRsyncTimeout
 	}
 	return opts
 }
@@ -787,6 +796,15 @@ func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *
 	if err != nil || !windowsWSLHasNativeRsyncSSH(ctx, wslExe) {
 		return windowsNativeRsyncCommand(ctx, args)
 	}
+	// WSL has rsync+ssh, but WSL2 runs in its own NAT network namespace and may
+	// not be able to route to the target -- for example a Hyper-V guest on the
+	// Default Switch is reachable from the Windows host but not from WSL. When
+	// WSL cannot reach the target the WSL rsync's SSH transport would block on
+	// connect, so use native rsync instead: the host's own network and ssh.exe
+	// can reach the target.
+	if !windowsWSLCanReachTarget(ctx, wslExe, target) {
+		return windowsNativeRsyncCommand(ctx, args)
+	}
 	mountRoot := windowsWSLMountRoot(ctx, wslExe)
 
 	// Prepare WSL key: copy with correct permissions.
@@ -857,6 +875,34 @@ func windowsHostPath(path string) string {
 		return string(path[1]) + ":" + path[2:]
 	}
 	return path
+}
+
+// wslReachabilityProbeScript builds a bash one-liner that succeeds only if a
+// TCP connection to host:port can be opened from inside WSL. timeout(1) bounds
+// an unreachable host so the probe itself cannot hang. Port defaults to SSH.
+func wslReachabilityProbeScript(host, port string) string {
+	if strings.TrimSpace(port) == "" {
+		port = "22"
+	}
+	return fmt.Sprintf("timeout 5 bash -c 'exec 3<>/dev/tcp/%s/%s' >/dev/null 2>&1", host, port)
+}
+
+// windowsWSLCanReachTarget reports whether the WSL distro that would run rsync
+// can open a TCP connection to the target's SSH endpoint. WSL2's separate NAT
+// namespace means a target reachable only from the Windows host (e.g. a Hyper-V
+// guest on the Default Switch) is unroutable from WSL even when WSL has rsync
+// and ssh installed; probing avoids selecting the WSL path only for its SSH
+// transport to block on connect. An empty host is treated as reachable so the
+// default WSL path is unchanged for targets without an explicit host.
+func windowsWSLCanReachTarget(ctx context.Context, wslExe string, target SSHTarget) bool {
+	host := strings.TrimSpace(target.Host)
+	if host == "" {
+		return true
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	script := wslReachabilityProbeScript(host, target.Port)
+	return exec.CommandContext(probeCtx, wslExe, "bash", "-c", script).Run() == nil
 }
 
 func windowsWSLHasNativeRsyncSSH(ctx context.Context, wslExe string) bool {

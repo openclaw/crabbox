@@ -1888,3 +1888,51 @@ func TestRemoteSyncSanityReportsDeletionSample(t *testing.T) {
 		}
 	}
 }
+
+func TestWSLReachabilityProbeScriptDefaultsToSSHPort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		host string
+		port string
+		want string
+	}{
+		{
+			name: "explicit port",
+			host: "10.0.0.5",
+			port: "2222",
+			want: "timeout 5 bash -c 'exec 3<>/dev/tcp/10.0.0.5/2222' >/dev/null 2>&1",
+		},
+		{
+			name: "empty port defaults to ssh",
+			host: "192.0.2.10",
+			port: "",
+			want: "timeout 5 bash -c 'exec 3<>/dev/tcp/192.0.2.10/22' >/dev/null 2>&1",
+		},
+		{
+			name: "whitespace port defaults to ssh",
+			host: "host.example",
+			port: "  ",
+			want: "timeout 5 bash -c 'exec 3<>/dev/tcp/host.example/22' >/dev/null 2>&1",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := wslReachabilityProbeScript(tc.host, tc.port); got != tc.want {
+				t.Fatalf("wslReachabilityProbeScript(%q, %q) = %q, want %q", tc.host, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWindowsWSLCanReachTargetEmptyHostKeepsWSLPath(t *testing.T) {
+	t.Parallel()
+	// An empty host has nothing to probe: the function must report reachable
+	// (keeping the default WSL rsync path) without invoking wsl. A bogus wslExe
+	// would error if it were ever executed, so a true result proves the
+	// short-circuit holds.
+	if !windowsWSLCanReachTarget(context.Background(), "wsl-does-not-exist.invalid", SSHTarget{Host: ""}) {
+		t.Fatal("empty-host target should short-circuit to reachable without invoking wsl")
+	}
+}
