@@ -29,6 +29,7 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 		"crabbox-desktop-launch.log",
 		"launch_before_windows=",
 		"desktop_launch_new_window",
+		"desktop_launch_observed_window",
 		"launch_pid=$!",
 		`kill -0 "$launch_pid"`,
 		"wmctrl -r :ACTIVE: -b remove,fullscreen",
@@ -121,6 +122,38 @@ exit 1
 	}
 }
 
+func TestDesktopLaunchRemoteCommandAcceptsExistingWindowHandoff(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "existing-window-focused")
+	xdotool := `#!/bin/sh
+if [ "$1" = getmouselocation ]; then exit 0; fi
+if [ "$1" = getactivewindow ]; then
+  if [ -f ` + shellQuote(marker) + ` ]; then echo 20; else echo 10; fi
+  exit 0
+fi
+if [ "$1" = search ]; then
+  printf '10\n20\n'
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "xdotool"), []byte(xdotool), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remote := desktopLaunchRemoteCommand(
+		SSHTarget{TargetOS: targetLinux},
+		"",
+		nil,
+		[]string{"sh", "-c", "touch " + shellQuote(marker)},
+		desktopLaunchOptions{VerifyProcess: true},
+	)
+	cmd := exec.Command("sh", "-c", remote)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":/usr/bin:/bin", "DISPLAY=:99")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("existing-window handoff failed: %v\n%s", err, out)
+	}
+}
+
 func TestDesktopLaunchRemoteCommandChecksLinuxTerminalVisibility(t *testing.T) {
 	got := desktopLaunchRemoteCommand(
 		SSHTarget{TargetOS: targetLinux},
@@ -130,7 +163,8 @@ func TestDesktopLaunchRemoteCommandChecksLinuxTerminalVisibility(t *testing.T) {
 		desktopLaunchOptions{VerifyProcess: true, VisibleWindowTitle: "Crabbox Desktop cbx-test"},
 	)
 	for _, want := range []string{
-		`xdotool search --onlyvisible --name 'Crabbox Desktop cbx-test'`,
+		"launch_before_windows=",
+		`&& desktop_launch_new_window`,
 		"desktop window not visible",
 		`kill "$launch_pid"`,
 	} {
@@ -138,8 +172,38 @@ func TestDesktopLaunchRemoteCommandChecksLinuxTerminalVisibility(t *testing.T) {
 			t.Fatalf("launch visibility check missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "launch_before_windows=") {
-		t.Fatalf("terminal verification should use its unique title, not generic window snapshots:\n%s", got)
+	if strings.Contains(got, `xdotool search --onlyvisible --name 'Crabbox Desktop cbx-test'`) {
+		t.Fatalf("terminal verification should not depend on a mutable title:\n%s", got)
+	}
+}
+
+func TestDesktopLaunchRemoteCommandAcceptsRetitledTerminalWindow(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "terminal-window-created")
+	xdotool := `#!/bin/sh
+if [ "$1" = getmouselocation ]; then exit 0; fi
+if [ "$1" = getactivewindow ]; then echo 10; exit 0; fi
+if [ "$1" = search ]; then
+  echo 10
+  [ -f ` + shellQuote(marker) + ` ] && echo 20
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "xdotool"), []byte(xdotool), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remote := desktopLaunchRemoteCommand(
+		SSHTarget{TargetOS: targetLinux},
+		"",
+		nil,
+		[]string{"sh", "-c", "touch " + shellQuote(marker) + "; sleep 2"},
+		desktopLaunchOptions{VerifyProcess: true, VisibleWindowTitle: "Crabbox Desktop cbx-test"},
+	)
+	cmd := exec.Command("sh", "-c", remote)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":/usr/bin:/bin", "DISPLAY=:99")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("retitled terminal window failed stable-identity verification: %v\n%s", err, out)
 	}
 }
 

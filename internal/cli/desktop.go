@@ -710,7 +710,7 @@ func posixDesktopLaunchRemoteCommand(target SSHTarget, workdir string, env map[s
 		b.WriteString("export " + key + "\n")
 	}
 	b.WriteString("log=${TMPDIR:-/tmp}/crabbox-desktop-launch.log\n")
-	if opts.VerifyProcess && target.TargetOS == targetLinux && strings.TrimSpace(opts.VisibleWindowTitle) == "" {
+	if opts.VerifyProcess && target.TargetOS == targetLinux {
 		b.WriteString(posixDesktopLaunchWindowSnapshotCommand())
 	}
 	b.WriteString("if command -v setsid >/dev/null 2>&1; then\n")
@@ -751,6 +751,7 @@ launch_before_windows=""
 if command -v xdotool >/dev/null 2>&1 && xdotool getmouselocation >/dev/null 2>&1; then
   launch_can_check_windows=1
   launch_before_windows=" $(xdotool search --onlyvisible --name '.*' 2>/dev/null | tr '\n' ' ' || true) "
+  launch_before_active="$(xdotool getactivewindow 2>/dev/null || true)"
 fi
 desktop_launch_new_window() {
   for launch_window in $(xdotool search --onlyvisible --name '.*' 2>/dev/null || true); do
@@ -759,6 +760,15 @@ desktop_launch_new_window() {
       *) return 0 ;;
     esac
   done
+  return 1
+}
+desktop_launch_observed_window() {
+  desktop_launch_new_window && return 0
+  launch_active="$(xdotool getactivewindow 2>/dev/null || true)"
+  [ -n "$launch_before_active" ] && [ -n "$launch_active" ] && [ "$launch_active" != "$launch_before_active" ] || return 1
+  case "$launch_before_windows" in
+    *" $launch_active "*) return 0 ;;
+  esac
   return 1
 }
 `
@@ -795,7 +805,7 @@ sleep 1
   if [ "$launch_can_check_windows" -eq 1 ]; then
     launch_attempt=0
     while [ "$launch_attempt" -lt 10 ]; do
-      if desktop_launch_new_window; then
+      if desktop_launch_observed_window; then
         launch_visible=1
         break
       fi
@@ -822,7 +832,7 @@ if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "wayland" ] && command -v xdotool >/dev/n
   launch_visible=0
   launch_attempt=0
   while [ "$launch_attempt" -lt 10 ]; do
-    if xdotool search --onlyvisible --name ` + shellQuote(visibleWindowTitle) + ` >/dev/null 2>&1; then
+    if [ "$launch_can_check_windows" -eq 1 ] && desktop_launch_new_window; then
       launch_visible=1
       break
     fi

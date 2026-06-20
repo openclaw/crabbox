@@ -42,9 +42,10 @@ connectivity.
 attaching a VNC viewer first. It waits for the loopback VNC service, starts the
 process detached from the SSH session, and verifies that the process remains
 alive through startup. A short-lived Linux/X11 wrapper can also succeed by
-creating a new visible window. Linux browser launches additionally require a
-visible browser window or browser process. macOS `open` launches wait on the
-opened app so an immediately failed launch is not reported as successful.
+creating a new visible window or focusing a different existing visible window.
+Linux browser launches additionally require a visible browser window or browser
+process. macOS `open` launches wait on the opened app so an immediately failed
+launch is not reported as successful.
 
 With `--browser`, Crabbox probes the target browser the same way
 `run --browser` does and launches the resolved `BROWSER` when no explicit
@@ -91,9 +92,10 @@ inline images when `--sixel` is set. On macOS it launches Ghostty via
 `open -W -na Ghostty.app`.
 
 POSIX launches must remain alive through startup. X11 terminals also receive a
-per-lease title and must expose that visible window before `launched terminal:`
-or any capture output is printed. This rejects commands that make the terminal
-exit immediately.
+per-lease title and must create a new visible window before `launched terminal:`
+or any capture output is printed. Verification follows the stable X11 window ID,
+so commands may change the window title. This rejects commands that make the
+terminal exit immediately.
 
 Add `--screenshot <path>` or `--record <path>` to capture proof after launch;
 `--wait-visible <duration>` controls the settle delay before capture (defaults
