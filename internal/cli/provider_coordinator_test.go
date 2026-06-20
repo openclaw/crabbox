@@ -11,14 +11,12 @@ import (
 	"time"
 )
 
-func TestCoordinatorListFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *testing.T) {
+func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/pool":
-			if got := r.Header.Get("Authorization"); got != "Bearer stale-admin-token" {
-				t.Fatalf("pool auth=%q", got)
-			}
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			t.Error("ordinary list must not probe the admin pool")
+			http.Error(w, "unexpected admin probe", http.StatusInternalServerError)
 		case "/v1/leases":
 			if got := r.URL.Query().Get("state"); got != "active" {
 				t.Fatalf("leases state=%q", got)
@@ -76,12 +74,59 @@ func TestCoordinatorListFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *testi
 	if servers[0].Labels["lease"] != "cbx_123" || servers[0].Labels["slug"] != "blue-lobster" {
 		t.Fatalf("server labels=%#v", servers[0].Labels)
 	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected warning: %q", stderr.String())
+	}
+}
+
+func TestCoordinatorListAllFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/pool":
+			if got := r.Header.Get("Authorization"); got != "Bearer stale-admin-token" {
+				t.Fatalf("pool auth=%q", got)
+			}
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		case "/v1/leases":
+			if got := r.Header.Get("Authorization"); got != "Bearer user-token" {
+				t.Fatalf("leases auth=%q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
+				{ID: "cbx_123", Provider: "aws", State: "active"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	cfg := Config{
+		Provider:        "aws",
+		TargetOS:        targetLinux,
+		Coordinator:     server.URL,
+		CoordToken:      "user-token",
+		CoordAdminToken: "stale-admin-token",
+	}
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
+
+	servers, err := backend.List(context.Background(), ListRequest{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0].Labels["lease"] != "cbx_123" {
+		t.Fatalf("servers=%#v", servers)
+	}
 	if !strings.Contains(stderr.String(), "falling back to user-visible leases") {
 		t.Fatalf("missing fallback warning: %q", stderr.String())
 	}
 }
 
-func TestCoordinatorListJSONFallsBackWhenAdminTokenMissing(t *testing.T) {
+func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/leases" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
@@ -100,7 +145,8 @@ func TestCoordinatorListJSONFallsBackWhenAdminTokenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+	var stderr bytes.Buffer
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
 	view, err := backend.ListJSON(context.Background(), ListRequest{})
 	if err != nil {
@@ -112,6 +158,9 @@ func TestCoordinatorListJSONFallsBackWhenAdminTokenMissing(t *testing.T) {
 	}
 	if len(leases) != 1 || leases[0].ID != "cbx_123" {
 		t.Fatalf("leases=%#v", leases)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected warning: %q", stderr.String())
 	}
 }
 

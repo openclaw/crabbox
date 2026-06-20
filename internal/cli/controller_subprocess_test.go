@@ -21,6 +21,13 @@ import (
 	"time"
 )
 
+func controllerSubprocessTestTimeout(base time.Duration) time.Duration {
+	if raceEnabled {
+		return 5 * base
+	}
+	return base
+}
+
 type fixedIdentityExecControllerRunner struct {
 	*execControllerWorkspaceRunner
 }
@@ -177,7 +184,7 @@ func TestControllerAcquireIdentityGateWaitsForPersistenceAcknowledgment(t *testi
 	go func() { done <- acknowledgeControllerAcquireIdentity(context.Background(), identity) }()
 	select {
 	case <-callbackStarted:
-	case <-time.After(time.Second):
+	case <-time.After(controllerSubprocessTestTimeout(time.Second)):
 		gate.close()
 		t.Fatal("identity callback did not start")
 	}
@@ -194,7 +201,7 @@ func TestControllerAcquireIdentityGateWaitsForPersistenceAcknowledgment(t *testi
 			gate.close()
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(controllerSubprocessTestTimeout(time.Second)):
 		gate.close()
 		t.Fatal("child did not receive identity acknowledgment")
 	}
@@ -346,7 +353,7 @@ func TestControllerTrackedChildWaitsForDurableLaunchGate(t *testing.T) {
 	}()
 	select {
 	case <-callbackStarted:
-	case <-time.After(time.Second):
+	case <-time.After(controllerSubprocessTestTimeout(time.Second)):
 		t.Fatal("tracked child callback did not start")
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -365,7 +372,7 @@ func TestControllerTrackedChildWaitsForDurableLaunchGate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(controllerSubprocessTestTimeout(time.Second)):
 		t.Fatal("tracked child did not finish")
 	}
 	if _, err := os.Stat(marker); err != nil {

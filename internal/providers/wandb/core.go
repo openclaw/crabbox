@@ -16,6 +16,7 @@ type Backend = core.Backend
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -49,6 +50,10 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
+}
+
+func shellQuote(value string) string {
+	return core.ShellQuote(value)
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {

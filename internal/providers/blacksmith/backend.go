@@ -133,6 +133,8 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		}
 	}
 	shouldStop := acquired && !req.Keep
+	finalExitCode := -1
+	finalActionsURL := ""
 	if shouldStop {
 		defer func() {
 			if !shouldStop {
@@ -144,6 +146,9 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			}
 			removeLeaseClaim(leaseID)
 			removeStoredTestboxKey(leaseID)
+			if finalExitCode == 0 {
+				printBlacksmithOneShotActionsWarning(b.rt.Stderr, finalActionsURL)
+			}
 		}()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=blacksmith-testbox id=%s sync=delegated auth=blacksmith\n", leaseID)
@@ -250,6 +255,8 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		result.ActionsURL = proof.ActionsURL
 		result.Artifacts = append(result.Artifacts, proof.Artifacts...)
 	}
+	finalExitCode = code
+	finalActionsURL = result.ActionsURL
 	result.Session = &core.RunSessionHandle{
 		Provider:       blacksmithTestboxProvider,
 		LeaseID:        leaseID,
@@ -284,6 +291,17 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		return result, ExitError{Code: code, Message: fmt.Sprintf("blacksmith testbox run exited %d", code)}
 	}
 	return result, nil
+}
+
+func printBlacksmithOneShotActionsWarning(w io.Writer, actionsURL string) {
+	if w == nil {
+		return
+	}
+	fmt.Fprint(w, "blacksmith proof note: stopped one-shot Testbox after success; the backing GitHub Actions run may show a cancelled Testbox step because Blacksmith owns the delegated session lifecycle")
+	if strings.TrimSpace(actionsURL) != "" {
+		fmt.Fprintf(w, " actions=%s", strings.TrimSpace(actionsURL))
+	}
+	fmt.Fprintln(w)
 }
 
 func blacksmithArtifactFailureExitCode(err error) int {

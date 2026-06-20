@@ -162,7 +162,8 @@ hint, and `sync.timeout` kills stalled syncs.
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other
   hosts are rejected. Add `--apply-local-patch` to apply the local `git diff
   --binary HEAD` on top of the PR checkout. `--fresh-pr` needs the SSH-run sync
-  path; delegated providers and native Windows targets reject it.
+  path; delegated providers reject it. Native Windows SSH targets are
+  supported.
 
 ## Actions hydration
 
