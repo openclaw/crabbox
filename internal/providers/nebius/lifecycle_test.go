@@ -91,21 +91,25 @@ func newTestBackend(t *testing.T, api *fakeNebiusAPI) *backend {
 
 func TestCloudInitRendersUserAndKey(t *testing.T) {
 	cfg := testConfig()
+	cfg.SSHUser = "alice"
 	got, err := renderNebiusCloudInit(cfg, "ssh-ed25519 AAAA test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"#cloud-config", `name: "crabbox"`, "NOPASSWD", "ssh-ed25519 AAAA test", "/usr/local/bin/crabbox-ready", "/var/lib/crabbox/bootstrapped", "rsync --version", "disable_root: true"} {
+	for _, want := range []string{"#cloud-config", `name: "alice"`, "NOPASSWD", "ssh-ed25519 AAAA test", "/usr/local/bin/crabbox-ready", "/var/lib/crabbox/bootstrapped", "rsync --version", "disable_root: true"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloud-init missing %q:\n%s", want, got)
 		}
 	}
-	cfg.Nebius.User = "root"
+	if strings.Contains(got, `name: "crabbox"`) {
+		t.Fatal("cloud-init ignored effective SSH user")
+	}
+	cfg.SSHUser = "root"
 	if _, err := renderNebiusCloudInit(cfg, "ssh-ed25519 AAAA test"); err == nil {
 		t.Fatal("reserved root user accepted")
 	}
 	for _, user := range []string{"alice\n  - name: root", "Alice", "bad user", "1alice", "alice:$evil"} {
-		cfg.Nebius.User = user
+		cfg.SSHUser = user
 		if _, err := renderNebiusCloudInit(cfg, "ssh-ed25519 AAAA test"); err == nil {
 			t.Fatalf("unsafe user %q accepted", user)
 		}
