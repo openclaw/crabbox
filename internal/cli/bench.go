@@ -402,7 +402,7 @@ func readBenchmarkTimingRecords(path string) ([]BenchmarkTimingRecord, error) {
 }
 
 func newBenchmarkTimingRecord(now time.Time, source string, report TimingReport, repo Repo, command []string, coldRun *bool, repeatIndex int) BenchmarkTimingRecord {
-	family, kind := benchmarkProviderInfo(report.Provider)
+	family, kind, category := benchmarkProviderInfo(report.Provider)
 	commandDisplay := strings.Join(readableShellWords(command), " ")
 	return BenchmarkTimingRecord{
 		SchemaVersion: benchmarkTimingSchemaVersion,
@@ -416,6 +416,7 @@ func newBenchmarkTimingRecord(now time.Time, source string, report TimingReport,
 			RepoHead:           repo.Head,
 			ProviderFamily:     family,
 			ProviderKind:       kind,
+			ProviderCategory:   category,
 			ColdRun:            coldRun,
 			RepeatIndex:        repeatIndex,
 		},
@@ -454,19 +455,19 @@ func benchmarkRepoFingerprint(repo Repo) string {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-func benchmarkProviderInfo(provider string) (string, string) {
+func benchmarkProviderInfo(provider string) (string, string, string) {
 	normalized := normalizeProviderName(provider)
 	for _, entry := range providerMatrix() {
 		if normalizeProviderName(entry.Provider) == normalized {
-			return entry.Family, string(entry.Kind)
+			return entry.Family, string(entry.Kind), benchmarkProviderCategories[entry.Provider]
 		}
 		for _, alias := range entry.Aliases {
 			if normalizeProviderName(alias) == normalized {
-				return entry.Family, string(entry.Kind)
+				return entry.Family, string(entry.Kind), benchmarkProviderCategories[entry.Provider]
 			}
 		}
 	}
-	return "", ""
+	return "", "", ""
 }
 
 func buildBenchmarkReport(records []BenchmarkTimingRecord, opts benchmarkReportOptions, now time.Time) benchmarkReport {
@@ -489,13 +490,16 @@ func buildBenchmarkReport(records []BenchmarkTimingRecord, opts benchmarkReportO
 				CommandFingerprint: record.Benchmark.CommandFingerprint,
 				ColdRun:            cloneBoolPtr(record.Benchmark.ColdRun),
 			}
-			if group.ProviderFamily == "" || group.ProviderKind == "" {
-				family, kind := benchmarkProviderInfo(group.Provider)
+			if group.ProviderFamily == "" || group.ProviderKind == "" || group.ProviderCategory == "" {
+				family, kind, category := benchmarkProviderInfo(group.Provider)
 				if group.ProviderFamily == "" {
 					group.ProviderFamily = family
 				}
 				if group.ProviderKind == "" {
 					group.ProviderKind = kind
+				}
+				if group.ProviderCategory == "" {
+					group.ProviderCategory = category
 				}
 			}
 			builder = &benchmarkReportGroupBuilder{group: group}

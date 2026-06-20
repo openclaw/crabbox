@@ -132,6 +132,9 @@ func TestBenchRecordAppendsTimingJSONRecord(t *testing.T) {
 	if record.Benchmark.RepeatIndex != 1 {
 		t.Fatalf("repeatIndex=%d", record.Benchmark.RepeatIndex)
 	}
+	if record.Benchmark.ProviderCategory != "brokerable-cloud" {
+		t.Fatalf("providerCategory=%q", record.Benchmark.ProviderCategory)
+	}
 }
 
 func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
