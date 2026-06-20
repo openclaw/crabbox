@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -414,8 +415,22 @@ func isIndeterminateNebiusError(err error) bool {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "timeout") || strings.Contains(text, "connection reset") || strings.Contains(text, "context deadline") || strings.Contains(text, "lost")
+	return nebiusTimeoutToken.MatchString(text) ||
+		strings.Contains(text, "timed out") ||
+		strings.Contains(text, "timeout waiting") ||
+		strings.Contains(text, "connection reset") ||
+		strings.Contains(text, "connection lost") ||
+		strings.Contains(text, "lost create response") ||
+		strings.Contains(text, "lost delete response") ||
+		strings.Contains(text, "lost response") ||
+		strings.Contains(text, "context deadline exceeded") ||
+		strings.Contains(text, "deadline exceeded") ||
+		strings.Contains(text, "transport is closing") ||
+		strings.Contains(text, "unexpected eof") ||
+		strings.Contains(text, "rpc error: code = unavailable")
 }
+
+var nebiusTimeoutToken = regexp.MustCompile(`(^|[^a-z0-9_])timeout([^a-z0-9_]|$)`)
 
 func isNebiusInstanceNotFound(err error, id string) bool {
 	if err == nil {

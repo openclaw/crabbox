@@ -388,6 +388,18 @@ func TestAcquireRecoveryRetainsClaimOnIndeterminateCreate(t *testing.T) {
 	}
 }
 
+func TestAcquireQuotaFailureWithTimeoutLabelDoesNotRetainRecoveryClaim(t *testing.T) {
+	api := &fakeNebiusAPI{createErr: errors.New("create --labels idle_timeout=300 failed: quota limit exceeded")}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "quota-failure"})
+	if err == nil {
+		t.Fatal("Acquire succeeded unexpectedly")
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("quota-failure", providerName); claimErr != nil || ok {
+		t.Fatalf("quota failure claim ok=%v err=%v", ok, claimErr)
+	}
+}
+
 func TestAcquireRollsBackCreatedInstanceWhenOnAcquiredFails(t *testing.T) {
 	api := &fakeNebiusAPI{
 		created: nebiusInstance{ID: "vm-new", Name: "pending", Status: "CREATING", Labels: map[string]string{}},
@@ -632,13 +644,15 @@ func TestAcquireRollbackFailureRetainsCreatedInstanceIDClaim(t *testing.T) {
 }
 
 func TestClassifyNebiusIndeterminateErrors(t *testing.T) {
-	for _, text := range []string{"timeout waiting", "connection reset by peer", "lost delete response"} {
+	for _, text := range []string{"timeout waiting", "i/o timeout", "TLS handshake timeout", "request timeout", "connection reset by peer", "lost delete response"} {
 		if !isIndeterminateNebiusError(errors.New(text)) {
 			t.Fatalf("%q not classified indeterminate", text)
 		}
 	}
-	if isIndeterminateNebiusError(errors.New("validation failed")) {
-		t.Fatal("validation error classified indeterminate")
+	for _, text := range []string{"validation failed", "create --labels idle_timeout=300 failed: quota limit exceeded"} {
+		if isIndeterminateNebiusError(errors.New(text)) {
+			t.Fatalf("%q classified indeterminate", text)
+		}
 	}
 }
 
