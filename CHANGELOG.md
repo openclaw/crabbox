@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Released newly created SSH leases when `prewarm` hydration, probe, or ready-pool registration fails, preventing paid lease leaks. Thanks @coygeek.
 - Revoked isolated Code viewer sessions when their GitHub portal session logs out, preventing stale viewer cookies from retaining prior-owner lease access. Thanks @coygeek.
 - Prevented unauthenticated Cloudflare Access key fetches and bounded key-set refresh work for invalid JWT key IDs. Thanks @coygeek.
 - Blocked normalized empty-segment variants of internal coordinator routes and stripped caller-supplied internal headers before fleet dispatch. Thanks @coygeek.

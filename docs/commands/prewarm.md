@@ -15,6 +15,12 @@ crabbox prewarm --dry-run
 The command prints the lease id and keeps the box running. Stop it with
 `crabbox stop <id>` when the test burst is done.
 
+If Actions hydration, the optional probe, or ready-pool registration fails,
+`prewarm` automatically releases a newly created SSH lease. If automatic
+release cannot resolve or stop the lease, the error output prints the exact
+`crabbox stop` command to run; delegated-run providers retain their
+provider-owned lifecycle behavior.
+
 ## Reuse
 
 Run follow-up commands against the printed lease id or slug:

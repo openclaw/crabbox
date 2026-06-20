@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const prewarmFailureCleanupTimeout = 2 * time.Minute
+
 func (a App) prewarm(ctx context.Context, args []string) error {
 	started := time.Now()
 	defaults := defaultConfig()
@@ -107,7 +109,9 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 		hydration = "actions"
 		hydrateStarted := time.Now()
 		hydrateArgs = prewarmHydrateArgs(cfg, leaseID, *githubRunner, *waitTimeout, *keepAliveMinutes, followupArgs)
-		if err := a.actionsHydrate(ctx, hydrateArgs); err != nil {
+		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, leaseID, "actions hydration", func() error {
+			return a.actionsHydrate(ctx, hydrateArgs)
+		}); err != nil {
 			return err
 		}
 		hydrateMs = time.Since(hydrateStarted).Milliseconds()
@@ -117,14 +121,17 @@ func (a App) prewarm(ctx context.Context, args []string) error {
 	probeMs := int64(0)
 	if strings.TrimSpace(*probeCommand) != "" {
 		probeStarted := time.Now()
-		if err := a.runCommand(ctx, prewarmProbeArgs(cfg, leaseID, *probeCommand, followupArgs)); err != nil {
+		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, leaseID, "probe", func() error {
+			return a.runCommand(ctx, prewarmProbeArgs(cfg, leaseID, *probeCommand, followupArgs))
+		}); err != nil {
 			return err
 		}
 		probeMs = time.Since(probeStarted).Milliseconds()
 	}
 	if readyPoolKey != "" {
-		if err := a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *githubRunner); err != nil {
-			a.releasePrewarmLeaseAfterPoolFailure(ctx, backend, cfg, leaseID, err)
+		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, leaseID, "pool registration", func() error {
+			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *githubRunner)
+		}); err != nil {
 			return err
 		}
 	}
@@ -237,24 +244,42 @@ func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, 
 	return nil
 }
 
-func (a App) releasePrewarmLeaseAfterPoolFailure(ctx context.Context, backend Backend, cfg Config, leaseID string, cause error) {
+func (a App) runPrewarmPostWarmupStep(ctx context.Context, backend Backend, cfg Config, leaseID, stage string, step func() error) error {
+	err := step()
+	if err == nil {
+		return nil
+	}
+	a.releasePrewarmLeaseAfterFailure(ctx, backend, cfg, leaseID, stage)
+	return err
+}
+
+func (a App) releasePrewarmLeaseAfterFailure(ctx context.Context, backend Backend, cfg Config, leaseID, stage string) {
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
 		return
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prewarmFailureCleanupTimeout)
+	defer cancel()
+	lease, err := sshBackend.Resolve(cleanupCtx, ResolveRequest{
 		Repo:        Repo{},
 		Options:     leaseOptionsFromConfig(cfg),
 		ID:          leaseID,
 		ReleaseOnly: true,
 	})
 	if err != nil {
-		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release skipped: %v\n", leaseID, cause, err)
+		if backendCoordinator(backend) == nil {
+			fmt.Fprintf(a.Stderr, "warning: prewarm %s failed; automatic release of %s skipped: %v; next: crabbox stop --provider %s --id %s\n", stage, leaseID, err, cfg.Provider, leaseID)
+			return
+		}
+		fmt.Fprintf(a.Stderr, "warning: could not inspect lease %s before prewarm cleanup: %v; releasing by lease ID\n", leaseID, err)
+		lease = LeaseTarget{LeaseID: leaseID}
+	}
+	fmt.Fprintf(a.Stderr, "prewarm cleanup: releasing id=%s after %s failure\n", leaseID, stage)
+	if err := a.releaseBackendLeaseBestEffort(cleanupCtx, sshBackend, cfg, lease); err != nil {
+		fmt.Fprintf(a.Stderr, "warning: prewarm %s failed; automatic release of %s failed: %v; next: crabbox stop --provider %s --id %s\n", stage, leaseID, err, cfg.Provider, leaseID)
 		return
 	}
-	if err := a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, lease); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: pool registration failed for %s: %v; release failed: %v\n", leaseID, cause, err)
-	}
+	fmt.Fprintf(a.Stderr, "prewarm cleanup: released id=%s after %s failure\n", leaseID, stage)
 }
 
 func prewarmReadyPoolCommit(cfg Config, repo Repo, githubRunner bool) string {
