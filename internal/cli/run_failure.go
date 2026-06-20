@@ -159,21 +159,22 @@ func finalTimingPhaseName(phases []TimingPhase) string {
 }
 
 type runFailureDigestInput struct {
-	Provider       string
-	TargetOS       string
-	WindowsMode    string
-	LeaseID        string
-	Slug           string
-	RunID          string
-	CommandDisplay string
-	ShellMode      bool
-	ScriptMode     bool
-	RoutingArgs    []string
-	SSHRoutingArgs []string
-	StopCommand    string
-	Classification FailureClassification
-	Phases         []TimingPhase
-	Results        *TestResultSummary
+	Provider              string
+	TargetOS              string
+	WindowsMode           string
+	LeaseID               string
+	Slug                  string
+	RunID                 string
+	RunHistoryUnavailable bool
+	CommandDisplay        string
+	ShellMode             bool
+	ScriptMode            bool
+	RoutingArgs           []string
+	SSHRoutingArgs        []string
+	StopCommand           string
+	Classification        FailureClassification
+	Phases                []TimingPhase
+	Results               *TestResultSummary
 }
 
 func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail, stderrTail *streamTailBuffer, stdoutCapture, stderrCapture string) {
@@ -190,6 +191,9 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail,
 	fmt.Fprintf(w, "  phase: %s\n", blank(phase, "unknown"))
 	fmt.Fprintf(w, "  area: %s\n", area)
 	fmt.Fprintf(w, "  retryable: %s\n", retry)
+	if input.RunHistoryUnavailable {
+		fmt.Fprintln(w, "  run_history: unavailable; use lease-based recovery commands below")
+	}
 	printFailureDigestPhases(w, input.Phases)
 	printFailureDigestShellChain(w, input)
 	printFailureDigestResults(w, input.Results)

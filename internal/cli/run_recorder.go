@@ -16,23 +16,25 @@ const (
 )
 
 type runRecorder struct {
-	coord            *CoordinatorClient
-	command          []string
-	label            string
-	runID            string
-	stderr           io.Writer
-	deferUntilLease  bool
-	eventsMu         sync.Mutex
-	eventsDisabled   bool
-	finished         bool
-	warned           bool
-	warnMu           sync.Mutex
-	output           *runOutputEventQueue
-	telemetryStart   *LeaseTelemetry
-	telemetryMu      sync.Mutex
-	telemetrySamples []*LeaseTelemetry
-	telemetryCancel  func()
-	telemetryDone    chan struct{}
+	coord              *CoordinatorClient
+	command            []string
+	label              string
+	runID              string
+	stderr             io.Writer
+	deferUntilLease    bool
+	retryCreateLease   bool
+	historyUnavailable bool
+	eventsMu           sync.Mutex
+	eventsDisabled     bool
+	finished           bool
+	warned             bool
+	warnMu             sync.Mutex
+	output             *runOutputEventQueue
+	telemetryStart     *LeaseTelemetry
+	telemetryMu        sync.Mutex
+	telemetrySamples   []*LeaseTelemetry
+	telemetryCancel    func()
+	telemetryDone      chan struct{}
 }
 
 func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer) *runRecorder {
@@ -46,7 +48,8 @@ func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, c
 			rec.deferUntilLease = true
 			return rec
 		}
-		rec.warn("run history create failed: %v", err)
+		rec.retryCreateLease = true
+		rec.warnRunHistory("run history create failed before lease; will retry after lease is available: %v", err)
 		return rec
 	}
 	rec.attachRun(run)
@@ -87,12 +90,15 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) {
 	if r == nil || r.finished {
 		return
 	}
-	if r.runID == "" && r.deferUntilLease && r.coord != nil && leaseID != "" {
+	if r.runID == "" && (r.deferUntilLease || r.retryCreateLease) && r.coord != nil && leaseID != "" {
+		r.deferUntilLease = false
+		r.retryCreateLease = false
 		ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
 		defer cancel()
 		run, err := r.coord.CreateRun(ctx, leaseID, cfg, r.command, r.label)
 		if err != nil {
-			r.warn("run history create failed: %v", err)
+			r.historyUnavailable = true
+			r.warnRunHistory("run history create failed after lease; run history unavailable, use lease-based recovery commands: %v", err)
 			return
 		}
 		r.attachRun(run)
@@ -207,6 +213,15 @@ func (r *runRecorder) warn(format string, args ...any) {
 		return
 	}
 	r.warned = true
+	fmt.Fprintf(r.stderr, "warning: "+format+"\n", args...)
+}
+
+func (r *runRecorder) warnRunHistory(format string, args ...any) {
+	if r == nil {
+		return
+	}
+	r.warnMu.Lock()
+	defer r.warnMu.Unlock()
 	fmt.Fprintf(r.stderr, "warning: "+format+"\n", args...)
 }
 
