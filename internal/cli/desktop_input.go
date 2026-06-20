@@ -458,7 +458,8 @@ xdotool type --clearmodifiers --delay 1 -- ` + shellQuote(text)
 func desktopPasteRemoteCommand() string {
 	return `set -eu
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+clip_pid=""
+trap 'if [ -n "$clip_pid" ]; then kill "$clip_pid" 2>/dev/null || true; wait "$clip_pid" 2>/dev/null || true; fi; rm -f "$tmp"' EXIT
 cat > "$tmp"
 if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
 if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
@@ -482,22 +483,39 @@ case "$active_class $active_name $active_proc" in
     exit 0
     ;;
 esac
+# Keep every clipboard server in the foreground so clip_pid tracks delivery.
 if command -v xclip >/dev/null 2>&1; then
-  timeout 5s xclip -selection clipboard -loops 1 "$tmp" &
+  timeout 5s xclip -quiet -selection clipboard -loops 1 "$tmp" &
   clip_pid=$!
 elif command -v xsel >/dev/null 2>&1; then
-  timeout 5s xsel --clipboard --input < "$tmp" &
+  timeout 5s xsel --nodetach --clipboard --input < "$tmp" &
   clip_pid=$!
 elif command -v wl-copy >/dev/null 2>&1; then
-  wl-copy --paste-once < "$tmp" &
+  wl-copy --foreground --paste-once < "$tmp" &
   clip_pid=$!
 else
   echo "missing clipboard tool; warm a new --desktop lease or install xclip/xsel" >&2
   exit 127
 fi
 sleep 0.2
+if ! kill -0 "$clip_pid" >/dev/null 2>&1; then
+  set +e
+  wait "$clip_pid"
+  clip_status=$?
+  set -e
+  [ "$clip_status" -ne 0 ] || clip_status=1
+  echo "clipboard helper exited before paste (status=$clip_status)" >&2
+  exit "$clip_status"
+fi
 xdotool key --clearmodifiers ctrl+v
-wait "$clip_pid" || true`
+set +e
+wait "$clip_pid"
+clip_status=$?
+set -e
+if [ "$clip_status" -ne 0 ]; then
+  echo "clipboard helper failed while serving paste (status=$clip_status)" >&2
+  exit "$clip_status"
+fi`
 }
 
 func desktopWaylandWtypeKeyArgs(keys string) ([]string, bool) {

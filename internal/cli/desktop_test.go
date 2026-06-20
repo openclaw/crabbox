@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,7 +16,7 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 		"/work/crabbox/cbx_1/repo",
 		map[string]string{"DISPLAY": ":99", "BROWSER": "/usr/bin/chromium", "GDK_BACKEND": "x11", "MOZ_ENABLE_WAYLAND": "0"},
 		[]string{"/usr/bin/chromium", "https://example.com"},
-		true,
+		desktopLaunchOptions{WindowedBrowser: true, VerifyProcess: true},
 	)
 	for _, want := range []string{
 		"mkdir -p '/work/crabbox/cbx_1/repo'",
@@ -24,6 +27,8 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 		"MOZ_ENABLE_WAYLAND='0'",
 		"setsid '/usr/bin/chromium' 'https://example.com'",
 		"crabbox-desktop-launch.log",
+		"launch_pid=$!",
+		`kill -0 "$launch_pid"`,
 		"wmctrl -r :ACTIVE: -b remove,fullscreen",
 		"xdotool search --onlyvisible --class google-chrome",
 		"windowsize \"$window\" 1500 900",
@@ -34,6 +39,55 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 	}
 	if strings.Contains(got, "swaymsg") {
 		t.Fatalf("desktop launch command should not use Sway-specific window commands:\n%s", got)
+	}
+}
+
+func TestDesktopLaunchRemoteCommandRejectsExitedPOSIXProcess(t *testing.T) {
+	remote := desktopLaunchRemoteCommand(
+		SSHTarget{TargetOS: targetLinux},
+		"",
+		nil,
+		[]string{"sh", "-c", "exit 23"},
+		desktopLaunchOptions{VerifyProcess: true},
+	)
+	out, err := exec.Command("sh", "-c", remote).CombinedOutput()
+	if err == nil {
+		t.Fatalf("launch command succeeded after child exited:\n%s", out)
+	}
+	if !strings.Contains(string(out), "desktop command exited during launch (status=23)") {
+		t.Fatalf("launch failure output=%q", out)
+	}
+}
+
+func TestDesktopLaunchRemoteCommandChecksLinuxTerminalVisibility(t *testing.T) {
+	got := desktopLaunchRemoteCommand(
+		SSHTarget{TargetOS: targetLinux},
+		"",
+		nil,
+		[]string{"xterm"},
+		desktopLaunchOptions{VerifyProcess: true, VisibleWindowTitle: "Crabbox Desktop cbx-test"},
+	)
+	for _, want := range []string{
+		`xdotool search --onlyvisible --name 'Crabbox Desktop cbx-test'`,
+		"desktop window not visible",
+		`kill "$launch_pid"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("launch visibility check missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestDesktopLaunchRemoteCommandMakesMacOpenWait(t *testing.T) {
+	got := desktopLaunchRemoteCommand(
+		SSHTarget{TargetOS: targetMacOS},
+		"",
+		nil,
+		[]string{"open", "-na", "Ghostty.app"},
+		desktopLaunchOptions{VerifyProcess: true},
+	)
+	if !strings.Contains(got, "open' '-W' '-na' 'Ghostty.app") {
+		t.Fatalf("macOS open command does not wait for the app:\n%s", got)
 	}
 }
 
@@ -81,19 +135,47 @@ func TestDesktopPasteRemoteCommandPrefersClipboardTools(t *testing.T) {
 	for _, want := range []string{
 		`CRABBOX_DESKTOP_ENV:-xfce`,
 		"wtype -d 1 -",
-		"timeout 5s xclip -selection clipboard -loops 1",
-		"timeout 5s xsel --clipboard --input",
-		"wl-copy --paste-once",
+		"timeout 5s xclip -quiet -selection clipboard -loops 1",
+		"timeout 5s xsel --nodetach --clipboard --input",
+		"wl-copy --foreground --paste-once",
 		"getactivewindow getwindowclassname",
 		"getactivewindow getwindowpid",
 		`*xterm*|*terminal*|*konsole*|*alacritty*|*kitty*|*wezterm*)`,
 		`xdotool type --clearmodifiers --delay 1 --file "$tmp"`,
 		"xdotool key --clearmodifiers ctrl+v",
-		"wait \"$clip_pid\" || true",
+		`kill -0 "$clip_pid"`,
+		"clipboard helper exited before paste",
+		"clipboard helper failed while serving paste",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("paste command missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, `wait "$clip_pid" || true`) {
+		t.Fatalf("paste command still swallows clipboard helper failure:\n%s", got)
+	}
+}
+
+func TestDesktopPasteRemoteCommandPropagatesClipboardHelperFailure(t *testing.T) {
+	dir := t.TempDir()
+	for name, script := range map[string]string{
+		"timeout": "#!/bin/sh\nshift\nexec \"$@\"\n",
+		"xdotool": "#!/bin/sh\n[ \"$1\" = key ] && exit 0\nexit 1\n",
+		"xclip":   "#!/bin/sh\nexit 42\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("sh", "-c", desktopPasteRemoteCommand())
+	cmd.Env = append(os.Environ(), "PATH="+dir+":/usr/bin:/bin", "CRABBOX_DESKTOP_ENV=xfce", "DISPLAY=:99")
+	cmd.Stdin = strings.NewReader("new clipboard value")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("paste command succeeded after clipboard helper failure:\n%s", out)
+	}
+	if !strings.Contains(string(out), "clipboard helper") || !strings.Contains(string(out), "status=42") {
+		t.Fatalf("paste failure output=%q", out)
 	}
 }
 
@@ -111,11 +193,11 @@ func TestDesktopLinuxTerminalSupportsWaylandAndX11(t *testing.T) {
 		"CRABBOX_DESKTOP_ENV:-xfce",
 		"export DISPLAY=\"${DISPLAY:-:0}\"",
 		"export GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0",
-		"exec gnome-terminal --working-directory=\"$PWD\" -- bash -lc",
+		"exec gnome-terminal --wait --title='Crabbox Desktop' --working-directory=\"$PWD\" -- bash -lc",
 		"exec foot --title='Crabbox Desktop'",
 		"monospace:size=16",
 		"export DISPLAY=\"${DISPLAY:-:99}\"",
-		"exec xterm -fa monospace -fs '16' -geometry '120x40'",
+		"exec xterm -title 'Crabbox Desktop' -fa monospace -fs '16' -geometry '120x40'",
 		"bash -lc ''\\''bash'\\'' '\\''-lc'\\'' '\\''echo hello'\\'''",
 	} {
 		if !strings.Contains(joined, want) {
@@ -302,7 +384,7 @@ func TestDesktopLaunchRemoteCommandCanPassEgressProxyToBrowser(t *testing.T) {
 		"/work/crabbox/cbx_1/repo",
 		map[string]string{"DISPLAY": ":99", "BROWSER": "/usr/bin/chromium"},
 		[]string{"/usr/bin/chromium", "--proxy-server=http://127.0.0.1:3128", "https://discord.com/login"},
-		true,
+		desktopLaunchOptions{WindowedBrowser: true},
 	)
 	if !strings.Contains(got, "'/usr/bin/chromium' '--proxy-server=http://127.0.0.1:3128' 'https://discord.com/login'") {
 		t.Fatalf("desktop launch command missing egress proxy arg:\n%s", got)
@@ -344,7 +426,7 @@ func TestWindowsDesktopLaunchRemoteCommandUsesInteractiveTask(t *testing.T) {
 		`C:\crabbox\cbx_1\repo`,
 		map[string]string{"BROWSER": `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`},
 		[]string{`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`, "https://example.com"},
-		true,
+		desktopLaunchOptions{WindowedBrowser: true},
 	)
 	for _, want := range []string{
 		"CrabboxDesktopLaunch-",
@@ -425,8 +507,8 @@ func TestMacOSDesktopTerminalUsesGhostty(t *testing.T) {
 	}
 	joined := strings.Join(got, " ")
 	for _, want := range []string{
-		"open -na Ghostty.app --args",
-		"--title=gifgrep tui",
+		"open -W -na Ghostty.app --args",
+		"--title=Crabbox Desktop",
 		"--font-size=18",
 		"--window-width=118",
 		"--window-height=34",
