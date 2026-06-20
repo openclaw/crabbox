@@ -219,9 +219,9 @@ them instead of hand-written input snippets.
   routed through the clipboard/paste path so keyboard layouts cannot corrupt
   special characters. Linux only.
 - `desktop paste` pastes text from `--text` or stdin via the remote clipboard.
-  Linux only. The clipboard helper must still own the clipboard when Ctrl+V is
-  sent and must exit successfully after serving the paste; helper failure makes
-  the command fail without printing `pasted:`.
+  Linux only. Crabbox verifies clipboard ownership before Ctrl+V and propagates
+  supported helper delivery failures; helper failure makes the command fail
+  without printing `pasted:`.
 - `desktop key` sends an `xdotool` key sequence (or a single modifier+key
   combination on Wayland). Linux only.
 

@@ -483,13 +483,46 @@ case "$active_class $active_name $active_proc" in
     exit 0
     ;;
 esac
-# Keep every clipboard server in the foreground so clip_pid tracks delivery.
+# Keep foreground-capable clipboard servers supervised; xsel is verified by
+# exact readback because it has no paste-once mode.
 if command -v xclip >/dev/null 2>&1; then
   timeout 5s xclip -quiet -selection clipboard -loops 1 "$tmp" &
   clip_pid=$!
 elif command -v xsel >/dev/null 2>&1; then
-  timeout 5s xsel --nodetach --clipboard --input < "$tmp" &
+  xsel --nodetach --selectionTimeout 5000 --clipboard --input < "$tmp" &
   clip_pid=$!
+  clip_verified=0
+  clip_attempt=0
+  while [ "$clip_attempt" -lt 10 ]; do
+    if ! kill -0 "$clip_pid" >/dev/null 2>&1; then
+      set +e
+      wait "$clip_pid"
+      clip_status=$?
+      set -e
+      [ "$clip_status" -ne 0 ] || clip_status=1
+      clip_pid=""
+      echo "clipboard helper exited before paste (xsel status=$clip_status)" >&2
+      exit "$clip_status"
+    fi
+    if timeout 1s xsel --clipboard --output | cmp -s - "$tmp"; then
+      clip_verified=1
+      break
+    fi
+    clip_attempt=$((clip_attempt + 1))
+    sleep 0.05
+  done
+  if [ "$clip_verified" -ne 1 ]; then
+    echo "clipboard helper failed to provide requested contents (xsel)" >&2
+    exit 1
+  fi
+  xdotool key --clearmodifiers ctrl+v
+  # xsel has no paste-once mode. Give the target time to request the selection,
+  # then stop the supervised owner so pasted contents do not remain exposed.
+  sleep 0.2
+  kill "$clip_pid" 2>/dev/null || true
+  wait "$clip_pid" 2>/dev/null || true
+  clip_pid=""
+  exit 0
 elif command -v wl-copy >/dev/null 2>&1; then
   wl-copy --foreground --paste-once < "$tmp" &
   clip_pid=$!

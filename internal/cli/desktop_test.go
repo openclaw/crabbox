@@ -201,7 +201,9 @@ func TestDesktopPasteRemoteCommandPrefersClipboardTools(t *testing.T) {
 		`CRABBOX_DESKTOP_ENV:-xfce`,
 		"wtype -d 1 -",
 		"timeout 5s xclip -quiet -selection clipboard -loops 1",
-		"timeout 5s xsel --nodetach --clipboard --input",
+		"xsel --nodetach --selectionTimeout 5000 --clipboard --input",
+		`timeout 1s xsel --clipboard --output | cmp -s - "$tmp"`,
+		"clipboard helper failed to provide requested contents (xsel)",
 		"wl-copy --foreground --paste-once",
 		"getactivewindow getwindowclassname",
 		"getactivewindow getwindowpid",
@@ -241,6 +243,43 @@ func TestDesktopPasteRemoteCommandPropagatesClipboardHelperFailure(t *testing.T)
 	}
 	if !strings.Contains(string(out), "clipboard helper") || !strings.Contains(string(out), "status=42") {
 		t.Fatalf("paste failure output=%q", out)
+	}
+}
+
+func TestDesktopPasteRemoteCommandVerifiesXselByReadback(t *testing.T) {
+	dir := t.TempDir()
+	clipboard := filepath.Join(dir, "clipboard")
+	pasted := filepath.Join(dir, "pasted")
+	stopped := filepath.Join(dir, "stopped")
+	for _, name := range []string{"cat", "cmp", "mktemp", "rm", "sleep", "tr"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(path, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, script := range map[string]string{
+		"timeout": "#!/bin/sh\nshift\nexec \"$@\"\n",
+		"xdotool": "#!/bin/sh\nif [ \"$1\" = key ]; then : > " + shellQuote(pasted) + "; exit 0; fi\nexit 1\n",
+		"xsel":    "#!/bin/sh\ncase \"$*\" in\n  *--input*)\n    cat > " + shellQuote(clipboard) + "\n    trap ': > " + shellQuote(stopped) + "; exit 0' TERM INT\n    while :; do sleep 0.05; done\n    ;;\n  *--output*) cat " + shellQuote(clipboard) + ";;\nesac\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("sh", "-c", desktopPasteRemoteCommand())
+	cmd.Env = append(os.Environ(), "PATH="+dir, "CRABBOX_DESKTOP_ENV=xfce", "DISPLAY=:99")
+	cmd.Stdin = strings.NewReader("xsel clipboard value")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("xsel paste command failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(pasted); err != nil {
+		t.Fatalf("xsel paste did not send Ctrl+V: %v", err)
+	}
+	if _, err := os.Stat(stopped); err != nil {
+		t.Fatalf("xsel clipboard owner was not stopped: %v", err)
 	}
 }
 
