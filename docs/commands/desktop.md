@@ -41,9 +41,10 @@ connectivity.
 `crabbox desktop launch` starts an app inside the desktop session without
 attaching a VNC viewer first. It waits for the loopback VNC service, starts the
 process detached from the SSH session, and verifies that the process remains
-alive through startup. Linux browser launches additionally require a visible
-browser window or browser process. macOS `open` launches wait on the opened app
-so an immediately failed launch is not reported as successful.
+alive through startup. A short-lived Linux/X11 wrapper can also succeed by
+creating a new visible window. Linux browser launches additionally require a
+visible browser window or browser process. macOS `open` launches wait on the
+opened app so an immediately failed launch is not reported as successful.
 
 With `--browser`, Crabbox probes the target browser the same way
 `run --browser` does and launches the resolved `BROWSER` when no explicit

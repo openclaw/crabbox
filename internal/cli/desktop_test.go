@@ -27,6 +27,8 @@ func TestDesktopLaunchRemoteCommandUsesDetachedPOSIXSession(t *testing.T) {
 		"MOZ_ENABLE_WAYLAND='0'",
 		"setsid '/usr/bin/chromium' 'https://example.com'",
 		"crabbox-desktop-launch.log",
+		"launch_before_windows=",
+		"desktop_launch_new_window",
 		"launch_pid=$!",
 		`kill -0 "$launch_pid"`,
 		"wmctrl -r :ACTIVE: -b remove,fullscreen",
@@ -59,6 +61,66 @@ func TestDesktopLaunchRemoteCommandRejectsExitedPOSIXProcess(t *testing.T) {
 	}
 }
 
+func TestDesktopLaunchRemoteCommandAcceptsNewVisibleWindowFromWrapper(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "window-created")
+	xdotool := `#!/bin/sh
+if [ "$1" = getmouselocation ]; then exit 0; fi
+if [ "$1" = search ]; then
+  [ -f ` + shellQuote(marker) + ` ] && echo 20
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "xdotool"), []byte(xdotool), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remote := desktopLaunchRemoteCommand(
+		SSHTarget{TargetOS: targetLinux},
+		"",
+		nil,
+		[]string{"sh", "-c", "touch " + shellQuote(marker)},
+		desktopLaunchOptions{VerifyProcess: true},
+	)
+	cmd := exec.Command("sh", "-c", remote)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":/usr/bin:/bin", "DISPLAY=:99")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wrapper launch with new visible window failed: %v\n%s", err, out)
+	}
+}
+
+func TestDesktopLaunchRemoteCommandRejectsFailedWrapperWithNewWindow(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "error-window-created")
+	xdotool := `#!/bin/sh
+if [ "$1" = getmouselocation ]; then exit 0; fi
+if [ "$1" = search ]; then
+  [ -f ` + shellQuote(marker) + ` ] && echo 20
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "xdotool"), []byte(xdotool), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remote := desktopLaunchRemoteCommand(
+		SSHTarget{TargetOS: targetLinux},
+		"",
+		nil,
+		[]string{"sh", "-c", "touch " + shellQuote(marker) + "; exit 23"},
+		desktopLaunchOptions{VerifyProcess: true},
+	)
+	cmd := exec.Command("sh", "-c", remote)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":/usr/bin:/bin", "DISPLAY=:99")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("failed wrapper with a new window was accepted:\n%s", out)
+	}
+	if !strings.Contains(string(out), "desktop command exited during launch (status=23)") {
+		t.Fatalf("wrapper failure output=%q", out)
+	}
+}
+
 func TestDesktopLaunchRemoteCommandChecksLinuxTerminalVisibility(t *testing.T) {
 	got := desktopLaunchRemoteCommand(
 		SSHTarget{TargetOS: targetLinux},
@@ -75,6 +137,9 @@ func TestDesktopLaunchRemoteCommandChecksLinuxTerminalVisibility(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("launch visibility check missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "launch_before_windows=") {
+		t.Fatalf("terminal verification should use its unique title, not generic window snapshots:\n%s", got)
 	}
 }
 

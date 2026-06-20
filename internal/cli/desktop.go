@@ -710,6 +710,9 @@ func posixDesktopLaunchRemoteCommand(target SSHTarget, workdir string, env map[s
 		b.WriteString("export " + key + "\n")
 	}
 	b.WriteString("log=${TMPDIR:-/tmp}/crabbox-desktop-launch.log\n")
+	if opts.VerifyProcess && target.TargetOS == targetLinux && strings.TrimSpace(opts.VisibleWindowTitle) == "" {
+		b.WriteString(posixDesktopLaunchWindowSnapshotCommand())
+	}
 	b.WriteString("if command -v setsid >/dev/null 2>&1; then\n")
 	b.WriteString("  setsid ")
 	writeShellArgv(&b, command)
@@ -742,24 +745,70 @@ func desktopMacOpenWaitCommand(target SSHTarget, command []string) []string {
 	return append(out, command[1:]...)
 }
 
+func posixDesktopLaunchWindowSnapshotCommand() string {
+	return `launch_can_check_windows=0
+launch_before_windows=""
+if command -v xdotool >/dev/null 2>&1 && xdotool getmouselocation >/dev/null 2>&1; then
+  launch_can_check_windows=1
+  launch_before_windows=" $(xdotool search --onlyvisible --name '.*' 2>/dev/null | tr '\n' ' ' || true) "
+fi
+desktop_launch_new_window() {
+  for launch_window in $(xdotool search --onlyvisible --name '.*' 2>/dev/null || true); do
+    case "$launch_before_windows" in
+      *" $launch_window "*) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+`
+}
+
 // posixDesktopLaunchVerificationCommand keeps detached launch success tied to
 // the spawned process and, where X11 exposes it, the intended terminal window.
 func posixDesktopLaunchVerificationCommand(target SSHTarget, visibleWindowTitle string) string {
 	var b bytes.Buffer
 	b.WriteString(`launch_pid=$!
 desktop_launch_failed() {
-  set +e
-  wait "$launch_pid"
-  launch_status=$?
-  set -e
+	launch_status="${1:-}"
+	if [ -z "$launch_status" ]; then
+		set +e
+		wait "$launch_pid"
+		launch_status=$?
+		set -e
+	fi
   [ "$launch_status" -ne 0 ] || launch_status=1
   echo "desktop command exited during launch (status=$launch_status)" >&2
   if [ -s "$log" ]; then tail -n 20 "$log" >&2; fi
   exit "$launch_status"
 }
 sleep 1
-kill -0 "$launch_pid" >/dev/null 2>&1 || desktop_launch_failed
 `)
+	if target.TargetOS == targetLinux && strings.TrimSpace(visibleWindowTitle) == "" {
+		b.WriteString(`if ! kill -0 "$launch_pid" >/dev/null 2>&1; then
+  set +e
+  wait "$launch_pid"
+  launch_status=$?
+  set -e
+  [ "$launch_status" -eq 0 ] || desktop_launch_failed "$launch_status"
+  launch_visible=0
+  if [ "$launch_can_check_windows" -eq 1 ]; then
+    launch_attempt=0
+    while [ "$launch_attempt" -lt 10 ]; do
+      if desktop_launch_new_window; then
+        launch_visible=1
+        break
+      fi
+      launch_attempt=$((launch_attempt + 1))
+      sleep 0.5
+    done
+  fi
+  [ "$launch_visible" -eq 1 ] || desktop_launch_failed 1
+fi
+`)
+	} else {
+		b.WriteString("kill -0 \"$launch_pid\" >/dev/null 2>&1 || desktop_launch_failed\n")
+	}
 	if target.TargetOS != targetLinux || strings.TrimSpace(visibleWindowTitle) == "" {
 		return b.String()
 	}
