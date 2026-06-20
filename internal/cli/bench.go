@@ -90,6 +90,20 @@ type benchmarkReportOptions struct {
 
 type benchmarkRunExecutor func(context.Context, []string, benchmarkRecordContext) error
 
+type capturedTimingReportWriter struct {
+	writer io.Writer
+	report *TimingReport
+}
+
+func (w *capturedTimingReportWriter) Write(p []byte) (int, error) {
+	return w.writer.Write(p)
+}
+
+func (w *capturedTimingReportWriter) WriteTimingReport(report TimingReport) error {
+	w.report = &report
+	return nil
+}
+
 func (a App) benchRun(ctx context.Context, args []string) error {
 	return a.benchRunWithExecutor(ctx, args, a.runCommandWithBenchmarkRecord)
 }

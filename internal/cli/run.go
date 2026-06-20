@@ -255,7 +255,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
 	var timingRecordColdRun *bool
-	var timingJSONHandledByBackend bool
+	var delegatedTimingCapture *capturedTimingReportWriter
 	defer func() {
 		if finalTimingReport == nil {
 			return
@@ -281,7 +281,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 			}
 		}
-		if !*timingJSON || timingJSONHandledByBackend {
+		if !*timingJSON {
 			return
 		}
 		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
@@ -478,7 +478,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return exit(2, "profile doctor is not supported for native Windows targets")
 		}
 	}
-	backend, err := loadBackend(cfg, runtimeForApp(a))
+	backendRuntime := runtimeForApp(a)
+	if timingRecordEnabled {
+		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
+		backendRuntime.Stderr = delegatedTimingCapture
+	}
+	backend, err := loadBackend(cfg, backendRuntime)
 	if err != nil {
 		return err
 	}
@@ -552,7 +557,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		Command:               command,
 		Label:                 runLabelValue,
 		RequestedSlug:         requestedSlug,
-		TimingJSON:            *timingJSON,
+		TimingJSON:            *timingJSON || timingRecordEnabled,
 		ArtifactGlobs:         expansion.ArtifactGlobs,
 		RequiredArtifactGlobs: requiredArtifactGlobs,
 		EmitProof:             strings.TrimSpace(*emitProof),
@@ -581,9 +586,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
-		// Delegated providers own their timing JSON output. Core still builds the
-		// result below when the local benchmark ledger needs a record.
-		timingJSONHandledByBackend = runReq.TimingJSON
 		result, runErr := delegated.Run(ctx, runReq)
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
@@ -606,8 +608,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			coldRun := !result.Session.Reused
 			timingRecordColdRun = &coldRun
 		}
-		if *timingJSON || timingRecordEnabled {
+		if timingRecordEnabled {
 			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
+			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
+				report = *delegatedTimingCapture.report
+			}
+			report.Artifacts = result.Artifacts
 			finalTimingReport = &report
 		}
 		return runErr

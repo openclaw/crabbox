@@ -57,7 +57,11 @@ func (b benchmarkTimingTestBackend) Run(_ context.Context, req RunRequest) (RunR
 		Total:         time.Second,
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.stderr, timingReportFromDelegatedRunResult(req, result, b.spec.Name, nil)); err != nil {
+		report := timingReportFromDelegatedRunResult(req, result, b.spec.Name, nil)
+		report.SyncMs = 400
+		report.SyncPhases = []TimingPhase{{Name: "archive", Ms: 400}}
+		report.MachineType = "test-medium"
+		if err := writeTimingJSON(b.stderr, report); err != nil {
 			return RunResult{}, err
 		}
 	}
@@ -146,12 +150,44 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	if count := strings.Count(stderr.String(), `"provider":"benchmark-timing-test"`); count != 1 {
 		t.Fatalf("delegated timing JSON count=%d want 1; stderr=%q", count, stderr.String())
 	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var emitted TimingReport
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &emitted); err != nil || emitted.Provider != "benchmark-timing-test" {
+		t.Fatalf("final stderr line is not delegated timing JSON: line=%q error=%v", lines[len(lines)-1], err)
+	}
 	records, err := readBenchmarkTimingRecords(storePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(records) != 1 || records[0].Timing.Provider != "benchmark-timing-test" {
 		t.Fatalf("records=%#v, want one delegated timing record", records)
+	}
+	if timing := records[0].Timing; timing.SyncMs != 400 || len(timing.SyncPhases) != 1 || timing.SyncPhases[0].Name != "archive" || timing.MachineType != "test-medium" {
+		t.Fatalf("delegated timing metadata=%#v", timing)
+	}
+}
+
+func TestRunDelegatedTimingRecordDoesNotPrintTimingJSON(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.runCommand(context.Background(), []string{
+		"--provider", "benchmark-timing-test",
+		"--timing-record", storePath,
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), `"provider":"benchmark-timing-test"`) {
+		t.Fatalf("timing JSON leaked without --timing-json: %q", stderr.String())
+	}
+	records, err := readBenchmarkTimingRecords(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Timing.SyncMs != 400 {
+		t.Fatalf("records=%#v, want one complete delegated timing record", records)
 	}
 }
 
