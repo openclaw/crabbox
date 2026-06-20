@@ -21,8 +21,7 @@ type runRecorder struct {
 	label              string
 	runID              string
 	stderr             io.Writer
-	deferUntilLease    bool
-	retryCreateLease   bool
+	createPending      bool
 	historyUnavailable bool
 	eventsMu           sync.Mutex
 	eventsDisabled     bool
@@ -44,11 +43,10 @@ func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, c
 	}
 	run, err := coord.CreateRun(ctx, "", cfg, command, rec.label)
 	if err != nil {
+		rec.createPending = true
 		if isInvalidLeaseIDCoordinatorError(err) {
-			rec.deferUntilLease = true
 			return rec
 		}
-		rec.retryCreateLease = true
 		rec.warnRunHistory("run history create failed before lease; will retry after lease is available: %v", err)
 		return rec
 	}
@@ -90,9 +88,7 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) {
 	if r == nil || r.finished {
 		return
 	}
-	if r.runID == "" && (r.deferUntilLease || r.retryCreateLease) && r.coord != nil && leaseID != "" {
-		r.deferUntilLease = false
-		r.retryCreateLease = false
+	if r.runID == "" && r.createPending && r.coord != nil && leaseID != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
 		defer cancel()
 		run, err := r.coord.CreateRun(ctx, leaseID, cfg, r.command, r.label)
@@ -163,6 +159,8 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 
 func (r *runRecorder) attachRun(run CoordinatorRun) {
 	r.runID = run.ID
+	r.createPending = false
+	r.historyUnavailable = false
 	r.output = newRunOutputEventQueue(r.coord, run.ID, r.handleRunEventAppendError)
 	fmt.Fprintf(r.stderr, "recording run %s\n", run.ID)
 }
