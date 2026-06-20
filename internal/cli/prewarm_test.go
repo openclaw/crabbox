@@ -21,6 +21,8 @@ type prewarmCleanupTestBackend struct {
 	releaseCalls    int
 	resolveCanceled bool
 	releaseCanceled bool
+	resolveCtx      context.Context
+	releaseCtx      context.Context
 	resolveErr      error
 	releaseErr      error
 }
@@ -39,6 +41,7 @@ func (b *prewarmCleanupTestBackend) Acquire(context.Context, AcquireRequest) (Le
 }
 func (b *prewarmCleanupTestBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	b.resolveCalls++
+	b.resolveCtx = ctx
 	b.resolveCanceled = ctx.Err() != nil
 	if b.resolveErr != nil {
 		return LeaseTarget{}, b.resolveErr
@@ -52,6 +55,7 @@ func (b *prewarmCleanupTestBackend) List(context.Context, ListRequest) ([]LeaseV
 }
 func (b *prewarmCleanupTestBackend) ReleaseLease(ctx context.Context, _ ReleaseLeaseRequest) error {
 	b.releaseCalls++
+	b.releaseCtx = ctx
 	b.releaseCanceled = ctx.Err() != nil
 	return b.releaseErr
 }
@@ -81,6 +85,9 @@ func TestPrewarmPostWarmupFailuresReleaseSSHLease(t *testing.T) {
 			}
 			if backend.resolveCanceled || backend.releaseCanceled {
 				t.Fatalf("cleanup inherited canceled context: resolve=%v release=%v", backend.resolveCanceled, backend.releaseCanceled)
+			}
+			if backend.resolveCtx == backend.releaseCtx {
+				t.Fatal("provider release reused the pre-release cleanup context")
 			}
 			for _, want := range []string{
 				"prewarm cleanup: releasing id=cbx_abcdef123456 after " + stage + " failure",

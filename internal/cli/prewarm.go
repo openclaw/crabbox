@@ -275,7 +275,10 @@ func (a App) releasePrewarmLeaseAfterFailure(ctx context.Context, backend Backen
 		lease = LeaseTarget{LeaseID: leaseID}
 	}
 	fmt.Fprintf(a.Stderr, "prewarm cleanup: releasing id=%s after %s failure\n", leaseID, stage)
-	if err := a.releaseBackendLeaseBestEffort(cleanupCtx, sshBackend, cfg, lease); err != nil {
+	a.cleanupBackendLeaseConnectionsBestEffort(cleanupCtx, lease)
+	releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), prewarmFailureCleanupTimeout)
+	defer releaseCancel()
+	if err := a.releaseBackendLease(releaseCtx, sshBackend, cfg, lease); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: prewarm %s failed; automatic release of %s failed: %v; next: crabbox stop --provider %s --id %s\n", stage, leaseID, err, cfg.Provider, leaseID)
 		return
 	}
