@@ -2654,9 +2654,17 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
+	a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
+	return a.releaseBackendLease(ctx, backend, cfg, lease)
+}
+
+func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
 	a.cleanupMediatedEgressBestEffort(ctx, lease.LeaseID, lease)
 	a.logoutRemoteTailscaleBestEffort(ctx, lease)
+}
+
+func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)

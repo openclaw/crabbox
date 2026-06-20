@@ -3,6 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +15,184 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+type prewarmCleanupTestBackend struct {
+	resolveCalls    int
+	releaseCalls    int
+	resolveCanceled bool
+	releaseCanceled bool
+	resolveCtx      context.Context
+	releaseCtx      context.Context
+	resolveErr      error
+	releaseErr      error
+}
+
+type prewarmDelegatedTestBackend struct{}
+
+func (prewarmDelegatedTestBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "prewarm-delegated-test", Kind: ProviderKindDelegatedRun}
+}
+
+func (b *prewarmCleanupTestBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "prewarm-cleanup-test", Kind: ProviderKindSSHLease}
+}
+func (b *prewarmCleanupTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b *prewarmCleanupTestBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	b.resolveCalls++
+	b.resolveCtx = ctx
+	b.resolveCanceled = ctx.Err() != nil
+	if b.resolveErr != nil {
+		return LeaseTarget{}, b.resolveErr
+	}
+	server := Server{Provider: "prewarm-cleanup-test"}
+	server.ServerType.Name = "test"
+	return LeaseTarget{LeaseID: req.ID, Server: server}, nil
+}
+func (b *prewarmCleanupTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b *prewarmCleanupTestBackend) ReleaseLease(ctx context.Context, _ ReleaseLeaseRequest) error {
+	b.releaseCalls++
+	b.releaseCtx = ctx
+	b.releaseCanceled = ctx.Err() != nil
+	return b.releaseErr
+}
+func (b *prewarmCleanupTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	return Server{}, nil
+}
+
+func TestPrewarmPostWarmupFailuresReleaseSSHLease(t *testing.T) {
+	for _, stage := range []string{"actions hydration", "probe", "pool registration"} {
+		t.Run(stage, func(t *testing.T) {
+			backend := &prewarmCleanupTestBackend{}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			cause := errors.New("step failed")
+			var stderr bytes.Buffer
+			app := App{Stdout: io.Discard, Stderr: &stderr}
+
+			err := app.runPrewarmPostWarmupStep(ctx, backend, Config{Provider: "prewarm-cleanup-test"}, "cbx_abcdef123456", stage, func() error {
+				return cause
+			})
+
+			if !errors.Is(err, cause) {
+				t.Fatalf("step error=%v, want %v", err, cause)
+			}
+			if backend.resolveCalls != 1 || backend.releaseCalls != 1 {
+				t.Fatalf("cleanup calls resolve=%d release=%d", backend.resolveCalls, backend.releaseCalls)
+			}
+			if backend.resolveCanceled || backend.releaseCanceled {
+				t.Fatalf("cleanup inherited canceled context: resolve=%v release=%v", backend.resolveCanceled, backend.releaseCanceled)
+			}
+			if backend.resolveCtx == backend.releaseCtx {
+				t.Fatal("provider release reused the pre-release cleanup context")
+			}
+			for _, want := range []string{
+				"prewarm cleanup: releasing id=cbx_abcdef123456 after " + stage + " failure",
+				"prewarm cleanup: released id=cbx_abcdef123456 after " + stage + " failure",
+			} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestPrewarmSuccessfulStepDoesNotReleaseLease(t *testing.T) {
+	backend := &prewarmCleanupTestBackend{}
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runPrewarmPostWarmupStep(
+		context.Background(), backend, Config{Provider: "prewarm-cleanup-test"}, "cbx_abcdef123456", "probe", func() error { return nil },
+	)
+	if err != nil || backend.resolveCalls != 0 || backend.releaseCalls != 0 {
+		t.Fatalf("successful step err=%v resolve=%d release=%d", err, backend.resolveCalls, backend.releaseCalls)
+	}
+}
+
+func TestPrewarmCleanupFailurePrintsStopCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend *prewarmCleanupTestBackend
+		want    string
+	}{
+		{name: "resolve", backend: &prewarmCleanupTestBackend{resolveErr: errors.New("resolve unavailable")}, want: "automatic release of cbx_abcdef123456 skipped: resolve unavailable"},
+		{name: "release", backend: &prewarmCleanupTestBackend{releaseErr: errors.New("release unavailable")}, want: "automatic release of cbx_abcdef123456 failed: release unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			cause := errors.New("hydrate failed")
+			err := (App{Stdout: io.Discard, Stderr: &stderr}).runPrewarmPostWarmupStep(
+				context.Background(), tc.backend, Config{Provider: "prewarm-cleanup-test"}, "cbx_abcdef123456", "actions hydration", func() error { return cause },
+			)
+			if !errors.Is(err, cause) {
+				t.Fatalf("step error=%v, want %v", err, cause)
+			}
+			for _, want := range []string{tc.want, "next: crabbox stop --provider prewarm-cleanup-test --id cbx_abcdef123456"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestPrewarmFailureDoesNotReleaseDelegatedProvider(t *testing.T) {
+	cause := errors.New("delegated step failed")
+	var stderr bytes.Buffer
+	err := (App{Stdout: io.Discard, Stderr: &stderr}).runPrewarmPostWarmupStep(
+		context.Background(), prewarmDelegatedTestBackend{}, Config{Provider: "prewarm-delegated-test"}, "run_abcdef123456", "probe", func() error { return cause },
+	)
+	if !errors.Is(err, cause) {
+		t.Fatalf("step error=%v, want %v", err, cause)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("delegated provider emitted SSH cleanup output:\n%s", stderr.String())
+	}
+}
+
+func TestPrewarmCoordinatorCleanupReleasesByIDWhenResolveFails(t *testing.T) {
+	released := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_abcdef123456":
+			http.Error(w, `{"error":"resolve unavailable"}`, http.StatusServiceUnavailable)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_abcdef123456/release":
+			released = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_abcdef123456", Provider: "aws", State: "released"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Provider: "aws", Coordinator: server.URL, CoordToken: "test-token"}
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{
+		spec:  ProviderSpec{Name: "aws", Kind: ProviderKindSSHLease},
+		cfg:   cfg,
+		coord: coord,
+		rt:    Runtime{Stderr: io.Discard},
+	}
+	var stderr bytes.Buffer
+	cause := errors.New("probe failed")
+	err = (App{Stdout: io.Discard, Stderr: &stderr}).runPrewarmPostWarmupStep(
+		context.Background(), backend, cfg, "cbx_abcdef123456", "probe", func() error { return cause },
+	)
+	if !errors.Is(err, cause) {
+		t.Fatalf("step error=%v, want %v", err, cause)
+	}
+	if !released {
+		t.Fatal("coordinator lease was not released by ID")
+	}
+	if !strings.Contains(stderr.String(), "releasing by lease ID") {
+		t.Fatalf("stderr missing resolve fallback:\n%s", stderr.String())
+	}
+}
 
 func TestPrewarmDryRunPlansHydratedLease(t *testing.T) {
 	clearConfigEnv(t)
