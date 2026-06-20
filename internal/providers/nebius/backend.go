@@ -582,6 +582,7 @@ func (b *backend) checkImage(ctx context.Context, client cliRunner) DoctorCheck 
 }
 
 func (b *backend) checkJSON(ctx context.Context, client cliRunner) DoctorCheck {
+	// A single page is enough to verify CLI JSON compatibility; lifecycle inventory uses --all.
 	result, err := client.run(ctx, "compute", "instance", "list", "--parent-id", b.Cfg.Nebius.ParentID, "--format", "json")
 	if err != nil {
 		return doctorCheck("json", "error", err.Error(), nil)

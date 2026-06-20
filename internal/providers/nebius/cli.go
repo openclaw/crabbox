@@ -115,7 +115,7 @@ func parseJSONArray(output string) ([]map[string]any, error) {
 }
 
 func (c *nebiusClient) ListInstances(ctx context.Context) ([]nebiusInstance, error) {
-	result, err := c.cli.run(ctx, "compute", "instance", "list", "--parent-id", c.cfg.ParentID, "--format", "json")
+	result, err := c.cli.run(ctx, "compute", "instance", "list", "--parent-id", c.cfg.ParentID, "--all", "--format", "json")
 	if err != nil {
 		return nil, err
 	}

@@ -210,6 +210,20 @@ func TestUpdateLabelsIncludesParentScope(t *testing.T) {
 	}
 }
 
+func TestListInstancesRequestsAllPages(t *testing.T) {
+	runner := &recordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{Stdout: `{"items":[]}`}, nil
+	}}
+	client := newNebiusClient(testConfig().Nebius, Runtime{Exec: runner})
+	if _, err := client.ListInstances(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.calls[len(runner.calls)-1], " ")
+	if !strings.Contains(got, "compute instance list --parent-id project-123 --all --format json") {
+		t.Fatalf("list command=%q", got)
+	}
+}
+
 func TestPublicIPParsesNestedCIDR(t *testing.T) {
 	item, err := parseNebiusInstance(`{"metadata":{"id":"vm-1","name":"n"},"status":{"state":"RUNNING","network_interfaces":[{"public_ip_address":{"address":"198.51.100.7/32"}}]}}`)
 	if err != nil {
