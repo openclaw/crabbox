@@ -95,7 +95,9 @@ and are not supported by Docker Sandbox.
 
 Where applicable, `stop` makes a best-effort attempt to stop GitHub
 [Actions hydration](../features/actions-hydration.md) on the host before
-releasing it.
+releasing it. For SSH leases that can host mediated egress, it also best-effort
+stops egress state: the local host daemon pid state and the lease-side egress
+client are cleaned up before the provider release runs.
 
 ## Flags
 

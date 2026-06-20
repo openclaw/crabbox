@@ -61,6 +61,11 @@ stop     Stop the local host daemon and the remote lease client
 `start` is the normal entry point. Use `host` and `client` directly when
 debugging tickets, custom tunnels, or a manually installed helper.
 
+For daemonized sessions, ordinary [`stop`](stop.md) also makes a best-effort
+cleanup pass before releasing an SSH lease. It stops local egress host daemon
+pid state and SSH-kills the lease-side egress client when the target is still
+reachable.
+
 ## Profiles and allowlist
 
 The host side refuses to become an open proxy. Every session needs either a
