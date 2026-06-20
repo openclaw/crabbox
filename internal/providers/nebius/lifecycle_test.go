@@ -90,20 +90,23 @@ func newTestBackend(t *testing.T, api *fakeNebiusAPI) *backend {
 }
 
 func TestCloudInitRendersUserAndKey(t *testing.T) {
-	got, err := renderNebiusCloudInit("crabbox", "ssh-ed25519 AAAA test")
+	cfg := testConfig()
+	got, err := renderNebiusCloudInit(cfg, "ssh-ed25519 AAAA test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"#cloud-config", "name: crabbox", "NOPASSWD", "ssh-ed25519 AAAA test", "disable_root: true"} {
+	for _, want := range []string{"#cloud-config", `name: "crabbox"`, "NOPASSWD", "ssh-ed25519 AAAA test", "/usr/local/bin/crabbox-ready", "/var/lib/crabbox/bootstrapped", "rsync --version", "disable_root: true"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloud-init missing %q:\n%s", want, got)
 		}
 	}
-	if _, err := renderNebiusCloudInit("root", "ssh-ed25519 AAAA test"); err == nil {
+	cfg.Nebius.User = "root"
+	if _, err := renderNebiusCloudInit(cfg, "ssh-ed25519 AAAA test"); err == nil {
 		t.Fatal("reserved root user accepted")
 	}
 	for _, user := range []string{"alice\n  - name: root", "Alice", "bad user", "1alice", "alice:$evil"} {
-		if _, err := renderNebiusCloudInit(user, "ssh-ed25519 AAAA test"); err == nil {
+		cfg.Nebius.User = user
+		if _, err := renderNebiusCloudInit(cfg, "ssh-ed25519 AAAA test"); err == nil {
 			t.Fatalf("unsafe user %q accepted", user)
 		}
 	}
@@ -188,6 +191,18 @@ func TestCLIErrorRedactsCloudInitAndDeleteUsesSupportedFlags(t *testing.T) {
 	got := strings.Join(runner.calls[len(runner.calls)-1], " ")
 	if strings.Contains(got, "--quiet") || !strings.Contains(got, "compute instance delete vm-1 --format json") {
 		t.Fatalf("delete command=%q", got)
+	}
+}
+
+func TestUpdateLabelsIncludesParentScope(t *testing.T) {
+	runner := &recordingRunner{}
+	client := newNebiusClient(testConfig().Nebius, Runtime{Exec: runner})
+	if err := client.UpdateLabels(context.Background(), "vm-1", map[string]string{"state": "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.calls[len(runner.calls)-1], " ")
+	if !strings.Contains(got, "compute instance update vm-1 --parent-id project-123 --labels-add state=ready --format json") {
+		t.Fatalf("update command=%q", got)
 	}
 }
 

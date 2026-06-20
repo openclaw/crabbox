@@ -181,7 +181,7 @@ func (c *nebiusClient) WaitInstance(ctx context.Context, id string) (nebiusInsta
 }
 
 func (c *nebiusClient) UpdateLabels(ctx context.Context, id string, labels map[string]string) error {
-	args := []string{"compute", "instance", "update", id}
+	args := []string{"compute", "instance", "update", id, "--parent-id", c.cfg.ParentID}
 	if labelsArg := renderLabels(labels); labelsArg != "" {
 		args = append(args, "--labels-add", labelsArg)
 	}

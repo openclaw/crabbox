@@ -1,15 +1,16 @@
 package nebius
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 var linuxUsernamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
-func renderNebiusCloudInit(user, publicKey string) (string, error) {
-	user = strings.TrimSpace(user)
+func renderNebiusCloudInit(cfg Config, publicKey string) (string, error) {
+	user := strings.TrimSpace(cfg.Nebius.User)
 	publicKey = strings.TrimSpace(publicKey)
 	if err := validateNebiusUser(user); err != nil {
 		return "", err
@@ -17,17 +18,8 @@ func renderNebiusCloudInit(user, publicKey string) (string, error) {
 	if publicKey == "" {
 		return "", validationError("ssh public key is required for nebius cloud-init")
 	}
-	return fmt.Sprintf(`#cloud-config
-users:
-  - name: %s
-    shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: [sudo]
-    ssh_authorized_keys:
-      - %s
-ssh_pwauth: false
-disable_root: true
-`, user, publicKey), nil
+	cfg.SSHUser = user
+	return core.CloudInitUserData(cfg, publicKey) + "ssh_pwauth: false\ndisable_root: true\n", nil
 }
 
 func validateNebiusUser(user string) error {
