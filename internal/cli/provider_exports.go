@@ -276,6 +276,38 @@ func SetOVHImageExplicit(cfg *Config) {
 	cfg.ovhImageExplicit = true
 }
 
+func ScalewayRegionWasExplicit(cfg Config) bool {
+	return cfg.scalewayRegionExplicit
+}
+
+func SetScalewayRegionExplicit(cfg *Config) {
+	cfg.scalewayRegionExplicit = true
+}
+
+func ScalewayZoneWasExplicit(cfg Config) bool {
+	return cfg.scalewayZoneExplicit
+}
+
+func SetScalewayZoneExplicit(cfg *Config) {
+	cfg.scalewayZoneExplicit = true
+}
+
+func ScalewayImageWasExplicit(cfg Config) bool {
+	return cfg.scalewayImageExplicit
+}
+
+func SetScalewayImageExplicit(cfg *Config) {
+	cfg.scalewayImageExplicit = true
+}
+
+func ScalewayTypeWasExplicit(cfg Config) bool {
+	return cfg.scalewayTypeExplicit
+}
+
+func SetScalewayTypeExplicit(cfg *Config) {
+	cfg.scalewayTypeExplicit = true
+}
+
 func CrabboxStateDir() (string, error) {
 	return crabboxStateDir()
 }

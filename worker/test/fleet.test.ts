@@ -3,6 +3,7 @@ import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { issueUserToken, sha256Hex } from "../src/auth";
 import { EC2SpotClient } from "../src/aws";
 import {
   awsPromotedAMIConfigKey,
@@ -10,6 +11,7 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "../src/config";
+import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   AWSProvider,
   FleetDurableObject,
@@ -207,6 +209,71 @@ describe("runtime adapter relay", () => {
     };
     expect(relay.codeAgents.get(lease.id)).toBe(restored[0]);
     expect(relay.runtimeAdapterAgents.get("example-adapter")).toBe(restored[3]);
+  });
+
+  it("rejects hibernated Code viewers whose portal session logged out", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000001",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const portalSessionHash = "a".repeat(64);
+    storage.seed(`code-viewer-session-revocation:${portalSessionHash}`, {
+      portalSessionHash,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const agent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+    const viewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "viewer-revoked",
+      auth: "github",
+      portalSessionHash,
+    });
+    const legacyViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "viewer-legacy",
+    });
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => [agent, viewer, legacyViewer] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    expect(viewer.closeCode).toBe(1008);
+    expect(viewer.closeReason).toBe("portal session ended");
+    expect(legacyViewer.closeCode).toBe(1008);
+    expect(legacyViewer.closeReason).toBe("portal session ended");
+    expect(agent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: "viewer-revoked",
+        code: 1008,
+        reason: "portal session ended",
+      },
+      {
+        type: "ws_close",
+        id: "viewer-legacy",
+        code: 1008,
+        reason: "portal session ended",
+      },
+    ]);
+    const relay = fleet as unknown as { codeViewers: Map<string, WebSocket> };
+    expect(relay.codeViewers.size).toBe(0);
+
+    await fleet.webSocketMessage(viewer as unknown as WebSocket, "post-logout-frame");
+    expect(agent.sentJSON()).toHaveLength(2);
   });
 
   it("fails closed ambiguous and invalid hibernated bridge sockets", () => {
@@ -1878,6 +1945,8 @@ describe("runtime adapter relay", () => {
       kind: "code-viewer",
       leaseID: lease.id,
       id: "code-viewer-expiry",
+      auth: "github",
+      portalSessionHash: "f".repeat(64),
     });
     const egressHost = new FakeWebSocket({
       kind: "egress-host",
@@ -12069,6 +12138,7 @@ describe("fleet lease identity and idle", () => {
     const leaseID = "cbx_000000000001";
     const tokenExpiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     const headers = {
+      authorization: "Bearer portal-session-token",
       "x-crabbox-auth": "github",
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
@@ -12177,6 +12247,125 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(malformedSession.status).toBe(302);
+  });
+
+  it("revokes isolated Code viewer access end to end when the portal session logs out", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_CODE_ORIGIN_TEMPLATE: "https://{lease}.code.example.test",
+      CRABBOX_PUBLIC_URL: "https://crabbox.test",
+      CRABBOX_SESSION_SECRET: "session-secret",
+    } as Env;
+    const fleet = testFleet(storage, {}, env);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "blue-lobster",
+        owner: "alice@example.com",
+        org: "example-org",
+        code: true,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const token = await issueUserToken(env, {
+      owner: "alice@example.com",
+      org: "example-org",
+      login: "alice",
+      ttlSeconds: 60 * 60,
+    });
+    const portalCookie = `crabbox_session=${encodeURIComponent(token)}`;
+    const throughCoordinator = async (input: Request): Promise<Response> =>
+      await routeCoordinatorRequest(input, env, async (prepared) => await fleet.fetch(prepared));
+    const codeEntry = "https://crabbox.test/portal/leases/blue-lobster/code/";
+
+    const redirect = await throughCoordinator(
+      new Request(codeEntry, { headers: { cookie: portalCookie } }),
+    );
+    expect(redirect.status).toBe(302);
+    const bootstrapURL = redirect.headers.get("location") || "";
+    expect(bootstrapURL).toContain("/__crabbox_bootstrap?ticket=code_view_");
+
+    const pendingRedirect = await throughCoordinator(
+      new Request(codeEntry, { headers: { cookie: portalCookie } }),
+    );
+    const pendingBootstrapURL = pendingRedirect.headers.get("location") || "";
+    expect(pendingRedirect.status).toBe(302);
+
+    const bootstrap = await throughCoordinator(new Request(bootstrapURL));
+    expect(bootstrap.status).toBe(303);
+    const codeCookie = (bootstrap.headers.get("set-cookie") || "").split(";", 1)[0] || "";
+    const isolatedPage = new URL(bootstrap.headers.get("location") || "", bootstrapURL).toString();
+    const page = await throughCoordinator(
+      new Request(isolatedPage, { headers: { cookie: codeCookie } }),
+    );
+    expect(page.status).toBe(200);
+
+    const activeViewerID = "active-code-viewer";
+    const portalSessionHash = await sha256Hex(token);
+    const activeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const activeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: activeViewerID,
+      auth: "github",
+      portalSessionHash,
+    });
+    const codeBridgeState = fleet as unknown as {
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+    };
+    codeBridgeState.codeAgents.set(leaseID, activeAgent as unknown as WebSocket);
+    codeBridgeState.codeViewers.set(activeViewerID, activeViewer as unknown as WebSocket);
+
+    const expiredRevocationKey = `code-viewer-session-revocation:${"f".repeat(64)}`;
+    storage.seed(expiredRevocationKey, {
+      portalSessionHash: "f".repeat(64),
+      createdAt: new Date(Date.now() - 2_000).toISOString(),
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const logout = await throughCoordinator(
+      new Request("https://crabbox.test/portal/logout", {
+        headers: { cookie: portalCookie },
+      }),
+    );
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");
+    expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(storage.value(expiredRevocationKey)).toBeUndefined();
+    expect(activeViewer.closeCode).toBe(1008);
+    expect(activeViewer.closeReason).toBe("portal session ended");
+    expect(activeAgent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: activeViewerID,
+        code: 1008,
+        reason: "portal session ended",
+      },
+    ]);
+    await fleet.webSocketMessage(activeViewer as unknown as WebSocket, "post-logout-frame");
+    expect(activeAgent.sentJSON()).toHaveLength(1);
+
+    const staleViewer = await throughCoordinator(
+      new Request(isolatedPage, { headers: { cookie: codeCookie } }),
+    );
+    expect(staleViewer.status).toBe(302);
+    expect(staleViewer.headers.get("location")).toBe(
+      `https://crabbox.test/portal/leases/${leaseID}/code/`,
+    );
+
+    const staleBootstrap = await throughCoordinator(new Request(pendingBootstrapURL));
+    expect(staleBootstrap.status).toBe(401);
+    await expect(staleBootstrap.json()).resolves.toMatchObject({
+      error: "code_viewer_session_revoked",
+    });
+
+    const stalePortalSession = await throughCoordinator(
+      new Request(codeEntry, { headers: { cookie: portalCookie } }),
+    );
+    expect(stalePortalSession.status).toBe(401);
+    expect(await stalePortalSession.text()).toContain("Log in again to open Code.");
   });
 
   it("keeps bridge tickets usable after endpoint binding mismatches", async () => {

@@ -15,6 +15,7 @@ func init() {
 	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testLinodeProvider{})
 	RegisterProvider(testNebiusProvider{})
+	RegisterProvider(testScalewayProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
@@ -380,6 +381,38 @@ func (testNebiusProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testNebiusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testScalewayProvider struct{}
+
+func (testScalewayProvider) Name() string      { return "scaleway" }
+func (testScalewayProvider) Aliases() []string { return nil }
+func (testScalewayProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "scaleway",
+		Family:      "scaleway",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testScalewayProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (testScalewayProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (testScalewayProvider) ServerTypeForConfig(cfg Config) string {
+	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
+		return cfg.ServerType
+	}
+	if cfg.Scaleway.Type != "" {
+		return cfg.Scaleway.Type
+	}
+	return "DEV1-S"
+}
+func (testScalewayProvider) ServerTypeForClass(string) string { return "DEV1-S" }
+func (p testScalewayProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

@@ -60,6 +60,10 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return core.FlagWasSet(fs, name)
 }
 
+func validateNativeCredentialDestination(cfg Config) error {
+	return core.ValidateNativeCredentialDestination(cfg, providerName)
+}
+
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }

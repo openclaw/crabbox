@@ -63,6 +63,105 @@ func TestWarmupFailureLeavesAcknowledgedLeaseForControllerReleaseGate(t *testing
 	}
 }
 
+func TestReleaseBackendLeaseBestEffortCleansMediatedEgressBeforeRelease(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	logPath := installRecordingSSH(t, dir)
+	runEnvProfileTestReleaseHook = func() error {
+		assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
+		return nil
+	}
+	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+
+	backend := runEnvProfileTestBackend{spec: runEnvProfileTestProvider{}.Spec()}
+	lease := LeaseTarget{
+		Server:  Server{Provider: "run-env-profile-test"},
+		SSH:     SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux},
+		LeaseID: "cbx_env_profile_test",
+	}
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).releaseBackendLeaseBestEffort(context.Background(), backend, defaultConfig(), lease)
+	if err != nil {
+		t.Fatalf("releaseBackendLeaseBestEffort error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
+}
+
+func TestStopCleansMediatedEgressBeforeRelease(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	logPath := installRecordingSSH(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	for _, id := range []string{"friendly-slug", "cbx_env_profile_test"} {
+		_, pidPath, err := egressDaemonPaths(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(pidPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pidPath, []byte("99999999\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runEnvProfileTestReleaseHook = func() error {
+		assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
+		return nil
+	}
+	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).stop(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--id", "friendly-slug",
+	})
+	if err != nil {
+		t.Fatalf("stop error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
+	for _, id := range []string{"friendly-slug", "cbx_env_profile_test"} {
+		_, pidPath, err := egressDaemonPaths(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+			t.Fatalf("egress pid path for %s still exists: %v", id, err)
+		}
+	}
+}
+
+func installRecordingSSH(t *testing.T, dir string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "ssh.log")
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	return logPath
+}
+
+func assertSSHLogContains(t *testing.T, logPath, want string) {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("ssh log missing %q:\n%s", want, data)
+	}
+}
+
 type windowsEnvHelperTestProvider struct{}
 
 func (windowsEnvHelperTestProvider) Name() string { return "windows-env-helper-test" }
@@ -154,6 +253,7 @@ type runEnvProfileTestBackend struct {
 }
 
 var runEnvProfileTestReleaseErr error
+var runEnvProfileTestReleaseHook func() error
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
@@ -176,6 +276,11 @@ func (b runEnvProfileTestBackend) List(context.Context, ListRequest) ([]LeaseVie
 	return nil, nil
 }
 func (b runEnvProfileTestBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	if runEnvProfileTestReleaseHook != nil {
+		if err := runEnvProfileTestReleaseHook(); err != nil {
+			return err
+		}
+	}
 	return runEnvProfileTestReleaseErr
 }
 func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, error) {

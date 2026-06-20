@@ -20,6 +20,7 @@ type crabboxKongCLI struct {
 	Warmup     warmupKongCmd     `cmd:"" passthrough:"" help:"Lease a box and wait until it is ready."`
 	Prewarm    prewarmKongCmd    `cmd:"" passthrough:"" help:"Lease and hydrate a reusable test-ready box."`
 	Run        runKongCmd        `cmd:"" passthrough:"" help:"Sync the repo, run a remote command, stream output."`
+	Bench      benchKongCmd      `cmd:"" help:"Record and report local benchmark timings."`
 	Job        jobKongCmd        `cmd:"" help:"Run named repo-local Crabbox jobs."`
 	Desktop    desktopKongCmd    `cmd:"" help:"Launch apps into a visible desktop session."`
 	Media      mediaKongCmd      `cmd:"" help:"Create preview artifacts from recorded desktop videos."`
@@ -125,7 +126,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "adapter", "admin", "artifacts", "azure", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "media", "pool":
+	case "actions", "adapter", "admin", "artifacts", "azure", "bench", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "media", "pool":
 		return true
 	default:
 		return false
@@ -154,6 +155,20 @@ type prewarmKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type runKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type benchKongCmd struct {
+	Run    benchRunKongCmd    `cmd:"" passthrough:"" help:"Run a workload across providers and record benchmark timings."`
+	Record benchRecordKongCmd `cmd:"" passthrough:"" help:"Append a TimingReport JSON object to the local benchmark ledger."`
+	Report benchReportKongCmd `cmd:"" passthrough:"" help:"Aggregate local benchmark timing observations."`
+}
+type benchRunKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type benchRecordKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type benchReportKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type jobKongCmd struct {
@@ -568,14 +583,23 @@ type pondReleaseKongCmd struct {
 
 type versionKongCmd struct{}
 
-func (c *initKongCmd) Run(ctx context.Context, app App) error      { return app.initProject(ctx, c.Args) }
-func (c *loginKongCmd) Run(ctx context.Context, app App) error     { return app.login(ctx, c.Args) }
-func (c *logoutKongCmd) Run(ctx context.Context, app App) error    { return app.logout(ctx, c.Args) }
-func (c *whoamiKongCmd) Run(ctx context.Context, app App) error    { return app.whoami(ctx, c.Args) }
-func (c *doctorKongCmd) Run(ctx context.Context, app App) error    { return app.doctor(ctx, c.Args) }
-func (c *warmupKongCmd) Run(ctx context.Context, app App) error    { return app.warmup(ctx, c.Args) }
-func (c *prewarmKongCmd) Run(ctx context.Context, app App) error   { return app.prewarm(ctx, c.Args) }
-func (c *runKongCmd) Run(ctx context.Context, app App) error       { return app.runCommand(ctx, c.Args) }
+func (c *initKongCmd) Run(ctx context.Context, app App) error    { return app.initProject(ctx, c.Args) }
+func (c *loginKongCmd) Run(ctx context.Context, app App) error   { return app.login(ctx, c.Args) }
+func (c *logoutKongCmd) Run(ctx context.Context, app App) error  { return app.logout(ctx, c.Args) }
+func (c *whoamiKongCmd) Run(ctx context.Context, app App) error  { return app.whoami(ctx, c.Args) }
+func (c *doctorKongCmd) Run(ctx context.Context, app App) error  { return app.doctor(ctx, c.Args) }
+func (c *warmupKongCmd) Run(ctx context.Context, app App) error  { return app.warmup(ctx, c.Args) }
+func (c *prewarmKongCmd) Run(ctx context.Context, app App) error { return app.prewarm(ctx, c.Args) }
+func (c *runKongCmd) Run(ctx context.Context, app App) error     { return app.runCommand(ctx, c.Args) }
+func (c *benchRunKongCmd) Run(ctx context.Context, app App) error {
+	return app.benchRun(ctx, c.Args)
+}
+func (c *benchRecordKongCmd) Run(ctx context.Context, app App) error {
+	return app.benchRecord(ctx, c.Args)
+}
+func (c *benchReportKongCmd) Run(ctx context.Context, app App) error {
+	return app.benchReport(ctx, c.Args)
+}
 func (c *jobListKongCmd) Run(ctx context.Context, app App) error   { return app.jobList(ctx, c.Args) }
 func (c *jobRunKongCmd) Run(ctx context.Context, app App) error    { return app.jobRun(ctx, c.Args) }
 func (c *syncPlanKongCmd) Run(ctx context.Context, app App) error  { return app.syncPlan(ctx, c.Args) }

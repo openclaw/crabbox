@@ -309,3 +309,14 @@ func TestRemoteEgressClientCommandRedactsThroughShellQuoting(t *testing.T) {
 		}
 	}
 }
+
+func TestEgressStopUsesSharedRemoteClientStopCommand(t *testing.T) {
+	got := remoteEgressClientCommand("https://broker.example.com", "cbx_abcdef123456", "egress_ticket", "egress_session", "127.0.0.1:3128")
+	want := remoteStopEgressClientCommand()
+	if !strings.HasPrefix(got, want+"\n") {
+		t.Fatalf("remote start command should stop existing client with shared command %q:\n%s", want, got)
+	}
+	if want != "pkill -f '[c]rabbox-egress-client egress client' >/dev/null 2>&1 || true" {
+		t.Fatalf("unexpected remote stop command: %q", want)
+	}
+}

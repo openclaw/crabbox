@@ -45,7 +45,18 @@ type TimingPhase struct {
 type timingReport = TimingReport
 type timingPhase = TimingPhase
 
+type timingReportWriter interface {
+	WriteTimingReport(TimingReport) error
+}
+
 func writeTimingJSON(w io.Writer, report TimingReport) error {
+	if writer, ok := w.(timingReportWriter); ok {
+		return writer.WriteTimingReport(report)
+	}
+	return encodeTimingJSON(w, report)
+}
+
+func encodeTimingJSON(w io.Writer, report TimingReport) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(report)

@@ -191,6 +191,35 @@ func TestPrintRunFailureDigest(t *testing.T) {
 	}
 }
 
+func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
+	var buf bytes.Buffer
+	printRunFailureDigest(&buf, runFailureDigestInput{
+		LeaseID:               "cbx_123",
+		Slug:                  "blue-lobster",
+		RunHistoryUnavailable: true,
+		CommandDisplay:        "go test ./...",
+		Classification:        FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
+	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	out := buf.String()
+	for _, want := range []string{
+		"run_history: unavailable; use lease-based recovery commands below",
+		"next: crabbox ssh --id blue-lobster",
+		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("digest missing %q:\n%s", want, out)
+		}
+	}
+	for _, unexpected := range []string{
+		"crabbox logs run_",
+		"crabbox doctor --from-run run_",
+	} {
+		if strings.Contains(out, unexpected) {
+			t.Fatalf("digest should not include run-based command %q:\n%s", unexpected, out)
+		}
+	}
+}
+
 func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	args := runFailureDigestRoutingArgs(Config{

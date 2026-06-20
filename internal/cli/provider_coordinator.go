@@ -257,6 +257,13 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 }
 
 func (b *coordinatorLeaseBackend) List(ctx context.Context, req ListRequest) ([]Server, error) {
+	if !req.All {
+		leases, err := b.listUserLeases(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return coordinatorLeasesToServers(leases, b.cfg), nil
+	}
 	machines, activeLeaseIDs, err := b.listMachines(ctx)
 	if err != nil {
 		leases, fallbackErr := b.listLeasesFallback(ctx, err)
@@ -269,12 +276,22 @@ func (b *coordinatorLeaseBackend) List(ctx context.Context, req ListRequest) ([]
 }
 
 func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest) (any, error) {
-	_ = req
+	if !req.All {
+		return b.listUserLeases(ctx)
+	}
 	machines, _, err := b.listMachines(ctx)
 	if err != nil {
 		return b.listLeasesFallback(ctx, err)
 	}
 	return machines, nil
+}
+
+func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
+	leases, err := b.coord.Leases(ctx, "active", 1000)
+	if err != nil {
+		return nil, err
+	}
+	return filterCoordinatorLeasesForProvider(leases, b.cfg.Provider), nil
 }
 
 func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]CoordinatorMachine, map[string]struct{}, error) {
@@ -311,11 +328,7 @@ func (b *coordinatorLeaseBackend) listLeasesFallback(ctx context.Context, adminE
 	} else if adminErr != nil {
 		return nil, adminErr
 	}
-	leases, err := b.coord.Leases(ctx, "active", 1000)
-	if err != nil {
-		return nil, err
-	}
-	return filterCoordinatorLeasesForProvider(leases, b.cfg.Provider), nil
+	return b.listUserLeases(ctx)
 }
 
 func coordinatorLeasesToServers(leases []CoordinatorLease, cfg Config) []Server {

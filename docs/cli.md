@@ -41,6 +41,8 @@ Commands are grouped here for orientation. Each links to its detailed page under
 crabbox warmup [lease flags]                 lease a box and wait until ready
 crabbox run -- <command...>                  sync, run a remote command, stream output
 crabbox run --pool <key> -- <command...>     borrow a hydrated ready-pool lease
+crabbox run --timing-record=default -- <cmd> append timing to the local benchmark ledger
+crabbox bench run --providers a,b -- <cmd>   run a workload and record benchmark timings
 crabbox status --id <id>                     show lease state (--wait to block)
 crabbox inspect --id <id>                     print lease/provider details
 crabbox list                                  list machines (alias: crabbox pool list)
@@ -75,11 +77,12 @@ crabbox logs <run-id>                         print run logs
 crabbox events <run-id>                       print run events
 crabbox attach <run-id>                       follow events for an active run
 crabbox results <run-id>                      show test-result summaries
+crabbox bench report [--json]                 aggregate local benchmark timing observations
 ```
 
 See [history](commands/history.md), [logs](commands/logs.md),
 [events](commands/events.md), [attach](commands/attach.md),
-[results](commands/results.md).
+[results](commands/results.md), [bench](commands/bench.md).
 
 ### Access and desktop
 

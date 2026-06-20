@@ -155,6 +155,201 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	}
 }
 
+func TestRunRecorderRetriesTransientCreateFailureAfterLease(t *testing.T) {
+	var stderr bytes.Buffer
+	var createBodies []map[string]any
+	var eventBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			createBodies = append(createBodies, body)
+			if len(createBodies) == 1 {
+				http.Error(w, `{"error":"temporary_unavailable"}`, http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","owner":"alice@example.com","org":"example-org","provider":"aws","class":"standard","serverType":"t3.small","command":["go","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
+			if err := json.NewDecoder(r.Body).Decode(&eventBody); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"event":{"runID":"run_123","seq":1,"type":"lease.created","createdAt":"2026-05-02T00:00:01Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	rec := newRunRecorder(context.Background(), client, Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	}, []string{"go", "test"}, "", &stderr)
+	rec.Event("leasing.started", "leasing", "")
+	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	})
+
+	if len(createBodies) != 2 {
+		t.Fatalf("create requests=%d want 2", len(createBodies))
+	}
+	if got := createBodies[0]["leaseID"]; got != "" {
+		t.Fatalf("first create leaseID=%#v want empty", got)
+	}
+	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
+		t.Fatalf("second create leaseID=%#v", got)
+	}
+	if got := eventBody["type"]; got != "lease.created" {
+		t.Fatalf("event body=%#v", eventBody)
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"warning: run history create failed before lease; will retry after lease is available:",
+		"recording run run_123",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "run history unavailable") || rec.historyUnavailable {
+		t.Fatalf("history should have recovered, stderr=%q unavailable=%v", text, rec.historyUnavailable)
+	}
+}
+
+func TestRunRecorderMarksHistoryUnavailableAfterPersistentCreateFailure(t *testing.T) {
+	var stderr bytes.Buffer
+	var createBodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		createBodies = append(createBodies, body)
+		if len(createBodies) == 1 {
+			http.Error(w, `{"error":"temporary_unavailable"}`, http.StatusInternalServerError)
+			return
+		}
+		http.Error(w, `{"error":"still_unavailable"}`, http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	rec := newRunRecorder(context.Background(), client, Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	}, []string{"go", "test"}, "", &stderr)
+	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	})
+
+	if len(createBodies) != 2 {
+		t.Fatalf("create requests=%d want 2", len(createBodies))
+	}
+	if rec.runID != "" || !rec.historyUnavailable {
+		t.Fatalf("recorder runID=%q historyUnavailable=%v", rec.runID, rec.historyUnavailable)
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"warning: run history create failed before lease; will retry after lease is available:",
+		"warning: run history create failed after lease; run history unavailable, use lease-based recovery commands:",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "recording run") {
+		t.Fatalf("stderr should not record a run:\n%s", text)
+	}
+}
+
+func TestRunRecorderRetriesFailedLeaseCreateOnReplacementLease(t *testing.T) {
+	var stderr bytes.Buffer
+	var createBodies []map[string]any
+	var eventBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			createBodies = append(createBodies, body)
+			if len(createBodies) < 3 {
+				http.Error(w, `{"error":"temporary_unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_replacement123","owner":"alice@example.com","org":"example-org","provider":"aws","class":"standard","serverType":"t3.small","command":["go","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
+			if err := json.NewDecoder(r.Body).Decode(&eventBody); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"event":{"runID":"run_123","seq":1,"type":"lease.created","createdAt":"2026-05-02T00:00:01Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	rec := newRunRecorder(context.Background(), client, Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	}, []string{"go", "test"}, "", &stderr)
+	rec.AttachLease("cbx_initial123456", "blue-lobster", Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	})
+	if rec.runID != "" || !rec.createPending || !rec.historyUnavailable {
+		t.Fatalf("after failed attach runID=%q createPending=%v historyUnavailable=%v", rec.runID, rec.createPending, rec.historyUnavailable)
+	}
+
+	rec.AttachLease("cbx_replacement123", "green-lobster", Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+	})
+
+	if len(createBodies) != 3 {
+		t.Fatalf("create requests=%d want 3", len(createBodies))
+	}
+	if got := createBodies[1]["leaseID"]; got != "cbx_initial123456" {
+		t.Fatalf("first lease-time create leaseID=%#v", got)
+	}
+	if got := createBodies[2]["leaseID"]; got != "cbx_replacement123" {
+		t.Fatalf("replacement create leaseID=%#v", got)
+	}
+	if got := eventBody["leaseID"]; got != "cbx_replacement123" {
+		t.Fatalf("lease.created body=%#v", eventBody)
+	}
+	if rec.runID != "run_123" || rec.createPending || rec.historyUnavailable {
+		t.Fatalf("recovered recorder runID=%q createPending=%v historyUnavailable=%v", rec.runID, rec.createPending, rec.historyUnavailable)
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"warning: run history create failed before lease; will retry after lease is available:",
+		"warning: run history create failed after lease; run history unavailable, use lease-based recovery commands:",
+		"recording run run_123",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestRunRecorderAttachLeaseUsesResolvedCoordinator(t *testing.T) {
 	var authorization string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -33,7 +33,7 @@ GET  /portal/runners/{provider}/{runner-id}      external runner detail
 GET  /portal/hosts/{provider}/{host-id}          dedicated host detail
 POST /portal/hosts/{provider}/{host-id}/vnc      enable VNC on the host's lease
 GET  /portal/login                               GitHub OAuth login redirect
-GET  /portal/logout                              clear the session cookie
+GET  /portal/logout                              end the portal and isolated Code sessions
 ```
 
 The WebVNC viewer page also drives a small set of bridge sub-routes that the
@@ -67,6 +67,9 @@ use the Code session on other portal routes or lease origins. The ingress must
 provide wildcard TLS and WebSocket routing for the template.
 Proxied responses may set only code-server's `vscode-tkn` cookie; Crabbox removes
 domain scope and confines it to that lease's Code path.
+Portal logout revokes isolated Code viewer sessions server-side, so their
+separate host-scoped cookies cannot retain access after the portal cookie is
+cleared.
 
 The setting is opt-in because Crabbox cannot provision an operator's wildcard
 DNS, certificate, or ingress route. When the setting is absent or invalid, Code

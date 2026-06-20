@@ -16,6 +16,7 @@ same order as the CLI help.
 - [warmup](warmup.md)
 - [prewarm](prewarm.md)
 - [run](run.md)
+- [bench](bench.md)
 - [job](job.md)
 - [desktop](desktop.md)
 - [media](media.md)

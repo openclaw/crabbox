@@ -180,7 +180,18 @@ func (a App) releaseWarmupLeaseAfterFailure(ctx context.Context, backend SSHLeas
 	a.releaseBackendLeaseBestEffort(ctx, backend, cfg, lease)
 }
 
-func (a App) runCommand(ctx context.Context, args []string) (err error) {
+type benchmarkRecordContext struct {
+	Source      string
+	RepeatIndex int
+	ColdRun     *bool
+	OnRecord    func()
+}
+
+func (a App) runCommand(ctx context.Context, args []string) error {
+	return a.runCommandWithBenchmarkRecord(ctx, args, benchmarkRecordContext{})
+}
+
+func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, benchmarkCtx benchmarkRecordContext) (err error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("run", a.Stderr)
 	leaseFlags := registerLeaseCreateFlags(fs, defaults)
@@ -231,17 +242,48 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	fs.Var(&requiredArtifactGlobs, "require-artifact", "require a remote file matching a safe glob after command success; repeatable")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
+	timingRecord := fs.String("timing-record", "", "append final timing to benchmark JSONL store: default, off, or path")
 	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	timingRecordPath, timingRecordEnabled, err := resolveBenchmarkTimingStore(*timingRecord)
+	if err != nil {
 		return err
 	}
 	var cleanup leaseCleanupResult
 	var finalTimingReport *timingReport
+	var timingRecordRepo Repo
+	var timingRecordCommand []string
+	var timingRecordColdRun *bool
+	var delegatedTimingCapture *capturedTimingReportWriter
 	defer func() {
-		if !*timingJSON || finalTimingReport == nil {
+		if finalTimingReport == nil {
 			return
 		}
 		report := *finalTimingReport
 		cleanup.apply(&report)
+		if timingRecordEnabled {
+			recordColdRun := timingRecordColdRun
+			if benchmarkCtx.ColdRun != nil {
+				recordColdRun = benchmarkCtx.ColdRun
+			}
+			record := newBenchmarkTimingRecord(time.Now().UTC(), firstNonBlank(strings.TrimSpace(benchmarkCtx.Source), "run"), report, timingRecordRepo, timingRecordCommand, recordColdRun, benchmarkCtx.RepeatIndex)
+			if writeErr := appendBenchmarkTimingRecord(timingRecordPath, record); writeErr != nil {
+				if err == nil {
+					err = writeErr
+				} else {
+					fmt.Fprintf(a.Stderr, "warning: benchmark timing record skipped: %v\n", writeErr)
+				}
+			} else {
+				if benchmarkCtx.OnRecord != nil {
+					benchmarkCtx.OnRecord()
+				}
+				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
+			}
+		}
+		if !*timingJSON {
+			return
+		}
 		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
 			err = writeErr
 		}
@@ -378,6 +420,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	timingRecordRepo = repo
 	freshPR, err := parseFreshPRSpec(*freshPRValue, repo)
 	if err != nil {
 		return err
@@ -435,7 +478,12 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			return exit(2, "profile doctor is not supported for native Windows targets")
 		}
 	}
-	backend, err := loadBackend(cfg, runtimeForApp(a))
+	backendRuntime := runtimeForApp(a)
+	if timingRecordEnabled {
+		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
+		backendRuntime.Stderr = delegatedTimingCapture
+	}
+	backend, err := loadBackend(cfg, backendRuntime)
 	if err != nil {
 		return err
 	}
@@ -509,7 +557,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		Command:               command,
 		Label:                 runLabelValue,
 		RequestedSlug:         requestedSlug,
-		TimingJSON:            *timingJSON,
+		TimingJSON:            *timingJSON || timingRecordEnabled,
 		ArtifactGlobs:         expansion.ArtifactGlobs,
 		RequiredArtifactGlobs: requiredArtifactGlobs,
 		EmitProof:             strings.TrimSpace(*emitProof),
@@ -534,6 +582,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			}
 			runReq.Script = script
 		}
+		timingRecordCommand = runScriptRecordCommand(script, command)
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
@@ -552,7 +601,20 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 			if err != nil {
 				return err
 			}
+			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
+		}
+		if result.Session != nil {
+			coldRun := !result.Session.Reused
+			timingRecordColdRun = &coldRun
+		}
+		if timingRecordEnabled {
+			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
+			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
+				report = *delegatedTimingCapture.report
+			}
+			report.Artifacts = result.Artifacts
+			finalTimingReport = &report
 		}
 		return runErr
 	}
@@ -612,6 +674,7 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 		return recordRunFailure(&runFailure, failure)
 	}
 	recordCommand := runScriptRecordCommand(script, command)
+	timingRecordCommand = recordCommand
 	if useCoordinator {
 		recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr)
 		defer func() {
@@ -663,6 +726,10 @@ func (a App) runCommand(ctx context.Context, args []string) (err error) {
 	}
 	if err != nil {
 		return recordFailure(err)
+	}
+	if timingRecordEnabled {
+		coldRun := acquired && strings.TrimSpace(*leaseIDFlag) == "" && borrowedPool == nil
+		timingRecordColdRun = &coldRun
 	}
 	applyResolvedServerConfig(&cfg, server)
 	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
@@ -1189,7 +1256,7 @@ afterSync:
 		printPreflight(target)
 		fmt.Fprintf(a.Stdout, "synced %s\n", workdir)
 		fmt.Fprintln(a.Stderr, formatRunSummary(timings, time.Since(timings.started), 0))
-		if *timingJSON {
+		if *timingJSON || timingRecordEnabled {
 			total := time.Since(timings.started)
 			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)
 			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, recorder.runID, workdir, nil)
@@ -1495,26 +1562,27 @@ afterSync:
 		labelField = fmt.Sprintf(" label=%q", runLabelValue)
 	}
 	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(serverSlug(server), "-"), blank(recorder.runID, "-"), labelField, blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
-	if *timingJSON {
+	if *timingJSON || timingRecordEnabled {
 		finalTimingReport = &report
 	}
 	if code != 0 {
 		printRunFailureDigest(a.Stderr, runFailureDigestInput{
-			Provider:       cfg.Provider,
-			TargetOS:       cfg.TargetOS,
-			WindowsMode:    cfg.WindowsMode,
-			LeaseID:        leaseID,
-			Slug:           serverSlug(server),
-			RunID:          recorder.runID,
-			CommandDisplay: commandDisplay,
-			ShellMode:      *shellMode || useShell,
-			ScriptMode:     script != nil,
-			RoutingArgs:    runFailureDigestRoutingArgs(cfg, leaseID),
-			SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, leaseID),
-			StopCommand:    report.StopCommand,
-			Classification: classification,
-			Phases:         timings.commandPhases,
-			Results:        results,
+			Provider:              cfg.Provider,
+			TargetOS:              cfg.TargetOS,
+			WindowsMode:           cfg.WindowsMode,
+			LeaseID:               leaseID,
+			Slug:                  serverSlug(server),
+			RunID:                 recorder.runID,
+			RunHistoryUnavailable: recorder.historyUnavailable,
+			CommandDisplay:        commandDisplay,
+			ShellMode:             *shellMode || useShell,
+			ScriptMode:            script != nil,
+			RoutingArgs:           runFailureDigestRoutingArgs(cfg, leaseID),
+			SSHRoutingArgs:        runFailureDigestSSHRoutingArgs(cfg, leaseID),
+			StopCommand:           report.StopCommand,
+			Classification:        classification,
+			Phases:                timings.commandPhases,
+			Results:               results,
 		}, stdoutTail, stderrTail, *captureStdout, *captureStderr)
 		capture := FailureCaptureMetadata{
 			Provider:       cfg.Provider,
@@ -2587,6 +2655,7 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
+	a.cleanupMediatedEgressBestEffort(ctx, lease.LeaseID, lease)
 	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
@@ -2956,6 +3025,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if lease.SSH.Host != "" {
 		a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
 	}
+	a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
 	a.logoutRemoteTailscaleBestEffort(ctx, lease)
 	if err := sshBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
 		Lease:                    lease,

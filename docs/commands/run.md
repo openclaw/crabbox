@@ -162,7 +162,8 @@ hint, and `sync.timeout` kills stalled syncs.
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other
   hosts are rejected. Add `--apply-local-patch` to apply the local `git diff
   --binary HEAD` on top of the PR checkout. `--fresh-pr` needs the SSH-run sync
-  path; delegated providers and native Windows targets reject it.
+  path; delegated providers reject it. Native Windows SSH targets are
+  supported.
 
 ## Actions hydration
 
@@ -408,6 +409,13 @@ stderr as `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases`
 without removing the marker line from output. In `blacksmith-testbox` mode, sync
 is reported as delegated in the same schema.
 
+Use `--timing-record=default` or `--timing-record <path>` to append the final
+timing payload to a local benchmark JSONL store. This is opt-in; ordinary
+`crabbox run` invocations do not persist timing rows. The persisted row wraps the
+same `TimingReport` payload with local benchmark context such as command
+fingerprint, repo fingerprint, provider family/kind, and cold/warm state when
+known. See [`crabbox bench`](bench.md) for reporting and privacy guidance.
+
 When a coordinator is configured, Crabbox records each remote command as a run
 history item. [`crabbox history`](history.md) lists those records and [`crabbox
 logs <run-id>`](logs.md) prints retained remote output (retention is bounded so
@@ -530,4 +538,5 @@ Run-specific flags:
 --capture-on-fail            Compatibility alias.
 --label <text>
 --timing-json
+--timing-record default|off|path
 ```

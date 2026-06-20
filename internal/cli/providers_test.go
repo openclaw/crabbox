@@ -16,6 +16,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
+	var scaleway *providerMatrixEntry
 	var moduleRuntime *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
@@ -35,6 +36,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "nebius" {
 			nebius = &entries[i]
+		}
+		if entries[i].Provider == "scaleway" {
+			scaleway = &entries[i]
 		}
 		if entries[i].Provider == "module-runtime-test" {
 			moduleRuntime = &entries[i]
@@ -57,6 +61,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if nebius == nil {
 		t.Fatal("nebius provider not found")
+	}
+	if scaleway == nil {
+		t.Fatal("scaleway provider not found")
 	}
 	if aws.Kind != ProviderKindSSHLease {
 		t.Fatalf("aws kind=%q", aws.Kind)
@@ -101,6 +108,17 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsFeature(nebius.Features, FeatureSSH) || !containsFeature(nebius.Features, FeatureCrabboxSync) || !containsFeature(nebius.Features, FeatureCleanup) {
 		t.Fatalf("nebius features=%v", nebius.Features)
+	}
+	if scaleway.Kind != ProviderKindSSHLease || scaleway.Family != "scaleway" || scaleway.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("scaleway kind/family/coordinator=%q/%q/%q", scaleway.Kind, scaleway.Family, scaleway.Coordinator)
+	}
+	if !containsString(scaleway.Targets, targetLinux) {
+		t.Fatalf("scaleway targets=%v", scaleway.Targets)
+	}
+	for _, feature := range []Feature{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale} {
+		if !containsFeature(scaleway.Features, feature) {
+			t.Fatalf("scaleway features=%v missing %s", scaleway.Features, feature)
+		}
 	}
 	if moduleRuntime == nil {
 		t.Fatal("module-runtime-test provider not found")

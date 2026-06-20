@@ -24,6 +24,7 @@ type credentialDestinationProvenance struct {
 	accessClientID      credentialValueSource
 	accessClientSecret  credentialValueSource
 	accessToken         credentialValueSource
+	azSessionsEndpoint  credentialValueSource
 	proxmoxAPIURL       credentialValueSource
 	proxmoxTokenID      credentialValueSource
 	proxmoxTokenSecret  credentialValueSource
@@ -151,6 +152,9 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "sprites-api-url") {
 		provenance.spritesAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "azure-dynamic-sessions-endpoint") {
+		provenance.azSessionsEndpoint = credentialSourceFlag
 	}
 }
 
@@ -282,6 +286,10 @@ func validateProviderCredentialDestination(cfg Config) error {
 func ValidateNativeCredentialDestination(cfg Config, provider string) error {
 	provenance := cfg.credentialProvenance
 	switch normalizeProviderName(provider) {
+	case "azure-dynamic-sessions":
+		if provenance.azSessionsEndpoint == credentialSourceRepository {
+			return repositoryCredentialDestinationError("azure-dynamic-sessions", "azureDynamicSessions.endpoint", "CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT or --azure-dynamic-sessions-endpoint")
+		}
 	case "daytona":
 		if provenance.daytonaAPIURL == credentialSourceRepository {
 			return repositoryCredentialDestinationError("daytona", "daytona.apiUrl", "CRABBOX_DAYTONA_API_URL or --daytona-api-url")

@@ -5,16 +5,25 @@
 ### Added
 
 - Added `provider: nebius` for direct Nebius AI Cloud Linux SSH leases through the native CLI, with profile-owned authentication, managed networking and disks, and claim-backed lifecycle hardening. Thanks @coygeek.
+- Added an opt-in local benchmark timing ledger with repeated provider runs and evidence-aware reports. Thanks @TurboTheTurtle.
 - Added the Phala confidential Intel TDX CVM provider with default-on hardware attestation, exact Compose binding, TLS-authenticated SSH, and fail-closed claim-backed lifecycle cleanup. Thanks @anagnorisis2peripeteia.
 - Added reusable E2B run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
 - Added reusable Modal run-session handles and cleanup commands for `--keep --lease-output`. Thanks @kiranmagic7.
+- Added the Scaleway direct Linux SSH-lease provider with per-lease IAM keys, claim-backed lifecycle recovery, and guarded live smoke coverage. Thanks @coygeek.
+- Added reusable W&B run-session handles and cleanup commands for `--keep --lease-output`.
 - Added Linux CPU capacity to lease telemetry and portal status details.
 ### Changed
 
+- Refreshed the bundled Crabbox agent skill for current remote-proof, job, pool, artifact, desktop, and provider-boundary workflows. Thanks @coygeek.
 - Defined Crabbox's supported single-user and cooperative-team security boundary, clarified repository configuration as trusted project automation, and separated vulnerability reporting from compatibility-preserving hardening.
 
 ### Fixed
 
+- Revoked isolated Code viewer sessions when their GitHub portal session logs out, preventing stale viewer cookies from retaining prior-owner lease access. Thanks @coygeek.
+- Prevented unauthenticated Cloudflare Access key fetches and bounded key-set refresh work for invalid JWT key IDs. Thanks @coygeek.
+- Blocked normalized empty-segment variants of internal coordinator routes and stripped caller-supplied internal headers before fleet dispatch. Thanks @coygeek.
+- Source-bound Azure Dynamic Sessions bearer tokens to operator-approved endpoints instead of repository-selected destinations. Thanks @coygeek.
+- Made coordinator-backed `crabbox list` query the user's active orchestrator leases directly, reserving admin-wide machine inventory for `--all` and avoiding stale admin-token warnings during ordinary listing.
 - Let Islo use tenant defaults for implicit sandbox image and capacity while preserving every explicit config, environment, and flag override. Thanks @zozo123.
 - Made new runtime-adapter ticket claims provisional until agent connection or lease registration, allowing authenticated recovery of expired inactive first claims while preserving all existing and confirmed adapter IDs.
 - Separated shared automation tokens from signed user-token keys, preserving shared-token-only automation while requiring distinct session signing material for GitHub login.
