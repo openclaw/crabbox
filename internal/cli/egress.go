@@ -292,7 +292,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	cfg, cfgErr := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if cfgErr == nil {
 		if _, target, leaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false); resolveErr == nil {
-			_ = runSSHQuiet(ctx, target, "pkill -f '[c]rabbox-egress-client egress client' >/dev/null 2>&1 || true")
+			_ = runSSHQuiet(ctx, target, remoteStopEgressClientCommand())
 			if leaseID != *id && !stoppedLocal {
 				stoppedLocal, _ = a.stopEgressHostDaemon(leaseID)
 			}
@@ -860,7 +860,7 @@ func remoteEgressClientCommand(coordinatorURL, leaseID, ticket, sessionID, liste
 		"--listen", listen,
 	}
 	var b strings.Builder
-	b.WriteString("pkill -f '[c]rabbox-egress-client egress client' >/dev/null 2>&1 || true\n")
+	b.WriteString(remoteStopEgressClientCommand() + "\n")
 	b.WriteString("nohup ")
 	for i, arg := range args {
 		if i > 0 {
@@ -870,6 +870,10 @@ func remoteEgressClientCommand(coordinatorURL, leaseID, ticket, sessionID, liste
 	}
 	b.WriteString(" >" + shellQuote(egressRemoteLog) + " 2>&1 < /dev/null &\n")
 	return b.String()
+}
+
+func remoteStopEgressClientCommand() string {
+	return "pkill -f '[c]rabbox-egress-client egress client' >/dev/null 2>&1 || true"
 }
 
 func waitRemoteEgressClient(ctx context.Context, target SSHTarget, listen string) error {
@@ -968,6 +972,30 @@ func (a App) stopEgressHostDaemon(leaseID string) (bool, error) {
 	_ = os.Remove(pidPath)
 	fmt.Fprintf(a.Stdout, "egress host daemon: stopped pid=%d\n", pid)
 	return true, nil
+}
+
+func (a App) cleanupMediatedEgressBestEffort(ctx context.Context, requestedID string, lease LeaseTarget) {
+	seen := map[string]bool{}
+	for _, id := range []string{requestedID, lease.LeaseID} {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if _, err := a.stopEgressHostDaemon(id); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", id, err)
+		}
+	}
+	if !supportsRemoteEgressClientCleanup(lease.SSH) {
+		return
+	}
+	if err := runSSHQuiet(ctx, lease.SSH, remoteStopEgressClientCommand()); err != nil {
+		fmt.Fprintf(a.Stderr, "warning: egress remote client cleanup failed for %s: %v\n", blank(lease.LeaseID, requestedID), err)
+	}
+}
+
+func supportsRemoteEgressClientCleanup(target SSHTarget) bool {
+	return target.Host != "" && (target.TargetOS == "" || target.TargetOS == targetLinux)
 }
 
 func isEgressDaemonCommand(command string) bool {
