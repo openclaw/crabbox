@@ -1936,3 +1936,46 @@ func TestWindowsWSLCanReachTargetEmptyHostKeepsWSLPath(t *testing.T) {
 		t.Fatal("empty-host target should short-circuit to reachable without invoking wsl")
 	}
 }
+
+func TestIsSafeProbeToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "ipv4", in: "172.19.55.70", want: true},
+		{name: "hostname", in: "host-1.example_net", want: true},
+		{name: "ipv6 with zone", in: "fe80::1%eth0", want: true},
+		{name: "port", in: "2222", want: true},
+		{name: "empty", in: "", want: false},
+		{name: "semicolon", in: "h;rm -rf /", want: false},
+		{name: "command sub", in: "$(touch pwned)", want: false},
+		{name: "backtick", in: "`id`", want: false},
+		{name: "space", in: "a b", want: false},
+		{name: "ampersand", in: "a&b", want: false},
+		{name: "pipe", in: "a|b", want: false},
+		{name: "redirect", in: "a>b", want: false},
+		{name: "single quote", in: "a'b", want: false},
+		{name: "slash", in: "a/b", want: false},
+		{name: "newline", in: "a\nb", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSafeProbeToken(tc.in); got != tc.want {
+				t.Fatalf("isSafeProbeToken(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWindowsWSLCanReachTargetRejectsHostileHost(t *testing.T) {
+	t.Parallel()
+	// A host carrying shell metacharacters must never be handed to a shell: the
+	// function must return false (native-rsync fallback) without invoking wsl. A
+	// bogus wslExe would error if executed, so a false result proves it never ran.
+	if windowsWSLCanReachTarget(context.Background(), "wsl-does-not-exist.invalid", SSHTarget{Host: "$(touch pwned)"}) {
+		t.Fatal("hostile host should not be probed and must fall back to native rsync")
+	}
+}

@@ -626,18 +626,9 @@ type rsyncOptions struct {
 	HeartbeatInterval time.Duration
 }
 
-// defaultRsyncTimeout bounds a sync that would otherwise block forever (for
-// example an SSH transport that can never reach the target). It is a generous
-// backstop, not a tight deadline: real source syncs finish well inside it, and
-// hitting it surfaces rsync's actionable timeout error instead of hanging.
-const defaultRsyncTimeout = 30 * time.Minute
-
 func normalizeRsyncOptions(opts rsyncOptions) rsyncOptions {
 	if opts.NoTimes {
 		opts.Checksum = true
-	}
-	if opts.Timeout <= 0 {
-		opts.Timeout = defaultRsyncTimeout
 	}
 	return opts
 }
@@ -894,14 +885,43 @@ func wslReachabilityProbeScript(host, port string) string {
 // and ssh installed; probing avoids selecting the WSL path only for its SSH
 // transport to block on connect. An empty host is treated as reachable so the
 // default WSL path is unchanged for targets without an explicit host.
+// isSafeProbeToken reports whether s contains only characters valid in a
+// hostname, IP address (v4/v6 with zone id), or TCP port -- and therefore no
+// shell metacharacters. host and port are interpolated into the reachability
+// probe's shell command, so any value outside this set must never reach a shell.
+func isSafeProbeToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == ':', r == '-', r == '_', r == '%':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func windowsWSLCanReachTarget(ctx context.Context, wslExe string, target SSHTarget) bool {
 	host := strings.TrimSpace(target.Host)
 	if host == "" {
 		return true
 	}
+	port := strings.TrimSpace(target.Port)
+	if port == "" {
+		port = "22"
+	}
+	// host and port are interpolated into a shell command run inside WSL. If
+	// either carries anything outside the hostname/IP/port character set, do not
+	// run a shell with it: fall back to native rsync, which is the safe choice.
+	if !isSafeProbeToken(host) || !isSafeProbeToken(port) {
+		return false
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	script := wslReachabilityProbeScript(host, target.Port)
+	script := wslReachabilityProbeScript(host, port)
 	return exec.CommandContext(probeCtx, wslExe, "bash", "-c", script).Run() == nil
 }
 
