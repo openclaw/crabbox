@@ -18,7 +18,6 @@
 
 ### Fixed
 
-- Retried transient coordinator run-history creation after lease attachment and preserved recovery across replacement leases.
 - Revoked isolated Code viewer sessions when their GitHub portal session logs out, preventing stale viewer cookies from retaining prior-owner lease access. Thanks @coygeek.
 - Prevented unauthenticated Cloudflare Access key fetches and bounded key-set refresh work for invalid JWT key IDs. Thanks @coygeek.
 - Blocked normalized empty-segment variants of internal coordinator routes and stripped caller-supplied internal headers before fleet dispatch. Thanks @coygeek.
