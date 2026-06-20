@@ -1041,6 +1041,7 @@ export class FleetCoordinator {
     const now = Date.now();
     const revoked = new Map<string, string>();
     const revokedCodeViewers = new Map<WebSocket, string>();
+    const codeViewersToCheck: Array<{ socket: WebSocket; portalSessionHash?: string }> = [];
     for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment || !("leaseID" in attachment)) {
@@ -1054,12 +1055,25 @@ export class FleetCoordinator {
         );
         continue;
       }
-      if (
-        attachment.kind === "code-viewer" &&
-        attachment.auth === "github" &&
-        (!validPortalSessionHash(attachment.portalSessionHash) ||
-          (await this.codeViewerPortalSessionRevoked(attachment.portalSessionHash)))
-      ) {
+      if (attachment.kind === "code-viewer" && attachment.auth === "github") {
+        codeViewersToCheck.push({
+          socket,
+          ...(attachment.portalSessionHash
+            ? { portalSessionHash: attachment.portalSessionHash }
+            : {}),
+        });
+      }
+    }
+    const codeViewerRevocations = await Promise.all(
+      codeViewersToCheck.map(async ({ socket, portalSessionHash }) => ({
+        socket,
+        revoked:
+          !validPortalSessionHash(portalSessionHash) ||
+          (await this.codeViewerPortalSessionRevoked(portalSessionHash)),
+      })),
+    );
+    for (const { socket, revoked: portalSessionRevoked } of codeViewerRevocations) {
+      if (portalSessionRevoked) {
         revokedCodeViewers.set(socket, "portal session ended");
       }
     }
