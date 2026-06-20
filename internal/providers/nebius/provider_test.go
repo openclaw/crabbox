@@ -162,7 +162,7 @@ func TestRedactNebiusText(t *testing.T) {
 func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
 	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		joined := strings.Join(req.Args, " ")
-		for _, forbidden := range []string{" create", " delete", " update", " compute instance", " disk create", " disk delete", " allocation create", " allocation delete"} {
+		for _, forbidden := range []string{" create", " delete", " update", " disk create", " disk delete", " allocation create", " allocation delete"} {
 			if strings.Contains(" "+joined, forbidden) {
 				return LocalCommandResult{}, errors.New("mutating command invoked: " + joined)
 			}
@@ -170,8 +170,8 @@ func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
 		switch joined {
 		case "--profile sandbox version":
 			return LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
-		case "--profile sandbox profile list --format json":
-			return LocalCommandResult{Stdout: `[{"name":"sandbox","active":true}]`}, nil
+		case "--profile sandbox profile list":
+			return LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
 		case "--profile sandbox iam project get project-123 --format json":
 			return LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
 		case "--profile sandbox vpc subnet list --parent-id project-123 --format json":
@@ -180,6 +180,8 @@ func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
 			return LocalCommandResult{Stdout: `[{"id":"cpu-d3"}]`}, nil
 		case "--profile sandbox compute image get-latest-by-family --image-family ubuntu24.04-driverless --format json":
 			return LocalCommandResult{Stdout: `{"metadata":{"id":"image-123"}}`}, nil
+		case "--profile sandbox compute instance list --parent-id project-123 --format json":
+			return LocalCommandResult{Stdout: `{"items":[]}`}, nil
 		default:
 			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}
@@ -206,8 +208,8 @@ func TestDoctorRejectsMissingImageFamily(t *testing.T) {
 		switch joined {
 		case "--profile sandbox version":
 			return LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
-		case "--profile sandbox profile list --format json":
-			return LocalCommandResult{Stdout: `[{"name":"sandbox","active":true}]`}, nil
+		case "--profile sandbox profile list":
+			return LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
 		case "--profile sandbox iam project get project-123 --format json":
 			return LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
 		case "--profile sandbox vpc subnet list --parent-id project-123 --format json":
@@ -216,6 +218,8 @@ func TestDoctorRejectsMissingImageFamily(t *testing.T) {
 			return LocalCommandResult{Stdout: `[{"metadata":{"id":"cpu-d3"}}]`}, nil
 		case "--profile sandbox compute image get-latest-by-family --image-family ubuntu24.04-driverless --format json":
 			return LocalCommandResult{Stdout: `{}`}, nil
+		case "--profile sandbox compute instance list --parent-id project-123 --format json":
+			return LocalCommandResult{Stdout: `{"items":[]}`}, nil
 		default:
 			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}

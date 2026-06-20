@@ -490,12 +490,12 @@ func (b *backend) checkVersion(ctx context.Context, client cliRunner) DoctorChec
 }
 
 func (b *backend) checkProfile(ctx context.Context, client cliRunner) DoctorCheck {
-	result, err := client.run(ctx, "profile", "list", "--format", "json")
+	result, err := client.run(ctx, "profile", "list")
 	if err != nil {
 		return doctorCheck("profile", "error", err.Error(), nil)
 	}
-	if !isJSON(result.Stdout) {
-		return doctorCheck("profile", "error", "profile list did not return JSON", nil)
+	if strings.TrimSpace(result.Stdout) == "" {
+		return doctorCheck("profile", "error", "profile store is empty", nil)
 	}
 	return doctorCheck("profile", "ok", "profile store readable", nil)
 }
@@ -567,7 +567,7 @@ func (b *backend) checkImage(ctx context.Context, client cliRunner) DoctorCheck 
 }
 
 func (b *backend) checkJSON(ctx context.Context, client cliRunner) DoctorCheck {
-	result, err := client.run(ctx, "profile", "list", "--format", "json")
+	result, err := client.run(ctx, "compute", "instance", "list", "--parent-id", b.Cfg.Nebius.ParentID, "--format", "json")
 	if err != nil {
 		return doctorCheck("json", "error", err.Error(), nil)
 	}
