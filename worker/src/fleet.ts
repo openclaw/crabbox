@@ -639,7 +639,13 @@ type BridgeAttachment =
       label: string;
     }
   | { kind: "code-agent"; leaseID: string }
-  | { kind: "code-viewer"; leaseID: string; id: string }
+  | {
+      kind: "code-viewer";
+      leaseID: string;
+      id: string;
+      auth: AuthContext["auth"];
+      portalSessionHash?: string;
+    }
   | { kind: "egress-host"; leaseID: string; sessionID: string }
   | { kind: "egress-client"; leaseID: string; sessionID: string }
   | {
@@ -1034,6 +1040,7 @@ export class FleetCoordinator {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     const now = Date.now();
     const revoked = new Map<string, string>();
+    const revokedCodeViewers = new Map<WebSocket, string>();
     for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
       if (!attachment || !("leaseID" in attachment)) {
@@ -1045,6 +1052,15 @@ export class FleetCoordinator {
           attachment.leaseID,
           lease && leaseIsLive(lease) ? "lease expired" : "lease ended",
         );
+        continue;
+      }
+      if (
+        attachment.kind === "code-viewer" &&
+        attachment.auth === "github" &&
+        (!validPortalSessionHash(attachment.portalSessionHash) ||
+          (await this.codeViewerPortalSessionRevoked(attachment.portalSessionHash)))
+      ) {
+        revokedCodeViewers.set(socket, "portal session ended");
       }
     }
     for (const [leaseID, reason] of revoked) {
@@ -1057,6 +1073,14 @@ export class FleetCoordinator {
       if (reason) {
         closeSocket(socket, 1008, reason);
       }
+    }
+    for (const [socket, reason] of revokedCodeViewers) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment?.kind !== "code-viewer") {
+        continue;
+      }
+      this.clearCodeViewer(attachment.leaseID, attachment.id, socket, 1008, reason);
+      closeSocket(socket, 1008, reason);
     }
     this.restoredLeaseBridgeSockets.clear();
   }
@@ -6679,6 +6703,7 @@ export class FleetCoordinator {
       return await this.bootstrapCodeViewer(request, identifier);
     }
     let authorizedRequest = request;
+    let viewerSession: CodeViewerSessionRecord | undefined;
     if (isolated) {
       const session = await this.codeViewerSession(request, identifier);
       if (!session) {
@@ -6690,6 +6715,7 @@ export class FleetCoordinator {
           { status: 403 },
         );
       }
+      viewerSession = session;
       authorizedRequest = requestWithAuthContext(request, {
         authorized: true,
         admin: session.admin,
@@ -6723,7 +6749,25 @@ export class FleetCoordinator {
       return portalCode(lease);
     }
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      return this.codeViewerWebSocket(authorizedRequest, lease, agent);
+      const auth = viewerSession?.auth ?? requestAuthType(authorizedRequest);
+      let portalSessionHash = viewerSession?.portalSessionHash;
+      if (auth === "github" && !portalSessionHash) {
+        const token = bearerToken(authorizedRequest);
+        if (!token) {
+          return json(
+            { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
+            { status: 401, headers: { "cache-control": "no-store" } },
+          );
+        }
+        portalSessionHash = await sha256Hex(token);
+      }
+      return await this.codeViewerWebSocket(
+        authorizedRequest,
+        lease,
+        agent,
+        auth,
+        portalSessionHash,
+      );
     }
     return await this.codeProxyHTTP(authorizedRequest, lease, agent);
   }
@@ -6952,14 +6996,17 @@ export class FleetCoordinator {
         const expiresAt = Number.isFinite(tokenExpiresAt)
           ? Math.min(revocationExpiresAt, tokenExpiresAt)
           : revocationExpiresAt;
-        await this.state.storage.put<CodeViewerSessionRevocationRecord>(
-          codeViewerSessionRevocationKey(portalSessionHash),
-          {
-            portalSessionHash,
-            createdAt: now.toISOString(),
-            expiresAt: new Date(expiresAt).toISOString(),
-          },
-        );
+        await this.withBridgeTicketLock(async () => {
+          await this.state.storage.put<CodeViewerSessionRevocationRecord>(
+            codeViewerSessionRevocationKey(portalSessionHash),
+            {
+              portalSessionHash,
+              createdAt: now.toISOString(),
+              expiresAt: new Date(expiresAt).toISOString(),
+            },
+          );
+          this.closeCodeViewersForPortalSession(portalSessionHash);
+        });
       }
     }
     return githubPortalLogout();
@@ -7037,21 +7084,44 @@ export class FleetCoordinator {
     });
   }
 
-  private codeViewerWebSocket(request: Request, lease: LeaseRecord, agent: WebSocket): Response {
-    const upgrade = this.state.createWebSocketUpgrade();
-    const viewer = upgrade.socket;
-    const id = crypto.randomUUID();
-    this.codeViewers.set(id, viewer);
-    this.acceptBridgeWebSocket(viewer, { kind: "code-viewer", leaseID: lease.id, id });
-    const url = new URL(request.url);
-    const open: CodeWebSocketOpen = {
-      type: "ws_open",
-      id,
-      path: `${url.pathname}${url.search}`,
-      headers: codeForwardHeaders(request.headers),
-    };
-    agent.send(JSON.stringify(open));
-    return upgrade.response;
+  private async codeViewerWebSocket(
+    request: Request,
+    lease: LeaseRecord,
+    agent: WebSocket,
+    auth: AuthContext["auth"],
+    portalSessionHash?: string,
+  ): Promise<Response> {
+    return await this.withBridgeTicketLock(async () => {
+      if (
+        (auth === "github" && !validPortalSessionHash(portalSessionHash)) ||
+        (portalSessionHash && (await this.codeViewerPortalSessionRevoked(portalSessionHash)))
+      ) {
+        return json(
+          { error: "code_viewer_session_revoked", message: "Code viewer session has ended" },
+          { status: 401, headers: { "cache-control": "no-store" } },
+        );
+      }
+      const upgrade = this.state.createWebSocketUpgrade();
+      const viewer = upgrade.socket;
+      const id = crypto.randomUUID();
+      this.codeViewers.set(id, viewer);
+      this.acceptBridgeWebSocket(viewer, {
+        kind: "code-viewer",
+        leaseID: lease.id,
+        id,
+        auth,
+        ...(portalSessionHash ? { portalSessionHash } : {}),
+      });
+      const url = new URL(request.url);
+      const open: CodeWebSocketOpen = {
+        type: "ws_open",
+        id,
+        path: `${url.pathname}${url.search}`,
+        headers: codeForwardHeaders(request.headers),
+      };
+      agent.send(JSON.stringify(open));
+      return upgrade.response;
+    });
   }
 
   private sendCodeWebSocketData(agent: WebSocket, message: CodeWebSocketData): void {
@@ -7219,6 +7289,20 @@ export class FleetCoordinator {
     const message: CodeWebSocketClose = { type: "ws_close", id, code, reason };
     if (agent?.readyState === WebSocket.OPEN) {
       agent.send(JSON.stringify(message));
+    }
+  }
+
+  private closeCodeViewersForPortalSession(portalSessionHash: string): void {
+    for (const [id, viewer] of this.codeViewers) {
+      const attachment = this.bridgeAttachment(viewer);
+      if (
+        attachment?.kind !== "code-viewer" ||
+        attachment.portalSessionHash !== portalSessionHash
+      ) {
+        continue;
+      }
+      this.clearCodeViewer(attachment.leaseID, id, viewer, 1008, "portal session ended");
+      closeSocket(viewer, 1008, "portal session ended");
     }
   }
 
@@ -12821,7 +12905,18 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
     case "code-agent":
       return typeof attachment.leaseID === "string" ? attachment : undefined;
     case "code-viewer":
-      return typeof attachment.leaseID === "string" && typeof attachment.id === "string"
+      if (typeof attachment.leaseID !== "string" || typeof attachment.id !== "string") {
+        return undefined;
+      }
+      if (attachment.auth === undefined) {
+        // Pre-revocation attachments carried no auth binding; restore them only long enough to
+        // fail closed through the normal viewer/agent shutdown path.
+        return { ...attachment, auth: "github" };
+      }
+      return (attachment.auth === "bearer" ||
+        attachment.auth === "github" ||
+        attachment.auth === "proxy") &&
+        (attachment.auth !== "github" || validPortalSessionHash(attachment.portalSessionHash))
         ? attachment
         : undefined;
     case "egress-host":

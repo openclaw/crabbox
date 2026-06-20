@@ -3,7 +3,7 @@ import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { issueUserToken } from "../src/auth";
+import { issueUserToken, sha256Hex } from "../src/auth";
 import { EC2SpotClient } from "../src/aws";
 import {
   awsPromotedAMIConfigKey,
@@ -209,6 +209,71 @@ describe("runtime adapter relay", () => {
     };
     expect(relay.codeAgents.get(lease.id)).toBe(restored[0]);
     expect(relay.runtimeAdapterAgents.get("example-adapter")).toBe(restored[3]);
+  });
+
+  it("rejects hibernated Code viewers whose portal session logged out", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000001",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const portalSessionHash = "a".repeat(64);
+    storage.seed(`code-viewer-session-revocation:${portalSessionHash}`, {
+      portalSessionHash,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const agent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+    const viewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "viewer-revoked",
+      auth: "github",
+      portalSessionHash,
+    });
+    const legacyViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "viewer-legacy",
+    });
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () => [agent, viewer, legacyViewer] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    expect(viewer.closeCode).toBe(1008);
+    expect(viewer.closeReason).toBe("portal session ended");
+    expect(legacyViewer.closeCode).toBe(1008);
+    expect(legacyViewer.closeReason).toBe("portal session ended");
+    expect(agent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: "viewer-revoked",
+        code: 1008,
+        reason: "portal session ended",
+      },
+      {
+        type: "ws_close",
+        id: "viewer-legacy",
+        code: 1008,
+        reason: "portal session ended",
+      },
+    ]);
+    const relay = fleet as unknown as { codeViewers: Map<string, WebSocket> };
+    expect(relay.codeViewers.size).toBe(0);
+
+    await fleet.webSocketMessage(viewer as unknown as WebSocket, "post-logout-frame");
+    expect(agent.sentJSON()).toHaveLength(2);
   });
 
   it("fails closed ambiguous and invalid hibernated bridge sockets", () => {
@@ -1880,6 +1945,8 @@ describe("runtime adapter relay", () => {
       kind: "code-viewer",
       leaseID: lease.id,
       id: "code-viewer-expiry",
+      auth: "github",
+      portalSessionHash: "f".repeat(64),
     });
     const egressHost = new FakeWebSocket({
       kind: "egress-host",
@@ -12235,6 +12302,23 @@ describe("fleet lease identity and idle", () => {
     );
     expect(page.status).toBe(200);
 
+    const activeViewerID = "active-code-viewer";
+    const portalSessionHash = await sha256Hex(token);
+    const activeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const activeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: activeViewerID,
+      auth: "github",
+      portalSessionHash,
+    });
+    const codeBridgeState = fleet as unknown as {
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+    };
+    codeBridgeState.codeAgents.set(leaseID, activeAgent as unknown as WebSocket);
+    codeBridgeState.codeViewers.set(activeViewerID, activeViewer as unknown as WebSocket);
+
     const expiredRevocationKey = `code-viewer-session-revocation:${"f".repeat(64)}`;
     storage.seed(expiredRevocationKey, {
       portalSessionHash: "f".repeat(64),
@@ -12250,6 +12334,18 @@ describe("fleet lease identity and idle", () => {
     expect(logout.headers.get("set-cookie")).toContain("crabbox_session=");
     expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
     expect(storage.value(expiredRevocationKey)).toBeUndefined();
+    expect(activeViewer.closeCode).toBe(1008);
+    expect(activeViewer.closeReason).toBe("portal session ended");
+    expect(activeAgent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: activeViewerID,
+        code: 1008,
+        reason: "portal session ended",
+      },
+    ]);
+    await fleet.webSocketMessage(activeViewer as unknown as WebSocket, "post-logout-frame");
+    expect(activeAgent.sentJSON()).toHaveLength(1);
 
     const staleViewer = await throughCoordinator(
       new Request(isolatedPage, { headers: { cookie: codeCookie } }),
