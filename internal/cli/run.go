@@ -255,6 +255,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
 	var timingRecordColdRun *bool
+	var timingJSONHandledByBackend bool
 	defer func() {
 		if finalTimingReport == nil {
 			return
@@ -280,7 +281,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 			}
 		}
-		if !*timingJSON {
+		if !*timingJSON || timingJSONHandledByBackend {
 			return
 		}
 		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
@@ -580,6 +581,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
+		// Delegated providers own their timing JSON output. Core still builds the
+		// result below when the local benchmark ledger needs a record.
+		timingJSONHandledByBackend = runReq.TimingJSON
 		result, runErr := delegated.Run(ctx, runReq)
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)

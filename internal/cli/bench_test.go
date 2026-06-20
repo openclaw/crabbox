@@ -4,12 +4,72 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func init() {
+	RegisterProvider(benchmarkTimingTestProvider{})
+}
+
+type benchmarkTimingTestProvider struct{}
+
+func (benchmarkTimingTestProvider) Name() string      { return "benchmark-timing-test" }
+func (benchmarkTimingTestProvider) Aliases() []string { return nil }
+func (benchmarkTimingTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "benchmark-timing-test",
+		Family:      "benchmark-timing-test",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (benchmarkTimingTestProvider) RegisterFlags(*flag.FlagSet, Config) any { return nil }
+func (benchmarkTimingTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p benchmarkTimingTestProvider) Configure(_ Config, rt Runtime) (Backend, error) {
+	return benchmarkTimingTestBackend{spec: p.Spec(), stderr: rt.Stderr}, nil
+}
+
+type benchmarkTimingTestBackend struct {
+	spec   ProviderSpec
+	stderr io.Writer
+}
+
+func (b benchmarkTimingTestBackend) Spec() ProviderSpec { return b.spec }
+func (b benchmarkTimingTestBackend) Warmup(context.Context, WarmupRequest) error {
+	return nil
+}
+func (b benchmarkTimingTestBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
+	result := RunResult{
+		Provider:      b.spec.Name,
+		LeaseID:       "bench_test",
+		Slug:          "benchmark-timing-test",
+		SyncDelegated: true,
+		Command:       250 * time.Millisecond,
+		Total:         time.Second,
+	}
+	if req.TimingJSON {
+		if err := writeTimingJSON(b.stderr, timingReportFromDelegatedRunResult(req, result, b.spec.Name, nil)); err != nil {
+			return RunResult{}, err
+		}
+	}
+	return result, nil
+}
+func (b benchmarkTimingTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b benchmarkTimingTestBackend) Status(context.Context, StatusRequest) (StatusView, error) {
+	return StatusView{}, nil
+}
+func (b benchmarkTimingTestBackend) Stop(context.Context, StopRequest) error { return nil }
 
 func TestBenchRecordAppendsTimingJSONRecord(t *testing.T) {
 	dir := t.TempDir()
@@ -67,6 +127,31 @@ func TestBenchRecordAppendsTimingJSONRecord(t *testing.T) {
 	}
 	if record.Benchmark.RepeatIndex != 1 {
 		t.Fatalf("repeatIndex=%d", record.Benchmark.RepeatIndex)
+	}
+}
+
+func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.runCommand(context.Background(), []string{
+		"--provider", "benchmark-timing-test",
+		"--timing-json",
+		"--timing-record", storePath,
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
+	}
+	if count := strings.Count(stderr.String(), `"provider":"benchmark-timing-test"`); count != 1 {
+		t.Fatalf("delegated timing JSON count=%d want 1; stderr=%q", count, stderr.String())
+	}
+	records, err := readBenchmarkTimingRecords(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Timing.Provider != "benchmark-timing-test" {
+		t.Fatalf("records=%#v, want one delegated timing record", records)
 	}
 }
 
