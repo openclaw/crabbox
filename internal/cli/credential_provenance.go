@@ -41,6 +41,8 @@ type credentialDestinationProvenance struct {
 	e2bAPIKey           credentialValueSource
 	railwayAPIURL       credentialValueSource
 	railwayAPIToken     credentialValueSource
+	fastAPICloudAPIURL  credentialValueSource
+	fastAPICloudToken   credentialValueSource
 	runpodAPIURL        credentialValueSource
 	runpodAPIKey        credentialValueSource
 	isloBaseURL         credentialValueSource
@@ -119,6 +121,9 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "railway-url") {
 		provenance.railwayAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "fastapi-cloud-url") {
+		provenance.fastAPICloudAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "runpod-url") {
 		provenance.runpodAPIURL = credentialSourceFlag
@@ -231,6 +236,11 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if provenance.railwayAPIURL == credentialSourceRepository &&
 			inheritedCredential(sourcedCredential{cfg.Railway.APIToken, provenance.railwayAPIToken}) {
 			return repositoryCredentialDestinationError("railway", "railway.apiUrl", "CRABBOX_RAILWAY_API_URL or --railway-url")
+		}
+	case "fastapi-cloud":
+		if provenance.fastAPICloudAPIURL == credentialSourceRepository &&
+			inheritedCredential(sourcedCredential{cfg.FastAPICloud.Token, provenance.fastAPICloudToken}) {
+			return repositoryCredentialDestinationError("fastapi-cloud", "fastapiCloud.apiUrl", "CRABBOX_FASTAPI_CLOUD_API_URL or --fastapi-cloud-url")
 		}
 	case "runpod":
 		if provenance.runpodAPIURL == credentialSourceRepository &&

@@ -112,6 +112,18 @@ func TestRepositoryCredentialDestinationsRejectInheritedCredentials(t *testing.T
 			want: "railway.apiUrl",
 		},
 		{
+			name: "fastapi cloud api",
+			cfg: Config{
+				Provider:     "fastapi-cloud",
+				FastAPICloud: FastAPICloudConfig{APIURL: "https://repo.example.test", Token: "secret"},
+				credentialProvenance: credentialDestinationProvenance{
+					fastAPICloudAPIURL: credentialSourceRepository,
+					fastAPICloudToken:  credentialSourceEnvironment,
+				},
+			},
+			want: "fastapiCloud.apiUrl",
+		},
+		{
 			name: "runpod api",
 			cfg: Config{
 				Provider: "runpod",

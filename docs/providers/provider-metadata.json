@@ -265,6 +265,20 @@
     "caveat": "Safety and semantics depend on the configured executable",
     "docs": "external.md"
   },
+  "fastapi-cloud": {
+    "status": "specialized",
+    "category": "service-control",
+    "substrate": "FastAPI Cloud app",
+    "location": "cloud",
+    "ssh": "not-applicable",
+    "sync": "none",
+    "gpu": "unknown",
+    "lifecycle": "FastAPI Cloud",
+    "cleanup": "not exposed",
+    "bestFit": "Inspecting FastAPI Cloud app deployment readiness",
+    "caveat": "Cannot execute arbitrary Crabbox run commands or stop apps",
+    "docs": "fastapi-cloud.md"
+  },
   "freestyle": {
     "status": "built-in",
     "category": "delegated-sandbox",

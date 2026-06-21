@@ -22,6 +22,7 @@ var benchmarkProviderCategories = map[string]string{
 	"e2b":                        "delegated-sandbox",
 	"exe-dev":                    "direct-cloud",
 	"external":                   "external-provider",
+	"fastapi-cloud":              "service-control",
 	"freestyle":                  "delegated-sandbox",
 	"gcp":                        "brokerable-cloud",
 	"hetzner":                    "brokerable-cloud",

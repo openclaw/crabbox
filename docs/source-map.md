@@ -15,10 +15,10 @@ Crabbox has three implementation surfaces:
 - **CLI** — Go, under `cmd/crabbox` (entrypoint) and `internal/cli` (commands,
   flags, lease/sync/run logic).
 - **Provider adapters** — Go, under `internal/providers/<name>`. Each adapter
-  registers a provider and implements either an SSH-lease backend or a
-  delegated-run backend. `internal/providers/all/all.go` imports every adapter
-  for its registration side effects; `internal/providers/shared` holds common
-  helpers.
+  registers a provider and implements an SSH-lease, delegated-run, or
+  service-control backend. `internal/providers/all/all.go` imports every
+  adapter for its registration side effects; `internal/providers/shared` holds
+  common helpers.
 - **Coordinator** — TypeScript, under `worker/src` and `worker/node`. Shared
   `FleetCoordinator` behavior runs either in a Cloudflare Worker plus one
   Durable Object or in Node.js backed by PostgreSQL and pg-boss. Only `aws`,
@@ -63,7 +63,9 @@ Provider adapters live under `internal/providers/<name>` and each expose
 `Name()`, `Aliases()`, and `Spec()` in their `provider.go`. The `Spec.Kind`
 field distinguishes an SSH-lease backend (Crabbox provisions and connects to an
 SSH-reachable box) from a delegated-run backend (the provider owns sync and run;
-there is no SSH lease). `internal/providers/all/all.go` imports them all.
+there is no SSH lease) or service-control backend (Crabbox inspects a
+provider-owned service without command execution). `internal/providers/all/all.go`
+imports them all.
 
 SSH-lease providers:
 
@@ -85,10 +87,9 @@ SSH-lease providers:
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Microsoft Hyper-V local Windows VM: `internal/providers/hyperv`
-- Daytona, Morph, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Railway:
+- Daytona, Morph, exe.dev, KubeVirt, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites:
   `internal/providers/daytona`, `internal/providers/morph`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
-  `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`,
-  `internal/providers/railway`
+  `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`
 
 Delegated-run providers (no SSH lease):
 
@@ -106,6 +107,11 @@ Delegated-run providers (no SSH lease):
 - Anthropic Sandbox Runtime live local enforcement smoke: `scripts/live-anthropic-sandbox-runtime-smoke.sh`
 - Azure Container Apps dynamic sessions (shares the `azure` family, but
   delegated-run): `internal/providers/azuredynamicsessions`, runner image `worker/azure-dynamic-sessions.Dockerfile`
+
+Service-control providers (no SSH lease and no arbitrary command execution):
+
+- Railway service control: `internal/providers/railway`
+- FastAPI Cloud app inspection: `internal/providers/fastapicloud`
 
 Shared and registration:
 

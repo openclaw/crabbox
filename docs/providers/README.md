@@ -60,7 +60,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 59 providers (35 SSH lease, 23 delegated run, 1 service control).
+Current built-in surface: 60 providers (35 SSH lease, 23 delegated run, 2 service control).
 
 Access terms:
 
@@ -89,6 +89,7 @@ Access terms:
 | [e2b](e2b.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `url-bridge`, `run-session` | `linux`; E2B Firecracker sandbox | `provider-managed`; GPU: no | E2B; sandbox kill or expiry | Hosted ephemeral code sandbox | URL bridge is provider-specific; no normal SSH lease |
 | [exe-dev](exe-dev.md) (`exe`, `exedev`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; exe.dev managed VM | `provider-managed`; GPU: unknown | exe.dev; provider lifecycle | Fast managed Linux VM exposed over SSH | Public SSH only; provider CLI owns auth |
 | [external](external.md) (`exec-provider`) | built-in; `ssh-lease` · external-provider | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; Configured executable contract | `byo`; GPU: unknown | external executable; contract-defined | Private or organization-specific provider integration | Safety and semantics depend on the configured executable |
+| [fastapi-cloud](fastapi-cloud.md) (`fastapicloud`, `fastapi`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: none | `linux`; FastAPI Cloud app | `cloud`; GPU: unknown | FastAPI Cloud; not exposed | Inspecting FastAPI Cloud app deployment readiness | Cannot execute arbitrary Crabbox run commands or stop apps |
 | [freestyle](freestyle.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `linux`; Freestyle VM | `provider-managed`; GPU: unknown | Freestyle; provider VM cleanup | Hosted delegated Linux VM execution | No Crabbox-managed SSH path |
 | [gcp](gcp.md) (`google`, `google-cloud`) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Google Compute Engine VM | `cloud`; GPU: optional | Crabbox or coordinator; instance and firewall cleanup | Linux compute with broad machine selection | Project, IAM, quota, and firewall setup required |
 | [hetzner](hetzner.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`; Hetzner Cloud server | `cloud`; GPU: no | Crabbox or coordinator; server delete | Cost-effective high-CPU Linux VM | Linux-only and capacity varies by location |
