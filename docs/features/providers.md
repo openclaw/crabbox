@@ -157,7 +157,8 @@ capacity fallback path in this branch.
   auto-logon, and first-network flyout suppression;
 - launches EC2 Mac leases on available Dedicated Hosts with On-Demand capacity,
   optionally pinned by `CRABBOX_HOST_ID` or `hostId` (`CRABBOX_AWS_MAC_HOST_ID`
-  and `aws.macHostId` remain compatibility aliases);
+  and `aws.macHostId` remain compatibility aliases); brokered pinning requires
+  admin authentication;
 - tags instances, volumes, and Spot requests;
 - falls back across broad C/M/R instance families, including account-policy and
   capacity rejections, and can fall back to a small burstable type when policy

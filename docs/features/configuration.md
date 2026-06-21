@@ -276,8 +276,10 @@ hostId: h-0123456789abcdef0
 
 The default region is `eu-west-1` and the default root volume is `400` GB.
 `aws.macHostId` is the AWS-specific allocated EC2 Mac Dedicated Host and
-seeds the generic `hostId` when that is unset; `target: macos` requires one of
-`hostId`, `aws.macHostId`, `CRABBOX_HOST_ID`, or `CRABBOX_AWS_MAC_HOST_ID`.
+seeds the generic `hostId` when that is unset. Direct `target: macos` requires
+one of `hostId`, `aws.macHostId`, `CRABBOX_HOST_ID`, or
+`CRABBOX_AWS_MAC_HOST_ID`. Brokered mode can discover an available host;
+explicit brokered host selection requires admin authentication.
 
 ### Azure
 

@@ -64,7 +64,9 @@ allocation period, so the lifecycle differs from regular Linux/Windows leases:
   `mac-m4pro.metal`, `mac-m4max.metal`, `mac2-m1ultra.metal`, `mac-m3ultra.metal`)
   and finally `mac1.metal`;
 - to pin the lease to a specific host, set `CRABBOX_HOST_ID` or `hostId` in
-  config. `CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain accepted aliases.
+  config. Brokered pinning requires admin authentication; normal broker users
+  rely on automatic discovery. `CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId`
+  remain accepted aliases.
 
 `crabbox warmup` does not allocate a Dedicated Host implicitly. Trusted
 operators manage hosts explicitly:
@@ -119,7 +121,8 @@ Static Macs work well over Tailscale: put the MagicDNS name or `100.x` address i
 
 **No host capacity (managed AWS).** Use `--market on-demand` and confirm an EC2
 Mac Dedicated Host is allocated in the region. Set `CRABBOX_HOST_ID` / `hostId`
-only to pin a specific host. Operators can inspect capacity:
+only to pin a specific host; brokered pinning requires admin authentication.
+Operators can inspect capacity:
 
 ```sh
 crabbox admin hosts offerings --provider aws --target macos --region <region>

@@ -202,9 +202,10 @@ SSH, desktop, browser, code-server, ports, `--class`, or `--type`.
 already allocated Dedicated Host. Crabbox can discover an available host in the
 selected region, or pin one with `CRABBOX_HOST_ID` / `hostId`
 (`CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain AWS compatibility
-aliases). Use `--market on-demand`, and expect EC2 Mac host lifecycle rules to
-dominate cleanup and cost. Warmup never allocates a Dedicated Host implicitly;
-trusted operators manage host lifecycle with
+aliases). Brokered host pinning requires admin authentication; normal broker
+users rely on automatic available-host discovery. Use `--market on-demand`, and
+expect EC2 Mac host lifecycle rules to dominate cleanup and cost. Warmup never
+allocates a Dedicated Host implicitly; trusted operators manage host lifecycle with
 `crabbox admin hosts offerings|quota|list|allocate|release --provider aws --target macos`.
 The default SSH user is `ec2-user`; the VNC password from `crabbox vnc` is the
 per-lease macOS account password set by bootstrap.

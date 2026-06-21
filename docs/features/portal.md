@@ -124,9 +124,10 @@ kinds:
   long-queued or long-running Actions, a copyable local stop command, and
   `stale` markers when a previously visible runner no longer appears in the
   next sync.
-- **Dedicated hosts** — when AWS credentials and a region are configured, EC2
-  Mac Dedicated Hosts appear as capacity rows, each linking to a host detail
-  page and (when attached) its active macOS lease.
+- **Dedicated hosts** — when AWS credentials and a region are configured, admins
+  see EC2 Mac Dedicated Host inventory as capacity rows. Normal users see only
+  hosts attached to active leases already visible to them. Each visible row
+  links to a host detail page and its active macOS lease when attached.
 
 Default view rules:
 
@@ -135,8 +136,9 @@ Default view rules:
 - Admin sessions get extra `mine` / `system` filters so personal leases stay
   distinct from external runners and other owners' leases.
 
-Clicking a lease opens its detail page; clicking an external runner or
-dedicated host opens the matching visibility-only detail page.
+Clicking a lease opens its detail page; clicking an external runner or visible
+dedicated host opens the matching visibility-only detail page. Unattached host
+details and host-pinned launch commands require admin authentication.
 
 ## Lease detail `/portal/leases/{id-or-slug}`
 

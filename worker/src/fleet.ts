@@ -1629,6 +1629,15 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
+    if (!isAdminRequest(request) && (config.hostID || config.awsMacHostID)) {
+      return json(
+        {
+          error: "admin_required",
+          message: "provider host pinning requires admin-token auth",
+        },
+        { status: 403 },
+      );
+    }
     config =
       (await this.provider(
         config.provider,
@@ -4462,7 +4471,10 @@ export class FleetCoordinator {
         leases,
         runners,
         request,
-        this.attachPortalMacHostLeases(macHosts, leases),
+        this.attachPortalMacHostLeases(
+          this.portalMacHostsVisibleToRequest(macHosts, leases, request),
+          leases,
+        ),
         manageableLeaseIDs,
       );
     }
@@ -4655,6 +4667,23 @@ export class FleetCoordinator {
     });
   }
 
+  private portalMacHostsVisibleToRequest(
+    hosts: PortalMacHostRecord[],
+    leases: LeaseRecord[],
+    request: Request,
+  ): PortalMacHostRecord[] {
+    if (isAdminRequest(request)) {
+      return hosts;
+    }
+    const visibleHostIDs = new Set(
+      leases
+        .filter((lease) => lease.state === "active" && lease.target === "macos")
+        .map(leaseHostID)
+        .filter(Boolean),
+    );
+    return hosts.filter((host) => visibleHostIDs.has(host.id));
+  }
+
   private async resolvePortalMacHost(
     request: Request,
     provider: string,
@@ -4664,7 +4693,8 @@ export class FleetCoordinator {
       return undefined;
     }
     const [leases, hosts] = await Promise.all([this.portalLeases(request), this.portalMacHosts()]);
-    return this.attachPortalMacHostLeases(hosts, leases).find(
+    const visibleHosts = this.portalMacHostsVisibleToRequest(hosts, leases, request);
+    return this.attachPortalMacHostLeases(visibleHosts, leases).find(
       (host) => host.provider === provider && host.id === hostID,
     );
   }

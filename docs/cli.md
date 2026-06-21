@@ -363,9 +363,10 @@ Managed provider targets are intentionally narrow:
   Windows for desktop/VNC; use WSL2 for Linux tooling on a Windows host.
 - AWS also supports EC2 Mac (`--target macos`) when an available Mac Dedicated
   Host exists in the selected region. Brokered mode can discover an available
-  host; direct mode requires `CRABBOX_HOST_ID` or `hostId`. `CRABBOX_AWS_MAC_HOST_ID`
-  and `aws.macHostId` remain AWS compatibility aliases. Azure has no managed
-  macOS target.
+  host; explicit brokered host pinning requires admin authentication, while
+  direct mode requires `CRABBOX_HOST_ID` or `hostId`. `CRABBOX_AWS_MAC_HOST_ID`
+  and `aws.macHostId` remain AWS compatibility aliases. Azure has no managed macOS
+  target.
 - Existing macOS and Windows machines belong on `provider: ssh`.
 
 Static macOS host:
@@ -407,6 +408,9 @@ hostId: h-0123456789abcdef0
 capacity:
   market: on-demand
 ```
+
+With a broker, explicit `hostId` selection requires admin authentication.
+Normal broker users omit it and use automatic available-host discovery.
 
 `crabbox warmup --market spot|on-demand` and `crabbox run --market spot|on-demand`
 override `capacity.market` for a single AWS lease, for temporary quota or capacity

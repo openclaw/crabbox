@@ -295,8 +295,10 @@ from the logged-in console session using a scheduled task.
 **macOS launch fails with a missing host id** — Use `--market on-demand` and
 make sure an available EC2 Mac Dedicated Host is allocated in the selected AWS
 region. Set `CRABBOX_HOST_ID` or `hostId` only when you want to pin a specific
-host or when running the direct AWS provider. `CRABBOX_AWS_MAC_HOST_ID` and
-`aws.macHostId` remain compatibility aliases.
+host or when running the direct AWS provider. Brokered host pinning requires
+admin authentication; normal broker users rely on automatic available-host
+discovery. `CRABBOX_AWS_MAC_HOST_ID` and `aws.macHostId` remain compatibility
+aliases.
 
 ## Related docs
 

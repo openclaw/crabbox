@@ -10554,36 +10554,56 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("persists provider host pins on AWS macOS leases", async () => {
+  it("requires admin auth for provider host pins on AWS macOS leases", async () => {
+    let created = false;
     const fleet = testFleet(new MemoryStorage(), {
-      aws: fakeProvider(undefined, {
-        provider: "aws",
-        serverType: "mac2.metal",
-        hostID: "h-000000000001",
-      }),
+      aws: fakeProvider(
+        () => {
+          created = true;
+        },
+        {
+          provider: "aws",
+          serverType: "mac2.metal",
+          hostID: "h-000000000001",
+        },
+      ),
     });
-
-    const create = await fleet.fetch(
+    const body = {
+      provider: "aws" as const,
+      target: "macos" as const,
+      class: "standard",
+      serverType: "mac2.metal",
+      hostId: "h-000000000001",
+      capacity: { market: "on-demand" as const },
+      sshPublicKey: "ssh-ed25519 test",
+    };
+    const denied = await fleet.fetch(
       request("POST", "/v1/leases", {
         headers: {
           "x-crabbox-owner": "alice@example.com",
           "cf-connecting-ip": "203.0.113.7",
           "x-crabbox-org": "example-org",
         },
-        body: {
-          leaseID: "cbx_abcdef123456",
-          provider: "aws",
-          target: "macos",
-          class: "standard",
-          serverType: "mac2.metal",
-          hostId: "h-000000000001",
-          capacity: { market: "on-demand" },
-          sshPublicKey: "ssh-ed25519 test",
+        body: { ...body, leaseID: "cbx_abcdef123456" },
+      }),
+    );
+    expect(denied.status).toBe(403);
+    expect(created).toBe(false);
+    await expect(denied.json()).resolves.toMatchObject({ error: "admin_required" });
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: {
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "admin@example.com",
+          "x-crabbox-org": "example-org",
         },
+        body: { ...body, leaseID: "cbx_abcdef123457" },
       }),
     );
 
     expect(create.status).toBe(201);
+    expect(created).toBe(true);
     const { lease } = (await create.json()) as { lease: LeaseRecord };
     expect(lease.hostId).toBe("h-000000000001");
   });
@@ -11434,6 +11454,7 @@ describe("fleet lease identity and idle", () => {
     const response = await fleet.fetch(
       request("GET", "/portal", {
         headers: {
+          "x-crabbox-admin": "true",
           "x-crabbox-owner": "alice@example.com",
           "x-crabbox-org": "example-org",
         },
@@ -11459,6 +11480,32 @@ describe("fleet lease identity and idle", () => {
     expect(body).toContain("eu-west-1c");
     expect(body).toContain("available");
     expect(body).toContain("pending");
+
+    const userHome = await fleet.fetch(
+      request("GET", "/portal", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    const userHomeBody = await userHome.text();
+    expect(userHomeBody).toContain("/portal/hosts/aws/h-000000000001");
+    expect(userHomeBody).toContain("/portal/hosts/aws/h-000000000002");
+    expect(userHomeBody).not.toContain("h-000000000003");
+
+    const friendHome = await fleet.fetch(
+      request("GET", "/portal", {
+        headers: {
+          "x-crabbox-owner": "friend@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    const friendHomeBody = await friendHome.text();
+    expect(friendHomeBody).toContain("/portal/hosts/aws/h-000000000001");
+    expect(friendHomeBody).not.toContain("h-000000000002");
+    expect(friendHomeBody).not.toContain("h-000000000003");
 
     const detail = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001", {
@@ -11492,6 +11539,16 @@ describe("fleet lease identity and idle", () => {
     expect(friendDetailBody).not.toContain(
       "crabbox webvnc --provider aws --target macos --id mac-mini --open",
     );
+
+    const hiddenHost = await fleet.fetch(
+      request("GET", "/portal/hosts/aws/h-000000000003", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(hiddenHost.status).toBe(404);
 
     const vnc = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001/vnc", {
@@ -11543,6 +11600,7 @@ describe("fleet lease identity and idle", () => {
     const startPage = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000003/vnc", {
         headers: {
+          "x-crabbox-admin": "true",
           "x-crabbox-owner": "alice@example.com",
           "x-crabbox-org": "example-org",
         },
@@ -11565,6 +11623,7 @@ describe("fleet lease identity and idle", () => {
     const idlePost = await fleet.fetch(
       request("POST", "/portal/hosts/aws/h-000000000003/vnc", {
         headers: {
+          "x-crabbox-admin": "true",
           "x-crabbox-owner": "alice@example.com",
           "x-crabbox-org": "example-org",
         },
