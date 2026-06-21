@@ -158,6 +158,114 @@ func TestCloudflareClientUsesBoundedDefaultTransport(t *testing.T) {
 	}
 }
 
+func TestCloudflareClientRejectsCrossOriginExecRedirectBeforeReplay(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			attackerCalls := 0
+			attacker := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				attackerCalls++
+			}))
+			defer attacker.Close()
+			runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Location", attacker.URL+"/stolen")
+				w.WriteHeader(status)
+			}))
+			defer runner.Close()
+
+			cfg := Config{}
+			cfg.Cloudflare.APIURL = runner.URL
+			cfg.Cloudflare.Token = "token"
+			client, err := newCloudflareClient(cfg, Runtime{HTTP: runner.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{
+				Command: "deploy",
+				Env:     map[string]string{"DEPLOY_TOKEN": "sensitive"},
+			}, io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+				t.Fatalf("execStream error = %v, want cross-origin redirect rejection", err)
+			}
+			if attackerCalls != 0 {
+				t.Fatalf("attacker calls = %d, want no body replay", attackerCalls)
+			}
+		})
+	}
+}
+
+func TestCloudflareClientRejectsCrossOriginUploadRedirect(t *testing.T) {
+	attackerCalls := 0
+	attacker := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		attackerCalls++
+	}))
+	defer attacker.Close()
+	runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", attacker.URL+"/stolen")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer runner.Close()
+
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = runner.URL
+	cfg.Cloudflare.Token = "token"
+	client, err := newCloudflareClient(cfg, Runtime{HTTP: runner.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := t.TempDir() + "/archive.tgz"
+	if err := os.WriteFile(local, []byte("sensitive archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = client.uploadFile(context.Background(), "cbx_test", local, "/tmp/archive.tgz")
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("uploadFile error = %v, want cross-origin redirect rejection", err)
+	}
+	if attackerCalls != 0 {
+		t.Fatalf("attacker calls = %d, want no redirected upload", attackerCalls)
+	}
+}
+
+func TestCloudflareClientAllowsSameOriginRedirectAndPreservesCallerPolicy(t *testing.T) {
+	redirectChecks := 0
+	runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/readiness":
+			w.Header().Set("Location", "/redirected-readiness")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		case "/redirected-readiness":
+			if r.Header.Get("Authorization") != "Bearer token" {
+				t.Fatalf("redirected authorization = %q", r.Header.Get("Authorization"))
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"runner":"cloudflare"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer runner.Close()
+	source := runner.Client()
+	source.CheckRedirect = func(*http.Request, []*http.Request) error {
+		redirectChecks++
+		return nil
+	}
+
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = runner.URL
+	cfg.Cloudflare.Token = "token"
+	client, err := newCloudflareClient(cfg, Runtime{HTTP: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.http == source {
+		t.Fatal("newCloudflareClient mutated the caller HTTP client")
+	}
+	if err := client.checkAuth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if redirectChecks != 1 {
+		t.Fatalf("caller redirect checks = %d, want 1", redirectChecks)
+	}
+}
+
 func TestCloudflareClientRejectsURLQueryAndFragment(t *testing.T) {
 	for _, rawURL := range []string{
 		"https://runner.example.com?",
