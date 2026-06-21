@@ -136,6 +136,7 @@ type Config struct {
 	Sync                          SyncConfig
 	Run                           RunConfig
 	EnvAllow                      []string
+	envAllowOverriddenByEnv       bool
 	Capacity                      CapacityConfig
 	Actions                       ActionsConfig
 	Blacksmith                    BlacksmithConfig
@@ -7187,6 +7188,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Sync.BaseRef = getenv("CRABBOX_SYNC_BASE_REF", cfg.Sync.BaseRef)
 	if envAllow := os.Getenv("CRABBOX_ENV_ALLOW"); envAllow != "" {
 		cfg.EnvAllow = splitCommaList(envAllow)
+		cfg.envAllowOverriddenByEnv = true
 	}
 	if tools := os.Getenv("CRABBOX_PREFLIGHT_TOOLS"); tools != "" {
 		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(tools))

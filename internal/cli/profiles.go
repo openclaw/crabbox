@@ -35,7 +35,9 @@ func applySelectedProfileConfig(cfg *Config) error {
 	if err := validateProfileConfig(name, profile); err != nil {
 		return err
 	}
-	cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, profile.EnvAllow...)
+	if !cfg.envAllowOverriddenByEnv {
+		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, profile.EnvAllow...)
+	}
 	if len(profile.Presets) > 0 {
 		if cfg.Presets == nil {
 			cfg.Presets = map[string]PresetConfig{}

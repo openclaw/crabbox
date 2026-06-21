@@ -396,9 +396,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 	}
-	for _, value := range allowEnvFlags {
-		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, splitCommaList(value)...)
-	}
+	applyRunEnvAllowFlags(&cfg, allowEnvFlags)
 	if *preflightTools != "" {
 		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(*preflightTools))
 	}
@@ -1624,6 +1622,12 @@ afterSync:
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
 	}
 	return nil
+}
+
+func applyRunEnvAllowFlags(cfg *Config, values []string) {
+	for _, value := range values {
+		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, splitCommaList(value)...)
+	}
 }
 
 func writeRunLeaseOutput(path string, session *RunSessionHandle) error {

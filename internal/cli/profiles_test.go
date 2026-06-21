@@ -149,6 +149,50 @@ profiles:
 	}
 }
 
+func TestProfileEnvAllowRespectsEnvironmentAndCLIPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		profile string
+	}{
+		{
+			name: "env allow",
+			profile: `env:
+      allow:
+        - PROFILE_SECRET`,
+		},
+		{
+			name: "legacy envAllow",
+			profile: `envAllow:
+      - PROFILE_SECRET`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, ".crabbox.yaml")
+			t.Setenv("CRABBOX_CONFIG", cfgPath)
+			t.Setenv("CRABBOX_ENV_ALLOW", "ENV_ONLY")
+			contents := "profile: qa\nenv:\n  allow:\n    - GLOBAL_SECRET\nprofiles:\n  qa:\n    " + tt.profile + "\n"
+			if err := os.WriteFile(cfgPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := applySelectedProfileConfig(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			applyRunEnvAllowFlags(&cfg, []string{"CLI_ONLY,CLI_SECOND"})
+
+			if got := strings.Join(cfg.EnvAllow, ","); got != "ENV_ONLY,CLI_ONLY,CLI_SECOND" {
+				t.Fatalf("env allow=%q", got)
+			}
+		})
+	}
+}
+
 func TestPresetCommandPreservesQuotedArguments(t *testing.T) {
 	cfg := Config{
 		Profile: "qa",
