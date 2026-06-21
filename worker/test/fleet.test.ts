@@ -11441,6 +11441,23 @@ describe("fleet lease identity and idle", () => {
         expiresAt: "2026-05-17T02:40:00.000Z",
       }),
     );
+    for (let index = 0; index < 101; index += 1) {
+      const id = `cbx_${(index + 1_000).toString(16).padStart(12, "0")}`;
+      const createdAt = new Date(Date.UTC(2026, 5, 1, 0, 0, index)).toISOString();
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          slug: `newer-linux-${index}`,
+          owner: "alice@example.com",
+          org: "example-org",
+          createdAt,
+          updatedAt: createdAt,
+          lastTouchedAt: createdAt,
+          expiresAt: "2026-06-02T00:00:00.000Z",
+        }),
+      );
+    }
     const fleet = testFleet(
       storage,
       {},
@@ -11506,6 +11523,16 @@ describe("fleet lease identity and idle", () => {
     expect(friendHomeBody).toContain("/portal/hosts/aws/h-000000000001");
     expect(friendHomeBody).not.toContain("h-000000000002");
     expect(friendHomeBody).not.toContain("h-000000000003");
+
+    const filteredHome = await fleet.fetch(
+      request("GET", "/portal?provider=hetzner", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(await filteredHome.text()).not.toContain("/portal/hosts/aws/");
 
     const detail = await fleet.fetch(
       request("GET", "/portal/hosts/aws/h-000000000001", {
