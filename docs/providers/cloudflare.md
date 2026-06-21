@@ -226,7 +226,8 @@ crabbox run \
   type is too small.
 - `warmup` starts a container and leaves it alive until `crabbox stop` or the
   configured TTL/idle deadline expires.
-- `status` and `stop` resolve local Crabbox claims, then call the runner.
+- Reuse, `status`, and `stop` resolve local Crabbox claims before calling the
+  runner and reject raw sandbox IDs without a matching claim.
 - `list` reports local Cloudflare claims. Add `--refresh` to check runner state
   for those claims. The runner intentionally does not expose a global container
   enumeration API.

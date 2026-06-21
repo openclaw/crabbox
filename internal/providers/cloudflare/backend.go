@@ -454,7 +454,7 @@ func (b *cloudflareBackend) resolveSandboxID(identifier, repoRoot string, reclai
 	if value == "" {
 		return "", "", "", "", exit(2, "%s id is required", providerName)
 	}
-	return value, value, newLeaseSlug(value), "", nil
+	return "", "", "", "", exit(2, "refusing to use %s sandbox %q without a local Crabbox claim", providerName, value)
 }
 
 func buildCloudflareCommand(command []string, shellMode bool) (string, error) {

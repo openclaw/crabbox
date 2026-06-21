@@ -759,6 +759,10 @@ func (w cloudflareErrWriter) Write([]byte) (int, error) {
 }
 
 func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := claimLeaseForRepoProvider("cbx_test", "test-run", providerName, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
 	execCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/sandboxes/cbx_test/exec-stream" {
@@ -1095,6 +1099,57 @@ func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 	}
 	if claim.RepoRoot != repoB {
 		t.Fatalf("claim repo = %q, want %q", claim.RepoRoot, repoB)
+	}
+}
+
+func TestCloudflareUnclaimedIDNeverReachesRunner(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(*cloudflareBackend) error
+	}{
+		{name: "run reuse", invoke: func(backend *cloudflareBackend) error {
+			_, err := backend.Run(context.Background(), RunRequest{
+				ID:      "raw-sandbox-id",
+				NoSync:  true,
+				Command: []string{"true"},
+			})
+			return err
+		}},
+		{name: "status", invoke: func(backend *cloudflareBackend) error {
+			_, err := backend.Status(context.Background(), StatusRequest{ID: "raw-sandbox-id"})
+			return err
+		}},
+		{name: "stop", invoke: func(backend *cloudflareBackend) error {
+			return backend.Stop(context.Background(), StopRequest{ID: "raw-sandbox-id"})
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				t.Errorf("unclaimed sandbox reached runner: %s %s", r.Method, r.URL.Path)
+				http.Error(w, "unexpected request", http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			cfg := Config{Provider: providerName}
+			cfg.Cloudflare.APIURL = server.URL
+			cfg.Cloudflare.Token = "token"
+			backend := &cloudflareBackend{
+				cfg: cfg,
+				rt:  Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard},
+			}
+
+			err := tt.invoke(backend)
+			if err == nil || !strings.Contains(err.Error(), "without a local Crabbox claim") {
+				t.Fatalf("error = %v, want local claim refusal", err)
+			}
+			if requests != 0 {
+				t.Fatalf("runner received %d requests, want 0", requests)
+			}
+		})
 	}
 }
 
