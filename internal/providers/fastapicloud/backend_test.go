@@ -73,6 +73,7 @@ func TestFastAPICloudClientSendsBearerAndUsesRESTPaths(t *testing.T) {
 			http.Error(w, "missing accept", http.StatusBadRequest)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		got = append(got, r.URL.String())
 		switch r.URL.Path {
 		case "/api/v1/apps/app-1":
@@ -348,6 +349,7 @@ func TestFastAPICloudClientListAppsPaginatesWithoutCount(t *testing.T) {
 			}
 		}
 		// Deliberately omit "count" to exercise the count-absent termination path.
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fastAPICloudListResponse[fastAPICloudApp]{Data: data})
 	}))
 	defer server.Close()
@@ -375,6 +377,7 @@ func TestFastAPICloudClientLatestDeploymentPicksNewest(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fastAPICloudListResponse[fastAPICloudDeployment]{
 			Data: []fastAPICloudDeployment{
 				{ID: "dep-old", AppID: "app-1", Status: fastAPICloudStatusSuccess, CreatedAt: "2026-06-01T10:00:00Z"},
@@ -447,6 +450,7 @@ func TestFastAPICloudAPIErrorMessage(t *testing.T) {
 
 func TestFastAPICloudClientMalformedJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":`)
 	}))
 	defer server.Close()
@@ -496,6 +500,7 @@ func TestFastAPICloudClientEscapesAppID(t *testing.T) {
 	var gotPath, gotRaw string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotRaw = r.URL.EscapedPath(), r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"x"}`)
 	}))
 	defer server.Close()
@@ -514,6 +519,7 @@ func TestFastAPICloudClientEncodesTeamID(t *testing.T) {
 	var gotTeam, gotRaw string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotTeam, gotRaw = r.URL.Query().Get("team_id"), r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fastAPICloudListResponse[fastAPICloudApp]{})
 	}))
 	defer server.Close()
@@ -610,7 +616,15 @@ func TestFastAPICloudDeploymentStatusMapping(t *testing.T) {
 
 func TestFastAPICloudStatusNoDeployment(t *testing.T) {
 	fake := &fakeFastAPICloudAPI{
-		app:           fastAPICloudApp{ID: "app-1", Slug: "my-app", URL: "https://my-app.fastapicloud.app"},
+		app: fastAPICloudApp{
+			ID:        "app-1",
+			TeamID:    "team-1",
+			Slug:      "my-app",
+			Directory: "src",
+			URL:       "https://my-app.fastapicloud.app",
+			Region:    "us-east",
+			UpdatedAt: "2024-01-01T00:00:00Z",
+		},
 		hasDeployment: false,
 	}
 	cfg := Config{}
@@ -622,6 +636,60 @@ func TestFastAPICloudStatusNoDeployment(t *testing.T) {
 	}
 	if view.State != "no-deployment" || view.Ready {
 		t.Fatalf("view = %#v, want no-deployment and not ready", view)
+	}
+	// App-level labels must still be populated when there is no deployment.
+	for key, want := range map[string]string{
+		"teamId":    "team-1",
+		"slug":      "my-app",
+		"directory": "src",
+		"url":       "https://my-app.fastapicloud.app",
+		"region":    "us-east",
+		"updatedAt": "2024-01-01T00:00:00Z",
+	} {
+		if view.Labels[key] != want {
+			t.Fatalf("Labels[%q] = %q, want %q", key, view.Labels[key], want)
+		}
+	}
+	// No deployment-scoped labels may appear when no deployment exists.
+	for _, key := range []string{"deploymentId", "deploymentSlug", "deploymentStatus", "deploymentCreatedAt", "deploymentUrl", "deploymentDashboardUrl"} {
+		if _, ok := view.Labels[key]; ok {
+			t.Fatalf("Labels contains %q with no deployment present", key)
+		}
+	}
+}
+
+func TestFastAPICloudHostFromAppURL(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"https host", "https://my-app.fastapicloud.app", "my-app.fastapicloud.app"},
+		{"ipv6 loopback strips brackets", "http://[::1]:8000", "::1"},
+		{"non-url falls back to raw", "not a url", "not a url"},
+		{"empty", "", ""},
+		{"whitespace trimmed", "  staging.example  ", "staging.example"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hostFromAppURL(tc.raw); got != tc.want {
+				t.Fatalf("hostFromAppURL(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFastAPICloudClientRejectsNonJSONContentType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>not json</html>"))
+	}))
+	defer server.Close()
+	client := newTestFastAPICloudClient(t, server)
+	_, err := client.GetApp(context.Background(), "app-1")
+	if err == nil || !strings.Contains(err.Error(), "application/json") {
+		t.Fatalf("err = %v, want a content-type mismatch error", err)
 	}
 }
 

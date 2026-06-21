@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -257,6 +258,12 @@ func (c *fastAPICloudClient) get(ctx context.Context, apiPath string, params url
 		return &fastAPICloudAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(data))}
 	}
 	if out != nil {
+		// A 2xx with a non-JSON body (an HTML error page from a proxy, a
+		// misconfigured gateway) would otherwise surface only as an opaque
+		// json.Unmarshal error; check the media type first for a clearer message.
+		if mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mediaType != "" && mediaType != "application/json" {
+			return fmt.Errorf("%s expected application/json response, got %q", providerName, resp.Header.Get("Content-Type"))
+		}
 		if err := json.Unmarshal(data, out); err != nil {
 			return fmt.Errorf("decode %s response: %w", providerName, err)
 		}
