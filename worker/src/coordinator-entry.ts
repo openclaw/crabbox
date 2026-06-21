@@ -7,6 +7,7 @@ import {
 } from "./auth";
 import { codeProxyRequestBodyBytes, isIsolatedCodeRequest } from "./code-origin";
 import { bearerToken, json, pathParts } from "./http";
+import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
 import type { Env } from "./types";
 
 export type CoordinatorFetch = (request: Request) => Promise<Response>;
@@ -75,7 +76,7 @@ export async function prepareCoordinatorRequest(
   ) {
     return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
-  const runtimeAdapterAuth = runtimeAdapterServiceAuth(request, env, url);
+  const runtimeAdapterAuth = runtimeAdapterServiceAuth(request, env, route);
   if (runtimeAdapterAuth) {
     return {
       request: requestWithAuthContext(requestWithoutTrustedHeaders(request), runtimeAdapterAuth),
@@ -140,9 +141,10 @@ function isRuntimeAdapterAgentUpgrade(request: Request, url: URL): boolean {
 function runtimeAdapterServiceAuth(
   request: Request,
   env: Pick<Env, "CRABBOX_RUNTIME_ADAPTER_TOKEN" | "CRABBOX_DEFAULT_ORG">,
-  url: URL,
+  route: string[],
 ): AuthContext | undefined {
-  if (url.pathname !== "/v1/workspaces" && !url.pathname.startsWith("/v1/workspaces/")) {
+  const path = runtimeAdapterProxyPath(route);
+  if (!path || !runtimeAdapterRelayMethodAllowed(request.method, path)) {
     return undefined;
   }
   const expected = env.CRABBOX_RUNTIME_ADAPTER_TOKEN?.trim();

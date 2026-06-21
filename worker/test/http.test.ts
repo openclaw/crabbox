@@ -180,17 +180,45 @@ describe("coordinator auth", () => {
   });
 
   it("requires normal coordinator authentication for workspace terminals", async () => {
-    const prepared = await prepareCoordinatorRequest(
+    const unauthorized = await prepareCoordinatorRequest(
       new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
         headers: { upgrade: "websocket" },
       }),
       {},
     );
+    const authorized = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
+        headers: { upgrade: "websocket", authorization: "Bearer shared" },
+      }),
+      {
+        CRABBOX_SHARED_TOKEN: "shared",
+        CRABBOX_SHARED_OWNER: "alice@example.com",
+        CRABBOX_DEFAULT_ORG: "example-org",
+      },
+    );
+    const authorizedRequest = "request" in authorized ? authorized.request : undefined;
 
-    expect(prepared).toMatchObject({
+    expect(unauthorized).toMatchObject({
       authenticated: false,
       response: { status: 401 },
     });
+    expect(authorized).toMatchObject({ authenticated: true });
+    expect(authorizedRequest?.headers.get("x-crabbox-owner")).toBe("alice@example.com");
+    expect(authorizedRequest?.headers.get("x-crabbox-org")).toBe("example-org");
+  });
+
+  it("rejects the runtime adapter token from workspace terminals", async () => {
+    const prepared = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
+        headers: {
+          upgrade: "websocket",
+          authorization: "Bearer runtime-adapter",
+        },
+      }),
+      { CRABBOX_RUNTIME_ADAPTER_TOKEN: "runtime-adapter" },
+    );
+
+    expect(prepared).toMatchObject({ authenticated: false, response: { status: 401 } });
   });
 
   it("accepts the runtime adapter token only for workspace routes", async () => {
@@ -202,8 +230,8 @@ describe("coordinator auth", () => {
       [
         new Request("https://example.test/v1/workspaces", { method: "POST" }),
         new Request("https://example.test/v1/workspaces/fleet-is-101"),
-        new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
-          headers: { upgrade: "websocket" },
+        new Request("https://example.test/v1/workspaces/fleet-is-101/connections/desktop", {
+          method: "POST",
         }),
       ].map((request) => {
         request.headers.set("authorization", "Bearer runtime-adapter");
@@ -228,6 +256,15 @@ describe("coordinator auth", () => {
 
     const denied = await Promise.all(
       [
+        new Request("https://example.test/v1/workspaces", {
+          headers: { authorization: "Bearer runtime-adapter" },
+        }),
+        new Request("https://example.test/v1/workspaces/fleet-is-101/terminal", {
+          headers: {
+            upgrade: "websocket",
+            authorization: "Bearer runtime-adapter",
+          },
+        }),
         new Request("https://example.test/v1/leases", {
           headers: { authorization: "Bearer runtime-adapter" },
         }),
@@ -244,6 +281,8 @@ describe("coordinator auth", () => {
           : null,
       ),
     ).toEqual([
+      { authenticated: false, status: 401 },
+      { authenticated: false, status: 401 },
       { authenticated: false, status: 401 },
       { authenticated: false, status: 401 },
     ]);
