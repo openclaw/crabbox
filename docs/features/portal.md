@@ -83,6 +83,7 @@ successful GitHub login through the same OAuth flow as `crabbox login`. The
 Worker converts the cookie to a `Bearer` token internally; an unauthenticated
 GET request to a portal page is redirected to `/portal/login` with a
 `returnTo` parameter. The session carries owner/org claims, and the Worker
+rejects altered or suffixed spellings of its signed session tokens. The session
 scopes every page to that identity.
 
 ```text

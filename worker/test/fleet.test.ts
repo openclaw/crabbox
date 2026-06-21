@@ -12366,6 +12366,15 @@ describe("fleet lease identity and idle", () => {
     );
     expect(stalePortalSession.status).toBe(401);
     expect(await stalePortalSession.text()).toContain("Log in again to open Code.");
+
+    const suffixedPortalSession = await throughCoordinator(
+      new Request(codeEntry, {
+        headers: { cookie: `crabbox_session=${encodeURIComponent(`${token}.ignored`)}` },
+      }),
+    );
+    expect(suffixedPortalSession.status).toBe(302);
+    expect(suffixedPortalSession.headers.get("location")).toContain("/portal/login?");
+    expect(suffixedPortalSession.headers.get("location")).not.toContain("__crabbox_bootstrap");
   });
 
   it("keeps bridge tickets usable after endpoint binding mismatches", async () => {

@@ -203,14 +203,11 @@ async function verifyUserToken(
   token: string,
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
 ): Promise<UserTokenPayload | undefined> {
-  if (!token.startsWith(tokenPrefix)) {
+  const parts = userTokenParts(token);
+  if (!parts) {
     return undefined;
   }
-  const raw = token.slice(tokenPrefix.length);
-  const [encodedPayload, signature] = raw.split(".", 2);
-  if (!encodedPayload || !signature) {
-    return undefined;
-  }
+  const { encodedPayload, signature } = parts;
   const expected = await sign(encodedPayload, sessionSecret(env));
   if (!constantTimeEqual(signature, expected)) {
     return undefined;
@@ -231,19 +228,28 @@ async function verifyUserToken(
 }
 
 function decodeUserTokenPayload(token: string): Partial<UserTokenPayload> {
-  if (!token.startsWith(tokenPrefix)) {
-    return {};
-  }
-  const raw = token.slice(tokenPrefix.length);
-  const [encodedPayload] = raw.split(".", 1);
-  if (!encodedPayload) {
+  const parts = userTokenParts(token);
+  if (!parts) {
     return {};
   }
   try {
-    return JSON.parse(decoder.decode(base64URLDecode(encodedPayload))) as Partial<UserTokenPayload>;
+    return JSON.parse(
+      decoder.decode(base64URLDecode(parts.encodedPayload)),
+    ) as Partial<UserTokenPayload>;
   } catch {
     return {};
   }
+}
+
+function userTokenParts(token: string): { encodedPayload: string; signature: string } | undefined {
+  if (!token.startsWith(tokenPrefix)) {
+    return undefined;
+  }
+  const parts = token.slice(tokenPrefix.length).split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return undefined;
+  }
+  return { encodedPayload: parts[0], signature: parts[1] };
 }
 
 function sessionSecret(env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">): string {

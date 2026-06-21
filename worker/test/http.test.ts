@@ -545,6 +545,31 @@ describe("coordinator auth", () => {
     expect(auth?.tokenExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
+  it("rejects non-canonical signed user token spellings", async () => {
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared",
+      CRABBOX_SESSION_SECRET: "session-secret",
+      CRABBOX_DEFAULT_ORG: "openclaw",
+    };
+    const token = await issueUserToken(env, {
+      owner: "friend@example.com",
+      org: "openclaw",
+      login: "friend",
+    });
+
+    const authResults = await Promise.all(
+      [`${token}.ignored`, `${token}.`, `${token}..ignored`].map((malformed) =>
+        authenticateRequest(
+          new Request("https://example.test/v1/whoami", {
+            headers: { authorization: `Bearer ${malformed}` },
+          }),
+          env,
+        ),
+      ),
+    );
+    expect(authResults).toEqual([undefined, undefined, undefined]);
+  });
+
   it("issues a distinct identity for each GitHub user session", async () => {
     const env = { CRABBOX_SESSION_SECRET: "session-secret" };
     const input = {
