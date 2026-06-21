@@ -130,7 +130,47 @@ func newRunpodClient(cfg Config, rt Runtime) (runpodAPI, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &runpodClient{apiKey: apiKey, apiURL: apiURL, httpClient: httpClient}, nil
+	return &runpodClient{apiKey: apiKey, apiURL: apiURL, httpClient: secureRunpodHTTPClient(httpClient, apiURL)}, nil
+}
+
+func secureRunpodHTTPClient(source *http.Client, apiURL string) *http.Client {
+	client := *source
+	trusted, _ := url.Parse(apiURL)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameRunpodOrigin(trusted, req.URL) {
+			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameRunpodOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveRunpodPort(a) == effectiveRunpodPort(b)
+}
+
+func effectiveRunpodPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func (c *runpodClient) do(ctx context.Context, method, path string, body any, out any) error {

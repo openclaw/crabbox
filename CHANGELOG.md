@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Rejected cross-origin RunPod REST redirects before bearer credentials or pod-create bodies can be replayed. Thanks @coygeek.
 - Rejected non-canonical signed browser-session tokens so suffix changes cannot bypass Code portal logout revocation. Thanks @coygeek.
 - Required a matching local claim before Cloudflare container reuse, status, or stop operations can reach the runner. Thanks @coygeek.
 - Redacted configured Freestyle API keys from lifecycle, command, and file-operation error diagnostics. Thanks @coygeek.

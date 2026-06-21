@@ -96,7 +96,8 @@ curl https://rest.runpod.io/v1/pods \
 ```
 
 Crabbox sends the identical `Authorization: Bearer $RUNPOD_API_KEY` header to
-the REST pod endpoints.
+the REST pod endpoints. Cross-origin redirects are rejected before credentials
+or pod-create bodies can be replayed to another destination.
 
 ## Config
 

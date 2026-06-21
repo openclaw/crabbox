@@ -533,6 +533,98 @@ func TestRunpodClientSendsBearerAndRESTRequest(t *testing.T) {
 	}
 }
 
+func TestRunpodClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
+	var targetRequests int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+		t.Errorf("redirect target received %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer target.Close()
+
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer trusted.Close()
+	cfg := Config{Runpod: RunpodConfig{APIKey: "test-key", APIURL: trusted.URL}}
+	client, err := newRunpodClient(cfg, Runtime{HTTP: trusted.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.DeployPod(context.Background(), runpodDeployInput{
+		Name: "test-pod", ImageName: "example/image", InstanceID: "NVIDIA L4", Ports: "22/tcp",
+	})
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("DeployPod error = %v, want cross-origin refusal", err)
+	}
+	if targetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", targetRequests)
+	}
+}
+
+func TestRunpodClientFollowsSameOriginRedirect(t *testing.T) {
+	var redirectedAuth string
+	var redirectedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/pods":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirectedAuth = r.Header.Get("Authorization")
+			if err := json.NewDecoder(r.Body).Decode(&redirectedBody); err != nil {
+				t.Errorf("decode redirected body: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"id":"pod_ok","status":"RUNNING"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	cfg := Config{Runpod: RunpodConfig{APIKey: "test-key", APIURL: server.URL}}
+	client, err := newRunpodClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pod, err := client.DeployPod(context.Background(), runpodDeployInput{
+		Name: "test-pod", ImageName: "example/image", InstanceID: "NVIDIA L4", Ports: "22/tcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.ID != "pod_ok" || redirectedAuth != "Bearer test-key" || redirectedBody["name"] != "test-pod" {
+		t.Fatalf("pod=%#v auth=%q body=%#v", pod, redirectedAuth, redirectedBody)
+	}
+}
+
+func TestRunpodClientPreservesCallerRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+	callerErr := errors.New("caller refused redirect")
+	callerChecks := 0
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks++
+		return callerErr
+	}
+	client, err := newRunpodClient(
+		Config{Runpod: RunpodConfig{APIKey: "test-key", APIURL: server.URL}},
+		Runtime{HTTP: httpClient},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Whoami(context.Background())
+	if !errors.Is(err, callerErr) || callerChecks != 1 {
+		t.Fatalf("Whoami error = %v, caller checks = %d", err, callerChecks)
+	}
+}
+
 func TestRunpodClientRetriesGPUCapacityFallbacks(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
