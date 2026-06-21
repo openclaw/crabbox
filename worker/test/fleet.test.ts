@@ -17111,6 +17111,48 @@ describe("fleet identity", () => {
     );
   });
 
+  it("rejects path-bearing AWS regions before signed requests", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      undefined,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+      },
+    );
+
+    const readiness = await fleet.fetch(
+      request("GET", "/v1/providers/aws/readiness?region=evil.example/"),
+    );
+    expect(readiness.status).toBe(400);
+    await expect(readiness.json()).resolves.toMatchObject({ error: "invalid_region" });
+
+    const responses = await Promise.all(
+      [
+        { awsRegion: "evil.example/" },
+        { capacity: { regions: ["eu-west-1", "evil.example/"] } },
+      ].map((body) =>
+        fleet.fetch(
+          request("POST", "/v1/leases", {
+            body: {
+              provider: "aws",
+              sshPublicKey: "ssh-ed25519 test",
+              ...body,
+            },
+          }),
+        ),
+      ),
+    );
+    expect(responses.map((response) => response.status)).toEqual([400, 400]);
+    const responseBodies = await Promise.all(responses.map((response) => response.json()));
+    for (const body of responseBodies) {
+      expect(body).toMatchObject({ error: "invalid_region" });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("fails brokered Azure leases with provider_not_configured before constructing Azure", async () => {
     const fleet = testFleet();
     const response = await fleet.fetch(

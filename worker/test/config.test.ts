@@ -443,6 +443,31 @@ describe("lease config", () => {
     expect(config.os).toBe("ubuntu:26.04");
   });
 
+  it("validates and normalizes AWS lease regions", () => {
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+      awsRegion: " US-EAST-1 ",
+      capacity: { regions: ["EU-WEST-1", "eu-west-1", ""] },
+    });
+    expect(config.awsRegion).toBe("us-east-1");
+    expect(config.capacityRegions).toEqual(["eu-west-1"]);
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsRegion: "evil.example/",
+      }),
+    ).toThrow("awsRegion must be an AWS region name");
+    expect(() =>
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        capacity: { regions: ["eu-west-1", "evil.example/"] },
+      }),
+    ).toThrow("capacity.regions entry must be an AWS region name");
+  });
+
   it("uses Azure defaults when requested", () => {
     const config = leaseConfig({
       provider: "azure",

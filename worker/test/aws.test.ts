@@ -1201,6 +1201,26 @@ describe("aws provider", () => {
         "us-east-1",
       ),
     ).toEqual(["us-east-1"]);
+    expect(
+      awsRegionCandidates(
+        { awsRegion: "evil.example/", capacityRegions: ["us-east-1", "bad/"] },
+        { CRABBOX_AWS_REGION: "also.bad/", CRABBOX_CAPACITY_REGIONS: "eu-west-1,evil/" },
+        "eu-central-1",
+      ),
+    ).toEqual(["eu-central-1", "eu-west-1", "us-east-1"]);
+  });
+
+  it("rejects invalid regions before constructing signed endpoints", () => {
+    expect(
+      () =>
+        new EC2SpotClient(
+          {
+            AWS_ACCESS_KEY_ID: "test",
+            AWS_SECRET_ACCESS_KEY: "secret",
+          } as never,
+          "evil.example/",
+        ),
+    ).toThrow("region must be an AWS region name");
   });
 
   it("treats macOS host and image misses as retryable regional AWS failures", () => {
