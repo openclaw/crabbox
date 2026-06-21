@@ -22,6 +22,7 @@ import {
   isAWSSecurityGroupRuleLimitError,
   type AWSMacHost,
 } from "./aws";
+import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import { AzureClient, azureRegionCandidates, type AzureDeferredCleanupRequest } from "./azure";
 import {
   codeOriginForLease,
@@ -1583,7 +1584,15 @@ export class FleetCoordinator {
     const azureWindowsARM64Image = this.env.CRABBOX_AZURE_WINDOWS_ARM64_IMAGE?.trim();
     if (azureWindowsARM64Image) defaults.azureWindowsARM64Image = azureWindowsARM64Image;
     if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
-    let config = leaseConfig(input, defaults);
+    let config: LeaseConfig;
+    try {
+      config = leaseConfig(input, defaults);
+    } catch (error) {
+      if (error instanceof InvalidAWSRegionError) {
+        return json({ error: "invalid_region", message: error.message }, { status: 400 });
+      }
+      throw error;
+    }
     if (workspaceID) {
       const hostKeys = workspaceSSHHostKeysFromRequest(request);
       if (!hostKeys) {
@@ -4367,6 +4376,13 @@ export class FleetCoordinator {
       );
     }
     const url = new URL(request.url);
+    const requestedAWSRegion = provider === "aws" ? url.searchParams.get("region") : null;
+    if (requestedAWSRegion && !sanitizeAWSRegion(requestedAWSRegion)) {
+      return json(
+        { error: "invalid_region", message: "region must be an AWS region name" },
+        { status: 400 },
+      );
+    }
     const readiness = this.providerConfigurationReadiness(
       provider,
       url.searchParams.get("gcpProject") ?? undefined,
@@ -4422,7 +4438,7 @@ export class FleetCoordinator {
     }
     const region = params.get("region");
     if (region) {
-      leaseRequest.awsRegion = region;
+      leaseRequest.awsRegion = sanitizeAWSRegion(region);
     }
     const config = leaseConfig(leaseRequest);
     return await new EC2SpotClient(this.env, config.awsRegion).capacityReadinessChecks(config);
@@ -11200,11 +11216,6 @@ function awsImageArchitectureForLease(
     return "arm64";
   }
   return awsImageArchitectureForTarget(target, serverType);
-}
-
-function sanitizeAWSRegion(value: string): string {
-  const region = value.trim().toLowerCase();
-  return /^[a-z]{2}-[a-z-]+-[0-9]$/.test(region) ? region : "";
 }
 
 function boolFromUnknown(value: unknown): boolean {

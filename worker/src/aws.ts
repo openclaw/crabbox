@@ -1,6 +1,7 @@
 import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
+import { requireAWSRegion, sanitizeAWSRegion } from "./aws-region";
 import { awsRunInstancesUserData } from "./bootstrap";
 import {
   awsPromotedAMIConfigKey,
@@ -225,12 +226,12 @@ export class EC2SpotClient {
     private readonly env: Env,
     region: string,
   ) {
+    this.region = requireAWSRegion(region || env.CRABBOX_AWS_REGION || "eu-west-1");
     const accessKeyId = env.AWS_ACCESS_KEY_ID;
     const secretAccessKey = env.AWS_SECRET_ACCESS_KEY;
     if (!accessKeyId || !secretAccessKey) {
       throw new Error("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY secrets are required");
     }
-    this.region = region || env.CRABBOX_AWS_REGION || "eu-west-1";
     this.endpoint = `https://ec2.${this.region}.amazonaws.com/`;
     this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.amazonaws.com/`;
     this.stsEndpoint = `https://sts.${this.region}.amazonaws.com/`;
@@ -2110,15 +2111,21 @@ export function awsRegionCandidates(
     config.target === "macos" &&
     (config.hostID || config.awsMacHostID || config.awsAMI || config.awsSnapshot)
   ) {
-    return uniqueStrings([config.awsRegion || preferredRegion || env.CRABBOX_AWS_REGION || ""]);
+    return validAWSRegionCandidates([
+      config.awsRegion || preferredRegion || env.CRABBOX_AWS_REGION || "",
+    ]);
   }
-  return uniqueStrings([
+  return validAWSRegionCandidates([
     preferredRegion,
     config.awsRegion,
     env.CRABBOX_AWS_REGION ?? "",
     ...splitCommaList(env.CRABBOX_CAPACITY_REGIONS ?? ""),
     ...config.capacityRegions,
   ]);
+}
+
+function validAWSRegionCandidates(values: string[]): string[] {
+  return uniqueStrings(values.map(sanitizeAWSRegion).filter(Boolean));
 }
 
 export function awsAvailabilityZoneForRegion(

@@ -1,3 +1,4 @@
+import { requireAWSRegion } from "./aws-region";
 import { normalizeOSImage, osImageSpec } from "./os-image";
 import type { LeaseRequest, Provider, TargetOS, WindowsMode } from "./types";
 
@@ -240,6 +241,17 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   if (tailscaleExitNodeAllowLanAccess && !tailscaleExitNode) {
     throw new Error("tailscaleExitNodeAllowLanAccess requires tailscaleExitNode");
   }
+  const requestedAWSRegion =
+    typeof input.awsRegion === "string" ? input.awsRegion.trim() : input.awsRegion;
+  const awsRegion = requireAWSRegion(requestedAWSRegion || "eu-west-1", "awsRegion");
+  const capacityRegions =
+    provider === "aws"
+      ? uniqueStrings(
+          (input.capacity?.regions ?? [])
+            .filter((region) => typeof region !== "string" || region.trim() !== "")
+            .map((region) => requireAWSRegion(region, "capacity.regions entry")),
+        )
+      : (input.capacity?.regions ?? []);
   return {
     provider,
     target,
@@ -266,7 +278,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     hostID: input.hostId ?? input.hostID ?? "",
     location: input.location ?? "fsn1",
     image: input.image ?? linuxOSImage?.hetznerImage ?? "ubuntu-24.04",
-    awsRegion: input.awsRegion ?? "eu-west-1",
+    awsRegion,
     awsAMI: input.awsAMI ?? "",
     awsUseStockImage: false,
     awsPromotedAMIs: {},
@@ -295,7 +307,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     capacityMarket: input.capacity?.market ?? "spot",
     capacityStrategy: input.capacity?.strategy ?? "most-available",
     capacityFallback: input.capacity?.fallback ?? "on-demand-after-120s",
-    capacityRegions: input.capacity?.regions ?? [],
+    capacityRegions,
     capacityAvailabilityZones: input.capacity?.availabilityZones ?? [],
     capacityHints: input.capacity?.hints ?? true,
     sshUser,
