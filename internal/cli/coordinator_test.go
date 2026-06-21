@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,10 +199,123 @@ func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
 			t.Fatalf("config missing %q:\n%s", want, config)
 		}
 	}
+	for _, line := range strings.Split(config, "\n") {
+		if strings.TrimSpace(line) == "location" {
+			t.Fatalf("credentialed curl config follows redirects:\n%s", config)
+		}
+	}
 	bodyPath := curlConfigValueForTest(t, config, "data-binary")
 	bodyPath = strings.TrimPrefix(bodyPath, "@")
 	if _, err := os.Stat(bodyPath); err != nil {
 		t.Fatalf("body file missing: %v", err)
+	}
+}
+
+func TestCoordinatorHTTPRejectsCrossOriginRedirect(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected.Add(1)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer broker-token" {
+			t.Errorf("Authorization=%q", got)
+		}
+		if got := r.Header.Get("CF-Access-Client-Secret"); got != "access-secret" {
+			t.Errorf("CF-Access-Client-Secret=%q", got)
+		}
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	client := CoordinatorClient{
+		BaseURL: source.URL,
+		Token:   "broker-token",
+		Access: AccessConfig{
+			ClientID:     "access-client",
+			ClientSecret: "access-secret",
+			Token:        "access-jwt",
+		},
+		Client: source.Client(),
+	}
+	err := client.doHTTP(context.Background(), http.MethodGet, "/v1/health", nil, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("error=%v, want cross-origin redirect rejection", err)
+	}
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
+	}
+}
+
+func TestCoordinatorHTTPAllowsSameOriginRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "/v1/health", http.StatusFound)
+			return
+		}
+		if r.URL.Path != "/v1/health" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	var response map[string]any
+	if err := client.doHTTP(context.Background(), http.MethodGet, "/redirect", nil, false, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["ok"] != true {
+		t.Fatalf("response=%v", response)
+	}
+}
+
+func TestCoordinatorCurlFallbackDoesNotFollowRedirect(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is unavailable")
+	}
+	curlHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(curlHome, ".curlrc"), []byte("location\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CURL_HOME", curlHome)
+	t.Setenv("HOME", curlHome)
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected.Add(1)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer broker-token" {
+			t.Errorf("Authorization=%q", got)
+		}
+		if got := r.Header.Get("CF-Access-Client-Secret"); got != "access-secret" {
+			t.Errorf("CF-Access-Client-Secret=%q", got)
+		}
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	client := CoordinatorClient{
+		BaseURL: source.URL,
+		Token:   "broker-token",
+		Access: AccessConfig{
+			ClientID:     "access-client",
+			ClientSecret: "access-secret",
+			Token:        "access-jwt",
+		},
+		Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("forced transport failure")
+		})},
+	}
+	err := client.Health(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "forced transport failure") || !strings.Contains(err.Error(), "curl fallback failed: coordinator GET /v1/health: http 302") {
+		t.Fatalf("error=%v, want transport and curl HTTP 302 errors", err)
+	}
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
 	}
 }
 
