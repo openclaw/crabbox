@@ -93,7 +93,12 @@ CRABBOX_FASTAPI_CLOUD_APP_ID   (or FASTAPI_CLOUD_APP_ID)
 CRABBOX_FASTAPI_CLOUD_TEAM_ID  (or FASTAPI_CLOUD_TEAM_ID)
 ```
 
-The API URL must use `https` unless it targets localhost for tests.
+The API URL must use `https` unless it targets localhost for tests. The loopback
+exception (`localhost`, `127.0.0.1`, `::1`) is matched on the parsed hostname, so
+spoofed authorities such as `http://localhost@example.com` are correctly rejected.
+Note that an `http://localhost...` URL transmits the bearer token in cleartext to
+whatever process listens on that port, so the exception is intended only for local
+testing against a trusted listener.
 
 ## Commands
 

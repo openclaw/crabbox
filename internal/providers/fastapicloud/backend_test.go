@@ -1,8 +1,10 @@
 package fastapicloud
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -399,11 +401,258 @@ func TestFastAPICloudClientLatestDeploymentPicksNewest(t *testing.T) {
 	}
 }
 
+func newTestFastAPICloudClient(t *testing.T, server *httptest.Server) fastAPICloudAPI {
+	t.Helper()
+	cfg := Config{}
+	cfg.FastAPICloud.Token = "secret-tok"
+	cfg.FastAPICloud.APIURL = server.URL + "/api/v1"
+	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func TestFastAPICloudClientUnauthorizedNoTokenLeak(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret-tok" {
+			http.Error(w, "bad bearer", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"detail":"Invalid credentials"}`)
+	}))
+	defer server.Close()
+	_, err := newTestFastAPICloudClient(t, server).GetApp(context.Background(), "app-1")
+	var apiErr *fastAPICloudAPIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *fastAPICloudAPIError", err)
+	}
+	if apiErr.StatusCode != 401 || !strings.Contains(apiErr.Body, "Invalid credentials") {
+		t.Fatalf("apiErr = %#v, want 401 with detail body", apiErr)
+	}
+	if strings.Contains(err.Error(), "secret-tok") {
+		t.Fatal("token leaked into error message")
+	}
+}
+
+func TestFastAPICloudAPIErrorMessage(t *testing.T) {
+	if got := (&fastAPICloudAPIError{Status: "502 Bad Gateway"}).Error(); got != "502 Bad Gateway" {
+		t.Fatalf("empty-body Error() = %q", got)
+	}
+	if got := (&fastAPICloudAPIError{Status: "500 X", Body: "boom"}).Error(); got != "500 X: boom" {
+		t.Fatalf("non-empty Error() = %q", got)
+	}
+}
+
+func TestFastAPICloudClientMalformedJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":`)
+	}))
+	defer server.Close()
+	_, err := newTestFastAPICloudClient(t, server).GetApp(context.Background(), "app-1")
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("err = %v, want decode error", err)
+	}
+	if errors.Unwrap(err) == nil {
+		t.Fatal("decode error must wrap the underlying json error")
+	}
+}
+
+func TestFastAPICloudClientResponseTooLarge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("a"), fastAPICloudMaxResponseBytes+1))
+	}))
+	defer server.Close()
+	_, err := newTestFastAPICloudClient(t, server).GetApp(context.Background(), "app-1")
+	if err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("err = %v, want size-limit error", err)
+	}
+	var apiErr *fastAPICloudAPIError
+	if errors.As(err, &apiErr) {
+		t.Fatal("size-limit failure must not be a *fastAPICloudAPIError")
+	}
+}
+
+func TestFastAPICloudClientContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := newTestFastAPICloudClient(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.GetApp(ctx, "app-1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	var apiErr *fastAPICloudAPIError
+	if errors.As(err, &apiErr) {
+		t.Fatal("transport cancellation must not be a *fastAPICloudAPIError")
+	}
+}
+
+func TestFastAPICloudClientEscapesAppID(t *testing.T) {
+	var gotPath, gotRaw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotRaw = r.URL.EscapedPath(), r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"id":"x"}`)
+	}))
+	defer server.Close()
+	if _, err := newTestFastAPICloudClient(t, server).GetApp(context.Background(), "a/b?c#d"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotPath, "a%2Fb%3Fc%23d") {
+		t.Fatalf("escaped path = %q, want the app id percent-escaped", gotPath)
+	}
+	if gotRaw != "" {
+		t.Fatalf("raw query = %q, want none (a malicious id must not inject a query)", gotRaw)
+	}
+}
+
+func TestFastAPICloudClientEncodesTeamID(t *testing.T) {
+	var gotTeam, gotRaw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTeam, gotRaw = r.URL.Query().Get("team_id"), r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(fastAPICloudListResponse[fastAPICloudApp]{})
+	}))
+	defer server.Close()
+	if _, err := newTestFastAPICloudClient(t, server).ListApps(context.Background(), "team a&b=c"); err != nil {
+		t.Fatal(err)
+	}
+	if gotTeam != "team a&b=c" {
+		t.Fatalf("decoded team_id = %q", gotTeam)
+	}
+	if !strings.Contains(gotRaw, "team_id=team+a%26b%3Dc") {
+		t.Fatalf("raw query = %q, want percent-encoded team_id", gotRaw)
+	}
+}
+
+func TestFastAPICloudClientLoopbackHTTPAccepted(t *testing.T) {
+	for _, u := range []string{
+		"http://localhost:8000/api/v1",
+		"http://127.0.0.1:8000/api/v1",
+		"http://[::1]:8000/api/v1",
+		"http://LOCALHOST:8000/api/v1",
+	} {
+		cfg := Config{}
+		cfg.FastAPICloud.Token = "t"
+		cfg.FastAPICloud.APIURL = u
+		if _, err := newFastAPICloudClient(cfg, Runtime{}); err != nil {
+			t.Fatalf("loopback %q rejected: %v", u, err)
+		}
+	}
+}
+
+func TestFastAPICloudClientLoopbackSpoofRejected(t *testing.T) {
+	for _, u := range []string{
+		"http://localhost@evil.com/api/v1",
+		"http://127.0.0.1.evil.com/api/v1",
+		"http://localhost.evil.com/api/v1",
+		"http://0x7f000001/api/v1",
+	} {
+		cfg := Config{}
+		cfg.FastAPICloud.Token = "t"
+		cfg.FastAPICloud.APIURL = u
+		_, err := newFastAPICloudClient(cfg, Runtime{})
+		if err == nil || !strings.Contains(err.Error(), "must use https") {
+			t.Fatalf("spoofed loopback %q: err = %v, want https rejection", u, err)
+		}
+	}
+}
+
+func TestFastAPICloudClientInvalidURL(t *testing.T) {
+	for _, u := range []string{"://nohost", "https://", "not a url"} {
+		cfg := Config{}
+		cfg.FastAPICloud.Token = "t"
+		cfg.FastAPICloud.APIURL = u
+		_, err := newFastAPICloudClient(cfg, Runtime{})
+		if err == nil || !strings.Contains(err.Error(), "is invalid") {
+			t.Fatalf("invalid url %q: err = %v, want invalid", u, err)
+		}
+	}
+}
+
+func TestFastAPICloudDeploymentStatusMapping(t *testing.T) {
+	cases := []struct {
+		status fastAPICloudDeploymentStatus
+		state  string
+		ready  bool
+	}{
+		{"waiting_upload", "waiting_upload", false},
+		{"upload_cancelled", "failed", false},
+		{"ready_for_build", "ready_for_build", false},
+		{"building", "building", false},
+		{"extracting", "extracting", false},
+		{"extracting_failed", "failed", false},
+		{"building_image", "building_image", false},
+		{"building_image_failed", "failed", false},
+		{"deploying", "deploying", false},
+		{"deploying_failed", "failed", false},
+		{"verifying", "verifying", false},
+		{"verifying_failed", "failed", false},
+		{"verifying_skipped", "ready", true},
+		{"success", "ready", true},
+		{"expired", "expired", false},
+		{"failed", "failed", false},
+		{"", "unknown", false},
+		{"SUCCESS", "ready", true}, // normalization is case-insensitive
+	}
+	for _, c := range cases {
+		if got := c.status.State(); got != c.state {
+			t.Errorf("State(%q) = %q, want %q", c.status, got, c.state)
+		}
+		if got := c.status.IsReady(); got != c.ready {
+			t.Errorf("IsReady(%q) = %v, want %v", c.status, got, c.ready)
+		}
+	}
+}
+
+func TestFastAPICloudStatusNoDeployment(t *testing.T) {
+	fake := &fakeFastAPICloudAPI{
+		app:           fastAPICloudApp{ID: "app-1", Slug: "my-app", URL: "https://my-app.fastapicloud.app"},
+		hasDeployment: false,
+	}
+	cfg := Config{}
+	cfg.FastAPICloud.AppID = "app-1"
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
+	view, err := backend.Status(context.Background(), StatusRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.State != "no-deployment" || view.Ready {
+		t.Fatalf("view = %#v, want no-deployment and not ready", view)
+	}
+}
+
+func TestFastAPICloudStatusAppNotFound(t *testing.T) {
+	fake := &fakeFastAPICloudAPI{getErr: errors.New("app not found")}
+	cfg := Config{}
+	cfg.FastAPICloud.AppID = "missing"
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
+	_, err := backend.Status(context.Background(), StatusRequest{})
+	if err == nil || !strings.Contains(err.Error(), "app not found") {
+		t.Fatalf("err = %v, want propagated app lookup error", err)
+	}
+	if fake.latestCalls != 0 {
+		t.Fatalf("latestCalls = %d, want 0 (must not query deployments once the app lookup fails)", fake.latestCalls)
+	}
+}
+
+func TestFastAPICloudStatusRequiresAppID(t *testing.T) {
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: Config{}, client: panicFastAPICloudAPI{}}
+	_, err := backend.Status(context.Background(), StatusRequest{})
+	if err == nil || !strings.Contains(err.Error(), "status requires") {
+		t.Fatalf("err = %v, want app-id requirement before any API call", err)
+	}
+}
+
 type fakeFastAPICloudAPI struct {
 	app           fastAPICloudApp
 	apps          []fastAPICloudApp
 	deployment    fastAPICloudDeployment
 	hasDeployment bool
+	getErr        error
 	getCalls      int
 	listCalls     int
 	latestCalls   int
@@ -411,6 +660,9 @@ type fakeFastAPICloudAPI struct {
 
 func (f *fakeFastAPICloudAPI) GetApp(context.Context, string) (fastAPICloudApp, error) {
 	f.getCalls++
+	if f.getErr != nil {
+		return fastAPICloudApp{}, f.getErr
+	}
 	return f.app, nil
 }
 
