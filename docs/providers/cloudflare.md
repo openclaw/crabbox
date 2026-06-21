@@ -81,6 +81,8 @@ command-line arguments can be captured in shell history and process listings.
 Runner redirects are followed only when they keep the configured scheme, host,
 and effective port. Cross-origin redirects fail before command, environment, or
 upload bodies can be replayed to another destination.
+Runner error bodies and streamed error events redact the configured token and
+bearer-shaped credentials before they reach CLI diagnostics.
 
 The workdir defaults to `/workspace/crabbox` and must resolve to an absolute
 path. Broad system paths (`/`, `/workspace`, `/usr`, `/var`, and similar) are

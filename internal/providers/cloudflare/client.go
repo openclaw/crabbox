@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -62,6 +63,8 @@ type execStreamEvent struct {
 const cloudflareDefaultResponseHeaderTimeout = 30 * time.Second
 
 var cloudflareCleanupTimeout = 15 * time.Second
+
+var cloudflareBearerPattern = regexp.MustCompile(`(?i)\bbearer[ \t]+[A-Za-z0-9._~+/=-]+`)
 
 func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 	apiURL := strings.TrimSpace(cfg.Cloudflare.APIURL)
@@ -288,7 +291,7 @@ func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req
 			if event.Error == "" {
 				event.Error = "stream error"
 			}
-			return exitCode, errors.New(event.Error)
+			return exitCode, errors.New(redactCloudflareRunnerSecrets(event.Error, c.token))
 		case "start", "heartbeat":
 		default:
 			return exitCode, fmt.Errorf("unknown %s stream event %q", providerName, event.Type)
@@ -342,13 +345,24 @@ func (c *cloudflareClient) responseError(resp *http.Response) error {
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &payload); err == nil && strings.TrimSpace(payload.Error) != "" {
-		return fmt.Errorf("%s API %s: %s", providerName, resp.Status, payload.Error)
+		return fmt.Errorf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(payload.Error, c.token))
 	}
 	text := strings.TrimSpace(string(body))
 	if text == "" {
 		text = resp.Status
 	}
-	return fmt.Errorf("%s API %s: %s", providerName, resp.Status, text)
+	return fmt.Errorf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(text, c.token))
+}
+
+func redactCloudflareRunnerSecrets(value string, secrets ...string) string {
+	redacted := value
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			redacted = strings.ReplaceAll(redacted, secret, "[redacted]")
+		}
+	}
+	return cloudflareBearerPattern.ReplaceAllString(redacted, "Bearer [redacted]")
 }
 
 func remoteArchivePath() string {

@@ -345,6 +345,60 @@ func TestCloudflareDoctorChecksRunnerAuth(t *testing.T) {
 	}
 }
 
+func TestCloudflareClientRedactsRunnerResponseErrors(t *testing.T) {
+	const token = "runner-secret-token"
+	client := &cloudflareClient{token: token}
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "json", body: `{"error":"bad Authorization: Bearer runner-secret-token"}`},
+		{name: "text", body: "proxy echoed runner-secret-token and Bearer reflected-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{
+				Status:     "401 Unauthorized",
+				StatusCode: http.StatusUnauthorized,
+				Body:       io.NopCloser(strings.NewReader(tc.body)),
+			}
+			err := client.responseError(resp)
+			if err == nil {
+				t.Fatal("responseError returned nil")
+			}
+			if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), "reflected-token") {
+				t.Fatalf("response error leaked bearer token: %v", err)
+			}
+			if !strings.Contains(err.Error(), "[redacted]") {
+				t.Fatalf("response error omitted redaction marker: %v", err)
+			}
+		})
+	}
+}
+
+func TestCloudflareClientRedactsStreamError(t *testing.T) {
+	const token = "runner-secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"type":"error","error":"bad Authorization: Bearer runner-secret-token"}`+"\n")
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	cfg.Cloudflare.APIURL = server.URL
+	cfg.Cloudflare.Token = token
+	client, err := newCloudflareClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("execStream returned nil")
+	}
+	if strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "Bearer [redacted]") {
+		t.Fatalf("stream error was not redacted: %v", err)
+	}
+}
+
 func TestCloudflareDoctorTimesOutStalledRunnerReadiness(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/readiness" || r.Method != http.MethodGet {
