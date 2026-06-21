@@ -339,6 +339,39 @@ func TestListArtifactBundleFilesSkipsPublishedMarkdown(t *testing.T) {
 	}
 }
 
+func TestArtifactsPublishRejectsSymlinksBeforeSideEffects(t *testing.T) {
+	for _, linkName := range []string{"screenshot.png", artifactManifestFilename, "published-artifacts.md"} {
+		t.Run(linkName, func(t *testing.T) {
+			dir := t.TempDir()
+			outside := filepath.Join(t.TempDir(), "outside-secret.txt")
+			mustWriteFile(t, outside, "outside-secret")
+			mustWriteFile(t, filepath.Join(dir, "safe.txt"), "safe")
+			if err := os.Symlink(outside, filepath.Join(dir, linkName)); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+
+			var stdout bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: io.Discard}).artifactsPublish(context.Background(), []string{
+				"--dir", dir,
+				"--storage", "local",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+				t.Fatalf("error=%v, want exit 2", err)
+			}
+			if !strings.Contains(exitErr.Message, "symlink") || !strings.Contains(exitErr.Message, linkName) {
+				t.Fatalf("message=%q", exitErr.Message)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout=%q, want no publish output", stdout.String())
+			}
+			if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "outside-secret" {
+				t.Fatalf("outside file changed: data=%q err=%v", got, readErr)
+			}
+		})
+	}
+}
+
 func TestArtifactsPublishWritesManifestByDefault(t *testing.T) {
 	dir := t.TempDir()
 	data := []byte("png-data")

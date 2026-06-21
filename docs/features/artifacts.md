@@ -122,7 +122,9 @@ renders Markdown with inline image/GIF links, writes that body to
 `published-artifacts.md`, writes and publishes `artifact-manifest.json`, and
 posts the body with `gh`.
 
-`--dir <bundle>` is required. Storage backends (`--storage`):
+`--dir <bundle>` is required. Publishing rejects symlinks and other non-regular
+bundle entries before upload, manifest, or Markdown side effects. Storage
+backends (`--storage`):
 
 - `auto` (default): use brokered publishing when a coordinator with a token is
   configured, otherwise fall back to `local`.

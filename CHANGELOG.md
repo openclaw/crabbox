@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Rejected symlinked and non-regular artifact bundle entries before publish side effects, preventing files outside the selected bundle from being uploaded. Thanks @coygeek.
 - Kept `CRABBOX_ENV_ALLOW` authoritative over selected profile allowlists while preserving explicit `--allow-env` additions. Thanks @coygeek.
 - Made desktop paste/type and POSIX launch/proof success depend on verified clipboard delivery or live/visible launch state, including clipboard-manager and wrapper handoffs. Thanks @coygeek.
 - Released newly created SSH leases when prewarm hydration, probe, or ready-pool registration fails, preventing paid lease leaks. Thanks @coygeek.
