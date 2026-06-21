@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Redacted configured OpenComputer API keys from control-plane and upload error diagnostics. Thanks @coygeek.
 - Rejected cross-origin Cloudflare runner redirects before command, environment, or upload bodies can be replayed. Thanks @coygeek.
 - Validated AWS region inputs before building SigV4-signed service endpoints, preventing request-selected hostname escapes. Thanks @coygeek.
 - Required run artifacts now reject dangling symlinks and symlinks to directories instead of treating them as proof files. Thanks @coygeek.

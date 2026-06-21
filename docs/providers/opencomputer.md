@@ -55,7 +55,8 @@ Crabbox resolves the API key from, in order, `CRABBOX_OPENCOMPUTER_API_KEY`,
 `OPENCOMPUTER_API_KEY`, then the `oc` CLI config file (`~/.oc/config.json`,
 if already configured). It is sent only in the `X-API-Key` header, never
 persisted in Crabbox config and never placed on argv. If no key is resolvable,
-operations fail with a clear error.
+operations fail with a clear error. Provider error diagnostics redact the
+configured key before display.
 
 Local lease claims are scoped to the normalized API URL and a random ownership
 marker stored in both the local claim and the sandbox tags. The API key is
