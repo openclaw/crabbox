@@ -602,7 +602,7 @@ func newFreestyleSandboxName(repo Repo) string {
 }
 
 func isCrabboxFreestyleSandboxName(name string) bool {
-	return strings.HasPrefix(normalizeLeaseSlug(name), freestyleNamePrefix)
+	return name == normalizeLeaseSlug(name) && strings.HasPrefix(name, freestyleNamePrefix)
 }
 
 func freestyleRandomSuffix() string {
