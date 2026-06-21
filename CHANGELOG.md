@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Confined remote failure-bundle links to the generated archive subtree and omitted unsafe special entries. Thanks @coygeek.
 - Required actual Islo sandbox identifiers to already be canonical before raw-ID recovery can reach provider operations. Thanks @coygeek.
 - Required canonical generated Freestyle VM names before raw-ID recovery can reuse or delete provider resources. Thanks @coygeek.
 - Rejected plaintext non-loopback E2B API endpoints before provider credentials can be attached. Thanks @coygeek.

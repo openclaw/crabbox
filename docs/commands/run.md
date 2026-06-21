@@ -368,6 +368,8 @@ JSON, command stdout/stderr, common debug paths such as `test-results`,
 gateway log tail when a known gateway log path exists. Implicit stdout/stderr
 entries are capped to keep bundles bounded; explicit `--capture-stdout` /
 `--capture-stderr` files are included as caller-created local files.
+Remote archive entries are confined to the bundle subtree; unsafe links and
+special files are omitted.
 `--capture-on-fail` remains accepted as a compatibility alias. Crabbox does not
 redact captured files; the caller owns redaction before sharing them.
 

@@ -106,7 +106,8 @@ a generic gateway log tail when present. Blacksmith delegated runs bundle
 stdout/stderr plus timing and redacted env/config metadata. The stdout/stderr
 files captured inside automatic failure bundles are size-capped — pass
 `--capture-stdout` / `--capture-stderr` when you need a complete local stream
-file. `--capture-on-fail` is still accepted as a compatibility alias; failure
+file. Remote archive entries are confined to the bundle subtree; unsafe links
+and special files are omitted. `--capture-on-fail` is still accepted as a compatibility alias; failure
 bundles are saved automatically on non-zero exit regardless.
 
 Crabbox does **not** redact captured files. Treat every bundle and capture file

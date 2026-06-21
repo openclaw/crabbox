@@ -2221,6 +2221,73 @@ func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing
 	}
 }
 
+func TestWriteLocalFailureBundleConfinesRemoteLinks(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	remoteTar := filepath.Join(dir, "remote.tar.gz")
+	file, err := os.Create(remoteTar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipWriter := gzip.NewWriter(file)
+	tarWriter := tar.NewWriter(gzipWriter)
+	entries := []struct {
+		header tar.Header
+		data   string
+	}{
+		{header: tar.Header{Name: "logs/result.txt", Typeflag: tar.TypeReg, Mode: 0o600, Size: 6}, data: "result"},
+		{header: tar.Header{Name: "logs/result-link", Typeflag: tar.TypeSymlink, Linkname: "result.txt", Mode: 0o777}},
+		{header: tar.Header{Name: "logs/result-hard", Typeflag: tar.TypeLink, Linkname: "logs/result.txt", Mode: 0o600}},
+		{header: tar.Header{Name: "logs/symlink-out", Typeflag: tar.TypeSymlink, Linkname: "../../outside", Mode: 0o777}},
+		{header: tar.Header{Name: "logs/windows-link-out", Typeflag: tar.TypeSymlink, Linkname: `C:\outside`, Mode: 0o777}},
+		{header: tar.Header{Name: "logs/hardlink-out", Typeflag: tar.TypeLink, Linkname: "/etc/passwd", Mode: 0o600}},
+		{header: tar.Header{Name: "logs/empty-link", Typeflag: tar.TypeSymlink, Mode: 0o777}},
+		{header: tar.Header{Name: "logs/pipe", Typeflag: tar.TypeFifo, Mode: 0o600}},
+	}
+	for _, entry := range entries {
+		if err := tarWriter.WriteHeader(&entry.header); err != nil {
+			t.Fatal(err)
+		}
+		if entry.data != "" {
+			if _, err := io.WriteString(tarWriter, entry.data); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	local, _, err := writeLocalFailureBundle("bundle.tar.gz", remoteTar, FailureCaptureMetadata{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := readTarGzHeaders(t, local)
+	regular := headers["crabbox-artifacts/remote/logs/result.txt"]
+	if regular == nil || regular.Typeflag != tar.TypeReg {
+		t.Fatalf("safe regular entry missing: %#v", regular)
+	}
+	symlink := headers["crabbox-artifacts/remote/logs/result-link"]
+	if symlink == nil || symlink.Typeflag != tar.TypeSymlink || symlink.Linkname != "result.txt" {
+		t.Fatalf("safe symlink=%#v", symlink)
+	}
+	hardlink := headers["crabbox-artifacts/remote/logs/result-hard"]
+	if hardlink == nil || hardlink.Typeflag != tar.TypeLink || hardlink.Linkname != "crabbox-artifacts/remote/logs/result.txt" {
+		t.Fatalf("safe hardlink=%#v", hardlink)
+	}
+	for _, name := range []string{"symlink-out", "windows-link-out", "hardlink-out", "empty-link", "pipe"} {
+		if header := headers["crabbox-artifacts/remote/logs/"+name]; header != nil {
+			t.Fatalf("unsafe remote entry preserved: %#v", header)
+		}
+	}
+}
+
 func TestNativeWindowsFailureBundleUsesLocalStreams(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -2358,6 +2425,33 @@ func readTarGzContents(t *testing.T, path string) map[string][]byte {
 		}
 	}
 	return entries
+}
+
+func readTarGzHeaders(t *testing.T, path string) map[string]*tar.Header {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	entries := make(map[string]*tar.Header)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			return entries
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		copy := *header
+		entries[header.Name] = &copy
+	}
 }
 
 func TestPrintKeepOnFailureSSHHint(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -761,12 +762,28 @@ func appendRemoteFailureTar(tw *tar.Writer, remoteTarPath, prefix string) error 
 		if err != nil {
 			return exit(2, "failure bundle read remote tar %s: %v", remoteTarPath, err)
 		}
-		cleanName := filepath.ToSlash(filepath.Clean(header.Name))
-		if cleanName == "." || cleanName == ".." || strings.HasPrefix(cleanName, "/") || strings.HasPrefix(cleanName, "../") {
+		cleanName, ok := cleanRemoteFailureTarPath(header.Name)
+		if !ok {
 			continue
 		}
 		next := *header
 		next.Name = prefix + cleanName
+		switch header.Typeflag {
+		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
+		case tar.TypeSymlink:
+			if !remoteFailureSymlinkTargetSafe(cleanName, header.Linkname) {
+				continue
+			}
+			next.Linkname = strings.ReplaceAll(header.Linkname, `\`, "/")
+		case tar.TypeLink:
+			cleanLink, ok := cleanRemoteFailureTarPath(header.Linkname)
+			if !ok {
+				continue
+			}
+			next.Linkname = prefix + cleanLink
+		default:
+			continue
+		}
 		if err := tw.WriteHeader(&next); err != nil {
 			return err
 		}
@@ -776,6 +793,34 @@ func appendRemoteFailureTar(tw *tar.Writer, remoteTarPath, prefix string) error 
 			}
 		}
 	}
+}
+
+func cleanRemoteFailureTarPath(name string) (string, bool) {
+	name = strings.ReplaceAll(name, `\`, "/")
+	if name == "" || remoteFailureTarPathRooted(name) {
+		return "", false
+	}
+	clean := path.Clean(name)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	return clean, true
+}
+
+func remoteFailureSymlinkTargetSafe(name, linkname string) bool {
+	linkname = strings.ReplaceAll(linkname, `\`, "/")
+	if linkname == "" || remoteFailureTarPathRooted(linkname) {
+		return false
+	}
+	_, ok := cleanRemoteFailureTarPath(path.Join(path.Dir(name), linkname))
+	return ok
+}
+
+func remoteFailureTarPathRooted(name string) bool {
+	if path.IsAbs(name) {
+		return true
+	}
+	return len(name) >= 2 && name[1] == ':' && ((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z'))
 }
 
 func failureEnvSummary(allowed []string, values map[string]string) string {
