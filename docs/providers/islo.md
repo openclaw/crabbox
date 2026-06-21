@@ -155,9 +155,9 @@ rejected before workspace preparation and sync.
   trim the checkout (more `.gitignore`/sync excludes) when a sync trips the
   large-archive guardrail.
 - `--shell` passes the raw shell string to `bash -lc` in the workdir.
-- `--id` accepts a Crabbox slug, an `isb_<name>` lease ID, or a Crabbox-created
-  sandbox name (one starting with `crabbox-`). Sandboxes not created by Crabbox
-  are rejected.
+- `--id` accepts a Crabbox slug, an `isb_<name>` lease ID, or a canonical
+  normalized sandbox name starting with `crabbox-`. Names that require case,
+  whitespace, or punctuation normalization and non-Crabbox sandboxes are rejected.
 
 Related docs:
 

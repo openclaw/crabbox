@@ -182,12 +182,40 @@ func TestResolveIsloLeaseIDRejectsUnclaimedRawSandbox(t *testing.T) {
 	if _, _, _, err := resolveIsloLeaseID("production", "", false); err == nil {
 		t.Fatal("expected raw non-Crabbox sandbox to be rejected")
 	}
+	for _, name := range []string{
+		"crabbox repo abc123",
+		"crabbox/repo/abc123",
+		"crabbox?repo=abc123",
+		"Crabbox-repo-abc123",
+	} {
+		for _, id := range []string{name, isloLeasePrefix + name} {
+			if _, _, _, err := resolveIsloLeaseID(id, "", false); err == nil {
+				t.Errorf("resolveIsloLeaseID(%q) accepted a non-canonical sandbox name", id)
+			}
+		}
+	}
 	leaseID, name, slug, err := resolveIsloLeaseID("crabbox-repo-abcdef", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if leaseID != "isb_crabbox-repo-abcdef" || name != "crabbox-repo-abcdef" || slug == "" {
 		t.Fatalf("lease=%q name=%q slug=%q", leaseID, name, slug)
+	}
+}
+
+func TestIsloStopRejectsNonCanonicalSandboxBeforeDelete(t *testing.T) {
+	client := &fakeIsloSyncClient{}
+	restore := swapNewIsloClient(client)
+	t.Cleanup(restore)
+	backend := &isloBackend{spec: (Provider{}).Spec(), cfg: Config{Provider: isloProvider}}
+
+	for _, id := range []string{"crabbox repo abc123", "isb_crabbox/repo/abc123"} {
+		if err := backend.Stop(context.Background(), StopRequest{ID: id}); err == nil {
+			t.Errorf("Stop(%q) accepted a non-canonical sandbox name", id)
+		}
+	}
+	if client.deleteCalls != 0 {
+		t.Fatalf("delete calls=%d, want 0", client.deleteCalls)
 	}
 }
 
