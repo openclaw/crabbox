@@ -3,11 +3,72 @@ package freestyle
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestFreestyleClientRedactsAPIKeyFromAllResponseErrors(t *testing.T) {
+	const apiKey = "fs_test_response_secret"
+	tests := []struct {
+		name   string
+		invoke func(*freestyleHTTPClient) error
+	}{
+		{name: "create vm", invoke: func(client *freestyleHTTPClient) error {
+			_, err := client.CreateVM(context.Background(), freestyleCreateVMRequest{Name: "test"})
+			return err
+		}},
+		{name: "get vm", invoke: func(client *freestyleHTTPClient) error {
+			_, err := client.GetVM(context.Background(), "vm123")
+			return err
+		}},
+		{name: "list vms", invoke: func(client *freestyleHTTPClient) error {
+			_, err := client.ListVMs(context.Background())
+			return err
+		}},
+		{name: "delete vm", invoke: func(client *freestyleHTTPClient) error {
+			return client.DeleteVM(context.Background(), "vm123")
+		}},
+		{name: "exec", invoke: func(client *freestyleHTTPClient) error {
+			_, err := client.Exec(context.Background(), "vm123", "true", io.Discard, io.Discard)
+			return err
+		}},
+		{name: "write file", invoke: func(client *freestyleHTTPClient) error {
+			return client.WriteFile(context.Background(), "vm123", "/tmp/file", "content", "utf8")
+		}},
+		{name: "read file", invoke: func(client *freestyleHTTPClient) error {
+			_, err := client.ReadFile(context.Background(), "vm123", "/tmp/file")
+			return err
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got, want := r.Header.Get("Authorization"), "Bearer "+apiKey; got != want {
+					t.Errorf("authorization header = %q, want %q", got, want)
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, "rejected Bearer "+apiKey+" (key "+apiKey+")")
+			}))
+			defer server.Close()
+			client := &freestyleHTTPClient{apiKey: apiKey, apiURL: server.URL, httpClient: server.Client()}
+
+			err := tt.invoke(client)
+			if err == nil {
+				t.Fatal("expected response error")
+			}
+			if strings.Contains(err.Error(), apiKey) {
+				t.Fatalf("API key leaked in response error: %v", err)
+			}
+			if !strings.Contains(err.Error(), "Bearer [redacted] (key [redacted])") {
+				t.Fatalf("response error was not redacted: %v", err)
+			}
+		})
+	}
+}
 
 func TestValidateFreestyleAPIURL(t *testing.T) {
 	tests := []struct {

@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Redacted configured Freestyle API keys from lifecycle, command, and file-operation error diagnostics. Thanks @coygeek.
 - Redacted configured OpenComputer API keys from control-plane and upload error diagnostics. Thanks @coygeek.
 - Rejected cross-origin Cloudflare runner redirects before command, environment, or upload bodies can be replayed. Thanks @coygeek.
 - Validated AWS region inputs before building SigV4-signed service endpoints, preventing request-selected hostname escapes. Thanks @coygeek.

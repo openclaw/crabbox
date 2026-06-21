@@ -211,8 +211,7 @@ func (c *freestyleHTTPClient) CreateVM(ctx context.Context, req freestyleCreateV
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return freestyleVM{}, freestyleError("create vm", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))
+		return freestyleVM{}, c.responseError("create vm", resp)
 	}
 	var parsed freestyleCreateVMResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
@@ -228,8 +227,7 @@ func (c *freestyleHTTPClient) GetVM(ctx context.Context, id string) (freestyleVM
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return freestyleVM{}, freestyleError("get vm", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))
+		return freestyleVM{}, c.responseError("get vm", resp)
 	}
 	var vm freestyleVM
 	if err := json.NewDecoder(resp.Body).Decode(&vm); err != nil {
@@ -247,9 +245,9 @@ func (c *freestyleHTTPClient) ListVMs(ctx context.Context) ([]freestyleVM, error
 			return nil, freestyleError("list vms", err)
 		}
 		if resp.StatusCode >= 400 {
-			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			responseErr := c.responseError("list vms", resp)
 			_ = resp.Body.Close()
-			return nil, freestyleError("list vms", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))
+			return nil, responseErr
 		}
 		var parsed freestyleListVMsResponse
 		decodeErr := json.NewDecoder(resp.Body).Decode(&parsed)
@@ -277,8 +275,7 @@ func (c *freestyleHTTPClient) DeleteVM(ctx context.Context, id string) error {
 		return nil
 	}
 	if resp.StatusCode >= 400 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return freestyleError("delete vm", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))
+		return c.responseError("delete vm", resp)
 	}
 	return nil
 }
@@ -294,8 +291,7 @@ func (c *freestyleHTTPClient) Exec(ctx context.Context, id string, command strin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 1, freestyleError("exec", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))
+		return 1, c.responseError("exec", resp)
 	}
 	var parsed freestyleExecResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
@@ -324,8 +320,7 @@ func (c *freestyleHTTPClient) WriteFile(ctx context.Context, id, path string, co
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return freestyleError("write file", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))
+		return c.responseError("write file", resp)
 	}
 	return nil
 }
@@ -340,8 +335,7 @@ func (c *freestyleHTTPClient) ReadFile(ctx context.Context, id, path string) (st
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", freestyleError("read file", fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(snippet))))
+		return "", c.responseError("read file", resp)
 	}
 	var parsed freestyleReadFileResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
@@ -362,6 +356,23 @@ func freestyleFileURLPath(id, path string) string {
 		path = "/" + path
 	}
 	return "/v1/vms/" + url.PathEscape(id) + "/files/" + url.PathEscape(path)
+}
+
+func (c *freestyleHTTPClient) responseError(action string, resp *http.Response) error {
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	detail := redactFreestyleSecret(strings.TrimSpace(string(snippet)), c.apiKey)
+	return freestyleError(action, fmt.Errorf("%s: %s", resp.Status, detail))
+}
+
+func redactFreestyleSecret(value, apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return value
+	}
+	return strings.NewReplacer(
+		"Bearer "+apiKey, "Bearer [redacted]",
+		apiKey, "[redacted]",
+	).Replace(value)
 }
 
 func freestyleError(action string, err error) error {
