@@ -127,7 +127,11 @@ func (a App) desktopLaunchWithCommand(ctx context.Context, args []string, comman
 	}
 	workdir := remoteJoin(cfg, leaseID, repo.Name)
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
-	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, command, *browser && !*fullscreen)); err != nil {
+	launchOptions := desktopLaunchOptions{
+		WindowedBrowser: *browser && !*fullscreen,
+		VerifyProcess:   !expectBrowserLaunch || target.TargetOS != targetLinux,
+	}
+	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, command, launchOptions)); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, command))
 		return exit(5, "launch desktop command: %v", err)
 	}
@@ -220,11 +224,13 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 	if err := waitForLoopbackVNC(ctx, &target); err != nil {
 		return err
 	}
+	terminalTitle := desktopTerminalWindowTitle(leaseID)
 	terminalCommand, err := desktopTerminalCommand(target, command, desktopTerminalOptions{
 		FontSize: *fontSize,
 		Cols:     *cols,
 		Rows:     *rows,
 		Sixel:    *sixel,
+		Title:    terminalTitle,
 	})
 	if err != nil {
 		return err
@@ -240,7 +246,10 @@ func (a App) desktopTerminal(ctx context.Context, args []string) error {
 		}
 	}
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
-	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, false)); err != nil {
+	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
+		VerifyProcess:      true,
+		VisibleWindowTitle: terminalTitle,
+	})); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
 		return exit(5, "launch desktop terminal: %v", err)
 	}
@@ -415,11 +424,13 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return exit(2, "create proof directory: %v", err)
 	}
+	terminalTitle := desktopTerminalWindowTitle(leaseID)
 	terminalCommand, err := desktopTerminalCommand(target, command, desktopTerminalOptions{
 		FontSize: *fontSize,
 		Cols:     *cols,
 		Rows:     *rows,
 		Sixel:    *sixel,
+		Title:    terminalTitle,
 	})
 	if err != nil {
 		return err
@@ -433,7 +444,10 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
-	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, false)); err != nil {
+	if out, err := runSSHCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
+		VerifyProcess:      true,
+		VisibleWindowTitle: terminalTitle,
+	})); err != nil {
 		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
 		return exit(5, "launch desktop proof terminal: %v", err)
 	}
@@ -536,6 +550,7 @@ type desktopTerminalOptions struct {
 	Cols     int
 	Rows     int
 	Sixel    bool
+	Title    string
 }
 
 func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerminalOptions) ([]string, error) {
@@ -547,6 +562,9 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 	}
 	if opts.Rows <= 0 {
 		opts.Rows = 32
+	}
+	if strings.TrimSpace(opts.Title) == "" {
+		opts.Title = "Crabbox Desktop"
 	}
 	if isWindowsNativeTarget(target) {
 		shellCommand := ""
@@ -565,6 +583,7 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 		}
 		return []string{
 			`C:\Program Files\Git\usr\bin\mintty.exe`,
+			"-t", opts.Title,
 			"-o", fmt.Sprintf("FontHeight=%d", opts.FontSize),
 			"-o", fmt.Sprintf("Columns=%d", opts.Cols),
 			"-o", fmt.Sprintf("Rows=%d", opts.Rows),
@@ -579,8 +598,8 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 		}
 		prefix := "export TERM=${TERM:-xterm-ghostty}; export GIFGREP_INLINE=${GIFGREP_INLINE:-kitty}; export GIFGREP_SOFTWARE_ANIM=${GIFGREP_SOFTWARE_ANIM:-1}; "
 		return []string{
-			"open", "-na", "Ghostty.app", "--args",
-			"--title=gifgrep tui",
+			"open", "-W", "-na", "Ghostty.app", "--args",
+			"--title=" + opts.Title,
 			fmt.Sprintf("--font-size=%d", opts.FontSize),
 			fmt.Sprintf("--window-width=%d", opts.Cols),
 			fmt.Sprintf("--window-height=%d", opts.Rows),
@@ -603,21 +622,32 @@ if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "xfce" ]; then
   if [ "${CRABBOX_DESKTOP_ENV:-}" = "gnome" ] && command -v gnome-terminal >/dev/null 2>&1; then
     export DISPLAY="${DISPLAY:-:0}"
     export GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0
-    exec gnome-terminal --working-directory="$PWD" -- bash -lc %s
+    exec gnome-terminal --wait --title=%s --working-directory="$PWD" -- bash -lc %s
   fi
   command -v foot >/dev/null 2>&1 || { echo "missing foot; warm a new Wayland desktop lease or install foot" >&2; exit 127; }
-  exec foot --title='Crabbox Desktop' --font=%s bash -lc %s
+  exec foot --title=%s --font=%s bash -lc %s
 fi
 export DISPLAY="${DISPLAY:-:99}"
-exec xterm -fa monospace -fs %s -geometry %s -e bash -lc %s`,
+exec xterm -title %s -fa monospace -fs %s -geometry %s -e bash -lc %s`,
+		shellQuote(opts.Title),
 		shellQuote(shellCommand),
+		shellQuote(opts.Title),
 		shellQuote(fmt.Sprintf("monospace:size=%d", opts.FontSize)),
 		shellQuote(shellCommand),
+		shellQuote(opts.Title),
 		shellQuote(fmt.Sprintf("%d", opts.FontSize)),
 		shellQuote(fmt.Sprintf("%dx%d", opts.Cols, opts.Rows)),
 		shellQuote(shellCommand),
 	)
 	return []string{"sh", "-lc", terminalScript}, nil
+}
+
+func desktopTerminalWindowTitle(leaseID string) string {
+	suffix := normalizeLeaseSlug(leaseID)
+	if suffix == "" {
+		suffix = "session"
+	}
+	return "Crabbox Desktop " + suffix
 }
 
 func shellJoin(args []string) string {
@@ -654,18 +684,22 @@ func firstNonBlank(values ...string) string {
 	return ""
 }
 
-func desktopLaunchRemoteCommand(target SSHTarget, workdir string, env map[string]string, command []string, windowedBrowser bool) string {
+type desktopLaunchOptions struct {
+	WindowedBrowser    bool
+	VerifyProcess      bool
+	VisibleWindowTitle string
+}
+
+func desktopLaunchRemoteCommand(target SSHTarget, workdir string, env map[string]string, command []string, opts desktopLaunchOptions) string {
 	if isWindowsNativeTarget(target) {
 		return windowsDesktopLaunchRemoteCommand(workdir, env, command)
 	}
-	if target.TargetOS == targetMacOS {
-		return posixDesktopLaunchRemoteCommand(workdir, env, command, windowedBrowser)
-	}
-	return posixDesktopLaunchRemoteCommand(workdir, env, command, windowedBrowser)
+	return posixDesktopLaunchRemoteCommand(target, workdir, env, command, opts)
 }
 
-func posixDesktopLaunchRemoteCommand(workdir string, env map[string]string, command []string, windowedBrowser bool) string {
+func posixDesktopLaunchRemoteCommand(target SSHTarget, workdir string, env map[string]string, command []string, opts desktopLaunchOptions) string {
 	var b bytes.Buffer
+	command = desktopMacOpenWaitCommand(target, command)
 	b.WriteString("set -eu\n")
 	if workdir != "" {
 		b.WriteString("mkdir -p " + shellQuote(workdir) + "\n")
@@ -676,6 +710,9 @@ func posixDesktopLaunchRemoteCommand(workdir string, env map[string]string, comm
 		b.WriteString("export " + key + "\n")
 	}
 	b.WriteString("log=${TMPDIR:-/tmp}/crabbox-desktop-launch.log\n")
+	if opts.VerifyProcess && target.TargetOS == targetLinux {
+		b.WriteString(posixDesktopLaunchWindowSnapshotCommand())
+	}
 	b.WriteString("if command -v setsid >/dev/null 2>&1; then\n")
 	b.WriteString("  setsid ")
 	writeShellArgv(&b, command)
@@ -685,9 +722,132 @@ func posixDesktopLaunchRemoteCommand(workdir string, env map[string]string, comm
 	writeShellArgv(&b, command)
 	b.WriteString(" >\"$log\" 2>&1 < /dev/null &\n")
 	b.WriteString("fi\n")
-	if windowedBrowser {
+	if opts.VerifyProcess {
+		b.WriteString(posixDesktopLaunchVerificationCommand(target, opts.VisibleWindowTitle))
+	}
+	if opts.WindowedBrowser {
 		b.WriteString(posixWindowBrowserCommand())
 	}
+	return b.String()
+}
+
+func desktopMacOpenWaitCommand(target SSHTarget, command []string) []string {
+	if target.TargetOS != targetMacOS || len(command) == 0 || filepath.Base(command[0]) != "open" {
+		return command
+	}
+	for _, arg := range command[1:] {
+		if arg == "-W" || arg == "--wait-apps" {
+			return command
+		}
+	}
+	out := make([]string, 0, len(command)+1)
+	out = append(out, command[0], "-W")
+	return append(out, command[1:]...)
+}
+
+func posixDesktopLaunchWindowSnapshotCommand() string {
+	return `launch_can_check_windows=0
+launch_before_windows=""
+if command -v xdotool >/dev/null 2>&1 && xdotool getmouselocation >/dev/null 2>&1; then
+  launch_can_check_windows=1
+  launch_before_windows=" $(xdotool search --onlyvisible --name '.*' 2>/dev/null | tr '\n' ' ' || true) "
+  launch_before_active="$(xdotool getactivewindow 2>/dev/null || true)"
+fi
+desktop_launch_new_window() {
+  for launch_window in $(xdotool search --onlyvisible --name '.*' 2>/dev/null || true); do
+    case "$launch_before_windows" in
+      *" $launch_window "*) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+desktop_launch_observed_window() {
+  desktop_launch_new_window && return 0
+  launch_active="$(xdotool getactivewindow 2>/dev/null || true)"
+  [ -n "$launch_before_active" ] && [ -n "$launch_active" ] && [ "$launch_active" != "$launch_before_active" ] || return 1
+  case "$launch_before_windows" in
+    *" $launch_active "*) return 0 ;;
+  esac
+  return 1
+}
+`
+}
+
+// posixDesktopLaunchVerificationCommand keeps detached launch success tied to
+// the spawned process and, where X11 exposes it, the intended terminal window.
+func posixDesktopLaunchVerificationCommand(target SSHTarget, visibleWindowTitle string) string {
+	var b bytes.Buffer
+	b.WriteString(`launch_pid=$!
+desktop_launch_failed() {
+	launch_status="${1:-}"
+	if [ -z "$launch_status" ]; then
+		set +e
+		wait "$launch_pid"
+		launch_status=$?
+		set -e
+	fi
+  [ "$launch_status" -ne 0 ] || launch_status=1
+  echo "desktop command exited during launch (status=$launch_status)" >&2
+  if [ -s "$log" ]; then tail -n 20 "$log" >&2; fi
+  exit "$launch_status"
+}
+sleep 1
+`)
+	if target.TargetOS == targetLinux && strings.TrimSpace(visibleWindowTitle) == "" {
+		b.WriteString(`if ! kill -0 "$launch_pid" >/dev/null 2>&1; then
+  set +e
+  wait "$launch_pid"
+  launch_status=$?
+  set -e
+  [ "$launch_status" -eq 0 ] || desktop_launch_failed "$launch_status"
+  launch_visible=0
+  if [ "$launch_can_check_windows" -eq 1 ]; then
+    launch_attempt=0
+    while [ "$launch_attempt" -lt 10 ]; do
+      if desktop_launch_observed_window; then
+        launch_visible=1
+        break
+      fi
+      launch_attempt=$((launch_attempt + 1))
+      sleep 0.5
+    done
+  fi
+  [ "$launch_visible" -eq 1 ] || desktop_launch_failed 1
+fi
+`)
+	} else {
+		b.WriteString("kill -0 \"$launch_pid\" >/dev/null 2>&1 || desktop_launch_failed\n")
+	}
+	if target.TargetOS != targetLinux || strings.TrimSpace(visibleWindowTitle) == "" {
+		return b.String()
+	}
+	b.WriteString(`if [ -f /var/lib/crabbox/desktop.env ]; then . /var/lib/crabbox/desktop.env; fi
+if [ "${CRABBOX_DESKTOP_ENV:-xfce}" != "wayland" ] && command -v xdotool >/dev/null 2>&1; then
+  if [ "${CRABBOX_DESKTOP_ENV:-xfce}" = "xfce" ]; then
+    export DISPLAY="${DISPLAY:-:99}"
+  else
+    export DISPLAY="${DISPLAY:-:0}"
+  fi
+  launch_visible=0
+  launch_attempt=0
+  while [ "$launch_attempt" -lt 10 ]; do
+    if [ "$launch_can_check_windows" -eq 1 ] && desktop_launch_new_window; then
+      launch_visible=1
+      break
+    fi
+    kill -0 "$launch_pid" >/dev/null 2>&1 || desktop_launch_failed
+    launch_attempt=$((launch_attempt + 1))
+    sleep 0.5
+  done
+  if [ "$launch_visible" -ne 1 ]; then
+    echo "desktop window not visible: ` + shellQuote(visibleWindowTitle) + `" >&2
+    if [ -s "$log" ]; then tail -n 20 "$log" >&2; fi
+    kill "$launch_pid" >/dev/null 2>&1 || true
+    exit 1
+  fi
+fi
+`)
 	return b.String()
 }
 

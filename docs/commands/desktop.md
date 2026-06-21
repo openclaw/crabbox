@@ -39,8 +39,13 @@ connectivity.
 ## desktop launch
 
 `crabbox desktop launch` starts an app inside the desktop session without
-attaching a VNC viewer first. It waits for the loopback VNC service, then starts
-the process detached from the SSH session.
+attaching a VNC viewer first. It waits for the loopback VNC service, starts the
+process detached from the SSH session, and verifies that the process remains
+alive through startup. A short-lived Linux/X11 wrapper can also succeed by
+creating a new visible window or focusing a different existing visible window.
+Linux browser launches additionally require a visible browser window or browser
+process. macOS `open` launches wait on the opened app so an immediately failed
+launch is not reported as successful.
 
 With `--browser`, Crabbox probes the target browser the same way
 `run --browser` does and launches the resolved `BROWSER` when no explicit
@@ -84,7 +89,13 @@ desktop launch --id <lease-id-or-slug>
 `gnome-terminal` on Wayland/GNOME desktop envs). On native Windows it launches
 Git-for-Windows `mintty`, which is present after bootstrap and can render Sixel
 inline images when `--sixel` is set. On macOS it launches Ghostty via
-`open -na Ghostty.app`.
+`open -W -na Ghostty.app`.
+
+POSIX launches must remain alive through startup. X11 terminals also receive a
+per-lease title and must create a new visible window before `launched terminal:`
+or any capture output is printed. Verification follows the stable X11 window ID,
+so commands may change the window title. This rejects commands that make the
+terminal exit immediately.
 
 Add `--screenshot <path>` or `--record <path>` to capture proof after launch;
 `--wait-visible <duration>` controls the settle delay before capture (defaults
@@ -139,9 +150,10 @@ Defaults: `--duration 10s`, `--fps 15`, `--contact-sheet-frames 5`,
 ## desktop proof
 
 `crabbox desktop proof` is the one-shot visual QA command for terminal smokes.
-It launches the terminal command, waits for the UI to settle (`--wait-visible`,
-default 2s), and writes a bundle into `--output` (default
-`artifacts/<slug>-proof`):
+It launches and verifies the terminal command, waits for the UI to settle
+(`--wait-visible`, default 2s), and writes a bundle into `--output` (default
+`artifacts/<slug>-proof`). A failed launch returns before metadata, screenshot,
+diagnostics, video, contact-sheet, or final `proof:` output is written:
 
 - `metadata.json`
 - `screenshot.png`
@@ -209,7 +221,9 @@ them instead of hand-written input snippets.
   routed through the clipboard/paste path so keyboard layouts cannot corrupt
   special characters. Linux only.
 - `desktop paste` pastes text from `--text` or stdin via the remote clipboard.
-  Linux only.
+  Linux only. Crabbox verifies clipboard ownership before Ctrl+V and propagates
+  supported helper delivery failures; helper failure makes the command fail
+  without printing `pasted:`.
 - `desktop key` sends an `xdotool` key sequence (or a single modifier+key
   combination on Wayland). Linux only.
 

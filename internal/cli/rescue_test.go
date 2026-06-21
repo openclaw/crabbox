@@ -13,6 +13,8 @@ func TestClassifyDesktopFailure(t *testing.T) {
 	}{
 		{output: "missing xdotool; warm a new --desktop lease", want: rescueInputStackDead},
 		{output: "missing clipboard tool; install xclip or xsel", want: rescueClipboardUnavailable},
+		{output: "clipboard helper failed while serving paste (status=124)", want: rescueClipboardDeliveryFailed},
+		{output: "desktop command exited during launch (status=1)", want: rescueDesktopCommandNotLaunched},
 		{output: "browser process not found", want: rescueBrowserNotLaunched},
 		{output: "Error: Can't open display: :99", want: rescueDesktopSessionMissing},
 		{output: "capture failed screenshot repair=restart desktop services", want: rescueScreenshotCaptureBroken},

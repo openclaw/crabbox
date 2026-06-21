@@ -7,18 +7,20 @@ import (
 )
 
 const (
-	rescueBrowserNotLaunched      = "browser not launched"
-	rescueClipboardUnavailable    = "clipboard unavailable"
-	rescueDesktopSessionMissing   = "desktop session missing"
-	rescueInputStackDead          = "input stack dead"
-	rescueVNCBridgeDisconnected   = "VNC bridge disconnected"
-	rescueVNCBridgeNotRunning     = "WebVNC daemon not running"
-	rescueVNCObserverSlotsFull    = "WebVNC observer slots exhausted"
-	rescueVNCStaleViewer          = "WebVNC viewer already active"
-	rescueVNCTargetUnreachable    = "VNC target unreachable"
-	rescueWindowManagerMissing    = "window manager missing"
-	rescueScreenshotCaptureBroken = "screenshot capture broken"
-	rescueArtifactCaptureFailed   = "artifact capture failed"
+	rescueBrowserNotLaunched        = "browser not launched"
+	rescueClipboardDeliveryFailed   = "clipboard delivery failed"
+	rescueClipboardUnavailable      = "clipboard unavailable"
+	rescueDesktopCommandNotLaunched = "desktop command not launched"
+	rescueDesktopSessionMissing     = "desktop session missing"
+	rescueInputStackDead            = "input stack dead"
+	rescueVNCBridgeDisconnected     = "VNC bridge disconnected"
+	rescueVNCBridgeNotRunning       = "WebVNC daemon not running"
+	rescueVNCObserverSlotsFull      = "WebVNC observer slots exhausted"
+	rescueVNCStaleViewer            = "WebVNC viewer already active"
+	rescueVNCTargetUnreachable      = "VNC target unreachable"
+	rescueWindowManagerMissing      = "window manager missing"
+	rescueScreenshotCaptureBroken   = "screenshot capture broken"
+	rescueArtifactCaptureFailed     = "artifact capture failed"
 )
 
 type rescueContext struct {
@@ -118,6 +120,10 @@ func classifyDesktopFailure(output string) string {
 		return rescueInputStackDead
 	case strings.Contains(text, "missing clipboard tool"), strings.Contains(text, "xclip: not found"), strings.Contains(text, "xsel: not found"):
 		return rescueClipboardUnavailable
+	case strings.Contains(text, "clipboard helper exited"), strings.Contains(text, "clipboard helper failed"):
+		return rescueClipboardDeliveryFailed
+	case strings.Contains(text, "desktop command exited during launch"), strings.Contains(text, "desktop window not visible"):
+		return rescueDesktopCommandNotLaunched
 	case strings.Contains(text, "browser window not visible"), strings.Contains(text, "browser process not found"):
 		return rescueBrowserNotLaunched
 	case strings.Contains(text, "can't open display"), strings.Contains(text, "unable to open display"), strings.Contains(text, "display"):
