@@ -78,6 +78,9 @@ export CRABBOX_CLOUDFLARE_RUNNER_TOKEN=...
 
 The token is intentionally **not** exposed as a command-line flag, because
 command-line arguments can be captured in shell history and process listings.
+Runner redirects are followed only when they keep the configured scheme, host,
+and effective port. Cross-origin redirects fail before command, environment, or
+upload bodies can be replayed to another destination.
 
 The workdir defaults to `/workspace/crabbox` and must resolve to an absolute
 path. Broad system paths (`/`, `/workspace`, `/usr`, `/var`, and similar) are
