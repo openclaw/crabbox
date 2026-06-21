@@ -91,7 +91,7 @@ func TestFastAPICloudClientSendsBearerAndUsesRESTPaths(t *testing.T) {
 				Count: 1,
 			})
 		case "/api/v1/apps/app-1/deployments/":
-			if r.URL.Query().Get("limit") != "1" || r.URL.Query().Get("skip") != "0" {
+			if r.URL.Query().Get("limit") != "100" || r.URL.Query().Get("skip") != "0" {
 				http.Error(w, fmt.Sprintf("query = %s", r.URL.RawQuery), http.StatusBadRequest)
 				return
 			}
@@ -282,6 +282,120 @@ func TestApplyFastAPICloudProviderFlagsRejectsClassAndType(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "--"+flagName+" is not supported") {
 			t.Fatalf("err = %v, want --%s rejection", err, flagName)
 		}
+	}
+}
+
+func TestFastAPICloudWarmupRejected(t *testing.T) {
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: Config{}, client: panicFastAPICloudAPI{}}
+	err := backend.Warmup(context.Background(), WarmupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "does not support warmup") {
+		t.Fatalf("err = %v, want warmup rejection", err)
+	}
+}
+
+func TestFastAPICloudStopRejected(t *testing.T) {
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: Config{}, client: panicFastAPICloudAPI{}}
+	err := backend.Stop(context.Background(), StopRequest{})
+	if err == nil || !strings.Contains(err.Error(), "does not support stop") {
+		t.Fatalf("err = %v, want stop rejection", err)
+	}
+}
+
+func TestFastAPICloudListWithTeamID(t *testing.T) {
+	fake := &fakeFastAPICloudAPI{
+		apps: []fastAPICloudApp{
+			{ID: "app-1", TeamID: "team-1", Slug: "one", Name: "One", URL: "https://one.fastapicloud.app"},
+			{ID: "app-2", TeamID: "team-1", Slug: "two", Name: "Two", URL: "https://two.fastapicloud.app"},
+		},
+	}
+	cfg := Config{}
+	cfg.FastAPICloud.TeamID = "team-1"
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
+	views, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 2 || views[0].CloudID != "app-1" || views[1].CloudID != "app-2" {
+		t.Fatalf("views = %#v, want two apps for the team", views)
+	}
+	if views[0].Provider != providerName || views[0].Labels["url"] == "" {
+		t.Fatalf("view metadata = %#v, want provider + url labels", views[0])
+	}
+	if fake.listCalls != 1 || fake.getCalls != 0 {
+		t.Fatalf("calls list=%d get=%d, want list only", fake.listCalls, fake.getCalls)
+	}
+}
+
+// Guards the pagination fix: a full first page with the "count" field absent must
+// not be mistaken for the final page.
+func TestFastAPICloudClientListAppsPaginatesWithoutCount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/apps/" {
+			http.NotFound(w, r)
+			return
+		}
+		var data []fastAPICloudApp
+		switch r.URL.Query().Get("skip") {
+		case "0":
+			for i := 0; i < 100; i++ {
+				data = append(data, fastAPICloudApp{ID: fmt.Sprintf("app-%d", i), TeamID: "team-1"})
+			}
+		case "100":
+			for i := 100; i < 150; i++ {
+				data = append(data, fastAPICloudApp{ID: fmt.Sprintf("app-%d", i), TeamID: "team-1"})
+			}
+		}
+		// Deliberately omit "count" to exercise the count-absent termination path.
+		_ = json.NewEncoder(w).Encode(fastAPICloudListResponse[fastAPICloudApp]{Data: data})
+	}))
+	defer server.Close()
+	cfg := Config{}
+	cfg.FastAPICloud.Token = "test-token"
+	cfg.FastAPICloud.APIURL = server.URL + "/api/v1"
+	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apps, err := client.ListApps(context.Background(), "team-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 150 {
+		t.Fatalf("got %d apps, want 150 (pagination must not stop early when count is absent)", len(apps))
+	}
+}
+
+// Guards the ordering fix: LatestDeployment must select the newest by created_at,
+// not assume the API returns newest-first.
+func TestFastAPICloudClientLatestDeploymentPicksNewest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/apps/app-1/deployments/" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(fastAPICloudListResponse[fastAPICloudDeployment]{
+			Data: []fastAPICloudDeployment{
+				{ID: "dep-old", AppID: "app-1", Status: fastAPICloudStatusSuccess, CreatedAt: "2026-06-01T10:00:00Z"},
+				{ID: "dep-new", AppID: "app-1", Status: fastAPICloudStatusSuccess, CreatedAt: "2026-06-21T10:00:00Z"},
+				{ID: "dep-mid", AppID: "app-1", Status: fastAPICloudStatusSuccess, CreatedAt: "2026-06-10T10:00:00Z"},
+			},
+			Count: 3,
+		})
+	}))
+	defer server.Close()
+	cfg := Config{}
+	cfg.FastAPICloud.Token = "test-token"
+	cfg.FastAPICloud.APIURL = server.URL + "/api/v1"
+	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep, ok, err := client.LatestDeployment(context.Background(), "app-1")
+	if err != nil || !ok {
+		t.Fatalf("LatestDeployment err=%v ok=%v", err, ok)
+	}
+	if dep.ID != "dep-new" {
+		t.Fatalf("latest = %q, want dep-new (newest by created_at)", dep.ID)
 	}
 }
 

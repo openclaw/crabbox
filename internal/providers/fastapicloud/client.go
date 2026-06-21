@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type fastAPICloudAPI interface {
@@ -173,7 +174,10 @@ func (c *fastAPICloudClient) ListApps(ctx context.Context, teamID string) ([]fas
 			return nil, err
 		}
 		apps = append(apps, page.Data...)
-		if len(page.Data) == 0 || len(apps) >= page.Count || len(page.Data) < fastAPICloudListPageSize {
+		// A short/empty page is the canonical end-of-pages signal. Only trust the
+		// envelope's count when it is actually present (>0): a full page with an
+		// absent/zero "count" must not be mistaken for the final page.
+		if len(page.Data) == 0 || len(page.Data) < fastAPICloudListPageSize || (page.Count > 0 && len(apps) >= page.Count) {
 			return apps, nil
 		}
 		skip += len(page.Data)
@@ -185,9 +189,13 @@ func (c *fastAPICloudClient) LatestDeployment(ctx context.Context, appID string)
 	if appID == "" {
 		return fastAPICloudDeployment{}, false, fmt.Errorf("latest deployment: app id is required")
 	}
+	// The deployments endpoint's default sort order is not a documented part of the
+	// contract, so don't assume Data[0] is newest: fetch a page and select the latest
+	// by created_at client-side. (Latest-deployment readiness is the common case and
+	// sits well within a single page.)
 	var page fastAPICloudListResponse[fastAPICloudDeployment]
 	params := url.Values{
-		"limit": []string{"1"},
+		"limit": []string{fmt.Sprint(fastAPICloudListPageSize)},
 		"skip":  []string{"0"},
 	}
 	if err := c.get(ctx, "/apps/"+url.PathEscape(appID)+"/deployments/", params, &page); err != nil {
@@ -196,7 +204,25 @@ func (c *fastAPICloudClient) LatestDeployment(ctx context.Context, appID string)
 	if len(page.Data) == 0 {
 		return fastAPICloudDeployment{}, false, nil
 	}
-	return page.Data[0], true, nil
+	latest := page.Data[0]
+	for _, d := range page.Data[1:] {
+		if fastAPICloudDeploymentNewer(d, latest) {
+			latest = d
+		}
+	}
+	return latest, true, nil
+}
+
+// fastAPICloudDeploymentNewer reports whether a is more recent than b by created_at.
+// Timestamps are RFC3339; fall back to lexical comparison (which also sorts RFC3339
+// chronologically) when either value cannot be parsed.
+func fastAPICloudDeploymentNewer(a, b fastAPICloudDeployment) bool {
+	at, aerr := time.Parse(time.RFC3339, a.CreatedAt)
+	bt, berr := time.Parse(time.RFC3339, b.CreatedAt)
+	if aerr == nil && berr == nil {
+		return at.After(bt)
+	}
+	return a.CreatedAt > b.CreatedAt
 }
 
 type fastAPICloudListResponse[T any] struct {
