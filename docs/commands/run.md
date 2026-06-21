@@ -335,10 +335,11 @@ proof file, manifest, report, or other evidence artifact. Required artifact glob
 are checked after the remote command exits 0 and before `--download` files are
 written locally. They are also collected into the run artifact tarball. If any
 required glob matches nothing, the run fails even though the command itself
-succeeded. The same SSH-run target limits as
-`--artifact-glob` apply. Delegated providers that support bounded run artifact
-retrieval enforce provider-owned file and byte limits before returning local
-artifacts.
+succeeded. Matches must resolve to regular files, so dangling symlinks and
+symlinks to directories do not satisfy the proof gate. The same SSH-run target
+limits as `--artifact-glob` apply. Delegated providers that support bounded run
+artifact retrieval enforce provider-owned file and byte limits before returning
+local artifacts.
 
 Use repeatable `--download remote=local` when the command writes proof files on
 the box. Downloads run only after a successful remote command, paths resolve

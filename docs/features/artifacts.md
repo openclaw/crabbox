@@ -25,7 +25,9 @@ collector; use Linux or Windows WSL2.
 Repeat `--require-artifact <glob>` when the run should fail unless a proof file,
 manifest, or report exists after the command exits successfully. Required
 artifacts use the same safe relative glob syntax and target limits as
-`--artifact-glob`; each required glob must match at least one file or symlink.
+`--artifact-glob`; each required glob must resolve to at least one regular file.
+A symlink counts only when its target is a regular file; dangling symlinks and
+symlinks to directories do not satisfy the proof gate or enter artifact archives.
 Crabbox checks required artifacts before local `--download` outputs, then
 includes required artifacts in the run artifact tarball. Callers can pair
 `--require-artifact reports/data/manifest.json` with a broader

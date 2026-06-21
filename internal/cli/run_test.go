@@ -1391,6 +1391,26 @@ done
 	}
 }
 
+func TestDelegatedRunArtifactScriptRejectsDanglingRequiredArtifact(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll(filepath.Join("reports", "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "missing.json"), filepath.Join("reports", "data", "proof.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	out, err := exec.Command("bash", "-c", DelegatedRunArtifactScript([]string{"reports/data/**/*.json"}, nil, 16, 1024*1024)).CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+		t.Fatalf("error=%v, want exit 8; output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "missing required artifact: reports/data/**/*.json") {
+		t.Fatalf("missing required artifact output:\n%s", out)
+	}
+}
+
 func TestRunCommandCleansEnvProfileWhenProbeFails(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)

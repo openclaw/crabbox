@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -1096,6 +1097,107 @@ func TestRunArtifactRequireScriptFailsOnMissingArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "missing required artifact: reports/data/manifest.json") {
 		t.Fatalf("missing required artifact output:\n%s", out)
+	}
+}
+
+func TestRunArtifactRequireScriptSymlinkPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		glob     string
+		setup    func(t *testing.T, dir, proof string)
+		wantPass bool
+	}{
+		{
+			name: "symlink to regular file",
+			glob: "reports/data/proof.json",
+			setup: func(t *testing.T, dir, proof string) {
+				target := filepath.Join(dir, "reports", "data", "target.json")
+				if err := os.WriteFile(target, []byte("{}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, proof); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+			wantPass: true,
+		},
+		{
+			name: "dangling symlink",
+			glob: "reports/data/proof.json",
+			setup: func(t *testing.T, dir, proof string) {
+				if err := os.Symlink(filepath.Join(dir, "missing.json"), proof); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name: "symlink to directory",
+			glob: "reports/data/proof.json",
+			setup: func(t *testing.T, dir, proof string) {
+				target := filepath.Join(dir, "proof-dir")
+				if err := os.Mkdir(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, proof); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name: "recursive dangling symlink",
+			glob: "reports/data/**/*.json",
+			setup: func(t *testing.T, dir, proof string) {
+				if err := os.Symlink(filepath.Join(dir, "missing.json"), proof); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			proofDir := filepath.Join(dir, "reports", "data")
+			if err := os.MkdirAll(proofDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(t, dir, filepath.Join(proofDir, "proof.json"))
+
+			out, err := exec.Command("bash", "-lc", runArtifactRequireScript(dir, []string{tt.glob})).CombinedOutput()
+			if tt.wantPass {
+				if err != nil || !strings.Contains(string(out), "matched=1") {
+					t.Fatalf("error=%v output=%s", err, out)
+				}
+				return
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+				t.Fatalf("error=%v, want exit 8; output=%s", err, out)
+			}
+			if !strings.Contains(string(out), "missing required artifact: "+tt.glob) {
+				t.Fatalf("missing required artifact output:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestRunArtifactCollectScriptSkipsDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	artifactDir := filepath.Join(dir, ".artifacts")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "missing.txt"), filepath.Join(artifactDir, "proof.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+	out, err := exec.Command("bash", "-lc", runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{".artifacts/**"})).CombinedOutput()
+	if err != nil {
+		t.Fatalf("collect script failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "warning: no artifact matches") {
+		t.Fatalf("missing empty artifact warning:\n%s", out)
+	}
+	if names := tarGzNames(t, archivePath); len(names) != 0 {
+		t.Fatalf("archive contains dangling symlink: %#v", names)
 	}
 }
 

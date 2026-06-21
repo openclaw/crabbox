@@ -159,7 +159,7 @@ func runArtifactRequireScript(workdir string, globs []string) string {
 	b.WriteString("shopt -s nullglob dotglob\n")
 	b.WriteString("missing=()\n")
 	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|.git|.git/*|.crabbox|.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
-	b.WriteString("check_artifact_file() { local f=\"$1\" rel; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
+	b.WriteString("check_artifact_file() { local f=\"$1\" rel; [ -f \"$f\" ] || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
 	b.WriteString("add_required_artifact_match() { local f=\"$1\" rel existing; check_artifact_file \"$f\" || return 0; rel=$(artifact_rel_path \"$f\") || return 0; if [ ${#matches[@]} -gt 0 ]; then for existing in \"${matches[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; matches+=(\"$rel\"); }\n")
 	for _, glob := range globs {
 		b.WriteString("matches=()\n")
@@ -185,7 +185,7 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 	b.WriteString("shopt -s nullglob dotglob\n")
 	b.WriteString("files=()\n")
 	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|.git|.git/*|.crabbox|.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
-	b.WriteString("add_artifact_file() { local f=\"$1\" rel existing; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 0; rel=$(artifact_rel_path \"$f\") || return 0; case \"$rel\" in " + remotePath + ") return 0;; esac; if [ ${#files[@]} -gt 0 ]; then for existing in \"${files[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; files+=(\"$rel\"); }\n")
+	b.WriteString("add_artifact_file() { local f=\"$1\" rel existing; [ -f \"$f\" ] || return 0; rel=$(artifact_rel_path \"$f\") || return 0; case \"$rel\" in " + remotePath + ") return 0;; esac; if [ ${#files[@]} -gt 0 ]; then for existing in \"${files[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; files+=(\"$rel\"); }\n")
 	for _, glob := range globs {
 		b.WriteString("for f in " + glob + "; do add_artifact_file \"$f\"; done\n")
 		if strings.Contains(glob, "**") {
@@ -211,7 +211,7 @@ func DelegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles 
 	b.WriteString("set -euo pipefail\n")
 	b.WriteString("shopt -s nullglob dotglob\n")
 	b.WriteString("artifact_rel_path() { local rel=\"${1#./}\"; case \"$rel\" in \"\"|.|/*|..|../*|.git|.git/*|.crabbox|.crabbox/*) return 1;; esac; printf '%s' \"$rel\"; }\n")
-	b.WriteString("check_artifact_file() { local f=\"$1\" rel; { [ -f \"$f\" ] || [ -L \"$f\" ]; } || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
+	b.WriteString("check_artifact_file() { local f=\"$1\" rel; [ -f \"$f\" ] || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
 	b.WriteString("dedupe_artifact_match() { local f=\"$1\" rel existing; check_artifact_file \"$f\" || return 0; rel=$(artifact_rel_path \"$f\") || return 0; if [ ${#matches[@]} -gt 0 ]; then for existing in \"${matches[@]}\"; do [ \"$existing\" = \"$rel\" ] && return 0; done; fi; matches+=(\"$rel\"); }\n")
 	appendArtifactGlobMatches := func(glob string) {
 		b.WriteString("for f in " + glob + "; do dedupe_artifact_match \"$f\"; done\n")
