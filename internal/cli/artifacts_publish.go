@@ -144,14 +144,19 @@ func listArtifactBundleFiles(dir string) ([]artifactFile, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("artifact bundle contains symlink: %s", filepath.ToSlash(rel))
 		}
+		name := entry.Name()
+		generatedOutput := name == "published-artifacts.md" || name == artifactManifestFilename
+		reservedOutputPath := rel == "published-artifacts.md" || rel == artifactManifestFilename
+		if reservedOutputPath && info.IsDir() {
+			return fmt.Errorf("artifact bundle contains directory at reserved output path: %s", filepath.ToSlash(rel))
+		}
 		if info.IsDir() {
 			return nil
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("artifact bundle contains non-regular file: %s", filepath.ToSlash(rel))
 		}
-		name := entry.Name()
-		if name == "published-artifacts.md" || name == artifactManifestFilename {
+		if generatedOutput {
 			return nil
 		}
 		files = append(files, artifactFile{Kind: artifactKindForPath(path), Name: filepath.ToSlash(rel), Path: path})

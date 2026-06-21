@@ -325,6 +325,7 @@ func TestListArtifactBundleFilesSkipsPublishedMarkdown(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "published-artifacts.md"), "old")
 	mustWriteFile(t, filepath.Join(dir, artifactManifestFilename), "{}")
 	mustWriteFile(t, filepath.Join(dir, "nested", "logs.txt"), "logs")
+	mustWriteFile(t, filepath.Join(dir, "nested", "published-artifacts.md", "child.txt"), "child")
 	files, err := listArtifactBundleFiles(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +335,7 @@ func TestListArtifactBundleFilesSkipsPublishedMarkdown(t *testing.T) {
 		names = append(names, file.Name)
 	}
 	got := strings.Join(names, ",")
-	if got != "nested/logs.txt,screenshot.png" {
+	if got != "nested/logs.txt,nested/published-artifacts.md/child.txt,screenshot.png" {
 		t.Fatalf("files=%s", got)
 	}
 }
@@ -367,6 +368,32 @@ func TestArtifactsPublishRejectsSymlinksBeforeSideEffects(t *testing.T) {
 			}
 			if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "outside-secret" {
 				t.Fatalf("outside file changed: data=%q err=%v", got, readErr)
+			}
+		})
+	}
+}
+
+func TestArtifactsPublishRejectsReservedOutputDirectoriesBeforeSideEffects(t *testing.T) {
+	for _, reservedName := range []string{artifactManifestFilename, "published-artifacts.md"} {
+		t.Run(reservedName, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFile(t, filepath.Join(dir, "safe.txt"), "safe")
+			mustWriteFile(t, filepath.Join(dir, reservedName, "nested.txt"), "nested")
+
+			var stdout bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: io.Discard}).artifactsPublish(context.Background(), []string{
+				"--dir", dir,
+				"--storage", "local",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+				t.Fatalf("error=%v, want exit 2", err)
+			}
+			if !strings.Contains(exitErr.Message, "reserved output path") || !strings.Contains(exitErr.Message, reservedName) {
+				t.Fatalf("message=%q", exitErr.Message)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout=%q, want no publish output", stdout.String())
 			}
 		})
 	}
