@@ -98,7 +98,7 @@ CRABBOX_AWS_SUBNET_ID
 CRABBOX_AWS_INSTANCE_PROFILE
 CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS               # comma-separated
-CRABBOX_HOST_ID                     # pin a Dedicated Host (EC2 Mac)
+CRABBOX_HOST_ID                     # pin a Dedicated Host; brokered use requires admin auth
 CRABBOX_AWS_MAC_HOST_ID             # legacy alias for the Mac host id
 CRABBOX_CAPACITY_REGIONS            # comma-separated fallback regions
 CRABBOX_CAPACITY_AVAILABILITY_ZONES
@@ -127,7 +127,7 @@ Notes:
 | Linux | Ubuntu bootstrap, SSH, rsync sync, optional desktop/browser/code, Tailscale, Actions hydration. |
 | Windows native | EC2Launch bootstrap, OpenSSH, Git for Windows, archive sync; optional desktop with `--desktop`. |
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL. |
-| macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Pin a host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias). |
+| macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin a host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users use automatic discovery. |
 
 ## Lifecycle
 

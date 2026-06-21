@@ -103,7 +103,7 @@ profile: project-check
 class: beast             # standard | fast | large | beast
 serverType: c7a.48xlarge # explicit provider type; overrides class fallback
 network: auto            # auto | tailscale | public
-hostId: h-0123456789abcdef0
+hostId: h-0123456789abcdef0 # brokered use requires admin authentication
 
 lease:
   idleTimeout: 30m
