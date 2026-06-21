@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"encoding/base64"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -174,6 +176,59 @@ func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows install script missing %q", want)
 		}
+	}
+}
+
+func TestGitHubActionsRunnerInstallTransportKeepsValuesOffRemoteCommand(t *testing.T) {
+	values := []string{"example-org/my-app", "runner name", "linux,x64", "sentinel-registration-token"}
+	script := "printf transport-ok\\n"
+	input := githubActionsRunnerInstallInput(values[0], values[1], values[2], values[3], script)
+	parts := strings.SplitN(input, "\n", 5)
+	if len(parts) != 5 || parts[4] != script {
+		t.Fatalf("install input framing failed: %#v", parts)
+	}
+	for i, encoded := range parts[:4] {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatalf("decode field %d: %v", i, err)
+		}
+		if string(decoded) != values[i] {
+			t.Fatalf("field %d=%q, want %q", i, decoded, values[i])
+		}
+	}
+
+	for _, target := range []SSHTarget{
+		{TargetOS: targetLinux},
+		{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+	} {
+		remote := githubActionsRunnerInstallRemoteCommand(target)
+		for _, value := range values {
+			if strings.Contains(remote, value) {
+				t.Fatalf("target=%#v remote command leaked %q: %s", target, value, remote)
+			}
+		}
+	}
+}
+
+func TestGitHubActionsRunnerInstallTransportExecutesLinuxPayload(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	if _, err := exec.LookPath("base64"); err != nil {
+		t.Skip("base64 is required")
+	}
+	script := `printf 'repo=%s\nname=%s\nlabels=%s\ntoken=%s\n' "$RUNNER_REPO" "$RUNNER_NAME" "$RUNNER_LABELS" "$RUNNER_TOKEN"`
+	input := githubActionsRunnerInstallInput("example-org/my-app", "runner name", "linux,x64", "sentinel-registration-token", script)
+	cmd := exec.Command("bash", "-c", githubActionsRunnerInstallRemoteCommand(SSHTarget{TargetOS: targetLinux}))
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute install transport: %v\n%s", err, out)
+	}
+	want := "repo=example-org/my-app\nname=runner name\nlabels=linux,x64\ntoken=sentinel-registration-token\n"
+	if string(out) != want {
+		t.Fatalf("transport output=%q, want %q", out, want)
 	}
 }
 

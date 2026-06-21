@@ -362,8 +362,9 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target
 	}
 	labels := githubActionsRunnerLabels(cfg, leaseID, slug, extraLabels)
 	script := githubActionsRunnerInstallScriptForTarget(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, target)
-	remote := githubActionsRunnerInstallRemoteCommand(target, ghRepo.Slug(), name, strings.Join(labels, ","), token)
-	if err := runSSHInputQuiet(ctx, target, remote, script); err != nil {
+	remote := githubActionsRunnerInstallRemoteCommand(target)
+	input := githubActionsRunnerInstallInput(ghRepo.Slug(), name, strings.Join(labels, ","), token, script)
+	if err := runSSHInputQuiet(ctx, target, remote, input); err != nil {
 		return exit(7, "register GitHub Actions runner on %s: %v", target.Host, err)
 	}
 	fmt.Fprintf(a.Stdout, "actions runner registered repo=%s name=%s labels=%s ephemeral=%t\n", ghRepo.Slug(), name, strings.Join(labels, ","), cfg.Actions.Ephemeral)
@@ -2485,13 +2486,18 @@ func githubActionsRunnerInstallScriptForTarget(version string, ephemeral bool, t
 	return githubActionsRunnerInstallScript(version, ephemeral)
 }
 
-func githubActionsRunnerInstallRemoteCommand(target SSHTarget, repo, name, labels, token string) string {
+func githubActionsRunnerInstallRemoteCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
 		return powershellCommand(`$ErrorActionPreference = "Stop"
-$env:RUNNER_REPO = ` + psQuote(repo) + `
-$env:RUNNER_NAME = ` + psQuote(name) + `
-$env:RUNNER_LABELS = ` + psQuote(labels) + `
-$env:RUNNER_TOKEN = ` + psQuote(token) + `
+function Read-CrabboxRunnerValue {
+  $line = [Console]::In.ReadLine()
+  if ($null -eq $line) { throw "missing runner registration input" }
+  [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line))
+}
+$env:RUNNER_REPO = Read-CrabboxRunnerValue
+$env:RUNNER_NAME = Read-CrabboxRunnerValue
+$env:RUNNER_LABELS = Read-CrabboxRunnerValue
+$env:RUNNER_TOKEN = Read-CrabboxRunnerValue
 $script = [Console]::In.ReadToEnd()
 $path = Join-Path $env:TEMP ("crabbox-actions-runner-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 [System.IO.File]::WriteAllText($path, $script, [System.Text.UTF8Encoding]::new($false))
@@ -2503,7 +2509,27 @@ try {
 }
 `)
 	}
-	return fmt.Sprintf("RUNNER_REPO=%s RUNNER_NAME=%s RUNNER_LABELS=%s RUNNER_TOKEN=%s bash -s", shellQuote(repo), shellQuote(name), shellQuote(labels), shellQuote(token))
+	return `set -eu
+IFS= read -r crabbox_runner_repo
+IFS= read -r crabbox_runner_name
+IFS= read -r crabbox_runner_labels
+IFS= read -r crabbox_runner_token
+export RUNNER_REPO="$(printf '%s' "$crabbox_runner_repo" | base64 -d)"
+export RUNNER_NAME="$(printf '%s' "$crabbox_runner_name" | base64 -d)"
+export RUNNER_LABELS="$(printf '%s' "$crabbox_runner_labels" | base64 -d)"
+export RUNNER_TOKEN="$(printf '%s' "$crabbox_runner_token" | base64 -d)"
+unset crabbox_runner_repo crabbox_runner_name crabbox_runner_labels crabbox_runner_token
+exec bash -s`
+}
+
+func githubActionsRunnerInstallInput(repo, name, labels, token, script string) string {
+	var input strings.Builder
+	for _, value := range []string{repo, name, labels, token} {
+		input.WriteString(base64.StdEncoding.EncodeToString([]byte(value)))
+		input.WriteByte('\n')
+	}
+	input.WriteString(script)
+	return input.String()
 }
 
 func githubActionsRunnerInstallPowerShellScript(version string, ephemeral bool) string {

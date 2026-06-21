@@ -71,7 +71,8 @@ Registers an existing box as a GitHub Actions self-hosted runner. Crabbox
 obtains a repository registration token through `gh api`, installs the official
 `actions/runner` package, and starts it under systemd on Linux/WSL2 or a
 detached PowerShell process on native Windows. Supports Linux and Windows
-targets only.
+targets only. Registration metadata and the short-lived token travel over SSH
+stdin rather than the remote process command line.
 
 ```sh
 crabbox actions register --id blue-lobster

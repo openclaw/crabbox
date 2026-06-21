@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Kept GitHub Actions runner registration tokens off remote SSH command arguments. Thanks @coygeek.
 - Redacted Cloudflare runner bearer tokens from HTTP and streamed error diagnostics. Thanks @coygeek.
 - Confined remote failure-bundle links to the generated archive subtree and omitted unsafe special entries. Thanks @coygeek.
 - Required actual Islo sandbox identifiers to already be canonical before raw-ID recovery can reach provider operations. Thanks @coygeek.
