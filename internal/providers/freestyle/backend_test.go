@@ -191,6 +191,43 @@ func TestResolveFreestyleLeaseIDAcceptsCrabboxSandbox(t *testing.T) {
 	}
 }
 
+func TestResolveFreestyleLeaseIDRejectsMalformedCrabboxNames(t *testing.T) {
+	for _, name := range []string{
+		"crabbox repo abc123",
+		"crabbox/repo/abc123",
+		"crabbox?repo=abc123",
+		"Crabbox-repo-abc123",
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &fakeFreestyleClient{getVM: freestyleVM{ID: "vm123", Name: name, State: "running"}}
+			backend := &freestyleBackend{}
+			if _, _, err := backend.resolveLeaseID(context.Background(), client, "fsb_vm123", "", false); err == nil {
+				t.Fatalf("expected malformed Freestyle VM name %q to be rejected", name)
+			}
+		})
+	}
+}
+
+func TestFreestyleStopRejectsMalformedCrabboxNameWithoutDelete(t *testing.T) {
+	client := &fakeFreestyleClient{getVM: freestyleVM{
+		ID:    "vm123",
+		Name:  "crabbox repo abc123",
+		State: "running",
+	}}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	t.Cleanup(func() { newFreestyleClient = oldClient })
+	backend := &freestyleBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+
+	err := backend.Stop(context.Background(), StopRequest{ID: "fsb_vm123"})
+	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+		t.Fatalf("Stop error = %v, want ownership refusal", err)
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("DeleteVM called for malformed name: %#v", client.deleteIDs)
+	}
+}
+
 func TestResolveFreestyleLeaseIDClaimsRawSandboxForRepo(t *testing.T) {
 	client := &fakeFreestyleClient{getVM: freestyleVM{
 		ID:    "vm123",
@@ -1011,6 +1048,14 @@ func TestNewFreestyleSandboxNameUsesCrabboxPrefix(t *testing.T) {
 	}
 	if !isCrabboxFreestyleSandboxName(name) {
 		t.Fatalf("expected %q to be recognized as Crabbox-owned", name)
+	}
+}
+
+func TestFreestyleOwnershipRequiresCanonicalGeneratedName(t *testing.T) {
+	for _, name := range []string{"crabbox repo abc123", "crabbox/repo/abc123", "crabbox?repo=abc123", "Crabbox-repo-abc123"} {
+		if isCrabboxFreestyleSandboxName(name) {
+			t.Fatalf("malformed provider name %q recognized as Crabbox-owned", name)
+		}
 	}
 }
 
