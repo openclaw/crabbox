@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Kept manual release publication on the reviewed default-branch GoReleaser configuration instead of allowing a selected tag to replace credentialed release behavior. Thanks @coygeek.
 - Rejected cross-origin coordinator redirects before bearer, Access, or local identity headers can be replayed. Thanks @coygeek.
 - Redacted configured Upstash Box API keys from HTTP and streamed error diagnostics. Thanks @coygeek.
 - Redacted configured Semaphore API tokens from provider response diagnostics. Thanks @coygeek.

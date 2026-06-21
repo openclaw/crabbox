@@ -273,6 +273,16 @@ Coordinator config values (not secret material):
 Local-only direct-provider secret: `CRABBOX_TAILSCALE_AUTH_KEY`. Do not forward
 it to commands, print it, or store it in repo config.
 
+## Release Integrity
+
+Release publication uses the GoReleaser configuration from the reviewed branch
+that dispatched the workflow, never configuration from a manually selected
+release tag. Manual re-releases must be dispatched from the default branch,
+accept only an existing exact `vMAJOR.MINOR.PATCH` tag in that branch's history,
+and may fail for historical tags that are incompatible with the current
+reviewed release configuration rather than falling back to tag-controlled
+publishing behavior.
+
 ## SSH
 
 SSH is the control and data path to a leased box; the broker manages leases but
