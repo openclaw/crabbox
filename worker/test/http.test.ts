@@ -549,11 +549,11 @@ describe("coordinator auth", () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",
       CRABBOX_SESSION_SECRET: "session-secret",
-      CRABBOX_DEFAULT_ORG: "openclaw",
+      CRABBOX_DEFAULT_ORG: "example-org",
     };
     const token = await issueUserToken(env, {
       owner: "friend@example.com",
-      org: "openclaw",
+      org: "example-org",
       login: "friend",
     });
 
