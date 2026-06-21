@@ -112,6 +112,10 @@ Notes:
   attached to the launched instance, not the local AWS CLI profile.
 - `CRABBOX_AWS_REGION` wins over `AWS_REGION` and `aws.region`; the built-in
   default region is `eu-west-1`.
+- Region values are trimmed, lowercased, and must match an AWS region name such
+  as `eu-west-1`. Broker readiness, lease `awsRegion`, and
+  `capacity.regions` reject malformed request values before constructing a
+  SigV4 endpoint; invalid environment/config fallback candidates are skipped.
 - For brokered AWS, the cloud credentials live in the Worker, not on developer
   machines. See `crabbox config set-broker --provider aws` and the brokered
   IAM policy from `crabbox admin aws-policy`.

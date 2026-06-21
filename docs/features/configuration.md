@@ -924,7 +924,10 @@ env:
 `env.allow` is name-based and supports trailing wildcards. Crabbox forwards
 matching local env vars to the remote command. The default allowlist is
 `CI` and `NODE_OPTIONS`. Secrets do not belong in `env.allow`; pass them
-through provider-side mechanisms. See [Environment forwarding](env-forwarding.md).
+through provider-side mechanisms. A selected profile may provide its own
+allowlist, but `CRABBOX_ENV_ALLOW` replaces the fully resolved config/profile
+list, and explicit `--allow-env` flags append afterward. See
+[Environment forwarding](env-forwarding.md).
 
 ### Run preflight
 

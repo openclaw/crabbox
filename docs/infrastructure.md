@@ -61,6 +61,13 @@ https://crabbox-coordinator.example.workers.dev     # workers.dev fallback for h
 - The workers.dev URL is useful for Cloudflare `/v1/health` checks if custom DNS is
   disrupted.
 
+Point each CLI configuration directly at the final canonical or
+Access-protected origin it should authenticate to. Credentialed Go requests
+follow only same-origin redirects, and the curl fallback follows no redirects;
+do not use a cross-origin redirecting alias as `CRABBOX_COORDINATOR`. Additional
+workers.dev or custom domains remain useful as independently verified health
+endpoints.
+
 Node deployments should put TLS termination and WebSocket-capable ingress in
 front of port `8080` (or `PORT`). Health checks use `/v1/health`; readiness
 checks use `/v1/ready`.

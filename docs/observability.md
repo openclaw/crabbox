@@ -73,6 +73,13 @@ crabbox attach run_...
 crabbox results run_...
 ```
 
+If the initial run-record request fails with a transient coordinator transport
+or service error, Crabbox keeps the create retry armed while it acquires or
+replaces the lease. It retries after a lease attaches and starts recording as
+soon as creation succeeds. If history remains unavailable, the remote run can
+still proceed; the warning and failure digest identify the lease and print the
+recovery commands that remain usable without a run handle.
+
 - **`history`** lists recorded runs. Filter with `--lease`, `--owner`, `--org`,
   `--state`, and `--limit` (default 50). It is intended for command debugging,
   not unbounded log archival.

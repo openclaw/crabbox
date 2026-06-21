@@ -36,6 +36,7 @@ lifecycle call. Auth failures stop a lease before it reaches a provider.
 
 - `401` or `403` responses;
 - `missing broker token`;
+- `coordinator refused cross-origin redirect`;
 - a GitHub `Invalid redirect_uri` error during browser login;
 - a Cloudflare Access challenge page returned instead of JSON.
 
@@ -54,6 +55,9 @@ printenv CRABBOX_PUBLIC_URL
   log in with `crabbox login`).
 - Point the CLI at the coordinator URL, or at the Access-protected route only when
   that is intended.
+- Configure the final coordinator origin directly. The Go transport permits
+  same-origin redirects, but cross-origin redirects are rejected and the curl
+  fallback intentionally follows no redirects.
 - Ensure `CRABBOX_COORDINATOR_TOKEN` matches the coordinator's `CRABBOX_SHARED_TOKEN`.
 - For self-hosted GitHub browser login, create a GitHub OAuth app and set its
   callback URL to `https://<your-coordinator-host>/v1/auth/github/callback`.

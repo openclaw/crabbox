@@ -190,6 +190,44 @@ env:
 See [environment forwarding](features/env-forwarding.md) for matching and
 profile behavior.
 
+### Credential destinations and diagnostics
+
+Credential-bearing coordinator requests follow redirects only when scheme,
+hostname, and effective port remain unchanged. The curl transport fallback
+does not follow redirects and disables ambient curl configuration before
+loading Crabbox's generated request config. Configure the CLI with the final
+canonical coordinator or Access-protected origin, not a redirecting alias.
+
+Provider clients apply the same destination principle where custom endpoints
+are supported. Cloudflare runner and RunPod requests reject cross-origin
+redirects before replaying authorization headers or request bodies. E2B API
+endpoints require HTTPS except for explicit localhost/loopback development
+URLs, and AWS region values are validated before constructing SigV4 service
+hosts.
+
+Configured OpenComputer, Freestyle, Cloudflare runner, Semaphore, and Upstash
+Box credentials are redacted from their documented HTTP or streamed error
+diagnostics. GitHub Actions registration metadata and its short-lived runner
+token travel over SSH stdin rather than the remote command line. These
+guarantees apply to Crabbox-generated diagnostics and process arguments, not
+to arbitrary command output, downloaded artifacts, screenshots, or failure
+bundles.
+
+### Resource and artifact boundaries
+
+Lifecycle recovery from raw provider identifiers is provider-specific and
+fails closed when ownership cannot be established. Cloudflare containers need
+a matching local claim; Freestyle and Islo recovery names must already be in
+their canonical Crabbox-generated form before reuse or deletion reaches the
+provider.
+
+Artifact publishing rejects symlinks, directories at reserved generated-output
+paths, and other non-regular bundle entries before upload side effects. Required
+artifact paths must resolve to regular files. Automatic remote failure bundles
+confine member names and link targets to their generated subtree and omit
+escaping, rooted, empty, or special-file entries. These filesystem checks do
+not redact the contents of accepted regular files.
+
 ### Coordinator secrets and config
 
 Inject these as Cloudflare Worker secrets or Node service secrets, never in the

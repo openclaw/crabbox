@@ -49,7 +49,7 @@ Crabbox has three implementation surfaces:
 - Repo-local claim files and `--reclaim` checks: `internal/cli/claim.go`
 - Direct-provider labels, safe label encoding, idle-touch labels, TTL cap math: `internal/cli/provider_labels.go`
 - Lease status/inspect/list/share/unshare/stop/cleanup commands: `internal/cli/status.go`, `internal/cli/inspect.go`, `internal/cli/pool.go`, `internal/cli/share.go`, `internal/cli/rescue.go`
-- Coordinator client request/response structs, slug lookup, heartbeats, usage, run history: `internal/cli/coordinator.go`, `internal/cli/provider_coordinator.go`
+- Coordinator client request/response structs, same-origin credential redirect guard, curl fallback, slug lookup, heartbeats, usage, and run history: `internal/cli/coordinator.go`, `internal/cli/provider_coordinator.go`
 - Lease backend selection (brokered vs direct SSH vs delegated): `internal/cli/provider_backend.go`
 - Worker env/request/record types: `worker/src/types.ts`
 - Worker lease records, public routes, slug allocation, heartbeat/expiry math, cleanup alarms: `worker/src/fleet.ts`
@@ -168,14 +168,15 @@ Provider docs:
 - Actions-first failure capsules: `internal/cli/capsule.go`
 - VM/workspace checkpoints (create/list/inspect/restore/fork/delete/prune): `internal/cli/checkpoint.go`, `internal/cli/checkpoint_native.go`, `internal/cli/checkpoint_store.go`
 - Cache list/stats/purge/warm commands: `internal/cli/cache.go`
-- Run history/logs/events/attach and retained run logs: `internal/cli/history.go`, `internal/cli/run_recorder.go`, `internal/cli/run_output_events.go`, `internal/cli/runlog.go`, `internal/cli/control_ws.go`
+- Run history creation/retry, logs/events/attach, and retained run logs: `internal/cli/history.go`, `internal/cli/run_recorder.go`, `internal/cli/run_output_events.go`, `internal/cli/runlog.go`, `internal/cli/control_ws.go`
 - JUnit result parsing, remote markers, and the `results` command: `internal/cli/results.go`, `internal/cli/results_parse.go`, `internal/cli/results_remote.go`
 - Per-run telemetry sampling: `internal/cli/telemetry.go`
 - Run timing breakdowns: `internal/cli/timing.go`
 
 ## Artifacts, Media, And Pond
 
-- Artifact bundle collect/video/gif/template/publish/list/pull: `internal/cli/artifacts.go`, `internal/cli/artifacts_manifest.go`, `internal/cli/artifacts_publish.go`
+- Artifact bundle collect/video/gif/template/publish/list/pull and regular-file publication checks: `internal/cli/artifacts.go`, `internal/cli/artifacts_manifest.go`, `internal/cli/artifacts_publish.go`
+- Automatic failure-bundle member/link confinement: `internal/cli/run_observability.go`
 - Media preview (trimmed GIF/MP4): `internal/cli/media.go`
 - Worker artifact upload endpoint and storage: `worker/src/artifacts.ts`, `worker/src/fleet.ts`
 - Pond peer discovery, SSH-mesh forwards, ACL tags, bulk release: `internal/cli/pond.go`, `internal/cli/pond_acl.go`, `internal/cli/pond_bridge.go`, `internal/cli/pond_bridge_doctor.go`, `internal/cli/pond_mesh.go`
