@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -667,6 +668,8 @@ func TestIsAzureRetryableDeleteError(t *testing.T) {
 		"validation failed": false,
 		"NicReservedForAnotherVm retry after 180 seconds": true,
 		"PublicIPAddressCannotBeDeleted because in use":   true,
+		"DiskIsAttachedToVM: disk is still attached":      true,
+		"DiskInUse: managed disk has active lease":        true,
 		"AnotherOperationInProgress":                      true,
 		"OperationNotAllowed retry after 180 seconds":     true,
 	}
@@ -678,6 +681,71 @@ func TestIsAzureRetryableDeleteError(t *testing.T) {
 		if got := isAzureRetryableDeleteError(err); got != want {
 			t.Fatalf("msg=%q got %v want %v", msg, got, want)
 		}
+	}
+}
+
+func TestWaitForAzureExtensionUsesResourceSuccess(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	pollStarted := make(chan struct{})
+	err := waitForAzureExtension(ctx, time.Millisecond, func(pollCtx context.Context) error {
+		close(pollStarted)
+		<-pollCtx.Done()
+		return context.Cause(pollCtx)
+	}, func(context.Context) (string, error) {
+		return "Succeeded", nil
+	})
+	if err != nil {
+		t.Fatalf("waitForAzureExtension returned %v, want nil", err)
+	}
+	select {
+	case <-pollStarted:
+	default:
+		t.Fatal("SDK poller was not started")
+	}
+}
+
+func TestWaitForAzureExtensionReturnsTerminalResourceFailure(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForAzureExtension(ctx, time.Millisecond, func(pollCtx context.Context) error {
+		<-pollCtx.Done()
+		return context.Cause(pollCtx)
+	}, func(context.Context) (string, error) {
+		return "Failed", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "reached Failed") {
+		t.Fatalf("waitForAzureExtension returned %v, want terminal resource failure", err)
+	}
+}
+
+func TestWaitForAzureExtensionReturnsPollerFailure(t *testing.T) {
+	t.Parallel()
+	want := errors.New("poller failed")
+	err := waitForAzureExtension(context.Background(), time.Hour, func(context.Context) error {
+		return want
+	}, func(context.Context) (string, error) {
+		return "", nil
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("waitForAzureExtension returned %v, want wrapped %v", err, want)
+	}
+}
+
+func TestWaitForAzureExtensionHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := waitForAzureExtension(ctx, time.Hour, func(pollCtx context.Context) error {
+		<-pollCtx.Done()
+		return context.Cause(pollCtx)
+	}, func(context.Context) (string, error) {
+		return "", nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForAzureExtension returned %v, want context cancellation", err)
 	}
 }
 

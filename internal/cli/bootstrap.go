@@ -223,10 +223,14 @@ $inMatch = $false
 foreach ($line in ($sshdConfig -split "\r?\n")) {
   if ($line -match '^\s*Match\s+') { $inMatch = $true }
   if (-not $inMatch -and $line -match '^\s*Port\s+\d+\s*$') { continue }
+  if (-not $inMatch -and $line -match '^\s*Subsystem\s+sftp\s+') { continue }
+  if (-not $inMatch -and $line -match '^\s*HostKey\s+') { continue }
   if ($enforceKeyAuth -and -not $inMatch -and $line -match '^\s*(PasswordAuthentication|PubkeyAuthentication)\s+') { continue }
   if ($inMatch) { $matchLines += $line } else { $globalLines += $line }
 }
 foreach ($port in $sshPorts) { $globalLines += "Port $port" }
+$globalLines += "Subsystem sftp internal-sftp"
+$globalLines += "HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key"
 if ($enforceKeyAuth) {
   $globalLines += "PubkeyAuthentication yes"
   $globalLines += "PasswordAuthentication no"
@@ -236,6 +240,15 @@ if (($matchLines -join [Environment]::NewLine) -notmatch '(?im)^\s*Match\s+Group
   $matchLines += "       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys"
 }
 Set-Content -Encoding ASCII -LiteralPath $sshdConfigPath -Value (($globalLines + $matchLines) -join [Environment]::NewLine)
+& "C:\Program Files\OpenSSH\ssh-keygen.exe" -A
+$hostKey = "$env:ProgramData\ssh\ssh_host_ed25519_key"
+if (-not (Test-Path -LiteralPath $hostKey)) {
+  & "C:\Program Files\OpenSSH\ssh-keygen.exe" -q -t ed25519 -N '""' -f $hostKey
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hostKey)) {
+    throw "failed to generate OpenSSH host key"
+  }
+}
+icacls.exe $hostKey /inheritance:r /grant "*S-1-5-18:F" /grant "*S-1-5-32-544:F" | Out-Null
 foreach ($port in $sshPorts) {
   $ruleName = "crabbox-sshd-$port"
   if (-not (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)) {
@@ -244,6 +257,9 @@ foreach ($port in $sshPorts) {
 }
 Set-Service -Name sshd -StartupType Automatic
 Start-Service sshd
+if ((Get-Service -Name sshd).Status -ne "Running") {
+  throw "sshd failed to start with generated sshd_config"
+}
 if (-not (Test-Path -LiteralPath "C:\Program Files\Git\cmd\git.exe")) {
   Retry { Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing }
   Assert-CrabboxFileSHA256 $gitInstaller ` + psQuote(gitForWindowsSetupSHA256) + `
@@ -484,8 +500,23 @@ schtasks.exe /Create /TN $startupTask /SC ONLOGON /TR "powershell.exe -NoProfile
 Get-Service -Name tvnserver -ErrorAction SilentlyContinue | Set-Service -StartupType Disabled
 Stop-Service -Name tvnserver -Force -ErrorAction SilentlyContinue
 $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+$oobe = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"
+if (-not (Test-Path -LiteralPath $oobe)) {
+  New-Item -Path $oobe | Out-Null
+}
+# Azure's Windows 11 client images can leave the privacy-consent page in the
+# first interactive session even after provisioning has created the account.
+# Mark the remaining first-logon gates complete before auto-logon so the
+# desktop is actually usable by Crabbox's desktop transport.
+New-ItemProperty -Force -Path $oobe -Name PrivacyConsentStatus -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -Force -Path $oobe -Name SetupDisplayedEula -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -Force -Path $oobe -Name SkipMachineOOBE -PropertyType DWord -Value 1 | Out-Null
+New-ItemProperty -Force -Path $oobe -Name SkipUserOOBE -PropertyType DWord -Value 1 | Out-Null
+$systemPolicies = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+New-ItemProperty -Force -Path $systemPolicies -Name EnableFirstLogonAnimation -PropertyType DWord -Value 0 | Out-Null
 Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1" -Type String
+Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $user -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
 if (-not (Test-Path -LiteralPath $setupCompletePath)) {

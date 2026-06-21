@@ -526,6 +526,11 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"install-sshd.ps1",
 		"administrators_authorized_keys",
 		"Match Group administrators",
+		"Subsystem sftp internal-sftp",
+		"HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key",
+		"ssh-keygen.exe",
+		"icacls.exe $hostKey",
+		"sshd failed to start with generated sshd_config",
 		"$sshPorts = @('2222', '22')",
 		"sshd_config",
 		"Port $port",
@@ -557,6 +562,13 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		`C:\ProgramData\crabbox\vnc.password`,
 		`C:\ProgramData\crabbox\windows.username`,
 		"AutoAdminLogon",
+		"DefaultDomainName",
+		"Test-Path -LiteralPath $oobe",
+		"PrivacyConsentStatus",
+		"SetupDisplayedEula",
+		"SkipMachineOOBE",
+		"SkipUserOOBE",
+		"EnableFirstLogonAnimation",
 		"Restart-Computer -Force",
 	} {
 		if !strings.Contains(got, want) {
@@ -682,6 +694,12 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		`C:\ProgramData\crabbox\vnc.password`,
 		"CrabboxUserVNC",
 		"AutoAdminLogon",
+		"DefaultDomainName",
+		"PrivacyConsentStatus",
+		"SetupDisplayedEula",
+		"SkipMachineOOBE",
+		"SkipUserOOBE",
+		"EnableFirstLogonAnimation",
 	} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("windows WSL2 bootstrap should not include %q", notWant)

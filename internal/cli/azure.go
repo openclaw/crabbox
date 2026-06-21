@@ -1304,10 +1304,62 @@ func (c *AzureClient) installWindowsBootstrapExtension(ctx context.Context, vmNa
 	if err != nil {
 		return fmt.Errorf("begin windows bootstrap extension: %w", err)
 	}
-	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
-		return fmt.Errorf("windows bootstrap extension: %w", err)
+	// Azure occasionally leaves the long-running-operation poller pending
+	// after the extension resource itself has reached Succeeded. Keep the SDK
+	// poller as the primary signal, but also read the resource state so a
+	// completed Windows bootstrap does not strand the lease indefinitely.
+	return waitForAzureExtension(ctx, 10*time.Second, func(pollCtx context.Context) error {
+		_, pollErr := poller.PollUntilDone(pollCtx, nil)
+		return pollErr
+	}, func(stateCtx context.Context) (string, error) {
+		extension, getErr := c.vmextc.Get(stateCtx, c.ResourceGroup, vmName, "crabbox-bootstrap", nil)
+		if getErr != nil || extension.Properties == nil || extension.Properties.ProvisioningState == nil {
+			return "", getErr
+		}
+		return *extension.Properties.ProvisioningState, nil
+	})
+}
+
+// waitForAzureExtension waits for the SDK long-running operation while also
+// consulting the extension resource state. Azure can leave the poller pending
+// after the resource has already reached a terminal state, so callers must not
+// rely on the poller alone.
+func waitForAzureExtension(
+	ctx context.Context,
+	stateInterval time.Duration,
+	poll func(context.Context) error,
+	state func(context.Context) (string, error),
+) error {
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	defer cancelPoll()
+	pollResult := make(chan error, 1)
+	go func() {
+		pollResult <- poll(pollCtx)
+	}()
+	ticker := time.NewTicker(stateInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case pollErr := <-pollResult:
+			if pollErr != nil {
+				return fmt.Errorf("windows bootstrap extension: %w", pollErr)
+			}
+			return nil
+		case <-ticker.C:
+			provisioningState, stateErr := state(ctx)
+			if stateErr != nil {
+				continue
+			}
+			switch strings.ToLower(provisioningState) {
+			case "succeeded":
+				return nil
+			case "failed", "canceled":
+				return fmt.Errorf("windows bootstrap extension reached %s", provisioningState)
+			}
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
 	}
-	return nil
 }
 
 func azureWindowsBootstrapCommand() string {
@@ -1636,6 +1688,10 @@ func isAzureRetryableDeleteError(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "NicReservedForAnotherVm") ||
 		strings.Contains(s, "PublicIPAddressCannotBeDeleted") ||
+		strings.Contains(s, "DiskInUse") ||
+		strings.Contains(s, "DiskIsAttachedToVM") ||
+		strings.Contains(s, "DiskAttached") ||
+		strings.Contains(s, "CannotDeleteDisk") ||
 		strings.Contains(s, "InUse") ||
 		strings.Contains(s, "AnotherOperationInProgress") ||
 		(strings.Contains(s, "OperationNotAllowed") && strings.Contains(s, "retry after"))

@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -54,9 +56,15 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
 $input | Set-Content -Encoding UTF8 -LiteralPath $path
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $path
 exit $LASTEXITCODE`)
-	err := runSSHInputQuiet(ctx, bootstrapTarget, remote, windowsBootstrapPowerShell(cfg, publicKey))
+	var bootstrapOutput bytes.Buffer
+	err := runSSHInput(ctx, bootstrapTarget, remote, strings.NewReader(windowsBootstrapPowerShell(cfg, publicKey)), &bootstrapOutput, &bootstrapOutput)
 	if err != nil {
-		fmt.Fprintf(stderr, "warning: %s SSH command ended before completion; waiting for reboot/ready state: %v\n", phase, err)
+		detail := strings.TrimSpace(bootstrapOutput.String())
+		if detail == "" {
+			fmt.Fprintf(stderr, "warning: %s SSH command ended before completion; waiting for reboot/ready state: %v\n", phase, err)
+		} else {
+			fmt.Fprintf(stderr, "warning: %s SSH command ended before completion; waiting for reboot/ready state: %v\n%s\n", phase, err, detail)
+		}
 	}
 	if err := waitForWindowsBootstrapSSHReady(ctx, target, stderr, bootstrapWaitTimeout(cfg)); err != nil {
 		return err
