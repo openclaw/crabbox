@@ -243,7 +243,7 @@ func (c *ocAPIClient) doJSONWithTimeout(ctx context.Context, timeout time.Durati
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError(method, path, resp)
+		return c.apiError(method, path, resp)
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -334,12 +334,12 @@ func (c *ocAPIClient) uploadFile(ctx context.Context, id, remotePath string, con
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError(http.MethodPut, "files?path="+remotePath, resp)
+		return c.apiError(http.MethodPut, "files?path="+remotePath, resp)
 	}
 	return nil
 }
 
-func apiError(method, path string, resp *http.Response) error {
+func (c *ocAPIClient) apiError(method, path string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	msg := strings.TrimSpace(string(body))
 	// Surface the API's {"error": "..."} message when present.
@@ -349,10 +349,22 @@ func apiError(method, path string, resp *http.Response) error {
 	if json.Unmarshal(body, &wrapped) == nil && wrapped.Error != "" {
 		msg = wrapped.Error
 	}
+	msg = redactOCSecrets(msg, c.apiKey)
+	path = redactOCSecrets(path, c.apiKey)
 	return &ocAPIError{
 		StatusCode: resp.StatusCode,
 		err:        exit(5, "opencomputer %s %s failed: %s: %s", method, path, resp.Status, msg),
 	}
+}
+
+func redactOCSecrets(value string, secrets ...string) string {
+	redacted := value
+	for _, secret := range secrets {
+		if strings.TrimSpace(secret) != "" {
+			redacted = strings.ReplaceAll(redacted, secret, "[redacted]")
+		}
+	}
+	return redacted
 }
 
 func isOCNotFound(err error) bool {

@@ -1198,6 +1198,58 @@ func TestAPIClientBlocksCrossOriginRedirects(t *testing.T) {
 	}
 }
 
+func TestAPIClientRedactsAPIKeyFromJSONErrors(t *testing.T) {
+	const apiKey = "osb_test_control_secret"
+	var gotAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-API-Key")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"bad key osb_test_control_secret; X-API-Key: osb_test_control_secret"}`)
+	}))
+	defer server.Close()
+	client := &ocAPIClient{http: server.Client(), baseURL: server.URL, apiKey: apiKey}
+
+	err := client.probeSandboxes(context.Background())
+	if err == nil {
+		t.Fatal("expected probe error")
+	}
+	if gotAPIKey != apiKey {
+		t.Fatalf("X-API-Key = %q, want configured key", gotAPIKey)
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Fatalf("API key leaked in control error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("control error was not redacted: %v", err)
+	}
+}
+
+func TestAPIClientRedactsAPIKeyFromUploadErrors(t *testing.T) {
+	const apiKey = "osb_test_upload_secret"
+	var gotAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("X-API-Key")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, "upload rejected: osb_test_upload_secret")
+	}))
+	defer server.Close()
+	client := &ocAPIClient{http: server.Client(), baseURL: server.URL, apiKey: apiKey}
+
+	err := client.uploadFile(context.Background(), "sb_123", "/tmp/archive.tgz", strings.NewReader("archive"))
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	if gotAPIKey != apiKey {
+		t.Fatalf("X-API-Key = %q, want configured key", gotAPIKey)
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Fatalf("API key leaked in upload error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("upload error was not redacted: %v", err)
+	}
+}
+
 func TestSameOCOriginNormalizesDefaultPorts(t *testing.T) {
 	parse := func(raw string) *url.URL {
 		t.Helper()
