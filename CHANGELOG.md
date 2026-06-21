@@ -19,6 +19,10 @@
 
 ### Fixed
 
+- Made desktop paste/type and POSIX launch/proof success depend on verified clipboard delivery or live/visible launch state, including clipboard-manager and wrapper handoffs. Thanks @coygeek.
+- Released newly created SSH leases when prewarm hydration, probe, or ready-pool registration fails, preventing paid lease leaks. Thanks @coygeek.
+- Preserved transient run-history creation retries until a replacement lease attaches successfully.
+- Stopped lease-local mediated egress daemons during ordinary lease stop before provider release.
 - Revoked isolated Code viewer sessions when their GitHub portal session logs out, preventing stale viewer cookies from retaining prior-owner lease access. Thanks @coygeek.
 - Prevented unauthenticated Cloudflare Access key fetches and bounded key-set refresh work for invalid JWT key IDs. Thanks @coygeek.
 - Blocked normalized empty-segment variants of internal coordinator routes and stripped caller-supplied internal headers before fleet dispatch. Thanks @coygeek.
