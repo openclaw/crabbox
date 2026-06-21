@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Rejected cross-origin Azure Dynamic Sessions redirects before command, environment, upload, or management bodies can be replayed. Thanks @coygeek.
 - Kept manual release publication on the reviewed default-branch GoReleaser configuration instead of allowing a selected tag to replace credentialed release behavior. Thanks @coygeek.
 - Rejected cross-origin coordinator redirects before bearer, Access, or local identity headers can be replayed. Thanks @coygeek.
 - Redacted configured Upstash Box API keys from HTTP and streamed error diagnostics. Thanks @coygeek.

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -287,6 +288,90 @@ func TestAzureDynamicSessionsListSessionsRejectsCrossOriginNextLink(t *testing.T
 	}
 	if attackerCalled {
 		t.Fatal("cross-origin nextLink was requested")
+	}
+}
+
+func TestAzureDynamicSessionsClientRejectsCrossOriginRedirects(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected.Add(1)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization=%q", got)
+		}
+		http.Redirect(w, r, target.URL+"/capture", http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	archive := filepath.Join(t.TempDir(), "archive.tgz")
+	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &azureDynamicSessionsClient{
+		endpoint:             source.URL,
+		managementAPIVersion: "2025-02-02-preview",
+		token:                "test-token",
+		httpClient:           source.Client(),
+	}
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "exec", run: func() error {
+			_, err := client.ExecStream(context.Background(), "azds-test", azureDynamicSessionsExecRequest{
+				Command: "env",
+				Env:     map[string]string{"MARKER": "fixture-value"},
+			}, io.Discard, io.Discard)
+			return err
+		}},
+		{name: "upload", run: func() error {
+			return client.UploadFile(context.Background(), "azds-test", archive, "/tmp/archive.tgz")
+		}},
+		{name: "json", run: func() error {
+			return client.DeleteSession(context.Background(), "azds-test")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+				t.Fatalf("error=%v, want cross-origin redirect rejection", err)
+			}
+		})
+	}
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
+	}
+}
+
+func TestAzureDynamicSessionsClientAllowsSameOriginRedirect(t *testing.T) {
+	var redirected atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization=%q", got)
+		}
+		if r.URL.Path == "/health" {
+			http.Redirect(w, r, "/health-ok", http.StatusTemporaryRedirect)
+			return
+		}
+		redirected.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	client := &azureDynamicSessionsClient{
+		endpoint:   server.URL,
+		token:      "test-token",
+		httpClient: server.Client(),
+	}
+	if err := client.CheckRunner(context.Background(), "azds-test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := redirected.Load(); got != 1 {
+		t.Fatalf("same-origin target received %d requests", got)
 	}
 }
 

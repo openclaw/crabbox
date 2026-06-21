@@ -225,10 +225,17 @@ func (c *azureDynamicSessionsClient) UploadFile(ctx context.Context, identifier,
 	if err != nil {
 		return err
 	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		redirectFile, err := os.Open(localPath)
+		if err != nil {
+			return nil, fmt.Errorf("reopen upload file for redirect: %w", err)
+		}
+		return redirectFile, nil
+	}
 	c.setHeaders(req)
 	req.ContentLength = info.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.secureHTTPClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -251,7 +258,7 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	}
 	c.setHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.secureHTTPClient().Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -394,7 +401,7 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.secureHTTPClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -417,6 +424,29 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 func (c *azureDynamicSessionsClient) responseError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: summarizeJSON(data)}
+}
+
+func (c *azureDynamicSessionsClient) secureHTTPClient() *http.Client {
+	source := c.httpClient
+	if source == nil {
+		source = http.DefaultClient
+	}
+	client := *source
+	trusted, _ := url.Parse(c.endpoint)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameOriginURL(trusted, req.URL) {
+			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
 }
 
 func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
@@ -450,7 +480,24 @@ func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
 }
 
 func sameOriginURL(a, b *url.URL) bool {
-	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveURLPort(a) == effectiveURLPort(b)
+}
+
+func effectiveURLPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func (c *azureDynamicSessionsClient) url(path string, query url.Values) string {

@@ -178,6 +178,8 @@ as `/`, `/tmp`, `/usr`, or bare `/workspace`; pick a dedicated subdirectory.
   `/v1/files`, extracts it under `workdir`, then streams the command over
   `/v1/exec` (NDJSON event stream). `--no-sync` skips the upload, `--sync-only`
   stops after sync. Acquired-but-not-kept sessions are stopped after the run.
+  API redirects are followed only when they remain on the configured endpoint's
+  origin, preventing credentials and request bodies from crossing trust boundaries.
 - **`status`** / **`list`** read `/.management/getSession` and
   `/.management/listSessions` and join them with local Crabbox claims. `status`
   can `--wait` for readiness.
