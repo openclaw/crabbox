@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Rejected cross-origin coordinator redirects before bearer, Access, or local identity headers can be replayed. Thanks @coygeek.
 - Redacted configured Upstash Box API keys from HTTP and streamed error diagnostics. Thanks @coygeek.
 - Redacted configured Semaphore API tokens from provider response diagnostics. Thanks @coygeek.
 - Kept GitHub Actions runner registration tokens off remote SSH command arguments. Thanks @coygeek.

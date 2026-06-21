@@ -1640,12 +1640,56 @@ func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, dat
 	if err := c.addRequestHeaders(ctx, req.Header); err != nil {
 		return err
 	}
-	resp, err := c.Client.Do(req)
+	resp, err := c.secureHTTPClient().Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	return decodeCoordinatorResponse(method, path, resp.StatusCode, resp.Body, out)
+}
+
+func (c *CoordinatorClient) secureHTTPClient() *http.Client {
+	source := c.Client
+	if source == nil {
+		source = http.DefaultClient
+	}
+	client := *source
+	trusted, _ := url.Parse(c.BaseURL)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameCoordinatorOrigin(trusted, req.URL) {
+			return fmt.Errorf("coordinator refused cross-origin redirect to %s", req.URL.Redacted())
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameCoordinatorOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveCoordinatorPort(a) == effectiveCoordinatorPort(b)
+}
+
+func effectiveCoordinatorPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func (c *CoordinatorClient) addRequestHeaders(ctx context.Context, headers http.Header) error {
@@ -1723,7 +1767,9 @@ func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, dat
 	}
 	defer cleanup()
 
-	cmd := exec.CommandContext(ctx, "curl", "--config", "-")
+	// -q must be curl's first argument so ambient curlrc settings cannot
+	// re-enable redirects or otherwise change credential handling.
+	cmd := exec.CommandContext(ctx, "curl", "-q", "--config", "-")
 	cmd.Stdin = strings.NewReader(config)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1770,7 +1816,6 @@ func (c *CoordinatorClient) curlConfig(ctx context.Context, method, path string,
 	curlConfigValue(&cfg, "max-time", strconv.Itoa(int(coordinatorHTTPTimeout/time.Second)))
 	curlConfigFlag(&cfg, "silent")
 	curlConfigFlag(&cfg, "show-error")
-	curlConfigFlag(&cfg, "location")
 	curlConfigValue(&cfg, "output", "-")
 	curlConfigValue(&cfg, "write-out", "\n%{http_code}")
 	if hasBody {

@@ -179,6 +179,10 @@ pre-minted JWT:
 fallbacks.) These credentials satisfy Cloudflare Access only — the Worker still requires the
 Crabbox bearer or signed user token.
 
+Coordinator HTTP requests follow redirects only when the scheme, host, and effective port
+remain unchanged. The curl transport fallback does not follow redirects, preventing bearer,
+Access, and local identity headers from being replayed to a different origin.
+
 For coordinators behind an upstream identity proxy that consumes the `Authorization` header,
 set `CRABBOX_COORDINATOR_TOKEN_COMMAND` to a JSON argv array. Crabbox executes it directly,
 without a shell, before each HTTP request and WebSocket reconnect. The command must print one
