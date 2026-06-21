@@ -39,6 +39,9 @@ export UPSTASH_BOX_API_KEY=...
 export CRABBOX_UPSTASH_BOX_API_KEY=...
 ```
 
+Crabbox redacts the configured API key from Upstash Box HTTP error bodies and
+exec-stream error events before displaying diagnostics.
+
 Rotate the key if it was ever pasted into a chat, shell history, issue, or log.
 
 ## Commands

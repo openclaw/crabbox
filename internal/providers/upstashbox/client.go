@@ -205,9 +205,9 @@ func (c *client) ExecStream(ctx context.Context, boxID, command, folder string, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, apiError(resp)
+		return 0, c.apiError(resp)
 	}
-	return parseExecStream(resp.Body, stdout)
+	return parseExecStream(resp.Body, stdout, c.apiKey)
 }
 
 func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath string) error {
@@ -262,7 +262,7 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return finishProducer(apiError(resp))
+		return finishProducer(c.apiError(resp))
 	}
 	return finishProducer(nil)
 }
@@ -299,7 +299,7 @@ func (c *client) doJSON(ctx context.Context, method, path string, query url.Valu
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError(resp)
+		return c.apiError(resp)
 	}
 	if out == nil {
 		return nil
@@ -321,16 +321,26 @@ func (c *client) addHeaders(req *http.Request) {
 	req.Header.Set("X-Box-Api-Key", c.apiKey)
 }
 
-func apiError(resp *http.Response) error {
+func (c *client) apiError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	msg := strings.TrimSpace(string(data))
+	msg := redactUpstashBoxSecrets(strings.TrimSpace(string(data)), c.apiKey)
+	status := redactUpstashBoxSecrets(resp.Status, c.apiKey)
 	if msg == "" {
-		msg = resp.Status
+		msg = status
 	}
-	return fmt.Errorf("upstash-box API %s: %s", resp.Status, msg)
+	return fmt.Errorf("upstash-box API %s: %s", status, msg)
 }
 
-func parseExecStream(r io.Reader, stdout io.Writer) (int, error) {
+func redactUpstashBoxSecrets(value string, secrets ...string) string {
+	for _, secret := range secrets {
+		if strings.TrimSpace(secret) != "" {
+			value = strings.ReplaceAll(value, secret, "[redacted]")
+		}
+	}
+	return value
+}
+
+func parseExecStream(r io.Reader, stdout io.Writer, secrets ...string) (int, error) {
 	reader := bufio.NewReader(r)
 	var buffer strings.Builder
 	for {
@@ -341,7 +351,7 @@ func parseExecStream(r io.Reader, stdout io.Writer) (int, error) {
 			flushExecOutputCandidates(&buffer, stdout)
 		}
 		if readErr == io.EOF {
-			return finishExecStream(&buffer, stdout)
+			return finishExecStream(&buffer, stdout, secrets...)
 		}
 		if readErr != nil {
 			return 0, readErr
@@ -376,7 +386,7 @@ func flushExecOutputCandidates(buffer *strings.Builder, stdout io.Writer) {
 	}
 }
 
-func finishExecStream(buffer *strings.Builder, stdout io.Writer) (int, error) {
+func finishExecStream(buffer *strings.Builder, stdout io.Writer, secrets ...string) (int, error) {
 	text := buffer.String()
 	buffer.Reset()
 	exitIdx := strings.LastIndex(text, execExitMarker)
@@ -405,6 +415,7 @@ func finishExecStream(buffer *strings.Builder, stdout io.Writer) (int, error) {
 		if msg == "" {
 			msg = "stream error"
 		}
+		msg = redactUpstashBoxSecrets(msg, secrets...)
 		return 1, fmt.Errorf("upstash-box exec stream: %s", msg)
 	}
 	if text != "" {

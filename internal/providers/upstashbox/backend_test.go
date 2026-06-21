@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -154,6 +155,55 @@ func TestClientUsesUpstashBoxRESTShape(t *testing.T) {
 	}
 	if !reflect.DeepEqual(deleteBody["ids"], []any{"box_1"}) {
 		t.Fatalf("delete body=%v", deleteBody)
+	}
+}
+
+func TestClientRedactsAPIKeyFromErrors(t *testing.T) {
+	const apiKey = "box_secret_live_proof"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Box-Api-Key"); got != apiKey {
+			t.Errorf("X-Box-Api-Key=%q want configured key", got)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprintf(w, "rejected X-Box-Api-Key %s", r.Header.Get("X-Box-Api-Key"))
+	}))
+	defer srv.Close()
+
+	client := &client{apiKey: apiKey, base: srv.URL, http: srv.Client()}
+	archive := filepath.Join(t.TempDir(), "archive.tgz")
+	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "json", run: func() error {
+			_, err := client.ListBoxes(context.Background())
+			return err
+		}},
+		{name: "exec stream response", run: func() error {
+			_, err := client.ExecStream(context.Background(), "box_1", "true", "", io.Discard)
+			return err
+		}},
+		{name: "upload", run: func() error {
+			return client.UploadFile(context.Background(), "box_1", archive, "/tmp/archive.tgz")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			if err == nil {
+				t.Fatal("expected API error")
+			}
+			message := err.Error()
+			if strings.Contains(message, apiKey) {
+				t.Fatalf("error contains API key: %q", message)
+			}
+			if !strings.Contains(message, "401 Unauthorized") || !strings.Contains(message, "[redacted]") {
+				t.Fatalf("error=%q, want status and redaction marker", message)
+			}
+		})
 	}
 }
 
@@ -345,6 +395,37 @@ func TestParseExecStreamRequiresExitEvent(t *testing.T) {
 	}
 	if stdout.String() != "partial output" {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestParseExecStreamRedactsAPIKeyFromErrorEvent(t *testing.T) {
+	const apiKey = "box_secret_stream"
+	body := "event: error\ndata: provider rejected " + apiKey + "\n\n"
+	code, err := parseExecStream(strings.NewReader(body), io.Discard, apiKey)
+	if code != 1 || err == nil {
+		t.Fatalf("code=%d err=%v, want stream error", code, err)
+	}
+	if strings.Contains(err.Error(), apiKey) || !strings.Contains(err.Error(), "provider rejected [redacted]") {
+		t.Fatalf("error=%q, want redacted API key", err)
+	}
+}
+
+func TestRedactUpstashBoxSecretsIgnoresEmptyValues(t *testing.T) {
+	const message = "upstash-box response"
+	if got := redactUpstashBoxSecrets(message, "", "   "); got != message {
+		t.Fatalf("redacted=%q want %q", got, message)
+	}
+}
+
+func TestAPIErrorRedactsAPIKeyFromStatus(t *testing.T) {
+	const apiKey = "box_secret_status"
+	client := &client{apiKey: apiKey}
+	err := client.apiError(&http.Response{
+		Status: "401 rejected " + apiKey,
+		Body:   io.NopCloser(strings.NewReader("")),
+	})
+	if strings.Contains(err.Error(), apiKey) || !strings.Contains(err.Error(), "401 rejected [redacted]") {
+		t.Fatalf("error=%q, want redacted status", err)
 	}
 }
 
