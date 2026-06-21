@@ -21,6 +21,12 @@ type testClock struct{}
 
 func (testClock) Now() time.Time { return time.Now() }
 
+type semaphoreRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f semaphoreRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func testConfig(host string) core.Config {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -221,6 +227,88 @@ func TestStripLeasePrefix(t *testing.T) {
 }
 
 // --- API client tests with httptest ---
+
+func TestAPIClientRedactsTokenFromAllResponseErrors(t *testing.T) {
+	const token = "semaphore-secret-token"
+	tests := []struct {
+		name string
+		path string
+		call func(*apiClient, string) error
+	}{
+		{
+			name: "get with headers",
+			path: "/get-with-headers",
+			call: func(client *apiClient, path string) error {
+				_, _, err := client.getWithHeaders(context.Background(), path)
+				return err
+			},
+		},
+		{name: "get", path: "/get", call: func(client *apiClient, path string) error {
+			return client.get(context.Background(), path, nil)
+		}},
+		{name: "post", path: "/post", call: func(client *apiClient, path string) error {
+			return client.post(context.Background(), path, map[string]string{"value": "test"}, nil)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &apiClient{
+				host:  "semaphore.example.test",
+				token: token,
+				http: &http.Client{Transport: semaphoreRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if got := req.Header.Get("Authorization"); got != "Token "+token {
+						t.Fatalf("Authorization=%q", got)
+					}
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Body:       io.NopCloser(strings.NewReader("bad Authorization: Token " + token)),
+						Header:     make(http.Header),
+					}, nil
+				})},
+			}
+			err := tc.call(client, tc.path)
+			if err == nil {
+				t.Fatal("API call returned nil")
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Fatalf("API error leaked token: %v", err)
+			}
+			for _, want := range []string{tc.path, "401", "Token [redacted]"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("API error=%q, want %q", err, want)
+				}
+			}
+		})
+	}
+	if got := redactSemaphoreSecrets("keep body", " "); got != "keep body" {
+		t.Fatalf("empty secret changed response body: %q", got)
+	}
+}
+
+func TestAPIClientTLSRedactsReflectedToken(t *testing.T) {
+	const token = "semaphore-secret-token"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if got := req.Header.Get("Authorization"); got != "Token "+token {
+			t.Fatalf("Authorization=%q", got)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, "bad "+req.Header.Get("Authorization"))
+	}))
+	defer server.Close()
+
+	client := &apiClient{
+		host:  strings.TrimPrefix(server.URL, "https://"),
+		token: token,
+		http:  server.Client(),
+	}
+	err := client.get(context.Background(), "/api/v1alpha/projects", nil)
+	if err == nil {
+		t.Fatal("API call returned nil")
+	}
+	if strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "Token [redacted]") {
+		t.Fatalf("TLS API error was not redacted: %v", err)
+	}
+}
 
 func TestCreateJob(t *testing.T) {
 	var receivedBody map[string]any

@@ -74,7 +74,8 @@ Defaults when unset: `machine: f1-standard-2`, `osImage: ubuntu2204`,
 | OS image    | `semaphore.osImage`  | `--semaphore-os-image`     | `CRABBOX_SEMAPHORE_OS_IMAGE`                       |
 | Idle timeout| `semaphore.idleTimeout` | `--semaphore-idle-timeout` | `CRABBOX_SEMAPHORE_IDLE_TIMEOUT`              |
 
-The token has no flag; pass it via env or config only.
+The token has no flag; pass it via env or config only. Semaphore API error
+bodies redact the configured token before they reach CLI diagnostics.
 
 Equivalent one-off invocations:
 

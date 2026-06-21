@@ -308,7 +308,7 @@ func (c *apiClient) getWithHeaders(ctx context.Context, path string) ([]byte, ht
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, &semaphoreAPIError{Path: path, StatusCode: resp.StatusCode, Body: string(body)}
+		return nil, nil, c.responseError(path, resp.StatusCode, body)
 	}
 	return body, resp.Header, nil
 }
@@ -321,6 +321,25 @@ type semaphoreAPIError struct {
 
 func (e *semaphoreAPIError) Error() string {
 	return fmt.Sprintf("semaphore API %s returned %d: %s", e.Path, e.StatusCode, e.Body)
+}
+
+func (c *apiClient) responseError(path string, statusCode int, body []byte) *semaphoreAPIError {
+	return &semaphoreAPIError{
+		Path:       path,
+		StatusCode: statusCode,
+		Body:       redactSemaphoreSecrets(strings.TrimSpace(string(body)), c.token),
+	}
+}
+
+func redactSemaphoreSecrets(value string, secrets ...string) string {
+	redacted := value
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			redacted = strings.ReplaceAll(redacted, secret, "[redacted]")
+		}
+	}
+	return redacted
 }
 
 func (c *apiClient) get(ctx context.Context, path string, target any) error {
@@ -339,7 +358,7 @@ func (c *apiClient) get(ctx context.Context, path string, target any) error {
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &semaphoreAPIError{Path: path, StatusCode: resp.StatusCode, Body: string(body)}
+		return c.responseError(path, resp.StatusCode, body)
 	}
 	if target != nil {
 		return json.Unmarshal(body, target)
@@ -372,7 +391,7 @@ func (c *apiClient) post(ctx context.Context, path string, payload any, target a
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &semaphoreAPIError{Path: path, StatusCode: resp.StatusCode, Body: string(body)}
+		return c.responseError(path, resp.StatusCode, body)
 	}
 	if target != nil {
 		return json.Unmarshal(body, target)

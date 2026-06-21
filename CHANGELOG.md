@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Redacted configured Semaphore API tokens from provider response diagnostics. Thanks @coygeek.
 - Kept GitHub Actions runner registration tokens off remote SSH command arguments. Thanks @coygeek.
 - Redacted Cloudflare runner bearer tokens from HTTP and streamed error diagnostics. Thanks @coygeek.
 - Confined remote failure-bundle links to the generated archive subtree and omitted unsafe special entries. Thanks @coygeek.
