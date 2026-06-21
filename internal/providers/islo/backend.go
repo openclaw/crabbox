@@ -920,7 +920,7 @@ func newIsloSandboxName(repo Repo) string {
 }
 
 func isCrabboxIsloSandboxName(name string) bool {
-	return strings.HasPrefix(normalizeLeaseSlug(name), isloNamePrefix)
+	return name == normalizeLeaseSlug(name) && strings.HasPrefix(name, isloNamePrefix)
 }
 
 func isloRandomSuffix() string {

@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Required actual Islo sandbox identifiers to already be canonical before raw-ID recovery can reach provider operations. Thanks @coygeek.
 - Required canonical generated Freestyle VM names before raw-ID recovery can reuse or delete provider resources. Thanks @coygeek.
 - Rejected plaintext non-loopback E2B API endpoints before provider credentials can be attached. Thanks @coygeek.
 - Rejected cross-origin RunPod REST redirects before bearer credentials or pod-create bodies can be replayed. Thanks @coygeek.

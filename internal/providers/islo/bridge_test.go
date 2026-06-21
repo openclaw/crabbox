@@ -46,6 +46,21 @@ func newBridgeBackend(t *testing.T, fake *fakeBridgeClient) *isloBackend {
 	}
 }
 
+func TestIsloSandboxNameFromLeaseIDRejectsNonCanonicalNames(t *testing.T) {
+	for _, name := range []string{
+		"crabbox repo abc123",
+		"crabbox/repo/abc123",
+		"crabbox?repo=abc123",
+		"Crabbox-repo-abc123",
+	} {
+		for _, leaseID := range []string{name, isloLeasePrefix + name} {
+			if _, err := isloSandboxNameFromLeaseID(leaseID); err == nil {
+				t.Errorf("isloSandboxNameFromLeaseID(%q) accepted a non-canonical sandbox name", leaseID)
+			}
+		}
+	}
+}
+
 func TestPublishPeerReusesExistingShare(t *testing.T) {
 	fake := &fakeBridgeClient{
 		preexisting: []IsloShare{{ShareID: "shr_existing", URL: "https://existing.share.islo.dev", Port: 8080}},
