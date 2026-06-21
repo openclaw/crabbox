@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Rejected plaintext non-loopback E2B API endpoints before provider credentials can be attached. Thanks @coygeek.
 - Rejected cross-origin RunPod REST redirects before bearer credentials or pod-create bodies can be replayed. Thanks @coygeek.
 - Rejected non-canonical signed browser-session tokens so suffix changes cannot bypass Code portal logout revocation. Thanks @coygeek.
 - Required a matching local claim before Cloudflare container reuse, status, or stop operations can reach the runner. Thanks @coygeek.

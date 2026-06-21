@@ -49,7 +49,8 @@ Do not pass the key as a command-line argument.
 Endpoint overrides:
 
 - `CRABBOX_E2B_API_URL` / `E2B_API_URL` or `e2b.apiUrl` override the default API
-  URL `https://api.e2b.app`.
+  URL `https://api.e2b.app`. Overrides must use HTTPS; plain HTTP is accepted
+  only for localhost or loopback development endpoints.
 - `CRABBOX_E2B_DOMAIN` / `E2B_DOMAIN` or `e2b.domain` override the default sandbox
   domain `e2b.app`.
 

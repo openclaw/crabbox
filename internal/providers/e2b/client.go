@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -97,9 +98,49 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	apiURL := strings.TrimRight(blank(cfg.E2B.APIURL, "https://api.e2b.app"), "/")
+	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, "https://api.e2b.app"))
+	if err != nil {
+		return nil, err
+	}
 	domain := strings.TrimSpace(blank(cfg.E2B.Domain, "e2b.app"))
 	return &e2bClient{apiKey: apiKey, apiURL: apiURL, domain: domain, user: cfg.E2B.User, httpClient: httpClient}, nil
+}
+
+func validateE2BAPIURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return "", exit(2, "provider=e2b API URL must be an absolute HTTPS URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", exit(2, "provider=e2b API URL must not contain userinfo, query parameters, or a fragment")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isE2BLoopbackHost(parsed.Hostname())) {
+		return "", exit(2, "provider=e2b API URL must use HTTPS except for loopback development endpoints")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	} else {
+		parsed.Host = host
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func isE2BLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c *e2bClient) CreateSandbox(ctx context.Context, req e2bCreateSandboxRequest) (e2bSandbox, error) {

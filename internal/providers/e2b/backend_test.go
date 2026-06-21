@@ -39,6 +39,42 @@ func TestParseE2BProcessStream(t *testing.T) {
 	}
 }
 
+func TestValidateE2BAPIURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{name: "https", raw: "HTTPS://API.E2B.APP:443/v1/", want: "https://api.e2b.app/v1"},
+		{name: "loopback", raw: "http://127.0.0.1:8080/api/", want: "http://127.0.0.1:8080/api"},
+		{name: "localhost", raw: "http://localhost:8080", want: "http://localhost:8080"},
+		{name: "IPv6 loopback", raw: "http://[::1]:8080/", want: "http://[::1]:8080"},
+		{name: "remote HTTP", raw: "http://api.e2b.app", wantErr: "must use HTTPS"},
+		{name: "relative", raw: "/api", wantErr: "absolute HTTPS URL"},
+		{name: "userinfo", raw: "https://user:pass@api.e2b.app", wantErr: "must not contain userinfo"},
+		{name: "query", raw: "https://api.e2b.app?token=secret", wantErr: "must not contain userinfo"},
+		{name: "fragment", raw: "https://api.e2b.app/#secret", wantErr: "must not contain userinfo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateE2BAPIURL(tt.raw)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateE2BAPIURL(%q) error = %v, want %q", tt.raw, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("validateE2BAPIURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseE2BProcessStreamRequiresEndEvent(t *testing.T) {
 	body := bytes.Join([][]byte{
 		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("partial"))}}}),
