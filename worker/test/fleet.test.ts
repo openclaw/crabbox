@@ -7555,6 +7555,26 @@ describe("fleet lease identity and idle", () => {
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
+    storage.seed(
+      "lease:cbx_000000000002",
+      testLease({
+        id: "cbx_000000000002",
+        slug: "blue-lobster",
+        owner: "other@example.com",
+        org: "elsewhere",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const scopedAdminLease = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster", {
+        headers: { ...ownerHeaders, "x-crabbox-admin": "true" },
+      }),
+    );
+    expect(scopedAdminLease.status).toBe(200);
+    await expect(scopedAdminLease.json()).resolves.toMatchObject({
+      lease: { id: "cbx_000000000001" },
+    });
 
     const hidden = await fleet.fetch(
       request("GET", "/v1/leases/blue-lobster", { headers: friendHeaders }),

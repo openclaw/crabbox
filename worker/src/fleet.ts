@@ -3595,7 +3595,7 @@ export class FleetCoordinator {
     }
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
-      const lease = await this.resolveLease(leaseID, request, admin);
+      const lease = await this.resolveLease(leaseID, request, false);
       return lease ? json({ lease: this.leaseForRequest(lease, request, admin) }) : notFound();
     }
     if (method === "POST" && action === "heartbeat") {
