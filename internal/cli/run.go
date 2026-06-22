@@ -1190,9 +1190,10 @@ retrySync:
 			timings.syncSteps.gitSeed = time.Since(stepStart)
 		}
 		manifestData := manifest.NUL()
+		deletedData := manifest.DeletedNUL()
 		stepStart = time.Now()
-		manifestInput := fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(manifest.DeletedNUL())
-		if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNew(workdir), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
+		manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
+		if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTarget(target, workdir), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
 			return recordFailure(exit(7, "write sync manifests: %v", err))
 		}
 		timings.syncSteps.manifestWrite = time.Since(stepStart)

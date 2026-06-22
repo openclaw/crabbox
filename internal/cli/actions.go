@@ -546,8 +546,9 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		}
 	}
 	manifestData := manifest.NUL()
-	manifestInput := fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(manifest.DeletedNUL())
-	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNew(workdir), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
+	deletedData := manifest.DeletedNUL()
+	manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
+	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTarget(target, workdir), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
 		return exit(7, "write sync manifests: %v", err)
 	}
 	if shouldPruneRemoteSync(cfg.Sync.Delete, false) {

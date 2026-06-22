@@ -1261,6 +1261,49 @@ cat > "$meta_dir/sync-deleted.new"
 	return "bash -lc " + shellQuote(script)
 }
 
+func syncManifestInputForTarget(target SSHTarget, manifestData, deletedData []byte) string {
+	if isWindowsWSL2Target(target) {
+		return fmt.Sprintf("%d\n%d\n", len(manifestData), len(deletedData)) + string(manifestData) + string(deletedData)
+	}
+	return fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(deletedData)
+}
+
+func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir string) string {
+	if isWindowsWSL2Target(target) {
+		return remoteWriteSyncManifestsNewPython(workdir)
+	}
+	return remoteWriteSyncManifestsNew(workdir)
+}
+
+func remoteWriteSyncManifestsNewPython(workdir string) string {
+	python := `import sys
+
+def read_len(name):
+    line = sys.stdin.buffer.readline()
+    try:
+        return int(line.strip())
+    except ValueError:
+        raise SystemExit(f"invalid {name} length")
+
+manifest_len = read_len("sync manifest")
+deleted_len = read_len("sync deleted")
+manifest = sys.stdin.buffer.read(manifest_len)
+if len(manifest) != manifest_len:
+    raise SystemExit(f"short sync manifest: got {len(manifest)} want {manifest_len}")
+deleted = sys.stdin.buffer.read(deleted_len)
+if len(deleted) != deleted_len:
+    raise SystemExit(f"short sync deleted manifest: got {len(deleted)} want {deleted_len}")
+
+with open(sys.argv[1], "wb") as handle:
+    handle.write(manifest)
+with open(sys.argv[2], "wb") as handle:
+    handle.write(deleted)
+`
+	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
+		"python3 -c " + shellQuote(python) + " \"$meta_dir/sync-manifest.new\" \"$meta_dir/sync-deleted.new\"\n"
+	return "bash -lc " + shellQuote(script)
+}
+
 func remoteSeedSyncManifestFromGit(workdir string) string {
 	script := "set -e\ncd " + shellQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `

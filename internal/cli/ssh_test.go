@@ -1338,6 +1338,67 @@ func TestRemoteWriteSyncManifestsNew(t *testing.T) {
 	}
 }
 
+func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *testing.T) {
+	got := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "/work/repo")
+	if !strings.Contains(got, "python3 -c") {
+		t.Fatalf("WSL2 manifest writer should use Python exact reads: %q", got)
+	}
+	if strings.Contains(got, "dd bs=1") {
+		t.Fatalf("WSL2 manifest writer should avoid byte-at-a-time dd: %q", got)
+	}
+	if strings.Contains(got, "perl -e") {
+		t.Fatalf("WSL2 manifest writer should keep the command short and avoid fallback scripts: %q", got)
+	}
+
+	plain := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetLinux}, "/work/repo")
+	if !strings.Contains(plain, "dd bs=1") {
+		t.Fatalf("non-WSL2 manifest writer should keep portable dd fallback: %q", plain)
+	}
+}
+
+func TestSyncManifestInputForTargetFramesDeletedLengthForWSL2(t *testing.T) {
+	manifest := []byte("keep.txt\x00")
+	deleted := []byte("old.txt\x00")
+	got := syncManifestInputForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, manifest, deleted)
+	want := fmt.Sprintf("%d\n%d\n", len(manifest), len(deleted)) + string(manifest) + string(deleted)
+	if got != want {
+		t.Fatalf("WSL2 manifest input = %q, want %q", got, want)
+	}
+
+	plain := syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest, deleted)
+	plainWant := fmt.Sprintf("%d\n", len(manifest)) + string(manifest) + string(deleted)
+	if plain != plainWant {
+		t.Fatalf("plain manifest input = %q, want %q", plain, plainWant)
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewPython(t *testing.T) {
+	workdir := t.TempDir()
+	manifest := strings.Repeat("manifest-entry\x00", 4096)
+	deleted := "old.txt\x00"
+	input := fmt.Sprintf("%d\n%d\n", len(manifest), len(deleted)) + manifest + deleted
+	cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestsNewPython(workdir))
+	cmd.Stdin = strings.NewReader(input)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write interpreted manifests failed: %v\n%s", err, out)
+	}
+	metaDir := filepath.Join(workdir, ".crabbox")
+	gotManifest, err := os.ReadFile(filepath.Join(metaDir, "sync-manifest.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotManifest) != manifest {
+		t.Fatalf("manifest bytes=%d want %d", len(gotManifest), len(manifest))
+	}
+	gotDeleted, err := os.ReadFile(filepath.Join(metaDir, "sync-deleted.new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotDeleted) != deleted {
+		t.Fatalf("unexpected deleted manifest: %q", gotDeleted)
+	}
+}
+
 func TestRemoteWriteSyncManifestsNewReadsChunkedInput(t *testing.T) {
 	workdir := t.TempDir()
 	manifest := strings.Repeat("manifest-entry\x00", 4096)
