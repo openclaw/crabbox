@@ -153,6 +153,9 @@ func TestRunCreatesExecutesAndDeletesTemporaryWorkspace(t *testing.T) {
 	if result.ExitCode != 0 || !result.SyncDelegated {
 		t.Fatalf("result=%#v", result)
 	}
+	if strings.Contains(result.CommandText, "EXAMPLE_TOKEN") || strings.Contains(result.CommandText, "secret value") {
+		t.Fatalf("proof command leaked forwarded env: %q", result.CommandText)
+	}
 	if got := stdout.String(); !strings.Contains(got, "crabbox-orgo-ok") {
 		t.Fatalf("stdout=%q", got)
 	}
