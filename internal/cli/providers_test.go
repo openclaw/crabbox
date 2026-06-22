@@ -381,10 +381,37 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "run-evidence", "versioned-workspace", "worker-runtime"} {
+	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "run-evidence", "versioned-workspace", "worker-runtime"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestProvidersRecommendFastFeedbackPrefersCacheVolumes(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "fast-feedback", 5)
+	if len(recommendations) == 0 {
+		t.Fatal("expected fast-feedback recommendations")
+	}
+	if !strings.HasPrefix(recommendations[0].Category, "local-") {
+		t.Fatalf("top fast-feedback category=%q recommendations=%v", recommendations[0].Category, recommendations)
+	}
+	if !providerRecommendationHasFeature(recommendations[0].Features, FeatureCacheVolume) {
+		t.Fatalf("top fast-feedback recommendation missing cache-volume feature: %#v", recommendations[0])
+	}
+	foundProofRunner := false
+	for _, recommendation := range recommendations {
+		if recommendation.Provider == "blacksmith-testbox" {
+			foundProofRunner = true
+		}
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureCacheVolume) &&
+			!strings.HasPrefix(recommendation.Category, "local-") &&
+			recommendation.Category != "ci-proof-runner" {
+			t.Fatalf("fast-feedback recommendation lacks cache, local runtime, or proof-runner signal: %#v", recommendation)
+		}
+	}
+	if !foundProofRunner {
+		t.Fatalf("fast-feedback recommendations should include CI proof runners: %#v", recommendations)
 	}
 }
 

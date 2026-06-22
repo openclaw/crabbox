@@ -90,6 +90,7 @@ It is selection guidance, not a readiness check; run `crabbox doctor --provider
 ```sh
 crabbox providers recommend
 crabbox providers recommend ci-proof
+crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
@@ -108,6 +109,8 @@ Supported use cases:
 - `ci-proof`: CI proof runners and providers that return run proof or
   artifacts.
 - `desktop`: providers with desktop/browser/code-server capabilities.
+- `fast-feedback`: providers suited to repeated test loops with reusable cache
+  volumes, checkout sync, cleanup, or reusable validation evidence.
 - `gpu`: GPU-oriented execution providers.
 - `linux-vm`: general Linux VM or SSH-lease execution.
 - `local`: local containers, VMs, or local sandboxes.
