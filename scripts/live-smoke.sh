@@ -1005,6 +1005,25 @@ orgo_smoke() {
   fi
   printf 'orgo computer=%s workspace=%s\n' "$computer_id" "$workspace_id"
 
+  local computer_state
+  computer_state="$(printf '%s\n' "$computer_json" | jq -r '(.status // "") | ascii_downcase')"
+  local ready_deadline=$((SECONDS + 300))
+  while [[ "$computer_state" != "running" ]]; do
+    case "$computer_state" in
+      error|failed|deleted)
+        echo "orgo computer $computer_id entered $computer_state state while starting" >&2
+        return 1
+        ;;
+    esac
+    if ((SECONDS >= ready_deadline)); then
+      echo "timed out waiting for orgo computer $computer_id to become running (last state=$computer_state)" >&2
+      return 1
+    fi
+    computer_json="$(orgo_request GET "/computers/$computer_id")"
+    computer_state="$(printf '%s\n' "$computer_json" | jq -r '(.status // "") | ascii_downcase')"
+    [[ "$computer_state" == "running" ]] || sleep 2
+  done
+
   local command="${CRABBOX_LIVE_ORGO_COMMAND:-printf crabbox-orgo-ok}"
   local bash_json
   bash_json="$(orgo_request POST "/computers/$computer_id/bash" "$(jq -n --arg command "$command" '{command:$command}')")"
