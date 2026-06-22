@@ -400,6 +400,7 @@ func providerRecommendationUseCases() []string {
 		"linux-vm",
 		"local",
 		"macos",
+		"mcp-sandbox",
 		"reachability",
 		"run-evidence",
 		"self-hosted",
@@ -432,6 +433,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "local", true
 	case "mac", "macos", "darwin":
 		return "macos", true
+	case "mcp", "mcp-sandbox", "mcp-attachments", "tool-sandbox", "tool-sandboxes":
+		return "mcp-sandbox", true
 	case "reachability", "reachable", "network", "networking", "ports", "port", "pond":
 		return "reachability", true
 	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download", "preview", "preview-url", "url-bridge":
@@ -670,6 +673,23 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureSnapshot) || hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) {
 			add(10, "supports provider state reuse")
 		}
+	case "mcp-sandbox":
+		if !hasFeature(FeatureMCP) {
+			break
+		}
+		add(80, "can attach MCP servers at sandbox creation")
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(25, "provider owns sandbox command execution")
+		}
+		if category == "local-sandbox" {
+			add(18, "local sandbox avoids cloud credentials")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(14, "returns reusable run sessions")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux MCP workloads")
+		}
 	case "reachability":
 		if capabilities.Tailscale {
 			add(45, "can join a tailnet as a bidirectional peer")
@@ -831,6 +851,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
 	fmt.Fprintln(out, "  crabbox providers recommend isolated-execution")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
+	fmt.Fprintln(out, "  crabbox providers recommend mcp-sandbox")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
 	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")

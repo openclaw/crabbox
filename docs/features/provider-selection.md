@@ -21,6 +21,7 @@ crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend agent-sandbox --json
+crabbox providers recommend mcp-sandbox
 crabbox providers recommend forkable-workspace --workspace fork
 ```
 
@@ -58,6 +59,7 @@ Use these rules before adding a new adapter:
 | Run evidence and previews | `blacksmith-testbox`, `islo`, `e2b` | They advertise normalized proof, artifact, download, or preview-url capabilities in `crabbox providers` and `providers recommend run-evidence`. |
 | Fast feedback with reusable caches | `local-container`, `apple-container`, `multipass`, `blacksmith-testbox` | They advertise cache-volume, sync, cleanup, or reusable proof/session capabilities in `crabbox providers` and `providers recommend fast-feedback`. |
 | Disposable isolated execution | `agent-sandbox`, `anthropic-sandbox-runtime`, `e2b`, `smolvm`, `vercel-sandbox` | They are delegated or local sandbox providers in `crabbox providers` and `providers recommend isolated-execution`. |
+| MCP-attached sandbox runs | `docker-sandbox` | It advertises `mcp-attachments` in `crabbox providers` and `providers recommend mcp-sandbox`. |
 | Shared app reachability | `hetzner`, `azure`, `gcp`, `islo`, `e2b` | They advertise tailnet, URL bridge, or SSH tunnel planes in `crabbox providers` and `providers recommend reachability`. |
 | Shared team cloud leases | `aws`, `azure`, `gcp`, `hetzner` | They advertise brokerable cloud, cleanup, SSH, and sync capabilities in `crabbox providers` and `providers recommend team-cloud`. |
 | Generic Linux command execution | `aws`, `azure`, `gcp`, `hetzner`, `digitalocean`, `linode`, `ssh` | SSH leases keep the normal Crabbox sync/run/debug path. |

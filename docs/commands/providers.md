@@ -93,6 +93,7 @@ crabbox providers recommend ci-proof
 crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
+crabbox providers recommend mcp-sandbox
 crabbox providers recommend reachability
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
@@ -122,6 +123,8 @@ Supported use cases:
 - `linux-vm`: general Linux VM or SSH-lease execution.
 - `local`: local containers, VMs, or local sandboxes.
 - `macos`: macOS targets.
+- `mcp-sandbox`: sandboxes that can attach MCP server references when creating
+  the run environment.
 - `reachability`: providers with a bidirectional tailnet plane, provider-native
   HTTPS endpoints, outbound-only tailnet egress, or operator-side SSH tunnels.
 - `run-evidence`: providers that can return run proof, collect artifacts,

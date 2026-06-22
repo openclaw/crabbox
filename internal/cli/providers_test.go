@@ -381,7 +381,19 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "isolated-execution", "reachability", "run-evidence", "team-cloud", "versioned-workspace", "worker-runtime"} {
+	for _, want := range []string{
+		"provider recommendation use cases:",
+		"ci-proof",
+		"agent-sandbox",
+		"fast-feedback",
+		"isolated-execution",
+		"mcp-sandbox",
+		"reachability",
+		"run-evidence",
+		"team-cloud",
+		"versioned-workspace",
+		"worker-runtime",
+	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
 		}
@@ -601,6 +613,40 @@ func TestProvidersRecommendForkableWorkspaceAlias(t *testing.T) {
 	}
 	if !containsString(entries[0].Workspace, "fork") {
 		t.Fatalf("forkable-workspace alias entry missing fork workspace capability: %#v", entries[0])
+	}
+}
+
+func TestProvidersRecommendMCPSandbox(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "mcp-sandbox", 5)
+	if len(recommendations) == 0 {
+		t.Fatal("expected mcp-sandbox recommendations")
+	}
+	if recommendations[0].Provider != "docker-sandbox" {
+		t.Fatalf("top mcp-sandbox provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
+	}
+	for _, recommendation := range recommendations {
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureMCP) {
+			t.Fatalf("mcp-sandbox recommendation lacks MCP attachments feature: %#v", recommendation)
+		}
+	}
+}
+
+func TestProvidersRecommendMCPSandboxAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "mcp",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend mcp error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureMCP) {
+		t.Fatalf("mcp alias entries=%#v", entries)
 	}
 }
 
