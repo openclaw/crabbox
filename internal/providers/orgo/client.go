@@ -174,6 +174,7 @@ func (c *orgoHTTPClient) DeleteWorkspace(ctx context.Context, id string) error {
 
 func (c *orgoHTTPClient) ListWorkspaces(ctx context.Context) ([]orgoWorkspace, error) {
 	var envelope struct {
+		Projects   []orgoWorkspace `json:"projects"`
 		Workspaces []orgoWorkspace `json:"workspaces"`
 		Data       []orgoWorkspace `json:"data"`
 		Items      []orgoWorkspace `json:"items"`
@@ -184,6 +185,8 @@ func (c *orgoHTTPClient) ListWorkspaces(ctx context.Context) ([]orgoWorkspace, e
 	}
 	if err := json.Unmarshal(raw, &envelope); err == nil {
 		switch {
+		case envelope.Projects != nil:
+			return envelope.Projects, nil
 		case envelope.Workspaces != nil:
 			return envelope.Workspaces, nil
 		case envelope.Data != nil:
