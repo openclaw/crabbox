@@ -63,6 +63,10 @@ func resolveLeaseClaimForProvider(identifier string) (core.LeaseClaim, bool, err
 	return core.ResolveLeaseClaimForProvider(identifier, providerName)
 }
 
+func resolveLeaseClaimForProviderCloudID(cloudID string) (core.LeaseClaim, bool, error) {
+	return core.ResolveLeaseClaimForProviderCloudID(cloudID, providerName)
+}
+
 func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }

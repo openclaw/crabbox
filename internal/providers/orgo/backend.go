@@ -335,9 +335,20 @@ func (b *orgoBackend) resolveComputer(ctx context.Context, client orgoAPI, ident
 	leaseID, slug := id, ""
 	createdWorkspace := ""
 	workspaceID := ""
-	if claim, ok, err := resolveLeaseClaimForProvider(id); err != nil {
+	// Exact provider resource identity wins over friendly slug matching. This is
+	// required for destructive operations when a slug happens to equal another
+	// computer's ID.
+	claim, ok, err := resolveLeaseClaimForProviderCloudID(id)
+	if err != nil {
 		return orgoLease{}, err
-	} else if ok {
+	}
+	if !ok {
+		claim, ok, err = resolveLeaseClaimForProvider(id)
+		if err != nil {
+			return orgoLease{}, err
+		}
+	}
+	if ok {
 		leaseID = claim.LeaseID
 		slug = claim.Slug
 		createdWorkspace = strings.TrimSpace(claim.Labels[orgoCreatedWorkspaceLabel])

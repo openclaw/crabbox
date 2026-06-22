@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeOrgoAPI struct {
@@ -186,6 +187,38 @@ func TestCreateComputerPreservesRequestedWorkspaceWhenResponseOmitsIt(t *testing
 	}
 	if err := backend.deleteLease(context.Background(), fake, lease); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStopByComputerIDDeletesTemporaryWorkspaceAndClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "cloud-id-stop", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherLeaseID := "cbx_slug_collision_1234567890"
+	if err := claimLeaseForRepoProviderEndpoint(otherLeaseID, lease.Computer.ID, t.TempDir(), time.Minute, false, Server{
+		CloudID:  "other-computer",
+		Provider: providerName,
+		Name:     "other-computer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeLeaseClaim(otherLeaseID) })
+	if err := backend.Stop(context.Background(), StopRequest{ID: lease.Computer.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fake.deletedComputers, ","); got != lease.Computer.ID {
+		t.Fatalf("deleted computers=%q", got)
+	}
+	if got := strings.Join(fake.deletedWorkspaces, ","); got != "ws_created" {
+		t.Fatalf("deleted workspaces=%q", got)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(lease.LeaseID); err != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, err)
 	}
 }
 
