@@ -22,7 +22,6 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "orgo",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureCleanup},
 		Coordinator: core.CoordinatorNever,
 	}
 }
