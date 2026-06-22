@@ -58,14 +58,13 @@ func TestSmokeCreateRunAndDelete(t *testing.T) {
 	}
 
 	computer, err := api.CreateComputer(ctx, orgoCreateComputerRequest{
-		WorkspaceID:     workspaceID,
-		Name:            "crabbox-smoke",
-		OS:              "linux",
-		RAMGB:           4,
-		CPUs:            1,
-		DiskGB:          8,
-		Resolution:      "1280x720x24",
-		AutoStopMinutes: 15,
+		WorkspaceID: workspaceID,
+		Name:        "crabbox-smoke",
+		OS:          "linux",
+		RAMGB:       4,
+		CPUs:        1,
+		DiskGB:      8,
+		Resolution:  "1280x720x24",
 	})
 	if err != nil {
 		t.Fatalf("CreateComputer: %v", err)

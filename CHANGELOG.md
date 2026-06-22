@@ -66,6 +66,7 @@
 - Added run-session metadata for OpenComputer runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for Agent Sandbox runs so retained and reused claims can be written through `--lease-output`.
 - Added run-session metadata for Apple Machine runs so retained and reused machines can be written through `--lease-output`.
+- Added the Orgo delegated-run provider with source-bound authentication, workspace/computer lifecycle cleanup, and real command execution. Thanks @zozo123.
 
 ### Fixed
 
