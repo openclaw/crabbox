@@ -2,6 +2,7 @@ package all
 
 import (
 	"io"
+	"slices"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -331,6 +332,16 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 				t.Fatalf("%s does not implement DoctorProvider", name)
 			}
 		})
+	}
+}
+
+func TestAllBuiltInProviderNamesCoverRegistry(t *testing.T) {
+	want := core.RegisteredProviderNames()
+	got := append([]string(nil), allBuiltInProviderNames()...)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("allBuiltInProviderNames()=%v, registered providers=%v", got, want)
 	}
 }
 
@@ -724,6 +735,7 @@ func allBuiltInProviderNames() []string {
 		"mxc",
 		"namespace-devbox",
 		"namespace-instance",
+		"nebius",
 		"nvidia-brev",
 		"opencomputer",
 		"opensandbox",
@@ -733,6 +745,7 @@ func allBuiltInProviderNames() []string {
 		"proxmox",
 		"railway",
 		"runpod",
+		"scaleway",
 		"anthropic-sandbox-runtime",
 		"semaphore",
 		"smolvm",
