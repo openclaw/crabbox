@@ -54,6 +54,7 @@ Use these rules before adding a new adapter:
 | Workflow | Prefer | Why |
 | --- | --- | --- |
 | CI reproduction with durable proof | `blacksmith-testbox`, `semaphore` | They map to CI/proof-runner semantics instead of generic devbox semantics. |
+| Run evidence and previews | `blacksmith-testbox`, `islo`, `e2b` | They advertise normalized proof, artifact, download, or preview-url capabilities in `crabbox providers` and `providers recommend run-evidence`. |
 | Generic Linux command execution | `aws`, `azure`, `gcp`, `hetzner`, `digitalocean`, `linode`, `ssh` | SSH leases keep the normal Crabbox sync/run/debug path. |
 | Existing owned machine | `ssh` | No provider lifecycle is needed; Crabbox only syncs and runs. |
 | Local disposable Linux | `local-container`, `apple-container`, `apple-vz`, `multipass` | Fast local iteration without cloud credentials. |
@@ -90,7 +91,8 @@ If Crabbox does not support Mitos directly, the user-facing behavior should be:
 - a clear note that Mitos is observed but unsupported;
 - reusable capability work for snapshot, fork, durable workspace, MCP, preview
   URLs, run proof, and delegated artifacts. `crabbox providers --json` exposes
-  normalized workspace capability names so this stays provider-neutral.
+  normalized workspace and run-evidence capability names so this stays
+  provider-neutral.
 
 That preserves optionality. If Mitos later has real demand and the contract is
 stable enough, it can arrive as either a delegated-run provider or an SSH-lease

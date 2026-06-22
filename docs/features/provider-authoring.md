@@ -214,6 +214,13 @@ capabilities as any other provider that can checkpoint and fork workspace state;
 its Firecracker, Kubernetes, or image identifiers belong inside the adapter and
 checkpoint metadata.
 
+Run evidence follows the same rule. Declare `FeatureRunProof`,
+`FeatureRunArtifacts`, `FeatureRunDownloads`, `FeatureURLBridge`, and
+`FeatureRunSession` only when the provider really exposes those contracts.
+`crabbox providers --json` normalizes them as `proof`, `artifacts`,
+`downloads`, `preview-url`, and `session`, and
+`crabbox providers recommend run-evidence` ignores session-only providers.
+
 ## Step 5. Own Provider-Specific Flags
 
 Go's `flag` package rejects unknown flags, so provider flags must be registered

@@ -459,6 +459,21 @@ Use that normalized field for workflow selection and external comparisons. Keep
 provider-specific snapshot names, CRDs, image IDs, and fork engines behind the
 provider adapter.
 
+The same provider matrix exposes normalized run-evidence capabilities:
+
+| Feature | Evidence capability |
+| --- | --- |
+| `FeatureRunProof` | `proof` |
+| `FeatureRunArtifacts` | `artifacts` |
+| `FeatureRunDownloads` | `downloads` |
+| `FeatureURLBridge` | `preview-url` |
+| `FeatureRunSession` | `session` |
+
+`providers recommend run-evidence` requires at least one proof, artifact,
+download, or preview-url capability. A bare session handle is useful metadata,
+but it is not enough by itself to claim the provider returns user-facing
+evidence.
+
 ## Flags and config
 
 Provider flags are registered before parsing because Go's `flag` package rejects

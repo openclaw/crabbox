@@ -17,6 +17,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
 	var scaleway *providerMatrixEntry
+	var blacksmith *providerMatrixEntry
+	var e2b *providerMatrixEntry
+	var islo *providerMatrixEntry
 	var localContainer *providerMatrixEntry
 	var parallels *providerMatrixEntry
 	var moduleRuntime *providerMatrixEntry
@@ -41,6 +44,15 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "scaleway" {
 			scaleway = &entries[i]
+		}
+		if entries[i].Provider == "blacksmith-testbox" {
+			blacksmith = &entries[i]
+		}
+		if entries[i].Provider == "e2b" {
+			e2b = &entries[i]
+		}
+		if entries[i].Provider == "islo" {
+			islo = &entries[i]
 		}
 		if entries[i].Provider == "local-container" {
 			localContainer = &entries[i]
@@ -72,6 +84,15 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if scaleway == nil {
 		t.Fatal("scaleway provider not found")
+	}
+	if blacksmith == nil {
+		t.Fatal("blacksmith-testbox provider not found")
+	}
+	if e2b == nil {
+		t.Fatal("e2b provider not found")
+	}
+	if islo == nil {
+		t.Fatal("islo provider not found")
 	}
 	if localContainer == nil {
 		t.Fatal("local-container provider not found")
@@ -163,6 +184,21 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 			t.Fatalf("parallels workspace=%v missing %s", parallels.Workspace, capability)
 		}
 	}
+	for _, capability := range []string{"proof", "artifacts", "session"} {
+		if !containsString(blacksmith.Evidence, capability) {
+			t.Fatalf("blacksmith evidence=%v missing %s", blacksmith.Evidence, capability)
+		}
+	}
+	for _, capability := range []string{"preview-url", "session"} {
+		if !containsString(e2b.Evidence, capability) {
+			t.Fatalf("e2b evidence=%v missing %s", e2b.Evidence, capability)
+		}
+	}
+	for _, capability := range []string{"downloads", "preview-url", "session"} {
+		if !containsString(islo.Evidence, capability) {
+			t.Fatalf("islo evidence=%v missing %s", islo.Evidence, capability)
+		}
+	}
 }
 
 func TestProvidersCommandJSON(t *testing.T) {
@@ -184,6 +220,9 @@ func TestProvidersCommandJSON(t *testing.T) {
 		}
 		if entry.Provider == "parallels" && !containsString(entry.Workspace, "snapshot-ref") {
 			t.Fatalf("parallels json missing workspace snapshot-ref: %#v", entry)
+		}
+		if entry.Provider == "blacksmith-testbox" && !containsString(entry.Evidence, "proof") {
+			t.Fatalf("blacksmith json missing evidence proof: %#v", entry)
 		}
 	}
 }
@@ -209,6 +248,9 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	if !strings.Contains(text, "parallels\n") || !strings.Contains(text, "  workspace: checkpoint,fork,restore,snapshot-ref\n") {
 		t.Fatalf("providers output missing workspace contract:\n%s", text)
 	}
+	if !strings.Contains(text, "blacksmith-testbox\n") || !strings.Contains(text, "  evidence: proof,artifacts,session\n") {
+		t.Fatalf("providers output missing evidence contract:\n%s", text)
+	}
 }
 
 func TestProvidersRecommendListsUseCases(t *testing.T) {
@@ -218,9 +260,32 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "versioned-workspace", "worker-runtime"} {
+	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "run-evidence", "versioned-workspace", "worker-runtime"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestProvidersRecommendRunEvidence(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "run-evidence", 5)
+	if len(recommendations) == 0 {
+		t.Fatal("expected run-evidence recommendations")
+	}
+	if recommendations[0].Provider != "blacksmith-testbox" {
+		t.Fatalf("top run-evidence provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
+	}
+	for _, capability := range []string{"proof", "artifacts", "session"} {
+		if !containsString(recommendations[0].Evidence, capability) {
+			t.Fatalf("top recommendation evidence=%v missing %s", recommendations[0].Evidence, capability)
+		}
+	}
+	for _, recommendation := range recommendations {
+		if len(recommendation.Evidence) == 0 {
+			t.Fatalf("run-evidence recommendation lacks evidence capabilities: %#v", recommendation)
+		}
+		if recommendation.Provider == "wandb" {
+			t.Fatalf("run-evidence should not recommend session-only providers: %#v", recommendation)
 		}
 	}
 }

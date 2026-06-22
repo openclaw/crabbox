@@ -10,6 +10,7 @@ crabbox providers
 crabbox providers --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
+crabbox providers recommend run-evidence
 crabbox providers recommend versioned-workspace
 ```
 
@@ -32,6 +33,7 @@ It is selection guidance, not a readiness check; run `crabbox doctor --provider
 crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend linux-vm --limit 8
+crabbox providers recommend run-evidence
 crabbox providers recommend versioned-workspace
 crabbox providers recommend worker-runtime --json
 ```
@@ -50,6 +52,8 @@ Supported use cases:
 - `linux-vm`: general Linux VM or SSH-lease execution.
 - `local`: local containers, VMs, or local sandboxes.
 - `macos`: macOS targets.
+- `run-evidence`: providers that can return run proof, collect artifacts,
+  materialize downloads, or expose preview URLs.
 - `self-hosted`: private virtualization, external providers, and BYO SSH.
 - `versioned-workspace`: providers with native checkpoint, fork, restore, or
   snapshot-reference capabilities.
@@ -80,6 +84,23 @@ parallels
   targets: linux,macos,windows/normal,windows/wsl2
   features: ssh,crabbox-sync,cleanup,desktop,browser,code,workspace-checkpoint,workspace-fork,workspace-restore,provider-snapshot
   workspace: checkpoint,fork,restore,snapshot-ref
+  coordinator: never
+
+blacksmith-testbox
+  family: blacksmith
+  kind: delegated-run
+  targets: linux
+  features: cache-volume,run-proof,run-session,run-artifacts
+  evidence: proof,artifacts,session
+  coordinator: never
+  aliases: blacksmith
+
+e2b
+  family: e2b
+  kind: delegated-run
+  targets: linux
+  features: url-bridge,run-session
+  evidence: preview-url,session
   coordinator: never
 
 wandb
@@ -126,12 +147,13 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "coordinator": "never"
   },
   {
-    "provider": "parallels",
-    "family": "parallels",
-    "kind": "ssh-lease",
-    "targets": ["linux", "macos", "windows/normal", "windows/wsl2"],
-    "features": ["ssh", "crabbox-sync", "cleanup", "desktop", "browser", "code", "workspace-checkpoint", "workspace-fork", "workspace-restore", "provider-snapshot"],
-    "workspace": ["checkpoint", "fork", "restore", "snapshot-ref"],
+    "provider": "blacksmith-testbox",
+    "family": "blacksmith",
+    "kind": "delegated-run",
+    "aliases": ["blacksmith"],
+    "targets": ["linux"],
+    "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
+    "evidence": ["proof", "artifacts", "session"],
     "coordinator": "never"
   }
 ]
@@ -167,6 +189,10 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
   flags. Possible values are `checkpoint`, `fork`, `restore`, and
   `snapshot-ref`. The field is omitted when a provider does not advertise any
   native workspace capabilities.
+- `evidence`: normalized run-evidence and preview capabilities derived from
+  feature flags. Possible values are `proof`, `artifacts`, `downloads`,
+  `preview-url`, and `session`. The field is omitted when a provider does not
+  advertise any run evidence or preview capabilities.
 - `coordinator`: whether the provider can route leases through the broker.
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.
@@ -182,6 +208,7 @@ Recommendation JSON returns ranked objects:
     "category": "ci-proof-runner",
     "targets": ["linux"],
     "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
+    "evidence": ["proof", "artifacts", "session"],
     "score": 158,
     "reasons": [
       "CI proof runner",

@@ -17,6 +17,7 @@ type providerMatrixEntry struct {
 	Targets     []string     `json:"targets"`
 	Features    []Feature    `json:"features"`
 	Workspace   []string     `json:"workspace,omitempty"`
+	Evidence    []string     `json:"evidence,omitempty"`
 	Coordinator string       `json:"coordinator"`
 }
 
@@ -27,6 +28,7 @@ type providerRecommendationEntry struct {
 	Targets   []string     `json:"targets"`
 	Features  []Feature    `json:"features"`
 	Workspace []string     `json:"workspace,omitempty"`
+	Evidence  []string     `json:"evidence,omitempty"`
 	Score     int          `json:"score"`
 	Reasons   []string     `json:"reasons"`
 }
@@ -119,6 +121,7 @@ func providerMatrix() []providerMatrixEntry {
 			Targets:     formatProviderTargets(spec.Targets),
 			Features:    append(FeatureSet{}, spec.Features...),
 			Workspace:   workspaceCapabilitiesForFeatures(spec.Features),
+			Evidence:    evidenceCapabilitiesForFeatures(spec.Features),
 			Coordinator: string(spec.Coordinator),
 		})
 	}
@@ -135,6 +138,7 @@ func providerRecommendationUseCases() []string {
 		"linux-vm",
 		"local",
 		"macos",
+		"run-evidence",
 		"self-hosted",
 		"versioned-workspace",
 		"windows",
@@ -160,6 +164,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "local", true
 	case "mac", "macos", "darwin":
 		return "macos", true
+	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download", "preview", "preview-url", "url-bridge":
+		return "run-evidence", true
 	case "self-hosted", "selfhosted", "homelab", "virtualization":
 		return "self-hosted", true
 	case "versioned-workspace", "workspace", "workspaces", "checkpoint", "checkpoints", "snapshot", "snapshots", "fork", "forks":
@@ -187,6 +193,7 @@ func recommendProvidersForUseCase(entries []providerMatrixEntry, useCase string,
 			Targets:   append([]string(nil), entry.Targets...),
 			Features:  append([]Feature(nil), entry.Features...),
 			Workspace: append([]string(nil), entry.Workspace...),
+			Evidence:  append([]string(nil), entry.Evidence...),
 			Score:     score,
 			Reasons:   reasons,
 		})
@@ -336,6 +343,26 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureSnapshot) || hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) {
 			add(10, "supports provider state reuse")
 		}
+	case "run-evidence":
+		hasEvidenceCapability := hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) || hasFeature(FeatureURLBridge)
+		if !hasEvidenceCapability {
+			break
+		}
+		if hasFeature(FeatureRunProof) {
+			add(45, "returns provider run proof")
+		}
+		if hasFeature(FeatureRunArtifacts) {
+			add(35, "can collect provider run artifacts")
+		}
+		if hasFeature(FeatureRunDownloads) {
+			add(30, "can materialize provider run downloads")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(25, "can expose provider-native preview URLs")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(15, "returns reusable run sessions for later inspection")
+		}
 	case "self-hosted":
 		if category == "self-hosted-virtualization" {
 			add(80, "self-hosted virtualization provider")
@@ -437,6 +464,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
+	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
 }
 
@@ -452,6 +480,9 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 		if len(entry.Workspace) > 0 {
 			fmt.Fprintf(out, "  workspace: %s\n", commaOrDash(entry.Workspace))
 		}
+		if len(entry.Evidence) > 0 {
+			fmt.Fprintf(out, "  evidence: %s\n", commaOrDash(entry.Evidence))
+		}
 		fmt.Fprintf(out, "  reasons: %s\n", strings.Join(entry.Reasons, "; "))
 	}
 }
@@ -465,6 +496,9 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 		fmt.Fprintf(out, "  features: %s\n", commaOrDash(featuresToStrings(entry.Features)))
 		if len(entry.Workspace) > 0 {
 			fmt.Fprintf(out, "  workspace: %s\n", commaOrDash(entry.Workspace))
+		}
+		if len(entry.Evidence) > 0 {
+			fmt.Fprintf(out, "  evidence: %s\n", commaOrDash(entry.Evidence))
 		}
 		fmt.Fprintf(out, "  coordinator: %s\n", blank(entry.Coordinator, "never"))
 		if len(entry.Aliases) > 0 {
@@ -499,6 +533,21 @@ func workspaceCapabilitiesForFeatures(features []Feature) []string {
 	add(FeatureFork, "fork")
 	add(FeatureRestore, "restore")
 	add(FeatureSnapshot, "snapshot-ref")
+	return out
+}
+
+func evidenceCapabilitiesForFeatures(features []Feature) []string {
+	var out []string
+	add := func(feature Feature, capability string) {
+		if FeatureSet(features).Has(feature) {
+			out = append(out, capability)
+		}
+	}
+	add(FeatureRunProof, "proof")
+	add(FeatureRunArtifacts, "artifacts")
+	add(FeatureRunDownloads, "downloads")
+	add(FeatureURLBridge, "preview-url")
+	add(FeatureRunSession, "session")
 	return out
 }
 
