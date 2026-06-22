@@ -13,6 +13,7 @@ crabbox providers --target linux --workspace checkpoint --workspace fork --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend run-evidence
+crabbox providers recommend run-evidence --kind delegated-run --evidence preview-url
 crabbox providers recommend versioned-workspace
 ```
 
@@ -37,6 +38,8 @@ Repeated filters are combined with AND semantics. Comma-separated values are als
 accepted, so `--workspace checkpoint,fork` means the same thing as passing
 `--workspace checkpoint --workspace fork`. Filter values are checked against the
 compiled provider matrix; unknown values fail before printing partial output.
+The same filters can be passed to `providers recommend` to rank only matching
+providers for a workflow.
 
 The matrix form takes no positional arguments. Use `providers recommend` for
 workflow-oriented ranked selection guidance.
@@ -54,7 +57,9 @@ crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend run-evidence
+crabbox providers recommend run-evidence --kind delegated-run --evidence preview-url
 crabbox providers recommend versioned-workspace
+crabbox providers recommend versioned-workspace --target macos --workspace fork
 crabbox providers recommend worker-runtime --json
 ```
 
@@ -85,6 +90,9 @@ Recommendation flags:
 - `--use-case <name>`: pass the use case by flag instead of positionally.
 - `--limit <n>`: maximum recommendations to print. Defaults to `5`.
 - `--json`: emit recommendations as JSON.
+- `--kind`, `--target`, `--feature`, `--workspace`, `--evidence`: filter the
+  candidate provider matrix before scoring. These flags use the same values and
+  repeat/comma semantics as the base `providers` matrix command.
 
 ## Output
 
