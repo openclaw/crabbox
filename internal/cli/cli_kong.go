@@ -26,7 +26,7 @@ type crabboxKongCLI struct {
 	Media      mediaKongCmd      `cmd:"" help:"Create preview artifacts from recorded desktop videos."`
 	Artifacts  artifactsKongCmd  `cmd:"" help:"Collect, transform, and publish QA artifacts."`
 	SyncPlan   syncPlanKongCmd   `cmd:"" name:"sync-plan" passthrough:"" help:"Show local sync manifest size hotspots."`
-	Providers  providersKongCmd  `cmd:"" passthrough:"" help:"Show provider capabilities."`
+	Providers  providersKongCmd  `cmd:"" passthrough:"" help:"Show provider capabilities and recommendations."`
 	History    historyKongCmd    `cmd:"" passthrough:"" help:"List recorded remote runs."`
 	Logs       logsKongCmd       `cmd:"" passthrough:"" help:"Print recorded run logs."`
 	Events     eventsKongCmd     `cmd:"" passthrough:"" help:"Print recorded run events."`

@@ -8,13 +8,55 @@ does not contact any cloud, check credentials, or query quota. Use
 ```sh
 crabbox providers
 crabbox providers --json
+crabbox providers recommend ci-proof
+crabbox providers recommend agent-sandbox --json
 ```
 
 ## Flags
 
 - `--json`: emit the matrix as a JSON array instead of grouped text.
 
-The command takes no positional arguments.
+The matrix form takes no positional arguments. Use `providers recommend` for
+workflow-oriented selection guidance.
+
+## `providers recommend`
+
+`crabbox providers recommend` ranks the compiled provider inventory for a
+specific workflow without contacting any provider. It uses each provider's
+declared targets and features plus the checked-in provider category metadata.
+It is selection guidance, not a readiness check; run `crabbox doctor --provider
+<name>` before a live workflow.
+
+```sh
+crabbox providers recommend
+crabbox providers recommend ci-proof
+crabbox providers recommend linux-vm --limit 8
+crabbox providers recommend worker-runtime --json
+```
+
+With no use case, the command lists supported use cases and examples.
+
+Supported use cases:
+
+- `agent-sandbox`: delegated sandboxes and managed devboxes for agent code
+  execution.
+- `byo-ssh`: existing SSH hosts.
+- `ci-proof`: CI proof runners and providers that return run proof or
+  artifacts.
+- `desktop`: providers with desktop/browser/code-server capabilities.
+- `gpu`: GPU-oriented execution providers.
+- `linux-vm`: general Linux VM or SSH-lease execution.
+- `local`: local containers, VMs, or local sandboxes.
+- `macos`: macOS targets.
+- `self-hosted`: private virtualization, external providers, and BYO SSH.
+- `windows`: native Windows and WSL2 targets.
+- `worker-runtime`: Worker/module-runtime execution.
+
+Recommendation flags:
+
+- `--use-case <name>`: pass the use case by flag instead of positionally.
+- `--limit <n>`: maximum recommendations to print. Defaults to `5`.
+- `--json`: emit recommendations as JSON.
 
 ## Output
 
@@ -112,6 +154,30 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.
   - `never`: the provider always runs direct from the CLI.
+
+Recommendation JSON returns ranked objects:
+
+```json
+[
+  {
+    "provider": "blacksmith-testbox",
+    "kind": "delegated-run",
+    "category": "ci-proof-runner",
+    "targets": ["linux"],
+    "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
+    "score": 158,
+    "reasons": [
+      "CI proof runner",
+      "returns provider run proof",
+      "can reuse provider run sessions",
+      "can collect provider run artifacts or downloads"
+    ]
+  }
+]
+```
+
+Scores are relative within one use case. They are intentionally heuristic and
+stable enough for selection help, not a benchmark or live availability signal.
 
 ## Related docs
 

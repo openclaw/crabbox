@@ -183,6 +183,75 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	}
 }
 
+func TestProvidersRecommendListsUseCases(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend"})
+	if err != nil {
+		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
+	}
+	text := stdout.String()
+	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "worker-runtime"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestProvidersRecommendCIPrefersProofRunner(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "ci-proof", 3)
+	if len(recommendations) == 0 {
+		t.Fatal("expected ci-proof recommendations")
+	}
+	if recommendations[0].Provider != "blacksmith-testbox" {
+		t.Fatalf("top ci-proof provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
+	}
+	if !providerRecommendationHasFeature(recommendations[0].Features, FeatureRunProof) {
+		t.Fatalf("top ci-proof recommendation missing run-proof feature: %#v", recommendations[0])
+	}
+}
+
+func TestProvidersRecommendWorkerRuntimeFindsModuleProvider(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "worker-runtime", 5)
+	if len(recommendations) == 0 {
+		t.Fatal("expected worker-runtime recommendations")
+	}
+	if !providerRecommendationHasString(recommendations[0].Targets, targetWorkerRuntime) {
+		t.Fatalf("top worker-runtime recommendation lacks worker target: %#v", recommendations[0])
+	}
+	if !providerRecommendationHasFeature(recommendations[0].Features, FeatureModuleRun) {
+		t.Fatalf("top worker-runtime recommendation lacks module-run feature: %#v", recommendations[0])
+	}
+}
+
+func TestProvidersRecommendCommandJSONAndLimit(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "linux-vm", "--limit", "2", "--json"})
+	if err != nil {
+		t.Fatalf("providers recommend --json error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 2 {
+		t.Fatalf("recommendation count=%d want=2 entries=%#v", len(entries), entries)
+	}
+	for _, entry := range entries {
+		if entry.Score <= 0 || len(entry.Reasons) == 0 {
+			t.Fatalf("entry missing score/reasons: %#v", entry)
+		}
+	}
+}
+
+func TestProvidersRecommendRejectsUnknownUseCase(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "moon-base"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("providers recommend unknown error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+}
+
 func containsFeature(values []Feature, want Feature) bool {
 	for _, value := range values {
 		if value == want {

@@ -180,7 +180,7 @@ Commands:
   media       Create preview artifacts from recorded desktop videos
   artifacts   Collect, transform, and publish QA artifacts
   sync-plan   Show local sync manifest size hotspots
-  providers   Show provider capabilities
+  providers   Show provider capabilities and recommendations
   history     List recorded remote runs
   logs        Print recorded run logs
   events      Print recorded run events
