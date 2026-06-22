@@ -481,6 +481,7 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 	case "team", "team-cloud", "shared-cloud", "brokered-cloud", "coordinator", "coordinated-cloud", "managed-cloud":
 		return "team-cloud", true
 	case "versioned-workspace", "workspace", "workspaces",
+		"workspace-reuse", "reusable-workspace", "reusable-workspaces",
 		"checkpoint", "checkpoints", "snapshot", "snapshots",
 		"fork", "forks", "forkable", "forkable-workspace",
 		"forkable-workspaces", "durable-workspace", "stateful-workspace",

@@ -114,7 +114,9 @@ Ship these in small PRs:
    dev-environment state needs to be parked and resumed.
 4. Strengthen workspace reuse before runtime-specific forking.
    Checkpoint, fork, restore, and provider snapshot semantics should be testable
-   through the CLI before adding live microVM fan-out.
+   through the CLI before adding live microVM fan-out. Use
+   `crabbox providers recommend workspace-reuse` as the workflow entry point
+   when the operator cares about reusable state more than a specific fork API.
 5. Keep edge/worker execution separate from Linux sandboxes.
    A Worker module runtime is not the same thing as a Linux shell. Make the
    target and feature names say that clearly.

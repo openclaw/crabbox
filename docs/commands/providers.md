@@ -106,6 +106,7 @@ crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
 crabbox providers recommend run-session
 crabbox providers recommend team-cloud
+crabbox providers recommend workspace-reuse
 crabbox providers recommend versioned-workspace
 crabbox providers recommend forkable-workspace --workspace fork
 crabbox providers recommend versioned-workspace --target macos --workspace fork
@@ -159,8 +160,8 @@ Supported use cases:
 - `team-cloud`: brokerable or direct cloud providers for shared team workflows,
   coordinator-mediated spend/cleanup, and normal SSH debugging.
 - `versioned-workspace`: providers with native checkpoint, fork, restore, or
-  snapshot-reference capabilities. Aliases include `forkable-workspace`,
-  `durable-workspace`, and `stateful-workspace`.
+  snapshot-reference capabilities. Aliases include `workspace-reuse`,
+  `forkable-workspace`, `durable-workspace`, and `stateful-workspace`.
 - `windows`: native Windows and WSL2 targets.
 - `worker-runtime`: Worker/module-runtime execution.
 
