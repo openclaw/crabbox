@@ -6,6 +6,9 @@ Read when:
 - comparing a Crabbox provider with an external sandbox or dev-environment tool;
 - deciding whether a new provider belongs in Crabbox.
 
+For a deeper competitor and roadmap view, read
+[Provider landscape](provider-landscape.md).
+
 Crabbox should support provider families, not every interesting runtime by name.
 Prefer the provider that fits the workflow and its evidence requirements. Add a
 new first-class provider only when the runtime exposes a stable lifecycle,
