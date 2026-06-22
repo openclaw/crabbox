@@ -334,6 +334,37 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	}
 }
 
+func TestProviderKindFeatureContracts(t *testing.T) {
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if spec.Kind == core.ProviderKindSSHLease && !spec.Features.Has(core.FeatureSSH) {
+			t.Fatalf("%s kind=%s must advertise %s", name, spec.Kind, core.FeatureSSH)
+		}
+		if spec.Features.Has(core.FeatureCrabboxSync) && (spec.Kind != core.ProviderKindSSHLease || !spec.Features.Has(core.FeatureSSH)) {
+			t.Fatalf("%s advertises %s but kind=%s features=%v", name, core.FeatureCrabboxSync, spec.Kind, spec.Features)
+		}
+		for _, feature := range []core.Feature{core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode} {
+			if spec.Features.Has(feature) && (spec.Kind != core.ProviderKindSSHLease || !spec.Features.Has(core.FeatureSSH)) {
+				t.Fatalf("%s advertises %s but kind=%s features=%v", name, feature, spec.Kind, spec.Features)
+			}
+		}
+		for _, feature := range []core.Feature{
+			core.FeatureArchiveSync,
+			core.FeatureModuleRun,
+			core.FeatureRunProof,
+			core.FeatureRunSession,
+			core.FeatureRunArtifacts,
+			core.FeatureRunDownloads,
+			core.FeaturePauseResume,
+		} {
+			if spec.Features.Has(feature) && spec.Kind != core.ProviderKindDelegatedRun {
+				t.Fatalf("%s advertises %s but kind=%s", name, feature, spec.Kind)
+			}
+		}
+	}
+}
+
 func TestPauseResumeFeatureRequiresPausableBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
