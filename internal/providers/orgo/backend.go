@@ -115,6 +115,7 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	if err != nil {
 		return RunResult{}, err
 	}
+	commandText := orgoCommandText(req)
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -129,7 +130,7 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		Provider:      providerName,
 		LeaseID:       lease.LeaseID,
 		Slug:          lease.Slug,
-		CommandText:   command,
+		CommandText:   commandText,
 	}
 	fmt.Fprintf(b.rt.Stderr, "orgo run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	if req.TimingJSON {
@@ -426,12 +427,7 @@ func orgoComputersForWorkspace(workspace orgoWorkspace) []orgoComputer {
 }
 
 func (b *orgoBackend) buildCommand(req RunRequest) (string, error) {
-	command := ""
-	if req.ShellMode {
-		command = strings.Join(req.Command, " ")
-	} else {
-		command = shellScriptFromArgv(req.Command)
-	}
+	command := orgoCommandText(req)
 	if len(req.Env) == 0 {
 		return command, nil
 	}
@@ -449,6 +445,13 @@ func (b *orgoBackend) buildCommand(req RunRequest) (string, error) {
 	}
 	bld.WriteString(command)
 	return bld.String(), nil
+}
+
+func orgoCommandText(req RunRequest) string {
+	if req.ShellMode {
+		return strings.Join(req.Command, " ")
+	}
+	return shellScriptFromArgv(req.Command)
 }
 
 func (b *orgoBackend) rejectRunOptions(req RunRequest) error {
