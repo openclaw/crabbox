@@ -93,6 +93,7 @@ crabbox providers recommend ci-proof
 crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
+crabbox providers recommend live-smoke
 crabbox providers recommend mcp-sandbox
 crabbox providers recommend reachability
 crabbox providers recommend remote-dev
@@ -122,6 +123,8 @@ Supported use cases:
   untrusted command execution. This is routing guidance, not a security
   certification for a specific provider.
 - `linux-vm`: general Linux VM or SSH-lease execution.
+- `live-smoke`: providers with enough lifecycle, sync, cleanup, or evidence
+  signals to be good candidates for opt-in live smoke validation.
 - `local`: local containers, VMs, or local sandboxes.
 - `macos`: macOS targets.
 - `mcp-sandbox`: sandboxes that can attach MCP server references when creating

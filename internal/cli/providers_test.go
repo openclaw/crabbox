@@ -387,6 +387,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"agent-sandbox",
 		"fast-feedback",
 		"isolated-execution",
+		"live-smoke",
 		"mcp-sandbox",
 		"reachability",
 		"remote-dev",
@@ -687,6 +688,53 @@ func TestProvidersRecommendRemoteDevAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !isRemoteDevProvider(entries[0].Provider) {
 		t.Fatalf("codespaces alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendLiveSmokePrefersProvableLifecycle(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "live-smoke", 8)
+	if len(recommendations) == 0 {
+		t.Fatal("expected live-smoke recommendations")
+	}
+	foundEvidence := false
+	for _, recommendation := range recommendations {
+		if recommendation.Kind == ProviderKindServiceControl {
+			t.Fatalf("live-smoke should not prefer service-control providers: %#v", recommendation)
+		}
+		hasSync := providerRecommendationHasFeature(recommendation.Features, FeatureCrabboxSync) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureArchiveSync)
+		hasEvidence := providerRecommendationHasFeature(recommendation.Features, FeatureRunProof) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge)
+		if hasEvidence {
+			foundEvidence = true
+		}
+		if !hasSync && !hasEvidence {
+			t.Fatalf("live-smoke recommendation lacks sync or evidence capability: %#v", recommendation)
+		}
+	}
+	if !foundEvidence {
+		t.Fatalf("live-smoke recommendations should include at least one evidence-capable provider: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendLiveSmokeAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "provider-smoke",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend provider-smoke error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || entries[0].Score <= 0 {
+		t.Fatalf("provider-smoke alias entries=%#v", entries)
 	}
 }
 
