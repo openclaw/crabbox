@@ -388,6 +388,47 @@ func TestWorkspaceFeaturesRequireNativeCheckpointProvider(t *testing.T) {
 	}
 }
 
+func TestRunEvidenceFeaturesRequireDelegatedBackends(t *testing.T) {
+	artifactProviders := 0
+	downloadProviders := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if !hasAnyFeature(spec.Features, core.FeatureRunArtifacts, core.FeatureRunDownloads) {
+			continue
+		}
+		if spec.Kind != core.ProviderKindDelegatedRun {
+			t.Fatalf("%s advertises delegated run evidence features %v but has kind=%s", name, spec.Features, spec.Kind)
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises delegated run evidence features %v; add an offline conformance config for it", name, spec.Features)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if spec.Features.Has(core.FeatureRunArtifacts) {
+			if _, ok := backend.(core.DelegatedRunArtifactBackend); !ok {
+				t.Fatalf("%s advertises %s but backend %T is not DelegatedRunArtifactBackend", name, core.FeatureRunArtifacts, backend)
+			}
+			artifactProviders++
+		}
+		if spec.Features.Has(core.FeatureRunDownloads) {
+			if _, ok := backend.(core.DelegatedRunDownloadBackend); !ok {
+				t.Fatalf("%s advertises %s but backend %T is not DelegatedRunDownloadBackend", name, core.FeatureRunDownloads, backend)
+			}
+			downloadProviders++
+		}
+	}
+	if artifactProviders == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunArtifacts)
+	}
+	if downloadProviders == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunDownloads)
+	}
+}
+
 func hasAnyFeature(features core.FeatureSet, wants ...core.Feature) bool {
 	for _, want := range wants {
 		if features.Has(want) {
@@ -400,6 +441,8 @@ func hasAnyFeature(features core.FeatureSet, wants ...core.Feature) bool {
 func offlineConformanceConfig(provider string) (core.Config, bool) {
 	cfg := core.Config{Provider: provider}
 	switch provider {
+	case "blacksmith-testbox":
+		return cfg, true
 	case "codesandbox":
 		cfg.CodeSandbox = core.CodeSandboxConfig{
 			Workdir:                  "/project/workspace",
@@ -434,19 +477,24 @@ func allBuiltInProviderNames() []string {
 		"cloudflare-dynamic-workers",
 		"codesandbox",
 		"daytona",
+		"digitalocean",
 		"docker-sandbox",
 		"e2b",
 		"exe-dev",
 		"external",
+		"fastapi-cloud",
 		"freestyle",
 		"gcp",
 		"hetzner",
 		"hostinger",
+		"hyperv",
 		"incus",
 		"islo",
 		"kubevirt",
+		"linode",
 		"local-container",
 		"modal",
+		"morph",
 		"multipass",
 		"mxc",
 		"namespace-devbox",
@@ -456,6 +504,7 @@ func allBuiltInProviderNames() []string {
 		"opensandbox",
 		"ovh",
 		"parallels",
+		"phala",
 		"proxmox",
 		"railway",
 		"runpod",
