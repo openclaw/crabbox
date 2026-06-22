@@ -385,6 +385,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"provider recommendation use cases:",
 		"artifact-download",
 		"ci-proof",
+		"cost-control",
 		"agent-sandbox",
 		"fast-feedback",
 		"isolated-execution",
@@ -450,6 +451,59 @@ func TestProvidersRecommendArtifactDownloadAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureRunArtifacts) {
 		t.Fatalf("run-artifacts alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendCostControlPrefersReusableOrGovernedCapacity(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "cost-control", 64)
+	if len(recommendations) == 0 {
+		t.Fatal("expected cost-control recommendations")
+	}
+	if !strings.HasPrefix(recommendations[0].Category, "local-") {
+		t.Fatalf("top cost-control category=%q recommendations=%v", recommendations[0].Category, recommendations)
+	}
+	foundLocal := false
+	foundCoordinator := false
+	foundCleanup := false
+	for _, recommendation := range recommendations {
+		if strings.HasPrefix(recommendation.Category, "local-") {
+			foundLocal = true
+		}
+		if recommendation.Provider == "aws" || recommendation.Provider == "azure" ||
+			recommendation.Provider == "gcp" || recommendation.Provider == "hetzner" {
+			foundCoordinator = true
+		}
+		if providerRecommendationHasFeature(recommendation.Features, FeatureCleanup) {
+			foundCleanup = true
+		}
+	}
+	if !foundLocal {
+		t.Fatalf("cost-control recommendations should include local providers: %#v", recommendations)
+	}
+	if !foundCoordinator {
+		t.Fatalf("cost-control recommendations should include coordinator-governed cloud providers: %#v", recommendations)
+	}
+	if !foundCleanup {
+		t.Fatalf("cost-control recommendations should include cleanup-capable providers: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendCostControlAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "budget",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend budget error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Category, "local-") {
+		t.Fatalf("budget alias entries=%#v", entries)
 	}
 }
 

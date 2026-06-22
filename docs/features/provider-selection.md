@@ -23,6 +23,7 @@ Start with the command-backed recommendation list:
 crabbox providers recommend
 crabbox providers recommend artifact-download
 crabbox providers recommend ci-proof
+crabbox providers recommend cost-control
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend live-smoke
@@ -72,6 +73,7 @@ Use these rules before adding a new adapter:
 | Pausable or resumable runtimes | `codesandbox`, `islo` | They advertise pause/resume capability and appear in `providers recommend pause-resume`. |
 | Provider preview URLs | `islo`, `e2b`, `railway` | They advertise provider-native preview URL evidence and appear in `providers recommend preview-url`. |
 | Provider live smoke | `blacksmith-testbox`, `cloudflare`, `local-container`, `apple-container`, `aws` | They advertise enough sync, cleanup, lifecycle, or evidence capability for `providers recommend live-smoke` to rank them as good opt-in smoke candidates. |
+| Cost- or quota-sensitive validation | `local-container`, `apple-container`, `multipass`, `aws`, `azure` | They advertise local execution, cache reuse, cleanup, or coordinator-governed cloud controls and appear in `providers recommend cost-control`. |
 | Fast feedback with reusable caches | `local-container`, `apple-container`, `multipass`, `blacksmith-testbox` | They advertise cache-volume, sync, cleanup, or reusable proof/session capabilities in `crabbox providers` and `providers recommend fast-feedback`. |
 | Disposable isolated execution | `agent-sandbox`, `anthropic-sandbox-runtime`, `e2b`, `smolvm`, `vercel-sandbox` | They are delegated or local sandbox providers in `crabbox providers` and `providers recommend isolated-execution`. |
 | Network-contained untrusted execution | `cloudflare`, `agent-sandbox`, `codesandbox`, `opensandbox`, `vercel-sandbox` | They keep execution inside delegated or local sandbox boundaries and appear in `providers recommend network-isolation`. |

@@ -107,6 +107,9 @@ Ship these in small PRs:
    one needs an opt-in smoke contract that says what real behavior proves. Use
    `crabbox providers recommend live-smoke` to pick candidates from offline
    lifecycle, sync, cleanup, and evidence metadata before spending capacity.
+   Use `crabbox providers recommend cost-control` when a workflow should prefer
+   local runtimes, coordinator governance, cleanup, cache reuse, or retained
+   proof before spending provider quota.
    Use `crabbox providers recommend pause-resume` when long-running sandbox or
    dev-environment state needs to be parked and resumed.
 4. Strengthen workspace reuse before runtime-specific forking.

@@ -394,6 +394,7 @@ func providerRecommendationUseCases() []string {
 		"artifact-download",
 		"byo-ssh",
 		"ci-proof",
+		"cost-control",
 		"desktop",
 		"fast-feedback",
 		"gpu",
@@ -429,6 +430,9 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "byo-ssh", true
 	case "ci", "ci-proof", "proof", "testbox", "repro":
 		return "ci-proof", true
+	case "cost", "cost-control", "cost-aware", "budget", "budget-control",
+		"quota", "quota-safe", "spend", "spend-control":
+		return "cost-control", true
 	case "desktop", "browser", "code", "vnc":
 		return "desktop", true
 	case "fast-feedback", "feedback", "fast-test", "fast-tests", "cache", "cached", "cache-heavy":
@@ -615,6 +619,37 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if category == "ci-proof-runner" && entry.Kind == ProviderKindSSHLease && hasFeature(FeatureCrabboxSync) {
 			add(12, "can debug through normal Crabbox sync and SSH")
+		}
+	case "cost-control":
+		if strings.HasPrefix(category, "local-") {
+			add(75, "local runtime avoids provider spend and cloud quota")
+		}
+		if entry.Coordinator == string(CoordinatorSupported) {
+			add(45, "can use coordinator spend and cleanup controls")
+		}
+		if category == "ci-proof-runner" {
+			add(35, "CI proof runner is designed for bounded validation work")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(25, "can clean up owned runtime resources")
+		}
+		if hasFeature(FeatureCacheVolume) {
+			add(20, "can reuse dependency and build caches")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(15, "can sync only the current workload")
+		}
+		if hasFeature(FeaturePauseResume) {
+			add(12, "can pause runtime state instead of keeping it hot")
+		}
+		if hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) || hasFeature(FeatureRestore) || hasFeature(FeatureSnapshot) {
+			add(10, "can reuse workspace state across runs")
+		}
+		if hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(10, "can retain proof without keeping capacity alive")
+		}
+		if hasTarget(targetLinux) {
+			add(5, "supports common Linux validation workloads")
 		}
 	case "desktop":
 		if hasFeature(FeatureDesktop) {
@@ -1104,6 +1139,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "examples:")
 	fmt.Fprintln(out, "  crabbox providers recommend artifact-download")
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
+	fmt.Fprintln(out, "  crabbox providers recommend cost-control")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
 	fmt.Fprintln(out, "  crabbox providers recommend isolated-execution")
