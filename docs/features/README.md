@@ -39,6 +39,8 @@ Read when:
 ## Providers
 
 - [Providers](providers.md): provider overview, target matrix, classes, and fallback.
+- [Provider selection](provider-selection.md): choose a provider, compare adjacent
+  systems, and decide when not to add a first-class adapter.
 - [Provider reference](../providers/README.md): per-adapter pages for every registered provider.
 - [Capacity and fallback](capacity-fallback.md): class chains, market spot/on-demand, and region/AZ routing.
 - [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.

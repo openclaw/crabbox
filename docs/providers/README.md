@@ -215,6 +215,7 @@ surface stay in `internal/cli`.
 
 Related docs:
 
+- [Provider selection](../features/provider-selection.md)
 - [Provider backends](../provider-backends.md)
 - [Feature overview](../features/providers.md)
 - [Source map](../source-map.md)

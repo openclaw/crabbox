@@ -186,4 +186,6 @@ stable enough for selection help, not a benchmark or live availability signal.
 - [Provider decision matrix](../providers/README.md#provider-decision-matrix) —
   richer provider selection guidance, including substrate, access, GPU,
   lifecycle, cleanup, best fit, and caveats.
+- [Provider selection](../features/provider-selection.md) — workflow selection
+  rules and adjacent-system guidance.
 - [Provider reference](../providers/README.md) — per-provider setup and config.

@@ -133,6 +133,7 @@ Pick whichever matches your intent:
   [Telemetry](features/telemetry.md), [Sync](features/sync.md).
 - **Pick or add a target:** [Provider reference](providers/README.md),
   [Providers feature overview](features/providers.md),
+  [Provider selection](features/provider-selection.md),
   [Provider authoring](features/provider-authoring.md),
   [Provider backends](provider-backends.md),
   [Capacity fallback](features/capacity-fallback.md),
