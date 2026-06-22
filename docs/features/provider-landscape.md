@@ -95,7 +95,9 @@ Ship these in small PRs:
    consistent proof, artifacts, downloads, preview URLs, logs, and error status.
 3. Add live smoke docs where credentials are required.
    Provider adapters can be valuable before broad live access exists, but each
-   one needs an opt-in smoke contract that says what real behavior proves.
+   one needs an opt-in smoke contract that says what real behavior proves. Use
+   `crabbox providers recommend live-smoke` to pick candidates from offline
+   lifecycle, sync, cleanup, and evidence metadata before spending capacity.
 4. Strengthen workspace reuse before runtime-specific forking.
    Checkpoint, fork, restore, and provider snapshot semantics should be testable
    through the CLI before adding live microVM fan-out.

@@ -398,6 +398,7 @@ func providerRecommendationUseCases() []string {
 		"gpu",
 		"isolated-execution",
 		"linux-vm",
+		"live-smoke",
 		"local",
 		"macos",
 		"mcp-sandbox",
@@ -430,6 +431,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "isolated-execution", true
 	case "linux", "linux-vm", "vm":
 		return "linux-vm", true
+	case "live-smoke", "live-smokes", "provider-smoke", "provider-smokes",
+		"smoke", "smokes", "smoke-test", "smoke-tests",
+		"live-validation", "live-validate", "live-proof":
+		return "live-smoke", true
 	case "local", "local-vm", "local-runtime", "local-sandbox":
 		return "local", true
 	case "mac", "macos", "darwin":
@@ -655,6 +660,43 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if category == "direct-cloud" {
 			add(14, "direct cloud lease path")
+		}
+	case "live-smoke":
+		if hasFeature(FeatureCleanup) {
+			add(30, "can clean up provider-owned smoke resources")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(24, "can sync a smoke workload")
+		}
+		if entry.Kind == ProviderKindSSHLease && hasFeature(FeatureSSH) {
+			add(22, "normal SSH lifecycle can run generic smoke commands")
+		}
+		if entry.Kind == ProviderKindDelegatedRun && (hasFeature(FeatureRunSession) || hasFeature(FeatureArchiveSync) || hasFeature(FeatureRunProof)) {
+			add(18, "delegated run lifecycle can execute smoke commands")
+		}
+		if hasFeature(FeatureRunProof) {
+			add(35, "returns provider smoke proof")
+		}
+		if hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(24, "can preserve smoke artifacts or downloads")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(20, "can expose smoke preview URLs")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(14, "returns reusable smoke sessions")
+		}
+		if strings.HasPrefix(category, "local-") {
+			add(14, "can smoke without cloud credentials")
+		}
+		if category == "ci-proof-runner" {
+			add(25, "CI proof runner is designed for validation smoke")
+		}
+		if category == "brokerable-cloud" || category == "direct-cloud" || category == "delegated-sandbox" || category == "ci-proof-runner" {
+			add(12, "provider class is useful for opt-in live validation")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux smoke workloads")
 		}
 	case "local":
 		if strings.HasPrefix(category, "local-") {
@@ -900,6 +942,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
 	fmt.Fprintln(out, "  crabbox providers recommend isolated-execution")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
+	fmt.Fprintln(out, "  crabbox providers recommend live-smoke")
 	fmt.Fprintln(out, "  crabbox providers recommend mcp-sandbox")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend remote-dev")
