@@ -383,6 +383,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 	text := stdout.String()
 	for _, want := range []string{
 		"provider recommendation use cases:",
+		"artifact-download",
 		"ci-proof",
 		"agent-sandbox",
 		"fast-feedback",
@@ -400,6 +401,52 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestProvidersRecommendArtifactDownloadPrefersArtifactProviders(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "artifact-download", 4)
+	if len(recommendations) == 0 {
+		t.Fatal("expected artifact-download recommendations")
+	}
+	found := map[string]bool{}
+	for _, recommendation := range recommendations {
+		hasArtifact := providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts)
+		hasDownload := providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads)
+		if !hasArtifact && !hasDownload {
+			t.Fatalf("artifact-download recommendation lacks artifact/download capability: %#v", recommendation)
+		}
+		if hasArtifact && !containsString(recommendation.Evidence, "artifacts") {
+			t.Fatalf("artifact-download recommendation missing artifacts evidence: %#v", recommendation)
+		}
+		if hasDownload && !containsString(recommendation.Evidence, "downloads") {
+			t.Fatalf("artifact-download recommendation missing downloads evidence: %#v", recommendation)
+		}
+		found[recommendation.Provider] = true
+	}
+	for _, provider := range []string{"blacksmith-testbox", "islo"} {
+		if !found[provider] {
+			t.Fatalf("artifact-download recommendations should include %s: %#v", provider, recommendations)
+		}
+	}
+}
+
+func TestProvidersRecommendArtifactDownloadAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "run-artifacts",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend run-artifacts error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureRunArtifacts) {
+		t.Fatalf("run-artifacts alias entries=%#v", entries)
 	}
 }
 

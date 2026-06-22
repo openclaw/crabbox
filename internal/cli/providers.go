@@ -391,6 +391,7 @@ func providerFieldContainsAll(values, wants []string) bool {
 func providerRecommendationUseCases() []string {
 	return []string{
 		"agent-sandbox",
+		"artifact-download",
 		"byo-ssh",
 		"ci-proof",
 		"desktop",
@@ -418,6 +419,9 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "agent", "agents", "agent-sandbox", "sandbox", "sandboxes", "devbox", "devboxes":
 		return "agent-sandbox", true
+	case "artifact-download", "artifact-downloads", "downloadable-artifacts",
+		"run-artifacts", "run-downloads", "evidence-downloads":
+		return "artifact-download", true
 	case "byo", "byo-ssh", "ssh", "static", "static-ssh":
 		return "byo-ssh", true
 	case "ci", "ci-proof", "proof", "testbox", "repro":
@@ -539,6 +543,34 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if entry.Kind == ProviderKindSSHLease && hasTarget(targetLinux) && category == "direct-cloud" {
 			add(18, "managed Linux devbox with normal Crabbox SSH workflow")
+		}
+	case "artifact-download":
+		if !hasFeature(FeatureRunArtifacts) && !hasFeature(FeatureRunDownloads) {
+			break
+		}
+		if hasFeature(FeatureRunArtifacts) {
+			add(80, "can collect provider run artifacts")
+		}
+		if hasFeature(FeatureRunDownloads) {
+			add(75, "can materialize provider run downloads")
+		}
+		if hasFeature(FeatureRunProof) {
+			add(22, "can pair downloads with provider run proof")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(18, "returns reusable sessions for later artifact inspection")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(14, "can pair artifacts with provider-native preview URLs")
+		}
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(12, "provider owns artifact-producing command execution")
+		}
+		if category == "ci-proof-runner" {
+			add(12, "CI proof runner is designed to retain validation outputs")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux artifact workloads")
 		}
 	case "byo-ssh":
 		if category == "byo-ssh" {
@@ -966,6 +998,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	}
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "examples:")
+	fmt.Fprintln(out, "  crabbox providers recommend artifact-download")
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")

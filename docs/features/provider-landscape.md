@@ -93,6 +93,8 @@ Ship these in small PRs:
 2. Improve evidence parity for delegated sandboxes.
    The biggest practical gap versus hosted sandbox products is not launch; it is
    consistent proof, artifacts, downloads, preview URLs, logs, and error status.
+   Use `crabbox providers recommend artifact-download` when a workflow needs
+   retained files or downloadable results from provider-owned execution.
    Use `crabbox providers recommend preview-url` when the workflow specifically
    needs provider-native app or service URLs.
 3. Add live smoke docs where credentials are required.

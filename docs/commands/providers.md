@@ -89,6 +89,7 @@ It is selection guidance, not a readiness check; run `crabbox doctor --provider
 
 ```sh
 crabbox providers recommend
+crabbox providers recommend artifact-download
 crabbox providers recommend ci-proof
 crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend isolated-execution
@@ -113,6 +114,8 @@ Supported use cases:
 
 - `agent-sandbox`: delegated sandboxes and managed devboxes for agent code
   execution.
+- `artifact-download`: providers that can collect run artifacts or materialize
+  downloads from provider-owned execution.
 - `byo-ssh`: existing SSH hosts.
 - `ci-proof`: CI proof runners and providers that return run proof or
   artifacts.
