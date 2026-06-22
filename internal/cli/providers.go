@@ -394,6 +394,7 @@ func providerRecommendationUseCases() []string {
 		"byo-ssh",
 		"ci-proof",
 		"desktop",
+		"fast-feedback",
 		"gpu",
 		"linux-vm",
 		"local",
@@ -416,6 +417,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "ci-proof", true
 	case "desktop", "browser", "code", "vnc":
 		return "desktop", true
+	case "fast-feedback", "feedback", "fast-test", "fast-tests", "cache", "cached", "cache-heavy":
+		return "fast-feedback", true
 	case "gpu", "cuda", "ml":
 		return "gpu", true
 	case "linux", "linux-vm", "vm":
@@ -550,6 +553,31 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if hasTarget(targetMacOS) || hasTarget(targetWindows+"/"+WindowsModeNormal) {
 			add(8, "supports native desktop OS targets")
+		}
+	case "fast-feedback":
+		if hasFeature(FeatureCacheVolume) {
+			add(45, "can reuse dependency/cache volumes across runs")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(25, "can sync the current checkout")
+		}
+		if strings.HasPrefix(category, "local-") {
+			add(20, "local runtime avoids cloud credentials and queueing")
+		}
+		if category == "ci-proof-runner" {
+			add(18, "CI-shaped runner for repeated validation loops")
+		}
+		if hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(15, "can preserve validation evidence")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(10, "returns reusable run sessions")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(10, "can clean up owned runtime state")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux test workloads")
 		}
 	case "gpu":
 		if category == "gpu-cloud" {
@@ -726,6 +754,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "examples:")
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
+	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")

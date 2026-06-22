@@ -55,6 +55,7 @@ Use these rules before adding a new adapter:
 | --- | --- | --- |
 | CI reproduction with durable proof | `blacksmith-testbox`, `semaphore` | They map to CI/proof-runner semantics instead of generic devbox semantics. |
 | Run evidence and previews | `blacksmith-testbox`, `islo`, `e2b` | They advertise normalized proof, artifact, download, or preview-url capabilities in `crabbox providers` and `providers recommend run-evidence`. |
+| Fast feedback with reusable caches | `local-container`, `apple-container`, `multipass`, `blacksmith-testbox` | They advertise cache-volume, sync, cleanup, or reusable proof/session capabilities in `crabbox providers` and `providers recommend fast-feedback`. |
 | Generic Linux command execution | `aws`, `azure`, `gcp`, `hetzner`, `digitalocean`, `linode`, `ssh` | SSH leases keep the normal Crabbox sync/run/debug path. |
 | Existing owned machine | `ssh` | No provider lifecycle is needed; Crabbox only syncs and runs. |
 | Local disposable Linux | `local-container`, `apple-container`, `apple-vz`, `multipass` | Fast local iteration without cloud credentials. |
