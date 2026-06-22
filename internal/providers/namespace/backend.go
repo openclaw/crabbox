@@ -392,9 +392,9 @@ func (b *namespaceLeaseBackend) listDevboxes(ctx context.Context) ([]namespaceLi
 }
 
 func (b *namespaceLeaseBackend) shutdownDevbox(ctx context.Context, name string) error {
-	result, err := b.runCommand(ctx, []string{"shutdown", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
+	_, err := b.runCommand(ctx, []string{"shutdown", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
 	if err != nil {
-		result, err = b.runCommand(ctx, []string{"stop", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
+		result, err := b.runCommand(ctx, []string{"stop", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
 		if err != nil {
 			return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("namespace devbox shutdown failed: %v", err)}
 		}
@@ -403,9 +403,9 @@ func (b *namespaceLeaseBackend) shutdownDevbox(ctx context.Context, name string)
 }
 
 func (b *namespaceLeaseBackend) deleteDevbox(ctx context.Context, name string) error {
-	result, err := b.runCommand(ctx, []string{"delete", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
+	_, err := b.runCommand(ctx, []string{"delete", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
 	if err != nil {
-		result, err = b.runCommand(ctx, []string{"destroy", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
+		result, err := b.runCommand(ctx, []string{"destroy", name, "--force"}, b.rt.Stdout, b.rt.Stderr)
 		if err != nil {
 			return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("namespace devbox delete failed: %v", err)}
 		}

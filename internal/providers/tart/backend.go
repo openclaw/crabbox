@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -437,21 +438,22 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 	args := startVMArgs(name)
 	var stderrBuf bytes.Buffer
 	var detachedStderr *os.File
+	var devNull *os.File
 	var cmd *exec.Cmd
+	var err error
 	if keep {
 		if err := ctx.Err(); err != nil {
 			return exit(2, "tart run %s: context already cancelled", name)
 		}
 		cmd = exec.Command("tart", args...)
 		detachCommand(cmd)
-		devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		devNull, err = os.OpenFile(os.DevNull, os.O_RDWR, 0)
 		if err != nil {
 			return exit(2, "tart run %s: open null device: %v", name, err)
 		}
-		defer devNull.Close()
 		detachedStderr, err = os.CreateTemp("", "crabbox-tart-run-*.log")
 		if err != nil {
-			return exit(2, "tart run %s: create startup log: %v", name, err)
+			return errors.Join(exit(2, "tart run %s: create startup log: %v", name, err), devNull.Close())
 		}
 		defer func() {
 			_ = detachedStderr.Close()
@@ -465,8 +467,19 @@ func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep boo
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.MultiWriter(&stderrBuf, b.rt.Stderr)
 	}
+	closeDevNull := func() error {
+		if devNull == nil {
+			return nil
+		}
+		err := devNull.Close()
+		devNull = nil
+		return err
+	}
 	if err := cmd.Start(); err != nil {
-		return exit(2, "tart run %s: %v", name, err)
+		return errors.Join(exit(2, "tart run %s: %v", name, err), closeDevNull())
+	}
+	if err := closeDevNull(); err != nil {
+		return exit(2, "tart run %s: close null device: %v", name, err)
 	}
 	exitCh := make(chan error, 1)
 	go func() { exitCh <- cmd.Wait() }()

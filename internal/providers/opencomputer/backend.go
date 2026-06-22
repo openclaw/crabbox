@@ -85,7 +85,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 		acquired = true
 	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, "", false, 0, api.baseURL)
+		leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, api.baseURL)
 		if err != nil {
 			return RunResult{}, err
 		}

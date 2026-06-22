@@ -975,7 +975,7 @@ export class EC2SpotClient {
 
   private async deleteSnapshotWithRetry(snapshotID: string): Promise<void> {
     let lastError: unknown;
-    for (let attempt = 0; attempt <= snapshotDeleteBackoffMs.length; attempt++) {
+    for (let attempt = 0; attempt < snapshotDeleteBackoffMs.length + 1; attempt++) {
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- retry preserves snapshot IDs after AMI deregistration.
         await this.ec2("DeleteSnapshot", { SnapshotId: snapshotID });

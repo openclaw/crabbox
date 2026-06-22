@@ -1906,15 +1906,12 @@ export class FleetCoordinator {
       return { started: true as const, current };
     });
     if (!provisioningStart.started) {
-      let current = provisioningStart.current;
-      if (provisioningStart.workspace) {
-        current = await this.finalizeAbsentWorkspaceLease(
+      const current = provisioningStart.workspace
+        ? await this.finalizeAbsentWorkspaceLease(
           provisioningStart.workspace,
           provisioningStart.current,
-        );
-      } else {
-        current = await this.removeReleasedLeaseReservation(record);
-      }
+        )
+        : await this.removeReleasedLeaseReservation(record);
       return json(
         {
           error: "lease_state_changed",

@@ -133,7 +133,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 		acquired = true
 	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
+		leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -141,7 +141,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if err != nil {
 			return RunResult{}, err
 		}
-		leaseID, sandboxID, slug, err = resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
+		leaseID, sandboxID, _, err = resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -513,7 +513,7 @@ func (b *openSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, err := resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
+	leaseID, _, _, err := resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
 	if err != nil {
 		return err
 	}
@@ -522,7 +522,7 @@ func (b *openSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	defer unlockOperation()
-	leaseID, sandboxID, _, err = resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
+	leaseID, sandboxID, _, err := resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
 	if err != nil {
 		return err
 	}

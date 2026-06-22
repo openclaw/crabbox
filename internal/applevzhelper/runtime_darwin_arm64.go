@@ -1090,12 +1090,17 @@ func cloneOrCopyFile(ctx context.Context, sourcePath, targetPath string) error {
 	if err != nil {
 		return fmt.Errorf("create target file: %w", err)
 	}
-	defer target.Close()
 	if err := target.Truncate(info.Size()); err != nil {
-		return fmt.Errorf("size target file: %w", err)
+		return errors.Join(fmt.Errorf("size target file: %w", err), target.Close())
 	}
 	buf := make([]byte, 4*1024*1024)
-	return copyReaderAtRange(ctx, target, source, 0, info.Size(), buf)
+	if err := copyReaderAtRange(ctx, target, source, 0, info.Size(), buf); err != nil {
+		return errors.Join(err, target.Close())
+	}
+	if err := target.Close(); err != nil {
+		return fmt.Errorf("close target file: %w", err)
+	}
+	return nil
 }
 
 func copyReaderAtRange(ctx context.Context, target *os.File, source io.ReaderAt, offset, length int64, buf []byte) error {
@@ -1186,8 +1191,7 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 		return fmt.Errorf("create seed image: %w", err)
 	}
 	if err := file.Truncate(8 * 1024 * 1024); err != nil {
-		file.Close()
-		return fmt.Errorf("size seed image: %w", err)
+		return errors.Join(fmt.Errorf("size seed image: %w", err), file.Close())
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("create seed image: %w", err)
@@ -1598,11 +1602,12 @@ func (r *vmConfigResources) Close() {
 }
 
 type consoleLogSink struct {
-	closeOnce sync.Once
-	closeErr  error
-	done      chan struct{}
-	readFile  *os.File
-	writeFile *os.File
+	closeOnce   sync.Once
+	closeErr    error
+	logCloseErr error
+	done        chan struct{}
+	readFile    *os.File
+	writeFile   *os.File
 }
 
 func newConsoleLogSink(path string, maxBytes int64) (*consoleLogSink, error) {
@@ -1614,13 +1619,11 @@ func newConsoleLogSink(path string, maxBytes int64) (*consoleLogSink, error) {
 		return nil, fmt.Errorf("open console log: %w", err)
 	}
 	if err := logFile.Chmod(0o600); err != nil {
-		logFile.Close()
-		return nil, fmt.Errorf("secure console log: %w", err)
+		return nil, errors.Join(fmt.Errorf("secure console log: %w", err), logFile.Close())
 	}
 	readFile, writeFile, err := os.Pipe()
 	if err != nil {
-		logFile.Close()
-		return nil, fmt.Errorf("create console log pipe: %w", err)
+		return nil, errors.Join(fmt.Errorf("create console log pipe: %w", err), logFile.Close())
 	}
 	sink := &consoleLogSink{
 		done:      make(chan struct{}),
@@ -1630,8 +1633,8 @@ func newConsoleLogSink(path string, maxBytes int64) (*consoleLogSink, error) {
 	go func() {
 		defer close(sink.done)
 		defer readFile.Close()
-		defer logFile.Close()
 		copyBoundedConsoleLog(logFile, readFile, maxBytes)
+		sink.logCloseErr = logFile.Close()
 	}()
 	return sink, nil
 }
@@ -1659,6 +1662,9 @@ func (s *consoleLogSink) Close() error {
 				closeErrs = append(closeErrs, err)
 			}
 			<-s.done
+		}
+		if s.logCloseErr != nil {
+			closeErrs = append(closeErrs, s.logCloseErr)
 		}
 		s.closeErr = errors.Join(closeErrs...)
 	})

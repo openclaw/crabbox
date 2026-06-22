@@ -263,11 +263,15 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return fmt.Errorf("open helper log: %w", err)
 	}
 	if err := logFile.Chmod(0o600); err != nil {
-		logFile.Close()
+		closeErr := logFile.Close()
 		_ = os.RemoveAll(instanceRoot)
-		return fmt.Errorf("secure helper log: %w", err)
+		return errors.Join(fmt.Errorf("secure helper log: %w", err), closeErr)
 	}
-	defer logFile.Close()
+	defer func() {
+		if err := logFile.Close(); err != nil {
+			fmt.Fprintf(stderr, "warning: close helper log: %v\n", err)
+		}
+	}()
 	exe, err := helperExecutable()
 	if err != nil {
 		_ = os.RemoveAll(instanceRoot)

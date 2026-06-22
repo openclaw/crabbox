@@ -359,8 +359,6 @@ func (b *backend) deleteServer(ctx context.Context, _ Config, server Server) err
 		if err := client.DeleteInstance(ctx, server.CloudID); err != nil {
 			if isNebiusInstanceNotFound(err, server.CloudID) {
 				confirmedAbsent = true
-			} else if isIndeterminateNebiusError(err) {
-				return err
 			} else {
 				return err
 			}

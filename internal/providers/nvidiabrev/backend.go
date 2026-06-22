@@ -215,17 +215,15 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 	}
 	lease.SSH = target
 	if req.Repo.Root != "" && isCrabboxBrevWorkspace(workspace) {
-		updatedClaim, claimErr := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, req.Reclaim, claim, claim.LeaseID != "")
+		_, claimErr := claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, req.Reclaim, claim, claim.LeaseID != "")
 		if claimErr != nil {
 			return LeaseTarget{}, claimErr
 		}
-		claim = updatedClaim
 	} else if claim.LeaseID != "" {
-		updatedClaim, claimErr := updateLeaseClaimEndpointIfUnchanged(leaseID, claim, lease.Server, lease.SSH)
+		_, claimErr := updateLeaseClaimEndpointIfUnchanged(leaseID, claim, lease.Server, lease.SSH)
 		if claimErr != nil {
 			return LeaseTarget{}, claimErr
 		}
-		claim = updatedClaim
 	}
 	return lease, nil
 }
@@ -1118,7 +1116,7 @@ func (b *nvidiaBrevBackend) resolveWorkspace(ctx context.Context, client *brevCl
 		return brevWorkspace{}, "", "", LeaseClaim{}, exit(4, "nvidia-brev workspace not found: %s", id)
 	}
 	if !claimed {
-		claim, claimed, err = resolveLeaseClaimForProviderCloudID(workspace.ID)
+		claim, _, err = resolveLeaseClaimForProviderCloudID(workspace.ID)
 		if err != nil {
 			return brevWorkspace{}, "", "", LeaseClaim{}, err
 		}

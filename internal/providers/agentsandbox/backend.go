@@ -962,7 +962,6 @@ func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient,
 	if err != nil {
 		return err
 	}
-	identity.LeaseID = leaseID
 	if err := client.Delete(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName, identity.UID); err != nil && !isNotFound(err) {
 		return err
 	}

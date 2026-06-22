@@ -358,11 +358,14 @@ func appendBenchmarkTimingRecord(path string, record BenchmarkTimingRecord) erro
 	if err != nil {
 		return exit(2, "open benchmark timing store %s: %v", path, err)
 	}
-	defer file.Close()
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(record); err != nil {
+		_ = file.Close()
 		return exit(2, "write benchmark timing record %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return exit(2, "close benchmark timing store %s: %v", path, err)
 	}
 	return nil
 }

@@ -1076,7 +1076,11 @@ func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bo
 	if err != nil {
 		return exit(2, "open WebVNC daemon log: %v", err)
 	}
-	defer logFile.Close()
+	defer func() {
+		if err := logFile.Close(); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: close WebVNC daemon log: %v\n", err)
+		}
+	}()
 	childArgs := append([]string{"webvnc"}, args...)
 	nonce, err := newWebVNCDaemonNonce()
 	if err != nil {

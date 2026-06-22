@@ -919,7 +919,6 @@ func (a App) startEgressHostDaemon(leaseID string, args []string) error {
 	if err != nil {
 		return exit(2, "open egress daemon log: %v", err)
 	}
-	defer logFile.Close()
 	childArgs := append([]string{"egress"}, args...)
 	cmd := exec.Command("sh", "-c", egressDaemonSupervisorScript(exe, childArgs))
 	cmd.Stdin = nil
@@ -927,15 +926,18 @@ func (a App) startEgressHostDaemon(leaseID string, args []string) error {
 	cmd.Stderr = logFile
 	configureDaemonCommand(cmd)
 	if err := cmd.Start(); err != nil {
-		return exit(5, "start egress daemon: %v", err)
+		return errors.Join(exit(5, "start egress daemon: %v", err), logFile.Close())
 	}
 	pid := cmd.Process.Pid
 	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
 		_ = cmd.Process.Kill()
-		return exit(2, "write egress daemon pid: %v", err)
+		return errors.Join(exit(2, "write egress daemon pid: %v", err), logFile.Close())
 	}
 	if err := cmd.Process.Release(); err != nil {
-		return exit(5, "release egress daemon process: %v", err)
+		return errors.Join(exit(5, "release egress daemon process: %v", err), logFile.Close())
+	}
+	if err := logFile.Close(); err != nil {
+		return exit(2, "close egress daemon log: %v", err)
 	}
 	fmt.Fprintf(a.Stdout, "egress host daemon: pid=%d log=%s\n", pid, logPath)
 	return nil

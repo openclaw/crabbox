@@ -74,9 +74,13 @@ func handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("open destination: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer file.Close()
 	if _, err := io.Copy(file, r.Body); err != nil {
+		_ = file.Close()
 		http.Error(w, fmt.Sprintf("write destination: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if err := file.Close(); err != nil {
+		http.Error(w, fmt.Sprintf("close destination: %v", err), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": path})
