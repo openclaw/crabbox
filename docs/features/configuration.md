@@ -705,6 +705,9 @@ kubevirt:
 The template must be one KubeVirt `VirtualMachine` using `runStrategy: Manual`.
 Crabbox sets its name, namespace, and lease labels, replaces documented
 placeholders, applies it with `kubectl`, and starts it with `virtctl`.
+Repository-local config may set inline `sshPublicKey` text, but Crabbox ignores
+`sshKey` and file-form `sshPublicKey` there. Put operator SSH key paths in
+trusted user config, environment variables, or explicit flags.
 
 ### External provider
 

@@ -3791,6 +3791,19 @@ func trustedConfigPath(path string) bool {
 	return userPath != "" && filepath.Clean(path) == filepath.Clean(userPath)
 }
 
+func inlineSSHPublicKey(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com":
+		return true
+	default:
+		return false
+	}
+}
+
 func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
 	credentialSource := credentialSourceForFile(trusted)
 	if file.Profile != "" {
@@ -4539,10 +4552,10 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.KubeVirt.SSHUser != "" {
 			cfg.KubeVirt.SSHUser = file.KubeVirt.SSHUser
 		}
-		if file.KubeVirt.SSHKey != "" {
+		if trusted && file.KubeVirt.SSHKey != "" {
 			cfg.KubeVirt.SSHKey = expandUserPath(file.KubeVirt.SSHKey)
 		}
-		if file.KubeVirt.SSHPublicKey != "" {
+		if file.KubeVirt.SSHPublicKey != "" && (trusted || inlineSSHPublicKey(file.KubeVirt.SSHPublicKey)) {
 			cfg.KubeVirt.SSHPublicKey = expandUserPath(file.KubeVirt.SSHPublicKey)
 		}
 		if file.KubeVirt.SSHPort != "" {

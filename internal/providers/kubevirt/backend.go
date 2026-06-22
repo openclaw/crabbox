@@ -591,6 +591,9 @@ func readKubeVirtPublicKeyFile(path string) (string, error) {
 	if publicKey == "" {
 		return "", core.Exit(2, "KubeVirt SSH public key %s is empty", path)
 	}
+	if !looksLikeInlineSSHPublicKey(publicKey) {
+		return "", core.Exit(2, "KubeVirt SSH public key %s is not a supported OpenSSH public key", path)
+	}
 	return publicKey, nil
 }
 
