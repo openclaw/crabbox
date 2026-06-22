@@ -337,6 +337,65 @@ func (b *codeSandboxBackend) Stop(ctx context.Context, req StopRequest) error {
 	return nil
 }
 
+func (b *codeSandboxBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
+	api, err := newCodeSandboxClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	claims, err := listCodeSandboxLeaseClaims()
+	if err != nil {
+		return err
+	}
+	now := b.now().UTC()
+	checked := 0
+	removed := 0
+	for _, listed := range claims {
+		if listed.Provider != providerName || !strings.HasPrefix(listed.LeaseID, leasePrefix) {
+			continue
+		}
+		claim, err := readLeaseClaim(listed.LeaseID)
+		if err != nil {
+			return err
+		}
+		if claim.LeaseID == "" || claim.Provider != providerName || !strings.HasPrefix(claim.LeaseID, leasePrefix) {
+			continue
+		}
+		if err := validateCodeSandboxClaimScope(claim); err != nil {
+			return err
+		}
+		checked++
+		due, reason := claimCleanupDue(claim, now)
+		sandboxID := strings.TrimPrefix(claim.LeaseID, leasePrefix)
+		if !due {
+			fmt.Fprintf(b.rt.Stderr, "skip sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+			continue
+		}
+		sb, err := api.GetSandbox(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		if err := validateCodeSandboxSandboxOwnership(claim, sb); err != nil {
+			return err
+		}
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+			continue
+		}
+		if err := api.DeleteSandbox(ctx, sandboxID); err != nil {
+			return err
+		}
+		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			return err
+		}
+		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
+		removed++
+	}
+	if !req.DryRun {
+		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d checked=%d\n", providerName, removed, checked)
+	}
+	return nil
+}
+
 func (b *codeSandboxBackend) Pause(ctx context.Context, req PauseRequest) error {
 	api, err := newCodeSandboxClient(b.cfg, b.rt)
 	if err != nil {
@@ -543,6 +602,7 @@ var _ interface {
 	List(context.Context, ListRequest) ([]LeaseView, error)
 	Status(context.Context, StatusRequest) (StatusView, error)
 	Stop(context.Context, StopRequest) error
+	Cleanup(context.Context, CleanupRequest) error
 	Pause(context.Context, PauseRequest) error
 	Resume(context.Context, ResumeRequest) error
 	Ports(context.Context, PortsRequest) (string, error)
