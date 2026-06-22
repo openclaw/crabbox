@@ -6,6 +6,10 @@
 
 - Added direct FastAPI Cloud application and deployment inspection through `status`, `list`, and `doctor`, including configured default application support. Thanks @zozo123.
 
+### Fixed
+
+- Made direct and brokered Azure Windows desktop leases converge on working SSH/SFTP, first-logon readiness, terminal extension state, retryable disk cleanup, and actionable bootstrap diagnostics. Thanks @fcoury-oai.
+
 ## 0.33.0 - 2026-06-22
 
 ### Added

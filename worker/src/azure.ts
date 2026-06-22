@@ -97,6 +97,11 @@ interface AzureSharedInfraNames {
   nsg: string;
 }
 
+interface AzureARMOptions {
+  lroTimeoutMs?: number;
+  terminalResourceState?: { path: string; apiVersion: string };
+}
+
 export interface AzureDeferredCleanupRequest {
   name: string;
   location: string;
@@ -858,6 +863,12 @@ export class AzureClient {
           },
         },
       },
+      {
+        terminalResourceState: {
+          path: `${vmPath(this.resourceGroup, vmName)}/extensions/crabbox-bootstrap`,
+          apiVersion: API_VERSIONS.compute,
+        },
+      },
     );
   }
 
@@ -1072,7 +1083,7 @@ export class AzureClient {
     path: string,
     apiVersion: string,
     body?: unknown,
-    opts?: { lroTimeoutMs?: number },
+    opts?: AzureARMOptions,
   ): Promise<T> {
     const token = await this.token();
     const url = `https://management.azure.com/subscriptions/${this.subscription}${path}?api-version=${apiVersion}`;
@@ -1092,7 +1103,7 @@ export class AzureClient {
     }
     const initialText = await response.text();
     if (response.status === 201 || response.status === 202) {
-      await this.awaitLRO(response, token, opts?.lroTimeoutMs);
+      await this.awaitLRO(response, token, opts);
       if (method === "DELETE") return undefined as T;
       // 201 typically returns the resource in the initial body; 202 returns nothing,
       // so re-GET the resource to read its post-provision state.
@@ -1168,11 +1179,12 @@ export class AzureClient {
     return support;
   }
 
-  private async awaitLRO(response: Response, token: string, timeoutMs?: number): Promise<void> {
+  private async awaitLRO(response: Response, token: string, opts?: AzureARMOptions): Promise<void> {
     const asyncURL =
       response.headers.get("azure-asyncoperation") ?? response.headers.get("location");
     if (!asyncURL) return;
     const interval = azureLROPollIntervalMS(response.headers.get("retry-after"));
+    const timeoutMs = opts?.lroTimeoutMs;
     const lroTimeoutMs = timeoutMs && timeoutMs > 0 ? timeoutMs : 20 * 60_000;
     const deadline = Date.now() + lroTimeoutMs;
     for (;;) {
@@ -1197,12 +1209,38 @@ export class AzureClient {
       if (status === "failed" || status === "canceled") {
         throw new Error(`azure LRO ${status}: ${text}`);
       }
+      if (opts?.terminalResourceState) {
+        // Azure can leave the extension LRO pending after the resource itself is terminal.
+        // Match the direct CLI by accepting the resource state as the completion signal.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- resource state follows each pending LRO poll.
+        const resourceState = await this.resourceProvisioningState(
+          token,
+          opts.terminalResourceState,
+        );
+        if (resourceState === "succeeded") return;
+        if (resourceState === "failed" || resourceState === "canceled") {
+          throw new Error(`azure resource reached ${resourceState}`);
+        }
+      }
     }
     throw new Error(
       timeoutMs && timeoutMs > 0
         ? `azure long-running operation timed out after ${Math.round(timeoutMs / 1000)}s`
         : "azure long-running operation timed out",
     );
+  }
+
+  private async resourceProvisioningState(
+    token: string,
+    resource: { path: string; apiVersion: string },
+  ): Promise<string> {
+    const url = `https://management.azure.com/subscriptions/${this.subscription}${resource.path}?api-version=${resource.apiVersion}`;
+    const response = await this.fetcher(url, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return "";
+    const body = (await response.json()) as { properties?: { provisioningState?: string } };
+    return body.properties?.provisioningState?.toLowerCase() ?? "";
   }
 
   private async token(): Promise<string> {
@@ -1395,6 +1433,10 @@ export function isRetryableDeleteError(error: unknown): boolean {
   return (
     message.includes("NicReservedForAnotherVm") ||
     message.includes("PublicIPAddressCannotBeDeleted") ||
+    message.includes("DiskInUse") ||
+    message.includes("DiskIsAttachedToVM") ||
+    message.includes("DiskAttached") ||
+    message.includes("CannotDeleteDisk") ||
     message.includes("InUse") ||
     message.includes("AnotherOperationInProgress") ||
     (message.includes("OperationNotAllowed") && message.includes("retry after"))

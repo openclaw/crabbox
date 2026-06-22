@@ -189,6 +189,9 @@ describe("azure provider", () => {
       true,
     );
     expect(isRetryableDeleteError("AnotherOperationInProgress")).toBe(true);
+    expect(isRetryableDeleteError("DiskInUse while detaching")).toBe(true);
+    expect(isRetryableDeleteError("DiskIsAttachedToVM")).toBe(true);
+    expect(isRetryableDeleteError("CannotDeleteDisk until detach completes")).toBe(true);
     expect(isRetryableDeleteError("plain validation error")).toBe(false);
   });
 
@@ -472,161 +475,202 @@ describe("azure provider", () => {
   });
 
   it("creates Windows VMs with Windows OS profile and bootstrap extension", async () => {
-    const client = new AzureClient(baseEnv);
-    const bodies: unknown[] = [];
-    const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (isAzureLoginURL(url)) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
-        );
-      }
-      if (init?.body) bodies.push(JSON.parse(String(init.body)));
-      if (url.includes("/resourceGroups/crabbox-leases?")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
-        );
-      }
-      if (url.includes("/virtualNetworks/crabbox-vnet?")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
-        );
-      }
-      if (url.includes("/networkSecurityGroups/crabbox-nsg?") && init?.method === "GET") {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({ tags: { managed_by: "crabbox" }, properties: { securityRules: [] } }),
-            { status: 200 },
-          ),
-        );
-      }
-      if (url.includes("/providers/Microsoft.Compute/skus?")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              value: [
-                {
-                  name: "Standard_D2ads_v6",
-                  resourceType: "virtualMachines",
-                  capabilities: [{ name: "EphemeralOSDiskSupported", value: "True" }],
-                },
-              ],
+    vi.useFakeTimers();
+    try {
+      const client = new AzureClient(baseEnv);
+      const bodies: unknown[] = [];
+      let extensionStateReads = 0;
+      const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (isAzureLoginURL(url)) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), {
+              status: 200,
             }),
-            { status: 200 },
-          ),
-        );
-      }
-      if (url.includes("/publicIPAddresses/") && init?.method === "GET") {
-        return Promise.resolve(
-          new Response(JSON.stringify({ properties: { ipAddress: "192.0.2.10" } }), {
-            status: 200,
-          }),
-        );
-      }
-      if (url.includes("/virtualMachines/") && init?.method === "GET") {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              name: "crabbox-blue-lobster",
-              tags: { crabbox: "true" },
-              properties: {
-                provisioningState: "Succeeded",
-                hardwareProfile: { vmSize: "Standard_D2ads_v6" },
+          );
+        }
+        if (init?.body) bodies.push(JSON.parse(String(init.body)));
+        if (url === "https://management.azure.com/windows-extension-op") {
+          return Promise.resolve(new Response(JSON.stringify({ status: "InProgress" })));
+        }
+        if (url.includes("/extensions/crabbox-bootstrap") && init?.method === "PUT") {
+          return Promise.resolve(
+            new Response(null, {
+              status: 202,
+              headers: {
+                "azure-asyncoperation": "https://management.azure.com/windows-extension-op",
               },
             }),
-            { status: 200 },
-          ),
-        );
-      }
-      return Promise.resolve(new Response("{}", { status: 200 }));
-    }) as typeof fetch;
-    client.fetcher = fakeFetch;
-    const config: LeaseConfig = {
-      provider: "azure",
-      target: "windows",
-      windowsMode: "normal",
-      desktop: false,
-      desktopEnv: "xfce",
-      browser: false,
-      code: false,
-      tailscale: false,
-      tailscaleTags: ["tag:crabbox"],
-      tailscaleHostname: "",
-      tailscaleAuthKey: "",
-      tailscaleExitNode: "",
-      tailscaleExitNodeAllowLanAccess: false,
-      profile: "default",
-      class: "standard",
-      serverType: "Standard_D2ads_v6",
-      serverTypeExplicit: true,
-      location: "fsn1",
-      image: "ubuntu-24.04",
-      awsRegion: "eu-west-1",
-      awsAMI: "",
-      awsSnapshot: "",
-      awsSGID: "",
-      awsSubnetID: "",
-      awsProfile: "",
-      awsRootGB: 400,
-      awsSSHCIDRs: [],
-      awsMacHostID: "",
-      azureLocation: "eastus",
-      azureImage: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
-      azureSnapshot: "",
-      azureOSDisk: "managed",
-      gcpProject: "",
-      gcpZone: "",
-      gcpImage: "",
-      gcpMachineImage: "",
-      gcpSnapshot: "",
-      gcpNetwork: "",
-      gcpSubnet: "",
-      gcpTags: [],
-      gcpSSHCIDRs: [],
-      gcpRootGB: 0,
-      gcpServiceAccount: "",
-      capacityMarket: "spot",
-      capacityStrategy: "most-available",
-      capacityFallback: "on-demand-after-120s",
-      capacityRegions: [],
-      capacityAvailabilityZones: [],
-      capacityHints: true,
-      sshUser: "crabbox",
-      sshPort: "2222",
-      sshFallbackPorts: ["22"],
-      providerKey: "crabbox-cbx",
-      workRoot: "C:\\crabbox",
-      ttlSeconds: 5400,
-      idleTimeoutSeconds: 1800,
-      keep: false,
-      sshPublicKey: "ssh-rsa test",
-    };
-    await client.createServerWithFallback(config, "cbx_123456789abc", "blue-lobster", "owner");
+          );
+        }
+        if (url.includes("/extensions/crabbox-bootstrap") && init?.method !== "PUT") {
+          extensionStateReads += 1;
+          return Promise.resolve(
+            new Response(JSON.stringify({ properties: { provisioningState: "Succeeded" } }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url.includes("/resourceGroups/crabbox-leases?")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+          );
+        }
+        if (url.includes("/virtualNetworks/crabbox-vnet?")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ tags: { managed_by: "crabbox" } }), { status: 200 }),
+          );
+        }
+        if (url.includes("/networkSecurityGroups/crabbox-nsg?") && init?.method === "GET") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                tags: { managed_by: "crabbox" },
+                properties: { securityRules: [] },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (url.includes("/providers/Microsoft.Compute/skus?")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                value: [
+                  {
+                    name: "Standard_D2ads_v6",
+                    resourceType: "virtualMachines",
+                    capabilities: [{ name: "EphemeralOSDiskSupported", value: "True" }],
+                  },
+                ],
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (url.includes("/publicIPAddresses/") && init?.method === "GET") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ properties: { ipAddress: "192.0.2.10" } }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url.includes("/virtualMachines/") && init?.method === "GET") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                name: "crabbox-blue-lobster",
+                tags: { crabbox: "true" },
+                properties: {
+                  provisioningState: "Succeeded",
+                  hardwareProfile: { vmSize: "Standard_D2ads_v6" },
+                },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+      client.fetcher = fakeFetch;
+      const config: LeaseConfig = {
+        provider: "azure",
+        target: "windows",
+        windowsMode: "normal",
+        desktop: false,
+        desktopEnv: "xfce",
+        browser: false,
+        code: false,
+        tailscale: false,
+        tailscaleTags: ["tag:crabbox"],
+        tailscaleHostname: "",
+        tailscaleAuthKey: "",
+        tailscaleExitNode: "",
+        tailscaleExitNodeAllowLanAccess: false,
+        profile: "default",
+        class: "standard",
+        serverType: "Standard_D2ads_v6",
+        serverTypeExplicit: true,
+        location: "fsn1",
+        image: "ubuntu-24.04",
+        awsRegion: "eu-west-1",
+        awsAMI: "",
+        awsSnapshot: "",
+        awsSGID: "",
+        awsSubnetID: "",
+        awsProfile: "",
+        awsRootGB: 400,
+        awsSSHCIDRs: [],
+        awsMacHostID: "",
+        azureLocation: "eastus",
+        azureImage: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
+        azureSnapshot: "",
+        azureOSDisk: "managed",
+        gcpProject: "",
+        gcpZone: "",
+        gcpImage: "",
+        gcpMachineImage: "",
+        gcpSnapshot: "",
+        gcpNetwork: "",
+        gcpSubnet: "",
+        gcpTags: [],
+        gcpSSHCIDRs: [],
+        gcpRootGB: 0,
+        gcpServiceAccount: "",
+        capacityMarket: "spot",
+        capacityStrategy: "most-available",
+        capacityFallback: "on-demand-after-120s",
+        capacityRegions: [],
+        capacityAvailabilityZones: [],
+        capacityHints: true,
+        sshUser: "crabbox",
+        sshPort: "2222",
+        sshFallbackPorts: ["22"],
+        providerKey: "crabbox-cbx",
+        workRoot: "C:\\crabbox",
+        ttlSeconds: 5400,
+        idleTimeoutSeconds: 1800,
+        keep: false,
+        sshPublicKey: "ssh-rsa test",
+      };
+      const create = client.createServerWithFallback(
+        config,
+        "cbx_123456789abc",
+        "blue-lobster",
+        "owner",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await create;
 
-    const vmBody = bodies.find(
-      (body): body is { properties: { osProfile: Record<string, unknown> } } =>
-        typeof body === "object" &&
-        body !== null &&
-        "properties" in body &&
-        JSON.stringify(body).includes("windowsConfiguration"),
-    );
-    expect(vmBody?.properties.osProfile).toMatchObject({
-      computerName: "cbxcbx123456789",
-      adminUsername: "crabadmin",
-      allowExtensionOperations: true,
-      windowsConfiguration: { provisionVMAgent: true, enableAutomaticUpdates: false },
-    });
-    expect(vmBody?.properties).toMatchObject({
-      priority: "Spot",
-      evictionPolicy: "Delete",
-      billingProfile: { maxPrice: -1 },
-    });
-    expect(String(vmBody?.properties.osProfile.customData ?? "")).toBeTruthy();
-    expect(JSON.stringify(vmBody)).toContain("MicrosoftWindowsServer");
-    const extensionBody = bodies.find((body) =>
-      JSON.stringify(body).includes("CustomScriptExtension"),
-    );
-    expect(JSON.stringify(extensionBody)).toContain("AzureData\\\\CustomData.bin");
+      const vmBody = bodies.find(
+        (body): body is { properties: { osProfile: Record<string, unknown> } } =>
+          typeof body === "object" &&
+          body !== null &&
+          "properties" in body &&
+          JSON.stringify(body).includes("windowsConfiguration"),
+      );
+      expect(vmBody?.properties.osProfile).toMatchObject({
+        computerName: "cbxcbx123456789",
+        adminUsername: "crabadmin",
+        allowExtensionOperations: true,
+        windowsConfiguration: { provisionVMAgent: true, enableAutomaticUpdates: false },
+      });
+      expect(vmBody?.properties).toMatchObject({
+        priority: "Spot",
+        evictionPolicy: "Delete",
+        billingProfile: { maxPrice: -1 },
+      });
+      expect(String(vmBody?.properties.osProfile.customData ?? "")).toBeTruthy();
+      expect(JSON.stringify(vmBody)).toContain("MicrosoftWindowsServer");
+      const extensionBody = bodies.find((body) =>
+        JSON.stringify(body).includes("CustomScriptExtension"),
+      );
+      expect(JSON.stringify(extensionBody)).toContain("AzureData\\\\CustomData.bin");
+      expect(extensionStateReads).toBeGreaterThanOrEqual(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses managed StandardSSD_LRS OS disks when azureOSDisk is managed", async () => {

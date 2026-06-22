@@ -475,6 +475,10 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("$sshPorts = @('2222', '22')");
     expect(got).toContain("sshd_config");
     expect(got).toContain("Port $port");
+    expect(got).toContain("Subsystem sftp internal-sftp");
+    expect(got).toContain("HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key");
+    expect(got).toContain('ssh-keygen.exe" -A');
+    expect(got).toContain("sshd failed to start with generated sshd_config");
     expect(got).toContain("crabbox-sshd-$port");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).toContain("d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e");
@@ -505,6 +509,10 @@ describe("cloud-init bootstrap", () => {
     );
     expect(got).toContain("C:\\ProgramData\\crabbox\\windows.username");
     expect(got).toContain("AutoAdminLogon");
+    expect(got).toContain("PrivacyConsentStatus");
+    expect(got).toContain("SkipMachineOOBE");
+    expect(got).toContain("EnableFirstLogonAnimation");
+    expect(got).toContain("DefaultDomainName");
     expect(got).toContain("Restart-Computer -Force");
     expect(got).toContain("exit 0");
     expect(got.indexOf("Assert-CrabboxFileSHA256 $openSSHZip")).toBeLessThan(
@@ -623,6 +631,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("Match Group administrators");
     expect(got).toContain("$sshPorts = @('2222', '22')");
     expect(got).toContain("PasswordAuthentication no");
+    expect(got).toContain("Subsystem sftp internal-sftp");
+    expect(got).toContain("ssh_host_ed25519_key");
     expect(got).toContain("Restart-Service sshd -Force");
     expect(got).toContain("Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath");
     expect(got).not.toContain("Restart-Computer");
