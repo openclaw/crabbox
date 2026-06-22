@@ -390,6 +390,32 @@ func TestCleanupFeatureRequiresCleanupBackend(t *testing.T) {
 	}
 }
 
+func TestDirectTailscaleFeatureRequiresMetadataBackend(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if !spec.Features.Has(core.FeatureTailscale) || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+			continue
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises direct %s; add an offline conformance config for it", name, core.FeatureTailscale)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.TailscaleMetadataBackend); !ok {
+			t.Fatalf("%s advertises direct %s but backend %T is not TailscaleMetadataBackend", name, core.FeatureTailscale, backend)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no direct SSH-lease providers advertised %s; conformance test is stale", core.FeatureTailscale)
+	}
+}
+
 func TestPauseResumeFeatureRequiresPausableBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
