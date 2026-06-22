@@ -153,6 +153,7 @@ type Config struct {
 	E2B                           E2BConfig
 	ExeDev                        ExeDevConfig
 	Railway                       RailwayConfig
+	FastAPICloud                  FastAPICloudConfig
 	Runpod                        RunpodConfig
 	NvidiaBrev                    NvidiaBrevConfig
 	nvidiaBrevWorkRootExplicit    bool
@@ -523,6 +524,13 @@ type RailwayConfig struct {
 	APIURL        string
 	ProjectID     string
 	EnvironmentID string
+}
+
+type FastAPICloudConfig struct {
+	Token  string
+	APIURL string
+	AppID  string
+	TeamID string
 }
 
 type RunpodConfig struct {
@@ -2284,6 +2292,9 @@ func baseConfig() Config {
 		Railway: RailwayConfig{
 			APIURL: "https://backboard.railway.com/graphql/v2",
 		},
+		FastAPICloud: FastAPICloudConfig{
+			APIURL: "https://api.fastapicloud.com/api/v1",
+		},
 		Runpod: RunpodConfig{
 			APIURL:     "https://rest.runpod.io/v1",
 			CloudType:  "SECURE",
@@ -2569,6 +2580,7 @@ type fileConfig struct {
 	E2B                      *fileE2BConfig                      `yaml:"e2b,omitempty"`
 	ExeDev                   *fileExeDevConfig                   `yaml:"exeDev,omitempty"`
 	Railway                  *fileRailwayConfig                  `yaml:"railway,omitempty"`
+	FastAPICloud             *fileFastAPICloudConfig             `yaml:"fastapiCloud,omitempty"`
 	Runpod                   *fileRunpodConfig                   `yaml:"runpod,omitempty"`
 	NvidiaBrev               *fileNvidiaBrevConfig               `yaml:"nvidiaBrev,omitempty"`
 	Hostinger                *fileHostingerConfig                `yaml:"hostinger,omitempty"`
@@ -3021,6 +3033,12 @@ type fileRailwayConfig struct {
 	APIURL        string `yaml:"apiUrl,omitempty"`
 	ProjectID     string `yaml:"projectId,omitempty"`
 	EnvironmentID string `yaml:"environmentId,omitempty"`
+}
+
+type fileFastAPICloudConfig struct {
+	APIURL string `yaml:"apiUrl,omitempty"`
+	AppID  string `yaml:"appId,omitempty"`
+	TeamID string `yaml:"teamId,omitempty"`
 }
 
 type fileRunpodConfig struct {
@@ -4833,6 +4851,18 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.Railway.EnvironmentID = file.Railway.EnvironmentID
 		}
 	}
+	if file.FastAPICloud != nil {
+		if file.FastAPICloud.APIURL != "" {
+			cfg.FastAPICloud.APIURL = file.FastAPICloud.APIURL
+			cfg.credentialProvenance.fastAPICloudAPIURL = credentialSource
+		}
+		if file.FastAPICloud.AppID != "" {
+			cfg.FastAPICloud.AppID = file.FastAPICloud.AppID
+		}
+		if file.FastAPICloud.TeamID != "" {
+			cfg.FastAPICloud.TeamID = file.FastAPICloud.TeamID
+		}
+	}
 	if file.Runpod != nil {
 		if file.Runpod.APIURL != "" {
 			cfg.Runpod.APIURL = file.Runpod.APIURL
@@ -6613,6 +6643,16 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.Railway.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.Railway.ProjectID))
 	cfg.Railway.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.Railway.EnvironmentID))
+	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_TOKEN", "FASTAPI_CLOUD_TOKEN"); ok {
+		cfg.FastAPICloud.Token = value
+		cfg.credentialProvenance.fastAPICloudToken = credentialSourceEnvironment
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_API_URL", "FASTAPI_CLOUD_API_URL"); ok {
+		cfg.FastAPICloud.APIURL = value
+		cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceEnvironment
+	}
+	cfg.FastAPICloud.AppID = getenv("CRABBOX_FASTAPI_CLOUD_APP_ID", getenv("FASTAPI_CLOUD_APP_ID", cfg.FastAPICloud.AppID))
+	cfg.FastAPICloud.TeamID = getenv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", getenv("FASTAPI_CLOUD_TEAM_ID", cfg.FastAPICloud.TeamID))
 	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_KEY", "RUNPOD_API_KEY"); ok {
 		cfg.Runpod.APIKey = value
 		cfg.credentialProvenance.runpodAPIKey = credentialSourceEnvironment

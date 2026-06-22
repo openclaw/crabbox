@@ -390,6 +390,14 @@ func clearConfigEnv(t *testing.T) {
 		"RAILWAY_PROJECT_ID",
 		"CRABBOX_RAILWAY_ENVIRONMENT_ID",
 		"RAILWAY_ENVIRONMENT_ID",
+		"CRABBOX_FASTAPI_CLOUD_TOKEN",
+		"FASTAPI_CLOUD_TOKEN",
+		"CRABBOX_FASTAPI_CLOUD_API_URL",
+		"FASTAPI_CLOUD_API_URL",
+		"CRABBOX_FASTAPI_CLOUD_APP_ID",
+		"FASTAPI_CLOUD_APP_ID",
+		"CRABBOX_FASTAPI_CLOUD_TEAM_ID",
+		"FASTAPI_CLOUD_TEAM_ID",
 		"CRABBOX_NVIDIA_BREV_CLI",
 		"CRABBOX_NVIDIA_BREV_ORG",
 		"CRABBOX_NVIDIA_BREV_TYPE",
@@ -4447,6 +4455,14 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_RAILWAY_PROJECT_ID", "railway-project-env")
 	t.Setenv("RAILWAY_ENVIRONMENT_ID", "railway-environment-file")
 	t.Setenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", "railway-environment-env")
+	t.Setenv("FASTAPI_CLOUD_TOKEN", "fastapi-token-file")
+	t.Setenv("CRABBOX_FASTAPI_CLOUD_TOKEN", "fastapi-token-env")
+	t.Setenv("FASTAPI_CLOUD_API_URL", "https://fastapi-file.example/api/v1")
+	t.Setenv("CRABBOX_FASTAPI_CLOUD_API_URL", "https://fastapi-env.example/api/v1")
+	t.Setenv("FASTAPI_CLOUD_APP_ID", "fastapi-app-file")
+	t.Setenv("CRABBOX_FASTAPI_CLOUD_APP_ID", "fastapi-app-env")
+	t.Setenv("FASTAPI_CLOUD_TEAM_ID", "fastapi-team-file")
+	t.Setenv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", "fastapi-team-env")
 	t.Setenv("RUNPOD_API_KEY", "runpod-key-file")
 	t.Setenv("CRABBOX_RUNPOD_API_KEY", "runpod-key-env")
 	t.Setenv("RUNPOD_API_URL", "https://runpod-file.example/v1")
@@ -4699,6 +4715,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 	if cfg.Railway.APIToken != "railway-token-env" || cfg.Railway.APIURL != "https://railway-env.example/graphql/v2" || cfg.Railway.ProjectID != "railway-project-env" || cfg.Railway.EnvironmentID != "railway-environment-env" {
 		t.Fatalf("unexpected railway env: %#v", cfg.Railway)
+	}
+	if cfg.FastAPICloud.Token != "fastapi-token-env" || cfg.FastAPICloud.APIURL != "https://fastapi-env.example/api/v1" || cfg.FastAPICloud.AppID != "fastapi-app-env" || cfg.FastAPICloud.TeamID != "fastapi-team-env" {
+		t.Fatalf("unexpected fastapi-cloud env: %#v", cfg.FastAPICloud)
 	}
 	if cfg.Runpod.APIKey != "runpod-key-env" || cfg.Runpod.APIURL != "https://runpod-env.example/v1" || cfg.Runpod.CloudType != "SECURE" || cfg.Runpod.InstanceID != "NVIDIA L4" || cfg.Runpod.Image != "runpod/pytorch:env" || cfg.Runpod.TemplateID != "tpl-env" || cfg.Runpod.DiskGB != 30 || cfg.Runpod.User != "runpod-env-user" || cfg.Runpod.WorkRoot != "/work/runpod-env" {
 		t.Fatalf("unexpected runpod env: %#v", cfg.Runpod)

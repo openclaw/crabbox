@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added direct FastAPI Cloud application and deployment inspection through `status`, `list`, and `doctor`, including configured default application support. Thanks @zozo123.
+
 ## 0.33.0 - 2026-06-22
 
 ### Added
