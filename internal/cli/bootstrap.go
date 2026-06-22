@@ -9,9 +9,13 @@ import (
 
 const (
 	tightVNCMSIURL              = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
+	tightVNCMSISHA256           = "d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e"
 	gitForWindowsSetupURL       = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
+	gitForWindowsSetupSHA256    = "d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c"
 	openSSHWin64ZipURL          = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
-	ubuntuWSLRootFSURL          = "https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+	openSSHWin64ZipSHA256       = "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54"
+	ubuntuWSLRootFSURL          = "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
+	ubuntuWSLRootFSSHA256       = "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea"
 	defaultTailscaleVersion     = "1.98.4"
 	defaultTailscaleAMD64SHA256 = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
 	defaultTailscaleARM64SHA256 = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
@@ -133,6 +137,14 @@ function Retry($ScriptBlock) {
     }
   }
 }
+function Assert-CrabboxFileSHA256([string]$Path, [string]$Expected) {
+  if (-not (Test-Path -LiteralPath $Path)) { throw "downloaded artifact is missing: $Path" }
+  $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne $Expected.ToLowerInvariant()) {
+    Remove-Item -Force -LiteralPath $Path -ErrorAction SilentlyContinue
+    throw "SHA-256 mismatch for downloaded artifact: $Path"
+  }
+}
 function New-CrabboxPassword {
   $bytes = New-Object byte[] 18
   $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -189,6 +201,7 @@ icacls.exe $userSSHDir /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-5
 icacls.exe $userAuthorizedKeys /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
 if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
   Retry { Invoke-WebRequest -Uri ` + psQuote(openSSHWin64ZipURL) + ` -OutFile $openSSHZip -UseBasicParsing }
+  Assert-CrabboxFileSHA256 $openSSHZip ` + psQuote(openSSHWin64ZipSHA256) + `
   Remove-Item -Recurse -Force "C:\Program Files\OpenSSH" -ErrorAction SilentlyContinue
   Expand-Archive -LiteralPath $openSSHZip -DestinationPath "C:\Program Files" -Force
   if (Test-Path -LiteralPath "C:\Program Files\OpenSSH-Win64") {
@@ -233,6 +246,7 @@ Set-Service -Name sshd -StartupType Automatic
 Start-Service sshd
 if (-not (Test-Path -LiteralPath "C:\Program Files\Git\cmd\git.exe")) {
   Retry { Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing }
+  Assert-CrabboxFileSHA256 $gitInstaller ` + psQuote(gitForWindowsSetupSHA256) + `
   Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -Wait
 }
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -365,9 +379,11 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	      if ($expectedLength -gt 0 -and $actualLength -ne $expectedLength) {
 	        throw "downloaded WSL rootfs is incomplete: $actualLength of $expectedLength bytes"
 	      }
+	      Assert-CrabboxFileSHA256 $wslRootfsDownload ` + psQuote(ubuntuWSLRootFSSHA256) + `
 	    }
 	    Move-Item -Force -LiteralPath $wslRootfsDownload -Destination $wslRootfs
 	  }
+	  Assert-CrabboxFileSHA256 $wslRootfs ` + psQuote(ubuntuWSLRootFSSHA256) + `
 	  wsl.exe --import $wslDistro $wslRoot $wslRootfs --version 2 | Out-Host
 	  if ($LASTEXITCODE -ne 0) { throw "wsl --import failed with exit $LASTEXITCODE" }
 	  wsl.exe --set-default $wslDistro | Out-Host
@@ -424,6 +440,7 @@ func windowsDesktopBootstrapPowerShell() string {
 	return `
 	if (-not (Test-Path -LiteralPath "C:\Program Files\TightVNC\tvnserver.exe")) {
 	  Retry { Invoke-WebRequest -Uri ` + psQuote(tightVNCMSIURL) + ` -OutFile $tightVNCInstaller -UseBasicParsing }
+	  Assert-CrabboxFileSHA256 $tightVNCInstaller ` + psQuote(tightVNCMSISHA256) + `
 	  $vncPassword = Get-Content -Raw -Path $vncPasswordPath
 	  Start-Process -FilePath msiexec.exe -ArgumentList @(
     "/i", $tightVNCInstaller, "/quiet", "/norestart",

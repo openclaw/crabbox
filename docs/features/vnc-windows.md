@@ -63,7 +63,9 @@ Bootstrap flow:
   Custom Script Extension copies `C:\AzureData\CustomData.bin` to
   `C:\AzureData\crabbox-bootstrap.ps1` and runs it.
 - The script installs OpenSSH, Git for Windows, and TightVNC, creates the `crabbox`
-  administrator, and configures auto-logon.
+  administrator, and configures auto-logon. Every downloaded installer/archive
+  is pinned to a release URL and verified with SHA-256 before extraction or
+  execution; a mismatch deletes the download and stops bootstrap.
 - In desktop mode the bootstrap reboots once to land the auto-logon console
   session, then Crabbox waits for SSH and VNC readiness.
 - VNC listens on port `5900` and is reachable only through the SSH tunnel.
@@ -107,7 +109,8 @@ Linux tooling on Windows-capable nested-virtualization VM families.
 
 The bootstrap enables the `Microsoft-Windows-Subsystem-Linux`,
 `VirtualMachinePlatform`, and `HypervisorPlatform` features, updates the WSL kernel,
-and imports a `Crabbox` distribution from an Ubuntu rootfs. Enabling the features
+and imports a `Crabbox` distribution from a versioned Ubuntu rootfs whose
+SHA-256 is verified before import. Enabling the features
 and updating the kernel each trigger a reboot, so the first WSL2 warmup takes longer
 than a native Windows warmup.
 

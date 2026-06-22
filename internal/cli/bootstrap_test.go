@@ -519,7 +519,10 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	}
 	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
+		"function Assert-CrabboxFileSHA256",
+		"Get-FileHash -LiteralPath $Path -Algorithm SHA256",
 		"OpenSSH-Win64.zip",
+		openSSHWin64ZipSHA256,
 		"install-sshd.ps1",
 		"administrators_authorized_keys",
 		"Match Group administrators",
@@ -528,7 +531,9 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"Port $port",
 		"crabbox-sshd-$port",
 		"Git-2.52.0-64-bit.exe",
+		gitForWindowsSetupSHA256,
 		"tightvnc-2.8.85-gpl-setup-64bit.msi",
+		tightVNCMSISHA256,
 		"VALUE_OF_PASSWORD=$vncPassword",
 		"VALUE_OF_ALLOWLOOPBACK=1",
 		"CrabboxUserVNC",
@@ -567,6 +572,17 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	if strings.Contains(got, "Start-Service -Name tvnserver") {
 		t.Fatalf("windows user data should not start service-session VNC")
 	}
+	for _, pair := range [][2]string{
+		{"Assert-CrabboxFileSHA256 $openSSHZip", "Expand-Archive -LiteralPath $openSSHZip"},
+		{"Assert-CrabboxFileSHA256 $gitInstaller", "Start-Process -FilePath $gitInstaller"},
+		{"Assert-CrabboxFileSHA256 $tightVNCInstaller", "Start-Process -FilePath msiexec.exe"},
+	} {
+		verifyIndex := strings.Index(got, pair[0])
+		useIndex := strings.Index(got, pair[1])
+		if verifyIndex < 0 || useIndex < 0 || verifyIndex > useIndex {
+			t.Fatalf("windows bootstrap must run %q before %q", pair[0], pair[1])
+		}
+	}
 	mirrorIndex := strings.Index(got, "$credentialPaths += $passwordMirrorPath")
 	aclIndex := strings.Index(got, "foreach ($credentialPath in $credentialPaths)")
 	if mirrorIndex < 0 || aclIndex < 0 || mirrorIndex > aclIndex {
@@ -582,8 +598,11 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 	cfg.WorkRoot = `C:\crabbox`
 	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
+		"function Assert-CrabboxFileSHA256",
 		"OpenSSH-Win64.zip",
+		openSSHWin64ZipSHA256,
 		"Git-2.52.0-64-bit.exe",
+		gitForWindowsSetupSHA256,
 		"$passwordPath = $windowsPasswordPath",
 		"$credentialPaths = @($passwordPath)",
 		`icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"`,
@@ -634,6 +653,9 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		"wsl.exe --update --web-download",
 		"wsl.exe --set-default-version 2",
 		ubuntuWSLRootFSURL,
+		ubuntuWSLRootFSSHA256,
+		"Assert-CrabboxFileSHA256 $wslRootfsDownload",
+		"Assert-CrabboxFileSHA256 $wslRootfs",
 		"$wslRootfsMinBytes = 100 * 1024 * 1024",
 		`$wslRootfsDownload = "$wslRootfs.download"`,
 		"Remove-Item -Force -LiteralPath $wslRootfs",
@@ -667,6 +689,9 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("windows WSL2 bootstrap should not include %q", notWant)
 		}
+	}
+	if verifyIndex, importIndex := strings.LastIndex(got, "Assert-CrabboxFileSHA256 $wslRootfs"), strings.Index(got, "wsl.exe --import $wslDistro"); verifyIndex < 0 || importIndex < 0 || verifyIndex > importIndex {
+		t.Fatalf("windows WSL2 bootstrap must verify the rootfs before import")
 	}
 }
 

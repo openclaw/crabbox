@@ -284,6 +284,14 @@ and may fail for historical tags that are incompatible with the current
 reviewed release configuration rather than falling back to tag-controlled
 publishing behavior.
 
+## Managed Windows Bootstrap Integrity
+
+Managed Windows bootstrap pins the OpenSSH-Win64 archive, Git for Windows
+installer, TightVNC installer, and versioned Ubuntu WSL rootfs to SHA-256
+digests embedded alongside their URLs. Generated PowerShell verifies every
+download before extraction, execution, or WSL import, removes mismatched bytes,
+and fails bootstrap closed. URL and digest updates are reviewed together.
+
 ## SSH
 
 SSH is the control and data path to a leased box; the broker manages leases but

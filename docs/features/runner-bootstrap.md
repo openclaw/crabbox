@@ -130,7 +130,10 @@ with per-OS scripts rather than cloud-init:
   port, and the VNC port `5900`.
 - **Windows** — a PowerShell script installs OpenSSH, configures key-only access
   for administrators, opens firewall rules on the SSH ports, and installs Git
-  for Windows so `git` and `tar` are on the machine PATH. `--windows-mode wsl2`
+  for Windows so `git` and `tar` are on the machine PATH. Crabbox verifies pinned
+  SHA-256 values before extracting or executing those downloads; desktop
+  TightVNC and the versioned WSL rootfs use the same fail-closed check.
+  `--windows-mode wsl2`
   additionally enables the WSL feature set, imports an Ubuntu rootfs, and runs
   the minimal Linux base inside WSL; `--desktop` adds TightVNC. The work root
   defaults to `C:\crabbox` (native) or the Linux default inside WSL.

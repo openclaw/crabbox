@@ -234,8 +234,10 @@ desktop session, x11vnc bound to `127.0.0.1:5900`, and an SSH local tunnel
 created by `crabbox vnc`. Azure native Windows desktop leases use the shared
 managed Windows bootstrap to install TightVNC, create the local `crabbox`
 administrator, enable auto-logon, and expose VNC only through an SSH tunnel.
+The OpenSSH, Git for Windows, and TightVNC downloads are pinned and SHA-256
+verified before extraction or execution.
 Azure WSL2 leases enable WSL, VirtualMachinePlatform, and HypervisorPlatform,
-update the WSL kernel, import the Ubuntu rootfs, and prepare the Linux-side
+update the WSL kernel, verify and import a versioned Ubuntu rootfs, and prepare the Linux-side
 `crabbox-ready` toolchain. Azure Windows does not provision browser/code
 targets.
 

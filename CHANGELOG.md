@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Verified pinned OpenSSH, Git for Windows, TightVNC, and versioned Ubuntu WSL bootstrap artifacts before privileged extraction, installation, or import. Thanks @coygeek.
 - Preserved valid JUnit summaries when sibling reports are malformed, stopped silently truncating auto-discovered reports, and added opt-in failure status for parsed test failures. Thanks @coygeek.
 - Redacted WebVNC viewer URLs, usernames, and passwords from command output by default while preserving explicit private-terminal reveal. Thanks @coygeek.
 - Prevented repository-local KubeVirt config from selecting operator SSH key paths while preserving inline public keys. Thanks @coygeek.

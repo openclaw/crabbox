@@ -465,7 +465,10 @@ describe("cloud-init bootstrap", () => {
     expect(awsUserData(input)).toContain("version: 1.1");
     expect(awsUserData(input)).toContain("task: enableOpenSsh");
     const got = windowsBootstrapPowerShell(input);
+    expect(got).toContain("function Assert-CrabboxFileSHA256");
+    expect(got).toContain("Get-FileHash -LiteralPath $Path -Algorithm SHA256");
     expect(got).toContain("OpenSSH-Win64.zip");
+    expect(got).toContain("0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54");
     expect(got).toContain("install-sshd.ps1");
     expect(got).toContain("administrators_authorized_keys");
     expect(got).toContain("Match Group administrators");
@@ -474,6 +477,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("Port $port");
     expect(got).toContain("crabbox-sshd-$port");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
+    expect(got).toContain("d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e");
+    expect(got).toContain("d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c");
     expect(got).toContain("NewNetworkWindowOff");
     expect(got).toContain("DoNotOpenServerManagerAtLogon");
     expect(got).toContain("VALUE_OF_PASSWORD=$vncPassword");
@@ -502,6 +507,15 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("AutoAdminLogon");
     expect(got).toContain("Restart-Computer -Force");
     expect(got).toContain("exit 0");
+    expect(got.indexOf("Assert-CrabboxFileSHA256 $openSSHZip")).toBeLessThan(
+      got.indexOf("Expand-Archive -LiteralPath $openSSHZip"),
+    );
+    expect(got.indexOf("Assert-CrabboxFileSHA256 $gitInstaller")).toBeLessThan(
+      got.indexOf("Start-Process -FilePath $gitInstaller"),
+    );
+    expect(got.indexOf("Assert-CrabboxFileSHA256 $tightVNCInstaller")).toBeLessThan(
+      got.indexOf("Start-Process -FilePath msiexec.exe"),
+    );
     expect(got.indexOf("$credentialPaths += $passwordMirrorPath")).toBeLessThan(
       got.indexOf("foreach ($credentialPath in $credentialPaths)"),
     );
@@ -520,8 +534,11 @@ describe("cloud-init bootstrap", () => {
       workRoot: "C:\\crabbox",
     } as const;
     const got = windowsBootstrapPowerShell(input);
+    expect(got).toContain("function Assert-CrabboxFileSHA256");
     expect(got).toContain("OpenSSH-Win64.zip");
+    expect(got).toContain("0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54");
     expect(got).toContain("Git-2.52.0-64-bit.exe");
+    expect(got).toContain("d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c");
     expect(got).toContain("$passwordPath = $windowsPasswordPath");
     expect(got).toContain("$credentialPaths = @($passwordPath)");
     expect(got).toContain(
@@ -560,7 +577,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("bcdedit.exe /set hypervisorlaunchtype auto");
     expect(got).toContain("wsl.exe --update --web-download");
     expect(got).toContain("wsl.exe --set-default-version 2");
-    expect(got).toContain("ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz");
+    expect(got).toContain(
+      "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+    );
+    expect(got).toContain("8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea");
+    expect(got).toContain("Assert-CrabboxFileSHA256 $wslRootfsDownload");
+    expect(got).toContain("Assert-CrabboxFileSHA256 $wslRootfs");
     expect(got).toContain("$wslRootfsMinBytes = 100 * 1024 * 1024");
     expect(got).toContain("curl.exe -fL --retry 8");
     expect(got).toContain("downloaded WSL rootfs is incomplete");
@@ -571,6 +593,9 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
     expect(got).toContain("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
     expect(got).toContain("test -w '/work/crabbox'");
+    expect(got.lastIndexOf("Assert-CrabboxFileSHA256 $wslRootfs")).toBeLessThan(
+      got.indexOf("wsl.exe --import $wslDistro"),
+    );
     const setupIndex = got.indexOf(
       "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
     );

@@ -149,12 +149,14 @@ trusted certificates, and treat `--xcp-ng-insecure-tls` as private-lab only.
 `--provider aws --target windows --windows-mode normal --desktop` creates a real
 AWS Windows Server lease. EC2Launch user data installs OpenSSH Server, Git for
 Windows, TightVNC Server, a per-lease local administrator named `crabbox`, and a
-loopback VNC password retrievable through `crabbox vnc --id <lease>`.
+loopback VNC password retrievable through `crabbox vnc --id <lease>`. The
+OpenSSH, Git, and TightVNC downloads are SHA-256 verified before use.
 
 `--provider aws --target windows --windows-mode wsl2` still creates a Windows
 Server host, then enables WSL, VirtualMachinePlatform, and HypervisorPlatform,
 reboots as needed, updates the WSL kernel, imports an Ubuntu rootfs, and
-prepares the Linux-side `crabbox-ready` toolchain. The launch enables nested
+prepares the Linux-side `crabbox-ready` toolchain. The rootfs uses a versioned
+URL and pinned SHA-256 verified before import. The launch enables nested
 virtualization and uses C8i, M8i, or R8i instance families. Commands and sync
 then use the POSIX WSL contract.
 
@@ -162,7 +164,8 @@ then use the POSIX WSL contract.
 
 `--provider azure --target windows` creates a native Windows Server lease, uses
 the VM Agent Custom Script Extension to install OpenSSH Server and Git for
-Windows, and configures the `crabbox` user for SSH/sync/run. Add `--desktop` to
+Windows, verifies both downloads by pinned SHA-256, and configures the `crabbox`
+user for SSH/sync/run. Add `--desktop` to
 run the shared Windows desktop bootstrap over SSH, install TightVNC, configure
 auto-logon, and expose VNC through the normal SSH tunnel. With
 `--windows-mode wsl2`, Crabbox enables WSL2 over SSH and uses the POSIX WSL
