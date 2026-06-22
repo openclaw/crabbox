@@ -189,6 +189,9 @@ Rules:
     `workspace-restore`, `provider-snapshot`).
   - `FeatureRunProof`, `FeatureRunSession` — delegated backend can return
     bounded stream/timing proof metadata or a reusable run session.
+  - `FeatureMCP` — delegated backend can attach MCP server references when it
+    creates a sandbox. This is a create-time attachment contract, not a generic
+    Crabbox MCP host.
 - `Coordinator` is `CoordinatorSupported` only when the shared coordinator
   provider adapter can provision your runners. Today that is `aws`, `azure`, `gcp`, and
   `hetzner`. Everything else — all delegated run backends and Static SSH —
@@ -214,11 +217,11 @@ capabilities as any other provider that can checkpoint and fork workspace state;
 its Firecracker, Kubernetes, or image identifiers belong inside the adapter and
 checkpoint metadata.
 
-Run evidence follows the same rule. Declare `FeatureRunProof`,
-`FeatureRunArtifacts`, `FeatureRunDownloads`, `FeatureURLBridge`, and
-`FeatureRunSession` only when the provider really exposes those contracts.
-`crabbox providers --json` normalizes them as `proof`, `artifacts`,
-`downloads`, `preview-url`, and `session`, and
+Run evidence and agent attachments follow the same rule. Declare
+`FeatureRunProof`, `FeatureRunArtifacts`, `FeatureRunDownloads`,
+`FeatureURLBridge`, `FeatureRunSession`, and `FeatureMCP` only when the provider
+really exposes those contracts. `crabbox providers --json` normalizes run
+evidence as `proof`, `artifacts`, `downloads`, `preview-url`, and `session`, and
 `crabbox providers recommend run-evidence` ignores session-only providers.
 
 ## Step 5. Own Provider-Specific Flags

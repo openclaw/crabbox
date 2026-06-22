@@ -368,6 +368,7 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 			core.FeatureRunArtifacts,
 			core.FeatureRunDownloads,
 			core.FeaturePauseResume,
+			core.FeatureMCP,
 		} {
 			if spec.Features.Has(feature) && spec.Kind != core.ProviderKindDelegatedRun {
 				t.Fatalf("%s advertises %s but kind=%s", name, feature, spec.Kind)
@@ -903,6 +904,23 @@ func TestURLBridgeFeatureRequiresBridgeProvider(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureURLBridge)
+	}
+}
+
+func TestMCPFeatureRequiresCreateTimePassthrough(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		if !provider.Spec().Features.Has(core.FeatureMCP) {
+			continue
+		}
+		if name != "docker-sandbox" {
+			t.Fatalf("%s advertises %s; add an offline conformance check for its MCP attachment contract", name, core.FeatureMCP)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureMCP)
 	}
 }
 

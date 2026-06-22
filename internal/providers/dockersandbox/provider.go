@@ -22,7 +22,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "docker-sandbox",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureRunSession},
+		Features:    core.FeatureSet{core.FeatureRunSession, core.FeatureMCP},
 		Coordinator: core.CoordinatorNever,
 	}
 }

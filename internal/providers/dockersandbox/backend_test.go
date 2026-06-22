@@ -32,6 +32,9 @@ func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
 	if !spec.Features.Has(core.FeatureRunSession) {
 		t.Fatalf("features=%v want run-session", spec.Features)
 	}
+	if !spec.Features.Has(core.FeatureMCP) {
+		t.Fatalf("features=%v want mcp-attachments", spec.Features)
+	}
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want linux only", spec.Targets)
 	}

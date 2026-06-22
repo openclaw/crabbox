@@ -500,6 +500,9 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureModuleRun) {
 			add(10, "runs source modules in a worker runtime")
 		}
+		if hasFeature(FeatureMCP) {
+			add(8, "can attach MCP servers at sandbox creation")
+		}
 		if entry.Kind == ProviderKindSSHLease && hasTarget(targetLinux) && category == "direct-cloud" {
 			add(18, "managed Linux devbox with normal Crabbox SSH workflow")
 		}

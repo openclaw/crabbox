@@ -319,6 +319,10 @@ const (
 	FeatureRunProof    Feature = "run-proof"
 	FeatureRunSession  Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
+	FeatureRunDownloads Feature = "run-downloads"
+	FeatureModuleRun    Feature = "module-run"
+	FeaturePauseResume  Feature = "pause-resume"
+	FeatureMCP          Feature = "mcp-attachments"
 )
 ```
 

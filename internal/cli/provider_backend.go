@@ -355,6 +355,7 @@ const (
 	FeatureRunDownloads Feature = "run-downloads"
 	FeatureModuleRun    Feature = "module-run"
 	FeaturePauseResume  Feature = "pause-resume"
+	FeatureMCP          Feature = "mcp-attachments"
 )
 
 type FeatureSet []Feature
