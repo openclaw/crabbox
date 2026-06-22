@@ -95,6 +95,7 @@ crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend mcp-sandbox
 crabbox providers recommend reachability
+crabbox providers recommend remote-dev
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
 crabbox providers recommend team-cloud
@@ -127,6 +128,8 @@ Supported use cases:
   the run environment.
 - `reachability`: providers with a bidirectional tailnet plane, provider-native
   HTTPS endpoints, outbound-only tailnet egress, or operator-side SSH tunnels.
+- `remote-dev`: managed developer environments and SSH-capable remote
+  workspaces for local-editor, remote-compute workflows.
 - `run-evidence`: providers that can return run proof, collect artifacts,
   materialize downloads, or expose preview URLs.
 - `self-hosted`: private virtualization, external providers, and BYO SSH.

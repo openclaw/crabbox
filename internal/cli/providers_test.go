@@ -389,6 +389,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"isolated-execution",
 		"mcp-sandbox",
 		"reachability",
+		"remote-dev",
 		"run-evidence",
 		"team-cloud",
 		"versioned-workspace",
@@ -647,6 +648,45 @@ func TestProvidersRecommendMCPSandboxAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureMCP) {
 		t.Fatalf("mcp alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendRemoteDevPrefersManagedDevEnvironments(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "remote-dev", 3)
+	if len(recommendations) == 0 {
+		t.Fatal("expected remote-dev recommendations")
+	}
+	found := map[string]bool{}
+	for _, recommendation := range recommendations {
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureCrabboxSync) &&
+			!providerRecommendationHasFeature(recommendation.Features, FeatureArchiveSync) {
+			t.Fatalf("remote-dev recommendation cannot sync workspace: %#v", recommendation)
+		}
+		found[recommendation.Provider] = true
+	}
+	for _, provider := range []string{"daytona", "morph", "namespace-devbox"} {
+		if !found[provider] {
+			t.Fatalf("remote-dev recommendations should include %s: %#v", provider, recommendations)
+		}
+	}
+}
+
+func TestProvidersRecommendRemoteDevAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "codespaces",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend codespaces error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !isRemoteDevProvider(entries[0].Provider) {
+		t.Fatalf("codespaces alias entries=%#v", entries)
 	}
 }
 

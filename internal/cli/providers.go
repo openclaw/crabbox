@@ -402,6 +402,7 @@ func providerRecommendationUseCases() []string {
 		"macos",
 		"mcp-sandbox",
 		"reachability",
+		"remote-dev",
 		"run-evidence",
 		"self-hosted",
 		"team-cloud",
@@ -437,6 +438,11 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "mcp-sandbox", true
 	case "reachability", "reachable", "network", "networking", "ports", "port", "pond":
 		return "reachability", true
+	case "remote-dev", "remote-development",
+		"dev-environment", "dev-environments",
+		"cloud-dev", "cloud-development", "cde",
+		"codespace", "codespaces", "remote-workspace":
+		return "remote-dev", true
 	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download", "preview", "preview-url", "url-bridge":
 		return "run-evidence", true
 	case "self-hosted", "selfhosted", "homelab", "virtualization":
@@ -706,6 +712,40 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureBrowser) || hasFeature(FeatureCode) {
 			add(8, "can pair reachability with interactive browser or code surfaces")
 		}
+	case "remote-dev":
+		if isRemoteDevProvider(entry.Provider) {
+			add(65, "managed developer environment provider")
+		}
+		if entry.Kind == ProviderKindSSHLease && hasFeature(FeatureSSH) {
+			add(28, "normal SSH developer access")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(24, "can sync the current checkout")
+		}
+		if category == "direct-cloud" {
+			add(20, "provider-managed remote development capacity")
+		}
+		if category == "delegated-sandbox" && hasFeature(FeatureArchiveSync) {
+			add(16, "provider-owned workspace with archive sync")
+		}
+		if category == "brokerable-cloud" {
+			add(12, "can use coordinator spend and cleanup controls")
+		}
+		if category == "self-hosted-virtualization" || category == "local-vm" || category == "byo-ssh" {
+			add(10, "works as a private development environment target")
+		}
+		if hasFeature(FeaturePauseResume) {
+			add(20, "supports pause and resume")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(12, "can clean up owned workspace resources")
+		}
+		if hasFeature(FeatureBrowser) || hasFeature(FeatureCode) || hasFeature(FeatureDesktop) {
+			add(8, "can expose interactive development surfaces")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux development workloads")
+		}
 	case "run-evidence":
 		hasEvidenceCapability := hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) || hasFeature(FeatureURLBridge)
 		if !hasEvidenceCapability {
@@ -821,6 +861,15 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 	return score, reasons
 }
 
+func isRemoteDevProvider(provider string) bool {
+	switch provider {
+	case "codesandbox", "daytona", "morph", "namespace-devbox", "opencomputer":
+		return true
+	default:
+		return false
+	}
+}
+
 func providerRecommendationHasString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -853,6 +902,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend mcp-sandbox")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
+	fmt.Fprintln(out, "  crabbox providers recommend remote-dev")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
 	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
