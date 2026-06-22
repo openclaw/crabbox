@@ -69,6 +69,21 @@ func finalizeTimingReport(report TimingReport) TimingReport {
 	return report
 }
 
+// TimingReportWithRunResult copies normalized run outcome fields onto a timing report.
+func TimingReportWithRunResult(report TimingReport, result RunResult, err error) TimingReport {
+	result = FinalizeRunResult(result, err)
+	if report.ExitCode == 0 && result.ExitCode != 0 {
+		report.ExitCode = result.ExitCode
+	}
+	if report.RunStatus == "" {
+		report.RunStatus = result.Status
+	}
+	if report.ErrorKind == "" {
+		report.ErrorKind = result.ErrorKind
+	}
+	return report
+}
+
 func encodeTimingJSON(w io.Writer, report TimingReport) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)

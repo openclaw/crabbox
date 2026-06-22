@@ -759,7 +759,7 @@ func timingReportFromDelegatedRunResult(req RunRequest, result RunResult, provid
 			exitCode = 1
 		}
 	}
-	return timingReport{
+	report := timingReport{
 		Provider:      firstNonBlank(result.Provider, provider),
 		LeaseID:       result.LeaseID,
 		Slug:          result.Slug,
@@ -771,4 +771,5 @@ func timingReportFromDelegatedRunResult(req RunRequest, result RunResult, provid
 		Label:         req.Label,
 		Artifacts:     result.Artifacts,
 	}
+	return TimingReportWithRunResult(report, result, runErr)
 }

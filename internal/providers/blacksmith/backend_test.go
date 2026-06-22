@@ -968,6 +968,7 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 		Command:               []string{"true"},
 		RequiredArtifactGlobs: []string{"reports/manifest.json"},
 		KeepOnFailure:         true,
+		TimingJSON:            true,
 	})
 	var exitErr ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
@@ -980,7 +981,7 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 		t.Fatalf("session=%#v, want kept after artifact failure", result.Session)
 	}
 	got := stderr.String()
-	for _, want := range []string{"blacksmith artifact retrieval failed", "missing required artifact reports/manifest.json", "blacksmith run summary", "exit=7", "failure-bundle local=", "keep-on-failure: kept lease=tbx_artifactfail"} {
+	for _, want := range []string{"blacksmith artifact retrieval failed", "missing required artifact reports/manifest.json", "blacksmith run summary", "exit=7", `"runStatus":"failed"`, `"errorKind":"command-exit"`, "failure-bundle local=", "keep-on-failure: kept lease=tbx_artifactfail"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr missing %q in:\n%s", want, got)
 		}

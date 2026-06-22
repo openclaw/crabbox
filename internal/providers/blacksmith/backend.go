@@ -227,6 +227,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		}
 	}
 	report := delegatedTimingReport(blacksmithTestboxProvider, leaseID, slug, "blacksmith-testbox owns sync", commandDuration, commandPhases, total, code)
+	report = core.TimingReportWithRunResult(report, result, nil)
 	if code != 0 {
 		classificationInput := string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes())
 		if artifactErr != nil {
