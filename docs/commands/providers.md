@@ -96,6 +96,7 @@ crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend live-smoke
 crabbox providers recommend mcp-sandbox
+crabbox providers recommend pause-resume
 crabbox providers recommend preview-url
 crabbox providers recommend reachability
 crabbox providers recommend remote-dev
@@ -134,6 +135,8 @@ Supported use cases:
 - `macos`: macOS targets.
 - `mcp-sandbox`: sandboxes that can attach MCP server references when creating
   the run environment.
+- `pause-resume`: providers that can pause and resume provider-owned runtime or
+  workspace state.
 - `preview-url`: providers that can expose provider-native preview URLs for app
   or service smoke workflows.
 - `reachability`: providers with a bidirectional tailnet plane, provider-native

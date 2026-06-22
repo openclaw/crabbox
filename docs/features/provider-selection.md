@@ -27,6 +27,7 @@ crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend live-smoke
 crabbox providers recommend mcp-sandbox
+crabbox providers recommend pause-resume
 crabbox providers recommend preview-url
 crabbox providers recommend remote-dev
 crabbox providers recommend run-session
@@ -67,6 +68,7 @@ Use these rules before adding a new adapter:
 | Run artifacts and downloads | `blacksmith-testbox`, `islo` | They advertise artifact or download evidence and appear in `providers recommend artifact-download`. |
 | Run evidence and previews | `blacksmith-testbox`, `islo`, `e2b` | They advertise normalized proof, artifact, download, or preview-url capabilities in `crabbox providers` and `providers recommend run-evidence`. |
 | Inspectable run sessions | `blacksmith-testbox`, `islo`, `e2b`, `cloudflare-dynamic-workers` | They advertise reusable session evidence and appear in `providers recommend run-session`. |
+| Pausable or resumable runtimes | `codesandbox`, `islo` | They advertise pause/resume capability and appear in `providers recommend pause-resume`. |
 | Provider preview URLs | `islo`, `e2b`, `railway` | They advertise provider-native preview URL evidence and appear in `providers recommend preview-url`. |
 | Provider live smoke | `blacksmith-testbox`, `cloudflare`, `local-container`, `apple-container`, `aws` | They advertise enough sync, cleanup, lifecycle, or evidence capability for `providers recommend live-smoke` to rank them as good opt-in smoke candidates. |
 | Fast feedback with reusable caches | `local-container`, `apple-container`, `multipass`, `blacksmith-testbox` | They advertise cache-volume, sync, cleanup, or reusable proof/session capabilities in `crabbox providers` and `providers recommend fast-feedback`. |

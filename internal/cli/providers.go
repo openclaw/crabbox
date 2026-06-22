@@ -403,6 +403,7 @@ func providerRecommendationUseCases() []string {
 		"local",
 		"macos",
 		"mcp-sandbox",
+		"pause-resume",
 		"preview-url",
 		"reachability",
 		"remote-dev",
@@ -447,6 +448,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "macos", true
 	case "mcp", "mcp-sandbox", "mcp-attachments", "tool-sandbox", "tool-sandboxes":
 		return "mcp-sandbox", true
+	case "pause-resume", "pause", "resume", "suspend", "suspended",
+		"pausable", "pausable-workspace", "pausable-workspaces",
+		"resumable", "resumable-workspace", "resumable-workspaces":
+		return "pause-resume", true
 	case "preview", "preview-url", "preview-urls", "url-bridge", "app-preview", "app-previews", "web-preview", "web-previews":
 		return "preview-url", true
 	case "reachability", "reachable", "network", "networking", "ports", "port", "pond":
@@ -778,6 +783,32 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasTarget(targetLinux) {
 			add(8, "supports common Linux MCP workloads")
 		}
+	case "pause-resume":
+		if !hasFeature(FeaturePauseResume) {
+			break
+		}
+		add(80, "supports pausing and resuming provider-owned runtime state")
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(25, "provider owns resumable sandbox execution")
+		}
+		if hasFeature(FeatureArchiveSync) || hasFeature(FeatureCrabboxSync) {
+			add(18, "can seed resumable state from the current checkout")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(16, "can clean up paused runtime resources")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(14, "returns sessions for paused runtime inspection")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(12, "can expose preview URLs before or after resume")
+		}
+		if hasFeature(FeatureRunDownloads) || hasFeature(FeatureRunArtifacts) {
+			add(10, "can preserve outputs from resumable runs")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux resumable workloads")
+		}
 	case "preview-url":
 		if !hasFeature(FeatureURLBridge) {
 			break
@@ -1040,6 +1071,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend live-smoke")
 	fmt.Fprintln(out, "  crabbox providers recommend mcp-sandbox")
+	fmt.Fprintln(out, "  crabbox providers recommend pause-resume")
 	fmt.Fprintln(out, "  crabbox providers recommend preview-url")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend remote-dev")

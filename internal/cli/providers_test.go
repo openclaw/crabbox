@@ -390,6 +390,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"isolated-execution",
 		"live-smoke",
 		"mcp-sandbox",
+		"pause-resume",
 		"preview-url",
 		"reachability",
 		"remote-dev",
@@ -833,6 +834,44 @@ func TestProvidersRecommendPreviewURLAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureURLBridge) {
 		t.Fatalf("app-preview alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendPauseResumePrefersResumableProviders(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "pause-resume", 64)
+	if len(recommendations) == 0 {
+		t.Fatal("expected pause-resume recommendations")
+	}
+	found := map[string]bool{}
+	for _, recommendation := range recommendations {
+		if !providerRecommendationHasFeature(recommendation.Features, FeaturePauseResume) {
+			t.Fatalf("pause-resume recommendation lacks pause-resume feature: %#v", recommendation)
+		}
+		found[recommendation.Provider] = true
+	}
+	for _, provider := range []string{"islo"} {
+		if !found[provider] {
+			t.Fatalf("pause-resume recommendations should include %s: %#v", provider, recommendations)
+		}
+	}
+}
+
+func TestProvidersRecommendPauseResumeAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "resumable-workspace",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend resumable-workspace error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeaturePauseResume) {
+		t.Fatalf("resumable-workspace alias entries=%#v", entries)
 	}
 }
 

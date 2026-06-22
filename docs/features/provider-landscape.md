@@ -31,7 +31,7 @@ That means:
 | --- | --- | --- | --- |
 | CI proof runners | Blacksmith Testbox, Semaphore, GitHub Actions-style runners | Strong fit. Crabbox already separates proof-runner semantics from generic VM semantics through `ci-proof-runner` providers and `providers recommend ci-proof`. | Keep run proof, artifacts, downloads, and status records normalized across providers. |
 | Hosted agent sandboxes | E2B, Vercel Sandbox, Modal Sandboxes, Cloudflare Sandbox SDK, OpenSandbox, smolvm, Upstash Box | Good fit when the provider owns process execution and files. These map to `delegated-run` better than SSH leases. | Improve artifact/download parity, preview URL reporting, timeout/error taxonomy, and optional MCP attachment routing. |
-| Remote developer environments | Daytona, Namespace Devbox, CodeSandbox, Morph, OpenComputer, Codespaces-like tools | Good fit when Crabbox can either SSH into the workspace or delegate a command with archive sync. `providers recommend remote-dev` is the routing surface. | Add clearer live smoke docs per provider and keep local-editor, remote-compute flows distinct from CI proof. |
+| Remote developer environments | Daytona, Namespace Devbox, CodeSandbox, Morph, OpenComputer, Codespaces-like tools | Good fit when Crabbox can either SSH into the workspace or delegate a command with archive sync. `providers recommend remote-dev` is the routing surface. | Add clearer live smoke docs per provider, surface pause/resume support, and keep local-editor, remote-compute flows distinct from CI proof. |
 | Forkable/versioned workspaces | Mitos, Firecracker snapshot systems, local-container, Parallels | Partial fit. Crabbox already has provider-neutral checkpoint/fork/restore capability names, but only local providers advertise them today. | Harden `versioned-workspace` behavior before adding any runtime-specific fork API. Do not add Mitos-only flags. |
 | Worker and module runtimes | Cloudflare Dynamic Workers, Cloudflare Sandbox SDK, Vercel/edge-adjacent runtimes | Narrow fit. `cloudflare-dynamic-workers` is a module-run provider; generic container sandboxes need a separate lifecycle and file/process contract. | Keep worker-runtime separate from Linux sandbox execution unless the provider can expose files, process status, logs, preview URLs, and cleanup. |
 | Self-hosted virtualization | Proxmox, XCP-ng, Incus, KubeVirt, local VMs | Strong fit when Crabbox gets a normal SSH lease and lifecycle hooks. | Keep provider-specific reconciliation behind adapters; no provider-specific branching in core. |
@@ -104,6 +104,8 @@ Ship these in small PRs:
    one needs an opt-in smoke contract that says what real behavior proves. Use
    `crabbox providers recommend live-smoke` to pick candidates from offline
    lifecycle, sync, cleanup, and evidence metadata before spending capacity.
+   Use `crabbox providers recommend pause-resume` when long-running sandbox or
+   dev-environment state needs to be parked and resumed.
 4. Strengthen workspace reuse before runtime-specific forking.
    Checkpoint, fork, restore, and provider snapshot semantics should be testable
    through the CLI before adding live microVM fan-out.
