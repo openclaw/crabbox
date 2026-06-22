@@ -537,6 +537,8 @@ func TestTimingJSONShape(t *testing.T) {
 		CommandMs   int64  `json:"commandMs"`
 		TotalMs     int64  `json:"totalMs"`
 		ExitCode    int    `json:"exitCode"`
+		RunStatus   string `json:"runStatus"`
+		ErrorKind   string `json:"errorKind"`
 		SyncSkipped bool   `json:"syncSkipped"`
 		SyncPhases  []struct {
 			Name    string `json:"name"`
@@ -551,8 +553,45 @@ func TestTimingJSONShape(t *testing.T) {
 	if got.Provider != "aws" || got.LeaseID != "cbx_123" || got.SyncMs != 1200 || got.CommandMs != 3400 || got.TotalMs != 5000 || got.ExitCode != 7 || !got.SyncSkipped {
 		t.Fatalf("unexpected report: %#v", got)
 	}
+	if got.RunStatus != "failed" || got.ErrorKind != "command-exit" {
+		t.Fatalf("runStatus/errorKind=%q/%q", got.RunStatus, got.ErrorKind)
+	}
 	if len(got.SyncPhases) != 2 || got.SyncPhases[1].Name != "git_hydrate" || !got.SyncPhases[1].Skipped || got.SyncPhases[1].Reason != "marker base current" {
 		t.Fatalf("unexpected phases: %#v", got.SyncPhases)
+	}
+}
+
+func TestTimingJSONDefaultsSuccessfulRunStatus(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeTimingJSON(&buf, timingReportFromRun("aws", "cbx_123", "blue-crab", runTimings{}, time.Second, 0)); err != nil {
+		t.Fatal(err)
+	}
+	var got TimingReport
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RunStatus != RunStatusSucceeded || got.ErrorKind != RunErrorNone {
+		t.Fatalf("runStatus/errorKind=%q/%q", got.RunStatus, got.ErrorKind)
+	}
+	if strings.Contains(buf.String(), `"errorKind"`) {
+		t.Fatalf("successful timing JSON should omit errorKind: %s", buf.String())
+	}
+}
+
+func TestTimingJSONPreservesProviderOutcome(t *testing.T) {
+	var buf bytes.Buffer
+	report := timingReportFromRun("sandbox", "cbx_123", "blue-crab", runTimings{}, time.Second, 1)
+	report.RunStatus = RunStatusTimedOut
+	report.ErrorKind = RunErrorTimeout
+	if err := writeTimingJSON(&buf, report); err != nil {
+		t.Fatal(err)
+	}
+	var got TimingReport
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RunStatus != RunStatusTimedOut || got.ErrorKind != RunErrorTimeout {
+		t.Fatalf("runStatus/errorKind=%q/%q", got.RunStatus, got.ErrorKind)
 	}
 }
 

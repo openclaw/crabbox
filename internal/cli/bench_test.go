@@ -168,6 +168,9 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	if timing := records[0].Timing; timing.SyncMs != 400 || len(timing.SyncPhases) != 1 || timing.SyncPhases[0].Name != "archive" || timing.MachineType != "test-medium" {
 		t.Fatalf("delegated timing metadata=%#v", timing)
 	}
+	if records[0].Timing.RunStatus != RunStatusSucceeded {
+		t.Fatalf("delegated timing runStatus=%q", records[0].Timing.RunStatus)
+	}
 }
 
 func TestRunDelegatedTimingRecordDoesNotPrintTimingJSON(t *testing.T) {

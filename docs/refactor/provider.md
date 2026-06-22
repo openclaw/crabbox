@@ -186,8 +186,10 @@ Delegated providers should also return normalized run outcome metadata in
 `RunResult`: `Status` uses `succeeded`, `failed`, `timed-out`, or `canceled`;
 `ErrorKind` uses `command-exit`, `timeout`, `canceled`, or `provider-error`.
 Call `FinalizeRunResult(result, err)` before returning once the provider knows
-the command exit code and provider error. That keeps future recommendation and
-proof surfaces provider-neutral instead of parsing provider-specific stderr.
+the command exit code and provider error. `--timing-json` emits the same
+normalized outcome fields, deriving them from `exitCode` when the provider did
+not set a more specific status. That keeps future recommendation and proof
+surfaces provider-neutral instead of parsing provider-specific stderr.
 
 ### Optional Backend Interfaces
 

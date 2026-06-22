@@ -20,6 +20,8 @@ type TimingReport struct {
 	CommandPhases []TimingPhase `json:"commandPhases,omitempty"`
 	TotalMs       int64         `json:"totalMs"`
 	ExitCode      int           `json:"exitCode"`
+	RunStatus     RunStatus     `json:"runStatus,omitempty"`
+	ErrorKind     RunErrorKind  `json:"errorKind,omitempty"`
 	ActionsRunURL string        `json:"actionsRunUrl,omitempty"`
 	RunID         string        `json:"runId,omitempty"`
 	Label         string        `json:"label,omitempty"`
@@ -50,10 +52,21 @@ type timingReportWriter interface {
 }
 
 func writeTimingJSON(w io.Writer, report TimingReport) error {
+	report = finalizeTimingReport(report)
 	if writer, ok := w.(timingReportWriter); ok {
 		return writer.WriteTimingReport(report)
 	}
 	return encodeTimingJSON(w, report)
+}
+
+func finalizeTimingReport(report TimingReport) TimingReport {
+	if report.RunStatus == "" {
+		report.RunStatus = RunStatusForResult(RunResult{ExitCode: report.ExitCode}, nil)
+	}
+	if report.ErrorKind == "" {
+		report.ErrorKind = RunErrorKindForResult(RunResult{ExitCode: report.ExitCode}, nil)
+	}
+	return report
 }
 
 func encodeTimingJSON(w io.Writer, report TimingReport) error {

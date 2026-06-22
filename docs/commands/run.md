@@ -408,12 +408,13 @@ or hidden local shell state.
 
 Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
 slug, run ID, machine type, repo path, remote workdir, sync phases, command
-phases, command duration, total duration, exit code, stop command, artifacts,
-and Actions run URL when available. Failed runs also include `blockedStage` and
-`retryLikely` when classifiable. Commands can emit phase markers on stdout or
-stderr as `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases`
-without removing the marker line from output. In `blacksmith-testbox` mode, sync
-is reported as delegated in the same schema.
+phases, command duration, total duration, exit code, normalized `runStatus`,
+optional `errorKind`, stop command, artifacts, and Actions run URL when
+available. Failed runs also include `blockedStage` and `retryLikely` when
+classifiable. Commands can emit phase markers on stdout or stderr as
+`CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing
+the marker line from output. In `blacksmith-testbox` mode, sync is reported as
+delegated in the same schema.
 
 Use `--timing-record=default` or `--timing-record <path>` to append the final
 timing payload to a local benchmark JSONL store. This is opt-in; ordinary
