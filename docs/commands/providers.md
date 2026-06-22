@@ -8,12 +8,12 @@ does not contact any cloud, check credentials, or query quota. Use
 ```sh
 crabbox providers
 crabbox providers --json
-crabbox providers --kind delegated-run --evidence preview-url
+crabbox providers --category delegated-sandbox --evidence preview-url
 crabbox providers --target linux --workspace checkpoint --workspace fork --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend run-evidence
-crabbox providers recommend run-evidence --kind delegated-run --evidence preview-url
+crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
 crabbox providers recommend versioned-workspace
 ```
 
@@ -22,6 +22,10 @@ crabbox providers recommend versioned-workspace
 - `--json`: emit the matrix as a JSON array instead of grouped text.
 - `--kind <kind>`: keep providers with this driver kind. Repeatable. Current
   values include `ssh-lease`, `delegated-run`, and `service-control`.
+- `--category <category>`: keep providers in this checked-in provider category,
+  such as `delegated-sandbox`, `direct-cloud`, `brokerable-cloud`,
+  `ci-proof-runner`, `gpu-cloud`, `local-vm`, or
+  `self-hosted-virtualization`. Repeatable.
 - `--target <target>`: keep providers that advertise this target, such as
   `linux`, `macos`, `windows/normal`, `windows/wsl2`, or `worker-runtime`.
   Repeatable.
@@ -57,7 +61,7 @@ crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend run-evidence
-crabbox providers recommend run-evidence --kind delegated-run --evidence preview-url
+crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
 crabbox providers recommend versioned-workspace
 crabbox providers recommend versioned-workspace --target macos --workspace fork
 crabbox providers recommend worker-runtime --json
@@ -90,9 +94,10 @@ Recommendation flags:
 - `--use-case <name>`: pass the use case by flag instead of positionally.
 - `--limit <n>`: maximum recommendations to print. Defaults to `5`.
 - `--json`: emit recommendations as JSON.
-- `--kind`, `--target`, `--feature`, `--workspace`, `--evidence`: filter the
-  candidate provider matrix before scoring. These flags use the same values and
-  repeat/comma semantics as the base `providers` matrix command.
+- `--kind`, `--category`, `--target`, `--feature`, `--workspace`,
+  `--evidence`: filter the candidate provider matrix before scoring. These flags
+  use the same values and repeat/comma semantics as the base `providers` matrix
+  command.
 
 ## Output
 
@@ -102,6 +107,7 @@ Text output lists every provider as a block of indented fields:
 aws
   family: aws
   kind: ssh-lease
+  category: brokerable-cloud
   targets: linux,windows/normal,windows/wsl2,macos
   features: ssh,crabbox-sync,cleanup,desktop,browser,code
   coordinator: supported
@@ -109,6 +115,7 @@ aws
 parallels
   family: parallels
   kind: ssh-lease
+  category: local-vm
   targets: linux,macos,windows/normal,windows/wsl2
   features: ssh,crabbox-sync,cleanup,desktop,browser,code,workspace-checkpoint,workspace-fork,workspace-restore,provider-snapshot
   workspace: checkpoint,fork,restore,snapshot-ref
@@ -117,6 +124,7 @@ parallels
 blacksmith-testbox
   family: blacksmith
   kind: delegated-run
+  category: ci-proof-runner
   targets: linux
   features: cache-volume,run-proof,run-session,run-artifacts
   evidence: proof,artifacts,session
@@ -126,6 +134,7 @@ blacksmith-testbox
 e2b
   family: e2b
   kind: delegated-run
+  category: delegated-sandbox
   targets: linux
   features: url-bridge,run-session
   evidence: preview-url,session
@@ -134,6 +143,7 @@ e2b
 wandb
   family: wandb
   kind: delegated-run
+  category: gpu-cloud
   targets: linux
   features: -
   coordinator: never
@@ -142,6 +152,7 @@ wandb
 module-runtime-example
   family: module-runtime-example
   kind: delegated-run
+  category: -
   targets: worker-runtime
   features: module-run
   coordinator: never
@@ -149,6 +160,7 @@ module-runtime-example
 hostinger
   family: hostinger
   kind: ssh-lease
+  category: direct-cloud
   targets: linux
   features: ssh,crabbox-sync,cleanup
   coordinator: never
@@ -170,6 +182,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "provider": "hostinger",
     "family": "hostinger",
     "kind": "ssh-lease",
+    "category": "direct-cloud",
     "targets": ["linux"],
     "features": ["ssh", "crabbox-sync", "cleanup"],
     "coordinator": "never"
@@ -178,6 +191,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "provider": "blacksmith-testbox",
     "family": "blacksmith",
     "kind": "delegated-run",
+    "category": "ci-proof-runner",
     "aliases": ["blacksmith"],
     "targets": ["linux"],
     "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
@@ -202,6 +216,12 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     itself; there is no SSH lease.
   - `service-control`: Crabbox can inspect or stop a provider-owned service but
     cannot execute arbitrary run commands there.
+- `category`: checked-in provider selection category used by recommendations and
+  benchmark grouping. Examples include `brokerable-cloud`, `direct-cloud`,
+  `delegated-sandbox`, `ci-proof-runner`, `gpu-cloud`, `local-runtime`,
+  `local-vm`, `local-sandbox`, `self-hosted-virtualization`, `byo-ssh`,
+  `external-provider`, and `service-control`. Omitted from JSON when no category
+  is known; text output prints `-`.
 - `targets`: supported OS, Windows mode, or runtime category combinations, such
   as `linux`, `macos`, `windows/normal`, `windows/wsl2`, and
   `worker-runtime`. `worker-runtime` means a hosted module or Worker-isolate

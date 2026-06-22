@@ -106,6 +106,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if aws.Family != "aws" {
 		t.Fatalf("aws family=%q", aws.Family)
 	}
+	if aws.Category != "brokerable-cloud" {
+		t.Fatalf("aws category=%q", aws.Category)
+	}
 	if !containsString(aws.Targets, targetLinux) || !containsString(aws.Targets, targetMacOS) {
 		t.Fatalf("aws targets=%v", aws.Targets)
 	}
@@ -218,6 +221,9 @@ func TestProvidersCommandJSON(t *testing.T) {
 		if entry.Features == nil {
 			t.Fatalf("provider %s encoded nil features", entry.Provider)
 		}
+		if entry.Provider == "aws" && entry.Category != "brokerable-cloud" {
+			t.Fatalf("aws json category=%q", entry.Category)
+		}
 		if entry.Provider == "parallels" && !containsString(entry.Workspace, "snapshot-ref") {
 			t.Fatalf("parallels json missing workspace snapshot-ref: %#v", entry)
 		}
@@ -234,7 +240,7 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 		t.Fatalf("providers error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  features: "} {
+	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  category: brokerable-cloud\n", "  features: "} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers output missing %q:\n%s", want, text)
 		}
@@ -257,6 +263,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
 		"--kind", "delegated-run",
+		"--category", "delegated-sandbox",
 		"--target", "linux",
 		"--evidence", "preview-url",
 		"--json",
@@ -272,7 +279,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 		t.Fatal("expected delegated preview providers")
 	}
 	for _, entry := range entries {
-		if entry.Kind != ProviderKindDelegatedRun || !containsString(entry.Targets, targetLinux) || !containsString(entry.Evidence, "preview-url") {
+		if entry.Kind != ProviderKindDelegatedRun || entry.Category != "delegated-sandbox" || !containsString(entry.Targets, targetLinux) || !containsString(entry.Evidence, "preview-url") {
 			t.Fatalf("entry escaped filters: %#v", entry)
 		}
 	}
@@ -417,7 +424,7 @@ func TestProvidersRecommendCommandAppliesFilters(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
 		"recommend", "run-evidence",
-		"--kind", "delegated-run",
+		"--category", "delegated-sandbox",
 		"--evidence", "preview-url",
 		"--json",
 	})
@@ -432,7 +439,7 @@ func TestProvidersRecommendCommandAppliesFilters(t *testing.T) {
 		t.Fatal("expected filtered run-evidence recommendations")
 	}
 	for _, entry := range entries {
-		if entry.Kind != ProviderKindDelegatedRun || !containsString(entry.Evidence, "preview-url") {
+		if entry.Category != "delegated-sandbox" || !containsString(entry.Evidence, "preview-url") {
 			t.Fatalf("recommendation escaped filters: %#v", entry)
 		}
 	}
