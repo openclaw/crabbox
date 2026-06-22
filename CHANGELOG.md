@@ -5,6 +5,7 @@
 ### Added
 
 - Added direct FastAPI Cloud application and deployment inspection through `status`, `list`, and `doctor`, including configured default application support. Thanks @zozo123.
+- Added the Orgo delegated-run provider with source-bound authentication, workspace/computer lifecycle cleanup, and real command execution. Thanks @zozo123.
 
 ### Fixed
 

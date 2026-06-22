@@ -13,6 +13,7 @@ providers=",${CRABBOX_LIVE_PROVIDERS-aws,hetzner},"
 default_live_command='if [ -f go.mod ]; then test -f go.mod; elif [ -f package.json ]; then test -f package.json; else test -d .; fi; printf crabbox-live-ok; printf " pwd=%s\n" "$PWD"'
 live_command="${CRABBOX_LIVE_COMMAND:-$default_live_command}"
 config_paths=()
+trusted_config_path=""
 
 run_in_repo() {
   (cd "$repo" && "$@")
@@ -29,8 +30,21 @@ add_config_path() {
 
 if [[ -n "${CRABBOX_CONFIG:-}" ]]; then
   add_config_path "$CRABBOX_CONFIG"
+  if [[ "$CRABBOX_CONFIG" == /* ]]; then
+    trusted_config_path="$CRABBOX_CONFIG"
+  else
+    trusted_config_path="$repo/$CRABBOX_CONFIG"
+  fi
 else
-  add_config_path "$(run_in_repo "$cb" config path 2>/dev/null || true)"
+  user_config_path="$(run_in_repo "$cb" config path 2>/dev/null || true)"
+  add_config_path "$user_config_path"
+  if [[ -n "$user_config_path" ]]; then
+    if [[ "$user_config_path" == /* ]]; then
+      trusted_config_path="$user_config_path"
+    else
+      trusted_config_path="$repo/$user_config_path"
+    fi
+  fi
   add_config_path "$repo/crabbox.yaml"
   add_config_path "$repo/.crabbox.yaml"
 fi
@@ -67,6 +81,40 @@ config_value() {
     return 0
   fi
   return 1
+}
+
+config_value_path() {
+  local key_path="$1"
+  command -v ruby >/dev/null 2>&1 || return 1
+  local found=""
+  local path
+  for path in "${config_paths[@]}"; do
+    [[ -r "$path" ]] || continue
+    if ruby -ryaml -e '
+      value = ARGV[1].split(".").reduce(YAML.load_file(ARGV[0])) do |memo, key|
+        memo.is_a?(Hash) ? memo[key] : nil
+      end
+      exit 3 if value.nil? || value.to_s.empty?
+    ' "$path" "$key_path" 2>/dev/null; then
+      found="$path"
+    fi
+  done
+  [[ -n "$found" ]] || return 1
+  printf '%s' "$found"
+}
+
+trusted_config_value() {
+  local key_path="$1"
+  command -v ruby >/dev/null 2>&1 || return 1
+  local path="$trusted_config_path"
+  [[ -r "$path" ]] || return 1
+  ruby -ryaml -e '
+    value = ARGV[1].split(".").reduce(YAML.load_file(ARGV[0])) do |memo, key|
+      memo.is_a?(Hash) ? memo[key] : nil
+    end
+    exit 3 if value.nil? || value.to_s.empty?
+    print value
+  ' "$path" "$key_path" 2>/dev/null
 }
 
 capture_run() {
@@ -864,16 +912,42 @@ orgo_smoke() {
   need_tool curl
   need_tool jq
 
-  local api_key="${CRABBOX_ORGO_API_KEY:-$(config_value orgo.apiKey || true)}"
+  local configured_api_key="$(trusted_config_value orgo.apiKey || true)"
+  local configured_api_key_path=""
+  if [[ -n "$configured_api_key" ]]; then
+    configured_api_key_path="$trusted_config_path"
+  fi
+  local api_key_source="inherited"
+  local api_key="${CRABBOX_ORGO_API_KEY:-}"
+  if [[ -z "$api_key" && -n "$configured_api_key" ]]; then
+    api_key="$configured_api_key"
+    api_key_source="config"
+  fi
   api_key="${api_key:-${ORGO_API_KEY:-}}"
   if [[ -z "$api_key" ]]; then
     echo "orgo smoke requires CRABBOX_ORGO_API_KEY, ORGO_API_KEY, or orgo.apiKey" >&2
     return 2
   fi
 
-  local api_base="${CRABBOX_ORGO_API_BASE:-${ORGO_API_BASE_URL:-$(config_value orgo.apiBase || true)}}"
+  local configured_api_base="$(config_value orgo.apiBase || true)"
+  local configured_api_base_path="$(config_value_path orgo.apiBase || true)"
+  if [[ -n "$configured_api_base" && -z "${CRABBOX_ORGO_API_BASE:-}" && -z "${ORGO_API_BASE_URL:-}" ]]; then
+    if [[ "$api_key_source" != "config" || "$configured_api_key_path" != "$configured_api_base_path" ]]; then
+      echo "orgo smoke refuses configured orgo.apiBase with an inherited API key; set CRABBOX_ORGO_API_BASE or ORGO_API_BASE_URL to approve it" >&2
+      return 2
+    fi
+  fi
+  local api_base="${CRABBOX_ORGO_API_BASE:-${ORGO_API_BASE_URL:-$configured_api_base}}"
   api_base="${api_base:-https://www.orgo.ai/api}"
   api_base="${api_base%/}"
+  case "$api_base" in
+    https://*) ;;
+    http://localhost | http://localhost:* | http://localhost/* | http://127.0.0.1 | http://127.0.0.1:* | http://127.0.0.1/* | 'http://[::1]' | 'http://[::1]':* | 'http://[::1]'/*) ;;
+    *)
+      echo "orgo smoke API base must use HTTPS unless it targets localhost" >&2
+      return 2
+      ;;
+  esac
   local workspace_id="${CRABBOX_ORGO_WORKSPACE_ID:-${ORGO_WORKSPACE_ID:-$(config_value orgo.workspaceID || true)}}"
   local created_workspace=""
   local computer_id=""
@@ -918,7 +992,7 @@ orgo_smoke() {
   computer_json="$(orgo_request POST /computers "$(jq -n \
     --arg workspace_id "$workspace_id" \
     --arg name "crabbox-smoke-$suffix" \
-    '{workspace_id:$workspace_id,name:$name,os:"linux",ram:4,cpu:1,disk_size_gb:8,auto_stop_minutes:15}')")"
+    '{workspace_id:$workspace_id,name:$name,os:"linux",ram:4,cpu:1,disk_size_gb:8}')")"
   computer_id="$(printf '%s\n' "$computer_json" | jq -r '.id // empty')"
   if [[ -z "$computer_id" ]]; then
     echo "orgo smoke could not create a computer" >&2

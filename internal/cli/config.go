@@ -590,15 +590,13 @@ type WandbConfig struct {
 // OrgoConfig drives the Orgo delegated-run provider. The API key is resolved
 // from env/config only; it must not be passed on the command line.
 type OrgoConfig struct {
-	APIKey                  string
-	APIBase                 string
-	WorkspaceID             string
-	RAMGB                   int
-	CPUs                    int
-	DiskGB                  int
-	Resolution              string
-	AutoStopMinutes         int
-	AutoStopMinutesExplicit bool
+	APIKey      string
+	APIBase     string
+	WorkspaceID string
+	RAMGB       int
+	CPUs        int
+	DiskGB      int
+	Resolution  string
 }
 
 type IsloConfig struct {
@@ -2286,12 +2284,11 @@ func baseConfig() Config {
 			WakeOnSSH:      true,
 		},
 		Orgo: OrgoConfig{
-			APIBase:         "https://www.orgo.ai/api",
-			RAMGB:           4,
-			CPUs:            1,
-			DiskGB:          8,
-			Resolution:      "1280x720x24",
-			AutoStopMinutes: 15,
+			APIBase:    "https://www.orgo.ai/api",
+			RAMGB:      4,
+			CPUs:       1,
+			DiskGB:     8,
+			Resolution: "1280x720x24",
 		},
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
@@ -3113,14 +3110,13 @@ type fileWandbConfig struct {
 }
 
 type fileOrgoConfig struct {
-	APIKey          string `yaml:"apiKey,omitempty"`
-	APIBase         string `yaml:"apiBase,omitempty"`
-	WorkspaceID     string `yaml:"workspaceID,omitempty"`
-	RAMGB           int    `yaml:"ramGB,omitempty"`
-	CPUs            int    `yaml:"cpus,omitempty"`
-	DiskGB          int    `yaml:"diskGB,omitempty"`
-	Resolution      string `yaml:"resolution,omitempty"`
-	AutoStopMinutes *int   `yaml:"autoStopMinutes,omitempty"`
+	APIKey      string `yaml:"apiKey,omitempty"`
+	APIBase     string `yaml:"apiBase,omitempty"`
+	WorkspaceID string `yaml:"workspaceID,omitempty"`
+	RAMGB       int    `yaml:"ramGB,omitempty"`
+	CPUs        int    `yaml:"cpus,omitempty"`
+	DiskGB      int    `yaml:"diskGB,omitempty"`
+	Resolution  string `yaml:"resolution,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -5016,11 +5012,13 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.Orgo != nil {
-		if file.Orgo.APIKey != "" {
+		if trusted && file.Orgo.APIKey != "" {
 			cfg.Orgo.APIKey = file.Orgo.APIKey
+			cfg.credentialProvenance.orgoAPIKey = credentialSource
 		}
 		if file.Orgo.APIBase != "" {
 			cfg.Orgo.APIBase = file.Orgo.APIBase
+			cfg.credentialProvenance.orgoAPIBase = credentialSource
 		}
 		if file.Orgo.WorkspaceID != "" {
 			cfg.Orgo.WorkspaceID = file.Orgo.WorkspaceID
@@ -5036,10 +5034,6 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 		if file.Orgo.Resolution != "" {
 			cfg.Orgo.Resolution = file.Orgo.Resolution
-		}
-		if file.Orgo.AutoStopMinutes != nil {
-			cfg.Orgo.AutoStopMinutes = *file.Orgo.AutoStopMinutes
-			cfg.Orgo.AutoStopMinutesExplicit = true
 		}
 	}
 	if file.Islo != nil {
@@ -6773,17 +6767,24 @@ func applyEnv(cfg *Config) error {
 	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)
 	cfg.Wandb.DefaultImage = getenv("CRABBOX_WANDB_DEFAULT_IMAGE", getenv("WANDB_DEFAULT_IMAGE", cfg.Wandb.DefaultImage))
 	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
-	cfg.Orgo.APIKey = getenv("CRABBOX_ORGO_API_KEY", cfg.Orgo.APIKey)
-	cfg.Orgo.APIBase = getenv("CRABBOX_ORGO_API_BASE", getenv("ORGO_API_BASE_URL", cfg.Orgo.APIBase))
+	if value := os.Getenv("CRABBOX_ORGO_API_KEY"); value != "" {
+		cfg.Orgo.APIKey = value
+		cfg.credentialProvenance.orgoAPIKey = credentialSourceEnvironment
+	} else if cfg.Orgo.APIKey == "" {
+		if value := os.Getenv("ORGO_API_KEY"); value != "" {
+			cfg.Orgo.APIKey = value
+			cfg.credentialProvenance.orgoAPIKey = credentialSourceEnvironment
+		}
+	}
+	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_BASE", "ORGO_API_BASE_URL"); ok {
+		cfg.Orgo.APIBase = value
+		cfg.credentialProvenance.orgoAPIBase = credentialSourceEnvironment
+	}
 	cfg.Orgo.WorkspaceID = getenv("CRABBOX_ORGO_WORKSPACE_ID", getenv("ORGO_WORKSPACE_ID", cfg.Orgo.WorkspaceID))
 	cfg.Orgo.RAMGB = getenvInt("CRABBOX_ORGO_RAM_GB", cfg.Orgo.RAMGB)
 	cfg.Orgo.CPUs = getenvInt("CRABBOX_ORGO_CPUS", cfg.Orgo.CPUs)
 	cfg.Orgo.DiskGB = getenvInt("CRABBOX_ORGO_DISK_GB", cfg.Orgo.DiskGB)
 	cfg.Orgo.Resolution = getenv("CRABBOX_ORGO_RESOLUTION", cfg.Orgo.Resolution)
-	if os.Getenv("CRABBOX_ORGO_AUTO_STOP_MINUTES") != "" {
-		cfg.Orgo.AutoStopMinutes = getenvInt("CRABBOX_ORGO_AUTO_STOP_MINUTES", cfg.Orgo.AutoStopMinutes)
-		cfg.Orgo.AutoStopMinutesExplicit = true
-	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_ISLO_API_KEY", "ISLO_API_KEY"); ok {
 		cfg.Islo.APIKey = value
 		cfg.credentialProvenance.isloAPIKey = credentialSourceEnvironment

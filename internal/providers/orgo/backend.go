@@ -57,7 +57,7 @@ func (b *orgoBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	}
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s computer=%s workspace=%s\n", lease.LeaseID, lease.Slug, providerName, lease.Computer.ID, lease.Computer.WorkspaceID)
 	if !req.Keep {
-		fmt.Fprintf(b.rt.Stderr, "warning: orgo warmup keeps the computer until explicit stop or provider auto-stop\n")
+		fmt.Fprintf(b.rt.Stderr, "warning: orgo warmup keeps the computer until explicit stop\n")
 	}
 	total := b.now().Sub(started)
 	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
@@ -287,6 +287,9 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 		}
 		return orgoLease{}, err
 	}
+	if computer.WorkspaceID == "" {
+		computer.WorkspaceID = workspaceID
+	}
 	lease := orgoLease{LeaseID: leaseID, Slug: slug, Computer: computer, CreatedWorkspace: createdWorkspace}
 	if err := b.claimLease(repo, lease, reclaim); err != nil {
 		_ = b.deleteLease(context.Background(), client, lease)
@@ -298,14 +301,13 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 func (b *orgoBackend) createComputerRequest(workspaceID, slug string) orgoCreateComputerRequest {
 	cfg := b.cfg.Orgo
 	return orgoCreateComputerRequest{
-		WorkspaceID:     workspaceID,
-		Name:            "crabbox-" + slug,
-		OS:              "linux",
-		RAMGB:           cfg.RAMGB,
-		CPUs:            cfg.CPUs,
-		DiskGB:          cfg.DiskGB,
-		Resolution:      strings.TrimSpace(cfg.Resolution),
-		AutoStopMinutes: cfg.AutoStopMinutes,
+		WorkspaceID: workspaceID,
+		Name:        "crabbox-" + slug,
+		OS:          "linux",
+		RAMGB:       cfg.RAMGB,
+		CPUs:        cfg.CPUs,
+		DiskGB:      cfg.DiskGB,
+		Resolution:  strings.TrimSpace(cfg.Resolution),
 	}
 }
 
@@ -332,12 +334,14 @@ func (b *orgoBackend) resolveComputer(ctx context.Context, client orgoAPI, ident
 	id := strings.TrimSpace(identifier)
 	leaseID, slug := id, ""
 	createdWorkspace := ""
+	workspaceID := ""
 	if claim, ok, err := resolveLeaseClaimForProvider(id); err != nil {
 		return orgoLease{}, err
 	} else if ok {
 		leaseID = claim.LeaseID
 		slug = claim.Slug
 		createdWorkspace = strings.TrimSpace(claim.Labels[orgoCreatedWorkspaceLabel])
+		workspaceID = strings.TrimSpace(claim.Labels[orgoWorkspaceLabel])
 		if strings.TrimSpace(claim.CloudID) != "" {
 			id = claim.CloudID
 		}
@@ -345,6 +349,9 @@ func (b *orgoBackend) resolveComputer(ctx context.Context, client orgoAPI, ident
 	computer, err := client.GetComputer(ctx, id)
 	if err != nil {
 		return orgoLease{}, err
+	}
+	if computer.WorkspaceID == "" {
+		computer.WorkspaceID = workspaceID
 	}
 	if slug == "" {
 		slug = computer.Name
@@ -377,7 +384,7 @@ func (b *orgoBackend) listComputers(ctx context.Context, client orgoAPI) ([]orgo
 		if err != nil {
 			return nil, err
 		}
-		return workspace.Computers, nil
+		return orgoComputersForWorkspace(workspace), nil
 	}
 	workspaces, err := client.ListWorkspaces(ctx)
 	if err != nil {
@@ -392,9 +399,19 @@ func (b *orgoBackend) listComputers(ctx context.Context, client orgoAPI) ([]orgo
 			}
 			workspace = full
 		}
-		computers = append(computers, workspace.Computers...)
+		computers = append(computers, orgoComputersForWorkspace(workspace)...)
 	}
 	return computers, nil
+}
+
+func orgoComputersForWorkspace(workspace orgoWorkspace) []orgoComputer {
+	computers := append([]orgoComputer(nil), workspace.Computers...)
+	for i := range computers {
+		if computers[i].WorkspaceID == "" {
+			computers[i].WorkspaceID = workspace.ID
+		}
+	}
+	return computers
 }
 
 func (b *orgoBackend) buildCommand(req RunRequest) (string, error) {
@@ -516,9 +533,6 @@ func applyOrgoDefaults(cfg *Config) {
 	}
 	if strings.TrimSpace(cfg.Orgo.Resolution) == "" {
 		cfg.Orgo.Resolution = "1280x720x24"
-	}
-	if cfg.Orgo.AutoStopMinutes < 0 || (cfg.Orgo.AutoStopMinutes == 0 && !cfg.Orgo.AutoStopMinutesExplicit) {
-		cfg.Orgo.AutoStopMinutes = 15
 	}
 }
 
