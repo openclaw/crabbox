@@ -445,6 +445,31 @@ func TestModuleRunFeatureGatesScriptMode(t *testing.T) {
 	}
 }
 
+func TestRunProofFeatureGatesEmitProof(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if spec.Kind != core.ProviderKindDelegatedRun {
+			continue
+		}
+		err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{EmitProof: "/tmp/proof.md"})
+		if spec.Features.Has(core.FeatureRunProof) {
+			if err != nil {
+				t.Fatalf("%s advertises %s but rejects --emit-proof: %v", name, core.FeatureRunProof, err)
+			}
+			checked++
+			continue
+		}
+		if err == nil {
+			t.Fatalf("%s accepts --emit-proof without %s", name, core.FeatureRunProof)
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunProof)
+	}
+}
+
 func TestProviderKindRequiresBackendInterface(t *testing.T) {
 	sshLeaseProviders := 0
 	delegatedRunProviders := 0
