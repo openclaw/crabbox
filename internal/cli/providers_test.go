@@ -581,6 +581,29 @@ func TestProvidersRecommendVersionedWorkspace(t *testing.T) {
 	}
 }
 
+func TestProvidersRecommendForkableWorkspaceAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "forkable-workspace",
+		"--workspace", "fork",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend forkable-workspace error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entry count=%d entries=%#v", len(entries), entries)
+	}
+	if !containsString(entries[0].Workspace, "fork") {
+		t.Fatalf("forkable-workspace alias entry missing fork workspace capability: %#v", entries[0])
+	}
+}
+
 func TestProvidersRecommendCIPrefersProofRunner(t *testing.T) {
 	recommendations := recommendProvidersForUseCase(providerMatrix(), "ci-proof", 3)
 	if len(recommendations) == 0 {

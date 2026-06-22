@@ -440,7 +440,11 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "self-hosted", true
 	case "team", "team-cloud", "shared-cloud", "brokered-cloud", "coordinator", "coordinated-cloud", "managed-cloud":
 		return "team-cloud", true
-	case "versioned-workspace", "workspace", "workspaces", "checkpoint", "checkpoints", "snapshot", "snapshots", "fork", "forks":
+	case "versioned-workspace", "workspace", "workspaces",
+		"checkpoint", "checkpoints", "snapshot", "snapshots",
+		"fork", "forks", "forkable", "forkable-workspace",
+		"forkable-workspaces", "durable-workspace", "stateful-workspace",
+		"snapshot-fork":
 		return "versioned-workspace", true
 	case "windows", "win":
 		return "windows", true
@@ -831,6 +835,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
 	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
+	fmt.Fprintln(out, "  crabbox providers recommend forkable-workspace --workspace fork")
 }
 
 func printProviderRecommendations(out io.Writer, useCase string, entries []providerRecommendationEntry) {

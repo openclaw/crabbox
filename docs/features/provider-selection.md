@@ -21,6 +21,7 @@ crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend agent-sandbox --json
+crabbox providers recommend forkable-workspace --workspace fork
 ```
 
 The recommendation command uses the built-in provider spec and checked-in
@@ -65,7 +66,7 @@ Use these rules before adding a new adapter:
 | Native desktop/browser/code-server | `aws`, `azure`, `hetzner`, `parallels`, `local-container`, `ssh` | These advertise the interactive lease features. |
 | GPU-oriented run | `runpod`, `nvidia-brev`, cloud VM providers with GPU types, `modal`, `wandb` | Pick SSH leases for normal debugging, delegated runs for provider-owned ML execution. |
 | Worker/module execution | `cloudflare-dynamic-workers` | It advertises the `worker-runtime` target and `module-run` feature. |
-| Versioned workspace reuse | `parallels`, `local-container` | They advertise normalized checkpoint/fork/restore/snapshot-reference capabilities in `crabbox providers` and `providers recommend versioned-workspace`. |
+| Versioned workspace reuse | `parallels`, `local-container` | They advertise normalized checkpoint/fork/restore/snapshot-reference capabilities in `crabbox providers` and `providers recommend versioned-workspace`; `forkable-workspace` is an alias for the same workflow. |
 | Self-hosted virtualization | `proxmox`, `xcp-ng`, `incus`, `kubevirt`, `external`, `ssh` | Keeps private infrastructure behind explicit provider boundaries. |
 
 ## Related external systems
