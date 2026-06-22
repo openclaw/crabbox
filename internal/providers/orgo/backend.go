@@ -13,6 +13,8 @@ import (
 const (
 	orgoCreatedWorkspaceLabel = "orgo_workspace_created"
 	orgoWorkspaceLabel        = "orgo_workspace_id"
+	orgoReadyTimeout          = 5 * time.Minute
+	orgoReadyPollInterval     = 250 * time.Millisecond
 )
 
 var orgoEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -291,12 +293,49 @@ func (b *orgoBackend) createComputer(ctx context.Context, client orgoAPI, repo R
 	if computer.WorkspaceID == "" {
 		computer.WorkspaceID = workspaceID
 	}
+	computer, err = b.waitForComputerRunning(ctx, client, computer)
+	if err != nil {
+		_ = b.deleteLease(context.Background(), client, orgoLease{
+			Computer:         computer,
+			CreatedWorkspace: createdWorkspace,
+		})
+		return orgoLease{}, err
+	}
 	lease := orgoLease{LeaseID: leaseID, Slug: slug, Computer: computer, CreatedWorkspace: createdWorkspace}
 	if err := b.claimLease(repo, lease, reclaim); err != nil {
 		_ = b.deleteLease(context.Background(), client, lease)
 		return orgoLease{}, err
 	}
 	return lease, nil
+}
+
+func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI, computer orgoComputer) (orgoComputer, error) {
+	deadline := b.now().Add(orgoReadyTimeout)
+	for {
+		state := normalizeOrgoStatus(computer.Status)
+		switch state {
+		case "running":
+			return computer, nil
+		case "error", "failed", "deleted":
+			return computer, exit(5, "orgo computer %s entered %s state while starting", computer.ID, state)
+		}
+		if !b.now().Before(deadline) {
+			return computer, exit(5, "timed out waiting for orgo computer %s to become running (last state=%s)", computer.ID, state)
+		}
+		select {
+		case <-ctx.Done():
+			return computer, ctx.Err()
+		case <-time.After(orgoReadyPollInterval):
+		}
+		refreshed, err := client.GetComputer(ctx, computer.ID)
+		if err != nil {
+			return computer, err
+		}
+		if refreshed.WorkspaceID == "" {
+			refreshed.WorkspaceID = computer.WorkspaceID
+		}
+		computer = refreshed
+	}
 }
 
 func (b *orgoBackend) createComputerRequest(workspaceID, slug string) orgoCreateComputerRequest {
