@@ -1258,6 +1258,60 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 	}
 }
 
+func TestConfigShowRedactsProxmoxAPIURLUserinfo(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	config := []byte(`proxmox:
+  apiUrl: https://proxy-user:proxy-pass@pve.example.test:8006/api2/json?view=1
+  tokenId: crabbox@pve!ci
+  tokenSecret: proxmox-token-secret
+`)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	wantURL := "https://<redacted>@pve.example.test:8006/api2/json?view=1"
+	if !strings.Contains(stdout.String(), "proxmox api_url="+wantURL) {
+		t.Fatalf("config show text missing redacted Proxmox API URL: %q", stdout.String())
+	}
+	for _, secret := range []string{"proxy-user", "proxy-pass", "proxy-user:proxy-pass", "proxmox-token-secret"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show text leaked %q: %q", secret, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Proxmox struct {
+			APIURL string `json:"apiUrl"`
+			Auth   string `json:"auth"`
+		} `json:"proxmox"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Proxmox.APIURL != wantURL || got.Proxmox.Auth != "configured" {
+		t.Fatalf("unexpected Proxmox json: %#v", got.Proxmox)
+	}
+	for _, secret := range []string{"proxy-user", "proxy-pass", "proxy-user:proxy-pass", "proxmox-token-secret"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show json leaked %q: %q", secret, stdout.String())
+		}
+	}
+}
+
 func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

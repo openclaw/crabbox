@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Redacted credential-bearing Proxmox API URL userinfo from text and JSON `config show` output. Thanks @coygeek.
 - Restricted EC2 Mac Dedicated Host inventory to admins or callers with a visible attached lease, and required admin authentication for explicit brokered host pinning. Thanks @coygeek.
 - Restricted runtime-adapter service credentials to workspace lifecycle and desktop-connection routes, excluding interactive terminal attachment. Thanks @coygeek.
 - Rejected cross-origin Azure Dynamic Sessions redirects before command, environment, upload, or management bodies can be replayed. Thanks @coygeek.
