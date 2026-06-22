@@ -97,6 +97,9 @@ func TestRunBuildsSRTCommandAndStreamsOutput(t *testing.T) {
 	if result.Provider != providerName || !result.SyncDelegated || result.ExitCode != 0 || result.Command <= 0 || result.Total <= 0 {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Status != core.RunStatusSucceeded || result.ErrorKind != core.RunErrorNone {
+		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+	}
 	if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "sync_delegated=true") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -162,6 +165,9 @@ func TestRunReturnsNonZeroExitWithoutPersistentSession(t *testing.T) {
 	}
 	if result.Session != nil || result.ExitCode != 7 {
 		t.Fatalf("result=%#v", result)
+	}
+	if result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
+		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
 	}
 }
 

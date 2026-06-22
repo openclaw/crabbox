@@ -182,6 +182,13 @@ rendering when a normalized view can describe the result. If a provider has a
 lossy or native-only status shape, keep that loss inside its backend and return
 the closest `StatusView` instead of printing directly from command code.
 
+Delegated providers should also return normalized run outcome metadata in
+`RunResult`: `Status` uses `succeeded`, `failed`, `timed-out`, or `canceled`;
+`ErrorKind` uses `command-exit`, `timeout`, `canceled`, or `provider-error`.
+Call `FinalizeRunResult(result, err)` before returning once the provider knows
+the command exit code and provider error. That keeps future recommendation and
+proof surfaces provider-neutral instead of parsing provider-specific stderr.
+
 ### Optional Backend Interfaces
 
 Several capabilities are opt-in: a provider implements an extra interface only

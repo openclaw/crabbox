@@ -196,6 +196,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		SyncDelegated: true,
 		Session:       session,
 	}
+	result = finalizeRunResult(result, commandErr)
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "%s run summary sync_skipped=true command=%s total=%s exit=%d\n", providerName, result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	} else {

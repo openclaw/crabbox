@@ -290,6 +290,9 @@ func TestRunInvokesHostRunnerWithNoSync(t *testing.T) {
 	if result.ExitCode != 0 || !result.SyncDelegated {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Status != core.RunStatusSucceeded || result.ErrorKind != core.RunErrorNone {
+		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+	}
 	if runner.name != "powershell.exe" {
 		t.Fatalf("runner name=%q", runner.name)
 	}
@@ -394,6 +397,9 @@ func TestRunKeepsWorkspaceOnFailureWithKeepOnFailure(t *testing.T) {
 	}
 	if result.ExitCode != 7 {
 		t.Fatalf("ExitCode=%d", result.ExitCode)
+	}
+	if result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
+		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
 	}
 	entries, readErr := os.ReadDir(cfg.WindowsSandbox.TempRoot)
 	if readErr != nil {

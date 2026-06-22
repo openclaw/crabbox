@@ -450,6 +450,9 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Fatalf("exit=%d want 0", result.ExitCode)
 	}
+	if result.Status != core.RunStatusSucceeded || result.ErrorKind != core.RunErrorNone {
+		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+	}
 	verbs := callVerbs(runner)
 	// With --no-sync we still prepare the workdir (mkdir) before the user's command.
 	want := []string{"sbx create", "sbx exec", "sbx exec", "sbx terminate"}
@@ -554,6 +557,9 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	result, err := backend.Run(context.Background(), req)
 	if result.ExitCode != 7 {
 		t.Fatalf("exit=%d want 7", result.ExitCode)
+	}
+	if result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
+		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
 	}
 	var ee ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {

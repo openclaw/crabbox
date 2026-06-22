@@ -134,6 +134,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
 	}
+	result = finalizeRunResult(result, runErr)
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "tensorlake run summary sync_skipped=true command=%s total=%s exit=%d\n",
 			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)

@@ -55,6 +55,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		Provider:      providerName,
 		CommandText:   commandText,
 	}
+	result = core.FinalizeRunResult(result, runErr)
 	fmt.Fprintf(b.rt.Stderr, "anthropic-sandbox-runtime run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{

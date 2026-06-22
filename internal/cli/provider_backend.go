@@ -798,6 +798,8 @@ type CleanupRequest struct {
 
 type RunResult struct {
 	ExitCode      int
+	Status        RunStatus
+	ErrorKind     RunErrorKind
 	Command       time.Duration
 	Total         time.Duration
 	SyncDelegated bool
@@ -809,6 +811,64 @@ type RunResult struct {
 	LogExcerpt    string
 	ActionsURL    string
 	Artifacts     []RunArtifact
+}
+
+type RunStatus string
+
+const (
+	RunStatusSucceeded RunStatus = "succeeded"
+	RunStatusFailed    RunStatus = "failed"
+	RunStatusTimedOut  RunStatus = "timed-out"
+	RunStatusCanceled  RunStatus = "canceled"
+)
+
+type RunErrorKind string
+
+const (
+	RunErrorNone        RunErrorKind = ""
+	RunErrorCommandExit RunErrorKind = "command-exit"
+	RunErrorTimeout     RunErrorKind = "timeout"
+	RunErrorCanceled    RunErrorKind = "canceled"
+	RunErrorProvider    RunErrorKind = "provider-error"
+)
+
+func FinalizeRunResult(result RunResult, err error) RunResult {
+	if result.Status == "" {
+		result.Status = RunStatusForResult(result, err)
+	}
+	if result.ErrorKind == "" {
+		result.ErrorKind = RunErrorKindForResult(result, err)
+	}
+	return result
+}
+
+func RunStatusForResult(result RunResult, err error) RunStatus {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return RunStatusTimedOut
+	}
+	if errors.Is(err, context.Canceled) {
+		return RunStatusCanceled
+	}
+	if result.ExitCode != 0 || err != nil {
+		return RunStatusFailed
+	}
+	return RunStatusSucceeded
+}
+
+func RunErrorKindForResult(result RunResult, err error) RunErrorKind {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return RunErrorTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return RunErrorCanceled
+	}
+	if result.ExitCode != 0 {
+		return RunErrorCommandExit
+	}
+	if err != nil {
+		return RunErrorProvider
+	}
+	return RunErrorNone
 }
 
 type DelegatedRunArtifactRequest struct {
