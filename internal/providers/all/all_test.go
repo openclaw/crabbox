@@ -1,6 +1,7 @@
 package all
 
 import (
+	"io"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -320,7 +321,68 @@ func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
 }
 
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
-	providers := []string{
+	for _, name := range allBuiltInProviderNames() {
+		t.Run(name, func(t *testing.T) {
+			provider, err := core.ProviderFor(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := provider.(core.DoctorProvider); !ok {
+				t.Fatalf("%s does not implement DoctorProvider", name)
+			}
+		})
+	}
+}
+
+func TestPauseResumeFeatureRequiresPausableBackend(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		if !provider.Spec().Features.Has(core.FeaturePauseResume) {
+			continue
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises %s; add an offline conformance config for it", name, core.FeaturePauseResume)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.PausableBackend); !ok {
+			t.Fatalf("%s advertises %s but backend %T is not PausableBackend", name, core.FeaturePauseResume, backend)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeaturePauseResume)
+	}
+}
+
+func offlineConformanceConfig(provider string) (core.Config, bool) {
+	cfg := core.Config{Provider: provider}
+	switch provider {
+	case "codesandbox":
+		cfg.CodeSandbox = core.CodeSandboxConfig{
+			Workdir:                  "/project/workspace",
+			Privacy:                  "private",
+			AutomaticWakeupHTTP:      true,
+			AutomaticWakeupWebSocket: false,
+			BridgeCommand:            "node",
+			SDKPackage:               "@codesandbox/sdk@2.4.2",
+			DoctorListLimit:          1,
+			OperationTimeoutSecs:     30,
+		}
+		return cfg, true
+	case "islo":
+		return cfg, true
+	default:
+		return core.Config{}, false
+	}
+}
+
+func allBuiltInProviderNames() []string {
+	return []string{
 		"agent-sandbox",
 		"apple-container",
 		"apple-machine",
@@ -373,17 +435,6 @@ func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 		"wandb",
 		"windows-sandbox",
 		"xcp-ng",
-	}
-	for _, name := range providers {
-		t.Run(name, func(t *testing.T) {
-			provider, err := core.ProviderFor(name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, ok := provider.(core.DoctorProvider); !ok {
-				t.Fatalf("%s does not implement DoctorProvider", name)
-			}
-		})
 	}
 }
 
