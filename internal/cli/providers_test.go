@@ -413,6 +413,55 @@ func TestProvidersRecommendCommandJSONAndLimit(t *testing.T) {
 	}
 }
 
+func TestProvidersRecommendCommandAppliesFilters(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "run-evidence",
+		"--kind", "delegated-run",
+		"--evidence", "preview-url",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend filtered --json error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected filtered run-evidence recommendations")
+	}
+	for _, entry := range entries {
+		if entry.Kind != ProviderKindDelegatedRun || !containsString(entry.Evidence, "preview-url") {
+			t.Fatalf("recommendation escaped filters: %#v", entry)
+		}
+	}
+}
+
+func TestProvidersRecommendFiltersRequireUseCase(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "--kind", "ssh-lease"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("providers recommend filter without use case error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(err.Error(), "provider recommendation filters require a use case") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestProvidersRecommendFilteredNoMatch(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "run-evidence", "--workspace", "checkpoint"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("providers recommend filtered no-match error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(err.Error(), `no providers matched use case "run-evidence" with the requested filters`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestProvidersRecommendRejectsUnknownUseCase(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "moon-base"})

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"sort"
@@ -41,18 +42,21 @@ type providerMatrixFilters struct {
 	Evidence   []string
 }
 
+type providerMatrixFilterFlagValues struct {
+	Kinds      stringListFlag
+	Targets    stringListFlag
+	Features   stringListFlag
+	Workspaces stringListFlag
+	Evidence   stringListFlag
+}
+
 func (a App) providers(_ context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "recommend" {
 		return a.providerRecommendations(args[1:])
 	}
 	fs := newFlagSet("providers", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
-	var kindFilters, targetFilters, featureFilters, workspaceFilters, evidenceFilters stringListFlag
-	fs.Var(&kindFilters, "kind", "filter by provider kind; repeatable")
-	fs.Var(&targetFilters, "target", "filter by target such as linux or worker-runtime; repeatable")
-	fs.Var(&featureFilters, "feature", "filter by raw feature flag such as ssh or run-proof; repeatable")
-	fs.Var(&workspaceFilters, "workspace", "filter by normalized workspace capability; repeatable")
-	fs.Var(&evidenceFilters, "evidence", "filter by normalized evidence capability; repeatable")
+	filterFlags := registerProviderMatrixFilterFlags(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -60,13 +64,7 @@ func (a App) providers(_ context.Context, args []string) error {
 		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--target TARGET] [--feature FEATURE] [--workspace CAPABILITY] [--evidence CAPABILITY] OR crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	entries := providerMatrix()
-	filters := providerMatrixFilters{
-		Kinds:      providerFilterValues(kindFilters),
-		Targets:    providerFilterValues(targetFilters),
-		Features:   providerFilterValues(featureFilters),
-		Workspaces: providerFilterValues(workspaceFilters),
-		Evidence:   providerFilterValues(evidenceFilters),
-	}
+	filters := filterFlags.filters()
 	if err := validateProviderMatrixFilters(filters, entries); err != nil {
 		return err
 	}
@@ -88,6 +86,7 @@ func (a App) providerRecommendations(args []string) error {
 	jsonOut := fs.Bool("json", false, "print JSON")
 	limit := fs.Int("limit", 5, "maximum recommendations to print")
 	useCaseFlag := fs.String("use-case", "", "use case to optimize for")
+	filterFlags := registerProviderMatrixFilterFlags(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -112,6 +111,9 @@ func (a App) providerRecommendations(args []string) error {
 		return exit(2, "usage: crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	if useCase == "" {
+		if !providerMatrixFiltersEmpty(filterFlags.filters()) {
+			return exit(2, "provider recommendation filters require a use case")
+		}
 		if *jsonOut {
 			return json.NewEncoder(a.Stdout).Encode(providerRecommendationUseCases())
 		}
@@ -122,9 +124,18 @@ func (a App) providerRecommendations(args []string) error {
 	if !ok {
 		return exit(2, "unknown provider recommendation use case %q; try one of: %s", useCase, strings.Join(providerRecommendationUseCases(), ", "))
 	}
-	recommendations := recommendProvidersForUseCase(providerMatrix(), canonical, *limit)
+	entries := providerMatrix()
+	filters := filterFlags.filters()
+	if err := validateProviderMatrixFilters(filters, entries); err != nil {
+		return err
+	}
+	entries = filterProviderMatrix(entries, filters)
+	recommendations := recommendProvidersForUseCase(entries, canonical, *limit)
 	if len(recommendations) == 0 {
-		return exit(1, "no providers matched use case %q", canonical)
+		if providerMatrixFiltersEmpty(filters) {
+			return exit(1, "no providers matched use case %q", canonical)
+		}
+		return exit(1, "no providers matched use case %q with the requested filters", canonical)
 	}
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(recommendations)
@@ -151,6 +162,29 @@ func providerMatrix() []providerMatrixEntry {
 		})
 	}
 	return entries
+}
+
+func registerProviderMatrixFilterFlags(fs *flag.FlagSet) *providerMatrixFilterFlagValues {
+	values := &providerMatrixFilterFlagValues{}
+	fs.Var(&values.Kinds, "kind", "filter by provider kind; repeatable")
+	fs.Var(&values.Targets, "target", "filter by target such as linux or worker-runtime; repeatable")
+	fs.Var(&values.Features, "feature", "filter by raw feature flag such as ssh or run-proof; repeatable")
+	fs.Var(&values.Workspaces, "workspace", "filter by normalized workspace capability; repeatable")
+	fs.Var(&values.Evidence, "evidence", "filter by normalized evidence capability; repeatable")
+	return values
+}
+
+func (values *providerMatrixFilterFlagValues) filters() providerMatrixFilters {
+	if values == nil {
+		return providerMatrixFilters{}
+	}
+	return providerMatrixFilters{
+		Kinds:      providerFilterValues(values.Kinds),
+		Targets:    providerFilterValues(values.Targets),
+		Features:   providerFilterValues(values.Features),
+		Workspaces: providerFilterValues(values.Workspaces),
+		Evidence:   providerFilterValues(values.Evidence),
+	}
 }
 
 func providerFilterValues(values stringListFlag) []string {
