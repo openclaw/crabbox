@@ -1069,14 +1069,45 @@ func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 }
 
 func TestValidateRequestedCapabilitiesUsesProviderSpec(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Provider = "blacksmith-testbox"
-	cfg.Desktop = true
-	if err := validateRequestedCapabilities(cfg); err == nil {
-		t.Fatal("expected blacksmith desktop capability rejection")
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{
+			name: "desktop",
+			mutate: func(cfg *Config) {
+				cfg.Desktop = true
+			},
+			want: "desktop/VNC is not supported",
+		},
+		{
+			name: "browser",
+			mutate: func(cfg *Config) {
+				cfg.Browser = true
+			},
+			want: "browser provisioning is not supported",
+		},
+		{
+			name: "code",
+			mutate: func(cfg *Config) {
+				cfg.Code = true
+			},
+			want: "web code is not supported",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "blacksmith-testbox"
+			tc.mutate(&cfg)
+			err := validateRequestedCapabilities(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want %q", err, tc.want)
+			}
+		})
 	}
 
-	cfg = baseConfig()
+	cfg := baseConfig()
 	cfg.Provider = "hetzner"
 	cfg.Desktop = true
 	if err := validateRequestedCapabilities(cfg); err != nil {

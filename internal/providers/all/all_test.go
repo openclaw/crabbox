@@ -553,6 +553,46 @@ func TestRunSessionFeatureRequiresDelegatedBackendAndValidHandle(t *testing.T) {
 	}
 }
 
+func TestInteractiveLeaseFeaturesRequireSSHLeaseBackends(t *testing.T) {
+	counts := map[core.Feature]int{
+		core.FeatureDesktop: 0,
+		core.FeatureBrowser: 0,
+		core.FeatureCode:    0,
+	}
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		features := []core.Feature{core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode}
+		if !hasAnyFeature(spec.Features, features...) {
+			continue
+		}
+		if spec.Kind != core.ProviderKindSSHLease || !spec.Features.Has(core.FeatureSSH) {
+			t.Fatalf("%s advertises interactive lease features %v but kind=%s features=%v", name, features, spec.Kind, spec.Features)
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises interactive lease features %v; add an offline conformance config for it", name, spec.Features)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.SSHLeaseBackend); !ok {
+			t.Fatalf("%s advertises interactive lease features %v but backend %T is not SSHLeaseBackend", name, spec.Features, backend)
+		}
+		for _, feature := range features {
+			if spec.Features.Has(feature) {
+				counts[feature]++
+			}
+		}
+	}
+	for _, feature := range []core.Feature{core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode} {
+		if counts[feature] == 0 {
+			t.Fatalf("no providers advertised %s; conformance test is stale", feature)
+		}
+	}
+}
+
 func TestCleanupFeatureRequiresCleanupBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
