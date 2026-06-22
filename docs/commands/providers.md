@@ -92,6 +92,7 @@ crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend linux-vm --limit 8
+crabbox providers recommend reachability
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
 crabbox providers recommend versioned-workspace
@@ -115,6 +116,8 @@ Supported use cases:
 - `linux-vm`: general Linux VM or SSH-lease execution.
 - `local`: local containers, VMs, or local sandboxes.
 - `macos`: macOS targets.
+- `reachability`: providers with a bidirectional tailnet plane, provider-native
+  HTTPS endpoints, outbound-only tailnet egress, or operator-side SSH tunnels.
 - `run-evidence`: providers that can return run proof, collect artifacts,
   materialize downloads, or expose preview URLs.
 - `self-hosted`: private virtualization, external providers, and BYO SSH.

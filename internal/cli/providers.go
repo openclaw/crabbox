@@ -399,6 +399,7 @@ func providerRecommendationUseCases() []string {
 		"linux-vm",
 		"local",
 		"macos",
+		"reachability",
 		"run-evidence",
 		"self-hosted",
 		"versioned-workspace",
@@ -427,6 +428,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "local", true
 	case "mac", "macos", "darwin":
 		return "macos", true
+	case "reachability", "reachable", "network", "networking", "ports", "port", "pond":
+		return "reachability", true
 	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download", "preview", "preview-url", "url-bridge":
 		return "run-evidence", true
 	case "self-hosted", "selfhosted", "homelab", "virtualization":
@@ -481,6 +484,7 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		reasons = append(reasons, reason)
 	}
 	category := benchmarkProviderCategories[entry.Provider]
+	capabilities := providerCapabilities(entry.Provider)
 	hasTarget := func(target string) bool { return providerRecommendationHasString(entry.Targets, target) }
 	hasFeature := func(feature Feature) bool { return providerRecommendationHasFeature(entry.Features, feature) }
 	switch useCase {
@@ -634,6 +638,22 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureSnapshot) || hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) {
 			add(10, "supports provider state reuse")
 		}
+	case "reachability":
+		if capabilities.Tailscale {
+			add(45, "can join a tailnet as a bidirectional peer")
+		}
+		if capabilities.URLBridge {
+			add(55, "can expose provider-native HTTPS endpoints")
+		}
+		if capabilities.SSHMesh {
+			add(20, "can build operator-side SSH tunnels")
+		}
+		if capabilities.TailscaleEgress {
+			add(10, "can use outbound-only tailnet egress")
+		}
+		if hasFeature(FeatureBrowser) || hasFeature(FeatureCode) {
+			add(8, "can pair reachability with interactive browser or code surfaces")
+		}
 	case "run-evidence":
 		hasEvidenceCapability := hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) || hasFeature(FeatureURLBridge)
 		if !hasEvidenceCapability {
@@ -756,6 +776,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
+	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
 }

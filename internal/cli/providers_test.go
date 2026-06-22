@@ -381,7 +381,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "run-evidence", "versioned-workspace", "worker-runtime"} {
+	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "reachability", "run-evidence", "versioned-workspace", "worker-runtime"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
 		}
@@ -435,6 +435,37 @@ func TestProvidersRecommendRunEvidence(t *testing.T) {
 		if recommendation.Provider == "wandb" {
 			t.Fatalf("run-evidence should not recommend session-only providers: %#v", recommendation)
 		}
+	}
+}
+
+func TestProvidersRecommendReachabilityUsesTransportCapabilities(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "reachability", 12)
+	if len(recommendations) == 0 {
+		t.Fatal("expected reachability recommendations")
+	}
+	top := providerCapabilities(recommendations[0].Provider)
+	if !top.Tailscale && !top.URLBridge && !top.SSHMesh {
+		t.Fatalf("top reachability recommendation lacks transport capabilities: %#v", recommendations[0])
+	}
+	foundTailnet := false
+	foundURLBridge := false
+	for _, recommendation := range recommendations {
+		capabilities := providerCapabilities(recommendation.Provider)
+		if capabilities.Tailscale {
+			foundTailnet = true
+		}
+		if capabilities.URLBridge {
+			foundURLBridge = true
+		}
+		if !capabilities.Tailscale && !capabilities.TailscaleEgress && !capabilities.URLBridge && !capabilities.SSHMesh {
+			t.Fatalf("reachability recommendation lacks any transport plane: %#v", recommendation)
+		}
+	}
+	if !foundTailnet {
+		t.Fatalf("reachability recommendations should include tailnet peer providers: %#v", recommendations)
+	}
+	if !foundURLBridge {
+		t.Fatalf("reachability recommendations should include URL bridge providers: %#v", recommendations)
 	}
 }
 
