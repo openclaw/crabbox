@@ -191,5 +191,5 @@ func resultSummaryLine(results *TestResultSummary) string {
 }
 
 func failRunForTestResults(commandExitCode int, cfg ResultsConfig, results *TestResultSummary) bool {
-	return commandExitCode == 0 && cfg.FailOnFailures && results != nil && (results.Failures > 0 || results.Errors > 0)
+	return commandExitCode == 0 && cfg.FailOnFailures && results != nil && (results.Failures > 0 || results.Errors > 0 || len(results.Failed) > 0)
 }

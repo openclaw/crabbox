@@ -66,6 +66,18 @@ func TestParseJUnitResultsAcceptsReportsLargerThanFormerAutoLimit(t *testing.T) 
 	}
 }
 
+func TestParseJUnitResultsDerivesFailuresWhenSuiteCountersAreOmitted(t *testing.T) {
+	results, err := parseJUnitResults(map[string]string{
+		"junit.xml": `<testsuite name="pkg" tests="1"><testcase name="fails"><failure message="boom"/></testcase></testsuite>`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results == nil || results.Failures != 1 || len(results.Failed) != 1 {
+		t.Fatalf("testcase failure was not reflected in aggregate counters: %#v", results)
+	}
+}
+
 func TestParseMarkedFiles(t *testing.T) {
 	files := parseMarkedFiles("\n__CRABBOX_RESULT_FILE__:a.xml\n<a/>\n__CRABBOX_RESULT_FILE__:b.xml\n<b/>\n")
 	if files["a.xml"] != "<a/>" || files["b.xml"] != "<b/>" {
@@ -222,6 +234,9 @@ func TestFailRunForTestResultsIsOptInAndPreservesCommandFailure(t *testing.T) {
 	}
 	if failRunForTestResults(7, ResultsConfig{FailOnFailures: true}, failing) {
 		t.Fatal("test result policy must not replace a command failure")
+	}
+	if !failRunForTestResults(0, ResultsConfig{FailOnFailures: true}, &TestResultSummary{Failed: []TestFailure{{Name: "case"}}}) {
+		t.Fatal("parsed failed cases must fail the run even when aggregate counters are missing")
 	}
 }
 
