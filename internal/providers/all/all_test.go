@@ -441,6 +441,35 @@ func TestCleanupFeatureRequiresCleanupBackend(t *testing.T) {
 	}
 }
 
+func TestCacheVolumeFeatureGatesRequiredCacheVolumes(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		cfg.Cache.Volumes = []core.CacheVolumeConfig{{
+			Name:     "pnpm",
+			Key:      "repo-linux-node24-lock",
+			Path:     "/var/cache/crabbox/pnpm",
+			Required: true,
+		}}
+		err := core.ValidateCacheVolumesForProvider(cfg)
+		if provider.Spec().Features.Has(core.FeatureCacheVolume) {
+			if err != nil {
+				t.Fatalf("%s advertises %s but rejects required cache volume: %v", name, core.FeatureCacheVolume, err)
+			}
+			checked++
+			continue
+		}
+		if err == nil {
+			t.Fatalf("%s accepts required cache volume without %s", name, core.FeatureCacheVolume)
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureCacheVolume)
+	}
+}
+
 func TestDirectTailscaleFeatureRequiresMetadataBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {

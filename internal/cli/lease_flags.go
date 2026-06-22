@@ -163,7 +163,7 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := applyProviderConfigDefaults(cfg); err != nil {
 		return err
 	}
-	if err := validateCacheVolumesForProvider(*cfg); err != nil {
+	if err := ValidateCacheVolumesForProvider(*cfg); err != nil {
 		return err
 	}
 	if err := validateProviderTarget(*cfg); err != nil {
