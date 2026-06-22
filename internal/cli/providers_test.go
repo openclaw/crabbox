@@ -17,6 +17,8 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
 	var scaleway *providerMatrixEntry
+	var localContainer *providerMatrixEntry
+	var parallels *providerMatrixEntry
 	var moduleRuntime *providerMatrixEntry
 	for i := range entries {
 		if entries[i].Provider == "aws" {
@@ -39,6 +41,12 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "scaleway" {
 			scaleway = &entries[i]
+		}
+		if entries[i].Provider == "local-container" {
+			localContainer = &entries[i]
+		}
+		if entries[i].Provider == "parallels" {
+			parallels = &entries[i]
 		}
 		if entries[i].Provider == "module-runtime-test" {
 			moduleRuntime = &entries[i]
@@ -64,6 +72,12 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if scaleway == nil {
 		t.Fatal("scaleway provider not found")
+	}
+	if localContainer == nil {
+		t.Fatal("local-container provider not found")
+	}
+	if parallels == nil {
+		t.Fatal("parallels provider not found")
 	}
 	if aws.Kind != ProviderKindSSHLease {
 		t.Fatalf("aws kind=%q", aws.Kind)
@@ -141,6 +155,14 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if !containsString(nvidiaBrev.Aliases, "brev") || !containsString(nvidiaBrev.Aliases, "nvidia") {
 		t.Fatalf("nvidia-brev aliases=%v", nvidiaBrev.Aliases)
 	}
+	if !containsString(localContainer.Workspace, "checkpoint") || !containsString(localContainer.Workspace, "fork") {
+		t.Fatalf("local-container workspace=%v", localContainer.Workspace)
+	}
+	for _, capability := range []string{"checkpoint", "fork", "restore", "snapshot-ref"} {
+		if !containsString(parallels.Workspace, capability) {
+			t.Fatalf("parallels workspace=%v missing %s", parallels.Workspace, capability)
+		}
+	}
 }
 
 func TestProvidersCommandJSON(t *testing.T) {
@@ -159,6 +181,9 @@ func TestProvidersCommandJSON(t *testing.T) {
 	for _, entry := range entries {
 		if entry.Features == nil {
 			t.Fatalf("provider %s encoded nil features", entry.Provider)
+		}
+		if entry.Provider == "parallels" && !containsString(entry.Workspace, "snapshot-ref") {
+			t.Fatalf("parallels json missing workspace snapshot-ref: %#v", entry)
 		}
 	}
 }
@@ -181,6 +206,9 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	if !strings.Contains(text, "incus\n") {
 		t.Fatalf("providers output missing incus:\n%s", text)
 	}
+	if !strings.Contains(text, "parallels\n") || !strings.Contains(text, "  workspace: checkpoint,fork,restore,snapshot-ref\n") {
+		t.Fatalf("providers output missing workspace contract:\n%s", text)
+	}
 }
 
 func TestProvidersRecommendListsUseCases(t *testing.T) {
@@ -190,9 +218,29 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "worker-runtime"} {
+	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "versioned-workspace", "worker-runtime"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestProvidersRecommendVersionedWorkspace(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "versioned-workspace", 3)
+	if len(recommendations) == 0 {
+		t.Fatal("expected versioned-workspace recommendations")
+	}
+	if recommendations[0].Provider != "parallels" {
+		t.Fatalf("top versioned-workspace provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
+	}
+	for _, capability := range []string{"checkpoint", "fork", "restore", "snapshot-ref"} {
+		if !containsString(recommendations[0].Workspace, capability) {
+			t.Fatalf("top recommendation workspace=%v missing %s", recommendations[0].Workspace, capability)
+		}
+	}
+	for _, recommendation := range recommendations {
+		if len(recommendation.Workspace) == 0 {
+			t.Fatalf("versioned-workspace recommendation lacks workspace capabilities: %#v", recommendation)
 		}
 	}
 }

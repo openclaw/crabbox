@@ -445,6 +445,20 @@ Do not set the checkpoint flags for plain SSH access alone. Generic
 Git/archive/log checkpoints are core-owned and work even when a provider
 advertises no native checkpoint features.
 
+`crabbox providers --json` also exposes a normalized `workspace` array derived
+from these feature flags:
+
+| Feature | Workspace capability |
+| --- | --- |
+| `FeatureCheckpoint` | `checkpoint` |
+| `FeatureFork` | `fork` |
+| `FeatureRestore` | `restore` |
+| `FeatureSnapshot` | `snapshot-ref` |
+
+Use that normalized field for workflow selection and external comparisons. Keep
+provider-specific snapshot names, CRDs, image IDs, and fork engines behind the
+provider adapter.
+
 ## Flags and config
 
 Provider flags are registered before parsing because Go's `flag` package rejects

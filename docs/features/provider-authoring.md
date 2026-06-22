@@ -206,6 +206,14 @@ repo metadata, logs, and artifacts. Set the checkpoint-related flags only when
 you can preserve or recreate state the generic ledger cannot, such as sandbox
 filesystem state, VM snapshot IDs, or copy-on-write forks.
 
+The provider matrix normalizes those flags into a `workspace` capability array:
+`checkpoint`, `fork`, `restore`, and `snapshot-ref`. New providers should make
+that normalized contract true instead of adding provider-specific command
+branches. For example, a future forkable microVM runtime should declare the same
+capabilities as any other provider that can checkpoint and fork workspace state;
+its Firecracker, Kubernetes, or image identifiers belong inside the adapter and
+checkpoint metadata.
+
 ## Step 5. Own Provider-Specific Flags
 
 Go's `flag` package rejects unknown flags, so provider flags must be registered

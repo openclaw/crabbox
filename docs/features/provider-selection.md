@@ -60,6 +60,7 @@ Use these rules before adding a new adapter:
 | Native desktop/browser/code-server | `aws`, `azure`, `hetzner`, `parallels`, `local-container`, `ssh` | These advertise the interactive lease features. |
 | GPU-oriented run | `runpod`, `nvidia-brev`, cloud VM providers with GPU types, `modal`, `wandb` | Pick SSH leases for normal debugging, delegated runs for provider-owned ML execution. |
 | Worker/module execution | `cloudflare-dynamic-workers` | It advertises the `worker-runtime` target and `module-run` feature. |
+| Versioned workspace reuse | `parallels`, `local-container` | They advertise normalized checkpoint/fork/restore/snapshot-reference capabilities in `crabbox providers` and `providers recommend versioned-workspace`. |
 | Self-hosted virtualization | `proxmox`, `xcp-ng`, `incus`, `kubevirt`, `external`, `ssh` | Keeps private infrastructure behind explicit provider boundaries. |
 
 ## Related external systems
@@ -88,7 +89,8 @@ If Crabbox does not support Mitos directly, the user-facing behavior should be:
 - no Mitos-specific branching in provider-neutral code;
 - a clear note that Mitos is observed but unsupported;
 - reusable capability work for snapshot, fork, durable workspace, MCP, preview
-  URLs, run proof, and delegated artifacts.
+  URLs, run proof, and delegated artifacts. `crabbox providers --json` exposes
+  normalized workspace capability names so this stays provider-neutral.
 
 That preserves optionality. If Mitos later has real demand and the contract is
 stable enough, it can arrive as either a delegated-run provider or an SSH-lease

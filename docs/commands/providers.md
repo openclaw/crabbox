@@ -10,6 +10,7 @@ crabbox providers
 crabbox providers --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
+crabbox providers recommend versioned-workspace
 ```
 
 ## Flags
@@ -31,6 +32,7 @@ It is selection guidance, not a readiness check; run `crabbox doctor --provider
 crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend linux-vm --limit 8
+crabbox providers recommend versioned-workspace
 crabbox providers recommend worker-runtime --json
 ```
 
@@ -49,6 +51,8 @@ Supported use cases:
 - `local`: local containers, VMs, or local sandboxes.
 - `macos`: macOS targets.
 - `self-hosted`: private virtualization, external providers, and BYO SSH.
+- `versioned-workspace`: providers with native checkpoint, fork, restore, or
+  snapshot-reference capabilities.
 - `windows`: native Windows and WSL2 targets.
 - `worker-runtime`: Worker/module-runtime execution.
 
@@ -69,6 +73,14 @@ aws
   targets: linux,windows/normal,windows/wsl2,macos
   features: ssh,crabbox-sync,cleanup,desktop,browser,code
   coordinator: supported
+
+parallels
+  family: parallels
+  kind: ssh-lease
+  targets: linux,macos,windows/normal,windows/wsl2
+  features: ssh,crabbox-sync,cleanup,desktop,browser,code,workspace-checkpoint,workspace-fork,workspace-restore,provider-snapshot
+  workspace: checkpoint,fork,restore,snapshot-ref
+  coordinator: never
 
 wandb
   family: wandb
@@ -114,12 +126,13 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "coordinator": "never"
   },
   {
-    "provider": "aws",
-    "family": "aws",
+    "provider": "parallels",
+    "family": "parallels",
     "kind": "ssh-lease",
-    "targets": ["linux", "windows/normal", "windows/wsl2", "macos"],
-    "features": ["ssh", "crabbox-sync", "cleanup", "desktop", "browser", "code"],
-    "coordinator": "supported"
+    "targets": ["linux", "macos", "windows/normal", "windows/wsl2"],
+    "features": ["ssh", "crabbox-sync", "cleanup", "desktop", "browser", "code", "workspace-checkpoint", "workspace-fork", "workspace-restore", "provider-snapshot"],
+    "workspace": ["checkpoint", "fork", "restore", "snapshot-ref"],
+    "coordinator": "never"
   }
 ]
 ```
@@ -150,6 +163,10 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
   `module-run`. `module-run` means delegated `crabbox run --script` or
   `--script-stdin` source-module execution; it does not imply POSIX command
   argv, archive sync, ports, or SSH access.
+- `workspace`: normalized versioned-workspace capabilities derived from feature
+  flags. Possible values are `checkpoint`, `fork`, `restore`, and
+  `snapshot-ref`. The field is omitted when a provider does not advertise any
+  native workspace capabilities.
 - `coordinator`: whether the provider can route leases through the broker.
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.

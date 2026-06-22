@@ -16,17 +16,19 @@ type providerMatrixEntry struct {
 	Kind        ProviderKind `json:"kind"`
 	Targets     []string     `json:"targets"`
 	Features    []Feature    `json:"features"`
+	Workspace   []string     `json:"workspace,omitempty"`
 	Coordinator string       `json:"coordinator"`
 }
 
 type providerRecommendationEntry struct {
-	Provider string       `json:"provider"`
-	Kind     ProviderKind `json:"kind"`
-	Category string       `json:"category,omitempty"`
-	Targets  []string     `json:"targets"`
-	Features []Feature    `json:"features"`
-	Score    int          `json:"score"`
-	Reasons  []string     `json:"reasons"`
+	Provider  string       `json:"provider"`
+	Kind      ProviderKind `json:"kind"`
+	Category  string       `json:"category,omitempty"`
+	Targets   []string     `json:"targets"`
+	Features  []Feature    `json:"features"`
+	Workspace []string     `json:"workspace,omitempty"`
+	Score     int          `json:"score"`
+	Reasons   []string     `json:"reasons"`
 }
 
 func (a App) providers(_ context.Context, args []string) error {
@@ -116,6 +118,7 @@ func providerMatrix() []providerMatrixEntry {
 			Kind:        spec.Kind,
 			Targets:     formatProviderTargets(spec.Targets),
 			Features:    append(FeatureSet{}, spec.Features...),
+			Workspace:   workspaceCapabilitiesForFeatures(spec.Features),
 			Coordinator: string(spec.Coordinator),
 		})
 	}
@@ -133,6 +136,7 @@ func providerRecommendationUseCases() []string {
 		"local",
 		"macos",
 		"self-hosted",
+		"versioned-workspace",
 		"windows",
 		"worker-runtime",
 	}
@@ -158,6 +162,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "macos", true
 	case "self-hosted", "selfhosted", "homelab", "virtualization":
 		return "self-hosted", true
+	case "versioned-workspace", "workspace", "workspaces", "checkpoint", "checkpoints", "snapshot", "snapshots", "fork", "forks":
+		return "versioned-workspace", true
 	case "windows", "win":
 		return "windows", true
 	case "worker", "worker-runtime", "module", "module-run":
@@ -175,13 +181,14 @@ func recommendProvidersForUseCase(entries []providerMatrixEntry, useCase string,
 			continue
 		}
 		recommendations = append(recommendations, providerRecommendationEntry{
-			Provider: entry.Provider,
-			Kind:     entry.Kind,
-			Category: benchmarkProviderCategories[entry.Provider],
-			Targets:  append([]string(nil), entry.Targets...),
-			Features: append([]Feature(nil), entry.Features...),
-			Score:    score,
-			Reasons:  reasons,
+			Provider:  entry.Provider,
+			Kind:      entry.Kind,
+			Category:  benchmarkProviderCategories[entry.Provider],
+			Targets:   append([]string(nil), entry.Targets...),
+			Features:  append([]Feature(nil), entry.Features...),
+			Workspace: append([]string(nil), entry.Workspace...),
+			Score:     score,
+			Reasons:   reasons,
 		})
 	}
 	sort.SliceStable(recommendations, func(i, j int) bool {
@@ -345,6 +352,29 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureCleanup) {
 			add(10, "can clean up owned resources")
 		}
+	case "versioned-workspace":
+		hasWorkspaceCapability := hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) || hasFeature(FeatureRestore) || hasFeature(FeatureSnapshot)
+		if !hasWorkspaceCapability {
+			break
+		}
+		if hasFeature(FeatureCheckpoint) {
+			add(45, "can create provider-aware checkpoints")
+		}
+		if hasFeature(FeatureFork) {
+			add(45, "can fork a new workspace from checkpoint state")
+		}
+		if hasFeature(FeatureRestore) {
+			add(30, "can restore an existing workspace to checkpoint state")
+		}
+		if hasFeature(FeatureSnapshot) {
+			add(20, "exposes provider-native snapshot identifiers")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(10, "can seed checkpointable state from the current checkout")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(8, "can clean up provider-owned workspace resources")
+		}
 	case "windows":
 		if hasTarget(targetWindows + "/" + WindowsModeNormal) {
 			add(80, "supports native Windows")
@@ -407,6 +437,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
+	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
 }
 
 func printProviderRecommendations(out io.Writer, useCase string, entries []providerRecommendationEntry) {
@@ -418,6 +449,9 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 		fmt.Fprintf(out, "  category: %s\n", blank(entry.Category, "-"))
 		fmt.Fprintf(out, "  targets: %s\n", commaOrDash(entry.Targets))
 		fmt.Fprintf(out, "  features: %s\n", commaOrDash(featuresToStrings(entry.Features)))
+		if len(entry.Workspace) > 0 {
+			fmt.Fprintf(out, "  workspace: %s\n", commaOrDash(entry.Workspace))
+		}
 		fmt.Fprintf(out, "  reasons: %s\n", strings.Join(entry.Reasons, "; "))
 	}
 }
@@ -429,6 +463,9 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 		fmt.Fprintf(out, "  kind: %s\n", entry.Kind)
 		fmt.Fprintf(out, "  targets: %s\n", commaOrDash(entry.Targets))
 		fmt.Fprintf(out, "  features: %s\n", commaOrDash(featuresToStrings(entry.Features)))
+		if len(entry.Workspace) > 0 {
+			fmt.Fprintf(out, "  workspace: %s\n", commaOrDash(entry.Workspace))
+		}
 		fmt.Fprintf(out, "  coordinator: %s\n", blank(entry.Coordinator, "never"))
 		if len(entry.Aliases) > 0 {
 			fmt.Fprintf(out, "  aliases: %s\n", strings.Join(entry.Aliases, ","))
@@ -448,6 +485,20 @@ func formatProviderTargets(targets []TargetSpec) []string {
 		}
 		out = append(out, value)
 	}
+	return out
+}
+
+func workspaceCapabilitiesForFeatures(features []Feature) []string {
+	var out []string
+	add := func(feature Feature, capability string) {
+		if FeatureSet(features).Has(feature) {
+			out = append(out, capability)
+		}
+	}
+	add(FeatureCheckpoint, "checkpoint")
+	add(FeatureFork, "fork")
+	add(FeatureRestore, "restore")
+	add(FeatureSnapshot, "snapshot-ref")
 	return out
 }
 
