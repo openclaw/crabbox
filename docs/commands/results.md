@@ -26,6 +26,7 @@ On the command line:
 ```sh
 crabbox run --junit junit.xml -- <command...>
 crabbox run --junit junit.xml,reports/junit.xml -- <command...>
+crabbox run --junit junit.xml --fail-on-test-failures -- <command...>
 ```
 
 In repo config:
@@ -35,6 +36,7 @@ results:
   junit:
     - junit.xml
     - reports/junit.xml
+  failOnFailures: true
 ```
 
 Or let `run` scan common JUnit locations after the command:
@@ -48,13 +50,22 @@ results:
   auto: true
 ```
 
-You can also set `CRABBOX_RESULTS_JUNIT` (comma-separated paths) in the
+You can also set `CRABBOX_RESULTS_JUNIT` (comma-separated paths),
+`CRABBOX_RESULTS_AUTO`, and `CRABBOX_RESULTS_FAIL_ON_FAILURES` in the
 environment.
 
 After the command finishes, the CLI reads each remote file from the workdir,
 parses the JUnit XML, and sends only the parsed summary to the coordinator.
 Raw XML is never stored. Multiple JUnit files are merged into one summary, so a
-multi-report setup still produces a single result record.
+multi-report setup still produces a single result record. Bad files produce
+named warnings without erasing valid summaries. Auto discovery accepts files
+up to 16 MiB and 64 MiB total; it skips larger reports explicitly instead of
+truncating them into invalid XML.
+
+By default, result parsing does not replace the wrapped command's exit status.
+With `--fail-on-test-failures` or `results.failOnFailures: true`, a command that
+exits zero but produces parsed JUnit failures or errors becomes a failed run
+with exit code 1. An existing command failure keeps its original exit code.
 
 ## Output
 

@@ -2,21 +2,26 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
 
 const (
-	resultFileMarker    = "__CRABBOX_RESULT_FILE__:"
-	remoteResultsMarker = "crabbox/results-start"
-	autoJUnitMaxFiles   = 50
-	autoJUnitMaxBytes   = 1 << 20
-	autoJUnitSniffBytes = 4 << 10
+	resultFileMarker           = "__CRABBOX_RESULT_FILE__:"
+	resultWarningMarker        = "__CRABBOX_RESULT_WARNING__:"
+	remoteResultsMarker        = "crabbox/results-start"
+	autoJUnitMaxFiles          = 50
+	autoJUnitMaxBytes          = 16 << 20
+	autoJUnitMaxTotalBytes     = 64 << 20
+	autoJUnitSniffBytes        = 4 << 10
+	autoJUnitFailureSniffBytes = 1 << 20
 )
 
 func collectRemoteJUnitResults(ctx context.Context, target SSHTarget, workdir string, cfg ResultsConfig, autoMarker string) (*TestResultSummary, error) {
 	paths := appendUniqueStrings(nil, cfg.JUnit...)
 	files := map[string]string{}
+	var warnings []error
 	if len(paths) > 0 {
 		remote := remoteReadResultFiles(workdir, paths)
 		if isWindowsNativeTarget(target) {
@@ -29,15 +34,16 @@ func collectRemoteJUnitResults(ctx context.Context, target SSHTarget, workdir st
 		files = parseMarkedFiles(out)
 	}
 	if cfg.Auto {
-		autoFiles, err := collectRemoteJUnitResultFilesAuto(ctx, target, workdir, autoMarker)
+		autoFiles, autoWarnings, err := collectRemoteJUnitResultFilesAuto(ctx, target, workdir, autoMarker)
 		if err != nil {
 			return nil, err
 		}
+		warnings = append(warnings, autoWarnings...)
 		seen := map[string]bool{}
 		for name := range files {
 			seen[normalizeResultPath(workdir, name)] = true
 		}
-		for name, data := range filterAutoJUnitFiles(autoFiles) {
+		for name, data := range autoFiles {
 			key := normalizeResultPath(workdir, name)
 			if !seen[key] {
 				files[name] = data
@@ -46,21 +52,24 @@ func collectRemoteJUnitResults(ctx context.Context, target SSHTarget, workdir st
 		}
 	}
 	if len(files) == 0 {
-		return nil, nil
+		return nil, errors.Join(warnings...)
 	}
-	return parseJUnitResults(files)
+	summary, parseErr := parseJUnitResults(files)
+	warnings = append(warnings, parseErr)
+	return summary, errors.Join(warnings...)
 }
 
-func collectRemoteJUnitResultFilesAuto(ctx context.Context, target SSHTarget, workdir, marker string) (map[string]string, error) {
+func collectRemoteJUnitResultFilesAuto(ctx context.Context, target SSHTarget, workdir, marker string) (map[string]string, []error, error) {
 	remote := remoteFindJUnitResultFiles(workdir, marker)
 	if isWindowsNativeTarget(target) {
 		remote = windowsRemoteFindJUnitResultFiles(workdir, marker)
 	}
 	out, err := runSSHOutput(ctx, target, remote)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return parseMarkedFiles(out), nil
+	files, warnings := parseMarkedResultOutput(out)
+	return files, warnings, nil
 }
 
 func remoteReadResultFiles(workdir string, paths []string) string {
@@ -88,7 +97,7 @@ func remoteFindJUnitResultFiles(workdir, marker string) string {
 	b.WriteString("cd ")
 	b.WriteString(shellQuote(workdir))
 	b.WriteString(" && { ")
-	b.WriteString("tmp=$(mktemp) || exit 0; trap 'rm -f \"$tmp\"' EXIT; count=0; ")
+	b.WriteString("tmp=$(mktemp) || exit 0; trap 'rm -f \"$tmp\"' EXIT; count=0; total=0; ")
 	if strings.TrimSpace(marker) != "" {
 		b.WriteString("marker=.crabbox/results-start; if git_marker=$(git rev-parse --git-path ")
 		b.WriteString(shellQuote(marker))
@@ -99,10 +108,10 @@ func remoteFindJUnitResultFiles(workdir, marker string) string {
 	if strings.TrimSpace(marker) != "" {
 		b.WriteString(`if [ "$marker" -nt "$f" ]; then continue; fi; `)
 	}
-	b.WriteString(fmt.Sprintf(`dd if="$f" bs=%d count=1 2>/dev/null | grep -Eq '<testsuites?' || continue; has_failed=0; dd if="$f" bs=%d count=1 2>/dev/null | grep -Eq '<(failure|error)([[:space:]>])' && has_failed=1; if [ "$want_failed" != "$has_failed" ]; then continue; fi; count=$((count + 1)); if [ "$count" -gt %d ]; then break 2; fi; `, autoJUnitSniffBytes, autoJUnitMaxBytes, autoJUnitMaxFiles))
+	b.WriteString(fmt.Sprintf(`dd if="$f" bs=%d count=1 2>/dev/null | grep -Eq '<testsuites?' || continue; has_failed=0; dd if="$f" bs=%d count=1 2>/dev/null | grep -Eq '<(failure|error)([[:space:]>])' && has_failed=1; if [ "$want_failed" != "$has_failed" ]; then continue; fi; count=$((count + 1)); if [ "$count" -gt %d ]; then break 2; fi; size=$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]') || continue; case "$size" in ''|*[!0-9]*) continue;; esac; if [ "$size" -gt %d ]; then printf '\n%s%%s\treport exceeds %d-byte per-file limit\n' "$f"; continue; fi; if [ $((total + size)) -gt %d ]; then printf '\n%s%%s\treport exceeds remaining %d-byte aggregate limit\n' "$f"; continue; fi; total=$((total + size)); `, autoJUnitSniffBytes, autoJUnitFailureSniffBytes, autoJUnitMaxFiles, autoJUnitMaxBytes, resultWarningMarker, autoJUnitMaxBytes, autoJUnitMaxTotalBytes, resultWarningMarker, autoJUnitMaxTotalBytes))
 	b.WriteString(`printf '\n`)
 	b.WriteString(resultFileMarker)
-	b.WriteString(fmt.Sprintf(`%%s\n' "$f"; dd if="$f" bs=%d count=1 2>/dev/null; done < "$tmp"; done; }`, autoJUnitMaxBytes))
+	b.WriteString(`%s\n' "$f"; cat "$f"; done < "$tmp"; done; }`)
 	return b.String()
 }
 
@@ -137,7 +146,13 @@ func normalizeResultPath(workdir, name string) string {
 }
 
 func parseMarkedFiles(output string) map[string]string {
+	files, _ := parseMarkedResultOutput(output)
+	return files
+}
+
+func parseMarkedResultOutput(output string) (map[string]string, []error) {
 	files := map[string]string{}
+	var warnings []error
 	current := ""
 	var b strings.Builder
 	flush := func() {
@@ -152,13 +167,20 @@ func parseMarkedFiles(output string) map[string]string {
 			current = strings.TrimSpace(name)
 			continue
 		}
+		if warning, ok := strings.CutPrefix(line, resultWarningMarker); ok {
+			flush()
+			current = ""
+			name, reason, _ := strings.Cut(strings.TrimSpace(warning), "\t")
+			warnings = append(warnings, fmt.Errorf("skip junit %s: %s", name, reason))
+			continue
+		}
 		if current != "" {
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}
 	}
 	flush()
-	return files
+	return files, warnings
 }
 
 func resultSummaryLine(results *TestResultSummary) string {
@@ -166,4 +188,8 @@ func resultSummaryLine(results *TestResultSummary) string {
 		return ""
 	}
 	return fmt.Sprintf("test results files=%d tests=%d failures=%d errors=%d skipped=%d", len(results.Files), results.Tests, results.Failures, results.Errors, results.Skipped)
+}
+
+func failRunForTestResults(commandExitCode int, cfg ResultsConfig, results *TestResultSummary) bool {
+	return commandExitCode == 0 && cfg.FailOnFailures && results != nil && (results.Failures > 0 || results.Errors > 0)
 }

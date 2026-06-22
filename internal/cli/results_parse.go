@@ -2,8 +2,10 @@ package cli
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -54,20 +56,40 @@ func parseJUnitResults(files map[string]string) (*TestResultSummary, error) {
 		Files:  make([]string, 0, len(files)),
 		Failed: []TestFailure{},
 	}
-	for name, data := range files {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var parseErrors []error
+	for _, name := range names {
+		data := files[name]
 		trimmed := strings.TrimSpace(data)
 		if trimmed == "" {
 			continue
 		}
-		summary.Files = append(summary.Files, name)
-		if err := addJUnitFile(summary, strings.NewReader(trimmed)); err != nil {
-			return nil, fmt.Errorf("parse junit %s: %w", name, err)
+		fileSummary := &TestResultSummary{Format: "junit", Failed: []TestFailure{}}
+		if err := addJUnitFile(fileSummary, strings.NewReader(trimmed)); err != nil {
+			parseErrors = append(parseErrors, fmt.Errorf("skip junit %s: %w", name, err))
+			continue
 		}
+		mergeJUnitSummary(summary, fileSummary)
+		summary.Files = append(summary.Files, name)
 	}
 	if len(summary.Files) == 0 {
-		return nil, nil
+		return nil, errors.Join(parseErrors...)
 	}
-	return summary, nil
+	return summary, errors.Join(parseErrors...)
+}
+
+func mergeJUnitSummary(dst, src *TestResultSummary) {
+	dst.Suites += src.Suites
+	dst.Tests += src.Tests
+	dst.Failures += src.Failures
+	dst.Errors += src.Errors
+	dst.Skipped += src.Skipped
+	dst.TimeSeconds += src.TimeSeconds
+	dst.Failed = append(dst.Failed, src.Failed...)
 }
 
 func addJUnitFile(summary *TestResultSummary, input io.Reader) error {

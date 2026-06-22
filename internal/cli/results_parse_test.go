@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -39,10 +40,46 @@ func TestParseJUnitResultsInitializesEmptyFailureList(t *testing.T) {
 	}
 }
 
+func TestParseJUnitResultsPreservesValidFilesWhenAnotherIsMalformed(t *testing.T) {
+	results, err := parseJUnitResults(map[string]string{
+		"good.xml": `<testsuite name="pkg" tests="1" failures="1"><testcase name="fails"><failure message="boom"/></testcase></testsuite>`,
+		"bad.xml":  `<testsuite name="partial"><testcase`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "skip junit bad.xml") {
+		t.Fatalf("error=%v, want named malformed-file warning", err)
+	}
+	if results == nil || results.Tests != 1 || results.Failures != 1 || len(results.Files) != 1 || results.Files[0] != "good.xml" {
+		t.Fatalf("valid results were not preserved: %#v", results)
+	}
+}
+
+func TestParseJUnitResultsAcceptsReportsLargerThanFormerAutoLimit(t *testing.T) {
+	padding := strings.Repeat("x", (1<<20)+1)
+	results, err := parseJUnitResults(map[string]string{
+		"large.xml": `<testsuite name="large" tests="1"><testcase name="ok"/><system-out>` + padding + `</system-out></testsuite>`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results == nil || results.Tests != 1 || len(results.Files) != 1 {
+		t.Fatalf("large report was not parsed: %#v", results)
+	}
+}
+
 func TestParseMarkedFiles(t *testing.T) {
 	files := parseMarkedFiles("\n__CRABBOX_RESULT_FILE__:a.xml\n<a/>\n__CRABBOX_RESULT_FILE__:b.xml\n<b/>\n")
 	if files["a.xml"] != "<a/>" || files["b.xml"] != "<b/>" {
 		t.Fatalf("files=%#v", files)
+	}
+}
+
+func TestParseMarkedResultOutputReportsBoundedAutoSkips(t *testing.T) {
+	files, warnings := parseMarkedResultOutput("\n" + resultFileMarker + "good.xml\n<testsuite/>\n" + resultWarningMarker + "huge.xml\treport exceeds 16777216-byte per-file limit\n")
+	if files["good.xml"] != "<testsuite/>" {
+		t.Fatalf("files=%#v", files)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Error(), "skip junit huge.xml") {
+		t.Fatalf("warnings=%#v", warnings)
 	}
 }
 
@@ -91,6 +128,10 @@ func TestRemoteFindJUnitResultFiles(t *testing.T) {
 		"if [ \"$want_failed\" != \"$has_failed\" ]",
 		"count=$((count + 1))",
 		"bs=1048576 count=1",
+		fmt.Sprintf(`if [ "$size" -gt %d ]`, autoJUnitMaxBytes),
+		fmt.Sprintf(`if [ $((total + size)) -gt %d ]`, autoJUnitMaxTotalBytes),
+		"cat \"$f\"",
+		resultWarningMarker,
 		"done; }",
 		resultFileMarker,
 	} {
@@ -139,7 +180,9 @@ func TestWindowsRemoteFindJUnitResultFilesPrintsPathMarker(t *testing.T) {
 		"if (-not (Test-Path -LiteralPath $marker)) { return }",
 		"$markerTime = (Get-Item -LiteralPath $marker).LastWriteTimeUtc",
 		"$_.LastWriteTimeUtc -ge $markerTime",
-		"$maxBytes = 1048576",
+		fmt.Sprintf("$maxBytes = %d", autoJUnitMaxBytes),
+		fmt.Sprintf("$maxTotalBytes = %d", autoJUnitMaxTotalBytes),
+		fmt.Sprintf("$failureSniffBytes = %d", autoJUnitFailureSniffBytes),
 		"$sniffBytes = 4096",
 		"$maxFiles = 50",
 		"$prefix -notmatch '<testsuites?'",
@@ -148,6 +191,8 @@ func TestWindowsRemoteFindJUnitResultFilesPrintsPathMarker(t *testing.T) {
 		"$hasFailed = $body -match '<(failure|error)(\\s|>)'",
 		"$hasFailed -ne $wantFailed",
 		"$count++",
+		"$totalBytes += $fs.Length",
+		resultWarningMarker,
 		resultFileMarker + `$($file.FullName)`,
 		"[System.IO.File]::OpenRead($file.FullName)",
 		"[System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)",
@@ -164,6 +209,19 @@ func TestWindowsRemoteFindJUnitResultFilesPrintsPathMarker(t *testing.T) {
 		if strings.Contains(got, blocked) {
 			t.Fatalf("windows auto junit command should cap raw file reads after sniffing, found %q:\n%s", blocked, got)
 		}
+	}
+}
+
+func TestFailRunForTestResultsIsOptInAndPreservesCommandFailure(t *testing.T) {
+	failing := &TestResultSummary{Failures: 1}
+	if failRunForTestResults(0, ResultsConfig{}, failing) {
+		t.Fatal("test failures changed exit status without opt-in")
+	}
+	if !failRunForTestResults(0, ResultsConfig{FailOnFailures: true}, failing) {
+		t.Fatal("opt-in test failure did not change successful command status")
+	}
+	if failRunForTestResults(7, ResultsConfig{FailOnFailures: true}, failing) {
+		t.Fatal("test result policy must not replace a command failure")
 	}
 }
 

@@ -26,6 +26,7 @@ Per run, on the command line:
 crabbox run --id cbx_... --junit junit.xml -- go test ./...
 crabbox run --id cbx_... --junit junit.xml,reports/junit.xml -- go test ./...
 crabbox run --id cbx_... --results-auto -- go test ./...
+crabbox run --id cbx_... --junit junit.xml --fail-on-test-failures -- ./test-wrapper
 ```
 
 Per repo, in any [config file](configuration.md):
@@ -33,13 +34,15 @@ Per repo, in any [config file](configuration.md):
 ```yaml
 results:
   auto: true
+  failOnFailures: true
   junit:
     - junit.xml
     - reports/junit.xml
 ```
 
-Or through the environment: `CRABBOX_RESULTS_JUNIT` (comma-separated paths) and
-`CRABBOX_RESULTS_AUTO` (boolean). The `--junit` path also flows through
+Or through the environment: `CRABBOX_RESULTS_JUNIT` (comma-separated paths),
+`CRABBOX_RESULTS_AUTO` (boolean), and `CRABBOX_RESULTS_FAIL_ON_FAILURES`
+(boolean). The `--junit` path also flows through
 [`crabbox job run`](jobs.md) (from a job's `junit:` list) and
 [`crabbox capsule replay`](capsules.md).
 
@@ -62,13 +65,23 @@ reports from an earlier run:
 3. Each candidate must be newer than the marker, must sniff as JUnit XML (the
    leading bytes contain `<testsuite`/`<testsuites`), and reports that contain
    failures or errors are prioritized over passing ones.
-4. Reads are capped before parsing: at most 50 files, each truncated to 1 MiB.
+4. Collection considers at most 50 files, accepts reports up to 16 MiB each,
+   and transfers at most 64 MiB total. Reports outside those bounds are skipped
+   with a warning naming the file; accepted reports are never truncated.
 
 Explicit `--junit` files and auto-discovered files are merged (de-duplicated by
 normalized workdir-relative path), so a multi-report setup still produces one
-result record. The CLI prints a one-line summary to stderr and includes the
-parsed summary in the run's `finish` payload; a collection failure is a
-non-fatal warning and does not fail the run.
+result record. A malformed, partial, or oversized report emits a named warning
+without discarding summaries parsed from other valid files. The CLI prints a
+one-line summary to stderr and includes every valid parsed summary in the run's
+`finish` payload.
+
+Result collection warnings remain non-fatal. To make parsed test failures affect
+the run status, opt in with `--fail-on-test-failures`,
+`results.failOnFailures: true`, or `CRABBOX_RESULTS_FAIL_ON_FAILURES=true`.
+When the wrapped command exits zero and a valid report contains failures or
+errors, Crabbox records and exits with code 1 after collecting requested
+artifacts. An existing non-zero command exit remains authoritative.
 
 ## The parsed summary
 

@@ -379,7 +379,10 @@ Add `--junit <path>` (comma-separated) or configure `results.junit` to attach
 JUnit XML summaries to the run record. Use `--results-auto` or `results.auto:
 true` to scan common remote JUnit XML paths written by the command; auto
 discovery skips dependency and Git directories and bounds remote file reads
-before parsing. [`crabbox results <run-id>`](results.md) then prints failed
+before parsing. Malformed or over-limit reports produce named warnings while
+valid reports remain attached. Add `--fail-on-test-failures` (or configure
+`results.failOnFailures: true`) to exit 1 when a successful command writes
+JUnit failures or errors. [`crabbox results <run-id>`](results.md) then prints failed
 tests without reading the raw log. See [test results](../features/test-results.md).
 
 ## Output and observability
@@ -533,6 +536,7 @@ Run-specific flags:
 --preflight-tools <comma-separated tool names>
 --junit <comma-separated remote XML paths>
 --results-auto
+--fail-on-test-failures
 --artifact-glob <glob>       Repeatable.
 --require-artifact <glob>    Repeatable.
 --download <remote=local>    Repeatable.

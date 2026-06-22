@@ -132,7 +132,9 @@ crabbox run --id swift-crab \
 ```
 
 Test results are stored as structured summaries when `--junit`,
-`--results-auto`, `results.junit`, or `results.auto` is configured.
+`--results-auto`, `results.junit`, or `results.auto` is configured. Optional
+`--fail-on-test-failures` / `results.failOnFailures` policy makes parsed JUnit
+failures turn an otherwise successful command into a failed run.
 
 Successful Blacksmith runs additionally support `--emit-proof <path>`: when
 requested, Crabbox writes bounded stdout/stderr, timing, metadata, and the

@@ -992,6 +992,7 @@ existing-lease reuse rules.
 ```yaml
 results:
   auto: false
+  failOnFailures: false
   junit:
     - junit.xml
     - reports/junit.xml

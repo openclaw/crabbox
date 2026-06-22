@@ -209,6 +209,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	freshSync := fs.Bool("fresh-sync", false, "alias for --full-resync")
 	junitResults := fs.String("junit", "", "comma-separated remote JUnit XML paths to record")
 	resultsAuto := fs.Bool("results-auto", false, "scan common remote JUnit XML paths after the command")
+	failOnTestFailures := fs.Bool("fail-on-test-failures", false, "exit non-zero when collected JUnit reports contain failures or errors")
 	captureStdout := fs.String("capture-stdout", "", "write remote stdout to a local file instead of the terminal")
 	captureStderr := fs.String("capture-stderr", "", "write remote stderr to a local file instead of the terminal")
 	captureOnFail := fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit")
@@ -413,6 +414,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if flagWasSet(fs, "results-auto") {
 		cfg.Results.Auto = *resultsAuto
+	}
+	if flagWasSet(fs, "fail-on-test-failures") {
+		cfg.Results.FailOnFailures = *failOnTestFailures
 	}
 	repo, err := findRepo()
 	if err != nil {
@@ -1474,8 +1478,9 @@ afterSync:
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results, resultsMarker)
 		if err != nil {
-			fmt.Fprintf(a.Stderr, "warning: collect test results failed: %v\n", err)
-		} else if line := resultSummaryLine(results); line != "" {
+			fmt.Fprintf(a.Stderr, "warning: collect test results incomplete: %v\n", err)
+		}
+		if line := resultSummaryLine(results); line != "" {
 			fmt.Fprintln(a.Stderr, line)
 		}
 	}
@@ -1513,6 +1518,12 @@ afterSync:
 			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 		}
 	}
+	var testResultsFailure error
+	if failRunForTestResults(code, cfg.Results, results) {
+		code = 1
+		testResultsFailure = ExitError{Code: code, Message: fmt.Sprintf("JUnit results contain %d failures and %d errors", results.Failures, results.Errors)}
+		fmt.Fprintf(a.Stderr, "test results policy: failing run because collected JUnit reports contain failures=%d errors=%d\n", results.Failures, results.Errors)
+	}
 	total := time.Since(timings.started)
 	classification := FailureClassification{}
 	if code != 0 {
@@ -1521,6 +1532,9 @@ afterSync:
 			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
 		}
 		classification = ClassifyRunFailure(code, classificationLog, timings.commandPhases)
+		if testResultsFailure != nil {
+			classification = FailureClassification{BlockedStage: "test", RetryLikely: "false"}
+		}
 		timings.blockedStage = classification.BlockedStage
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
@@ -1618,6 +1632,9 @@ afterSync:
 		printFailureTail(a.Stderr, "stderr", stderrTail, *captureStderr)
 		if artifactFailure != nil {
 			return recordFailure(artifactFailure)
+		}
+		if testResultsFailure != nil {
+			return recordFailure(testResultsFailure)
 		}
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
 	}

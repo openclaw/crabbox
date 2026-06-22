@@ -1016,8 +1016,9 @@ type StaticConfig struct {
 }
 
 type ResultsConfig struct {
-	JUnit []string
-	Auto  bool
+	JUnit          []string
+	Auto           bool
+	FailOnFailures bool
 }
 
 type CacheConfig struct {
@@ -3498,8 +3499,9 @@ type fileStaticConfig struct {
 }
 
 type fileResultsConfig struct {
-	JUnit []string `yaml:"junit,omitempty"`
-	Auto  *bool    `yaml:"auto,omitempty"`
+	JUnit          []string `yaml:"junit,omitempty"`
+	Auto           *bool    `yaml:"auto,omitempty"`
+	FailOnFailures *bool    `yaml:"failOnFailures,omitempty"`
 }
 
 type fileCacheConfig struct {
@@ -5699,6 +5701,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Results.Auto != nil {
 			cfg.Results.Auto = *file.Results.Auto
 		}
+		if file.Results.FailOnFailures != nil {
+			cfg.Results.FailOnFailures = *file.Results.FailOnFailures
+		}
 	}
 	if file.Cache != nil {
 		if file.Cache.Pnpm != nil {
@@ -7144,6 +7149,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := getenvBool("CRABBOX_RESULTS_AUTO"); ok {
 		cfg.Results.Auto = value
+	}
+	if value, ok := getenvBool("CRABBOX_RESULTS_FAIL_ON_FAILURES"); ok {
+		cfg.Results.FailOnFailures = value
 	}
 	if value, ok := getenvBool("CRABBOX_CACHE_PNPM"); ok {
 		cfg.Cache.Pnpm = value
