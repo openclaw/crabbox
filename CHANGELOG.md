@@ -12,6 +12,7 @@
 - Added the Scaleway direct Linux SSH-lease provider with per-lease IAM keys, claim-backed lifecycle recovery, and guarded live smoke coverage. Thanks @coygeek.
 - Added reusable W&B run-session handles and cleanup commands for `--keep --lease-output`.
 - Added Linux CPU capacity to lease telemetry and portal status details.
+
 ### Changed
 
 - Consolidated lifecycle cleanup, credential routing, artifact boundaries, and run-history recovery guarantees across the README and operational documentation.
