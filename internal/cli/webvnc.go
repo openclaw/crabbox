@@ -676,8 +676,7 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 		for _, prefix := range []string{"password:", "username:", "webvnc:", "opened:"} {
 			if strings.HasPrefix(trimmed, prefix) {
 				if (prefix == "webvnc:" || prefix == "opened:") &&
-					!strings.Contains(trimmed, "password=") &&
-					!strings.Contains(trimmed, "username=") {
+					!webVNCOutputURLHasCredentials(strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))) {
 					break
 				}
 				ending := ""
@@ -694,6 +693,14 @@ func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 		return 0, err
 	}
 	return len(data), nil
+}
+
+func webVNCOutputURLHasCredentials(value string) bool {
+	if strings.Contains(value, "password=") || strings.Contains(value, "username=") {
+		return true
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.User != nil
 }
 
 func (a App) webVNCDaemonStatusCommand(args []string) error {

@@ -89,15 +89,15 @@ func TestWebVNCURLs(t *testing.T) {
 func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
 	var output bytes.Buffer
 	writer := webVNCRedactingWriter{Writer: &output}
-	input := "bridge: connected\nwebvnc: https://portal.example/vnc#password=secret\npassword: secret\nusername: crabbox\nwebvnc: run crabbox webvnc --id demo\nwebvnc: https://portal.example/vnc\n"
+	input := "bridge: connected\nwebvnc: https://portal.example/vnc#password=secret\npassword: secret\nusername: crabbox\nwebvnc: https://broker-user:broker-secret@portal.example/vnc\nopened: https://other-user:other-secret@portal.example/vnc\nwebvnc: run crabbox webvnc --id demo\nwebvnc: https://portal.example/vnc\n"
 	if _, err := writer.Write([]byte(input)); err != nil {
 		t.Fatal(err)
 	}
 	got := output.String()
-	if strings.Contains(got, "secret") || strings.Contains(got, "#password=") {
+	if strings.Contains(got, "secret") || strings.Contains(got, "broker-user") || strings.Contains(got, "other-user") || strings.Contains(got, "#password=") {
 		t.Fatalf("credential leaked: %q", got)
 	}
-	if !strings.Contains(got, "bridge: connected") || strings.Count(got, "[redacted]") != 3 {
+	if !strings.Contains(got, "bridge: connected") || strings.Count(got, "[redacted]") != 5 {
 		t.Fatalf("unexpected redacted output: %q", got)
 	}
 	if !strings.Contains(got, "webvnc: run crabbox webvnc --id demo") || !strings.Contains(got, "webvnc: https://portal.example/vnc") {
