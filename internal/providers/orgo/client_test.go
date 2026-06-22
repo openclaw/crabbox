@@ -106,6 +106,26 @@ func TestGetWorkspaceReadsOfficialDesktopsField(t *testing.T) {
 	}
 }
 
+func TestListWorkspacesReadsLiveProjectsEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/workspaces" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"projects":[{"id":"workspace_test","name":"Test"}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: server.Client()}
+	workspaces, err := client.ListWorkspaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaces) != 1 || workspaces[0].ID != "workspace_test" {
+		t.Fatalf("workspaces=%#v", workspaces)
+	}
+}
+
 func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "http://api.example.test")
