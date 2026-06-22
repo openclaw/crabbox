@@ -477,6 +477,9 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("Port $port");
     expect(got).toContain("Subsystem sftp internal-sftp");
     expect(got).toContain("HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key");
+    expect(got).toContain('Start-Process -FilePath "C:\\Program Files\\OpenSSH\\ssh-keygen.exe"');
+    expect(got).toContain('-q -t ed25519 -N "" -f "');
+    expect(got).toContain("$hostKey + '\"'");
     expect(got).toContain('ssh-keygen.exe" -A');
     expect(got).toContain("sshd failed to start with generated sshd_config");
     expect(got).toContain("crabbox-sshd-$port");

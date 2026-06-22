@@ -243,8 +243,8 @@ Set-Content -Encoding ASCII -LiteralPath $sshdConfigPath -Value (($globalLines +
 & "C:\Program Files\OpenSSH\ssh-keygen.exe" -A
 $hostKey = "$env:ProgramData\ssh\ssh_host_ed25519_key"
 if (-not (Test-Path -LiteralPath $hostKey)) {
-  & "C:\Program Files\OpenSSH\ssh-keygen.exe" -q -t ed25519 -N '""' -f $hostKey
-  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hostKey)) {
+  $hostKeyProcess = Start-Process -FilePath "C:\Program Files\OpenSSH\ssh-keygen.exe" -ArgumentList ('-q -t ed25519 -N "" -f "' + $hostKey + '"') -Wait -PassThru -NoNewWindow
+  if ($hostKeyProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $hostKey)) {
     throw "failed to generate OpenSSH host key"
   }
 }
