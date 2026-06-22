@@ -32,12 +32,17 @@ func (a App) status(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	if err := requireLeaseID(*id, "crabbox status --id <lease-id-or-slug>", cfg); err != nil {
-		return err
-	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
+	}
+	// Service-control providers may resolve status from configured application
+	// context instead of a lease ID. Let the provider own that contract and its
+	// missing-context diagnostic.
+	if backend.Spec().Kind != ProviderKindServiceControl {
+		if err := requireLeaseID(*id, "crabbox status --id <lease-id-or-slug>", cfg); err != nil {
+			return err
+		}
 	}
 	statusBackend, isStatus := backend.(interface {
 		Status(context.Context, StatusRequest) (statusView, error)

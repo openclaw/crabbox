@@ -25,6 +25,34 @@ func TestStatusWaitDoneTreatsTerminalStatesAsDone(t *testing.T) {
 	}
 }
 
+func TestStatusAllowsServiceControlProviderToResolveConfiguredID(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	testServiceControlStatusHook = func(req StatusRequest) (StatusView, error) {
+		if req.ID != "" {
+			t.Fatalf("status ID = %q, want provider-resolved empty ID", req.ID)
+		}
+		return StatusView{
+			ID:       "configured-app",
+			Provider: "service-control-test",
+			TargetOS: targetLinux,
+			State:    "ready",
+			Ready:    true,
+		}, nil
+	}
+	defer func() { testServiceControlStatusHook = nil }()
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.status(context.Background(), []string{"--provider", "service-control-test"}); err != nil {
+		t.Fatalf("status returned error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "configured-app") {
+		t.Fatalf("status output = %q, want configured app", stdout.String())
+	}
+}
+
 func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 	err := statusWaitTerminalError("cbx_123", statusView{State: "stopped"})
 	var exitErr ExitError

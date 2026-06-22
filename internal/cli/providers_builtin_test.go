@@ -2126,6 +2126,15 @@ type testServiceControlBackend struct {
 
 func (b testServiceControlBackend) Spec() ProviderSpec { return b.spec }
 
+var testServiceControlStatusHook func(StatusRequest) (StatusView, error)
+
+func (b testServiceControlBackend) Status(_ context.Context, req StatusRequest) (StatusView, error) {
+	if testServiceControlStatusHook != nil {
+		return testServiceControlStatusHook(req)
+	}
+	return StatusView{}, exit(2, "service-control-test status unavailable")
+}
+
 func (b testDelegatedBackend) Spec() ProviderSpec { return b.spec }
 func (b testDelegatedBackend) Warmup(context.Context, WarmupRequest) error {
 	return nil
