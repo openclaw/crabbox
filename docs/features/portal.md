@@ -167,7 +167,9 @@ header. The share page (`/share`) adds or removes individual users, sets
 org-wide access (`use`, `manage`, or off), or clears sharing entirely; it can
 also render embedded (`?embed=1`) inside the VNC viewer's share dialog. A
 `use` share can open visible lease pages and portal bridges; a `manage` share
-can also change sharing and use the matching stop or deregistration action.
+can also view or change the sharing roster and use the matching stop or
+deregistration action. Lease API responses shown to `use` recipients omit the
+sharing roster.
 For adapter-managed registrations, that matching action deletes the external
 workspace rather than only removing coordinator metadata.
 

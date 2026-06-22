@@ -108,7 +108,7 @@ GET  /v1/leases/{id-or-slug}     resolves only if visible to the caller
 POST /v1/leases/{id}/heartbeat   owner, manage share, or admin
 POST /v1/leases/{id}/release     owner, manage share, or admin
 POST /v1/leases/{id}/tailscale   owner, manage share, or admin
-PUT/DELETE /v1/leases/{id}/share owner, manage share, or admin
+GET/PUT/DELETE /v1/leases/{id}/share owner, manage share, or admin
 GET  /v1/runs and logs/events    own runs only
 GET  /v1/usage                   own usage only
 GET  /v1/pool                    admin token only
@@ -134,6 +134,10 @@ shared bearer or admin token. Roles:
 - **use** — see the lease and open visible portal bridges (WebVNC, code).
 - **manage** — everything `use` allows, plus heartbeat/touch the lease, update
   non-secret Tailscale metadata, change sharing, and stop the lease.
+
+Ordinary lease detail and list responses omit the sharing roster for `use`
+recipients. Listing or changing the roster requires owner, admin, or `manage`
+access.
 
 ```sh
 crabbox share --id swift-crab --user alice@example.com           # default role: use

@@ -7577,9 +7577,27 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/v1/leases/blue-lobster", { headers: friendHeaders }),
     );
     expect(friendLease.status).toBe(200);
-    await expect(friendLease.json()).resolves.toMatchObject({
-      lease: { id: "cbx_000000000001", share: { users: { "friend@example.com": "use" } } },
+    const friendLeaseBody = (await friendLease.json()) as {
+      lease: { id: string; slug: string; share?: unknown };
+    };
+    expect(friendLeaseBody.lease).toMatchObject({
+      id: "cbx_000000000001",
+      slug: "blue-lobster",
     });
+    expect(friendLeaseBody.lease.share).toBeUndefined();
+
+    const friendLeases = await fleet.fetch(
+      request("GET", "/v1/leases", { headers: friendHeaders }),
+    );
+    expect(friendLeases.status).toBe(200);
+    const friendLeaseList = (await friendLeases.json()) as { leases: Array<{ share?: unknown }> };
+    expect(friendLeaseList.leases).toHaveLength(1);
+    expect(friendLeaseList.leases[0]?.share).toBeUndefined();
+
+    const friendShare = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/share", { headers: friendHeaders }),
+    );
+    expect(friendShare.status).toBe(403);
 
     const friendTicket = await fleet.fetch(
       request("POST", "/v1/leases/blue-lobster/webvnc/ticket", {
@@ -7637,6 +7655,14 @@ describe("fleet lease identity and idle", () => {
     );
     expect(orgShared.status).toBe(200);
     await expect(orgShared.json()).resolves.toMatchObject({
+      share: { users: { "friend@example.com": "use" }, org: "manage" },
+    });
+
+    const friendManageShare = await fleet.fetch(
+      request("GET", "/v1/leases/blue-lobster/share", { headers: friendHeaders }),
+    );
+    expect(friendManageShare.status).toBe(200);
+    await expect(friendManageShare.json()).resolves.toMatchObject({
       share: { users: { "friend@example.com": "use" }, org: "manage" },
     });
 

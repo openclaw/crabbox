@@ -35,6 +35,10 @@ The lease can be addressed by its canonical id (`cbx_…`) or its slug, either v
 When you pass neither `--user` nor `--org` (or pass `--list`), the command prints
 the current sharing instead of changing it.
 
+Only the lease owner, an admin, or a user with `manage` access can list or change
+sharing. A user with `use` access can see the lease but cannot enumerate its
+sharing roster.
+
 ## Roles
 
 ```text

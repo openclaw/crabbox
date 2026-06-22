@@ -3594,8 +3594,9 @@ export class FleetCoordinator {
       return await this.registerLease(request, leaseID);
     }
     if (method === "GET" && action === undefined) {
-      const lease = await this.resolveLease(leaseID, request, false);
-      return lease ? json({ lease }) : notFound();
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
+      return lease ? json({ lease: this.leaseForRequest(lease, request, admin) }) : notFound();
     }
     if (method === "POST" && action === "heartbeat") {
       return this.heartbeatLease(request, leaseID);
@@ -4318,15 +4319,16 @@ export class FleetCoordinator {
 
   private async shareLeaseRoute(request: Request, leaseID: string): Promise<Response> {
     const method = request.method.toUpperCase();
-    const lease = await this.resolveLease(leaseID, request, isAdminRequest(request));
+    const admin = isAdminRequest(request);
+    const lease = await this.resolveLease(leaseID, request, admin);
     if (!lease) {
       return notFound();
     }
+    if (!this.leaseManageableByRequest(lease, request, admin)) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
+    }
     if (method === "GET") {
       return json({ leaseID: lease.id, share: normalizedLeaseShare(lease.share) });
-    }
-    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
-      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     if (method === "PUT") {
       const input = await readJson<Partial<LeaseShare>>(request);
@@ -8224,10 +8226,11 @@ export class FleetCoordinator {
   }
 
   private async listLeases(request: Request): Promise<Response> {
-    const leases = isAdminRequest(request)
+    const admin = isAdminRequest(request);
+    const leases = admin
       ? this.filterLeases(await this.leaseRecords(), request)
       : this.filterLeasesForRequest(await this.leaseRecords(), request);
-    return json({ leases });
+    return json({ leases: leases.map((lease) => this.leaseForRequest(lease, request, admin)) });
   }
 
   private async adminLeases(request: Request): Promise<Response> {
@@ -10300,6 +10303,15 @@ export class FleetCoordinator {
   private leaseManageableByRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
     const role = this.leaseAccessRole(lease, request, admin);
     return role === "owner" || role === "manage";
+  }
+
+  private leaseForRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
+    if (!lease.share || this.leaseManageableByRequest(lease, request, admin)) {
+      return lease;
+    }
+    const visible = { ...lease };
+    delete visible.share;
+    return visible;
   }
 
   private leaseAccessRole(
