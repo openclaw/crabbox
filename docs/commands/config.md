@@ -42,6 +42,7 @@ it reports.
 
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 
+- Credential-bearing URL userinfo is replaced with `<redacted>@`.
 - Broker tokens, Cloudflare/Proxmox/Upstash tokens: `configured` or `missing`.
 - Cloudflare Access auth: `missing`, `service-token` (client ID + secret),
   `token` (service token), `service-token+token`, or `incomplete` (only one of
