@@ -1177,6 +1177,43 @@ func TestRejectDelegatedSyncOptionsAllowsModuleRunScriptOnly(t *testing.T) {
 	}
 }
 
+func TestValidateRunSessionForSpec(t *testing.T) {
+	spec := ProviderSpec{Name: "e2b", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureRunSession}}
+	valid := RunResult{Session: &RunSessionHandle{
+		Provider:       "e2b",
+		LeaseID:        "cbx_test",
+		CleanupCommand: "crabbox stop --provider e2b cbx_test",
+	}}
+	if err := ValidateRunSessionForSpec(spec, RunResult{}); err != nil {
+		t.Fatalf("nil session should be allowed: %v", err)
+	}
+	if err := ValidateRunSessionForSpec(spec, valid); err != nil {
+		t.Fatalf("valid session rejected: %v", err)
+	}
+	if err := ValidateRunSessionForSpec(ProviderSpec{Name: "plain"}, valid); err == nil || !strings.Contains(err.Error(), "does not advertise run-session") {
+		t.Fatalf("missing feature err=%v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*RunSessionHandle)
+		wantErr string
+	}{
+		{name: "provider", mutate: func(s *RunSessionHandle) { s.Provider = " " }, wantErr: "without provider"},
+		{name: "lease id", mutate: func(s *RunSessionHandle) { s.LeaseID = "" }, wantErr: "without lease id"},
+		{name: "cleanup", mutate: func(s *RunSessionHandle) { s.CleanupCommand = "\t" }, wantErr: "without cleanup command"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session := *valid.Session
+			tc.mutate(&session)
+			err := ValidateRunSessionForSpec(spec, RunResult{Session: &session})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err=%v want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
 	fs := newFlagSet("test", io.Discard)

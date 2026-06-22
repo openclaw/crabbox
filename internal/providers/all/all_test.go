@@ -510,6 +510,49 @@ func TestProviderKindRequiresBackendInterface(t *testing.T) {
 	}
 }
 
+func TestRunSessionFeatureRequiresDelegatedBackendAndValidHandle(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if !spec.Features.Has(core.FeatureRunSession) {
+			if err := core.ValidateRunSessionForSpec(spec, core.RunResult{Session: &core.RunSessionHandle{
+				Provider:       name,
+				LeaseID:        "cbx_test",
+				CleanupCommand: "crabbox stop --provider " + name + " cbx_test",
+			}}); err == nil {
+				t.Fatalf("%s accepts a run session without %s", name, core.FeatureRunSession)
+			}
+			continue
+		}
+		if spec.Kind != core.ProviderKindDelegatedRun {
+			t.Fatalf("%s advertises %s but kind=%s", name, core.FeatureRunSession, spec.Kind)
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises %s; add an offline conformance config for it", name, core.FeatureRunSession)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.DelegatedRunBackend); !ok {
+			t.Fatalf("%s advertises %s but backend %T is not DelegatedRunBackend", name, core.FeatureRunSession, backend)
+		}
+		if err := core.ValidateRunSessionForSpec(spec, core.RunResult{Session: &core.RunSessionHandle{
+			Provider:       name,
+			LeaseID:        "cbx_test",
+			CleanupCommand: "crabbox stop --provider " + name + " cbx_test",
+		}}); err != nil {
+			t.Fatalf("%s rejects a valid %s handle: %v", name, core.FeatureRunSession, err)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunSession)
+	}
+}
+
 func TestCleanupFeatureRequiresCleanupBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {

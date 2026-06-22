@@ -592,6 +592,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
 		}
+		if sessionErr := ValidateRunSessionForSpec(backend.Spec(), result); sessionErr != nil {
+			if runErr == nil {
+				return sessionErr
+			}
+			fmt.Fprintf(a.Stderr, "warning: ignoring invalid delegated run session: %v\n", sessionErr)
+			result.Session = nil
+		}
 		if err := writeRunLeaseOutput(strings.TrimSpace(*leaseOutput), result.Session); err != nil {
 			if runErr == nil {
 				return err

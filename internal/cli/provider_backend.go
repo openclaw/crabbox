@@ -833,6 +833,27 @@ type RunSessionHandle struct {
 	CleanupCommand string `json:"cleanupCommand"`
 }
 
+func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
+	session := result.Session
+	if session == nil {
+		return nil
+	}
+	provider := blank(strings.TrimSpace(spec.Name), "provider")
+	if !featureSetHas(spec.Features, FeatureRunSession) {
+		return exit(2, "%s returned a run session but does not advertise %s", provider, FeatureRunSession)
+	}
+	if strings.TrimSpace(session.Provider) == "" {
+		return exit(2, "%s returned a run session without provider", provider)
+	}
+	if strings.TrimSpace(session.LeaseID) == "" {
+		return exit(2, "%s returned a run session without lease id", provider)
+	}
+	if strings.TrimSpace(session.CleanupCommand) == "" {
+		return exit(2, "%s returned a run session without cleanup command", provider)
+	}
+	return nil
+}
+
 type LeaseTarget struct {
 	Server      Server
 	SSH         SSHTarget
