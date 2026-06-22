@@ -754,13 +754,13 @@ func TestPauseResumeFeatureRequiresPausableBackend(t *testing.T) {
 }
 
 func TestWorkspaceFeaturesRequireNativeCheckpointProvider(t *testing.T) {
-	checked := 0
 	workspaceFeatures := []core.Feature{
 		core.FeatureCheckpoint,
 		core.FeatureFork,
 		core.FeatureRestore,
 		core.FeatureSnapshot,
 	}
+	counts := make(map[core.Feature]int, len(workspaceFeatures))
 	for _, name := range allBuiltInProviderNames() {
 		provider := mustProvider(t, name)
 		spec := provider.Spec()
@@ -775,10 +775,16 @@ func TestWorkspaceFeaturesRequireNativeCheckpointProvider(t *testing.T) {
 				t.Fatalf("%s advertises %s but does not implement NativeCheckpointForkProvider", name, core.FeatureFork)
 			}
 		}
-		checked++
+		for _, feature := range workspaceFeatures {
+			if spec.Features.Has(feature) {
+				counts[feature]++
+			}
+		}
 	}
-	if checked == 0 {
-		t.Fatal("no providers advertised workspace features; conformance test is stale")
+	for _, feature := range workspaceFeatures {
+		if counts[feature] == 0 {
+			t.Fatalf("no providers advertised %s; conformance test is stale", feature)
+		}
 	}
 }
 
