@@ -8,6 +8,8 @@ does not contact any cloud, check credentials, or query quota. Use
 ```sh
 crabbox providers
 crabbox providers --json
+crabbox providers --kind delegated-run --evidence preview-url
+crabbox providers --target linux --workspace checkpoint --workspace fork --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend run-evidence
@@ -17,9 +19,27 @@ crabbox providers recommend versioned-workspace
 ## Flags
 
 - `--json`: emit the matrix as a JSON array instead of grouped text.
+- `--kind <kind>`: keep providers with this driver kind. Repeatable. Current
+  values include `ssh-lease`, `delegated-run`, and `service-control`.
+- `--target <target>`: keep providers that advertise this target, such as
+  `linux`, `macos`, `windows/normal`, `windows/wsl2`, or `worker-runtime`.
+  Repeatable.
+- `--feature <feature>`: keep providers that advertise this raw feature flag,
+  such as `ssh`, `crabbox-sync`, `run-proof`, or `url-bridge`. Repeatable.
+- `--workspace <capability>`: keep providers that advertise this normalized
+  workspace capability, such as `checkpoint`, `fork`, `restore`, or
+  `snapshot-ref`. Repeatable.
+- `--evidence <capability>`: keep providers that advertise this normalized
+  evidence capability, such as `proof`, `artifacts`, `downloads`,
+  `preview-url`, or `session`. Repeatable.
+
+Repeated filters are combined with AND semantics. Comma-separated values are also
+accepted, so `--workspace checkpoint,fork` means the same thing as passing
+`--workspace checkpoint --workspace fork`. Filter values are checked against the
+compiled provider matrix; unknown values fail before printing partial output.
 
 The matrix form takes no positional arguments. Use `providers recommend` for
-workflow-oriented selection guidance.
+workflow-oriented ranked selection guidance.
 
 ## `providers recommend`
 

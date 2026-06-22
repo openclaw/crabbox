@@ -253,6 +253,63 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	}
 }
 
+func TestProvidersCommandFiltersJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"--kind", "delegated-run",
+		"--target", "linux",
+		"--evidence", "preview-url",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers filtered --json error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerMatrixEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected delegated preview providers")
+	}
+	for _, entry := range entries {
+		if entry.Kind != ProviderKindDelegatedRun || !containsString(entry.Targets, targetLinux) || !containsString(entry.Evidence, "preview-url") {
+			t.Fatalf("entry escaped filters: %#v", entry)
+		}
+	}
+}
+
+func TestProvidersCommandFiltersRequireAllCapabilities(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"--workspace", "checkpoint,fork",
+	})
+	if err != nil {
+		t.Fatalf("providers workspace filter error=%v stderr=%q", err, stderr.String())
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "local-container\n") {
+		t.Fatalf("workspace filter should include local-container:\n%s", text)
+	}
+	if !strings.Contains(text, "parallels\n") {
+		t.Fatalf("workspace filter should include parallels:\n%s", text)
+	}
+	if strings.Contains(text, "blacksmith-testbox\n") {
+		t.Fatalf("workspace filter should exclude providers without workspace capabilities:\n%s", text)
+	}
+}
+
+func TestProvidersCommandRejectsUnknownFilter(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"--evidence", "memory-fork"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("providers unknown filter error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(err.Error(), `unknown provider evidence filter "memory-fork"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestProvidersRecommendListsUseCases(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend"})
