@@ -359,6 +359,44 @@ func TestPauseResumeFeatureRequiresPausableBackend(t *testing.T) {
 	}
 }
 
+func TestWorkspaceFeaturesRequireNativeCheckpointProvider(t *testing.T) {
+	checked := 0
+	workspaceFeatures := []core.Feature{
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
+		core.FeatureSnapshot,
+	}
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if !hasAnyFeature(spec.Features, workspaceFeatures...) {
+			continue
+		}
+		if _, ok := provider.(core.NativeCheckpointProvider); !ok {
+			t.Fatalf("%s advertises workspace features %v but does not implement NativeCheckpointProvider", name, spec.Features)
+		}
+		if spec.Features.Has(core.FeatureFork) {
+			if _, ok := provider.(core.NativeCheckpointForkProvider); !ok {
+				t.Fatalf("%s advertises %s but does not implement NativeCheckpointForkProvider", name, core.FeatureFork)
+			}
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no providers advertised workspace features; conformance test is stale")
+	}
+}
+
+func hasAnyFeature(features core.FeatureSet, wants ...core.Feature) bool {
+	for _, want := range wants {
+		if features.Has(want) {
+			return true
+		}
+	}
+	return false
+}
+
 func offlineConformanceConfig(provider string) (core.Config, bool) {
 	cfg := core.Config{Provider: provider}
 	switch provider {
