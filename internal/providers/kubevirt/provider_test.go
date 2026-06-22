@@ -236,6 +236,19 @@ func TestSSHKeyReadsFileFormPublicKey(t *testing.T) {
 	}
 }
 
+func TestSSHKeyRejectsNonPublicKeyFile(t *testing.T) {
+	cfg := testConfig(t)
+	path := filepath.Join(t.TempDir(), "not-a-public-key")
+	if err := os.WriteFile(path, []byte("private or unrelated file contents\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.KubeVirt.SSHPublicKey = path
+	backend := &leaseBackend{cfg: cfg}
+	if _, _, err := backend.sshKey("cbx_123"); err == nil || !strings.Contains(err.Error(), "not a supported OpenSSH public key") {
+		t.Fatalf("err=%v, want public-key validation failure", err)
+	}
+}
+
 func TestRenderManifestSetsIdentityLabelsAndPlaceholders(t *testing.T) {
 	cfg := testConfig(t)
 	data, err := renderManifest(cfg.KubeVirt.Template, "crabbox-test-deadbeef", "test-ns", "cbx_123", "test", cfg.KubeVirt.SSHPublicKey, map[string]string{

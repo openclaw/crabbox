@@ -52,6 +52,10 @@ When `sshKey` is empty, Crabbox generates a per-lease key. When it is set,
 `sshPublicKey` may contain the matching public key text or a public-key file
 path; otherwise Crabbox reads `<sshKey>.pub`.
 
+Repository-local config may provide inline `sshPublicKey` text but cannot
+select `sshKey` or a file-form `sshPublicKey`. Configure operator key paths in
+trusted user config, environment variables, or explicit flags.
+
 Provider flags use the `--kubevirt-*` prefix. Environment overrides use the
 `CRABBOX_KUBEVIRT_*` prefix.
 

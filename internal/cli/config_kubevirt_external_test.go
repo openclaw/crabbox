@@ -88,6 +88,37 @@ func TestLoadKubeVirtConfigExpandsUserPaths(t *testing.T) {
 	}
 }
 
+func TestKubeVirtRepositoryConfigCannotSelectSSHKeyPaths(t *testing.T) {
+	cfg := baseConfig()
+	cfg.KubeVirt.SSHKey = "/trusted/id_ed25519"
+	cfg.KubeVirt.SSHPublicKey = "/trusted/id_ed25519.pub"
+	file := fileConfig{KubeVirt: &fileKubeVirtConfig{
+		Context:      "repo-context",
+		Namespace:    "repo-namespace",
+		Template:     "./repo-vm.yaml",
+		SSHKey:       "~/.ssh/id_ed25519",
+		SSHPublicKey: "~/.ssh/id_ed25519.pub",
+	}}
+
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KubeVirt.Context != "repo-context" || cfg.KubeVirt.Namespace != "repo-namespace" || cfg.KubeVirt.Template != "./repo-vm.yaml" {
+		t.Fatalf("safe repository settings not applied: %#v", cfg.KubeVirt)
+	}
+	if cfg.KubeVirt.SSHKey != "/trusted/id_ed25519" || cfg.KubeVirt.SSHPublicKey != "/trusted/id_ed25519.pub" {
+		t.Fatalf("repository config replaced trusted SSH key paths: %#v", cfg.KubeVirt)
+	}
+
+	file.KubeVirt.SSHPublicKey = "ssh-ed25519 AAAA repo@example.com"
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KubeVirt.SSHPublicKey != "ssh-ed25519 AAAA repo@example.com" {
+		t.Fatalf("inline repository public key not applied: %q", cfg.KubeVirt.SSHPublicKey)
+	}
+}
+
 func TestKubeVirtEnvExpandsUserPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
