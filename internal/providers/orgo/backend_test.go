@@ -24,6 +24,9 @@ type fakeOrgoAPI struct {
 	bashStdout         string
 	bashStderr         string
 	omitWorkspaceID    bool
+	computerStatuses   []string
+	getComputerCalls   int
+	bashStatuses       []string
 }
 
 func newFakeOrgoAPI() *fakeOrgoAPI {
@@ -63,11 +66,16 @@ func (f *fakeOrgoAPI) GetWorkspace(_ context.Context, id string) (orgoWorkspace,
 }
 
 func (f *fakeOrgoAPI) CreateComputer(_ context.Context, req orgoCreateComputerRequest) (orgoComputer, error) {
+	status := "running"
+	if len(f.computerStatuses) > 0 {
+		status = f.computerStatuses[0]
+		f.computerStatuses = f.computerStatuses[1:]
+	}
 	computer := orgoComputer{
 		ID:            "computer_test",
 		InstanceID:    "instance_test",
 		Name:          req.Name,
-		Status:        "running",
+		Status:        status,
 		OS:            req.OS,
 		RAMGB:         req.RAMGB,
 		CPUs:          req.CPUs,
@@ -87,6 +95,12 @@ func (f *fakeOrgoAPI) GetComputer(_ context.Context, id string) (orgoComputer, e
 	if !ok {
 		return orgoComputer{}, exit(4, "missing computer %s", id)
 	}
+	f.getComputerCalls++
+	if len(f.computerStatuses) > 0 {
+		computer.Status = f.computerStatuses[0]
+		f.computerStatuses = f.computerStatuses[1:]
+		f.computers[id] = computer
+	}
 	return computer, nil
 }
 
@@ -96,7 +110,8 @@ func (f *fakeOrgoAPI) DeleteComputer(_ context.Context, id string) error {
 	return f.deleteComputerErr
 }
 
-func (f *fakeOrgoAPI) RunBash(_ context.Context, _ string, command string, stdout, stderr io.Writer) (int, error) {
+func (f *fakeOrgoAPI) RunBash(_ context.Context, id string, command string, stdout, stderr io.Writer) (int, error) {
+	f.bashStatuses = append(f.bashStatuses, f.computers[id].Status)
 	f.bashCommands = append(f.bashCommands, command)
 	if f.bashStdout != "" {
 		_, _ = io.WriteString(stdout, f.bashStdout)
@@ -167,6 +182,58 @@ func TestRunCreatesExecutesAndDeletesTemporaryWorkspace(t *testing.T) {
 	}
 	if len(fake.bashCommands) != 1 || !strings.Contains(fake.bashCommands[0], "export EXAMPLE_TOKEN=") || !strings.Contains(fake.bashCommands[0], "crabbox-orgo-ok") {
 		t.Fatalf("bash commands=%#v", fake.bashCommands)
+	}
+	if got := strings.Join(fake.deletedComputers, ","); got != "computer_test" {
+		t.Fatalf("deleted computers=%q", got)
+	}
+	if got := strings.Join(fake.deletedWorkspaces, ","); got != "ws_created" {
+		t.Fatalf("deleted workspaces=%q", got)
+	}
+}
+
+func TestRunWaitsForNewComputerBeforeBash(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	fake.computerStatuses = []string{"creating", "running"}
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir()},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit=%d", result.ExitCode)
+	}
+	if fake.getComputerCalls == 0 {
+		t.Fatal("new computer readiness was not polled")
+	}
+	if got := strings.Join(fake.bashStatuses, ","); got != "running" {
+		t.Fatalf("bash states=%q, want running", got)
+	}
+}
+
+func TestCreateComputerCleansUpTerminalStartupFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	fake.computerStatuses = []string{"creating", "error"}
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir()},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "entered error state while starting") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fake.bashCommands) != 0 {
+		t.Fatalf("bash ran before readiness: %#v", fake.bashCommands)
 	}
 	if got := strings.Join(fake.deletedComputers, ","); got != "computer_test" {
 		t.Fatalf("deleted computers=%q", got)
