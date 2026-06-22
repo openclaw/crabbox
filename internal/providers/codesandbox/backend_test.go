@@ -106,6 +106,78 @@ func TestStopRejectsMissingOwnershipTagBeforeDelete(t *testing.T) {
 	}
 }
 
+func TestCleanupDeletesDueOwnedClaims(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	backend, stdout, _ := newFakeBackend(t, fake)
+	backend.rt.Clock = fixedClock{t: time.Now().UTC().Add(2 * time.Second)}
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "old", providerName, fake.scope, "", "/repo", time.Second, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup err=%v", err)
+	}
+	if !reflect.DeepEqual(fake.deleted, []string{fake.sandboxID}) {
+		t.Fatalf("deleted=%v, want sandbox delete", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("claim after cleanup=%#v err=%v, want removed", claim, err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "delete sandbox="+fake.sandboxID+" lease="+leaseID+" reason=idle timeout") ||
+		!strings.Contains(got, "codesandbox cleanup removed=1 checked=1") {
+		t.Fatalf("stdout=%q", got)
+	}
+}
+
+func TestCleanupDryRunKeepsDueOwnedClaims(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	backend, stdout, _ := newFakeBackend(t, fake)
+	backend.rt.Clock = fixedClock{t: time.Now().UTC().Add(2 * time.Second)}
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "old", providerName, fake.scope, "", "/repo", time.Second, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+		t.Fatalf("Cleanup dry-run err=%v", err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%v, want dry-run to skip delete", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+		t.Fatalf("claim after dry-run=%#v err=%v, want retained", claim, err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "would delete sandbox="+fake.sandboxID+" lease="+leaseID+" reason=idle timeout") {
+		t.Fatalf("stdout=%q", got)
+	}
+}
+
+func TestCleanupSkipsClaimsBeforeIdleDeadline(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	backend, _, stderr := newFakeBackend(t, fake)
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "fresh", providerName, fake.scope, "", "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup err=%v", err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%v, want not-due claim retained", fake.deleted)
+	}
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+		t.Fatalf("claim after cleanup=%#v err=%v, want retained", claim, err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "skip sandbox="+fake.sandboxID+" lease="+leaseID+" reason=idle timeout not reached") {
+		t.Fatalf("stderr=%q", got)
+	}
+}
+
 func TestPauseResumeUseSDKLifecycleAndKeepClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeCodeSandboxAPI()
@@ -429,6 +501,14 @@ type fakeCodeSandboxAPI struct {
 	waitedPorts    []int
 	commandResults []CommandResult
 	blockRun       bool
+}
+
+type fixedClock struct {
+	t time.Time
+}
+
+func (c fixedClock) Now() time.Time {
+	return c.t
 }
 
 func newFakeCodeSandboxAPI() *fakeCodeSandboxAPI {

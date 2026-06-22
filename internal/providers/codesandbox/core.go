@@ -23,6 +23,7 @@ type RunRequest = core.RunRequest
 type RunResult = core.RunResult
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
+type CleanupRequest = core.CleanupRequest
 type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
@@ -102,6 +103,10 @@ func listCodeSandboxLeaseClaims() ([]LeaseClaim, error) {
 
 func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
+}
+
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

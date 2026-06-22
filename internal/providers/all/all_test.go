@@ -365,6 +365,31 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 	}
 }
 
+func TestCleanupFeatureRequiresCleanupBackend(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		if !provider.Spec().Features.Has(core.FeatureCleanup) {
+			continue
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises %s; add an offline conformance config for it", name, core.FeatureCleanup)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.CleanupBackend); !ok {
+			t.Fatalf("%s advertises %s but backend %T is not CleanupBackend", name, core.FeatureCleanup, backend)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureCleanup)
+	}
+}
+
 func TestPauseResumeFeatureRequiresPausableBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
@@ -495,30 +520,38 @@ func hasAnyFeature(features core.FeatureSet, wants ...core.Feature) bool {
 }
 
 func offlineConformanceConfig(provider string) (core.Config, bool) {
-	cfg := core.Config{Provider: provider}
+	cfg := core.BaseConfig()
+	cfg.Provider = provider
 	switch provider {
+	case "agent-sandbox":
+		cfg.AgentSandbox.Context = "agent-context"
+		cfg.AgentSandbox.WarmPool = "linux-pool"
+		return cfg, true
 	case "blacksmith-testbox":
+		return cfg, true
+	case "cloudflare-dynamic-workers":
+		cfg.CloudflareDynamicWorkers.LoaderURL = "https://loader.example.test"
+		cfg.CloudflareDynamicWorkers.Token = "test-token"
 		return cfg, true
 	case "e2b":
 		return cfg, true
+	case "external":
+		cfg.External.Command = "external-provider"
+		return cfg, true
 	case "codesandbox":
-		cfg.CodeSandbox = core.CodeSandboxConfig{
-			Workdir:                  "/project/workspace",
-			Privacy:                  "private",
-			AutomaticWakeupHTTP:      true,
-			AutomaticWakeupWebSocket: false,
-			BridgeCommand:            "node",
-			SDKPackage:               "@codesandbox/sdk@2.4.2",
-			DoctorListLimit:          1,
-			OperationTimeoutSecs:     30,
-		}
+		return cfg, true
+	case "hyperv":
+		cfg.TargetOS = core.TargetWindows
+		return cfg, true
+	case "kubevirt":
+		cfg.KubeVirt.Context = "agent-context"
 		return cfg, true
 	case "islo":
 		return cfg, true
 	case "railway":
 		return cfg, true
 	default:
-		return core.Config{}, false
+		return cfg, true
 	}
 }
 
