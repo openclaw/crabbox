@@ -429,6 +429,31 @@ func TestRunEvidenceFeaturesRequireDelegatedBackends(t *testing.T) {
 	}
 }
 
+func TestURLBridgeFeatureRequiresBridgeProvider(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		if !provider.Spec().Features.Has(core.FeatureURLBridge) {
+			continue
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises %s; add an offline conformance config for it", name, core.FeatureURLBridge)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.BridgeProvider); !ok {
+			t.Fatalf("%s advertises %s but backend %T is not BridgeProvider", name, core.FeatureURLBridge, backend)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureURLBridge)
+	}
+}
+
 func hasAnyFeature(features core.FeatureSet, wants ...core.Feature) bool {
 	for _, want := range wants {
 		if features.Has(want) {
@@ -443,6 +468,8 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 	switch provider {
 	case "blacksmith-testbox":
 		return cfg, true
+	case "e2b":
+		return cfg, true
 	case "codesandbox":
 		cfg.CodeSandbox = core.CodeSandboxConfig{
 			Workdir:                  "/project/workspace",
@@ -456,6 +483,8 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 		}
 		return cfg, true
 	case "islo":
+		return cfg, true
+	case "railway":
 		return cfg, true
 	default:
 		return core.Config{}, false
