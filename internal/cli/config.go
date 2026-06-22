@@ -1144,7 +1144,8 @@ func validateCacheVolume(volume CacheVolumeConfig) error {
 	return nil
 }
 
-func validateCacheVolumesForProvider(cfg Config) error {
+// ValidateCacheVolumesForProvider checks provider support for configured cache volumes.
+func ValidateCacheVolumesForProvider(cfg Config) error {
 	if len(cfg.Cache.Volumes) == 0 {
 		return nil
 	}
