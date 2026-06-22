@@ -32,6 +32,11 @@ func TestRunBashExitCodeFieldPresence(t *testing.T) {
 			body: `{"stdout":"ok\n"}`,
 			want: 0,
 		},
+		{
+			name: "explicit failure without exit code",
+			body: `{"stdout":"ok\n","success":false}`,
+			want: 1,
+		},
 	}
 
 	for _, tt := range tests {
