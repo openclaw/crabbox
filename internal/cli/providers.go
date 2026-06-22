@@ -407,6 +407,7 @@ func providerRecommendationUseCases() []string {
 		"reachability",
 		"remote-dev",
 		"run-evidence",
+		"run-session",
 		"self-hosted",
 		"team-cloud",
 		"versioned-workspace",
@@ -457,6 +458,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "remote-dev", true
 	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download":
 		return "run-evidence", true
+	case "run-session", "run-sessions", "session", "sessions",
+		"inspectable-run", "inspectable-runs", "reusable-run", "reusable-runs",
+		"session-inspection":
+		return "run-session", true
 	case "self-hosted", "selfhosted", "homelab", "virtualization":
 		return "self-hosted", true
 	case "team", "team-cloud", "shared-cloud", "brokered-cloud", "coordinator", "coordinated-cloud", "managed-cloud":
@@ -869,6 +874,35 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureRunSession) {
 			add(15, "returns reusable run sessions for later inspection")
 		}
+	case "run-session":
+		if !hasFeature(FeatureRunSession) {
+			break
+		}
+		add(80, "returns reusable run sessions for later inspection")
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(25, "provider owns inspectable command execution")
+		}
+		if hasFeature(FeatureRunProof) {
+			add(22, "can pair sessions with provider run proof")
+		}
+		if hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(18, "can pair sessions with retained run outputs")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(16, "can pair sessions with provider-native preview URLs")
+		}
+		if hasFeature(FeatureArchiveSync) || hasFeature(FeatureCrabboxSync) {
+			add(12, "can sync an inspectable run workload")
+		}
+		if hasFeature(FeatureMCP) {
+			add(10, "can inspect MCP-attached sandbox sessions")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(8, "can clean up session-owned resources")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
+			add(8, "supports common inspectable run targets")
+		}
 	case "self-hosted":
 		if category == "self-hosted-virtualization" {
 			add(80, "self-hosted virtualization provider")
@@ -1010,6 +1044,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend remote-dev")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
+	fmt.Fprintln(out, "  crabbox providers recommend run-session")
 	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
 	fmt.Fprintln(out, "  crabbox providers recommend forkable-workspace --workspace fork")

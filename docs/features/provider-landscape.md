@@ -93,6 +93,8 @@ Ship these in small PRs:
 2. Improve evidence parity for delegated sandboxes.
    The biggest practical gap versus hosted sandbox products is not launch; it is
    consistent proof, artifacts, downloads, preview URLs, logs, and error status.
+   Use `crabbox providers recommend run-session` when the workflow needs a
+   reusable provider session handle for later inspection.
    Use `crabbox providers recommend artifact-download` when a workflow needs
    retained files or downloadable results from provider-owned execution.
    Use `crabbox providers recommend preview-url` when the workflow specifically

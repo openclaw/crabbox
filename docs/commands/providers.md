@@ -101,6 +101,7 @@ crabbox providers recommend reachability
 crabbox providers recommend remote-dev
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
+crabbox providers recommend run-session
 crabbox providers recommend team-cloud
 crabbox providers recommend versioned-workspace
 crabbox providers recommend forkable-workspace --workspace fork
@@ -141,6 +142,8 @@ Supported use cases:
   workspaces for local-editor, remote-compute workflows.
 - `run-evidence`: providers that can return run proof, collect artifacts,
   materialize downloads, or expose preview URLs.
+- `run-session`: providers that return reusable run/session handles for later
+  inspection, logs, previews, artifacts, or downloads.
 - `self-hosted`: private virtualization, external providers, and BYO SSH.
 - `team-cloud`: brokerable or direct cloud providers for shared team workflows,
   coordinator-mediated spend/cleanup, and normal SSH debugging.

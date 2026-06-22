@@ -394,6 +394,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"reachability",
 		"remote-dev",
 		"run-evidence",
+		"run-session",
 		"team-cloud",
 		"versioned-workspace",
 		"worker-runtime",
@@ -497,6 +498,61 @@ func TestProvidersRecommendRunEvidence(t *testing.T) {
 		if recommendation.Provider == "wandb" {
 			t.Fatalf("run-evidence should not recommend session-only providers: %#v", recommendation)
 		}
+	}
+}
+
+func TestProvidersRecommendRunSessionPrefersInspectableRuns(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "run-session", 8)
+	if len(recommendations) == 0 {
+		t.Fatal("expected run-session recommendations")
+	}
+	foundProof := false
+	foundPreview := false
+	foundWorker := false
+	for _, recommendation := range recommendations {
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureRunSession) {
+			t.Fatalf("run-session recommendation lacks run-session feature: %#v", recommendation)
+		}
+		if !containsString(recommendation.Evidence, "session") {
+			t.Fatalf("run-session recommendation lacks session evidence: %#v", recommendation)
+		}
+		if providerRecommendationHasFeature(recommendation.Features, FeatureRunProof) {
+			foundProof = true
+		}
+		if providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge) {
+			foundPreview = true
+		}
+		if providerRecommendationHasString(recommendation.Targets, targetWorkerRuntime) {
+			foundWorker = true
+		}
+	}
+	if !foundProof {
+		t.Fatalf("run-session recommendations should include proof-capable sessions: %#v", recommendations)
+	}
+	if !foundPreview {
+		t.Fatalf("run-session recommendations should include preview-capable sessions: %#v", recommendations)
+	}
+	if !foundWorker {
+		t.Fatalf("run-session recommendations should include worker runtime sessions: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendRunSessionAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "inspectable-run",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend inspectable-run error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureRunSession) {
+		t.Fatalf("inspectable-run alias entries=%#v", entries)
 	}
 }
 
