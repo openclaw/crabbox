@@ -829,6 +829,58 @@ func TestRunEvidenceFeaturesRequireDelegatedBackends(t *testing.T) {
 	}
 }
 
+func TestRunEvidenceFeaturesGateDelegatedOptions(t *testing.T) {
+	artifactProviders := 0
+	downloadProviders := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if spec.Kind != core.ProviderKindDelegatedRun {
+			continue
+		}
+		artifactErr := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{
+			ArtifactGlobs: []string{"reports/**"},
+		})
+		if spec.Features.Has(core.FeatureRunArtifacts) {
+			if artifactErr != nil {
+				t.Fatalf("%s advertises %s but rejects --artifact-glob: %v", name, core.FeatureRunArtifacts, artifactErr)
+			}
+			artifactProviders++
+		} else if artifactErr == nil {
+			t.Fatalf("%s accepts --artifact-glob without %s", name, core.FeatureRunArtifacts)
+		}
+
+		downloadErr := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{
+			Downloads: []string{"reports/result.json=result.json"},
+		})
+		if spec.Features.Has(core.FeatureRunDownloads) {
+			if downloadErr != nil {
+				t.Fatalf("%s advertises %s but rejects --download: %v", name, core.FeatureRunDownloads, downloadErr)
+			}
+			downloadProviders++
+		} else if downloadErr == nil {
+			t.Fatalf("%s accepts --download without %s", name, core.FeatureRunDownloads)
+		}
+
+		requiredErr := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{
+			RequiredArtifactGlobs: []string{"reports/result.json"},
+		})
+		if hasAnyFeature(spec.Features, core.FeatureRunArtifacts, core.FeatureRunDownloads) {
+			if requiredErr != nil {
+				t.Fatalf("%s advertises run evidence features %v but rejects --require-artifact: %v", name, spec.Features, requiredErr)
+			}
+		} else if requiredErr == nil {
+			t.Fatalf("%s accepts --require-artifact without run evidence features", name)
+		}
+	}
+	if artifactProviders == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunArtifacts)
+	}
+	if downloadProviders == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunDownloads)
+	}
+}
+
 func TestURLBridgeFeatureRequiresBridgeProvider(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
