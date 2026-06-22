@@ -402,6 +402,7 @@ func providerRecommendationUseCases() []string {
 		"local",
 		"macos",
 		"mcp-sandbox",
+		"preview-url",
 		"reachability",
 		"remote-dev",
 		"run-evidence",
@@ -441,6 +442,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "macos", true
 	case "mcp", "mcp-sandbox", "mcp-attachments", "tool-sandbox", "tool-sandboxes":
 		return "mcp-sandbox", true
+	case "preview", "preview-url", "preview-urls", "url-bridge", "app-preview", "app-previews", "web-preview", "web-previews":
+		return "preview-url", true
 	case "reachability", "reachable", "network", "networking", "ports", "port", "pond":
 		return "reachability", true
 	case "remote-dev", "remote-development",
@@ -448,7 +451,7 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		"cloud-dev", "cloud-development", "cde",
 		"codespace", "codespaces", "remote-workspace":
 		return "remote-dev", true
-	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download", "preview", "preview-url", "url-bridge":
+	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download":
 		return "run-evidence", true
 	case "self-hosted", "selfhosted", "homelab", "virtualization":
 		return "self-hosted", true
@@ -738,6 +741,32 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasTarget(targetLinux) {
 			add(8, "supports common Linux MCP workloads")
 		}
+	case "preview-url":
+		if !hasFeature(FeatureURLBridge) {
+			break
+		}
+		add(80, "can expose provider-native preview URLs")
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(30, "provider owns preview run execution")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(20, "returns reusable preview sessions")
+		}
+		if hasFeature(FeatureRunDownloads) || hasFeature(FeatureRunArtifacts) {
+			add(14, "can pair previews with downloadable evidence")
+		}
+		if hasFeature(FeatureArchiveSync) || hasFeature(FeatureCrabboxSync) {
+			add(12, "can sync a preview workload")
+		}
+		if hasFeature(FeaturePauseResume) {
+			add(8, "supports pausing preview sandboxes")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(8, "can clean up preview resources")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux preview workloads")
+		}
 	case "reachability":
 		if capabilities.Tailscale {
 			add(45, "can join a tailnet as a bidirectional peer")
@@ -944,6 +973,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend live-smoke")
 	fmt.Fprintln(out, "  crabbox providers recommend mcp-sandbox")
+	fmt.Fprintln(out, "  crabbox providers recommend preview-url")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend remote-dev")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")

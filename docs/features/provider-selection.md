@@ -26,6 +26,7 @@ crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend live-smoke
 crabbox providers recommend mcp-sandbox
+crabbox providers recommend preview-url
 crabbox providers recommend remote-dev
 crabbox providers recommend forkable-workspace --workspace fork
 ```
@@ -62,6 +63,7 @@ Use these rules before adding a new adapter:
 | --- | --- | --- |
 | CI reproduction with durable proof | `blacksmith-testbox`, `semaphore` | They map to CI/proof-runner semantics instead of generic devbox semantics. |
 | Run evidence and previews | `blacksmith-testbox`, `islo`, `e2b` | They advertise normalized proof, artifact, download, or preview-url capabilities in `crabbox providers` and `providers recommend run-evidence`. |
+| Provider preview URLs | `islo`, `e2b`, `railway` | They advertise provider-native preview URL evidence and appear in `providers recommend preview-url`. |
 | Provider live smoke | `blacksmith-testbox`, `cloudflare`, `local-container`, `apple-container`, `aws` | They advertise enough sync, cleanup, lifecycle, or evidence capability for `providers recommend live-smoke` to rank them as good opt-in smoke candidates. |
 | Fast feedback with reusable caches | `local-container`, `apple-container`, `multipass`, `blacksmith-testbox` | They advertise cache-volume, sync, cleanup, or reusable proof/session capabilities in `crabbox providers` and `providers recommend fast-feedback`. |
 | Disposable isolated execution | `agent-sandbox`, `anthropic-sandbox-runtime`, `e2b`, `smolvm`, `vercel-sandbox` | They are delegated or local sandbox providers in `crabbox providers` and `providers recommend isolated-execution`. |

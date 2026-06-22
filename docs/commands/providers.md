@@ -95,6 +95,7 @@ crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend live-smoke
 crabbox providers recommend mcp-sandbox
+crabbox providers recommend preview-url
 crabbox providers recommend reachability
 crabbox providers recommend remote-dev
 crabbox providers recommend run-evidence
@@ -129,6 +130,8 @@ Supported use cases:
 - `macos`: macOS targets.
 - `mcp-sandbox`: sandboxes that can attach MCP server references when creating
   the run environment.
+- `preview-url`: providers that can expose provider-native preview URLs for app
+  or service smoke workflows.
 - `reachability`: providers with a bidirectional tailnet plane, provider-native
   HTTPS endpoints, outbound-only tailnet egress, or operator-side SSH tunnels.
 - `remote-dev`: managed developer environments and SSH-capable remote

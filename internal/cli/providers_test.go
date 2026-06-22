@@ -389,6 +389,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"isolated-execution",
 		"live-smoke",
 		"mcp-sandbox",
+		"preview-url",
 		"reachability",
 		"remote-dev",
 		"run-evidence",
@@ -688,6 +689,47 @@ func TestProvidersRecommendRemoteDevAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !isRemoteDevProvider(entries[0].Provider) {
 		t.Fatalf("codespaces alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendPreviewURLPrefersURLBridgeProviders(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "preview-url", 3)
+	if len(recommendations) == 0 {
+		t.Fatal("expected preview-url recommendations")
+	}
+	found := map[string]bool{}
+	for _, recommendation := range recommendations {
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge) {
+			t.Fatalf("preview-url recommendation lacks url-bridge feature: %#v", recommendation)
+		}
+		if !containsString(recommendation.Evidence, "preview-url") {
+			t.Fatalf("preview-url recommendation lacks preview-url evidence: %#v", recommendation)
+		}
+		found[recommendation.Provider] = true
+	}
+	for _, provider := range []string{"e2b", "islo"} {
+		if !found[provider] {
+			t.Fatalf("preview-url recommendations should include %s: %#v", provider, recommendations)
+		}
+	}
+}
+
+func TestProvidersRecommendPreviewURLAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "app-preview",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend app-preview error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureURLBridge) {
+		t.Fatalf("app-preview alias entries=%#v", entries)
 	}
 }
 
