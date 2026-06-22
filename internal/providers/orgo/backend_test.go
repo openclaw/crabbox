@@ -22,6 +22,7 @@ type fakeOrgoAPI struct {
 	bashExitCode       int
 	bashStdout         string
 	bashStderr         string
+	omitWorkspaceID    bool
 }
 
 func newFakeOrgoAPI() *fakeOrgoAPI {
@@ -65,7 +66,6 @@ func (f *fakeOrgoAPI) CreateComputer(_ context.Context, req orgoCreateComputerRe
 		ID:            "computer_test",
 		InstanceID:    "instance_test",
 		Name:          req.Name,
-		WorkspaceID:   req.WorkspaceID,
 		Status:        "running",
 		OS:            req.OS,
 		RAMGB:         req.RAMGB,
@@ -73,6 +73,9 @@ func (f *fakeOrgoAPI) CreateComputer(_ context.Context, req orgoCreateComputerRe
 		DiskGB:        req.DiskGB,
 		Resolution:    req.Resolution,
 		ConnectionURL: "https://www.orgo.ai/desktops/instance_test",
+	}
+	if !f.omitWorkspaceID {
+		computer.WorkspaceID = req.WorkspaceID
 	}
 	f.computers[computer.ID] = computer
 	return computer, nil
@@ -117,7 +120,6 @@ func TestProviderRegistersSecretSafeFlags(t *testing.T) {
 		"--orgo-cpu", "2",
 		"--orgo-disk", "32",
 		"--orgo-resolution", "1440x900x24",
-		"--orgo-auto-stop-minutes", "0",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +127,7 @@ func TestProviderRegistersSecretSafeFlags(t *testing.T) {
 	if err := ApplyOrgoProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Orgo.APIBase != "https://orgo.test/api" || cfg.Orgo.WorkspaceID != "ws_test" || cfg.Orgo.RAMGB != 8 || cfg.Orgo.CPUs != 2 || cfg.Orgo.DiskGB != 32 || cfg.Orgo.Resolution != "1440x900x24" || cfg.Orgo.AutoStopMinutes != 0 {
+	if cfg.Orgo.APIBase != "https://orgo.test/api" || cfg.Orgo.WorkspaceID != "ws_test" || cfg.Orgo.RAMGB != 8 || cfg.Orgo.CPUs != 2 || cfg.Orgo.DiskGB != 32 || cfg.Orgo.Resolution != "1440x900x24" {
 		t.Fatalf("applied cfg=%#v", cfg.Orgo)
 	}
 }
@@ -167,6 +169,23 @@ func TestRunCreatesExecutesAndDeletesTemporaryWorkspace(t *testing.T) {
 	}
 	if got := strings.Join(fake.deletedWorkspaces, ","); got != "ws_created" {
 		t.Fatalf("deleted workspaces=%q", got)
+	}
+}
+
+func TestCreateComputerPreservesRequestedWorkspaceWhenResponseOmitsIt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	fake.omitWorkspaceID = true
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "workspace-proof", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Computer.WorkspaceID != "ws_created" {
+		t.Fatalf("workspace id=%q", lease.Computer.WorkspaceID)
+	}
+	if err := backend.deleteLease(context.Background(), fake, lease); err != nil {
+		t.Fatal(err)
 	}
 }
 

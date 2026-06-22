@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +74,37 @@ func TestRunBashExitCodeFieldPresence(t *testing.T) {
 				t.Fatalf("stderr=%q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestGetWorkspaceReadsOfficialDesktopsField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/workspaces/workspace_test" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"workspace_test","desktops":[{"id":"computer_test","status":"running"}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: server.Client()}
+	workspace, err := client.GetWorkspace(context.Background(), "workspace_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Computers) != 1 || workspace.Computers[0].ID != "computer_test" {
+		t.Fatalf("computers=%#v", workspace.Computers)
+	}
+	computers := orgoComputersForWorkspace(workspace)
+	if computers[0].WorkspaceID != "workspace_test" {
+		t.Fatalf("workspace id=%q", computers[0].WorkspaceID)
+	}
+}
+
+func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
+	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
+	t.Setenv("CRABBOX_ORGO_API_BASE", "http://api.example.test")
+	if _, err := newOrgoClient(Config{}, Runtime{}); err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("err=%v, want HTTPS requirement", err)
 	}
 }

@@ -2,6 +2,10 @@
 
 ## 0.35.1 - Unreleased
 
+### Added
+
+- Added the Orgo delegated-run provider with source-bound authentication, workspace/computer lifecycle cleanup, and real command execution. Thanks @zozo123.
+
 ### Changed
 
 - Renamed the `apple-vz` provider to `apple-vm`; the old provider name/aliases, `appleVZ:` config keys, `--apple-vz-*` flags, and `CRABBOX_APPLE_VZ_*` environment variables keep working as deprecated aliases, existing leases and claims stay manageable, and the state directory migrates automatically.

@@ -48,7 +48,8 @@ commands can use `--id <slug>`.
 Resolve the Orgo API key in this precedence:
 
 1. `CRABBOX_ORGO_API_KEY` — explicit per-run override, CI-friendly.
-2. `orgo.apiKey` — config-file value.
+2. `orgo.apiKey` — trusted user or explicit `CRABBOX_CONFIG` value; repository
+   config cannot supply provider secrets.
 3. `ORGO_API_KEY` — canonical Orgo environment variable.
 
 The API key is never exposed as a CLI flag; do not pass secrets on the command
@@ -66,7 +67,6 @@ orgo:
   cpus: 1
   diskGB: 8
   resolution: 1280x720x24
-  autoStopMinutes: 15
 ```
 
 If `workspaceID` is omitted, Crabbox creates a temporary workspace for each new
@@ -82,7 +82,6 @@ Provider flags, each overriding the matching `orgo.*` config key:
 --orgo-cpu
 --orgo-disk
 --orgo-resolution
---orgo-auto-stop-minutes
 ```
 
 Environment overrides:
@@ -93,11 +92,13 @@ Environment overrides:
 - `CRABBOX_ORGO_CPUS`
 - `CRABBOX_ORGO_DISK_GB`
 - `CRABBOX_ORGO_RESOLUTION`
-- `CRABBOX_ORGO_AUTO_STOP_MINUTES`
 
 Defaults: API base `https://www.orgo.ai/api`, 4 GB RAM, 1 CPU, 8 GB disk,
-resolution `1280x720x24`, and `autoStopMinutes: 15`. Set
-`autoStopMinutes: 0` explicitly to request Orgo's always-on behavior.
+and resolution `1280x720x24`.
+
+Repository config cannot redirect an inherited Orgo API key. Set
+`CRABBOX_ORGO_API_BASE` or pass `--orgo-api-base` to explicitly approve a
+custom credential destination. Non-loopback API endpoints must use HTTPS.
 
 ## Lifecycle
 
@@ -142,3 +143,4 @@ Related docs:
 
 - [Provider reference](README.md)
 - [Provider authoring](../features/provider-authoring.md)
+- [Orgo API reference](https://docs.orgo.ai/api-reference/introduction)

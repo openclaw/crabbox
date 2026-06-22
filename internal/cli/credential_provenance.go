@@ -44,6 +44,8 @@ type credentialDestinationProvenance struct {
 	railwayAPIToken     credentialValueSource
 	fastAPICloudAPIURL  credentialValueSource
 	fastAPICloudToken   credentialValueSource
+	orgoAPIBase         credentialValueSource
+	orgoAPIKey          credentialValueSource
 	runpodAPIURL        credentialValueSource
 	runpodAPIKey        credentialValueSource
 	vastAPIURL          credentialValueSource
@@ -135,6 +137,9 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "fastapi-cloud-url") {
 		provenance.fastAPICloudAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "orgo-api-base") {
+		provenance.orgoAPIBase = credentialSourceFlag
 	}
 	if flagWasSet(fs, "runpod-url") {
 		provenance.runpodAPIURL = credentialSourceFlag
@@ -273,6 +278,11 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if provenance.fastAPICloudAPIURL == credentialSourceRepository &&
 			inheritedCredential(sourcedCredential{cfg.FastAPICloud.Token, provenance.fastAPICloudToken}) {
 			return repositoryCredentialDestinationError("fastapi-cloud", "fastapiCloud.apiUrl", "CRABBOX_FASTAPI_CLOUD_API_URL or --fastapi-cloud-url")
+		}
+	case "orgo":
+		if provenance.orgoAPIBase == credentialSourceRepository &&
+			inheritedCredential(sourcedCredential{cfg.Orgo.APIKey, provenance.orgoAPIKey}) {
+			return repositoryCredentialDestinationError("orgo", "orgo.apiBase", "CRABBOX_ORGO_API_BASE or --orgo-api-base")
 		}
 	case "runpod":
 		if provenance.runpodAPIURL == credentialSourceRepository &&

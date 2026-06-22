@@ -30,7 +30,7 @@ type orgoWorkspace struct {
 	Name      string         `json:"name"`
 	Status    string         `json:"status"`
 	CreatedAt string         `json:"created_at"`
-	Computers []orgoComputer `json:"computers"`
+	Computers []orgoComputer `json:"desktops"`
 }
 
 type orgoComputer struct {
@@ -50,14 +50,13 @@ type orgoComputer struct {
 }
 
 type orgoCreateComputerRequest struct {
-	WorkspaceID     string `json:"workspace_id"`
-	Name            string `json:"name"`
-	OS              string `json:"os"`
-	RAMGB           int    `json:"ram"`
-	CPUs            int    `json:"cpu"`
-	DiskGB          int    `json:"disk_size_gb"`
-	Resolution      string `json:"resolution,omitempty"`
-	AutoStopMinutes int    `json:"auto_stop_minutes"`
+	WorkspaceID string `json:"workspace_id"`
+	Name        string `json:"name"`
+	OS          string `json:"os"`
+	RAMGB       int    `json:"ram"`
+	CPUs        int    `json:"cpu"`
+	DiskGB      int    `json:"disk_size_gb"`
+	Resolution  string `json:"resolution,omitempty"`
 }
 
 type orgoBashResponse struct {
@@ -129,8 +128,15 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 	if baseURL == "" {
 		baseURL = defaultAPIBase
 	}
-	if _, err := url.ParseRequestURI(baseURL); err != nil {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
 		return nil, exit(2, "provider=%s invalid Orgo API base URL %q: %v", providerName, baseURL, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, exit(2, "provider=%s invalid Orgo API base URL %q", providerName, baseURL)
+	}
+	if parsed.Scheme != "https" && !isOrgoLoopbackHTTP(parsed) {
+		return nil, exit(2, "provider=%s API base URL %q must use https unless it targets localhost", providerName, baseURL)
 	}
 	client := rt.HTTP
 	if client == nil {
@@ -141,6 +147,18 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 		apiKey:  apiKey,
 		http:    client,
 	}, nil
+}
+
+func isOrgoLoopbackHTTP(parsed *url.URL) bool {
+	if parsed.Scheme != "http" {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *orgoHTTPClient) CreateWorkspace(ctx context.Context, name string) (orgoWorkspace, error) {

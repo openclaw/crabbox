@@ -126,6 +126,18 @@ func TestRepositoryCredentialDestinationsRejectInheritedCredentials(t *testing.T
 			want: "fastapiCloud.apiUrl",
 		},
 		{
+			name: "orgo api",
+			cfg: Config{
+				Provider: "orgo",
+				Orgo:     OrgoConfig{APIBase: "https://repo.example.test", APIKey: "secret"},
+				credentialProvenance: credentialDestinationProvenance{
+					orgoAPIBase: credentialSourceRepository,
+					orgoAPIKey:  credentialSourceEnvironment,
+				},
+			},
+			want: "orgo.apiBase",
+		},
+		{
 			name: "runpod api",
 			cfg: Config{
 				Provider: "runpod",
@@ -645,6 +657,13 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 			approveEnv:    "CRABBOX_RAILWAY_API_URL",
 		},
 		{
+			name:          "orgo",
+			provider:      "orgo",
+			file:          fileConfig{Orgo: &fileOrgoConfig{APIBase: "https://repo.example.test"}},
+			credentialEnv: "CRABBOX_ORGO_API_KEY",
+			approveEnv:    "CRABBOX_ORGO_API_BASE",
+		},
+		{
 			name:          "runpod",
 			provider:      "runpod",
 			file:          fileConfig{Runpod: &fileRunpodConfig{APIURL: "https://repo.example.test"}},
@@ -1103,4 +1122,20 @@ func TestRepositorySSHDestinationsAllowExplicitFlagOverride(t *testing.T) {
 			t.Fatalf("explicit static host rejected: %v", err)
 		}
 	})
+}
+
+func TestConfigMergeIgnoresRepositoryOrgoCredential(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "orgo"
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		Orgo: &fileOrgoConfig{
+			APIBase: "https://repo.example.test",
+			APIKey:  "project-secret",
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Orgo.APIKey != "" {
+		t.Fatal("repository Orgo API key was loaded")
+	}
 }
