@@ -390,6 +390,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"isolated-execution",
 		"live-smoke",
 		"mcp-sandbox",
+		"network-isolation",
 		"pause-resume",
 		"preview-url",
 		"reachability",
@@ -641,6 +642,50 @@ func TestProvidersRecommendIsolatedExecutionAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Kind != ProviderKindDelegatedRun {
 		t.Fatalf("secure-sandbox alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendNetworkIsolationPrefersSandboxBoundaries(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "network-isolation", 64)
+	if len(recommendations) == 0 {
+		t.Fatal("expected network-isolation recommendations")
+	}
+	foundLocalSandbox := false
+	foundDelegatedSandbox := false
+	for _, recommendation := range recommendations {
+		switch recommendation.Category {
+		case "delegated-sandbox":
+			foundDelegatedSandbox = true
+		case "local-sandbox":
+			foundLocalSandbox = true
+		default:
+			t.Fatalf("network-isolation recommendation escaped sandbox categories: %#v", recommendation)
+		}
+	}
+	if !foundDelegatedSandbox {
+		t.Fatalf("network-isolation recommendations should include delegated sandboxes: %#v", recommendations)
+	}
+	if !foundLocalSandbox {
+		t.Fatalf("network-isolation recommendations should include local sandboxes: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendNetworkIsolationAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "egress-control",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend egress-control error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || entries[0].Category != "delegated-sandbox" {
+		t.Fatalf("egress-control alias entries=%#v", entries)
 	}
 }
 

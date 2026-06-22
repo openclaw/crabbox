@@ -99,6 +99,9 @@ Ship these in small PRs:
    retained files or downloadable results from provider-owned execution.
    Use `crabbox providers recommend preview-url` when the workflow specifically
    needs provider-native app or service URLs.
+   Use `crabbox providers recommend network-isolation` when the workflow runs
+   untrusted code and network exposure should stay inside a delegated or local
+   sandbox boundary.
 3. Add live smoke docs where credentials are required.
    Provider adapters can be valuable before broad live access exists, but each
    one needs an opt-in smoke contract that says what real behavior proves. Use

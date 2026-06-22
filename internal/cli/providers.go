@@ -403,6 +403,7 @@ func providerRecommendationUseCases() []string {
 		"local",
 		"macos",
 		"mcp-sandbox",
+		"network-isolation",
 		"pause-resume",
 		"preview-url",
 		"reachability",
@@ -448,6 +449,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "macos", true
 	case "mcp", "mcp-sandbox", "mcp-attachments", "tool-sandbox", "tool-sandboxes":
 		return "mcp-sandbox", true
+	case "network-isolation", "network-isolated", "network-containment",
+		"egress-control", "egress-controlled", "contained-execution",
+		"contained-sandbox", "contained-sandboxes":
+		return "network-isolation", true
 	case "pause-resume", "pause", "resume", "suspend", "suspended",
 		"pausable", "pausable-workspace", "pausable-workspaces",
 		"resumable", "resumable-workspace", "resumable-workspaces":
@@ -783,6 +788,40 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasTarget(targetLinux) {
 			add(8, "supports common Linux MCP workloads")
 		}
+	case "network-isolation":
+		if category != "delegated-sandbox" && category != "local-sandbox" {
+			break
+		}
+		if category == "delegated-sandbox" {
+			add(65, "delegated sandbox boundary for untrusted execution")
+		}
+		if category == "local-sandbox" {
+			add(55, "local policy-constrained sandbox boundary")
+		}
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(28, "provider owns the command execution boundary")
+		}
+		if hasFeature(FeatureArchiveSync) {
+			add(20, "accepts bounded archive sync instead of a long-lived SSH lease")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(18, "can clean up provider-owned sandbox state")
+		}
+		if capabilities.TailscaleEgress {
+			add(12, "uses outbound-only tailnet egress")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(10, "returns sandbox sessions for later inspection")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(8, "can expose provider-native URLs without SSH tunneling")
+		}
+		if hasFeature(FeatureMCP) {
+			add(8, "can attach MCP servers within the sandbox boundary")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux sandbox workloads")
+		}
 	case "pause-resume":
 		if !hasFeature(FeaturePauseResume) {
 			break
@@ -1071,6 +1110,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend live-smoke")
 	fmt.Fprintln(out, "  crabbox providers recommend mcp-sandbox")
+	fmt.Fprintln(out, "  crabbox providers recommend network-isolation")
 	fmt.Fprintln(out, "  crabbox providers recommend pause-resume")
 	fmt.Fprintln(out, "  crabbox providers recommend preview-url")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")

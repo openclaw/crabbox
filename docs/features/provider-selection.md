@@ -27,6 +27,7 @@ crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend live-smoke
 crabbox providers recommend mcp-sandbox
+crabbox providers recommend network-isolation
 crabbox providers recommend pause-resume
 crabbox providers recommend preview-url
 crabbox providers recommend remote-dev
@@ -73,6 +74,7 @@ Use these rules before adding a new adapter:
 | Provider live smoke | `blacksmith-testbox`, `cloudflare`, `local-container`, `apple-container`, `aws` | They advertise enough sync, cleanup, lifecycle, or evidence capability for `providers recommend live-smoke` to rank them as good opt-in smoke candidates. |
 | Fast feedback with reusable caches | `local-container`, `apple-container`, `multipass`, `blacksmith-testbox` | They advertise cache-volume, sync, cleanup, or reusable proof/session capabilities in `crabbox providers` and `providers recommend fast-feedback`. |
 | Disposable isolated execution | `agent-sandbox`, `anthropic-sandbox-runtime`, `e2b`, `smolvm`, `vercel-sandbox` | They are delegated or local sandbox providers in `crabbox providers` and `providers recommend isolated-execution`. |
+| Network-contained untrusted execution | `cloudflare`, `agent-sandbox`, `codesandbox`, `opensandbox`, `vercel-sandbox` | They keep execution inside delegated or local sandbox boundaries and appear in `providers recommend network-isolation`. |
 | MCP-attached sandbox runs | `docker-sandbox` | It advertises `mcp-attachments` in `crabbox providers` and `providers recommend mcp-sandbox`. |
 | Remote developer environments | `namespace-devbox`, `daytona`, `morph`, `codesandbox`, `opencomputer` | They are managed dev-environment substrates with checkout sync, SSH or provider-owned workspace access, and `providers recommend remote-dev` routing. |
 | Shared app reachability | `hetzner`, `azure`, `gcp`, `islo`, `e2b` | They advertise tailnet, URL bridge, or SSH tunnel planes in `crabbox providers` and `providers recommend reachability`. |
