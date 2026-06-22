@@ -1030,6 +1030,10 @@ orgo_smoke() {
     echo "orgo smoke requires CRABBOX_ORGO_API_KEY, ORGO_API_KEY, or orgo.apiKey" >&2
     return 2
   fi
+  if [[ "$api_key" == *$'\r'* || "$api_key" == *$'\n'* ]]; then
+    echo "orgo smoke API key must not contain line breaks" >&2
+    return 2
+  fi
 
   local configured_api_base="$(config_value orgo.apiBase || true)"
   local configured_api_base_path="$(config_value_path orgo.apiBase || true)"
@@ -1058,11 +1062,12 @@ orgo_smoke() {
     local method="$1"
     local path="$2"
     local data="${3:-}"
-    local args=(-fsS -X "$method" "$api_base$path" -H "Authorization: Bearer $api_key")
+    local args=(-fsS -X "$method" "$api_base$path")
     if [[ -n "$data" ]]; then
       args+=(-H "Content-Type: application/json" -d "$data")
     fi
-    curl "${args[@]}"
+    # Keep the bearer token out of process argv and ordinary command tracing.
+    printf 'Authorization: Bearer %s\n' "$api_key" | curl -H @- "${args[@]}"
   }
 
   cleanup() {
