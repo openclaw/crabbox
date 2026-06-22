@@ -1908,9 +1908,9 @@ export class FleetCoordinator {
     if (!provisioningStart.started) {
       const current = provisioningStart.workspace
         ? await this.finalizeAbsentWorkspaceLease(
-          provisioningStart.workspace,
-          provisioningStart.current,
-        )
+            provisioningStart.workspace,
+            provisioningStart.current,
+          )
         : await this.removeReleasedLeaseReservation(record);
       return json(
         {
