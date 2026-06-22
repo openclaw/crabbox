@@ -3629,6 +3629,9 @@ case "$method $url" in
     printf '{"id":"ws_test"}\\n'
     ;;
   "POST https://orgo.test/computers")
+    printf '{"id":"computer_test","status":"creating"}\\n'
+    ;;
+  "GET https://orgo.test/computers/computer_test")
     printf '{"id":"computer_test","status":"running"}\\n'
     ;;
   "POST https://orgo.test/computers/computer_test/bash")
@@ -3671,6 +3674,7 @@ esac
   const curlCalls = fs.readFileSync(curlLog, "utf8");
   assert.match(curlCalls, /POST https:\/\/orgo\.test\/workspaces data=\{\n  "name": "crabbox-smoke-test"\n\}/);
   assert.match(curlCalls, /POST https:\/\/orgo\.test\/computers data=\{[\s\S]*"workspace_id": "ws_test"/);
+  assert.match(curlCalls, /^GET https:\/\/orgo\.test\/computers\/computer_test data=$/m);
   assert.match(curlCalls, /POST https:\/\/orgo\.test\/computers\/computer_test\/bash data=\{\n  "command": "printf crabbox-orgo-ok"\n\}/);
   assert.match(curlCalls, /^DELETE https:\/\/orgo\.test\/computers\/computer_test data=$/m);
   assert.match(curlCalls, /^DELETE https:\/\/orgo\.test\/workspaces\/ws_test data=$/m);
