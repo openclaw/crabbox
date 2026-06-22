@@ -365,6 +365,46 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 	}
 }
 
+func TestProviderKindRequiresBackendInterface(t *testing.T) {
+	sshLeaseProviders := 0
+	delegatedRunProviders := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s kind=%s; add an offline conformance config for it", name, spec.Kind)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		switch spec.Kind {
+		case core.ProviderKindSSHLease:
+			if _, ok := backend.(core.SSHLeaseBackend); !ok {
+				t.Fatalf("%s kind=%s but backend %T is not SSHLeaseBackend", name, spec.Kind, backend)
+			}
+			sshLeaseProviders++
+		case core.ProviderKindDelegatedRun:
+			if _, ok := backend.(core.DelegatedRunBackend); !ok {
+				t.Fatalf("%s kind=%s but backend %T is not DelegatedRunBackend", name, spec.Kind, backend)
+			}
+			delegatedRunProviders++
+		case core.ProviderKindServiceControl:
+			// Service-control providers expose command-specific interfaces instead of
+			// the two lease/run backend shapes.
+		default:
+			t.Fatalf("%s has unknown provider kind %q", name, spec.Kind)
+		}
+	}
+	if sshLeaseProviders == 0 {
+		t.Fatalf("no providers advertised kind=%s; conformance test is stale", core.ProviderKindSSHLease)
+	}
+	if delegatedRunProviders == 0 {
+		t.Fatalf("no providers advertised kind=%s; conformance test is stale", core.ProviderKindDelegatedRun)
+	}
+}
+
 func TestCleanupFeatureRequiresCleanupBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
@@ -624,6 +664,9 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 	case "kubevirt":
 		cfg.KubeVirt.Context = "agent-context"
 		return cfg, true
+	case "mxc":
+		cfg.TargetOS = core.TargetWindows
+		return cfg, true
 	case "islo":
 		return cfg, true
 	case "railway":
@@ -634,6 +677,10 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 		return cfg, true
 	case "sprites":
 		cfg.Sprites.Token = "test-token"
+		return cfg, true
+	case "windows-sandbox":
+		cfg.TargetOS = core.TargetWindows
+		cfg.WindowsMode = core.WindowsModeNormal
 		return cfg, true
 	default:
 		return cfg, true
