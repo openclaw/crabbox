@@ -58,6 +58,7 @@ Use these rules before adding a new adapter:
 | Fast feedback with reusable caches | `local-container`, `apple-container`, `multipass`, `blacksmith-testbox` | They advertise cache-volume, sync, cleanup, or reusable proof/session capabilities in `crabbox providers` and `providers recommend fast-feedback`. |
 | Disposable isolated execution | `agent-sandbox`, `anthropic-sandbox-runtime`, `e2b`, `smolvm`, `vercel-sandbox` | They are delegated or local sandbox providers in `crabbox providers` and `providers recommend isolated-execution`. |
 | Shared app reachability | `hetzner`, `azure`, `gcp`, `islo`, `e2b` | They advertise tailnet, URL bridge, or SSH tunnel planes in `crabbox providers` and `providers recommend reachability`. |
+| Shared team cloud leases | `aws`, `azure`, `gcp`, `hetzner` | They advertise brokerable cloud, cleanup, SSH, and sync capabilities in `crabbox providers` and `providers recommend team-cloud`. |
 | Generic Linux command execution | `aws`, `azure`, `gcp`, `hetzner`, `digitalocean`, `linode`, `ssh` | SSH leases keep the normal Crabbox sync/run/debug path. |
 | Existing owned machine | `ssh` | No provider lifecycle is needed; Crabbox only syncs and runs. |
 | Local disposable Linux | `local-container`, `apple-container`, `apple-vz`, `multipass` | Fast local iteration without cloud credentials. |

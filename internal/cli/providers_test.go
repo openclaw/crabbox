@@ -381,7 +381,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "isolated-execution", "reachability", "run-evidence", "versioned-workspace", "worker-runtime"} {
+	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "isolated-execution", "reachability", "run-evidence", "team-cloud", "versioned-workspace", "worker-runtime"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
 		}
@@ -522,6 +522,42 @@ func TestProvidersRecommendIsolatedExecutionAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Kind != ProviderKindDelegatedRun {
 		t.Fatalf("secure-sandbox alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendTeamCloudPrefersBrokerableProviders(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "team-cloud", 4)
+	if len(recommendations) == 0 {
+		t.Fatal("expected team-cloud recommendations")
+	}
+	for _, recommendation := range recommendations {
+		if recommendation.Category != "brokerable-cloud" {
+			t.Fatalf("team-cloud top recommendations should be brokerable cloud providers: %#v", recommendations)
+		}
+		if recommendation.Kind != ProviderKindSSHLease {
+			t.Fatalf("team-cloud recommendation should be SSH lease: %#v", recommendation)
+		}
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureCleanup) {
+			t.Fatalf("team-cloud recommendation missing cleanup feature: %#v", recommendation)
+		}
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureCrabboxSync) {
+			t.Fatalf("team-cloud recommendation missing crabbox-sync feature: %#v", recommendation)
+		}
+	}
+}
+
+func TestProvidersRecommendTeamCloudAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "brokered-cloud", "--limit", "1", "--json"})
+	if err != nil {
+		t.Fatalf("providers recommend brokered-cloud error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || entries[0].Category != "brokerable-cloud" {
+		t.Fatalf("brokered-cloud alias entries=%#v", entries)
 	}
 }
 

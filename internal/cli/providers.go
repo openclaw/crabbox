@@ -403,6 +403,7 @@ func providerRecommendationUseCases() []string {
 		"reachability",
 		"run-evidence",
 		"self-hosted",
+		"team-cloud",
 		"versioned-workspace",
 		"windows",
 		"worker-runtime",
@@ -437,6 +438,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "run-evidence", true
 	case "self-hosted", "selfhosted", "homelab", "virtualization":
 		return "self-hosted", true
+	case "team", "team-cloud", "shared-cloud", "brokered-cloud", "coordinator", "coordinated-cloud", "managed-cloud":
+		return "team-cloud", true
 	case "versioned-workspace", "workspace", "workspaces", "checkpoint", "checkpoints", "snapshot", "snapshots", "fork", "forks":
 		return "versioned-workspace", true
 	case "windows", "win":
@@ -715,6 +718,28 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureCleanup) {
 			add(10, "can clean up owned resources")
 		}
+	case "team-cloud":
+		if category == "brokerable-cloud" {
+			add(80, "brokerable cloud provider for shared coordinator control")
+		}
+		if entry.Coordinator == string(CoordinatorSupported) {
+			add(35, "can use Crabbox coordinator spend and cleanup controls")
+		}
+		if category == "direct-cloud" {
+			add(25, "direct cloud provider with owned-account lifecycle")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(20, "can clean up owned cloud resources")
+		}
+		if hasFeature(FeatureCrabboxSync) {
+			add(15, "uses normal Crabbox sync and run")
+		}
+		if hasFeature(FeatureSSH) {
+			add(10, "supports SSH debugging")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux team workloads")
+		}
 	case "versioned-workspace":
 		hasWorkspaceCapability := hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) || hasFeature(FeatureRestore) || hasFeature(FeatureSnapshot)
 		if !hasWorkspaceCapability {
@@ -804,6 +829,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
+	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
 }
 

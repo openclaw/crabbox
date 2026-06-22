@@ -96,6 +96,7 @@ crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend reachability
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
+crabbox providers recommend team-cloud
 crabbox providers recommend versioned-workspace
 crabbox providers recommend versioned-workspace --target macos --workspace fork
 crabbox providers recommend worker-runtime --json
@@ -125,6 +126,8 @@ Supported use cases:
 - `run-evidence`: providers that can return run proof, collect artifacts,
   materialize downloads, or expose preview URLs.
 - `self-hosted`: private virtualization, external providers, and BYO SSH.
+- `team-cloud`: brokerable or direct cloud providers for shared team workflows,
+  coordinator-mediated spend/cleanup, and normal SSH debugging.
 - `versioned-workspace`: providers with native checkpoint, fork, restore, or
   snapshot-reference capabilities.
 - `windows`: native Windows and WSL2 targets.
