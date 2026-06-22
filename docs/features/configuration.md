@@ -40,7 +40,7 @@ Two commands expose the resolved view:
 - `crabbox config show` prints the merged configuration as the CLI sees it
   after every layer runs. `--json` is stable enough to diff in scripts, and
   neither form prints secret values (tokens render as a state such as
-  `configured` or `missing`, and URL userinfo renders as `<redacted>@`).
+  `configured` or `missing`; Proxmox API URL userinfo renders as `<redacted>@`).
 - `crabbox config path` prints the user config file path so other tools can
   edit it without parsing prose.
 
