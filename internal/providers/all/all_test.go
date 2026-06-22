@@ -376,6 +376,75 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 	}
 }
 
+func TestArchiveSyncFeatureGatesDelegatedSyncOptions(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if spec.Kind != core.ProviderKindDelegatedRun {
+			continue
+		}
+		err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{SyncOnly: true})
+		if spec.Features.Has(core.FeatureArchiveSync) {
+			if err != nil {
+				t.Fatalf("%s advertises %s but rejects --sync-only: %v", name, core.FeatureArchiveSync, err)
+			}
+			if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ForceSyncLarge: true}); err != nil {
+				t.Fatalf("%s advertises %s but rejects --force-sync-large: %v", name, core.FeatureArchiveSync, err)
+			}
+			if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ChecksumSync: true}); err == nil {
+				t.Fatalf("%s advertises %s but accepts --checksum", name, core.FeatureArchiveSync)
+			}
+			checked++
+			continue
+		}
+		if err == nil {
+			t.Fatalf("%s accepts --sync-only without %s", name, core.FeatureArchiveSync)
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureArchiveSync)
+	}
+}
+
+func TestModuleRunFeatureGatesScriptMode(t *testing.T) {
+	checked := 0
+	script := &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")}
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if spec.Kind != core.ProviderKindDelegatedRun {
+			continue
+		}
+		err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{
+			ScriptRequested: true,
+			Script:          script,
+		})
+		if spec.Features.Has(core.FeatureModuleRun) {
+			if err != nil {
+				t.Fatalf("%s advertises %s but rejects script mode: %v", name, core.FeatureModuleRun, err)
+			}
+			if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{Command: []string{"node", "worker.mjs"}}); err == nil {
+				t.Fatalf("%s advertises %s but accepts trailing command argv", name, core.FeatureModuleRun)
+			}
+			if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{
+				ScriptRequested: true,
+				ShellMode:       true,
+			}); err == nil {
+				t.Fatalf("%s advertises %s but accepts --shell", name, core.FeatureModuleRun)
+			}
+			checked++
+			continue
+		}
+		if err == nil {
+			t.Fatalf("%s accepts script mode without %s", name, core.FeatureModuleRun)
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureModuleRun)
+	}
+}
+
 func TestProviderKindRequiresBackendInterface(t *testing.T) {
 	sshLeaseProviders := 0
 	delegatedRunProviders := 0
