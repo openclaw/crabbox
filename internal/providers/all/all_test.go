@@ -416,6 +416,58 @@ func TestDirectTailscaleFeatureRequiresMetadataBackend(t *testing.T) {
 	}
 }
 
+func TestSSHFeatureRequiresSSHLoginBackend(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if !spec.Features.Has(core.FeatureSSH) {
+			continue
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises %s; add an offline conformance config for it", name, core.FeatureSSH)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.SSHLoginBackend); !ok {
+			t.Fatalf("%s advertises %s but backend %T is not SSHLoginBackend", name, core.FeatureSSH, backend)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureSSH)
+	}
+}
+
+func TestCrabboxSyncFeatureRequiresSSHLeaseBackend(t *testing.T) {
+	checked := 0
+	for _, name := range allBuiltInProviderNames() {
+		provider := mustProvider(t, name)
+		spec := provider.Spec()
+		if !spec.Features.Has(core.FeatureCrabboxSync) {
+			continue
+		}
+		cfg, ok := offlineConformanceConfig(name)
+		if !ok {
+			t.Fatalf("%s advertises %s; add an offline conformance config for it", name, core.FeatureCrabboxSync)
+		}
+		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+		if err != nil {
+			t.Fatalf("%s configure error: %v", name, err)
+		}
+		if _, ok := backend.(core.SSHLeaseBackend); !ok {
+			t.Fatalf("%s advertises %s but backend %T is not SSHLeaseBackend", name, core.FeatureCrabboxSync, backend)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureCrabboxSync)
+	}
+}
+
 func TestPauseResumeFeatureRequiresPausableBackend(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
@@ -575,6 +627,13 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 	case "islo":
 		return cfg, true
 	case "railway":
+		return cfg, true
+	case "semaphore":
+		cfg.Semaphore.Host = "semaphore.example.test"
+		cfg.Semaphore.Token = "test-token"
+		return cfg, true
+	case "sprites":
+		cfg.Sprites.Token = "test-token"
 		return cfg, true
 	default:
 		return cfg, true
