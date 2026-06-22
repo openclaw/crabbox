@@ -606,6 +606,9 @@ func TestControllerWebVNCURLParser(t *testing.T) {
 	if got := controllerWebVNCURL("webvnc: run crabbox webvnc --id demo\n"); got != "" {
 		t.Fatalf("command hint parsed as URL: %q", got)
 	}
+	if got := controllerWebVNCURL("webvnc: [redacted]\n"); got != "" {
+		t.Fatalf("redaction marker parsed as URL: %q", got)
+	}
 }
 
 func TestControllerWebVNCReadyParser(t *testing.T) {
@@ -1280,7 +1283,7 @@ fi
 		"webvnc daemon stop --id cbx_legacy123",
 		"webvnc daemon start --id cbx_legacy123 --provider external",
 		"--controller-owned=true",
-		"webvnc status --id cbx_legacy123 --provider external --local-port",
+		"webvnc status --id cbx_legacy123 --redact-credentials=false --provider external --local-port",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("calls missing %q:\n%s", want, got)

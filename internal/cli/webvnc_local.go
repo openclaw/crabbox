@@ -52,7 +52,9 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage:")
 		fmt.Fprintln(fs.Output(), "  crabbox webvnc local --vnc-host 127.0.0.1 --vnc-port <port> --username <user> --password-stdin [--security-type auto|vnc] [--local-port <port>] [--open]")
+		fmt.Fprintln(fs.Output(), "  --redact-credentials=false  reveal viewer credentials (unsafe)")
 	}
+	redactCredentials := registerWebVNCCredentialOutputFlag(fs)
 	vncHost := fs.String("vnc-host", "127.0.0.1", "loopback VNC source host")
 	vncPort := fs.String("vnc-port", "", "loopback VNC source port")
 	username := fs.String("username", "", "VNC username")
@@ -62,6 +64,9 @@ func (a App) webVNCLocal(ctx context.Context, args []string) error {
 	openViewer := fs.Bool("open", false, "open the local WebVNC viewer")
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *redactCredentials {
+		a.Stdout = webVNCRedactingWriter{Writer: a.Stdout}
 	}
 	if !localWebVNCSupported() {
 		return exit(2, "webvnc local is supported only on macOS and Linux")

@@ -89,7 +89,7 @@ func TestWebVNCURLs(t *testing.T) {
 func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
 	var output bytes.Buffer
 	writer := webVNCRedactingWriter{Writer: &output}
-	input := "bridge: connected\nwebvnc: https://portal.example/vnc#password=secret\npassword: secret\nusername: crabbox\n"
+	input := "bridge: connected\nwebvnc: https://portal.example/vnc#password=secret\npassword: secret\nusername: crabbox\nwebvnc: run crabbox webvnc --id demo\nwebvnc: https://portal.example/vnc\n"
 	if _, err := writer.Write([]byte(input)); err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +99,29 @@ func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
 	}
 	if !strings.Contains(got, "bridge: connected") || strings.Count(got, "[redacted]") != 3 {
 		t.Fatalf("unexpected redacted output: %q", got)
+	}
+	if !strings.Contains(got, "webvnc: run crabbox webvnc --id demo") || !strings.Contains(got, "webvnc: https://portal.example/vnc") {
+		t.Fatalf("non-secret WebVNC output was redacted: %q", got)
+	}
+}
+
+func TestWebVNCCredentialOutputDefaultsToRedacted(t *testing.T) {
+	fs := newFlagSet("webvnc-test", io.Discard)
+	redact := registerWebVNCCredentialOutputFlag(fs)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !*redact {
+		t.Fatal("WebVNC credential output must default to redacted")
+	}
+
+	fs = newFlagSet("webvnc-test", io.Discard)
+	redact = registerWebVNCCredentialOutputFlag(fs)
+	if err := parseFlags(fs, []string{"--redact-credentials=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if *redact {
+		t.Fatal("explicit private-terminal reveal was ignored")
 	}
 }
 

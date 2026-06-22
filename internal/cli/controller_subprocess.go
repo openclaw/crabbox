@@ -302,7 +302,9 @@ func (r *execControllerWorkspaceRunner) DesktopConnection(ctx context.Context, i
 	if err != nil {
 		return "", err
 	}
-	statusArgs := r.appendProviderArg([]string{"webvnc", "status", "--id", identifier}, request)
+	// This subprocess output is bounded and parsed in-process; the controller needs
+	// the credential-bearing URL without exposing it in human-facing command output.
+	statusArgs := r.appendProviderArg([]string{"webvnc", "status", "--id", identifier, "--redact-credentials=false"}, request)
 	statusArgs = append(statusArgs,
 		"--local-port", localPort,
 		"--expected-listener-owner-pid", strconv.Itoa(initialDaemonPID),
@@ -507,7 +509,7 @@ func controllerWebVNCURL(output string) string {
 	for _, line := range strings.Split(output, "\n") {
 		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "webvnc: "); ok {
 			value = strings.TrimSpace(value)
-			if value != "" && !strings.HasPrefix(value, "run ") {
+			if value != "" && value != "[redacted]" && !strings.HasPrefix(value, "run ") {
 				return value
 			}
 		}

@@ -482,7 +482,7 @@ func TestWebVNCLocalRunsWithPasswordOnlyOnStdin(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for local WebVNC command")
 	}
-	if got := output.String(); strings.Contains(got, "stdin-only-secret") || !strings.Contains(got, "VNC source 127.0.0.1:") {
+	if got := output.String(); strings.Contains(got, "stdin-only-secret") || !strings.Contains(got, "VNC source 127.0.0.1:") || !strings.Contains(got, "webvnc: file:") {
 		t.Fatalf("unexpected command output: %q", got)
 	}
 	cancel()

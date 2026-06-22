@@ -165,6 +165,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		fmt.Fprintln(fs.Output(), "  --local-port <port>")
 		fmt.Fprintln(fs.Output(), "  --open")
 		fmt.Fprintln(fs.Output(), "  --take-control")
+		fmt.Fprintln(fs.Output(), "  --redact-credentials=false  reveal viewer credentials (unsafe)")
 		fmt.Fprintln(fs.Output(), "  --reclaim")
 	}
 	provider := fs.String("provider", defaults.Provider, "desktop SSH provider")
@@ -175,7 +176,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
 	takeControl := fs.Bool("take-control", false, "ask the portal viewer to take keyboard and mouse control after connecting")
-	redactCredentials := fs.Bool("redact-credentials", false, "omit credential-bearing URLs and passwords from output")
+	redactCredentials := registerWebVNCCredentialOutputFlag(fs)
 	daemon := fs.Bool("daemon", false, "compatibility alias for daemon start")
 	background := fs.Bool("background", false, "compatibility alias for daemon start")
 	daemonStatus := fs.Bool("status", false, "compatibility alias for daemon status")
@@ -663,13 +664,22 @@ type webVNCRedactingWriter struct {
 	io.Writer
 }
 
+func registerWebVNCCredentialOutputFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("redact-credentials", true, "omit credential-bearing URLs and passwords from output; set false to reveal (unsafe)")
+}
+
 func (w webVNCRedactingWriter) Write(data []byte) (int, error) {
 	text := string(data)
 	lines := strings.SplitAfter(text, "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		for _, prefix := range []string{"webvnc:", "password:", "username:", "opened:"} {
+		for _, prefix := range []string{"password:", "username:", "webvnc:", "opened:"} {
 			if strings.HasPrefix(trimmed, prefix) {
+				if (prefix == "webvnc:" || prefix == "opened:") &&
+					!strings.Contains(trimmed, "password=") &&
+					!strings.Contains(trimmed, "username=") {
+					break
+				}
 				ending := ""
 				if strings.HasSuffix(line, "\n") {
 					ending = "\n"
@@ -761,6 +771,7 @@ func (a App) webVNCDaemonListCommand(args []string) error {
 func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc status", a.Stderr)
+	redactCredentials := registerWebVNCCredentialOutputFlag(fs)
 	provider := fs.String("provider", defaults.Provider, "desktop SSH provider")
 	id := fs.String("id", "", "lease id or slug")
 	localPort := fs.String("local-port", "", "local VNC tunnel port")
@@ -772,6 +783,9 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *redactCredentials {
+		a.Stdout = webVNCRedactingWriter{Writer: a.Stdout}
 	}
 	expectedIdentity, err := expectedIdentityFlags.value(fs)
 	if err != nil {
@@ -917,6 +931,7 @@ func (a App) webVNCStatusCommand(ctx context.Context, args []string) error {
 func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("webvnc reset", a.Stderr)
+	redactCredentials := registerWebVNCCredentialOutputFlag(fs)
 	provider := fs.String("provider", defaults.Provider, "desktop SSH provider")
 	id := fs.String("id", "", "lease id or slug")
 	openPortal := fs.Bool("open", false, "open the web portal VNC page")
@@ -926,6 +941,9 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *redactCredentials {
+		a.Stdout = webVNCRedactingWriter{Writer: a.Stdout}
 	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {

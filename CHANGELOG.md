@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Redacted WebVNC viewer URLs, usernames, and passwords from command output by default while preserving explicit private-terminal reveal. Thanks @coygeek.
 - Prevented repository-local KubeVirt config from selecting operator SSH key paths while preserving inline public keys. Thanks @coygeek.
 - Restricted lease sharing rosters to owners, admins, and `manage` recipients while keeping shared leases visible to `use` recipients. Thanks @coygeek.
 - Redacted credential-bearing Proxmox API URL userinfo from text and JSON `config show` output. Thanks @coygeek.

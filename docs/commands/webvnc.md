@@ -230,7 +230,8 @@ automation should use the explicit `daemon` subcommands.
 `crabbox webvnc status --id <lease-id-or-slug>` prints the full health view:
 local daemon pid/log, the SSH tunnel command, target VNC reachability, the
 coordinator bridge/viewer state, recent bridge log events, the portal URL and
-password, and the exact native VNC fallback command.
+credential state, and the exact native VNC fallback command. Credential-bearing
+viewer URLs, usernames, and passwords are redacted by default.
 
 ```text
 lease: cbx_0123456789ab slug=swift-crab provider=aws target=linux
@@ -240,7 +241,7 @@ ssh tunnel: ssh ... -o GatewayPorts=no -L 127.0.0.1:5901:127.0.0.1:5900 ...
 portal bridge: connected=true viewers=2 observers=1 slots=2
 portal controller: alice
 event: 2026-05-07T12:00:00Z bridge_connected
-webvnc: https://broker.example.com/portal/leases/cbx_.../vnc#password=...
+webvnc: [redacted]
 fallback: crabbox vnc --provider aws --target linux --network tailscale --id cbx_... --open
 ```
 
@@ -253,6 +254,12 @@ output also prints the native `crabbox vnc ... --open` fallback with the same
 provider/target/network flags. Running `status` with `--network public` or
 `--network tailscale` carries that same network selection into the printed
 fallback.
+
+`--open` still hands credentials directly to the browser without printing
+them. Credential-free viewer URLs and recovery commands remain visible. For a
+manual credential handoff in a private terminal, explicitly pass
+`--redact-credentials=false`; treat that output as a reusable secret while the
+bridge remains active. Daemon and controller output always stays redacted.
 
 ### reset
 
@@ -274,13 +281,15 @@ instead of granting general passwordless sudo.
 ## Portal and passwords
 
 `--open` opens the portal page after the bridge starts. When the VNC password is
-available, the command also places it in the URL fragment for the local browser
-tab and prints it on stdout. URL fragments are not sent to the coordinator, and
-Crabbox preserves special characters such as `!` when building the fragment. For
-macOS targets the lease username is also surfaced. If the portal login flow
-redirects first, the page may still prompt for the VNC password; use the
-password printed by the command. If an old tab is retrying with a stale
-fragment, close it before opening the new bridge URL.
+available, the command places it in the URL fragment handed to the local browser
+tab. URL fragments are not sent to the coordinator, and Crabbox preserves
+special characters such as `!` when building the fragment. Credential-bearing
+viewer URLs, usernames, and passwords remain redacted on stdout unless the
+operator explicitly sets `--redact-credentials=false`. Credential-free URLs and
+recovery commands remain visible. If the portal login flow redirects first,
+the page may still prompt for the VNC password; use the explicit reveal only in
+a private terminal. If an old tab is retrying with a stale fragment, close it
+before opening the new bridge URL.
 
 The portal page may show `WebVNC daemon not running` or `waiting for VNC bridge`
 until the local command has connected. If you opened the portal first, start the
@@ -317,6 +326,7 @@ explicit instead of fully automatic.
 --local-port <port>         local VNC tunnel port (auto-selected when unset)
 --open                      open the portal VNC page once the bridge connects
 --take-control              ask the portal viewer to request control after connecting
+--redact-credentials=false  reveal viewer URLs, usernames, and passwords (unsafe)
 --reclaim                   claim this lease for the current repo
 ```
 
@@ -389,9 +399,10 @@ If WebVNC remains unreliable, use the exact native fallback command printed by
 
 VNC authentication fails
 
-Use the password printed by `crabbox webvnc`. With `--open`, the command tries
-to pass the password in the browser URL fragment, but a portal login redirect
-can lose that fragment before noVNC sees it.
+Retry with `--open` so Crabbox hands the credential directly to the browser. If
+manual entry is required, run the command in a private terminal with
+`--redact-credentials=false`; avoid copying that output into logs, issues, or
+chat. A portal login redirect can lose the URL fragment before noVNC sees it.
 
 ## Related docs
 
