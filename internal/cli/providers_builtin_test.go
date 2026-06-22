@@ -2039,7 +2039,7 @@ func (testDockerSandboxProvider) Spec() ProviderSpec {
 		Family:      "docker-sandbox",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureRunSession},
+		Features:    FeatureSet{FeatureRunSession, FeatureMCP},
 		Coordinator: CoordinatorNever,
 	}
 }

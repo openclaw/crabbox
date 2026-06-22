@@ -404,6 +404,7 @@ cli.FeatureRunSession   // "run-session"
 cli.FeatureModuleRun    // "module-run"
 cli.FeatureRunArtifacts // "run-artifacts"
 cli.FeatureRunDownloads // "run-downloads"
+cli.FeatureMCP          // "mcp-attachments"
 ```
 
 Actions runner hydration is intentionally not a provider feature. It is a core
@@ -436,6 +437,8 @@ Checkpoint-related features are reserved for versioned workspaces:
   successful command.
 - `FeatureModuleRun`: delegated provider accepts `--script` or `--script-stdin`
   as source module input and does not interpret trailing argv as a shell command.
+- `FeatureMCP`: delegated provider can attach MCP server references during
+  sandbox creation.
 - `FeatureArchiveSync`: provider syncs the checkout as an uploaded archive rather
   than over rsync.
 - `FeatureURLBridge`: delegated provider can expose a lease's port through the
