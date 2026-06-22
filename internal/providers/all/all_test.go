@@ -401,6 +401,9 @@ func TestArchiveSyncFeatureGatesDelegatedSyncOptions(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s accepts --sync-only without %s", name, core.FeatureArchiveSync)
 		}
+		if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ForceSyncLarge: true}); err == nil {
+			t.Fatalf("%s accepts --force-sync-large without %s", name, core.FeatureArchiveSync)
+		}
 	}
 	if checked == 0 {
 		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureArchiveSync)
