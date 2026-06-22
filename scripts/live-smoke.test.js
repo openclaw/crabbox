@@ -3501,7 +3501,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -H)
-      if [[ "$2" == Authorization:* ]]; then
+      if [[ "$2" == "@-" ]]; then
+        IFS= read -r auth_header
+      elif [[ "$2" == Authorization:* ]]; then
         auth_header="$2"
       fi
       shift 2
@@ -3602,7 +3604,9 @@ while [[ $# -gt 0 ]]; do
     -X) method="$2"; shift 2 ;;
     -d) data="$2"; shift 2 ;;
     -H)
-      if [[ "$2" == Authorization:* ]]; then
+      if [[ "$2" == "@-" ]]; then
+        IFS= read -r auth_header
+      elif [[ "$2" == Authorization:* ]]; then
         auth_header="$2"
       fi
       shift 2
@@ -3697,6 +3701,42 @@ exit 99
   assert.match(result.stderr, /CRABBOX_ORGO_API_KEY/);
   assert.match(result.stderr, /ORGO_API_KEY/);
   assert.match(result.stderr, /orgo\.apiKey/);
+  const calls = fs.existsSync(curlLog) ? fs.readFileSync(curlLog, "utf8") : "";
+  assert.equal(calls, "");
+});
+
+test("orgo live smoke rejects line breaks in API keys before curl", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-orgo-key-lines-"));
+  const bin = path.join(dir, "bin");
+  const curlLog = path.join(dir, "curl.log");
+  fs.mkdirSync(bin);
+  writeExecutable(
+    path.join(bin, "curl"),
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_CURL_LOG:?}"
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_FAKE_CURL_LOG: curlLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "orgo",
+      CRABBOX_LIVE_REPO: repoRoot,
+      ORGO_API_KEY: "dummy-orgo-key\nurl = https://attacker.invalid",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /API key must not contain line breaks/);
+  assert.doesNotMatch(result.stdout + result.stderr, /dummy-orgo-key|attacker/);
   const calls = fs.existsSync(curlLog) ? fs.readFileSync(curlLog, "utf8") : "";
   assert.equal(calls, "");
 });
