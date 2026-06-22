@@ -91,6 +91,7 @@ It is selection guidance, not a readiness check; run `crabbox doctor --provider
 crabbox providers recommend
 crabbox providers recommend ci-proof
 crabbox providers recommend fast-feedback --feature cache-volume
+crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend reachability
 crabbox providers recommend run-evidence
@@ -113,6 +114,9 @@ Supported use cases:
 - `fast-feedback`: providers suited to repeated test loops with reusable cache
   volumes, checkout sync, cleanup, or reusable validation evidence.
 - `gpu`: GPU-oriented execution providers.
+- `isolated-execution`: delegated and local sandbox providers for disposable or
+  untrusted command execution. This is routing guidance, not a security
+  certification for a specific provider.
 - `linux-vm`: general Linux VM or SSH-lease execution.
 - `local`: local containers, VMs, or local sandboxes.
 - `macos`: macOS targets.

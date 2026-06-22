@@ -381,7 +381,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		t.Fatalf("providers recommend error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "reachability", "run-evidence", "versioned-workspace", "worker-runtime"} {
+	for _, want := range []string{"provider recommendation use cases:", "ci-proof", "agent-sandbox", "fast-feedback", "isolated-execution", "reachability", "run-evidence", "versioned-workspace", "worker-runtime"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers recommend output missing %q:\n%s", want, text)
 		}
@@ -466,6 +466,62 @@ func TestProvidersRecommendReachabilityUsesTransportCapabilities(t *testing.T) {
 	}
 	if !foundURLBridge {
 		t.Fatalf("reachability recommendations should include URL bridge providers: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendIsolatedExecutionPrefersDelegatedSandboxes(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "isolated-execution", 8)
+	if len(recommendations) == 0 {
+		t.Fatal("expected isolated-execution recommendations")
+	}
+	if recommendations[0].Kind != ProviderKindDelegatedRun {
+		t.Fatalf("top isolated-execution kind=%q recommendations=%v", recommendations[0].Kind, recommendations)
+	}
+	if recommendations[0].Category != "delegated-sandbox" && recommendations[0].Category != "local-sandbox" {
+		t.Fatalf("top isolated-execution category=%q recommendations=%v", recommendations[0].Category, recommendations)
+	}
+	for _, recommendation := range recommendations {
+		if recommendation.Category != "delegated-sandbox" && recommendation.Category != "local-sandbox" {
+			t.Fatalf("isolated-execution recommendation escaped sandbox categories: %#v", recommendation)
+		}
+	}
+}
+
+func TestProvidersRecommendIsolatedExecutionIncludesLocalSandboxes(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "isolated-execution", 64)
+	if len(recommendations) == 0 {
+		t.Fatal("expected isolated-execution recommendations")
+	}
+	foundLocalSandbox := false
+	foundDelegatedSandbox := false
+	for _, recommendation := range recommendations {
+		switch recommendation.Category {
+		case "local-sandbox":
+			foundLocalSandbox = true
+		case "delegated-sandbox":
+			foundDelegatedSandbox = true
+		}
+	}
+	if !foundLocalSandbox {
+		t.Fatalf("isolated-execution recommendations should include local sandbox providers: %#v", recommendations)
+	}
+	if !foundDelegatedSandbox {
+		t.Fatalf("isolated-execution recommendations should include delegated sandbox providers: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendIsolatedExecutionAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "secure-sandbox", "--limit", "1", "--json"})
+	if err != nil {
+		t.Fatalf("providers recommend secure-sandbox error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || entries[0].Kind != ProviderKindDelegatedRun {
+		t.Fatalf("secure-sandbox alias entries=%#v", entries)
 	}
 }
 

@@ -396,6 +396,7 @@ func providerRecommendationUseCases() []string {
 		"desktop",
 		"fast-feedback",
 		"gpu",
+		"isolated-execution",
 		"linux-vm",
 		"local",
 		"macos",
@@ -422,6 +423,8 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "fast-feedback", true
 	case "gpu", "cuda", "ml":
 		return "gpu", true
+	case "isolated", "isolated-execution", "isolation", "secure", "secure-sandbox", "untrusted", "untrusted-code":
+		return "isolated-execution", true
 	case "linux", "linux-vm", "vm":
 		return "linux-vm", true
 	case "local", "local-vm", "local-runtime", "local-sandbox":
@@ -595,6 +598,28 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if hasFeature(FeatureRunSession) {
 			add(8, "supports reusable run sessions")
+		}
+	case "isolated-execution":
+		if category == "delegated-sandbox" {
+			add(55, "delegated sandbox provider")
+		}
+		if category == "local-sandbox" {
+			add(45, "local policy-constrained sandbox")
+		}
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(30, "provider owns command execution boundary")
+		}
+		if hasFeature(FeatureArchiveSync) {
+			add(15, "accepts bounded archive sync instead of a long-lived SSH lease")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(12, "can clean up provider-owned sandbox state")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux sandbox workloads")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(6, "returns sandbox run sessions for inspection")
 		}
 	case "linux-vm":
 		if hasTarget(targetLinux) {
@@ -775,6 +800,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
+	fmt.Fprintln(out, "  crabbox providers recommend isolated-execution")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
