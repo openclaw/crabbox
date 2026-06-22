@@ -68,6 +68,7 @@ type orgoBashResponse struct {
 	Message       string `json:"message"`
 	ExitCode      *int   `json:"exit_code"`
 	ExitCodeCamel *int   `json:"exitCode"`
+	Success       *bool  `json:"success"`
 }
 
 type orgoHTTPClient struct {
@@ -244,6 +245,9 @@ func (c *orgoHTTPClient) RunBash(ctx context.Context, id, command string, stdout
 	}
 	if res.ExitCode != nil {
 		return *res.ExitCode, nil
+	}
+	if res.Success != nil && !*res.Success {
+		return 1, nil
 	}
 	return 0, nil
 }
