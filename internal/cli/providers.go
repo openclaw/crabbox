@@ -33,19 +33,44 @@ type providerRecommendationEntry struct {
 	Reasons   []string     `json:"reasons"`
 }
 
+type providerMatrixFilters struct {
+	Kinds      []string
+	Targets    []string
+	Features   []string
+	Workspaces []string
+	Evidence   []string
+}
+
 func (a App) providers(_ context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "recommend" {
 		return a.providerRecommendations(args[1:])
 	}
 	fs := newFlagSet("providers", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
+	var kindFilters, targetFilters, featureFilters, workspaceFilters, evidenceFilters stringListFlag
+	fs.Var(&kindFilters, "kind", "filter by provider kind; repeatable")
+	fs.Var(&targetFilters, "target", "filter by target such as linux or worker-runtime; repeatable")
+	fs.Var(&featureFilters, "feature", "filter by raw feature flag such as ssh or run-proof; repeatable")
+	fs.Var(&workspaceFilters, "workspace", "filter by normalized workspace capability; repeatable")
+	fs.Var(&evidenceFilters, "evidence", "filter by normalized evidence capability; repeatable")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox providers [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
+		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--target TARGET] [--feature FEATURE] [--workspace CAPABILITY] [--evidence CAPABILITY] OR crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	entries := providerMatrix()
+	filters := providerMatrixFilters{
+		Kinds:      providerFilterValues(kindFilters),
+		Targets:    providerFilterValues(targetFilters),
+		Features:   providerFilterValues(featureFilters),
+		Workspaces: providerFilterValues(workspaceFilters),
+		Evidence:   providerFilterValues(evidenceFilters),
+	}
+	if err := validateProviderMatrixFilters(filters, entries); err != nil {
+		return err
+	}
+	entries = filterProviderMatrix(entries, filters)
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(entries)
 	}
@@ -126,6 +151,117 @@ func providerMatrix() []providerMatrixEntry {
 		})
 	}
 	return entries
+}
+
+func providerFilterValues(values stringListFlag) []string {
+	var out []string
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.ToLower(strings.TrimSpace(part))
+			if part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
+}
+
+func validateProviderMatrixFilters(filters providerMatrixFilters, entries []providerMatrixEntry) error {
+	allowed := map[string]map[string]bool{
+		"kind":      {},
+		"target":    {},
+		"feature":   {},
+		"workspace": {},
+		"evidence":  {},
+	}
+	for _, entry := range entries {
+		allowed["kind"][strings.ToLower(string(entry.Kind))] = true
+		addProviderFilterAllowed(allowed["target"], entry.Targets)
+		addProviderFilterAllowed(allowed["feature"], featuresToStrings(entry.Features))
+		addProviderFilterAllowed(allowed["workspace"], entry.Workspace)
+		addProviderFilterAllowed(allowed["evidence"], entry.Evidence)
+	}
+	check := func(name string, values []string) error {
+		for _, value := range values {
+			if !allowed[name][value] {
+				return exit(2, "unknown provider %s filter %q; try one of: %s", name, value, strings.Join(sortedProviderFilterValues(allowed[name]), ", "))
+			}
+		}
+		return nil
+	}
+	if err := check("kind", filters.Kinds); err != nil {
+		return err
+	}
+	if err := check("target", filters.Targets); err != nil {
+		return err
+	}
+	if err := check("feature", filters.Features); err != nil {
+		return err
+	}
+	if err := check("workspace", filters.Workspaces); err != nil {
+		return err
+	}
+	return check("evidence", filters.Evidence)
+}
+
+func addProviderFilterAllowed(allowed map[string]bool, values []string) {
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			allowed[value] = true
+		}
+	}
+}
+
+func sortedProviderFilterValues(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func filterProviderMatrix(entries []providerMatrixEntry, filters providerMatrixFilters) []providerMatrixEntry {
+	if providerMatrixFiltersEmpty(filters) {
+		return entries
+	}
+	out := make([]providerMatrixEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !providerEntryMatchesFilters(entry, filters) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func providerMatrixFiltersEmpty(filters providerMatrixFilters) bool {
+	return len(filters.Kinds) == 0 && len(filters.Targets) == 0 && len(filters.Features) == 0 && len(filters.Workspaces) == 0 && len(filters.Evidence) == 0
+}
+
+func providerEntryMatchesFilters(entry providerMatrixEntry, filters providerMatrixFilters) bool {
+	return providerFieldContainsAll([]string{string(entry.Kind)}, filters.Kinds) &&
+		providerFieldContainsAll(entry.Targets, filters.Targets) &&
+		providerFieldContainsAll(featuresToStrings(entry.Features), filters.Features) &&
+		providerFieldContainsAll(entry.Workspace, filters.Workspaces) &&
+		providerFieldContainsAll(entry.Evidence, filters.Evidence)
+}
+
+func providerFieldContainsAll(values, wants []string) bool {
+	if len(wants) == 0 {
+		return true
+	}
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[strings.ToLower(strings.TrimSpace(value))] = true
+	}
+	for _, want := range wants {
+		if !set[want] {
+			return false
+		}
+	}
+	return true
 }
 
 func providerRecommendationUseCases() []string {
