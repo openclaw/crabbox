@@ -150,7 +150,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		fmt.Fprintf(b.rt.Stderr, "windows-sandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		report := timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			Slug:          result.Slug,
 			SyncDelegated: true,
@@ -161,7 +161,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, execErr)
+		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}

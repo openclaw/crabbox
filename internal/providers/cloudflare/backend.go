@@ -203,7 +203,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		fmt.Fprintf(b.rt.Stderr, "%s run summary sync=%s command=%s total=%s exit=%d\n", providerName, syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		report := timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -215,7 +215,8 @@ func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, commandErr)
+		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}

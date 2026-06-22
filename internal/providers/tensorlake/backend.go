@@ -143,7 +143,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		report := timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -155,7 +155,8 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      exitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, runErr)
+		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}

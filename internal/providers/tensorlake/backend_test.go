@@ -548,11 +548,15 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 			},
 		},
 	)
-	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
 	req := RunRequest{
-		Repo:    Repo{Name: "carbbox", Root: t.TempDir()},
-		Command: []string{"false"},
-		NoSync:  true,
+		Repo:       Repo{Name: "carbbox", Root: t.TempDir()},
+		Command:    []string{"false"},
+		NoSync:     true,
+		TimingJSON: true,
 	}
 	result, err := backend.Run(context.Background(), req)
 	if result.ExitCode != 7 {
@@ -560,6 +564,9 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	}
 	if result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
 		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+	}
+	if !strings.Contains(stderr.String(), `"runStatus":"failed"`) || !strings.Contains(stderr.String(), `"errorKind":"command-exit"`) {
+		t.Fatalf("stderr = %q, want failed command-exit timing", stderr.String())
 	}
 	var ee ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {

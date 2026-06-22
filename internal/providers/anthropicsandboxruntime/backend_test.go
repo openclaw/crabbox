@@ -154,10 +154,12 @@ func TestRunReturnsNonZeroExitWithoutPersistentSession(t *testing.T) {
 		}
 		return LocalCommandResult{ExitCode: 7, Stderr: "boom\n"}, errors.New("exit status 7")
 	}}
-	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+	var stderr bytes.Buffer
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
-		Command: []string{"false"},
+		Repo:       Repo{Name: "my-app", Root: t.TempDir()},
+		Command:    []string{"false"},
+		TimingJSON: true,
 	})
 	var exitErr core.ExitError
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
@@ -168,6 +170,9 @@ func TestRunReturnsNonZeroExitWithoutPersistentSession(t *testing.T) {
 	}
 	if result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
 		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+	}
+	if !strings.Contains(stderr.String(), `"runStatus":"failed"`) || !strings.Contains(stderr.String(), `"errorKind":"command-exit"`) {
+		t.Fatalf("stderr = %q, want failed command-exit timing", stderr.String())
 	}
 }
 

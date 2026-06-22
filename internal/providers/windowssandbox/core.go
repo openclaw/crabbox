@@ -47,6 +47,10 @@ func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
+func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
+	return core.TimingReportWithRunResult(report, result, err)
+}
+
 func finalizeRunResult(result RunResult, err error) RunResult {
 	return core.FinalizeRunResult(result, err)
 }

@@ -58,7 +58,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	result = core.FinalizeRunResult(result, runErr)
 	fmt.Fprintf(b.rt.Stderr, "anthropic-sandbox-runtime run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		report := timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			SyncDelegated: true,
 			SyncSkipped:   true,
@@ -66,7 +66,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      exitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, runErr)
+		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}

@@ -41,6 +41,10 @@ func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
+func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
+	return core.TimingReportWithRunResult(report, result, err)
+}
+
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }

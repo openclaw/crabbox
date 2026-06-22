@@ -853,6 +853,9 @@ func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 	if !strings.Contains(stderr.String(), `"exitCode":1`) {
 		t.Fatalf("stderr = %q, want timing exitCode=1", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), `"runStatus":"failed"`) || !strings.Contains(stderr.String(), `"errorKind":"command-exit"`) {
+		t.Fatalf("stderr = %q, want failed command-exit timing", stderr.String())
+	}
 }
 
 func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {

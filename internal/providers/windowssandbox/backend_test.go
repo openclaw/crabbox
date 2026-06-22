@@ -386,11 +386,13 @@ func TestRunKeepsWorkspaceOnFailureWithKeepOnFailure(t *testing.T) {
 	runner := &recordingRunner{result: LocalCommandResult{ExitCode: 7}, err: errors.New("exit status 7")}
 	cfg := core.BaseConfig()
 	cfg.WindowsSandbox.TempRoot = t.TempDir()
-	be := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	var stderr strings.Builder
+	be := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: &stderr, Exec: runner})
 	result, err := be.(*backend).Run(context.Background(), RunRequest{
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"cmd.exe", "/c", "exit 7"},
+		TimingJSON:    true,
 	})
 	if err == nil {
 		t.Fatal("expected run error")
@@ -400,6 +402,9 @@ func TestRunKeepsWorkspaceOnFailureWithKeepOnFailure(t *testing.T) {
 	}
 	if result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
 		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+	}
+	if !strings.Contains(stderr.String(), `"runStatus":"failed"`) || !strings.Contains(stderr.String(), `"errorKind":"command-exit"`) {
+		t.Fatalf("stderr = %q, want failed command-exit timing", stderr.String())
 	}
 	entries, readErr := os.ReadDir(cfg.WindowsSandbox.TempRoot)
 	if readErr != nil {
