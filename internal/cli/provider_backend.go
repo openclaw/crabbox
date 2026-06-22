@@ -883,6 +883,16 @@ func registeredProviders() []Provider {
 	return providers
 }
 
+// RegisteredProviderNames returns the canonical names of every registered provider.
+func RegisteredProviderNames() []string {
+	providers := registeredProviders()
+	names := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		names = append(names, provider.Name())
+	}
+	return names
+}
+
 func normalizeProviderName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
