@@ -900,6 +900,9 @@ func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Status != "succeeded" || result.ErrorKind != "" {
+		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+	}
 	if execCalls != 2 {
 		t.Fatalf("exec calls=%d, want prepare and command", execCalls)
 	}

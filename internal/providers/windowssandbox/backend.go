@@ -143,6 +143,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		Slug:          filepath.Base(run.root),
 		CommandText:   windowsSandboxCommandText(req),
 	}
+	result = finalizeRunResult(result, execErr)
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "windows-sandbox run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	} else {

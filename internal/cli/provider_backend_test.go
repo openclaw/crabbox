@@ -26,6 +26,30 @@ func testRuntimeWithRunner(r CommandRunner) Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: realClock{}, Exec: r}
 }
 
+func TestFinalizeRunResultClassifiesStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		result    RunResult
+		err       error
+		want      RunStatus
+		wantError RunErrorKind
+	}{
+		{name: "success", result: RunResult{}, want: RunStatusSucceeded, wantError: RunErrorNone},
+		{name: "command exit", result: RunResult{ExitCode: 7}, err: ExitError{Code: 7, Message: "failed"}, want: RunStatusFailed, wantError: RunErrorCommandExit},
+		{name: "provider error", result: RunResult{}, err: io.ErrUnexpectedEOF, want: RunStatusFailed, wantError: RunErrorProvider},
+		{name: "timeout", result: RunResult{}, err: context.DeadlineExceeded, want: RunStatusTimedOut, wantError: RunErrorTimeout},
+		{name: "canceled", result: RunResult{}, err: context.Canceled, want: RunStatusCanceled, wantError: RunErrorCanceled},
+		{name: "preserve provider status", result: RunResult{Status: RunStatusFailed, ErrorKind: RunErrorProvider}, want: RunStatusFailed, wantError: RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FinalizeRunResult(tc.result, tc.err)
+			if got.Status != tc.want || got.ErrorKind != tc.wantError {
+				t.Fatalf("status/error=%q/%q want %q/%q", got.Status, got.ErrorKind, tc.want, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestExecCommandRunnerBoundsCapturedOutputAndStopsChild(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

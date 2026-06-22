@@ -47,6 +47,10 @@ func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
+func finalizeRunResult(result RunResult, err error) RunResult {
+	return core.FinalizeRunResult(result, err)
+}
+
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
 }
