@@ -276,8 +276,11 @@ func TestWSL2WrapsRemoteCommand(t *testing.T) {
 	for _, want := range []string{
 		`[Convert]::FromBase64String("`,
 		`[System.IO.File]::WriteAllBytes($path, $scriptBytes)`,
-		`& wsl.exe --exec bash $wslPath`,
-		`$code = $LASTEXITCODE`,
+		`$psi.RedirectStandardInput = $true`,
+		`$psi.Arguments = "--exec bash " + $wslPath`,
+		`[Console]::OpenStandardInput().CopyTo($process.StandardInput.BaseStream)`,
+		`$process.WaitForExit()`,
+		`$code = $process.ExitCode`,
 		`exit $code`,
 	} {
 		if !strings.Contains(decoded, want) {

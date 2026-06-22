@@ -715,8 +715,19 @@ $scriptBytes = [Convert]::FromBase64String("` + encoded + `")
 [System.IO.File]::WriteAllBytes($path, $scriptBytes)
 $wslPath = "/mnt/c/ProgramData/crabbox/commands/" + $name
 try {
-  & wsl.exe --exec bash $wslPath
-  $code = $LASTEXITCODE
+  $psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardInput = $true
+  $psi.Arguments = "--exec bash " + $wslPath
+  $process = [System.Diagnostics.Process]::Start($psi)
+  try {
+    [Console]::OpenStandardInput().CopyTo($process.StandardInput.BaseStream)
+  } catch [System.IO.IOException] {
+  } finally {
+    $process.StandardInput.Close()
+  }
+  $process.WaitForExit()
+  $code = $process.ExitCode
 } finally {
   Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 }
