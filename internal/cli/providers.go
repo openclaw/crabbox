@@ -35,6 +35,15 @@ type providerRecommendationEntry struct {
 	Reasons   []string     `json:"reasons"`
 }
 
+type providerFilterValuesEntry struct {
+	Kind      []string `json:"kind"`
+	Category  []string `json:"category"`
+	Target    []string `json:"target"`
+	Feature   []string `json:"feature"`
+	Workspace []string `json:"workspace"`
+	Evidence  []string `json:"evidence"`
+}
+
 type providerMatrixFilters struct {
 	Kinds      []string
 	Categories []string
@@ -54,6 +63,9 @@ type providerMatrixFilterFlagValues struct {
 }
 
 func (a App) providers(_ context.Context, args []string) error {
+	if len(args) > 0 && args[0] == "filters" {
+		return a.providerFilters(args[1:])
+	}
 	if len(args) > 0 && args[0] == "recommend" {
 		return a.providerRecommendations(args[1:])
 	}
@@ -64,7 +76,7 @@ func (a App) providers(_ context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--workspace CAPABILITY] [--evidence CAPABILITY] OR crabbox providers recommend <use-case> [--limit N] [--json]")
+		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--workspace CAPABILITY] [--evidence CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	entries := providerMatrix()
 	filters := filterFlags.filters()
@@ -76,6 +88,23 @@ func (a App) providers(_ context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(entries)
 	}
 	printProviderMatrix(a.Stdout, entries)
+	return nil
+}
+
+func (a App) providerFilters(args []string) error {
+	fs := newFlagSet("providers filters", a.Stderr)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return exit(2, "usage: crabbox providers filters [--json]")
+	}
+	values := providerMatrixFilterValues(providerMatrix())
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(values)
+	}
+	printProviderFilterValues(a.Stdout, values)
 	return nil
 }
 
@@ -206,7 +235,7 @@ func providerFilterValues(values stringListFlag) []string {
 	return out
 }
 
-func validateProviderMatrixFilters(filters providerMatrixFilters, entries []providerMatrixEntry) error {
+func providerMatrixFilterValues(entries []providerMatrixEntry) providerFilterValuesEntry {
 	allowed := map[string]map[string]bool{
 		"kind":      {},
 		"category":  {},
@@ -216,13 +245,25 @@ func validateProviderMatrixFilters(filters providerMatrixFilters, entries []prov
 		"evidence":  {},
 	}
 	for _, entry := range entries {
-		allowed["kind"][strings.ToLower(string(entry.Kind))] = true
+		addProviderFilterAllowed(allowed["kind"], []string{string(entry.Kind)})
 		addProviderFilterAllowed(allowed["category"], []string{entry.Category})
 		addProviderFilterAllowed(allowed["target"], entry.Targets)
 		addProviderFilterAllowed(allowed["feature"], featuresToStrings(entry.Features))
 		addProviderFilterAllowed(allowed["workspace"], entry.Workspace)
 		addProviderFilterAllowed(allowed["evidence"], entry.Evidence)
 	}
+	return providerFilterValuesEntry{
+		Kind:      sortedProviderFilterValues(allowed["kind"]),
+		Category:  sortedProviderFilterValues(allowed["category"]),
+		Target:    sortedProviderFilterValues(allowed["target"]),
+		Feature:   sortedProviderFilterValues(allowed["feature"]),
+		Workspace: sortedProviderFilterValues(allowed["workspace"]),
+		Evidence:  sortedProviderFilterValues(allowed["evidence"]),
+	}
+}
+
+func validateProviderMatrixFilters(filters providerMatrixFilters, entries []providerMatrixEntry) error {
+	allowed := providerMatrixFilterAllowedValues(entries)
 	check := func(name string, values []string) error {
 		for _, value := range values {
 			if !allowed[name][value] {
@@ -249,6 +290,26 @@ func validateProviderMatrixFilters(filters providerMatrixFilters, entries []prov
 	return check("evidence", filters.Evidence)
 }
 
+func providerMatrixFilterAllowedValues(entries []providerMatrixEntry) map[string]map[string]bool {
+	values := providerMatrixFilterValues(entries)
+	return map[string]map[string]bool{
+		"kind":      providerFilterAllowedSet(values.Kind),
+		"category":  providerFilterAllowedSet(values.Category),
+		"target":    providerFilterAllowedSet(values.Target),
+		"feature":   providerFilterAllowedSet(values.Feature),
+		"workspace": providerFilterAllowedSet(values.Workspace),
+		"evidence":  providerFilterAllowedSet(values.Evidence),
+	}
+}
+
+func providerFilterAllowedSet(values []string) map[string]bool {
+	allowed := make(map[string]bool, len(values))
+	for _, value := range values {
+		allowed[value] = true
+	}
+	return allowed
+}
+
 func addProviderFilterAllowed(allowed map[string]bool, values []string) {
 	for _, value := range values {
 		value = strings.ToLower(strings.TrimSpace(value))
@@ -265,6 +326,23 @@ func sortedProviderFilterValues(values map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func printProviderFilterValues(out io.Writer, values providerFilterValuesEntry) {
+	fmt.Fprintln(out, "provider filter values:")
+	fmt.Fprintf(out, "  kind: %s\n", providerFilterValueLine(values.Kind))
+	fmt.Fprintf(out, "  category: %s\n", providerFilterValueLine(values.Category))
+	fmt.Fprintf(out, "  target: %s\n", providerFilterValueLine(values.Target))
+	fmt.Fprintf(out, "  feature: %s\n", providerFilterValueLine(values.Feature))
+	fmt.Fprintf(out, "  workspace: %s\n", providerFilterValueLine(values.Workspace))
+	fmt.Fprintf(out, "  evidence: %s\n", providerFilterValueLine(values.Evidence))
+}
+
+func providerFilterValueLine(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ",")
 }
 
 func filterProviderMatrix(entries []providerMatrixEntry, filters providerMatrixFilters) []providerMatrixEntry {

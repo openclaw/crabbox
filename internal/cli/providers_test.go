@@ -317,6 +317,63 @@ func TestProvidersCommandRejectsUnknownFilter(t *testing.T) {
 	}
 }
 
+func TestProvidersFiltersCommandHumanOutput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"filters"})
+	if err != nil {
+		t.Fatalf("providers filters error=%v stderr=%q", err, stderr.String())
+	}
+	text := stdout.String()
+	for _, want := range []string{
+		"provider filter values:",
+		"  kind: ",
+		"delegated-run",
+		"  category: ",
+		"delegated-sandbox",
+		"  evidence: ",
+		"preview-url",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("providers filters output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestProvidersFiltersCommandJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"filters", "--json"})
+	if err != nil {
+		t.Fatalf("providers filters --json error=%v stderr=%q", err, stderr.String())
+	}
+	var values providerFilterValuesEntry
+	if err := json.Unmarshal(stdout.Bytes(), &values); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	for _, tc := range []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{name: "kind", values: values.Kind, want: "delegated-run"},
+		{name: "category", values: values.Category, want: "delegated-sandbox"},
+		{name: "evidence", values: values.Evidence, want: "preview-url"},
+		{name: "workspace", values: values.Workspace, want: "fork"},
+	} {
+		if !containsString(tc.values, tc.want) {
+			t.Fatalf("%s values=%v missing %q", tc.name, tc.values, tc.want)
+		}
+	}
+}
+
+func TestProvidersFiltersRejectsArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"filters", "kind"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("providers filters arg error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+}
+
 func TestProvidersRecommendListsUseCases(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend"})

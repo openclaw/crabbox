@@ -8,6 +8,8 @@ does not contact any cloud, check credentials, or query quota. Use
 ```sh
 crabbox providers
 crabbox providers --json
+crabbox providers filters
+crabbox providers filters --json
 crabbox providers --category delegated-sandbox --evidence preview-url
 crabbox providers --target linux --workspace checkpoint --workspace fork --json
 crabbox providers recommend ci-proof
@@ -45,8 +47,37 @@ compiled provider matrix; unknown values fail before printing partial output.
 The same filters can be passed to `providers recommend` to rank only matching
 providers for a workflow.
 
+Run `crabbox providers filters` to print the exact filter values accepted by
+the current binary.
+
 The matrix form takes no positional arguments. Use `providers recommend` for
 workflow-oriented ranked selection guidance.
+
+## `providers filters`
+
+`crabbox providers filters` prints allowed filter values from the compiled
+provider matrix. It does not contact provider APIs. Use it before composing
+matrix or recommendation filters in scripts.
+
+```sh
+crabbox providers filters
+crabbox providers filters --json
+```
+
+Text output groups values by flag:
+
+```text
+provider filter values:
+  kind: delegated-run,service-control,ssh-lease
+  category: brokerable-cloud,byo-ssh,ci-proof-runner,delegated-sandbox,direct-cloud,external-provider,gpu-cloud,local-runtime,local-sandbox,local-vm,self-hosted-virtualization,service-control
+  target: linux,macos,windows/normal,windows/wsl2,worker-runtime
+  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
+  workspace: checkpoint,fork,restore,snapshot-ref
+  evidence: artifacts,downloads,preview-url,proof,session
+```
+
+JSON output returns one object with `kind`, `category`, `target`, `feature`,
+`workspace`, and `evidence` arrays.
 
 ## `providers recommend`
 
