@@ -267,6 +267,12 @@ crabbox run \
 The repeatable live check is opt-in because it creates a billable Nebius VM:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
+```
+
+The top-level smoke dispatches to the provider-specific script:
+
+```sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-nebius-smoke.sh
 ```
 
