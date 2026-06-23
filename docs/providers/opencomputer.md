@@ -157,6 +157,8 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
    clears its local claim. For an existing lease, a 404 is account-ambiguous and
    keeps the claim by default; pass `--opencomputer-forget-missing` to `stop`
    only after confirming the sandbox is gone in the intended account.
+6. `run --lease-output <path>` writes the OpenComputer lease ID, slug,
+   reuse/retention state, and exact cleanup command for orchestration handoff.
 
 ## Capabilities
 
