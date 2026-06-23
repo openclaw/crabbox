@@ -68,6 +68,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=linode scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=ovh scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nvidia-brev scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -100,6 +101,11 @@ Per-provider smoke prerequisites:
   empty Crabbox-owned OVH inventory, creates one short-lived `b3-8` instance by
   default, verifies status and `echo ok`, stops the lease, runs dry-run cleanup,
   and prints a final classification.
+- **NVIDIA Brev** — authenticated `brev` CLI on `PATH` plus enough GPU quota
+  and capacity for the selected workspace type. `scripts/live-nvidia-brev-smoke.sh`
+  is coordinator-free, creates one short-lived GPU workspace, verifies
+  `nvidia-smi`, deletes the workspace with `crabbox stop`, and prints a final
+  classification.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 

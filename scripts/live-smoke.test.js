@@ -1446,6 +1446,86 @@ esac
   assert.equal(seen[9], "list --provider ovh --json");
 });
 
+test("nvidia brev live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nvidia-brev-dispatch-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+case "$1" in
+  doctor)
+    printf 'auth=ready control_plane=ready inventory=ready leases=0 runtime=unchecked\\n'
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\\n'
+    else
+      printf '[{"labels":{"slug":"%s"},"provider":"nvidia-brev"}]\\n' "$slug"
+    fi
+    ;;
+  warmup)
+    requested_slug=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --slug)
+          requested_slug="\${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\\n' "$requested_slug" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\\n'
+    ;;
+  run)
+    printf 'NVIDIA-SMI 555.55.55\\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  *)
+    printf 'unexpected args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "nvidia-brev",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_nvidia_brev_smoke_passed slug=nbrev-smoke-/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen[0], "doctor --provider nvidia-brev --nvidia-brev-cli brev");
+  assert.equal(seen[1], "list --provider nvidia-brev --nvidia-brev-cli brev --json");
+  assert.match(seen[2], /^warmup --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --slug nbrev-smoke-\d+-\d+-[0-9a-f]{8} --keep=false --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[3], /^status --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --no-sync -- nvidia-smi$/);
+  assert.equal(seen[5], "list --provider nvidia-brev --nvidia-brev-cli brev --json");
+  assert.match(seen[6], /^stop --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete nbrev-smoke-\d+-\d+-[0-9a-f]{8}$/);
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");

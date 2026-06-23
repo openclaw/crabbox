@@ -914,6 +914,10 @@ if has_provider ovh; then
   "$root/scripts/live-ovh-smoke.sh"
 fi
 
+if has_provider nvidia-brev || has_provider brev || has_provider nvidia; then
+  CRABBOX_NVIDIA_BREV_LIVE=1 "$root/scripts/live-nvidia-brev-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi

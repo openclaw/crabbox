@@ -256,13 +256,16 @@ The repository live smoke is intentionally separate from default CI because it
 can create a billable GPU workspace:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nvidia-brev scripts/live-smoke.sh
 CRABBOX_NVIDIA_BREV_LIVE=1 scripts/live-nvidia-brev-smoke.sh
 ```
 
-The script builds or reuses `bin/crabbox`, runs `doctor`, creates one workspace
-with `--keep=false` so partial acquisition failures roll back, proves
-`nvidia-smi` through `crabbox run`, lists the lease, and then deletes the lease
-with `crabbox stop`. It prints a stable classification:
+The top-level script dispatches to the provider-specific script with
+`CRABBOX_NVIDIA_BREV_LIVE=1`. The provider-specific script builds or reuses
+`bin/crabbox`, runs `doctor`, creates one workspace with `--keep=false` so
+partial acquisition failures roll back, proves `nvidia-smi` through
+`crabbox run`, lists the lease, and then deletes the lease with `crabbox stop`.
+It prints a stable classification:
 
 - `live_nvidia_brev_smoke_passed` when the full GPU path passes;
 - `environment_blocked` for missing CLI/auth/configuration;
