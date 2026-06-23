@@ -257,6 +257,13 @@ scripts/xcpng-live-smoke.sh --read-only
 Read-only mode runs `crabbox doctor --provider xcp-ng --json`, writes redacted
 evidence under `.crabbox/xcpng-live-smoke/`, and does not create or delete VMs.
 
+The read-only path can also be selected through the guarded top-level provider
+matrix:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=xcp-ng CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
+```
+
 Mutating smoke requires an explicit gate and a configured template:
 
 ```sh

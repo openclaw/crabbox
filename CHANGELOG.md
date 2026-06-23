@@ -33,6 +33,7 @@
 - Added Anthropic Sandbox Runtime to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added OpenSandbox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Proxmox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
+- Added XCP-ng to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Multipass to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Tart to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.

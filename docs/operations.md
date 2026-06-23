@@ -72,6 +72,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nvidia-brev scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=anthropic-sandbox-runtime scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=opensandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=proxmox CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=xcp-ng CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -122,6 +123,11 @@ Per-provider smoke prerequisites:
   credentials/config, and `jq`/`perl`. `scripts/proxmox-live-smoke.sh` is
   coordinator-free and read-only by default; set `CRABBOX_PROXMOX_LIVE_SMOKE=1`
   only after `doctor` is green to run the guarded warmup/status/ssh/stop proof.
+- **XCP-ng** — a locally built Crabbox binary (`CRABBOX_BIN`), XCP-ng API
+  credentials/config, and `python3`. `scripts/xcpng-live-smoke.sh` is
+  coordinator-free and read-only by default; pass `--mutate` through the
+  standalone script and set `CRABBOX_XCP_NG_LIVE_MUTATE=1` only after `doctor`
+  is green.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 
