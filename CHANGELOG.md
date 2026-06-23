@@ -36,6 +36,7 @@
 - Added Proxmox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added XCP-ng to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Agent Sandbox live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
+- Added Scaleway live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Multipass to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Tart to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.

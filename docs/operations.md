@@ -60,6 +60,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tenki CRABBOX_LIVE_COORDINATOR=0 CRABBOX_L
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=kubevirt CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_KUBEVIRT_TEMPLATE=/path/to/vm.yaml scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=external CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_EXTERNAL_COMMAND=/path/to/provider scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=scaleway CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=docker-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=smolvm CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=superserve CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
@@ -95,6 +96,14 @@ Per-provider smoke prerequisites:
   creates a short-lived `SandboxClaim`, verifies archive sync, env forwarding,
   retained-claim reuse, replacement sync, status/list, and claim deletion.
 - **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
+- **Scaleway** — `SCW_ACCESS_KEY`, `SCW_SECRET_KEY`,
+  `SCW_DEFAULT_ORGANIZATION_ID`, `SCW_DEFAULT_PROJECT_ID`,
+  `SCW_DEFAULT_REGION`, and `SCW_DEFAULT_ZONE`, or equivalent
+  `CRABBOX_SCALEWAY_*` overrides for project/location fields.
+  `scripts/live-scaleway-smoke.sh` is coordinator-free, requires an empty
+  Crabbox-owned inventory before provisioning, creates one short-lived
+  `DEV1-S` instance by default, verifies status/run/list, stops the lease, and
+  proves the inventory is empty afterward.
 - **Docker Sandbox** — the standalone `sbx` CLI on `PATH` or configured with `CRABBOX_DOCKER_SANDBOX_CLI`; run `sbx login` first when your account requires authentication.
 - **SmolVM** — `CRABBOX_SMOLVM_API_KEY`, `SMOLMACHINES_API_KEY`, or `SMK_API_KEY`.
 - **Superserve** — `CRABBOX_SUPERSERVE_API_KEY` or `SUPERSERVE_API_KEY`.

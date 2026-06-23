@@ -48,6 +48,26 @@ Instances through the local Scaleway SDK profile. They are cost-bearing when
 they create live Instances, so use `doctor` and `cleanup --dry-run` before
 running live workflows.
 
+## Live Smoke
+
+The provider-specific live smoke is guarded by `CRABBOX_LIVE=1` and an explicit
+provider selection. It builds `bin/crabbox` unless `CRABBOX_BIN` points at an
+existing binary, verifies the Crabbox-owned Scaleway inventory starts empty,
+creates one short-lived Instance, proves status, command execution, list JSON,
+cleanup, and final empty inventory.
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=scaleway CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+# or, directly:
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=scaleway scripts/live-scaleway-smoke.sh
+```
+
+The script emits `classification=environment_blocked`,
+`classification=quota_blocked`, `classification=validation_failed`, or
+`classification=cleanup_failed` on stderr when a required credential, quota,
+provider response, or cleanup invariant blocks the smoke. `SCW_ACCESS_KEY` and
+`SCW_SECRET_KEY` are redacted from captured command output before printing.
+
 `--type` is the exact Scaleway Instances commercial type, such as `DEV1-S`.
 There is no separate Scaleway size flag for the generic lease commands.
 
