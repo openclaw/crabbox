@@ -645,6 +645,86 @@ esac
   }
 });
 
+test("docker-sandbox live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-docker-sandbox-dispatch-"));
+  const bin = path.join(dir, "bin");
+  const tempRepo = path.join(dir, "repo");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  const slugFile = path.join(dir, "slug.txt");
+  fs.mkdirSync(bin);
+  fs.mkdirSync(tempRepo);
+
+  writeExecutable(
+    path.join(bin, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${crabboxLog}"
+case "$1" in
+  doctor)
+    printf 'ok      sbx_version provider=docker-sandbox version=sbx client fake\n'
+    ;;
+  warmup)
+    printf '%s\n' "$5" >"${slugFile}"
+    ;;
+  run)
+    printf 'crabbox-docker-sandbox-ok\n'
+    ;;
+  list)
+    slug="$(cat "${slugFile}")"
+    printf '[{"name":"sandbox","labels":{"slug":"%s"}}]\n' "$slug"
+    ;;
+  stop)
+    printf 'stopped %s\n' "\${*: -1}"
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\n' "$*" >&2
+    exit 99
+    ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: tempRepo,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "docker-sandbox",
+      CRABBOX_LIVE_REPO: tempRepo,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_sbx_smoke_passed/);
+  assert.match(result.stdout, /cleanup=complete/);
+  const calls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(calls, /^doctor --provider docker-sandbox$/m);
+  assert.match(calls, /^warmup --provider docker-sandbox --slug docker-sandbox-smoke-\d{14}-\d+ --keep$/m);
+  assert.match(calls, /^run --provider docker-sandbox --id docker-sandbox-smoke-\d{14}-\d+ -- echo ok$/m);
+  assert.match(calls, /^run --provider docker-sandbox --id docker-sandbox-smoke-\d{14}-\d+ -- pwd$/m);
+  assert.match(calls, /^list --provider docker-sandbox --json$/m);
+  assert.match(calls, /^stop --provider docker-sandbox docker-sandbox-smoke-\d{14}-\d+$/m);
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");

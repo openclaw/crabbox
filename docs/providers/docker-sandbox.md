@@ -259,6 +259,12 @@ Common blockers:
 When the host has a usable Docker Sandbox provider configuration, run:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=docker-sandbox scripts/live-smoke.sh
+```
+
+That top-level smoke dispatches to the provider-specific script:
+
+```sh
 scripts/live-docker-sandbox-smoke.sh
 ```
 
@@ -286,7 +292,7 @@ Use this matrix when proving a fresh install or upgrade:
 | Host/runtime blockers | `crabbox doctor --provider docker-sandbox` | Surfaces virtualization, hypervisor, KVM, control-plane, quota, or capacity blockers without claiming live success. |
 | Clone mode | `crabbox warmup --provider docker-sandbox --docker-sandbox-clone ...` | Requires the main checkout of a normal Git repository workspace before calling `sbx create --clone`; linked Git worktrees are rejected. |
 | Unsupported delegated flags | Docker Sandbox run flags and config validation | Rejects unsupported agent, desktop, Tailscale, `--class`, and `--type` surfaces clearly while allowing create-time MCP passthrough. |
-| Live lifecycle | `scripts/live-docker-sandbox-smoke.sh` | Prints `classification=live_sbx_smoke_passed ... cleanup=complete` only after create, run, list, and stop complete. |
+| Live lifecycle | `CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=docker-sandbox scripts/live-smoke.sh` or `scripts/live-docker-sandbox-smoke.sh` | Prints `classification=live_sbx_smoke_passed ... cleanup=complete` only after create, run, list, and stop complete. |
 | Trust boundary handoff | `scripts/docker-sandbox-trust-boundary-smoke.sh` | Uses a fake `sbx` at the process boundary to prove Crabbox sends the workspace path, user command, and `--env-file`, while the forwarded value stays out of local argv and is present only in the env-file handoff. |
 
 Related docs:
