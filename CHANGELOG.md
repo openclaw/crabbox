@@ -56,6 +56,7 @@
 
 ### Fixed
 
+- Fixed Tart SSH readiness on hosts where OpenSSH can reach the guest but Go's raw TCP probe cannot. Thanks @kmcquade.
 - Revoked active WebVNC and Code viewers when their lease share access is removed while preserving owner, admin, and still-authorized sessions. Thanks @coygeek.
 - Prevented E2B and Upstash Box credentials from following redirects outside each request's trusted origin while preserving same-origin redirects. Thanks @coygeek.
 - Prevented SmolVM API credentials from following redirects outside the configured API origin while preserving same-origin redirects. Thanks @coygeek.
