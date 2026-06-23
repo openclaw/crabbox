@@ -125,7 +125,12 @@ Per-provider smoke prerequisites:
   `SandboxWarmPool`. `scripts/live-agent-sandbox-smoke.sh` is coordinator-free,
   creates a short-lived `SandboxClaim`, verifies archive sync, env forwarding,
   retained-claim reuse, replacement sync, status/list, and claim deletion.
-- **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
+- **External** — a configured provider executable through `external.command` or
+  `CRABBOX_LIVE_EXTERNAL_COMMAND`, or a declarative
+  `external.lifecycle.acquire` configuration. `scripts/live-smoke.sh` refuses
+  to call External lifecycle commands until one path is configured, then runs
+  the normal SSH lease lifecycle, lists normalized inventory, and stops the
+  lease.
 - **Morph** — `CRABBOX_MORPH_API_KEY`, `MORPH_API_KEY`, or `morph.apiKey`,
   plus `CRABBOX_LIVE_MORPH_SNAPSHOT`. `scripts/live-smoke.sh` refuses to call
   Morph until both are configured, then creates one delete-on-release instance,

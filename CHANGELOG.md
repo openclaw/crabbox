@@ -45,6 +45,7 @@
 - Added Blacksmith Testbox live-smoke documentation and workflow preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added W&B live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Incus live-smoke documentation and preflight regression coverage for the guarded `scripts/live-smoke.sh` matrix.
+- Added External live-smoke documentation and configuration preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added E2B live-smoke documentation and API-key preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Modal live-smoke documentation and Python-client preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Tenki live-smoke documentation and CLI-auth preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
