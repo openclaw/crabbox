@@ -121,6 +121,9 @@ If Crabbox does not support Mitos directly, the user-facing behavior should be:
   URLs, run proof, and delegated artifacts. `crabbox providers --json` exposes
   normalized workspace and run-evidence capability names so this stays
   provider-neutral.
+- `crabbox checkpoint fork --count <n>` for provider-neutral fan-out from an
+  existing archive or native checkpoint, rather than a Mitos-only live-fork
+  command.
 
 That preserves optionality. If Mitos later has real demand and the contract is
 stable enough, it can arrive as either a delegated-run provider or an SSH-lease
