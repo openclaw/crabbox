@@ -105,6 +105,7 @@ It is selection guidance, not a readiness check; run `crabbox doctor --provider
 crabbox providers recommend
 crabbox providers recommend artifact-download
 crabbox providers recommend ci-proof
+crabbox providers recommend code-interpreter
 crabbox providers recommend cost-control
 crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend failure-diagnostics
@@ -143,6 +144,10 @@ Supported use cases:
 - `byo-ssh`: existing SSH hosts.
 - `ci-proof`: CI proof runners and providers that return run proof or
   artifacts.
+- `code-interpreter`: delegated or local sandboxes for generated-code and
+  script execution with sessions, archive sync, retained outputs, preview URLs,
+  MCP attachments, or module execution. Aliases include `python-sandbox`,
+  `ai-code-runner`, `generated-code`, and `script-runner`.
 - `cost-control`: providers with local execution, coordinator governance,
   cleanup, cache reuse, reusable state, or retained proof to reduce quota and
   hot-capacity waste.

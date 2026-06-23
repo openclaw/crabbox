@@ -127,6 +127,10 @@ Ship these in small PRs:
    Use `crabbox providers recommend resource-observability` when the workflow
    needs coordinator usage/cost visibility, SSH resource telemetry, retained run
    evidence, reusable sessions, or preview URLs for later inspection.
+   Use `crabbox providers recommend code-interpreter` when generated-code or
+   script execution should prefer delegated or local sandboxes with sessions,
+   archive sync, retained outputs, preview URLs, MCP attachments, or module
+   execution.
 3. Add live smoke docs where credentials are required.
    Provider adapters can be valuable before broad live access exists, but each
    one needs an opt-in smoke contract that says what real behavior proves. Use

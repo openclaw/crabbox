@@ -447,6 +447,7 @@ func providerRecommendationUseCases() []string {
 		"artifact-download",
 		"byo-ssh",
 		"ci-proof",
+		"code-interpreter",
 		"cost-control",
 		"desktop",
 		"fast-feedback",
@@ -488,6 +489,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "byo-ssh", true
 	case "ci", "ci-proof", "proof", "testbox", "repro":
 		return "ci-proof", true
+	case "code-interpreter", "code-interpreters", "code-execution",
+		"ai-code", "ai-code-runner", "generated-code", "generated-code-runner",
+		"python-sandbox", "script-runner", "notebook-sandbox":
+		return "code-interpreter", true
 	case "cost", "cost-control", "cost-aware", "budget", "budget-control",
 		"quota", "quota-safe", "spend", "spend-control":
 		return "cost-control", true
@@ -702,6 +707,45 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if category == "ci-proof-runner" && entry.Kind == ProviderKindSSHLease && hasFeature(FeatureCrabboxSync) {
 			add(12, "can debug through normal Crabbox sync and SSH")
+		}
+	case "code-interpreter":
+		isSandboxRuntime := category == "delegated-sandbox" || category == "local-sandbox"
+		hasExecutionSignal := hasFeature(FeatureArchiveSync) || hasFeature(FeatureRunSession) ||
+			hasFeature(FeatureRunDownloads) || hasFeature(FeatureRunArtifacts) ||
+			hasFeature(FeatureURLBridge) || hasFeature(FeatureMCP) ||
+			hasFeature(FeatureModuleRun)
+		if !isSandboxRuntime || !hasExecutionSignal {
+			break
+		}
+		if category == "delegated-sandbox" {
+			add(50, "delegated sandbox for provider-owned code execution")
+		}
+		if category == "local-sandbox" {
+			add(40, "local sandbox for credentialless code execution")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(30, "returns reusable interpreter sessions")
+		}
+		if hasFeature(FeatureArchiveSync) {
+			add(24, "can seed generated-code workloads from an archive")
+		}
+		if hasFeature(FeatureRunDownloads) || hasFeature(FeatureRunArtifacts) {
+			add(22, "can retain generated outputs")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(16, "can expose generated app or notebook previews")
+		}
+		if hasFeature(FeatureMCP) {
+			add(14, "can attach MCP tools to the sandbox")
+		}
+		if hasFeature(FeatureModuleRun) {
+			add(12, "can execute module source directly")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(10, "can clean up disposable interpreter resources")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
+			add(8, "supports common interpreter execution targets")
 		}
 	case "cost-control":
 		if strings.HasPrefix(category, "local-") {
@@ -1403,6 +1447,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "examples:")
 	fmt.Fprintln(out, "  crabbox providers recommend artifact-download")
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
+	fmt.Fprintln(out, "  crabbox providers recommend code-interpreter")
 	fmt.Fprintln(out, "  crabbox providers recommend cost-control")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")

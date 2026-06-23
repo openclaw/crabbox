@@ -493,6 +493,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"provider recommendation use cases:",
 		"artifact-download",
 		"ci-proof",
+		"code-interpreter",
 		"cost-control",
 		"agent-sandbox",
 		"fast-feedback",
@@ -564,6 +565,63 @@ func TestProvidersRecommendArtifactDownloadAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureRunArtifacts) {
 		t.Fatalf("run-artifacts alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendCodeInterpreterPrefersSandboxExecution(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "code-interpreter", 12)
+	if len(recommendations) == 0 {
+		t.Fatal("expected code-interpreter recommendations")
+	}
+	foundDelegatedSandbox := false
+	foundLocalSandbox := false
+	foundSession := false
+	foundSeededWorkload := false
+	foundOutputsOrPreview := false
+	for _, recommendation := range recommendations {
+		hasSession := providerRecommendationHasFeature(recommendation.Features, FeatureRunSession)
+		hasArchiveSync := providerRecommendationHasFeature(recommendation.Features, FeatureArchiveSync)
+		hasOutputsOrPreview := providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge)
+		hasMCPOrModule := providerRecommendationHasFeature(recommendation.Features, FeatureMCP) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureModuleRun)
+		if recommendation.Category != "delegated-sandbox" && recommendation.Category != "local-sandbox" {
+			t.Fatalf("code-interpreter recommendation escaped sandbox categories: %#v", recommendation)
+		}
+		if !hasSession && !hasArchiveSync && !hasOutputsOrPreview && !hasMCPOrModule {
+			t.Fatalf("code-interpreter recommendation lacks interpreter execution signal: %#v", recommendation)
+		}
+		foundDelegatedSandbox = foundDelegatedSandbox || recommendation.Category == "delegated-sandbox"
+		foundLocalSandbox = foundLocalSandbox || recommendation.Category == "local-sandbox"
+		foundSession = foundSession || hasSession
+		foundSeededWorkload = foundSeededWorkload || hasArchiveSync
+		foundOutputsOrPreview = foundOutputsOrPreview || hasOutputsOrPreview
+	}
+	if !foundDelegatedSandbox || !foundLocalSandbox || !foundSession || !foundSeededWorkload || !foundOutputsOrPreview {
+		t.Fatalf("code-interpreter should include delegated/local sandboxes, sessions, seeded workloads, and outputs/previews: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendPythonSandboxAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "python-sandbox",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend python-sandbox error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("python-sandbox alias entries=%#v", entries)
+	}
+	if entries[0].Category != "delegated-sandbox" && entries[0].Category != "local-sandbox" {
+		t.Fatalf("python-sandbox alias should prefer sandbox providers: %#v", entries)
 	}
 }
 
