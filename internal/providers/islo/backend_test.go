@@ -553,13 +553,14 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	}
 	backend := &isloBackend{
 		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &bytes.Buffer{}},
 	}
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: root, Name: "repo"},
-		Keep:    true,
-		Command: []string{"true"},
+		Repo:       Repo{Root: root, Name: "repo"},
+		Keep:       true,
+		TimingJSON: true,
+		Command:    []string{"true"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -580,6 +581,39 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	}
 	if got.CleanupCommand != "crabbox stop --provider islo 'isb_crabbox-repo-abcdef'" {
 		t.Fatalf("cleanup command=%q", got.CleanupCommand)
+	}
+	report := decodeLastTimingReport(t, backend.rt.Stderr.(*bytes.Buffer).String())
+	if report.RunStatus != "succeeded" || report.ErrorKind != "" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
+	}
+}
+
+func TestIsloRunTimingJSONClassifiesCommandFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeIsloSyncClient{
+		createName: "crabbox-repo-abcdef",
+		execCodes:  []int{0, 42},
+	}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	var stderr bytes.Buffer
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+	}
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+		Keep:       true,
+		NoSync:     true,
+		TimingJSON: true,
+		Command:    []string{"false"},
+	})
+	if err == nil || result.ExitCode != 42 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	report := decodeLastTimingReport(t, stderr.String())
+	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
 
@@ -1102,6 +1136,25 @@ func TestIsloCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 	if client.createRequest != nil {
 		t.Fatalf("CreateSandbox was called with %#v", client.createRequest)
 	}
+}
+
+func decodeLastTimingReport(t *testing.T, output string) timingReport {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		start := strings.Index(line, "{")
+		if start < 0 {
+			continue
+		}
+		var report timingReport
+		if err := json.Unmarshal([]byte(line[start:]), &report); err != nil {
+			t.Fatalf("timing json: %v\noutput=%s", err, output)
+		}
+		return report
+	}
+	t.Fatalf("output does not contain timing JSON: %s", output)
+	return timingReport{}
 }
 
 func TestIsloCreateSandboxOmitsDefaultProviderCreateFields(t *testing.T) {

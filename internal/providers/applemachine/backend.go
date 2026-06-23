@@ -120,7 +120,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	commandDuration := time.Since(commandStarted)
 	out := RunResult{ExitCode: result.ExitCode, Command: commandDuration, Total: time.Since(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug, CommandText: strings.Join(req.Command, " ")}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncSkipped: true, CommandMs: out.Command.Milliseconds(), TotalMs: out.Total.Milliseconds(), ExitCode: out.ExitCode, Label: strings.TrimSpace(req.Label)}); err != nil {
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncSkipped: true, CommandMs: out.Command.Milliseconds(), TotalMs: out.Total.Milliseconds(), ExitCode: out.ExitCode, Label: strings.TrimSpace(req.Label)}, out, runErr)); err != nil {
 			return out, err
 		}
 	}
