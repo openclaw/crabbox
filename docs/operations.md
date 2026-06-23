@@ -69,6 +69,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=ovh scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nvidia-brev scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=anthropic-sandbox-runtime scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -106,6 +107,10 @@ Per-provider smoke prerequisites:
   is coordinator-free, creates one short-lived GPU workspace, verifies
   `nvidia-smi`, deletes the workspace with `crabbox stop`, and prints a final
   classification.
+- **Anthropic Sandbox Runtime** — `srt` and `curl` on `PATH` plus host sandbox
+  support. `scripts/live-anthropic-sandbox-runtime-smoke.sh` is coordinator-free
+  and local-only; it verifies `doctor`, one-shot command execution, allowed
+  temp-file access, denied secret reads, and denied network access.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 

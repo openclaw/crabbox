@@ -918,6 +918,10 @@ if has_provider nvidia-brev || has_provider brev || has_provider nvidia; then
   CRABBOX_NVIDIA_BREV_LIVE=1 "$root/scripts/live-nvidia-brev-smoke.sh"
 fi
 
+if has_provider anthropic-sandbox-runtime || has_provider srt; then
+  "$root/scripts/live-anthropic-sandbox-runtime-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi

@@ -136,11 +136,14 @@ rejected through delegated-provider validation.
 Run the scripted live proof on a host with SRT installed:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=anthropic-sandbox-runtime scripts/live-smoke.sh
 scripts/live-anthropic-sandbox-runtime-smoke.sh
 ```
 
-The script builds `bin/crabbox`, runs `doctor`, verifies a one-shot
-`echo ok`, then creates a temporary SRT settings file that:
+The top-level script dispatches to the provider-specific script. The
+provider-specific script builds `bin/crabbox` unless `CRABBOX_BIN` is set, runs
+`doctor`, verifies a one-shot `echo ok`, then creates a temporary SRT settings
+file that:
 
 - allows writing inside one temporary directory;
 - denies reading a temporary secret file;

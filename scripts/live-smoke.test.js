@@ -1526,6 +1526,71 @@ esac
   assert.match(seen[6], /^stop --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete nbrev-smoke-\d+-\d+-[0-9a-f]{8}$/);
 });
 
+test("anthropic sandbox runtime live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-dispatch-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const calls = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "srt"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+case "$*" in
+  "doctor --provider anthropic-sandbox-runtime")
+    printf 'ok      srt_help provider=anthropic-sandbox-runtime mutation=false\\n'
+    ;;
+  "run --provider anthropic-sandbox-runtime -- echo ok")
+    printf 'ok\\n'
+    ;;
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*allowed*)
+    printf 'ok\\n'
+    ;;
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*cat*)
+    printf 'Operation not permitted\\n' >&2
+    exit 5
+    ;;
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*curl*)
+    printf 'Connection blocked by network allowlist\\n' >&2
+    exit 7
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "anthropic-sandbox-runtime",
+      TMPDIR: dir,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_anthropic_sandbox_runtime_smoke_passed/);
+  assert.match(result.stderr, /Operation not permitted/);
+  assert.match(result.stderr, /Connection blocked by network allowlist/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen.length, 5, JSON.stringify(seen));
+  assert.equal(seen[0], "doctor --provider anthropic-sandbox-runtime");
+  assert.equal(seen[1], "run --provider anthropic-sandbox-runtime -- echo ok");
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");
