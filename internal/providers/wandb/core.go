@@ -74,6 +74,10 @@ func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
+func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
+	return core.TimingReportWithRunResult(report, result, err)
+}
+
 // printEnvForwardingSummary mirrors the modal/e2b/islo/tensorlake call site
 // so --allow-env / env profiles / CRABBOX_ENV_ALLOW users see the redacted
 // "env forwarding ..." confirmation line on stderr.

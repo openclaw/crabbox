@@ -51,6 +51,16 @@ func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
+func timingReportWithRunResult(report core.TimingReport, result RunResult, err error) core.TimingReport {
+	return core.TimingReportWithRunResult(report, result, err)
+}
+
+func timingReportWithProviderError(report core.TimingReport) core.TimingReport {
+	report.RunStatus = core.RunStatusFailed
+	report.ErrorKind = core.RunErrorProvider
+	return report
+}
+
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
 }

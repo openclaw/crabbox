@@ -3,6 +3,7 @@ package azuredynamicsessions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -94,6 +95,7 @@ func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"false"},
+		TimingJSON:    true,
 	})
 	var exitErr ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
@@ -107,6 +109,24 @@ func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 	}
 	if claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok || claim.RepoRoot != repo {
 		t.Fatalf("retained claim ok=%t claim=%#v err=%v", ok, claim, err)
+	}
+	var report timingReport
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(backend.rt.Stderr.(*bytes.Buffer).String()), "\n") {
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &report); err != nil {
+			t.Fatalf("timing json: %v\nstderr=%s", err, backend.rt.Stderr)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("stderr does not contain timing JSON: %s", backend.rt.Stderr)
+	}
+	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
 

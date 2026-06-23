@@ -131,7 +131,7 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
-			return result, writeTimingJSON(b.rt.Stderr, timingReport{
+			return result, writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -143,7 +143,7 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 				ExitCode:      0,
 				Label:         strings.TrimSpace(req.Label),
 				Workdir:       workdir,
-			})
+			}, result, nil))
 		}
 		return result, nil
 	}
@@ -176,7 +176,7 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -189,7 +189,7 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			ExitCode:      exitCode,
 			Label:         strings.TrimSpace(req.Label),
 			Workdir:       workdir,
-		}); err != nil {
+		}, result, runErr)); err != nil {
 			return result, err
 		}
 	}

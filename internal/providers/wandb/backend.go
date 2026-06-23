@@ -137,14 +137,14 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 	// `--timing-json` still gets a report when the user's command exits
 	// non-zero or the exec itself errors. Mirrors railway / modal / e2b.
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:  providerName,
 			Slug:      sandboxID,
 			CommandMs: commandDuration.Milliseconds(),
 			TotalMs:   result.Total.Milliseconds(),
 			ExitCode:  result.ExitCode,
 			Label:     strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, execErr)); err != nil {
 			return finishResult(), err
 		}
 	}

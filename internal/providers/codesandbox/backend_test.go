@@ -369,6 +369,7 @@ func TestRunPropagatesExitAndKeepOnFailureRetainsSandbox(t *testing.T) {
 		NoSync:        true,
 		Command:       []string{"false"},
 		KeepOnFailure: true,
+		TimingJSON:    true,
 	})
 	if err == nil {
 		t.Fatal("expected non-zero exit error")
@@ -382,6 +383,19 @@ func TestRunPropagatesExitAndKeepOnFailureRetainsSandbox(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "stop: crabbox stop --provider codesandbox") {
 		t.Fatalf("missing keep-on-failure stop hint: %q", stderr.String())
+	}
+	var report map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err == nil {
+			report = candidate
+		}
+	}
+	if report == nil {
+		t.Fatalf("stderr does not contain timing JSON: %q", stderr.String())
+	}
+	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
+		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
 	}
 }
 
