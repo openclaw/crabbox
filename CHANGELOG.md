@@ -28,6 +28,7 @@
 - Added run-session metadata for SmolVM runs so retained and reused machines can be written through `--lease-output`.
 - Added run-session metadata for OpenComputer runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for Agent Sandbox runs so retained and reused claims can be written through `--lease-output`.
+- Added run-session metadata for Apple Machine runs so retained and reused machines can be written through `--lease-output`.
 
 ### Fixed
 

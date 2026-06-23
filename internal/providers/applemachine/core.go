@@ -16,6 +16,7 @@ type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -62,3 +63,4 @@ func timingReportWithRunResult(report timingReport, result RunResult, err error)
 }
 
 func shellScriptFromArgv(command []string) string { return core.ShellScriptFromArgv(command) }
+func shellQuote(s string) string                  { return core.ShellQuote(s) }

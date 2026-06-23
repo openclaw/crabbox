@@ -19,7 +19,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "container",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{},
+		Features:    core.FeatureSet{core.FeatureRunSession},
 		Coordinator: core.CoordinatorNever,
 	}
 }

@@ -109,6 +109,12 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	if result.LeaseID != leaseID || !result.SyncDelegated {
 		t.Fatalf("result=%+v", result)
 	}
+	if result.Session == nil || result.Session.Provider != providerName || result.Session.LeaseID != leaseID || result.Session.Slug != slug || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if result.Session.CleanupCommand != "crabbox stop --provider apple-machine --id "+shellQuote(leaseID) {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	got := strings.Join(runner.requests[0].Args, " ")
 	if !strings.Contains(got, "machine run --name crabbox-123456789abc --cwd "+repo+" --env-file ") || !strings.HasSuffix(got, " go test ./...") {
 		t.Fatalf("args=%q", got)
@@ -157,9 +163,42 @@ func TestRunTimingJSONClassifiesCommandFailure(t *testing.T) {
 	if err == nil || result.ExitCode != 9 {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained failed reused lease", result.Session)
+	}
 	report := decodeLastTimingReport(t, stderr.String())
 	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
 		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
+	}
+}
+
+func TestRunDeletesOneShotMachineSession(t *testing.T) {
+	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
+	hostGOOS, hostGOARCH = "darwin", "arm64"
+	t.Cleanup(func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH })
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(home, "src", "one-shot")
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	result, err := b.Run(t.Context(), RunRequest{
+		Repo:    Repo{Root: repo},
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil || result.Session.Reused || result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("session=%#v, want cleaned one-shot handle", result.Session)
+	}
+	args := []string{}
+	for _, req := range runner.requests {
+		args = append(args, strings.Join(req.Args, " "))
+	}
+	if !strings.Contains(strings.Join(args, "\n"), "machine rm crabbox-") {
+		t.Fatalf("remove command not recorded: %v", args)
 	}
 }
 

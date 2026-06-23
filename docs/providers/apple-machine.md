@@ -57,6 +57,8 @@ Provider flags:
 
 - `warmup` maps to `container machine create`.
 - `run` maps to `container machine run` and preserves the host repository path.
+- `run --lease-output <path>` writes the Apple Machine lease ID, slug,
+  reuse/retention state, and exact cleanup command for orchestration handoff.
 - `status` and `list` use machine JSON inspection.
 - `stop` deletes the machine and its persistent storage with `container machine rm`.
 - The home directory is mounted read-write. Use `apple-container` when a narrower

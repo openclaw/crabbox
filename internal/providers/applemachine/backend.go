@@ -81,18 +81,29 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !acquired || req.Keep,
+		CleanupCommand: appleMachineCleanupCommand(leaseID),
+	}
 	failed := false
 	if acquired && !req.Keep {
 		defer func() {
 			if failed && req.KeepOnFailure {
 				fmt.Fprintf(b.rt.Stderr, "kept failed apple-machine lease=%s slug=%s\n", leaseID, slug)
+				session.Kept = true
 				return
 			}
 			if err := b.removeMachine(context.Background(), name); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", err)
+				session.Kept = true
 				return
 			}
 			removeLeaseClaim(leaseID)
+			session.Kept = false
 		}()
 	}
 	args := []string{"machine", "run", "--name", name}
@@ -118,7 +129,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	commandStarted := time.Now()
 	result, runErr := b.command(ctx, args, req.Repo.Root)
 	commandDuration := time.Since(commandStarted)
-	out := RunResult{ExitCode: result.ExitCode, Command: commandDuration, Total: time.Since(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug, CommandText: strings.Join(req.Command, " ")}
+	out := RunResult{ExitCode: result.ExitCode, Command: commandDuration, Total: time.Since(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug, CommandText: strings.Join(req.Command, " "), Session: session}
 	if req.TimingJSON {
 		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncSkipped: true, CommandMs: out.Command.Milliseconds(), TotalMs: out.Total.Milliseconds(), ExitCode: out.ExitCode, Label: strings.TrimSpace(req.Label)}, out, runErr)); err != nil {
 			return out, err
@@ -129,6 +140,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return out, exit(result.ExitCode, "apple-machine command failed: %s", failureDetail(result, runErr))
 	}
 	return out, nil
+}
+
+func appleMachineCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
 func writeEnvFile(env map[string]string, explicitlyAllowed []string) (string, func(), error) {
