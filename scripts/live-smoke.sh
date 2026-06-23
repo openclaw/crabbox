@@ -276,6 +276,12 @@ e2b_smoke() {
   need_tool jq
   need_tool rg
 
+  local e2b_api_key="${CRABBOX_E2B_API_KEY:-${E2B_API_KEY:-}}"
+  if [[ -z "$e2b_api_key" ]]; then
+    echo "e2b smoke requires CRABBOX_E2B_API_KEY or E2B_API_KEY" >&2
+    return 2
+  fi
+
   local lease=""
   local slug=""
   cleanup() {

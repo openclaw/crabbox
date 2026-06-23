@@ -656,6 +656,61 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("E2B live smoke requires an API key before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-e2b-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(path.join(bin, "rg"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_E2B_API_KEY: "",
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "e2b",
+      CRABBOX_LIVE_REPO: repoRoot,
+      E2B_API_KEY: "",
+      PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /e2b smoke requires CRABBOX_E2B_API_KEY or E2B_API_KEY/,
+  );
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^warmup --provider e2b/m);
+  assert.doesNotMatch(calls, /^status --provider e2b/m);
+  assert.doesNotMatch(calls, /^run --provider e2b/m);
+  assert.doesNotMatch(calls, /^list --provider e2b/m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

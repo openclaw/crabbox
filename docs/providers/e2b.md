@@ -125,6 +125,22 @@ code. Keep the API key in the environment; never pass it as an argument.
 ```sh
 export E2B_API_KEY=e2b_...
 go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_PROVIDERS=e2b \
+CRABBOX_LIVE_REPO=/path/to/my-app \
+scripts/live-smoke.sh
+```
+
+The shared harness exits before any E2B `warmup`, `status`, `run`, `list`, or
+`stop` command when no API key is exported. With the key configured, it creates
+one E2B sandbox from the selected template, waits for readiness, runs one
+no-sync command, lists normalized E2B inventory, and stops the lease.
+
+For manual debugging, run the same lifecycle directly:
+
+```sh
+export E2B_API_KEY=e2b_...
+go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox warmup --provider e2b --e2b-template base --timing-json
 lease=<slug-or-cbx_id-from-warmup-output>
