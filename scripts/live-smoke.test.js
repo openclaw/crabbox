@@ -270,6 +270,63 @@ exit 99
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("KubeVirt live smoke requires an explicit VM template before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-kubevirt-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "kubectl"), "#!/usr/bin/env bash\nexit 99\n");
+  writeExecutable(path.join(bin, "virtctl"), "#!/usr/bin/env bash\nexit 99\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  "config show --json")
+    printf '{}\\n'
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "kubevirt",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_LIVE_KUBEVIRT_TEMPLATE: "",
+      CRABBOX_KUBEVIRT_TEMPLATE: "",
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /kubevirt smoke requires CRABBOX_LIVE_KUBEVIRT_TEMPLATE, CRABBOX_KUBEVIRT_TEMPLATE, or kubevirt\.template/,
+  );
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^doctor --provider kubevirt/m);
+  assert.doesNotMatch(calls, /^warmup /m);
+  assert.doesNotMatch(calls, /^run /m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

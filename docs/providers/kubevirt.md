@@ -210,7 +210,10 @@ The live harness also needs `jq` and `rg` on the operator machine. Use
 Kubernetes context. Use `CRABBOX_LIVE_KUBEVIRT_NAMESPACE` when the configured
 namespace is not the target namespace. `CRABBOX_LIVE_COMMAND` overrides the
 remote smoke command; by default it accepts either a Go repo (`go.mod`) or a
-Node repo (`package.json`).
+Node repo (`package.json`). After local helper tools are available, the harness
+refuses to run before `doctor`, `warmup`, or any mutating provider command
+unless a VM template is configured through `CRABBOX_LIVE_KUBEVIRT_TEMPLATE`,
+`CRABBOX_KUBEVIRT_TEMPLATE`, or `kubevirt.template`.
 
 ## Troubleshooting
 
