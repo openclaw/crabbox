@@ -22,7 +22,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      providerFamily,
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume},
+		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume, core.FeatureRunSession},
 		Coordinator: core.CoordinatorNever,
 	}
 }

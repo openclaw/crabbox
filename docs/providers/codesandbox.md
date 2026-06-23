@@ -156,6 +156,9 @@ wake a hibernated sandbox when HTTP wakeup is enabled.
   file before command execution.
 - Pause/resume: yes — `pause` calls CodeSandbox hibernate and `resume` calls
   CodeSandbox resume.
+- Run session: yes, `run` returns a reusable Crabbox lease/session handle for
+  `--lease-output`, retained failure inspection, and later `run --id`,
+  `status`, `ports`, `pause`, `resume`, or `stop`.
 - URL bridge: yes — `ports` returns SDK-owned host URLs for open HTTP ports.
 - Desktop / browser / code: no Crabbox VNC, browser provisioning, or
   code-server surface.

@@ -20,7 +20,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("spec kind/coordinator=%#v", spec)
 	}
-	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume} {
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume, core.FeatureRunSession} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}

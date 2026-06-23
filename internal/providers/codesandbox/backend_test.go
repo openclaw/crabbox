@@ -341,6 +341,9 @@ func TestRunStreamsOutputAndCleansUpOneShot(t *testing.T) {
 	if result.ExitCode != 0 || !result.SyncDelegated || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil || result.Session.Provider != providerName || result.Session.Reused || result.Session.Kept || !strings.Contains(result.Session.CleanupCommand, "crabbox stop --provider codesandbox") {
+		t.Fatalf("unexpected one-shot session handle: %#v", result.Session)
+	}
 	if !strings.Contains(stdout.String(), "hello\n") || !strings.Contains(stderr.String(), "note\n") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -378,6 +381,9 @@ func TestRunPropagatesExitAndKeepOnFailureRetainsSandbox(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 || result.ExitCode != 7 {
 		t.Fatalf("err=%v result=%#v", err, result)
 	}
+	if result.Session == nil || result.Session.Reused || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("keep-on-failure should return retained session handle: %#v", result.Session)
+	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%v, want retained", fake.deleted)
 	}
@@ -396,6 +402,39 @@ func TestRunPropagatesExitAndKeepOnFailureRetainsSandbox(t *testing.T) {
 	}
 	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
 		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
+	}
+}
+
+func TestRunByIDReturnsReusedSessionHandle(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeCodeSandboxAPI()
+	fake.commandResults = []CommandResult{
+		{ExitCode: 0},
+		{ExitCode: 0, Stdout: "reused\n"},
+	}
+	backend, stdout, _ := newFakeBackend(t, fake)
+	leaseID := leasePrefix + fake.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "reused", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: "/repo"},
+		ID:      "reused",
+		NoSync:  true,
+		Command: []string{"echo", "reused"},
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if result.Session == nil || result.Session.LeaseID != leaseID || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("unexpected reused session handle: %#v", result.Session)
+	}
+	if !strings.Contains(stdout.String(), "reused\n") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%v, want retained", fake.deleted)
 	}
 }
 

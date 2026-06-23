@@ -21,6 +21,7 @@ type DoctorCheck = core.DoctorCheck
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type CleanupRequest = core.CleanupRequest
@@ -127,6 +128,10 @@ func shellScriptFromArgv(command []string) string {
 
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
+}
+
+func codeSandboxCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " " + shellQuote(leaseID)
 }
 
 func operationTimeout(cfg CodeSandboxConfig) time.Duration {

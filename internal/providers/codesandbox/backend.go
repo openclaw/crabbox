@@ -51,7 +51,7 @@ func (b *codeSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	return nil
 }
 
-func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
 		return RunResult{}, err
 	}
@@ -97,18 +97,36 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		}
 	}
 	shouldStop := acquired && !req.Keep
+	cleanedUp := false
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: codeSandboxCleanupCommand(leaseID),
+	}
+	finishResult := func(result RunResult) RunResult {
+		result.Session = session
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
 	if shouldStop {
 		defer func() {
 			if !shouldStop {
+				result = finishResult(result)
 				return
 			}
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
 			if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: codesandbox stop failed for %s: %v\n", sandboxID, err)
+				result = finishResult(result)
 				return
 			}
 			removeLeaseClaim(leaseID)
+			cleanedUp = true
+			result = finishResult(result)
 		}()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
@@ -119,16 +137,16 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, sandboxID, req, workdir)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}, err
+			return finishResult(RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}), err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
+		return finishResult(RunResult{}), err
 	}
 
 	if req.SyncOnly {
-		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}
+		result := finishResult(RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug})
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
 			return result, writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
@@ -150,7 +168,7 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 
 	command, err := buildCommand(req.Command, req.ShellMode)
 	if err != nil {
-		return RunResult{}, err
+		return finishResult(RunResult{}), err
 	}
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
@@ -158,7 +176,7 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	commandStart := b.now()
 	exitCode, runErr := b.execCommand(ctx, api, sandboxID, workdir, command, req.Env)
 	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
+	result = finishResult(RunResult{
 		ExitCode:      exitCode,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
@@ -167,7 +185,7 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		LeaseID:       leaseID,
 		Slug:          slug,
 		CommandText:   strings.Join(command, " "),
-	}
+	})
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "codesandbox run summary sync_skipped=true command=%s total=%s exit=%d\n",
 			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
