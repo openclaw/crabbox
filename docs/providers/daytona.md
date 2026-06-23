@@ -29,6 +29,21 @@ crabbox ssh --provider daytona --id swift-crab
 crabbox stop --provider daytona swift-crab
 ```
 
+## Live Smoke
+
+The shared live-smoke harness can validate Daytona without a coordinator:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+```
+
+The smoke requires a snapshot through `CRABBOX_DAYTONA_SNAPSHOT`,
+`DAYTONA_SNAPSHOT`, or `daytona.snapshot`. It exits before any Daytona `run`,
+`list`, `warmup`, or `stop` command when the snapshot is missing, so
+credentialless machines can verify the guard without mutating provider state.
+With a snapshot configured, the harness runs one delegated Daytona command and
+then lists normalized Daytona inventory.
+
 ## Auth
 
 Crabbox reads the active Daytona CLI profile when no Daytona auth values are set

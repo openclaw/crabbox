@@ -327,6 +327,55 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Daytona live smoke requires an explicit snapshot before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-daytona-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_DAYTONA_SNAPSHOT: "",
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "daytona",
+      CRABBOX_LIVE_REPO: repoRoot,
+      DAYTONA_SNAPSHOT: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /daytona smoke requires CRABBOX_DAYTONA_SNAPSHOT, DAYTONA_SNAPSHOT, or daytona\.snapshot/,
+  );
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^run --provider daytona/m);
+  assert.doesNotMatch(calls, /^list --provider daytona/m);
+  assert.doesNotMatch(calls, /^warmup /m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

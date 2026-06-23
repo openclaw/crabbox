@@ -84,7 +84,10 @@ Per-provider smoke prerequisites:
 - **E2B** — `E2B_API_KEY`.
 - **Modal** — an authenticated Modal Python client (`python3 -m modal setup` or Modal token env vars).
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
-- **Daytona** — `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or `daytona.snapshot`.
+- **Daytona** — `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or
+  `daytona.snapshot`. `scripts/live-smoke.sh` refuses to call Daytona until a
+  snapshot is configured, then runs one delegated command and normalized list
+  proof.
 - **Namespace** — the authenticated `devbox` CLI on `PATH`.
 - **Namespace Compute** — the authenticated `nsc` CLI on `PATH`; run `nsc login` first.
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
