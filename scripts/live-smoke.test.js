@@ -12,6 +12,24 @@ function writeExecutable(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
+test("OpenSandbox live smoke dispatches to the provider-specific script", () => {
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "opensandbox",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /environment_blocked missing CRABBOX_OPENSANDBOX_API_KEY or OPEN_SANDBOX_API_KEY/);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

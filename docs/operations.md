@@ -70,6 +70,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=ovh scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nvidia-brev scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=anthropic-sandbox-runtime scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=opensandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -111,6 +112,11 @@ Per-provider smoke prerequisites:
   support. `scripts/live-anthropic-sandbox-runtime-smoke.sh` is coordinator-free
   and local-only; it verifies `doctor`, one-shot command execution, allowed
   temp-file access, denied secret reads, and denied network access.
+- **OpenSandbox** — `CRABBOX_OPENSANDBOX_API_KEY` or `OPEN_SANDBOX_API_KEY`,
+  plus `CRABBOX_OPENSANDBOX_API_URL` or `OPEN_SANDBOX_API_URL`.
+  `scripts/live-opensandbox-smoke.sh` is coordinator-free, proves archive sync,
+  off-argv environment forwarding, retained sandbox reuse, staged `sync.delete`
+  replacement, list/status, and cleanup.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 
