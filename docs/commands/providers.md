@@ -108,6 +108,7 @@ crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend live-smoke
 crabbox providers recommend mcp-sandbox
 crabbox providers recommend network-isolation
+crabbox providers recommend offline-validation
 crabbox providers recommend pause-resume
 crabbox providers recommend preview-url
 crabbox providers recommend reachability
@@ -159,6 +160,11 @@ Supported use cases:
 - `network-isolation`: delegated and local sandboxes for contained untrusted
   execution when network exposure should stay narrow. This is routing guidance,
   not a security certification for a specific provider.
+- `offline-validation`: local, BYO SSH, or external-provider paths for
+  validation when cloud/provider credentials are unavailable. Aliases include
+  `no-credentials`, `credentialless`, and `local-first`. This is selection
+  guidance; local providers may still need Docker, a VM runtime, or other local
+  engine software installed.
 - `pause-resume`: providers that can pause and resume provider-owned runtime or
   workspace state.
 - `preview-url`: providers that can expose provider-native preview URLs for app

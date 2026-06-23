@@ -442,6 +442,7 @@ func providerRecommendationUseCases() []string {
 		"macos",
 		"mcp-sandbox",
 		"network-isolation",
+		"offline-validation",
 		"pause-resume",
 		"preview-url",
 		"reachability",
@@ -498,6 +499,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		"egress-control", "egress-controlled", "contained-execution",
 		"contained-sandbox", "contained-sandboxes":
 		return "network-isolation", true
+	case "offline", "offline-validation", "offline-smoke", "no-credentials",
+		"no-provider-credentials", "credentialless", "without-credentials",
+		"local-first", "local-validation":
+		return "offline-validation", true
 	case "pause-resume", "pause", "resume", "suspend", "suspended",
 		"pausable", "pausable-workspace", "pausable-workspaces",
 		"resumable", "resumable-workspace", "resumable-workspaces":
@@ -933,6 +938,43 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasTarget(targetLinux) {
 			add(8, "supports common Linux sandbox workloads")
 		}
+	case "offline-validation":
+		offlineCandidate := true
+		switch {
+		case category == "local-runtime":
+			add(95, "local runtime can validate without provider credentials")
+		case category == "local-sandbox":
+			add(90, "local sandbox can run disposable validation without provider credentials")
+		case category == "local-vm":
+			add(82, "local VM can validate without cloud credentials")
+		case category == "byo-ssh":
+			add(55, "bring-your-own SSH host avoids provider API credentials")
+		case category == "external-provider":
+			add(35, "external provider can wrap private infrastructure")
+		default:
+			offlineCandidate = false
+		}
+		if !offlineCandidate {
+			break
+		}
+		if strings.HasPrefix(category, "local-") && hasFeature(FeatureCacheVolume) {
+			add(16, "can reuse local dependency/cache state")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(16, "can sync the current checkout")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(14, "can clean up local validation resources")
+		}
+		if hasFeature(FeatureMCP) {
+			add(10, "can exercise MCP-attached sandbox flows locally")
+		}
+		if hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) || hasFeature(FeatureRestore) || hasFeature(FeatureSnapshot) {
+			add(8, "can reuse local workspace state across validation runs")
+		}
+		if hasTarget(targetLinux) {
+			add(8, "supports common Linux validation workloads")
+		}
 	case "pause-resume":
 		if !hasFeature(FeaturePauseResume) {
 			break
@@ -1224,6 +1266,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend live-smoke")
 	fmt.Fprintln(out, "  crabbox providers recommend mcp-sandbox")
 	fmt.Fprintln(out, "  crabbox providers recommend network-isolation")
+	fmt.Fprintln(out, "  crabbox providers recommend offline-validation")
 	fmt.Fprintln(out, "  crabbox providers recommend pause-resume")
 	fmt.Fprintln(out, "  crabbox providers recommend preview-url")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
