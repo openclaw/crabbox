@@ -662,6 +662,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	id := fs.String("id", "", "provider source VM id/name for provider-native fork")
 	snapshot := fs.String("snapshot", "", "provider-native snapshot name or id")
 	keep := fs.Bool("keep", true, "keep forked lease after restore")
+	count := fs.Int("count", 1, "number of forked leases to create")
 	dryRun := fs.Bool("dry-run", false, "show provider-native fork target without cloning")
 	workdirOverride := fs.String("workdir", "", "remote restore workdir")
 	clear := fs.Bool("clear", true, "clear the remote workdir before restoring")
@@ -676,11 +677,14 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	if *count < 1 {
+		return exit(2, "--count must be at least 1")
+	}
 	if strings.TrimSpace(*snapshot) != "" || flagWasSet(fs, "parallels-template") {
 		if fs.NArg() != 0 {
 			return exit(2, "usage: crabbox checkpoint fork --provider parallels --id <source-vm> --snapshot <name-or-id> [--slug <slug>]")
 		}
-		return a.checkpointForkParallelsSnapshot(ctx, fs, leaseFlags, *id, *snapshot, *keep, *reclaim, requestedSlug, *dryRun)
+		return a.checkpointForkParallelsSnapshot(ctx, fs, leaseFlags, *id, *snapshot, *keep, *reclaim, requestedSlug, *count, *dryRun)
 	}
 	if fs.NArg() != 1 {
 		return exit(2, "usage: crabbox checkpoint fork <checkpoint-id> [--class <class>]")
@@ -716,7 +720,14 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		}
 	}
 	if *dryRun {
-		fmt.Fprintf(a.Stdout, "would fork checkpoint id=%s provider=%s resource=%s slug=%s keep=%t\n", record.ID, cfg.Provider, blank(nativeCheckpointResourceID(record), "-"), blank(requestedSlug, "-"), *keep)
+		for i := 1; i <= *count; i++ {
+			slug := checkpointForkFanoutSlug(requestedSlug, i, *count)
+			if *count == 1 {
+				fmt.Fprintf(a.Stdout, "would fork checkpoint id=%s provider=%s resource=%s slug=%s keep=%t\n", record.ID, cfg.Provider, blank(nativeCheckpointResourceID(record), "-"), blank(slug, "-"), *keep)
+			} else {
+				fmt.Fprintf(a.Stdout, "would fork checkpoint id=%s provider=%s resource=%s slug=%s keep=%t index=%d/%d\n", record.ID, cfg.Provider, blank(nativeCheckpointResourceID(record), "-"), blank(slug, "-"), *keep, i, *count)
+			}
+		}
 		return nil
 	}
 	repo, err := findRepo()
@@ -731,18 +742,46 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if !ok {
 		return exit(2, "provider=%s does not support checkpoint fork", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
+	for i := 1; i <= *count; i++ {
+		slug := checkpointForkFanoutSlug(requestedSlug, i, *count)
+		if err := a.checkpointForkRecordOnce(ctx, cfg, backend, sshBackend, repo, record, paths, *keep, *reclaim, slug, strings.TrimSpace(*workdirOverride), *clear); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkpointForkFanoutSlug(requestedSlug string, index, total int) string {
+	requestedSlug = strings.TrimSpace(requestedSlug)
+	if total <= 1 || requestedSlug == "" {
+		return requestedSlug
+	}
+	width := len(strconv.Itoa(total))
+	suffix := fmt.Sprintf("-%0*d", width, index)
+	baseLimit := maxRequestedLeaseSlugLength - len(suffix)
+	base := strings.Trim(requestedSlug, "-")
+	if len(base) > baseLimit {
+		base = strings.Trim(base[:baseLimit], "-")
+	}
+	if base == "" {
+		base = "fork"
+	}
+	return base + suffix
+}
+
+func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool) (err error) {
+	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim, RequestedSlug: requestedSlug})
 	if err != nil {
 		return err
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
 	defer func() {
-		if err == nil && !*keep {
+		if err == nil && !keep {
 			a.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		}
 	}()
 	applyResolvedServerConfig(&cfg, server)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, lease)
 		return err
 	}
@@ -756,7 +795,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		}
 	}
 	if isNativeCheckpointKind(record.Kind) {
-		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, *workdirOverride)
+		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, workdirOverride)
 		if err := validateCheckpointForkWorkdirs(ctx, backend, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, record.Workdir, workdir); err != nil {
 			a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 			return err
@@ -768,7 +807,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(serverSlug(server), "-"), nativeCheckpointResourceID(record), workdir)
 		return nil
 	}
-	workdir := strings.TrimSpace(*workdirOverride)
+	workdir := strings.TrimSpace(workdirOverride)
 	if workdir == "" {
 		workdir = defaultCheckpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir)
 	}
@@ -776,7 +815,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		return err
 	}
-	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, *clear); err != nil {
+	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, clear); err != nil {
 		a.releaseBackendLeaseBestEffort(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 		return err
 	}
@@ -800,7 +839,7 @@ func validateCheckpointForkWorkdirs(ctx context.Context, backend Backend, lease 
 	return nil
 }
 
-func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagSet, leaseFlags leaseCreateFlagValues, source, snapshot string, keep, reclaim bool, requestedSlug string, dryRun bool) (err error) {
+func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagSet, leaseFlags leaseCreateFlagValues, source, snapshot string, keep, reclaim bool, requestedSlug string, count int, dryRun bool) (err error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -839,7 +878,14 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 		if err := validateParallelsSnapshotCloneMode(snapshot, cfg.Parallels.CloneMode); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Stdout, "would fork provider=parallels host=%s source=%s snapshot=%s name=%q slug=%s\n", blank(selected.Parallels.SelectedHost, "local"), cfg.Parallels.Source, snapshot.ID, snapshot.Name, blank(requestedSlug, "-"))
+		for i := 1; i <= count; i++ {
+			slug := checkpointForkFanoutSlug(requestedSlug, i, count)
+			if count == 1 {
+				fmt.Fprintf(a.Stdout, "would fork provider=parallels host=%s source=%s snapshot=%s name=%q slug=%s\n", blank(selected.Parallels.SelectedHost, "local"), cfg.Parallels.Source, snapshot.ID, snapshot.Name, blank(slug, "-"))
+			} else {
+				fmt.Fprintf(a.Stdout, "would fork provider=parallels host=%s source=%s snapshot=%s name=%q slug=%s index=%d/%d\n", blank(selected.Parallels.SelectedHost, "local"), cfg.Parallels.Source, snapshot.ID, snapshot.Name, blank(slug, "-"), i, count)
+			}
+		}
 		return nil
 	}
 	repo, err := findRepo()
@@ -854,6 +900,16 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 	if !ok {
 		return exit(2, "provider=%s does not support checkpoint fork", backend.Spec().Name)
 	}
+	for i := 1; i <= count; i++ {
+		slug := checkpointForkFanoutSlug(requestedSlug, i, count)
+		if err := a.checkpointForkParallelsSnapshotOnce(ctx, cfg, sshBackend, repo, source, snapshot, keep, reclaim, slug); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a App) checkpointForkParallelsSnapshotOnce(ctx context.Context, cfg Config, sshBackend SSHLeaseBackend, repo Repo, source, snapshot string, keep, reclaim bool, requestedSlug string) (err error) {
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim, RequestedSlug: requestedSlug})
 	if err != nil {
 		return err

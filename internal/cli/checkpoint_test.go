@@ -261,6 +261,59 @@ func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
 	}
 }
 
+func TestCheckpointForkDryRunFansOutRequestedSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_fork_fanout", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointFork(context.Background(), []string{record.ID, "--dry-run", "--count", "3", "--slug", "Fork Smoke"}); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"slug=fork-smoke-1 keep=true index=1/3",
+		"slug=fork-smoke-2 keep=true index=2/3",
+		"slug=fork-smoke-3 keep=true index=3/3",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if got := strings.Count(out, "would fork checkpoint"); got != 3 {
+		t.Fatalf("dry-run fork lines=%d, want 3:\n%s", got, out)
+	}
+}
+
+func TestCheckpointForkRejectsInvalidCount(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err := app.checkpointFork(context.Background(), []string{"chk_missing", "--count", "0"})
+	if err == nil || !strings.Contains(err.Error(), "--count must be at least 1") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCheckpointForkFanoutSlugTruncatesToLeaseLimit(t *testing.T) {
+	base := strings.Repeat("a", maxRequestedLeaseSlugLength)
+	got := checkpointForkFanoutSlug(base, 12, 12)
+	if len(got) > maxRequestedLeaseSlugLength {
+		t.Fatalf("slug length=%d, want <= %d", len(got), maxRequestedLeaseSlugLength)
+	}
+	if !strings.HasSuffix(got, "-12") {
+		t.Fatalf("slug=%q, want -12 suffix", got)
+	}
+}
+
 func TestCheckpointDeleteParallelsSnapshotRejectsLocalOnly(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	app := App{Stdout: io.Discard, Stderr: io.Discard}

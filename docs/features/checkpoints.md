@@ -153,7 +153,7 @@ crabbox checkpoint create  --id <lease> [--name <name>] [--mode auto|native|arch
 crabbox checkpoint list    [--json] [--verify]
 crabbox checkpoint inspect <checkpoint-id> [--json] [--verify]
 crabbox checkpoint restore <checkpoint-id> --id <lease> [--clear=false]
-crabbox checkpoint fork    <checkpoint-id> [--class <class>] [--keep]
+crabbox checkpoint fork    <checkpoint-id> [--class <class>] [--keep] [--count <n>]
 crabbox checkpoint delete  <checkpoint-id> [--local-only]
 crabbox checkpoint prune   --older-than <duration> [--kind native|archive] [--dry-run]
 ```
@@ -229,6 +229,11 @@ Fork leases a **new** box from a checkpoint and keeps it running.
 crabbox checkpoint fork chk_abc123 --class beast
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=purple-whale ...
 crabbox run --id purple-whale -- npm test
+
+crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow
+# checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-1 ...
+# checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-2 ...
+# checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-3 ...
 ```
 
 - Native forks acquire a lease from the provider using the snapshot/image, wait
@@ -236,7 +241,10 @@ crabbox run --id purple-whale -- npm test
   path.
 - Archive forks acquire a standard lease, upload the tarball, and extract it.
 - Accepts the standard lease-create flags (`--class`, `--type`, `--market`,
-  `--slug`, etc.), `--keep` (default true), `--workdir`, and `--clear`.
+  `--slug`, etc.), `--keep` (default true), `--count`, `--workdir`, and
+  `--clear`.
+- `--count <n>` fans out the same checkpoint into multiple fresh leases. When
+  `--slug` is set, each fork gets a stable numeric suffix.
 - `--dry-run` prints the planned fork target.
 
 Parallels can fork from a snapshot by name:

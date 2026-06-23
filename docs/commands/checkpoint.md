@@ -206,6 +206,12 @@ crabbox checkpoint fork chk_abc123 --class beast
 # Request a friendly slug for the forked lease
 crabbox checkpoint fork chk_abc123 --slug update-flow-smoke
 
+# Fan out one checkpoint into several forked leases for parallel attempts
+crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow
+# checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-1 ...
+# checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-2 ...
+# checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-3 ...
+
 # Fork directly from a Parallels snapshot without recording it first
 crabbox checkpoint fork --provider parallels --target macos --id "macOS Tahoe" --snapshot "macOS 26.4" --slug tahoe-test
 crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --slug test-a --dry-run
@@ -215,6 +221,7 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 
 ```
 --keep            Keep the forked lease running (default true).
+--count <n>       Create multiple forked leases (default 1).
 --id <vm>         Parallels source VM when forking from --snapshot.
 --snapshot <name> Parallels snapshot name or id for a direct fork.
 --clear           Clear the workdir before restoring an archive (default true).
@@ -230,15 +237,17 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
   the lease id and slug.
 - *Archive:* acquire a standard new lease, upload and extract the tarball into
   the workdir, then print the lease id and slug.
+- *Fan-out:* `--count <n>` repeats the same provider-neutral fork flow. When
+  combined with `--slug`, Crabbox appends a stable numeric suffix such as
+  `update-flow-1`, `update-flow-2`, and `update-flow-3`.
 
 Fork multiple times to run scenarios in parallel:
 
 ```sh
-crabbox checkpoint fork chk_abc123 --class beast
-crabbox run --id purple-whale -- npm test
+crabbox checkpoint fork chk_abc123 --class beast --count 2 --slug update-flow
 
-crabbox checkpoint fork chk_abc123 --class beast
-crabbox run --id green-tiger -- npm run integration-test
+crabbox run --id update-flow-1 -- npm test
+crabbox run --id update-flow-2 -- npm run integration-test
 ```
 
 For macOS native checkpoints, forks default to the `on-demand` market (unless

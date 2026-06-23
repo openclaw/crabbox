@@ -188,6 +188,7 @@
 - Added `provider: cloudflare-dynamic-workers` for authenticated Worker-runtime module execution through Cloudflare Dynamic Workers, including blocked-by-default egress, stable caching, durable run metadata, lifecycle commands, and isolated live smoke coverage. Thanks @coygeek.
 - Added `provider: agent-sandbox` for delegated Linux runs through Agent Sandbox `v0.5.0rc1` `v1beta1` warm pools, using the operator's `kubectl` for dependency-light discovery, lifecycle, archive sync, exec, guarded ownership cleanup, and live smoke coverage. Thanks @coygeek.
 - Added `provider: vercel-sandbox` for delegated Linux microVM runs through the official Vercel Sandbox SDK, including archive sync, streamed output, retained-session resume, ownership-guarded lifecycle operations, and guarded live smoke coverage. Thanks @coygeek.
+- Added `crabbox checkpoint fork --count` for provider-neutral fan-out from archive checkpoints, native checkpoints, and direct Parallels snapshots without adding runtime-specific fork flags.
 - Added generic Job evidence fields plus bounded Islo single-file `--require-artifact` and `--download` support, with provider capability gating and secret-safe archive upload errors. Thanks @zozo123.
 - Added owner-scoped outbound runtime-adapter relays so registered workspaces can be created and deleted through a provider-neutral lifecycle API without exposing the provider control plane, including confirmed Delete actions in the portal.
 
