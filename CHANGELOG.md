@@ -20,6 +20,7 @@
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for CodeSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for OpenSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
+- Added run-session metadata for Upstash Box runs so retained and reused boxes can be written through `--lease-output`.
 
 ### Fixed
 

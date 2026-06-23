@@ -122,6 +122,8 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
 - SSH: no.
 - Crabbox sync: yes — archive sync through Box file upload + exec.
+- Run session: yes. `--lease-output` records the Box lease, reuse/retention
+  state, and the matching `crabbox stop` cleanup command.
 - Provider sync: no separate Upstash sync step.
 - Desktop / browser / code: no.
 - Actions hydration: no.

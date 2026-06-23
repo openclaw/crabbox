@@ -49,6 +49,9 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if !hasFeature(spec.Features, core.FeatureArchiveSync) {
 		t.Fatalf("features=%#v want archive sync", spec.Features)
 	}
+	if !hasFeature(spec.Features, core.FeatureRunSession) {
+		t.Fatalf("features=%#v want run-session", spec.Features)
+	}
 }
 
 func TestClientUsesUpstashBoxRESTShape(t *testing.T) {
@@ -445,6 +448,21 @@ func TestRunCreatesExecsAndDeletesOneShotBox(t *testing.T) {
 	if result.ExitCode != 0 || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil {
+		t.Fatal("result.Session is nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Slug != result.Slug {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+	if result.Session.Reused {
+		t.Fatalf("session.Reused=true, want false")
+	}
+	if result.Session.Kept {
+		t.Fatalf("session.Kept=true, want false after cleanup")
+	}
+	if !strings.Contains(result.Session.CleanupCommand, "crabbox stop --provider upstash-box") {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	if fake.createReq.Runtime != "node" || fake.createReq.Size != "small" {
 		t.Fatalf("create req=%#v", fake.createReq)
 	}
@@ -477,6 +495,9 @@ func TestRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("result=%#v", result)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained session after cleanup failure", result.Session)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
@@ -586,6 +607,32 @@ func TestSyncWorkspaceWarnsWhenRemoteArchiveCleanupExitsNonzero(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "warning: upstash-box sync cleanup failed for box_1") || !strings.Contains(stderr.String(), "cleanup denied") {
 		t.Fatalf("stderr=%q, want cleanup warning", stderr.String())
+	}
+}
+
+func TestRunReusedBoxReturnsSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_123456789abc"
+	fake := &fakeAPI{box: boxData{ID: "box_1", Name: "crabbox-blue-123456789abc", Runtime: "node", Size: "small", Status: "running"}}
+	withFakeAPI(t, fake)
+	if err := claimLeaseForRepoProvider(leaseID, "blue", providerName, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	result, err := backend.Run(context.Background(), RunRequest{
+		ID: leaseID, Repo: Repo{Name: "repo", Root: "/repo"}, Command: []string{"echo", "hello"}, NoSync: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained reused box", result.Session)
+	}
+	if result.Session.LeaseID != leaseID || result.Session.Slug != "blue" {
+		t.Fatalf("session=%#v, want lease=%s slug=blue", result.Session, leaseID)
+	}
+	if len(fake.deletedIDs) != 0 {
+		t.Fatalf("deleted=%#v, want reused box retained", fake.deletedIDs)
 	}
 }
 

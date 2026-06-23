@@ -56,7 +56,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	workdir, err := cleanWorkdir(workdir(b.cfg))
 	if err != nil {
 		return RunResult{}, err
@@ -88,18 +88,52 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	shouldStop := acquired && !req.Keep
+	cleanedUp := false
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: upstashBoxCleanupCommand(leaseID),
+	}
+	finishResult := func(result RunResult) RunResult {
+		if result.Provider == "" {
+			result.Provider = providerName
+		}
+		if result.LeaseID == "" {
+			result.LeaseID = leaseID
+		}
+		if result.Slug == "" {
+			result.Slug = slug
+		}
+		result.Session = session
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
+	defer func() {
+		result = finishResult(result)
+	}()
+	cleanupBox := func() error {
+		if !shouldStop {
+			return nil
+		}
+		cleanupCtx, cancel := upstashBoxCleanupContext()
+		defer cancel()
+		if err := client.DeleteBoxes(cleanupCtx, []string{boxID}); err != nil {
+			shouldStop = false
+			return err
+		}
+		removeLeaseClaim(leaseID)
+		cleanedUp = true
+		shouldStop = false
+		return nil
+	}
 	if shouldStop {
 		defer func() {
-			if !shouldStop {
-				return
-			}
-			cleanupCtx, cancel := upstashBoxCleanupContext()
-			defer cancel()
-			if err := client.DeleteBoxes(cleanupCtx, []string{boxID}); err != nil {
+			if err := cleanupBox(); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: upstash-box delete failed for %s: %v\n", boxID, err)
-				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 
@@ -163,7 +197,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	} else if exitCode == 0 && envCleanupErr != nil {
 		finalExitCode = 5
 	}
-	result := RunResult{
+	result = RunResult{
 		ExitCode:      finalExitCode,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
