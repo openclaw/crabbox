@@ -23,6 +23,7 @@ type DoctorCheck = core.DoctorCheck
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest

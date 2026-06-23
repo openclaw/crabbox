@@ -186,10 +186,23 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 	}
 	shouldStop = acquired && !req.Keep && b.cfg.AgentSandbox.DeleteOnRelease
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: agentSandboxCleanupCommand(leaseID),
+	}
 	var pendingTiming *timingReport
 	commandFailed := false
 	providerFailure := false
 	defer func() {
+		if result.Provider == "" && leaseID != "" {
+			result.Provider = providerName
+			result.LeaseID = leaseID
+			result.Slug = slug
+		}
 		if claim.LeaseID != "" && claimTTLExpired(claim, b.now().UTC()) {
 			shouldStop = true
 			providerFailure = true
@@ -207,6 +220,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
 			if cleanupErr := b.deleteCurrentRunClaim(cleanupCtx, client, leaseID, claimName); cleanupErr != nil {
+				session.Kept = true
 				if result.ExitCode == 0 {
 					result.ExitCode = 1
 				}
@@ -218,7 +232,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 				} else {
 					retErr = errors.Join(retErr, cleanupErr)
 				}
+			} else {
+				session.Kept = false
 			}
+		} else {
+			session.Kept = true
+		}
+		if result.LeaseID != "" {
+			result.Session = session
 		}
 		if pendingTiming != nil {
 			pendingTiming.ExitCode = result.ExitCode
@@ -302,6 +323,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		pendingTiming = &timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, CommandMs: commandDuration.Milliseconds(), TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)}
 	}
 	return result, commandErr
+}
+
+func agentSandboxCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
 func (b *backend) deleteCurrentRunClaim(ctx context.Context, client kubernetesClient, leaseID, claimName string) error {
