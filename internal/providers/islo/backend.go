@@ -293,9 +293,19 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		fmt.Fprintf(b.rt.Stderr, "islo run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		var timingErr error
+		switch {
+		case artifactErr != nil:
+			timingErr = artifactErr
+		case runErr != nil:
+			timingErr = runErr
+		case result.ExitCode != 0:
+			timingErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("islo run exited %d", result.ExitCode)}
+		}
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:      isloProvider,
 			LeaseID:       leaseID,
+			Slug:          slug,
 			SyncDelegated: true,
 			SyncMs:        syncDuration.Milliseconds(),
 			SyncPhases:    syncPhases,
@@ -305,7 +315,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
 			Artifacts:     result.Artifacts,
-		}); err != nil {
+		}, result, timingErr)); err != nil {
 			return result, err
 		}
 	}

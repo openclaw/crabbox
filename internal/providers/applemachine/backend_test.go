@@ -1,7 +1,10 @@
 package applemachine
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,18 +17,28 @@ import (
 type recordingRunner struct {
 	requests  []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
+	errs      map[string]error
+	fallback  core.LocalCommandResult
+	err       error
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.requests = append(r.requests, req)
-	result := r.responses[strings.Join(req.Args, "\x00")]
+	key := strings.Join(req.Args, "\x00")
+	result, ok := r.responses[key]
+	if !ok {
+		result = r.fallback
+	}
 	if req.Stdout != nil {
 		_, _ = io.WriteString(req.Stdout, result.Stdout)
 	}
 	if req.Stderr != nil {
 		_, _ = io.WriteString(req.Stderr, result.Stderr)
 	}
-	return result, nil
+	if err := r.errs[key]; err != nil {
+		return result, err
+	}
+	return result, r.err
 }
 
 func testBackend(runner *recordingRunner) *backend {
@@ -80,13 +93,15 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	}
 	t.Cleanup(func() { removeLeaseClaim(leaseID) })
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
+	var stderr bytes.Buffer
+	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*backend)
 	result, err := b.Run(t.Context(), RunRequest{
-		Repo:    Repo{Root: repo},
-		ID:      leaseID,
-		Keep:    true,
-		Command: []string{"go", "test", "./..."},
-		Env:     map[string]string{"CI": "1", "PATH": "/opt/homebrew/bin"},
+		Repo:       Repo{Root: repo},
+		ID:         leaseID,
+		Keep:       true,
+		TimingJSON: true,
+		Command:    []string{"go", "test", "./..."},
+		Env:        map[string]string{"CI": "1", "PATH": "/opt/homebrew/bin"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +119,48 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	if runner.requests[0].Dir != repo {
 		t.Fatalf("dir=%q", runner.requests[0].Dir)
 	}
+	report := decodeLastTimingReport(t, stderr.String())
+	if report.RunStatus != "succeeded" || report.ErrorKind != "" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
+	}
+}
+
+func TestRunTimingJSONClassifiesCommandFailure(t *testing.T) {
+	originalGOOS, originalGOARCH := hostGOOS, hostGOARCH
+	hostGOOS, hostGOARCH = "darwin", "arm64"
+	t.Cleanup(func() { hostGOOS, hostGOARCH = originalGOOS, originalGOARCH })
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(home, "src", "example")
+	leaseID := "cbx_abcdef123456"
+	slug := "failed-command"
+	if err := claimLease(leaseID, slug, repo, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	var stderr bytes.Buffer
+	runner := &recordingRunner{
+		responses: map[string]core.LocalCommandResult{},
+		fallback:  core.LocalCommandResult{ExitCode: 9, Stderr: "boom"},
+		err:       errors.New("exit status 9"),
+	}
+	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*backend)
+	result, err := b.Run(t.Context(), RunRequest{
+		Repo:       Repo{Root: repo},
+		ID:         leaseID,
+		Keep:       true,
+		TimingJSON: true,
+		Command:    []string{"false"},
+	})
+	if err == nil || result.ExitCode != 9 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	report := decodeLastTimingReport(t, stderr.String())
+	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
+	}
 }
 
 func TestValidateRepoMountRejectsOutsideHome(t *testing.T) {
@@ -117,4 +174,23 @@ func TestWriteEnvFileRejectsExplicitHostOwnedVariable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cannot forward host-owned") {
 		t.Fatalf("err=%v", err)
 	}
+}
+
+func decodeLastTimingReport(t *testing.T, output string) timingReport {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		start := strings.Index(line, "{")
+		if start < 0 {
+			continue
+		}
+		var report timingReport
+		if err := json.Unmarshal([]byte(line[start:]), &report); err != nil {
+			t.Fatalf("timing json: %v\noutput=%s", err, output)
+		}
+		return report
+	}
+	t.Fatalf("output does not contain timing JSON: %s", output)
+	return timingReport{}
 }

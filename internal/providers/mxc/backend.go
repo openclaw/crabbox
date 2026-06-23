@@ -97,7 +97,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	result, runErr := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: defaultString(b.cfg.MXC.CLIPath, "wxc-exec.exe"), Args: args, Dir: req.Repo.Root, Stdout: b.rt.Stdout, Stderr: b.rt.Stderr})
 	out := RunResult{ExitCode: result.ExitCode, Command: time.Since(commandStarted), Total: time.Since(started), SyncDelegated: true, Provider: providerName, CommandText: strings.Join(req.Command, " ")}
 	if req.TimingJSON {
-		_ = writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, CommandMs: out.Command.Milliseconds(), TotalMs: out.Total.Milliseconds(), ExitCode: out.ExitCode, SyncDelegated: true, SyncSkipped: true})
+		_ = writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{Provider: providerName, CommandMs: out.Command.Milliseconds(), TotalMs: out.Total.Milliseconds(), ExitCode: out.ExitCode, SyncDelegated: true, SyncSkipped: true}, out, runErr))
 	}
 	if runErr != nil {
 		detail := strings.TrimSpace(result.Stderr)
