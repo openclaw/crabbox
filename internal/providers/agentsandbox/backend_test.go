@@ -400,6 +400,12 @@ func TestRunSyncOnlyUploadsArchiveThroughPodExecTar(t *testing.T) {
 	if result.ExitCode != 0 || !result.SyncDelegated {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil || result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Slug != result.Slug || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+	if result.Session.CleanupCommand != "crabbox stop --provider agent-sandbox --id "+shellQuote(result.LeaseID) {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	if fake.deletes != 0 {
 		t.Fatalf("kept run deleted claim")
 	}
@@ -439,6 +445,9 @@ func TestRunMapsRemoteExitStatus(t *testing.T) {
 	}
 	if result.ExitCode != 42 {
 		t.Fatalf("exit=%d err=%v", result.ExitCode, err)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained failed session", result.Session)
 	}
 	if !strings.Contains(err.Error(), "exited 42") {
 		t.Fatalf("err=%v", err)
@@ -562,6 +571,9 @@ func TestRunFailsWhenDefaultOneShotCleanupFails(t *testing.T) {
 	}
 	if result.ExitCode != 1 {
 		t.Fatalf("cleanup failure should mark nonzero result: %#v", result)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("session=%#v, want retained cleanup handle", result.Session)
 	}
 	if got := backend.rt.Stderr.(*bytes.Buffer).String(); !strings.Contains(got, `"exitCode":1`) {
 		t.Fatalf("timing JSON did not report cleanup failure: %s", got)
@@ -702,6 +714,9 @@ func TestRunExistingLeaseReclaimRefreshesNewRepo(t *testing.T) {
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("result=%#v", result)
+	}
+	if result.Session == nil || result.Session.LeaseID != claim.LeaseID || result.Session.Slug != "reclaim-me" || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
 	}
 	updated, err := readLeaseClaim(claim.LeaseID)
 	if err != nil {
@@ -1390,6 +1405,9 @@ func TestRunReportsAndReleasesClaimThatExpiresDuringCommand(t *testing.T) {
 			}
 			if fake.deletes != 1 {
 				t.Fatalf("deletes=%d want=1", fake.deletes)
+			}
+			if result.Session == nil || result.Session.Kept {
+				t.Fatalf("session=%#v, want released expired session", result.Session)
 			}
 			if claim, readErr := readLeaseClaim(result.LeaseID); readErr != nil || claim.LeaseID != "" {
 				t.Fatalf("expired local claim retained: claim=%#v err=%v", claim, readErr)

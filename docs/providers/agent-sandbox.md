@@ -90,6 +90,8 @@ Crabbox TTL expires. At expiry, the controller tears down the sandbox workload
 but retains the `SandboxClaim` as an exact cleanup handle.
 A `run` without `--id` creates a claim and deletes it after the command unless
 `--keep` or `--keep-on-failure` retains it. The provider is Linux-only.
+`run --lease-output <path>` writes the Agent Sandbox lease ID, slug,
+reuse/retention state, and exact cleanup command for orchestration handoff.
 
 ## Config
 

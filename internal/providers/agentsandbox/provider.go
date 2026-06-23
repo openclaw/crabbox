@@ -24,7 +24,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      "agent-sandbox",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup},
+		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession},
 		Coordinator: core.CoordinatorNever,
 	}
 }
