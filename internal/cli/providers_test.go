@@ -496,6 +496,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"code-interpreter",
 		"cost-control",
 		"agent-sandbox",
+		"disposable-execution",
 		"fast-feedback",
 		"failure-diagnostics",
 		"fanout-testing",
@@ -675,6 +676,60 @@ func TestProvidersRecommendCostControlAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !strings.HasPrefix(entries[0].Category, "local-") {
 		t.Fatalf("budget alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendDisposableExecutionRequiresCleanupSandboxes(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "disposable-execution", 12)
+	if len(recommendations) == 0 {
+		t.Fatal("expected disposable-execution recommendations")
+	}
+	foundDelegatedSandbox := false
+	foundSeededWorkload := false
+	foundSessionOrEvidence := false
+	for _, recommendation := range recommendations {
+		if recommendation.Category != "delegated-sandbox" && recommendation.Category != "local-sandbox" {
+			t.Fatalf("disposable-execution recommendation escaped sandbox categories: %#v", recommendation)
+		}
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureCleanup) {
+			t.Fatalf("disposable-execution recommendation lacks cleanup feature: %#v", recommendation)
+		}
+		hasArchiveSync := providerRecommendationHasFeature(recommendation.Features, FeatureArchiveSync)
+		hasSessionOrEvidence := providerRecommendationHasFeature(recommendation.Features, FeatureRunSession) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge)
+		foundDelegatedSandbox = foundDelegatedSandbox || recommendation.Category == "delegated-sandbox"
+		foundSeededWorkload = foundSeededWorkload || hasArchiveSync
+		foundSessionOrEvidence = foundSessionOrEvidence || hasSessionOrEvidence
+	}
+	if !foundDelegatedSandbox || !foundSeededWorkload || !foundSessionOrEvidence {
+		t.Fatalf("disposable-execution should include delegated sandboxes, seeded workloads, and inspectable outputs: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendEphemeralSandboxAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "ephemeral-sandbox",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend ephemeral-sandbox error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("ephemeral-sandbox alias entries=%#v", entries)
+	}
+	if entries[0].Category != "delegated-sandbox" && entries[0].Category != "local-sandbox" {
+		t.Fatalf("ephemeral-sandbox alias should prefer sandbox providers: %#v", entries)
+	}
+	if !providerRecommendationHasFeature(entries[0].Features, FeatureCleanup) {
+		t.Fatalf("ephemeral-sandbox alias should require cleanup: %#v", entries)
 	}
 }
 

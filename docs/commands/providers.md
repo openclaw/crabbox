@@ -107,6 +107,7 @@ crabbox providers recommend artifact-download
 crabbox providers recommend ci-proof
 crabbox providers recommend code-interpreter
 crabbox providers recommend cost-control
+crabbox providers recommend disposable-execution
 crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend failure-diagnostics
 crabbox providers recommend fanout-testing --workspace fork
@@ -152,6 +153,10 @@ Supported use cases:
   cleanup, cache reuse, reusable state, or retained proof to reduce quota and
   hot-capacity waste.
 - `desktop`: providers with desktop/browser/code-server capabilities.
+- `disposable-execution`: delegated or local sandboxes that advertise cleanup
+  for temporary workloads, with optional archive sync, sessions, retained
+  outputs, preview URLs, or pause/resume before release. Aliases include
+  `ephemeral-sandbox`, `throwaway-sandbox`, and `auto-cleanup`.
 - `fast-feedback`: providers suited to repeated test loops with reusable cache
   volumes, checkout sync, cleanup, or reusable validation evidence.
 - `failure-diagnostics`: providers with proof, sessions, artifacts, downloads,

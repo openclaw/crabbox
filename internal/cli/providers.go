@@ -450,6 +450,7 @@ func providerRecommendationUseCases() []string {
 		"code-interpreter",
 		"cost-control",
 		"desktop",
+		"disposable-execution",
 		"fast-feedback",
 		"failure-diagnostics",
 		"fanout-testing",
@@ -498,6 +499,11 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "cost-control", true
 	case "desktop", "browser", "code", "vnc":
 		return "desktop", true
+	case "disposable-execution", "disposable", "ephemeral-execution",
+		"ephemeral-sandbox", "ephemeral-sandboxes", "throwaway",
+		"throwaway-sandbox", "throwaway-sandboxes", "auto-cleanup",
+		"clean-sandbox", "cleanup-sandbox", "temporary-sandbox":
+		return "disposable-execution", true
 	case "fast-feedback", "feedback", "fast-test", "fast-tests", "cache", "cached", "cache-heavy":
 		return "fast-feedback", true
 	case "failure-diagnostics", "failure-diagnostic", "failed-run", "failed-runs",
@@ -746,6 +752,36 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
 			add(8, "supports common interpreter execution targets")
+		}
+	case "disposable-execution":
+		isSandboxRuntime := category == "delegated-sandbox" || category == "local-sandbox"
+		if !isSandboxRuntime || !hasFeature(FeatureCleanup) {
+			break
+		}
+		if category == "delegated-sandbox" {
+			add(55, "delegated sandbox for provider-owned disposable execution")
+		}
+		if category == "local-sandbox" {
+			add(45, "local sandbox for credentialless disposable execution")
+		}
+		add(45, "can clean up disposable sandbox resources")
+		if hasFeature(FeatureArchiveSync) {
+			add(24, "can seed a temporary workload from the current checkout")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(18, "returns a run session before cleanup")
+		}
+		if hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(16, "can retain outputs before deleting runtime resources")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(12, "can expose temporary app previews")
+		}
+		if hasFeature(FeaturePauseResume) {
+			add(8, "can pause disposable state before release when needed")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
+			add(8, "supports common disposable execution targets")
 		}
 	case "cost-control":
 		if strings.HasPrefix(category, "local-") {
@@ -1449,6 +1485,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend ci-proof")
 	fmt.Fprintln(out, "  crabbox providers recommend code-interpreter")
 	fmt.Fprintln(out, "  crabbox providers recommend cost-control")
+	fmt.Fprintln(out, "  crabbox providers recommend disposable-execution")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
 	fmt.Fprintln(out, "  crabbox providers recommend failure-diagnostics")

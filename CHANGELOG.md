@@ -14,6 +14,7 @@
 - Added `crabbox providers recommend warm-start` for low-latency repeated-run guidance across local runtimes, cache volumes, retained sessions, pause/resume, and workspace-state providers.
 - Added `crabbox providers recommend resource-observability` for coordinator usage/cost visibility, SSH resource telemetry, retained run evidence, reusable sessions, and preview URL guidance.
 - Added `crabbox providers recommend code-interpreter` for generated-code and script execution guidance across delegated and local sandbox providers.
+- Added `crabbox providers recommend disposable-execution` for cleanup-capable temporary sandbox guidance across delegated and local sandbox providers.
 
 ### Fixed
 

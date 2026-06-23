@@ -131,6 +131,10 @@ Ship these in small PRs:
    script execution should prefer delegated or local sandboxes with sessions,
    archive sync, retained outputs, preview URLs, MCP attachments, or module
    execution.
+   Use `crabbox providers recommend disposable-execution` when temporary
+   workloads should prefer cleanup-capable delegated or local sandboxes before
+   retaining only the proof, outputs, session, or preview metadata needed for
+   inspection.
 3. Add live smoke docs where credentials are required.
    Provider adapters can be valuable before broad live access exists, but each
    one needs an opt-in smoke contract that says what real behavior proves. Use
