@@ -3,6 +3,7 @@ package modal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -358,6 +359,7 @@ func TestKeepOnFailureRetainsSandbox(t *testing.T) {
 		Command:       []string{"false"},
 		NoSync:        true,
 		KeepOnFailure: true,
+		TimingJSON:    true,
 	}
 	result, err := backend.Run(context.Background(), req)
 	if result.ExitCode != 7 {
@@ -375,6 +377,19 @@ func TestKeepOnFailureRetainsSandbox(t *testing.T) {
 	}
 	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
 		t.Fatalf("session=%#v", result.Session)
+	}
+	var report map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err == nil {
+			report = candidate
+		}
+	}
+	if report == nil {
+		t.Fatalf("stderr does not contain timing JSON: %q", stderr.String())
+	}
+	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
+		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
 	}
 }
 

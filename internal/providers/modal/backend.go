@@ -127,7 +127,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		result := finishResult()
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReport{
+			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -138,7 +138,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 				TotalMs:       result.Total.Milliseconds(),
 				ExitCode:      0,
 				Label:         strings.TrimSpace(req.Label),
-			})
+			}, result, nil))
 			return result, err
 		}
 		return result, nil
@@ -178,7 +178,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		fmt.Fprintf(b.rt.Stderr, "modal run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -190,7 +190,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, commandErr)); err != nil {
 			return result, err
 		}
 	}

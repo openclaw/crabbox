@@ -495,11 +495,12 @@ func TestRunEnvCleanupUsesBoundedContext(t *testing.T) {
 	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
 	start := time.Now()
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"echo", "hello"},
-		Env:     map[string]string{"TOKEN": "secret"},
-		NoSync:  true,
-		Keep:    true,
+		Repo:       Repo{Name: "repo", Root: t.TempDir()},
+		Command:    []string{"echo", "hello"},
+		Env:        map[string]string{"TOKEN": "secret"},
+		NoSync:     true,
+		Keep:       true,
+		TimingJSON: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "upstash-box env cleanup failed for box_1: context deadline exceeded") {
 		t.Fatalf("err=%v, want bounded env cleanup failure", err)
@@ -509,6 +510,18 @@ func TestRunEnvCleanupUsesBoundedContext(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report struct {
+		ExitCode  int    `json:"exitCode"`
+		RunStatus string `json:"runStatus"`
+		ErrorKind string `json:"errorKind"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatalf("timing json: %v\nstderr=%s", err, stderr.String())
+	}
+	if report.ExitCode != 5 || report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
+		t.Fatalf("timing outcome exit=%d status=%q kind=%q", report.ExitCode, report.RunStatus, report.ErrorKind)
 	}
 }
 
