@@ -1350,6 +1350,102 @@ esac
   assert.equal(seen[8], "list --provider nebius --json");
 });
 
+test("ovh live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ovh-dispatch-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+if [[ "\${OVH_APPLICATION_KEY:-}" != "ovh_app_fake" || "\${OVH_APPLICATION_SECRET:-}" != "ovh_secret_fake" || "\${OVH_CONSUMER_KEY:-}" != "ovh_consumer_fake" ]]; then
+  printf 'missing OVH auth\\n' >&2
+  exit 91
+fi
+case "$1" in
+  doctor)
+    printf 'auth=ready control_plane=ready inventory=ready mutation=false leases=0 endpoint=https://api.us.ovhcloud.com/1.0 region=BHS5 image=Ubuntu 24.04 flavor=b3-8\\n'
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\\n'
+    else
+      printf '[{"labels":{"slug":"%s"},"provider":"ovh"}]\\n' "$slug"
+    fi
+    ;;
+  warmup)
+    requested_slug=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --slug)
+          requested_slug="\${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\\n' "$requested_slug" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\\n'
+    ;;
+  run)
+    printf 'ok\\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  cleanup)
+    printf 'skip server id=none name=none reason=missing labels\\n'
+    ;;
+  *)
+    printf 'unexpected args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "ovh",
+      OVH_APPLICATION_KEY: "ovh_app_fake",
+      OVH_APPLICATION_SECRET: "ovh_secret_fake",
+      OVH_CONSUMER_KEY: "ovh_consumer_fake",
+      CRABBOX_OVH_PROJECT_ID: "project-test",
+      CRABBOX_OVH_REGION: "BHS5",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_ovh_smoke_passed slug=ovh-smoke-/);
+  assert.doesNotMatch(result.stdout + result.stderr, /ovh_secret_fake|ovh_consumer_fake/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen[0], "doctor --provider ovh");
+  assert.equal(seen[1], "list --provider ovh --json");
+  assert.match(seen[2], /^warmup --provider ovh --slug ovh-smoke-\d{14}-\d+ --keep --type b3-8 --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[3], /^status --provider ovh --id ovh-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider ovh --id ovh-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
+  assert.equal(seen[5], "list --provider ovh --json");
+  assert.match(seen[6], /^stop --provider ovh ovh-smoke-\d{14}-\d+$/);
+  assert.equal(seen[7], "doctor --provider ovh");
+  assert.equal(seen[8], "cleanup --provider ovh --dry-run");
+  assert.equal(seen[9], "list --provider ovh --json");
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");

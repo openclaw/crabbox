@@ -136,6 +136,7 @@ validate_doctor_inventory_empty() {
 
 cleanup_armed=0
 slug="ovh-smoke-$(date +%Y%m%d%H%M%S)-$$"
+crabbox_bin=""
 config_file=""
 
 cleanup() {
@@ -147,7 +148,7 @@ cleanup() {
     local cleanup_attempts="${CRABBOX_OVH_CLEANUP_ATTEMPTS:-65}"
     for ((attempt = 1; attempt <= cleanup_attempts; attempt++)); do
       set +e
-      cleanup_output="$(bin/crabbox stop --provider ovh "$slug" 2>&1)"
+      cleanup_output="$("$crabbox_bin" stop --provider ovh "$slug" 2>&1)"
       cleanup_status=$?
       set -e
       if [ "$cleanup_status" -eq 0 ]; then
@@ -159,7 +160,7 @@ cleanup() {
       fi
     done
     if [ "$cleanup_status" -ne 0 ]; then
-      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "bin/crabbox stop --provider ovh $slug" "$cleanup_status" "$slug" >&2
+      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$crabbox_bin stop --provider ovh $slug" "$cleanup_status" "$slug" >&2
       printf '%s\n' "$cleanup_output" >&2
       if [ "$status" -eq 0 ]; then
         status="$cleanup_status"
@@ -207,7 +208,11 @@ if [[ -z "$ovh_region" ]]; then
 fi
 
 mkdir -p bin
-go build -trimpath -o bin/crabbox ./cmd/crabbox
+crabbox_bin="${CRABBOX_BIN:-bin/crabbox}"
+if [[ -z "${CRABBOX_BIN:-}" ]]; then
+  mkdir -p "$(dirname "$crabbox_bin")"
+  go build -trimpath -o "$crabbox_bin" ./cmd/crabbox
+fi
 
 config_file="$(mktemp)"
 cat >"$config_file" <<YAML
@@ -227,23 +232,23 @@ export OVH_APPLICATION_KEY
 export OVH_APPLICATION_SECRET
 export OVH_CONSUMER_KEY
 
-doctor_output="$(run_capture "bin/crabbox doctor --provider ovh" bin/crabbox doctor --provider ovh)"
-validate_doctor_inventory_empty "bin/crabbox doctor --provider ovh" "$doctor_output"
+doctor_output="$(run_capture "$crabbox_bin doctor --provider ovh" "$crabbox_bin" doctor --provider ovh)"
+validate_doctor_inventory_empty "$crabbox_bin doctor --provider ovh" "$doctor_output"
 printf '%s\n' "$doctor_output"
-initial_list_output="$(run_capture "bin/crabbox list --provider ovh --json" bin/crabbox list --provider ovh --json)"
-validate_list_json_empty "bin/crabbox list --provider ovh --json" "$initial_list_output"
+initial_list_output="$(run_capture "$crabbox_bin list --provider ovh --json" "$crabbox_bin" list --provider ovh --json)"
+validate_list_json_empty "$crabbox_bin list --provider ovh --json" "$initial_list_output"
 cleanup_armed=1
-run_capture "bin/crabbox warmup --provider ovh --slug $slug --keep --type $ovh_flavor --ttl 20m --idle-timeout 5m" bin/crabbox warmup --provider ovh --slug "$slug" --keep --type "$ovh_flavor" --ttl 20m --idle-timeout 5m >/dev/null
-run_capture "bin/crabbox status --provider ovh --id $slug --wait --wait-timeout 300s" bin/crabbox status --provider ovh --id "$slug" --wait --wait-timeout 300s >/dev/null
-run_capture "bin/crabbox run --provider ovh --id $slug --no-sync -- echo ok" bin/crabbox run --provider ovh --id "$slug" --no-sync -- echo ok >/dev/null
-list_output="$(run_capture "bin/crabbox list --provider ovh --json" bin/crabbox list --provider ovh --json)"
+run_capture "$crabbox_bin warmup --provider ovh --slug $slug --keep --type $ovh_flavor --ttl 20m --idle-timeout 5m" "$crabbox_bin" warmup --provider ovh --slug "$slug" --keep --type "$ovh_flavor" --ttl 20m --idle-timeout 5m >/dev/null
+run_capture "$crabbox_bin status --provider ovh --id $slug --wait --wait-timeout 300s" "$crabbox_bin" status --provider ovh --id "$slug" --wait --wait-timeout 300s >/dev/null
+run_capture "$crabbox_bin run --provider ovh --id $slug --no-sync -- echo ok" "$crabbox_bin" run --provider ovh --id "$slug" --no-sync -- echo ok >/dev/null
+list_output="$(run_capture "$crabbox_bin list --provider ovh --json" "$crabbox_bin" list --provider ovh --json)"
 printf '%s\n' "$list_output"
-validate_list_json_contains_slug "bin/crabbox list --provider ovh --json" "$list_output"
-run_capture "bin/crabbox stop --provider ovh $slug" bin/crabbox stop --provider ovh "$slug" >/dev/null
+validate_list_json_contains_slug "$crabbox_bin list --provider ovh --json" "$list_output"
+run_capture "$crabbox_bin stop --provider ovh $slug" "$crabbox_bin" stop --provider ovh "$slug" >/dev/null
 cleanup_armed=0
 post_doctor_output=""
 for attempt in {1..30}; do
-  post_doctor_output="$(run_capture "bin/crabbox doctor --provider ovh" bin/crabbox doctor --provider ovh)"
+  post_doctor_output="$(run_capture "$crabbox_bin doctor --provider ovh" "$crabbox_bin" doctor --provider ovh)"
   if doctor_inventory_empty "$post_doctor_output"; then
     break
   fi
@@ -251,10 +256,10 @@ for attempt in {1..30}; do
     sleep 2
   fi
 done
-validate_doctor_inventory_empty "bin/crabbox doctor --provider ovh" "$post_doctor_output"
-cleanup_output="$(run_capture "bin/crabbox cleanup --provider ovh --dry-run" bin/crabbox cleanup --provider ovh --dry-run)"
-post_list_output="$(run_capture "bin/crabbox list --provider ovh --json" bin/crabbox list --provider ovh --json)"
-validate_list_json_empty "bin/crabbox list --provider ovh --json" "$post_list_output"
+validate_doctor_inventory_empty "$crabbox_bin doctor --provider ovh" "$post_doctor_output"
+cleanup_output="$(run_capture "$crabbox_bin cleanup --provider ovh --dry-run" "$crabbox_bin" cleanup --provider ovh --dry-run)"
+post_list_output="$(run_capture "$crabbox_bin list --provider ovh --json" "$crabbox_bin" list --provider ovh --json)"
+validate_list_json_empty "$crabbox_bin list --provider ovh --json" "$post_list_output"
 printf '%s\n' "$cleanup_output"
 printf '%s\n' "$post_doctor_output"
 printf '%s\n' "$post_list_output"

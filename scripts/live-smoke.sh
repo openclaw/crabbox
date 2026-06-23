@@ -910,6 +910,10 @@ if has_provider nebius; then
   "$root/scripts/live-nebius-smoke.sh"
 fi
 
+if has_provider ovh; then
+  "$root/scripts/live-ovh-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi

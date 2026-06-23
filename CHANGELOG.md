@@ -28,6 +28,7 @@
 - Added Linode to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added DigitalOcean to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Nebius to the guarded `scripts/live-smoke.sh` provider smoke matrix.
+- Added OVHcloud to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Multipass to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Tart to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.

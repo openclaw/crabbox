@@ -177,14 +177,16 @@ crabbox cleanup --provider ovh
 The repeatable live check is opt-in:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=ovh scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=ovh scripts/live-ovh-smoke.sh
 ```
 
-The script builds `bin/crabbox`, reads OVH credentials and project settings from
-the environment, requires an empty Crabbox-owned OVH inventory, creates a small
-`b3-8` instance by default, waits for ready status, runs `echo ok`, verifies
-`list --json`, stops the lease, runs dry-run cleanup, and verifies the
-Crabbox-owned inventory is empty afterward.
+The top-level script dispatches to the provider-specific script. The
+provider-specific script builds `bin/crabbox` unless `CRABBOX_BIN` is set, reads
+OVH credentials and project settings from the environment, requires an empty
+Crabbox-owned OVH inventory, creates a small `b3-8` instance by default, waits
+for ready status, runs `echo ok`, verifies `list --json`, stops the lease, runs
+dry-run cleanup, and verifies the Crabbox-owned inventory is empty afterward.
 
 Optional smoke overrides:
 

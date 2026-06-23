@@ -67,6 +67,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=vercel-sandbox CRABBOX_LIVE_COORDINATOR=0 
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=linode scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=ovh scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -94,6 +95,11 @@ Per-provider smoke prerequisites:
   requires explicit `CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius`, creates one
   short-lived CPU-default VM, verifies status and `echo ok`, stops the lease,
   runs dry-run cleanup, and prints a final classification.
+- **OVHcloud** — OVH application credentials plus `ovh.projectId` and
+  `ovh.region`. `scripts/live-ovh-smoke.sh` is coordinator-free, requires an
+  empty Crabbox-owned OVH inventory, creates one short-lived `b3-8` instance by
+  default, verifies status and `echo ok`, stops the lease, runs dry-run cleanup,
+  and prints a final classification.
 
 For a direct-provider smoke (no coordinator), disable the broker with a scratch config and run the same lease lifecycle manually:
 
@@ -115,6 +121,11 @@ Use `scripts/live-smoke.sh` or `scripts/live-nebius-smoke.sh` for the repeatable
 direct Nebius equivalent; it builds or reuses `bin/crabbox`, uses the documented
 Nebius config and CLI profile, creates a unique `nebius-smoke-*` lease, and
 verifies the slug is absent after stop and dry-run cleanup.
+Use `scripts/live-smoke.sh` or `scripts/live-ovh-smoke.sh` for the repeatable
+direct OVHcloud equivalent; it builds or reuses `bin/crabbox`, uses the
+documented OVH credentials and project settings, creates a unique
+`ovh-smoke-*` lease, and verifies the Crabbox-owned inventory is empty after
+stop and dry-run cleanup.
 
 ## Deployment
 
