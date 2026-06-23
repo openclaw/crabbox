@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -73,7 +74,47 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 		httpClient = defaultUpstashBoxHTTPClient()
 	}
 	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com"), "/")
-	return &client{apiKey: apiKey, base: base, http: httpClient}, nil
+	return &client{apiKey: apiKey, base: base, http: secureUpstashBoxHTTPClient(httpClient, base)}, nil
+}
+
+func secureUpstashBoxHTTPClient(source *http.Client, apiURL string) *http.Client {
+	client := *source
+	trusted, _ := url.Parse(apiURL)
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameUpstashBoxOrigin(trusted, req.URL) {
+			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameUpstashBoxOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveUpstashBoxPort(a) == effectiveUpstashBoxPort(b)
+}
+
+func effectiveUpstashBoxPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 func upstashBoxCleanupContext() (context.Context, context.CancelFunc) {
