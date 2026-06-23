@@ -141,6 +141,7 @@ func installRecordingSSH(t *testing.T, dir string) string {
 cmd=""
 for arg do cmd="$arg"; done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+cat >/dev/null || true
 exit 0
 `
 	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
@@ -2115,6 +2116,79 @@ func TestWindowsRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testin
 			t.Fatalf("windows preflight command missing %q in %q", want, decoded)
 		}
 	}
+}
+
+func TestWindowsRemoteCapabilityPreflightUploadsScriptBeforeRunning(t *testing.T) {
+	dir := t.TempDir()
+	logPath := installRecordingSSH(t, dir)
+	cfg := defaultConfig()
+	cfg.Run.PreflightTools = []string{"node"}
+	target := SSHTarget{
+		User:        "crabbox",
+		Host:        "127.0.0.1",
+		Port:        "22",
+		TargetOS:    targetWindows,
+		WindowsMode: windowsModeNormal,
+	}
+	env := map[string]string{"CRABBOX_LONG_ENV": strings.Repeat("x", 40000)}
+
+	var out bytes.Buffer
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, target, "cbx_123", `C:\crabbox\repo`, []string{`.crabbox\env\run.env`}, true, "", true, env)
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := recordedSSHCommands(string(data))
+	if len(commands) != 3 {
+		t.Fatalf("ssh commands=%d want 3:\n%s", len(commands), data)
+	}
+	upload := decodePowerShellCommand(t, commands[0])
+	for _, want := range []string{
+		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
+		`$stdin.CopyTo($memory)`,
+		`.crabbox/preflight/`,
+	} {
+		if !strings.Contains(upload, want) {
+			t.Fatalf("upload command missing %q in %q", want, upload)
+		}
+	}
+	run := decodePowerShellCommand(t, commands[1])
+	for _, want := range []string{
+		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
+		`$__crabboxPreflight = '.crabbox/preflight/`,
+		`-File $__crabboxPreflight`,
+	} {
+		if !strings.Contains(run, want) {
+			t.Fatalf("run command missing %q in %q", want, run)
+		}
+	}
+	cleanup := decodePowerShellCommand(t, commands[2])
+	for _, want := range []string{
+		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
+		`$__crabboxPreflight = '.crabbox/preflight/`,
+		`if (Test-Path -LiteralPath $__crabboxPreflight)`,
+		`Remove-Item -LiteralPath $__crabboxPreflight -Force -ErrorAction Stop`,
+	} {
+		if !strings.Contains(cleanup, want) {
+			t.Fatalf("cleanup command missing %q in %q", want, cleanup)
+		}
+	}
+	if strings.Contains(run, env["CRABBOX_LONG_ENV"]) || strings.Contains(upload, env["CRABBOX_LONG_ENV"]) || strings.Contains(cleanup, env["CRABBOX_LONG_ENV"]) {
+		t.Fatalf("large preflight script leaked into encoded commands")
+	}
+}
+
+func recordedSSHCommands(log string) []string {
+	parts := strings.Split(log, "---\n")
+	commands := make([]string, 0, len(parts))
+	for _, part := range parts {
+		command := strings.TrimSpace(part)
+		if command != "" {
+			commands = append(commands, command)
+		}
+	}
+	return commands
 }
 
 func TestPreflightToolsForTargetFiltersByOS(t *testing.T) {

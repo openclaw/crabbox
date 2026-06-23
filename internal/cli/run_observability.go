@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -162,11 +164,13 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	if len(tools) == 0 {
 		return
 	}
-	command := remoteCapabilityPreflightCommand(workdir, env, envFiles, tools)
+	var out string
+	var err error
 	if isWindowsNativeTarget(target) {
-		command = windowsRemoteCapabilityPreflightCommand(workdir, env, envFiles, tools)
+		out, err = runWindowsRemoteCapabilityPreflight(ctx, target, workdir, env, envFiles, tools)
+	} else {
+		out, err = runSSHCombinedOutput(ctx, target, remoteCapabilityPreflightCommand(workdir, env, envFiles, tools))
 	}
-	out, err := runSSHCombinedOutput(ctx, target, command)
 	if err != nil {
 		fmt.Fprintf(w, "remote preflight failed: %v\n", err)
 		if strings.TrimSpace(out) != "" {
@@ -365,6 +369,75 @@ preflight_cmd() {
 }
 
 func windowsRemoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string, tools []string) string {
+	return powershellCommand(windowsRemoteCapabilityPreflightScript(workdir, env, envFiles, tools))
+}
+
+func runWindowsRemoteCapabilityPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string, tools []string) (string, error) {
+	script := windowsRemoteCapabilityPreflightScript(workdir, env, envFiles, tools)
+	remotePath := windowsRemoteCapabilityPreflightPath(script)
+	cleanup := func() (string, error) {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return runSSHCombinedOutput(cleanupCtx, target, windowsRemoteRemoveCapabilityPreflightCommand(workdir, remotePath))
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runSSHInput(ctx, target, windowsRemoteUploadUTF8BOMFileCommand(workdir, remotePath), strings.NewReader(script), &stdout, &stderr); err != nil {
+		cleanupOut, cleanupErr := cleanup()
+		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
+		if detail != "" {
+			if cleanupErr != nil {
+				return "", fmt.Errorf("upload preflight %s: %w: %s; cleanup preflight: %v: %s", remotePath, err, detail, cleanupErr, strings.TrimSpace(cleanupOut))
+			}
+			return "", fmt.Errorf("upload preflight %s: %w: %s", remotePath, err, detail)
+		}
+		if cleanupErr != nil {
+			return "", fmt.Errorf("upload preflight %s: %w; cleanup preflight: %v: %s", remotePath, err, cleanupErr, strings.TrimSpace(cleanupOut))
+		}
+		return "", fmt.Errorf("upload preflight %s: %w", remotePath, err)
+	}
+	out, err := runSSHCombinedOutput(ctx, target, windowsRemoteRunCapabilityPreflightCommand(workdir, remotePath))
+	cleanupOut, cleanupErr := cleanup()
+	if cleanupErr != nil {
+		cleanupDetail := strings.TrimSpace(cleanupOut)
+		if err != nil {
+			if cleanupDetail != "" {
+				return out, fmt.Errorf("run preflight: %w; cleanup preflight %s: %v: %s", err, remotePath, cleanupErr, cleanupDetail)
+			}
+			return out, fmt.Errorf("run preflight: %w; cleanup preflight %s: %v", err, remotePath, cleanupErr)
+		}
+		if cleanupDetail != "" {
+			return out, fmt.Errorf("cleanup preflight %s: %w: %s", remotePath, cleanupErr, cleanupDetail)
+		}
+		return out, fmt.Errorf("cleanup preflight %s: %w", remotePath, cleanupErr)
+	}
+	return out, err
+}
+
+func windowsRemoteCapabilityPreflightPath(script string) string {
+	sum := sha256.Sum256([]byte(script))
+	return ".crabbox/preflight/" + safeScriptName("preflight.ps1", hex.EncodeToString(sum[:])[:12])
+}
+
+func windowsRemoteRunCapabilityPreflightCommand(workdir, remotePath string) string {
+	return powershellCommand(`$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath ` + psQuote(workdir) + `
+$__crabboxPreflight = ` + psQuote(remotePath) + `
+& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $__crabboxPreflight
+exit $LASTEXITCODE
+`)
+}
+
+func windowsRemoteRemoveCapabilityPreflightCommand(workdir, remotePath string) string {
+	return powershellCommand(`$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath ` + psQuote(workdir) + `
+$__crabboxPreflight = ` + psQuote(remotePath) + `
+if (Test-Path -LiteralPath $__crabboxPreflight) {
+  Remove-Item -LiteralPath $__crabboxPreflight -Force -ErrorAction Stop
+}
+`)
+}
+
+func windowsRemoteCapabilityPreflightScript(workdir string, env map[string]string, envFiles []string, tools []string) string {
 	var b bytes.Buffer
 	writeWindowsRemotePrefix(&b, workdir, env, envFiles)
 	b.WriteString(`function Test-Value($Label, $ScriptBlock) {
@@ -396,7 +469,7 @@ Test-Value "cwd" { (Get-Location).Path }
 	for _, tool := range tools {
 		b.WriteString(windowsPreflightProbe(tool))
 	}
-	return powershellCommand(b.String())
+	return b.String()
 }
 
 type preflightToolSpec struct {
