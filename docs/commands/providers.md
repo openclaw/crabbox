@@ -10,12 +10,12 @@ crabbox providers
 crabbox providers --json
 crabbox providers filters
 crabbox providers filters --json
-crabbox providers --category delegated-sandbox --evidence preview-url
+crabbox providers --runtime managed-sandbox --evidence preview-url
 crabbox providers --target linux --workspace checkpoint --workspace fork --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend run-evidence
-crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
+crabbox providers recommend run-evidence --runtime managed-sandbox --evidence preview-url
 crabbox providers recommend versioned-workspace
 ```
 
@@ -33,6 +33,10 @@ crabbox providers recommend versioned-workspace
   Repeatable.
 - `--feature <feature>`: keep providers that advertise this raw feature flag,
   such as `ssh`, `crabbox-sync`, `run-proof`, or `url-bridge`. Repeatable.
+- `--runtime <capability>`: keep providers that advertise this normalized
+  runtime capability, such as `ssh-host`, `delegated-command`,
+  `managed-sandbox`, `local-runtime`, `ci-runner`, `remote-dev`,
+  `worker-module`, or `interactive`. Repeatable.
 - `--workspace <capability>`: keep providers that advertise this normalized
   workspace capability, such as `checkpoint`, `fork`, `restore`, or
   `snapshot-ref`. Repeatable.
@@ -71,13 +75,14 @@ provider filter values:
   kind: delegated-run,service-control,ssh-lease
   category: brokerable-cloud,byo-ssh,ci-proof-runner,delegated-sandbox,direct-cloud,external-provider,gpu-cloud,local-runtime,local-sandbox,local-vm,self-hosted-virtualization,service-control
   target: linux,macos,windows/normal,windows/wsl2,worker-runtime
-  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
+  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
+  runtime: ci-runner,delegated-command,interactive,local-runtime,local-sandbox,managed-sandbox,remote-dev,service-control,ssh-host,worker-module
   workspace: checkpoint,fork,restore,snapshot-ref
   evidence: artifacts,downloads,preview-url,proof,session
 ```
 
 JSON output returns one object with `kind`, `category`, `target`, `feature`,
-`workspace`, and `evidence` arrays.
+`runtime`, `workspace`, and `evidence` arrays.
 
 ## `providers recommend`
 
@@ -103,7 +108,7 @@ crabbox providers recommend preview-url
 crabbox providers recommend reachability
 crabbox providers recommend remote-dev
 crabbox providers recommend run-evidence
-crabbox providers recommend run-evidence --category delegated-sandbox --evidence preview-url
+crabbox providers recommend run-evidence --runtime managed-sandbox --evidence preview-url
 crabbox providers recommend run-session
 crabbox providers recommend team-cloud
 crabbox providers recommend workspace-reuse
@@ -170,7 +175,7 @@ Recommendation flags:
 - `--use-case <name>`: pass the use case by flag instead of positionally.
 - `--limit <n>`: maximum recommendations to print. Defaults to `5`.
 - `--json`: emit recommendations as JSON.
-- `--kind`, `--category`, `--target`, `--feature`, `--workspace`,
+- `--kind`, `--category`, `--target`, `--feature`, `--runtime`, `--workspace`,
   `--evidence`: filter the candidate provider matrix before scoring. These flags
   use the same values and repeat/comma semantics as the base `providers` matrix
   command.
@@ -186,6 +191,7 @@ aws
   category: brokerable-cloud
   targets: linux,windows/normal,windows/wsl2,macos
   features: ssh,crabbox-sync,cleanup,desktop,browser,code
+  runtime: ssh-host,interactive
   coordinator: supported
 
 parallels
@@ -194,6 +200,7 @@ parallels
   category: local-vm
   targets: linux,macos,windows/normal,windows/wsl2
   features: ssh,crabbox-sync,cleanup,desktop,browser,code,workspace-checkpoint,workspace-fork,workspace-restore,provider-snapshot
+  runtime: ssh-host,local-runtime,interactive
   workspace: checkpoint,fork,restore,snapshot-ref
   coordinator: never
 
@@ -203,6 +210,7 @@ blacksmith-testbox
   category: ci-proof-runner
   targets: linux
   features: cache-volume,run-proof,run-session,run-artifacts
+  runtime: delegated-command,ci-runner
   evidence: proof,artifacts,session
   coordinator: never
   aliases: blacksmith
@@ -213,6 +221,7 @@ e2b
   category: delegated-sandbox
   targets: linux
   features: url-bridge,run-session
+  runtime: delegated-command,managed-sandbox
   evidence: preview-url,session
   coordinator: never
 
@@ -222,6 +231,7 @@ wandb
   category: gpu-cloud
   targets: linux
   features: -
+  runtime: delegated-command
   coordinator: never
   aliases: weights-and-biases
 
@@ -231,6 +241,7 @@ module-runtime-example
   category: -
   targets: worker-runtime
   features: module-run
+  runtime: delegated-command,worker-module
   coordinator: never
 
 hostinger
@@ -239,6 +250,7 @@ hostinger
   category: direct-cloud
   targets: linux
   features: ssh,crabbox-sync,cleanup
+  runtime: ssh-host
   coordinator: never
 ```
 
@@ -261,6 +273,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "category": "direct-cloud",
     "targets": ["linux"],
     "features": ["ssh", "crabbox-sync", "cleanup"],
+    "runtime": ["ssh-host"],
     "coordinator": "never"
   },
   {
@@ -271,6 +284,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "aliases": ["blacksmith"],
     "targets": ["linux"],
     "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
+    "runtime": ["delegated-command", "ci-runner"],
     "evidence": ["proof", "artifacts", "session"],
     "coordinator": "never"
   }
@@ -305,10 +319,15 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
 - `features`: advertised capability flags. Possible values include `ssh`,
   `crabbox-sync`, `archive-sync`, `cleanup`, `desktop`, `browser`, `code`,
   `tailscale`, `url-bridge`, `workspace-checkpoint`, `workspace-fork`,
-  `workspace-restore`, `provider-snapshot`, `run-proof`, `run-session`, and
-  `module-run`. `module-run` means delegated `crabbox run --script` or
-  `--script-stdin` source-module execution; it does not imply POSIX command
-  argv, archive sync, ports, or SSH access.
+  `workspace-restore`, `provider-snapshot`, `run-proof`, `run-session`,
+  `mcp-attachments`, and `module-run`. `module-run` means delegated
+  `crabbox run --script` or `--script-stdin` source-module execution; it does
+  not imply POSIX command argv, archive sync, ports, or SSH access.
+- `runtime`: normalized execution-shape capabilities derived from kind,
+  category, targets, and features. Possible values are `ssh-host`,
+  `delegated-command`, `managed-sandbox`, `local-runtime`, `local-sandbox`,
+  `ci-runner`, `remote-dev`, `worker-module`, `interactive`, and
+  `service-control`. These are routing hints, not isolation certifications.
 - `workspace`: normalized versioned-workspace capabilities derived from feature
   flags. Possible values are `checkpoint`, `fork`, `restore`, and
   `snapshot-ref`. The field is omitted when a provider does not advertise any
@@ -332,6 +351,7 @@ Recommendation JSON returns ranked objects:
     "category": "ci-proof-runner",
     "targets": ["linux"],
     "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
+    "runtime": ["delegated-command", "ci-runner"],
     "evidence": ["proof", "artifacts", "session"],
     "score": 158,
     "reasons": [

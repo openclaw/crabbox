@@ -115,6 +115,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if !containsFeature(aws.Features, FeatureSSH) || !containsFeature(aws.Features, FeatureDesktop) {
 		t.Fatalf("aws features=%v", aws.Features)
 	}
+	for _, capability := range []string{"ssh-host", "interactive"} {
+		if !containsString(aws.Runtime, capability) {
+			t.Fatalf("aws runtime=%v missing %s", aws.Runtime, capability)
+		}
+	}
 	if incus.Kind != ProviderKindSSHLease || incus.Family != "local-vm" {
 		t.Fatalf("incus kind/family=%q/%q", incus.Kind, incus.Family)
 	}
@@ -167,6 +172,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if !containsFeature(moduleRuntime.Features, FeatureModuleRun) {
 		t.Fatalf("module-runtime-test features=%v missing %s", moduleRuntime.Features, FeatureModuleRun)
 	}
+	for _, capability := range []string{"delegated-command", "worker-module"} {
+		if !containsString(moduleRuntime.Runtime, capability) {
+			t.Fatalf("module-runtime-test runtime=%v missing %s", moduleRuntime.Runtime, capability)
+		}
+	}
 	if nvidiaBrev.Kind != ProviderKindSSHLease || nvidiaBrev.Family != "nvidia-brev" || nvidiaBrev.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("nvidia-brev kind/family/coordinator=%q/%q/%q", nvidiaBrev.Kind, nvidiaBrev.Family, nvidiaBrev.Coordinator)
 	}
@@ -178,6 +188,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if !containsString(nvidiaBrev.Aliases, "brev") || !containsString(nvidiaBrev.Aliases, "nvidia") {
 		t.Fatalf("nvidia-brev aliases=%v", nvidiaBrev.Aliases)
+	}
+	for _, capability := range []string{"local-runtime", "ssh-host"} {
+		if !containsString(localContainer.Runtime, capability) {
+			t.Fatalf("local-container runtime=%v missing %s", localContainer.Runtime, capability)
+		}
 	}
 	if !containsString(localContainer.Workspace, "checkpoint") || !containsString(localContainer.Workspace, "fork") {
 		t.Fatalf("local-container workspace=%v", localContainer.Workspace)
@@ -192,9 +207,19 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 			t.Fatalf("blacksmith evidence=%v missing %s", blacksmith.Evidence, capability)
 		}
 	}
+	for _, capability := range []string{"delegated-command", "ci-runner"} {
+		if !containsString(blacksmith.Runtime, capability) {
+			t.Fatalf("blacksmith runtime=%v missing %s", blacksmith.Runtime, capability)
+		}
+	}
 	for _, capability := range []string{"preview-url", "session"} {
 		if !containsString(e2b.Evidence, capability) {
 			t.Fatalf("e2b evidence=%v missing %s", e2b.Evidence, capability)
+		}
+	}
+	for _, capability := range []string{"delegated-command", "managed-sandbox"} {
+		if !containsString(e2b.Runtime, capability) {
+			t.Fatalf("e2b runtime=%v missing %s", e2b.Runtime, capability)
 		}
 	}
 	for _, capability := range []string{"downloads", "preview-url", "session"} {
@@ -224,6 +249,9 @@ func TestProvidersCommandJSON(t *testing.T) {
 		if entry.Provider == "aws" && entry.Category != "brokerable-cloud" {
 			t.Fatalf("aws json category=%q", entry.Category)
 		}
+		if entry.Provider == "aws" && !containsString(entry.Runtime, "ssh-host") {
+			t.Fatalf("aws json missing ssh-host runtime: %#v", entry)
+		}
 		if entry.Provider == "parallels" && !containsString(entry.Workspace, "snapshot-ref") {
 			t.Fatalf("parallels json missing workspace snapshot-ref: %#v", entry)
 		}
@@ -240,7 +268,7 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 		t.Fatalf("providers error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  category: brokerable-cloud\n", "  features: "} {
+	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  category: brokerable-cloud\n", "  features: ", "  runtime: ssh-host,interactive\n"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers output missing %q:\n%s", want, text)
 		}
@@ -265,6 +293,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 		"--kind", "delegated-run",
 		"--category", "delegated-sandbox",
 		"--target", "linux",
+		"--runtime", "managed-sandbox",
 		"--evidence", "preview-url",
 		"--json",
 	})
@@ -279,7 +308,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 		t.Fatal("expected delegated preview providers")
 	}
 	for _, entry := range entries {
-		if entry.Kind != ProviderKindDelegatedRun || entry.Category != "delegated-sandbox" || !containsString(entry.Targets, targetLinux) || !containsString(entry.Evidence, "preview-url") {
+		if entry.Kind != ProviderKindDelegatedRun || entry.Category != "delegated-sandbox" || !containsString(entry.Targets, targetLinux) || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Evidence, "preview-url") {
 			t.Fatalf("entry escaped filters: %#v", entry)
 		}
 	}
@@ -307,12 +336,12 @@ func TestProvidersCommandFiltersRequireAllCapabilities(t *testing.T) {
 
 func TestProvidersCommandRejectsUnknownFilter(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"--evidence", "memory-fork"})
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"--runtime", "microvm-fork"})
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
 		t.Fatalf("providers unknown filter error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(err.Error(), `unknown provider evidence filter "memory-fork"`) {
+	if !strings.Contains(err.Error(), `unknown provider runtime filter "microvm-fork"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -330,6 +359,8 @@ func TestProvidersFiltersCommandHumanOutput(t *testing.T) {
 		"delegated-run",
 		"  category: ",
 		"delegated-sandbox",
+		"  runtime: ",
+		"managed-sandbox",
 		"  evidence: ",
 		"preview-url",
 	} {
@@ -356,6 +387,7 @@ func TestProvidersFiltersCommandJSON(t *testing.T) {
 	}{
 		{name: "kind", values: values.Kind, want: "delegated-run"},
 		{name: "category", values: values.Category, want: "delegated-sandbox"},
+		{name: "runtime", values: values.Runtime, want: "managed-sandbox"},
 		{name: "evidence", values: values.Evidence, want: "preview-url"},
 		{name: "workspace", values: values.Workspace, want: "fork"},
 	} {
@@ -1094,6 +1126,7 @@ func TestProvidersRecommendCommandAppliesFilters(t *testing.T) {
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
 		"recommend", "run-evidence",
 		"--category", "delegated-sandbox",
+		"--runtime", "managed-sandbox",
 		"--evidence", "preview-url",
 		"--json",
 	})
@@ -1108,7 +1141,7 @@ func TestProvidersRecommendCommandAppliesFilters(t *testing.T) {
 		t.Fatal("expected filtered run-evidence recommendations")
 	}
 	for _, entry := range entries {
-		if entry.Category != "delegated-sandbox" || !containsString(entry.Evidence, "preview-url") {
+		if entry.Category != "delegated-sandbox" || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Evidence, "preview-url") {
 			t.Fatalf("recommendation escaped filters: %#v", entry)
 		}
 	}
