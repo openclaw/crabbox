@@ -135,6 +135,7 @@ Pick whichever matches your intent:
   [Providers feature overview](features/providers.md),
   [Provider selection](features/provider-selection.md),
   [Provider landscape](features/provider-landscape.md),
+  [Provider live smoke](features/provider-live-smoke.md),
   [Provider authoring](features/provider-authoring.md),
   [Provider backends](provider-backends.md),
   [Capacity fallback](features/capacity-fallback.md),

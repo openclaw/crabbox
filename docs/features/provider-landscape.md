@@ -143,7 +143,8 @@ Ship these in small PRs:
    browser/code/desktop access, sessions, or retained outputs.
 3. Add live smoke docs where credentials are required.
    Provider adapters can be valuable before broad live access exists, but each
-   one needs an opt-in smoke contract that says what real behavior proves. Use
+   one needs an opt-in smoke contract that says what real behavior proves. See
+   [Provider live smoke](provider-live-smoke.md) for the shared contract. Use
    `crabbox providers recommend live-smoke` to pick candidates from offline
    lifecycle, sync, cleanup, and evidence metadata before spending capacity.
    Use `crabbox providers recommend cost-control` when a workflow should prefer

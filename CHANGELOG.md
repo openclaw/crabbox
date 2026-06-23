@@ -17,6 +17,7 @@
 - Added `crabbox providers recommend disposable-execution` for cleanup-capable temporary sandbox guidance across delegated and local sandbox providers.
 - Added `crabbox providers recommend web-app-smoke` for app and service smoke guidance across provider URLs, SSH tunnels, tailnet reachability, browser/code/desktop access, sessions, and retained outputs.
 - Added `crabbox providers recommend interactive-debug` for live inspection guidance across synced SSH, browser/code/desktop access, reusable sessions, provider URLs, and retained evidence.
+- Added a provider live-smoke contract doc for opt-in validation of adapters that need credentials, quota, local runtimes, or private control planes.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for CodeSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for OpenSandbox runs so retained and reused sandboxes can be written through `--lease-output`.

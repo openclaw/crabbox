@@ -43,6 +43,9 @@ Read when:
   systems, and decide when not to add a first-class adapter.
 - [Provider landscape](provider-landscape.md): competitor map, support stance,
   and provider capability roadmap.
+- [Provider live smoke](provider-live-smoke.md): opt-in validation contract for
+  providers that need credentials, quota, local runtimes, or private control
+  planes.
 - [Provider reference](../providers/README.md): per-adapter pages for every registered provider.
 - [Capacity and fallback](capacity-fallback.md): class chains, market spot/on-demand, and region/AZ routing.
 - [Provider backends](../provider-backends.md): contract reference for backend interfaces and registration.

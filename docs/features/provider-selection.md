@@ -45,7 +45,8 @@ prove credentials. Treat it as routing advice, then run:
 crabbox doctor --provider <name>
 ```
 
-before spending real capacity.
+before spending real capacity. For the live proof expected from provider PRs,
+see [Provider live smoke](provider-live-smoke.md).
 
 ## Selection rules
 
