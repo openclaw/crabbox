@@ -416,6 +416,7 @@ func providerRecommendationUseCases() []string {
 		"cost-control",
 		"desktop",
 		"fast-feedback",
+		"fanout-testing",
 		"gpu",
 		"isolated-execution",
 		"linux-vm",
@@ -456,6 +457,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "desktop", true
 	case "fast-feedback", "feedback", "fast-test", "fast-tests", "cache", "cached", "cache-heavy":
 		return "fast-feedback", true
+	case "fanout", "fanout-testing", "best-of-n", "best-of-n-testing",
+		"parallel-testing", "parallel-exploration", "branch-race",
+		"snapshot-fanout", "fork-fanout":
+		return "fanout-testing", true
 	case "gpu", "cuda", "ml":
 		return "gpu", true
 	case "isolated", "isolated-execution", "isolation", "secure", "secure-sandbox", "untrusted", "untrusted-code":
@@ -712,6 +717,38 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if hasTarget(targetLinux) {
 			add(8, "supports common Linux test workloads")
+		}
+	case "fanout-testing":
+		if !hasFeature(FeatureFork) {
+			break
+		}
+		add(90, "can fork workspaces for parallel exploration")
+		if hasFeature(FeatureCheckpoint) {
+			add(35, "can checkpoint a prepared baseline")
+		}
+		if hasFeature(FeatureRestore) {
+			add(25, "can restore workspace state after experiments")
+		}
+		if hasFeature(FeatureSnapshot) {
+			add(18, "exposes provider-native snapshot identifiers")
+		}
+		if providerRecommendationHasString(entry.Runtime, "local-runtime") {
+			add(20, "local runtime avoids cloud quota for fanout")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(18, "can clean up forked workspace resources")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(16, "can seed fanout from the current checkout")
+		}
+		if hasFeature(FeatureCacheVolume) {
+			add(12, "can reuse dependency/cache state across branches")
+		}
+		if hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(10, "can retain evidence from competing runs")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetMacOS) {
+			add(8, "supports common fanout test targets")
 		}
 	case "gpu":
 		if category == "gpu-cloud" {
@@ -1163,6 +1200,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend cost-control")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
+	fmt.Fprintln(out, "  crabbox providers recommend fanout-testing --workspace fork")
 	fmt.Fprintln(out, "  crabbox providers recommend isolated-execution")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend live-smoke")

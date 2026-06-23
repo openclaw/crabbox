@@ -420,6 +420,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"cost-control",
 		"agent-sandbox",
 		"fast-feedback",
+		"fanout-testing",
 		"isolated-execution",
 		"live-smoke",
 		"mcp-sandbox",
@@ -563,6 +564,50 @@ func TestProvidersRecommendFastFeedbackPrefersCacheVolumes(t *testing.T) {
 	}
 	if !foundProofRunner {
 		t.Fatalf("fast-feedback recommendations should include CI proof runners: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendFanoutTestingRequiresForkableWorkspaces(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "fanout-testing", 8)
+	if len(recommendations) == 0 {
+		t.Fatal("expected fanout-testing recommendations")
+	}
+	if recommendations[0].Provider != "parallels" {
+		t.Fatalf("top fanout-testing provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
+	}
+	foundLocalContainer := false
+	for _, recommendation := range recommendations {
+		if !providerRecommendationHasFeature(recommendation.Features, FeatureFork) {
+			t.Fatalf("fanout-testing recommendation lacks fork feature: %#v", recommendation)
+		}
+		if !containsString(recommendation.Workspace, "fork") {
+			t.Fatalf("fanout-testing recommendation missing fork workspace capability: %#v", recommendation)
+		}
+		if recommendation.Provider == "local-container" {
+			foundLocalContainer = true
+		}
+	}
+	if !foundLocalContainer {
+		t.Fatalf("fanout-testing recommendations should include local-container: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendBestOfNAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "best-of-n",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend best-of-n error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureFork) {
+		t.Fatalf("best-of-n alias entries=%#v", entries)
 	}
 }
 
