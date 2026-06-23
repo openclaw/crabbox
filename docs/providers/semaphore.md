@@ -43,6 +43,18 @@ export CRABBOX_SEMAPHORE_PROJECT=my-app
 export CRABBOX_SEMAPHORE_TOKEN=...
 
 go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+```
+
+The shared harness exits before any Semaphore `warmup`, `run`, `list`, or `stop`
+command when host, project, or token configuration is missing. With those values
+configured, it creates one short-lived Semaphore testbox, waits for SSH, verifies
+one no-sync command, lists normalized Semaphore inventory, and stops the lease.
+
+For manual debugging, run the same lifecycle directly:
+
+```sh
+go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox warmup --provider semaphore --semaphore-idle-timeout 10m
 lease=<slug-or-sem_id-from-warmup-output>
