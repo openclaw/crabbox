@@ -232,6 +232,9 @@ egress and cannot be combined with allow/deny entries. `ports` accepts ports or
 - Desktop / browser / code / VNC: no.
 - Actions hydration: no.
 - Coordinator broker: no, Vercel Sandbox runs direct from the CLI.
+- Run session: yes, `run` returns a reusable Crabbox lease/session handle for
+  `--lease-output`, retained failure inspection, and later `run --id`,
+  `status`, or `stop`.
 - Pause/resume: retained sessions resume automatically for sync and execution;
   explicit pause/resume commands are not advertised in v1.
 - Ports, snapshots, and persistence: configuration is accepted and passed to

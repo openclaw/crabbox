@@ -199,6 +199,9 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	if result.ExitCode != 0 || !result.SyncDelegated || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil || result.Session.Provider != providerName || result.Session.Reused || result.Session.Kept || !strings.Contains(result.Session.CleanupCommand, "crabbox stop --provider vercel-sandbox") {
+		t.Fatalf("unexpected one-shot session handle: %#v", result.Session)
+	}
 	if len(fake.sandboxes) != 0 {
 		t.Fatalf("one-shot sandbox not deleted: %#v", fake.sandboxes)
 	}
@@ -240,6 +243,9 @@ func TestRetainedRunByIDVerifiesOwnershipAndKeepsClaim(t *testing.T) {
 	}
 	if result.LeaseID != leaseID {
 		t.Fatalf("lease=%q want %q", result.LeaseID, leaseID)
+	}
+	if result.Session == nil || result.Session.LeaseID != leaseID || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("unexpected retained session handle: %#v", result.Session)
 	}
 	if _, err := readLeaseClaim(leaseID); err != nil {
 		t.Fatalf("claim not retained: %v", err)
@@ -499,6 +505,9 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	})
 	if err == nil || result.ExitCode != 7 {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("keep-on-failure should return retained session handle: %#v", result.Session)
 	}
 	if len(fake.sandboxes) != 1 {
 		t.Fatalf("sandbox should be retained on failure: %#v", fake.sandboxes)

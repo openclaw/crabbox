@@ -18,6 +18,7 @@ type DoctorCheck = core.DoctorCheck
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -125,4 +126,8 @@ func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, s
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
+}
+
+func vercelSandboxCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " " + shellQuote(leaseID)
 }
