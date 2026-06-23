@@ -161,6 +161,83 @@ func TestClientUsesUpstashBoxRESTShape(t *testing.T) {
 	}
 }
 
+func TestClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
+	var targetRequests int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+		t.Errorf("redirect target received %s %s key=%q", r.Method, r.URL.Path, r.Header.Get("X-Box-Api-Key"))
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer target.Close()
+
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer trusted.Close()
+
+	apiClient, err := newAPI(Config{UpstashBox: UpstashBoxConfig{APIKey: "box_key", BaseURL: trusted.URL}}, Runtime{HTTP: trusted.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = apiClient.ListBoxes(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("ListBoxes error = %v, want cross-origin refusal", err)
+	}
+	if targetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", targetRequests)
+	}
+}
+
+func TestClientFollowsSameOriginRedirect(t *testing.T) {
+	var redirectedKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/box":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirectedKey = r.Header.Get("X-Box-Api-Key")
+			_ = json.NewEncoder(w).Encode([]boxData{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	apiClient, err := newAPI(Config{UpstashBox: UpstashBoxConfig{APIKey: "box_key", BaseURL: server.URL}}, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apiClient.ListBoxes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if redirectedKey != "box_key" {
+		t.Fatalf("redirected key = %q", redirectedKey)
+	}
+}
+
+func TestClientPreservesCallerRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+
+	callerErr := errors.New("caller refused redirect")
+	callerChecks := 0
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks++
+		return callerErr
+	}
+	apiClient, err := newAPI(Config{UpstashBox: UpstashBoxConfig{APIKey: "box_key", BaseURL: server.URL}}, Runtime{HTTP: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = apiClient.ListBoxes(t.Context())
+	if !errors.Is(err, callerErr) || callerChecks != 1 {
+		t.Fatalf("ListBoxes error = %v, caller checks = %d", err, callerChecks)
+	}
+}
+
 func TestClientRedactsAPIKeyFromErrors(t *testing.T) {
 	const apiKey = "box_secret_live_proof"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

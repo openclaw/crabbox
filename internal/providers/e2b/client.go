@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -143,6 +144,45 @@ func isE2BLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func secureE2BHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
+	client := *source
+	originalCheckRedirect := source.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameE2BOrigin(trusted, req.URL) {
+			return fmt.Errorf("e2b refused cross-origin redirect to %s", req.URL.Redacted())
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameE2BOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil &&
+		strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectiveE2BPort(a) == effectiveE2BPort(b)
+}
+
+func effectiveE2BPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(value.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
 func (c *e2bClient) CreateSandbox(ctx context.Context, req e2bCreateSandboxRequest) (e2bSandbox, error) {
 	body := map[string]any{
 		"templateID":            req.TemplateID,
@@ -263,7 +303,7 @@ func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPa
 		}
 		_ = pw.Close()
 	}()
-	resp, err := c.httpClient.Do(req)
+	resp, err := secureE2BHTTPClient(c.httpClient, req.URL).Do(req)
 	if err != nil {
 		_ = pr.CloseWithError(err)
 		_ = pw.CloseWithError(err)
@@ -317,7 +357,7 @@ func (c *e2bClient) StartProcess(ctx context.Context, session e2bSession, req e2
 	if timeoutMs := durationMillisCeil(req.Timeout); timeoutMs > 0 {
 		httpReq.Header.Set("Connect-Timeout-Ms", fmt.Sprint(timeoutMs))
 	}
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := secureE2BHTTPClient(c.httpClient, httpReq.URL).Do(httpReq)
 	if err != nil {
 		return 1, err
 	}
@@ -356,7 +396,7 @@ func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := secureE2BHTTPClient(c.httpClient, req.URL).Do(req)
 	if err != nil {
 		return nil, err
 	}
