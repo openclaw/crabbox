@@ -448,6 +448,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"live-smoke",
 		"mcp-sandbox",
 		"network-isolation",
+		"offline-validation",
 		"pause-resume",
 		"preview-url",
 		"reachability",
@@ -560,6 +561,64 @@ func TestProvidersRecommendCostControlAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || !strings.HasPrefix(entries[0].Category, "local-") {
 		t.Fatalf("budget alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendOfflineValidationPrefersCredentiallessProviders(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "offline-validation", 16)
+	if len(recommendations) == 0 {
+		t.Fatal("expected offline-validation recommendations")
+	}
+	if !strings.HasPrefix(recommendations[0].Category, "local-") {
+		t.Fatalf("top offline-validation category=%q recommendations=%v", recommendations[0].Category, recommendations)
+	}
+	foundLocalRuntime := false
+	foundLocalSandbox := false
+	foundLocalVM := false
+	foundBYO := false
+	for _, recommendation := range recommendations {
+		switch {
+		case strings.HasPrefix(recommendation.Category, "local-"):
+			if recommendation.Category == "local-runtime" {
+				foundLocalRuntime = true
+			}
+			if recommendation.Category == "local-sandbox" {
+				foundLocalSandbox = true
+			}
+			if recommendation.Category == "local-vm" {
+				foundLocalVM = true
+			}
+		case recommendation.Category == "byo-ssh":
+			foundBYO = true
+		case recommendation.Category == "external-provider":
+		default:
+			t.Fatalf("offline-validation recommendation requires provider credentials: %#v", recommendation)
+		}
+	}
+	if !foundLocalRuntime || !foundLocalSandbox || !foundLocalVM {
+		t.Fatalf("offline-validation should include local runtime, sandbox, and VM providers: %#v", recommendations)
+	}
+	if !foundBYO {
+		t.Fatalf("offline-validation should include BYO SSH fallback: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendNoCredentialsAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "no-credentials",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend no-credentials error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Category, "local-") {
+		t.Fatalf("no-credentials alias entries=%#v", entries)
 	}
 }
 

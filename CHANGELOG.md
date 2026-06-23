@@ -8,6 +8,7 @@
 - Added normalized provider runtime capabilities and `--runtime` filters to `crabbox providers` and `crabbox providers recommend`.
 - Added `crabbox providers recommend fanout-testing` for forkable workspace and best-of-N test selection guidance.
 - Added normalized provider reachability capabilities and `--reachability` filters to `crabbox providers` and `crabbox providers recommend`.
+- Added `crabbox providers recommend offline-validation` for credentialless local, BYO SSH, and external-provider validation guidance.
 
 ### Fixed
 

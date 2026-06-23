@@ -126,6 +126,10 @@ Ship these in small PRs:
    Use `crabbox providers recommend cost-control` when a workflow should prefer
    local runtimes, coordinator governance, cleanup, cache reuse, or retained
    proof before spending provider quota.
+   Use `crabbox providers recommend offline-validation` when live provider
+   credentials or quota are not available yet; it prefers local runtimes,
+   local sandboxes/VMs, BYO SSH hosts, and external-provider contracts over
+   cloud API-backed leases.
    Use `crabbox providers recommend pause-resume` when long-running sandbox or
    dev-environment state needs to be parked and resumed.
 4. Strengthen workspace reuse before runtime-specific forking.
