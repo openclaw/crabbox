@@ -125,6 +125,7 @@ crabbox providers recommend run-session
 crabbox providers recommend team-cloud
 crabbox providers recommend workspace-reuse
 crabbox providers recommend versioned-workspace
+crabbox providers recommend warm-start
 crabbox providers recommend forkable-workspace --workspace fork
 crabbox providers recommend versioned-workspace --target macos --workspace fork
 crabbox providers recommend worker-runtime --json
@@ -192,6 +193,11 @@ Supported use cases:
 - `versioned-workspace`: providers with native checkpoint, fork, restore, or
   snapshot-reference capabilities. Aliases include `workspace-reuse`,
   `forkable-workspace`, `durable-workspace`, and `stateful-workspace`.
+- `warm-start`: providers with local runtimes, reusable cache volumes, retained
+  sessions, pause/resume, or workspace-state features that can reduce repeated
+  setup overhead. Aliases include `warm-pool`, `prewarm`, and
+  `low-latency-start`. This is provider selection guidance over existing
+  reuse signals, not a guarantee of native warm-pool APIs.
 - `windows`: native Windows and WSL2 targets.
 - `worker-runtime`: Worker/module-runtime execution.
 

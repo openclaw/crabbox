@@ -138,6 +138,9 @@ Ship these in small PRs:
    cloud API-backed leases.
    Use `crabbox providers recommend pause-resume` when long-running sandbox or
    dev-environment state needs to be parked and resumed.
+   Use `crabbox providers recommend warm-start` when repeated runs should
+   prefer local runtimes, reusable caches, retained sessions, pause/resume, or
+   workspace-state signals before paying remote cold-start cost.
 4. Strengthen workspace reuse before runtime-specific forking.
    Checkpoint, fork, restore, and provider snapshot semantics should be testable
    through the CLI before adding live microVM fan-out. Use

@@ -470,6 +470,7 @@ func providerRecommendationUseCases() []string {
 		"self-hosted",
 		"team-cloud",
 		"versioned-workspace",
+		"warm-start",
 		"windows",
 		"worker-runtime",
 	}
@@ -555,6 +556,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		"forkable-workspaces", "durable-workspace", "stateful-workspace",
 		"snapshot-fork":
 		return "versioned-workspace", true
+	case "warm-start", "warm", "warmup", "warm-up", "warm-pool", "warm-pools",
+		"prewarm", "pre-warm", "prewarmed", "pre-warmed", "low-latency-start",
+		"low-latency", "reuse-state", "reuse-runtime":
+		return "warm-start", true
 	case "windows", "win":
 		return "windows", true
 	case "worker", "worker-runtime", "module", "module-run":
@@ -1251,6 +1256,44 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureCleanup) {
 			add(8, "can clean up provider-owned workspace resources")
 		}
+	case "warm-start":
+		hasWarmSignal := hasFeature(FeatureCacheVolume) || hasFeature(FeatureRunSession) ||
+			hasFeature(FeaturePauseResume) || hasFeature(FeatureCheckpoint) ||
+			hasFeature(FeatureFork) || hasFeature(FeatureRestore) ||
+			hasFeature(FeatureSnapshot) || strings.HasPrefix(category, "local-")
+		if !hasWarmSignal {
+			break
+		}
+		if strings.HasPrefix(category, "local-") {
+			add(45, "local runtime avoids cloud cold starts")
+		}
+		if hasFeature(FeatureCacheVolume) {
+			add(35, "can reuse dependency/cache volumes")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(30, "can reuse retained run sessions")
+		}
+		if hasFeature(FeaturePauseResume) {
+			add(28, "can pause and resume warm runtime state")
+		}
+		if hasFeature(FeatureCheckpoint) || hasFeature(FeatureFork) || hasFeature(FeatureRestore) || hasFeature(FeatureSnapshot) {
+			add(25, "can reuse prepared workspace state")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(16, "can seed warm state from the current checkout")
+		}
+		if category == "ci-proof-runner" {
+			add(14, "CI proof runner is optimized for repeated validation loops")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(12, "can clean up warm-start resources")
+		}
+		if hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(8, "can retain evidence without keeping every run hot")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
+			add(6, "supports common warm-start targets")
+		}
 	case "windows":
 		if hasTarget(targetWindows + "/" + WindowsModeNormal) {
 			add(80, "supports native Windows")
@@ -1340,6 +1383,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend run-session")
 	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
+	fmt.Fprintln(out, "  crabbox providers recommend warm-start")
 	fmt.Fprintln(out, "  crabbox providers recommend forkable-workspace --workspace fork")
 }
 

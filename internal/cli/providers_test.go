@@ -511,6 +511,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"run-session",
 		"team-cloud",
 		"versioned-workspace",
+		"warm-start",
 		"worker-runtime",
 	} {
 		if !strings.Contains(text, want) {
@@ -735,6 +736,64 @@ func TestProvidersRecommendFailureDiagnosticsPrefersInspectableEvidence(t *testi
 	}
 	if !foundProof || !foundSession || !foundDownload || !foundPreview || !foundSSHDebug {
 		t.Fatalf("failure-diagnostics should include proof, session, download, preview, and SSH-debuggable providers: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendWarmStartPrefersReusableState(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "warm-start", 12)
+	if len(recommendations) == 0 {
+		t.Fatal("expected warm-start recommendations")
+	}
+	if recommendations[0].Provider != "local-container" && recommendations[0].Provider != "parallels" {
+		t.Fatalf("top warm-start provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
+	}
+	foundCache := false
+	foundSession := false
+	foundPause := false
+	foundWorkspaceState := false
+	foundLocalRuntime := false
+	for _, recommendation := range recommendations {
+		hasCache := providerRecommendationHasFeature(recommendation.Features, FeatureCacheVolume)
+		hasSession := providerRecommendationHasFeature(recommendation.Features, FeatureRunSession)
+		hasPause := providerRecommendationHasFeature(recommendation.Features, FeaturePauseResume)
+		hasWorkspaceState := providerRecommendationHasFeature(recommendation.Features, FeatureCheckpoint) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureFork) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRestore) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureSnapshot)
+		hasLocalRuntime := strings.HasPrefix(recommendation.Category, "local-")
+		if !hasCache && !hasSession && !hasPause && !hasWorkspaceState && !hasLocalRuntime {
+			t.Fatalf("warm-start recommendation lacks warm-state signal: %#v", recommendation)
+		}
+		foundCache = foundCache || hasCache
+		foundSession = foundSession || hasSession
+		foundPause = foundPause || hasPause
+		foundWorkspaceState = foundWorkspaceState || hasWorkspaceState
+		foundLocalRuntime = foundLocalRuntime || hasLocalRuntime
+	}
+	if !foundCache || !foundSession || !foundPause || !foundWorkspaceState || !foundLocalRuntime {
+		t.Fatalf("warm-start should include cache, session, pause/resume, workspace-state, and local-runtime signals: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendWarmPoolAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "warm-pool",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend warm-pool error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("warm-pool alias entries=%#v", entries)
+	}
+	if entries[0].Provider != "local-container" && entries[0].Provider != "parallels" {
+		t.Fatalf("warm-pool alias should prefer local reusable state providers: %#v", entries)
 	}
 }
 
