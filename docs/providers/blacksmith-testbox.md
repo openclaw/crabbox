@@ -70,6 +70,21 @@ crabbox warmup \
 `blacksmith` is accepted as an alias, but docs and scripts should prefer
 `blacksmith-testbox`.
 
+## Live Smoke
+
+Run the shared smoke only when the selected workflow is a real Testbox workflow:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=blacksmith-testbox CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+```
+
+The smoke exits before any Blacksmith `list` or `run` call when it cannot derive
+an org, when the configured workflow file is missing, or when that workflow file
+does not contain a `useblacksmith/testbox`, `useblacksmith/begin-testbox`, or
+`useblacksmith/run-testbox` step. With a valid org and workflow, it lists the
+current inventory and runs one delegated `echo blacksmith-crabbox-ok && pwd`
+command through the configured workflow/job/ref.
+
 ## Auth
 
 Authentication lives entirely in the `blacksmith` CLI. Log in once before using

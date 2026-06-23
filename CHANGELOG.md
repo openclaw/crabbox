@@ -42,6 +42,7 @@
 - Added Namespace Devbox live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Semaphore live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Sprites live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
+- Added Blacksmith Testbox live-smoke documentation and workflow preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added W&B live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Incus live-smoke documentation and preflight regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added E2B live-smoke documentation and API-key preflight coverage for the guarded `scripts/live-smoke.sh` matrix.

@@ -1049,6 +1049,72 @@ exit 99
   assert.match(result.stderr, /requires CRABBOX_BLACKSMITH_ORG, blacksmith\.org, or actions\.repo/);
 });
 
+test("blacksmith live smoke requires a Testbox workflow before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-blacksmith-workflow-"));
+  const repo = path.join(dir, "repo");
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const config = path.join(dir, "crabbox.yaml");
+  const workflow = path.join(repo, ".github", "workflows", "ci.yml");
+  const log = path.join(dir, "crabbox.log");
+  fs.mkdirSync(path.dirname(workflow), { recursive: true });
+  fs.mkdirSync(bin);
+  fs.writeFileSync(
+    workflow,
+    `name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo no-testbox
+`,
+    "utf8",
+  );
+  fs.writeFileSync(
+    config,
+    `blacksmith:
+  org: example-org
+  workflow: .github/workflows/ci.yml
+  job: test
+`,
+    "utf8",
+  );
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: config,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "blacksmith-testbox",
+      CRABBOX_LIVE_REPO: repo,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /blacksmith-testbox smoke requires \.github\/workflows\/ci\.yml to contain a useblacksmith\/testbox/,
+  );
+  const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "";
+  assert.doesNotMatch(calls, /^list --provider blacksmith-testbox/m);
+  assert.doesNotMatch(calls, /^run --provider blacksmith-testbox/m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("blacksmith live smoke derives organization from actions repo", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-blacksmith-actions-org-"));
   const bin = path.join(dir, "bin");

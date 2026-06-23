@@ -80,7 +80,12 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=agent-sandbox CRABBOX_LIVE_COORDINATOR=0 s
 
 Per-provider smoke prerequisites:
 
-- **Blacksmith** — a workflow containing a `useblacksmith/testbox`, `useblacksmith/begin-testbox`, or `useblacksmith/run-testbox` step; set `CRABBOX_BLACKSMITH_WORKFLOW` when the default path is wrong.
+- **Blacksmith** — a workflow containing a `useblacksmith/testbox`,
+  `useblacksmith/begin-testbox`, or `useblacksmith/run-testbox` step; set
+  `CRABBOX_BLACKSMITH_WORKFLOW` when the default path is wrong.
+  `scripts/live-smoke.sh` refuses to call Blacksmith until it can derive an org
+  and validate the selected Testbox workflow, then lists inventory and runs one
+  delegated command through the configured workflow/job/ref.
 - **E2B** — `CRABBOX_E2B_API_KEY` or `E2B_API_KEY`.
   `scripts/live-smoke.sh` refuses to call E2B until an API key is exported, then
   creates one sandbox, runs one no-sync command, lists normalized inventory, and
