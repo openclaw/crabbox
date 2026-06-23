@@ -47,6 +47,7 @@
 
 ### Fixed
 
+- Prevented SmolVM API credentials from following redirects outside the configured API origin while preserving same-origin redirects. Thanks @coygeek.
 - Made direct and brokered Azure Windows desktop leases converge on working SSH/SFTP, first-logon readiness, terminal extension state, retryable disk cleanup, and actionable bootstrap diagnostics. Thanks @fcoury-oai.
 
 ## 0.33.0 - 2026-06-22

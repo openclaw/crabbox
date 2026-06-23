@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -214,6 +215,118 @@ func TestNewAPINormalizesBaseURL(t *testing.T) {
 	}
 	if c.base != "https://eu.smolmachines.com/base" {
 		t.Fatalf("base = %q, want normalized base URL", c.base)
+	}
+}
+
+func TestSmolvmClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
+	var targetRequests int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+		t.Errorf("redirect target received %s %s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer target.Close()
+
+	trusted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/stolen", http.StatusTemporaryRedirect)
+	}))
+	defer trusted.Close()
+
+	cfg := Config{Smolvm: SmolvmConfig{APIKey: "smk_key", BaseURL: trusted.URL}}
+	apiClient, err := newAPI(cfg, Runtime{HTTP: trusted.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = apiClient.ListMachines(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("ListMachines error = %v, want cross-origin refusal", err)
+	}
+	if targetRequests != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", targetRequests)
+	}
+}
+
+func TestSmolvmClientFollowsSameOriginRedirect(t *testing.T) {
+	var redirectedAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/machines":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirectedAuth = r.Header.Get("Authorization")
+			_ = json.NewEncoder(w).Encode([]machineData{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{Smolvm: SmolvmConfig{APIKey: "smk_key", BaseURL: server.URL}}
+	apiClient, err := newAPI(cfg, Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apiClient.ListMachines(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if redirectedAuth != "Bearer smk_key" {
+		t.Fatalf("redirected auth = %q", redirectedAuth)
+	}
+}
+
+func TestSmolvmClientPreservesCallerRedirectPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/redirected", http.StatusFound)
+	}))
+	defer server.Close()
+
+	callerErr := errors.New("caller refused redirect")
+	callerChecks := 0
+	httpClient := server.Client()
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		callerChecks++
+		return callerErr
+	}
+	apiClient, err := newAPI(
+		Config{Smolvm: SmolvmConfig{APIKey: "smk_key", BaseURL: server.URL}},
+		Runtime{HTTP: httpClient},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = apiClient.ListMachines(context.Background())
+	if !errors.Is(err, callerErr) || callerChecks != 1 {
+		t.Fatalf("ListMachines error = %v, caller checks = %d", err, callerChecks)
+	}
+}
+
+func TestSameSmolvmOrigin(t *testing.T) {
+	base, err := url.Parse("https://api.smolmachines.com/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "same origin", url: "https://api.smolmachines.com/redirected", want: true},
+		{name: "explicit default port", url: "https://api.smolmachines.com:443/redirected", want: true},
+		{name: "scheme downgrade", url: "http://api.smolmachines.com/redirected", want: false},
+		{name: "different port", url: "https://api.smolmachines.com:8443/redirected", want: false},
+		{name: "subdomain", url: "https://sub.api.smolmachines.com/redirected", want: false},
+		{name: "different host", url: "https://attacker.example/redirected", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			redirected, err := url.Parse(tc.url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sameSmolvmOrigin(base, redirected); got != tc.want {
+				t.Fatalf("sameSmolvmOrigin(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
 	}
 }
 
