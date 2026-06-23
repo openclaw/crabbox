@@ -40,6 +40,7 @@
 - Added KubeVirt live-smoke dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Daytona live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Namespace Devbox live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
+- Added Namespace Compute live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Semaphore live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Sprites live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Blacksmith Testbox live-smoke documentation and workflow preflight coverage for the guarded `scripts/live-smoke.sh` matrix.

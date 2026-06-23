@@ -433,6 +433,95 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Namespace Compute live smoke uses the generic SSH lease lifecycle", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-namespace-compute-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  fs.mkdirSync(bin);
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  warmup|status|inspect|ssh|cache|run|history|stop)
+    if [[ "\${CRABBOX_PROVIDER:-}" != "namespace-instance" ]]; then
+      printf 'missing namespace-instance provider environment for: %s\\n' "$*" >&2
+      exit 97
+    fi
+    ;;
+esac
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+case "$1" in
+  doctor)
+    printf 'ok provider=namespace-instance\\n'
+    ;;
+  list)
+    printf '[{"CloudID":"nsc-existing","Provider":"namespace-instance","State":"ready"}]\\n'
+    ;;
+  warmup)
+    printf 'provisioning provider=namespace-instance lease=cbx_123456789abc slug=namespace-compute-smoke-test\\n'
+    printf 'provisioned lease=cbx_123456789abc slug=namespace-compute-smoke-test state=ready\\n'
+    ;;
+  status)
+    printf 'lease=cbx_123456789abc slug=namespace-compute-smoke-test provider=namespace-instance state=ready ready=true\\n'
+    ;;
+  inspect)
+    printf '{"id":"cbx_123456789abc","slug":"namespace-compute-smoke-test","provider":"namespace-instance","state":"ready","serverType":"4x8","host":"127.0.0.1","ready":true,"lastTouchedAt":"2026-06-11T00:00:00Z","expiresAt":"2026-06-11T00:10:00Z"}\\n'
+    ;;
+  ssh)
+    exit 0
+    ;;
+  cache)
+    printf '[]\\n'
+    ;;
+  run)
+    printf 'crabbox-live-ok\\n'
+    ;;
+  history)
+    printf 'history ok\\n'
+    ;;
+  stop)
+    printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  admin)
+    printf '[]\\n'
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "namespace-instance",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /crabbox-live-ok/);
+  const calls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(calls, /^doctor --provider namespace-instance$/m);
+  assert.equal((calls.match(/^list --provider namespace-instance --json$/gm) ?? []).length, 2);
+  assert.match(calls, /^warmup --provider namespace-instance --class standard --ttl 10m --idle-timeout 5m$/m);
+  for (const command of ["status", "inspect", "ssh", "cache", "run", "history", "stop"]) {
+    assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
+  }
+});
+
 test("Semaphore live smoke requires host before provider mutation", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-semaphore-"));
   const fakeCrabbox = path.join(dir, "crabbox");
