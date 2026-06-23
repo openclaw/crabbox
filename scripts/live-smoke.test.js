@@ -772,6 +772,102 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Tenki live smoke requires authenticated CLI before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-auth-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const fakeTenki = path.join(bin, "tenki");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  const tenkiLog = path.join(dir, "tenki.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "rg"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    path.join(bin, "jq"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+input="$(cat)"
+case "$*" in
+  *'startswith("Logged in")'*)
+    case "$input" in
+      *'"status":"Logged in'*) exit 0 ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+  );
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${crabboxLog}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+  writeExecutable(
+    fakeTenki,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${tenkiLog}"
+case "$1" in
+  status)
+    printf '{"status":"Logged out"}\\n'
+    ;;
+  *)
+    printf 'unexpected tenki args: %s\\n' "$*" >&2
+    exit 97
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "tenki",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_TENKI_ENDPOINT: "https://sandbox.tenki.test",
+      TENKI_CLI: fakeTenki,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /tenki smoke requires an authenticated Tenki CLI; run tenki login/,
+  );
+  const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(crabboxCalls, /^config path$/m);
+  assert.doesNotMatch(crabboxCalls, /^doctor --provider tenki/m);
+  assert.doesNotMatch(crabboxCalls, /^warmup --provider tenki/m);
+  assert.doesNotMatch(crabboxCalls, /^status --provider tenki/m);
+  assert.doesNotMatch(crabboxCalls, /^run --provider tenki/m);
+  assert.doesNotMatch(crabboxCalls, /^list --provider tenki/m);
+  assert.doesNotMatch(crabboxCalls, /^stop /m);
+
+  const tenkiCalls = fs.readFileSync(tenkiLog, "utf8");
+  assert.match(tenkiCalls, /^status --json$/m);
+  assert.doesNotMatch(tenkiCalls, /^--version$/m);
+  assert.doesNotMatch(tenkiCalls, /^sandbox /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");
