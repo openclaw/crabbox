@@ -1265,6 +1265,91 @@ esac
   assert.equal(seen[8], "list --provider digitalocean --json");
 });
 
+test("nebius live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nebius-dispatch-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+case "$1" in
+  doctor)
+    printf 'auth=ready control_plane=ready inventory=ready leases=0 runtime=unchecked\\n'
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\\n'
+    else
+      printf '[{"labels":{"crabbox_slug":"%s"},"provider":"nebius"}]\\n' "$slug"
+    fi
+    ;;
+  warmup)
+    requested_slug=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --slug)
+          requested_slug="\${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\\n' "$requested_slug" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\\n'
+    ;;
+  run)
+    printf 'ok\\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  cleanup)
+    printf 'skip nebius instance id=none name=none reason=missing labels\\n'
+    ;;
+  *)
+    printf 'unexpected args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "nebius",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_nebius_smoke_passed slug=nebius-smoke-/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen[0], "doctor --provider nebius");
+  assert.equal(seen[1], "list --provider nebius --json");
+  assert.match(seen[2], /^warmup --provider nebius --slug nebius-smoke-\d+-\d+-[0-9a-f]{8} --keep --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[3], /^status --provider nebius --id nebius-smoke-\d+-\d+-[0-9a-f]{8} --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider nebius --id nebius-smoke-\d+-\d+-[0-9a-f]{8} --no-sync -- echo ok$/);
+  assert.equal(seen[5], "list --provider nebius --json");
+  assert.match(seen[6], /^stop --provider nebius nebius-smoke-\d+-\d+-[0-9a-f]{8}$/);
+  assert.equal(seen[7], "cleanup --provider nebius --dry-run");
+  assert.equal(seen[8], "list --provider nebius --json");
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");

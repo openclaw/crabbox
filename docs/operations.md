@@ -66,7 +66,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=superserve CRABBOX_LIVE_COORDINATOR=0 scri
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=vercel-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=linode scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
-CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-nebius-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -111,10 +111,10 @@ Use `scripts/live-smoke.sh` or `scripts/live-digitalocean-smoke.sh` for the
 repeatable direct DigitalOcean equivalent; it builds or reuses `bin/crabbox`,
 creates a guarded `digitalocean` scratch config, and verifies the Crabbox-owned
 inventory is empty before create and after stop/cleanup.
-Use `scripts/live-nebius-smoke.sh` for the repeatable direct Nebius equivalent;
-it builds or reuses `bin/crabbox`, uses the documented Nebius config and CLI
-profile, creates a unique `nebius-smoke-*` lease, and verifies the slug is absent
-after stop and dry-run cleanup.
+Use `scripts/live-smoke.sh` or `scripts/live-nebius-smoke.sh` for the repeatable
+direct Nebius equivalent; it builds or reuses `bin/crabbox`, uses the documented
+Nebius config and CLI profile, creates a unique `nebius-smoke-*` lease, and
+verifies the slug is absent after stop and dry-run cleanup.
 
 ## Deployment
 

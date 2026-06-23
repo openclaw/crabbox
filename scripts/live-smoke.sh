@@ -906,6 +906,10 @@ if has_provider digitalocean || has_provider do; then
   "$root/scripts/live-digitalocean-smoke.sh"
 fi
 
+if has_provider nebius; then
+  "$root/scripts/live-nebius-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi
