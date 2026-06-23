@@ -265,6 +265,16 @@ CRABBOX_LIVE=1 \
 CRABBOX_LIVE_PROVIDERS=vercel-sandbox \
 CRABBOX_VERCEL_SANDBOX_PROJECT_ID=prj_example \
 CRABBOX_VERCEL_SANDBOX_TEAM_ID=team_example \
+scripts/live-smoke.sh
+```
+
+The top-level smoke dispatches to the provider-specific script:
+
+```sh
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_PROVIDERS=vercel-sandbox \
+CRABBOX_VERCEL_SANDBOX_PROJECT_ID=prj_example \
+CRABBOX_VERCEL_SANDBOX_TEAM_ID=team_example \
 scripts/live-vercel-sandbox-smoke.sh
 ```
 
