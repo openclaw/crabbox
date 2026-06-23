@@ -1,9 +1,25 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestWriteWindowsBootstrapSSHWarningIncludesDetail(t *testing.T) {
+	var stderr bytes.Buffer
+	writeWindowsBootstrapSSHWarning(&stderr, "Windows WSL2 bootstrap", errors.New("exit status 1"), "\nsetup failed\n")
+	got := stderr.String()
+	for _, want := range []string{
+		"warning: Windows WSL2 bootstrap SSH command ended before completion; waiting for reboot/ready state: exit status 1",
+		"setup failed",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning missing %q:\n%s", want, got)
+		}
+	}
+}
 
 func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 	got := cloudInit(baseConfig(), "ssh-ed25519 test")
