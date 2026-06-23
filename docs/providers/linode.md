@@ -171,10 +171,17 @@ create ingress rules in this phase.
 The repeatable live check is opt-in:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=linode scripts/live-smoke.sh
+```
+
+The top-level smoke dispatches to the provider-specific script:
+
+```sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=linode scripts/live-linode-smoke.sh
 ```
 
-The script builds `bin/crabbox`, uses `LINODE_TOKEN` from the environment,
+The script builds `bin/crabbox` unless `CRABBOX_BIN` points at an existing
+binary, uses `LINODE_TOKEN` from the environment,
 requires an empty Crabbox-owned Linode inventory, creates a small
 `g6-standard-1` instance, waits for ready status, runs `echo ok`, verifies
 `list --json`, stops the lease, runs dry-run cleanup, and verifies the

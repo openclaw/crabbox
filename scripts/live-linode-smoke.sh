@@ -175,6 +175,7 @@ local_testbox_key_snapshot() {
 
 cleanup_armed=0
 slug="linode-smoke-$(date +%Y%m%d%H%M%S)-$$"
+crabbox_bin=""
 config_file=""
 initial_local_key_snapshot=""
 
@@ -188,7 +189,7 @@ cleanup() {
     local cleanup_poll_seconds=2
     for ((attempt = 1; attempt <= cleanup_attempts; attempt++)); do
       set +e
-      cleanup_output="$(bin/crabbox stop --provider linode "$slug" 2>&1)"
+      cleanup_output="$("$crabbox_bin" stop --provider linode "$slug" 2>&1)"
       cleanup_status=$?
       set -e
       if [ "$cleanup_status" -eq 0 ]; then
@@ -222,7 +223,7 @@ cleanup() {
       fi
     done
     if [ "$cleanup_status" -ne 0 ]; then
-      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "bin/crabbox stop --provider linode $slug" "$cleanup_status" "$slug" >&2
+      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$crabbox_bin stop --provider linode $slug" "$cleanup_status" "$slug" >&2
       printf '%s\n' "$cleanup_output" >&2
       if [ "$status" -eq 0 ]; then
         status="$cleanup_status"
@@ -251,8 +252,11 @@ if [[ -z "${LINODE_TOKEN:-}" ]]; then
   exit 0
 fi
 
-mkdir -p bin
-go build -trimpath -o bin/crabbox ./cmd/crabbox
+crabbox_bin="${CRABBOX_BIN:-bin/crabbox}"
+if [[ -z "${CRABBOX_BIN:-}" ]]; then
+  mkdir -p "$(dirname "$crabbox_bin")"
+  go build -trimpath -o "$crabbox_bin" ./cmd/crabbox
+fi
 
 config_file="$(mktemp)"
 cat >"$config_file" <<'YAML'
@@ -268,23 +272,23 @@ export CRABBOX_CONFIG="$config_file"
 export CRABBOX_COORDINATOR=
 export LINODE_TOKEN
 
-doctor_output="$(run_capture "bin/crabbox doctor --provider linode" bin/crabbox doctor --provider linode)"
+doctor_output="$(run_capture "$crabbox_bin doctor --provider linode" "$crabbox_bin" doctor --provider linode)"
 printf '%s\n' "$doctor_output"
-initial_list_output="$(run_capture "bin/crabbox list --provider linode --json" bin/crabbox list --provider linode --json)"
-validate_list_json_empty "bin/crabbox list --provider linode --json" "$initial_list_output"
+initial_list_output="$(run_capture "$crabbox_bin list --provider linode --json" "$crabbox_bin" list --provider linode --json)"
+validate_list_json_empty "$crabbox_bin list --provider linode --json" "$initial_list_output"
 initial_local_key_snapshot="$(local_testbox_key_snapshot)"
 cleanup_armed=1
-run_capture "bin/crabbox warmup --provider linode --slug $slug --keep --type g6-standard-1 --ttl 20m --idle-timeout 5m" bin/crabbox warmup --provider linode --slug "$slug" --keep --type g6-standard-1 --ttl 20m --idle-timeout 5m >/dev/null
-run_capture "bin/crabbox status --provider linode --id $slug --wait --wait-timeout 300s" bin/crabbox status --provider linode --id "$slug" --wait --wait-timeout 300s >/dev/null
-run_capture "bin/crabbox run --provider linode --id $slug --no-sync -- echo ok" bin/crabbox run --provider linode --id "$slug" --no-sync -- echo ok >/dev/null
-list_output="$(run_capture "bin/crabbox list --provider linode --json" bin/crabbox list --provider linode --json)"
+run_capture "$crabbox_bin warmup --provider linode --slug $slug --keep --type g6-standard-1 --ttl 20m --idle-timeout 5m" "$crabbox_bin" warmup --provider linode --slug "$slug" --keep --type g6-standard-1 --ttl 20m --idle-timeout 5m >/dev/null
+run_capture "$crabbox_bin status --provider linode --id $slug --wait --wait-timeout 300s" "$crabbox_bin" status --provider linode --id "$slug" --wait --wait-timeout 300s >/dev/null
+run_capture "$crabbox_bin run --provider linode --id $slug --no-sync -- echo ok" "$crabbox_bin" run --provider linode --id "$slug" --no-sync -- echo ok >/dev/null
+list_output="$(run_capture "$crabbox_bin list --provider linode --json" "$crabbox_bin" list --provider linode --json)"
 printf '%s\n' "$list_output"
-validate_list_json_contains_slug "bin/crabbox list --provider linode --json" "$list_output"
-run_capture "bin/crabbox stop --provider linode $slug" bin/crabbox stop --provider linode "$slug" >/dev/null
+validate_list_json_contains_slug "$crabbox_bin list --provider linode --json" "$list_output"
+run_capture "$crabbox_bin stop --provider linode $slug" "$crabbox_bin" stop --provider linode "$slug" >/dev/null
 cleanup_armed=0
-cleanup_output="$(run_capture "bin/crabbox cleanup --provider linode --dry-run" bin/crabbox cleanup --provider linode --dry-run)"
-post_list_output="$(run_capture "bin/crabbox list --provider linode --json" bin/crabbox list --provider linode --json)"
-validate_list_json_empty "bin/crabbox list --provider linode --json" "$post_list_output"
+cleanup_output="$(run_capture "$crabbox_bin cleanup --provider linode --dry-run" "$crabbox_bin" cleanup --provider linode --dry-run)"
+post_list_output="$(run_capture "$crabbox_bin list --provider linode --json" "$crabbox_bin" list --provider linode --json)"
+validate_list_json_empty "$crabbox_bin list --provider linode --json" "$post_list_output"
 printf '%s\n' "$cleanup_output"
 printf '%s\n' "$post_list_output"
 printf 'classification=live_linode_smoke_passed slug=%s cleanup=complete\n' "$slug"
