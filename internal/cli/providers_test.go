@@ -1623,9 +1623,13 @@ func TestProvidersRecommendLiveSmokePrefersProvableLifecycle(t *testing.T) {
 		t.Fatal("expected live-smoke recommendations")
 	}
 	foundEvidence := false
+	foundLocalRuntime := false
 	for _, recommendation := range recommendations {
 		if recommendation.Kind == ProviderKindServiceControl {
 			t.Fatalf("live-smoke should not prefer service-control providers: %#v", recommendation)
+		}
+		if recommendation.Category == "local-runtime" {
+			foundLocalRuntime = true
 		}
 		hasSync := providerRecommendationHasFeature(recommendation.Features, FeatureCrabboxSync) ||
 			providerRecommendationHasFeature(recommendation.Features, FeatureArchiveSync)
@@ -1642,6 +1646,9 @@ func TestProvidersRecommendLiveSmokePrefersProvableLifecycle(t *testing.T) {
 	}
 	if !foundEvidence {
 		t.Fatalf("live-smoke recommendations should include at least one evidence-capable provider: %#v", recommendations)
+	}
+	if !foundLocalRuntime {
+		t.Fatalf("live-smoke recommendations should include a local runtime for credentialless smoke paths: %#v", recommendations)
 	}
 }
 

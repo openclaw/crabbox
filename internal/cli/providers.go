@@ -1058,6 +1058,9 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureRunSession) {
 			add(14, "returns reusable smoke sessions")
 		}
+		if category == "local-runtime" {
+			add(32, "local runtime smoke does not need cloud credentials")
+		}
 		if strings.HasPrefix(category, "local-") {
 			add(14, "can smoke without cloud credentials")
 		}

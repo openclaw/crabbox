@@ -179,7 +179,9 @@ Supported use cases:
   certification for a specific provider.
 - `linux-vm`: general Linux VM or SSH-lease execution.
 - `live-smoke`: providers with enough lifecycle, sync, cleanup, or evidence
-  signals to be good candidates for opt-in live smoke validation.
+  signals to be good candidates for opt-in live smoke validation. Local
+  runtimes are ranked high so operators without cloud credentials still get a
+  useful smoke path.
 - `local`: local containers, VMs, or local sandboxes.
 - `macos`: macOS targets.
 - `mcp-sandbox`: sandboxes that can attach MCP server references when creating
