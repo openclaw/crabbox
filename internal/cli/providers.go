@@ -450,6 +450,7 @@ func providerRecommendationUseCases() []string {
 		"cost-control",
 		"desktop",
 		"fast-feedback",
+		"failure-diagnostics",
 		"fanout-testing",
 		"gpu",
 		"isolated-execution",
@@ -492,6 +493,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "desktop", true
 	case "fast-feedback", "feedback", "fast-test", "fast-tests", "cache", "cached", "cache-heavy":
 		return "fast-feedback", true
+	case "failure-diagnostics", "failure-diagnostic", "failed-run", "failed-runs",
+		"failure-triage", "run-debugging", "debuggable-run", "debuggable-runs",
+		"debuggability", "postmortem", "post-mortem":
+		return "failure-diagnostics", true
 	case "fanout", "fanout-testing", "best-of-n", "best-of-n-testing",
 		"parallel-testing", "parallel-exploration", "branch-race",
 		"snapshot-fanout", "fork-fanout":
@@ -758,6 +763,47 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if hasTarget(targetLinux) {
 			add(8, "supports common Linux test workloads")
+		}
+	case "failure-diagnostics":
+		hasDiagnostics := hasFeature(FeatureRunProof) || hasFeature(FeatureRunSession) ||
+			hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) ||
+			hasFeature(FeatureURLBridge) ||
+			(hasFeature(FeatureSSH) && hasFeature(FeatureCrabboxSync))
+		if !hasDiagnostics {
+			break
+		}
+		if hasFeature(FeatureRunProof) {
+			add(45, "returns provider run proof")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(35, "keeps inspectable run or session handles")
+		}
+		if hasFeature(FeatureRunArtifacts) {
+			add(30, "can retain failure artifacts")
+		}
+		if hasFeature(FeatureRunDownloads) {
+			add(25, "can materialize diagnostic downloads")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(22, "can expose provider-native preview URLs")
+		}
+		if category == "ci-proof-runner" {
+			add(20, "CI proof runner is optimized for reproducible failure evidence")
+		}
+		if hasFeature(FeatureSSH) && hasFeature(FeatureCrabboxSync) {
+			add(16, "supports SSH debugging against a synced checkout")
+		}
+		if entry.Kind == ProviderKindDelegatedRun {
+			add(10, "provider owns command execution and inspection")
+		}
+		if hasFeature(FeaturePauseResume) {
+			add(8, "can preserve runtime state during failure triage")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(8, "can clean up diagnostic resources")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
+			add(6, "supports common diagnostic run targets")
 		}
 	case "fanout-testing":
 		if !hasFeature(FeatureFork) {
@@ -1278,6 +1324,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend cost-control")
 	fmt.Fprintln(out, "  crabbox providers recommend agent-sandbox --json")
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
+	fmt.Fprintln(out, "  crabbox providers recommend failure-diagnostics")
 	fmt.Fprintln(out, "  crabbox providers recommend fanout-testing --workspace fork")
 	fmt.Fprintln(out, "  crabbox providers recommend isolated-execution")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")

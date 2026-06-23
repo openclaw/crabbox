@@ -496,6 +496,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"cost-control",
 		"agent-sandbox",
 		"fast-feedback",
+		"failure-diagnostics",
 		"fanout-testing",
 		"isolated-execution",
 		"live-smoke",
@@ -699,6 +700,60 @@ func TestProvidersRecommendFastFeedbackPrefersCacheVolumes(t *testing.T) {
 	}
 	if !foundProofRunner {
 		t.Fatalf("fast-feedback recommendations should include CI proof runners: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendFailureDiagnosticsPrefersInspectableEvidence(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "failure-diagnostics", 8)
+	if len(recommendations) == 0 {
+		t.Fatal("expected failure-diagnostics recommendations")
+	}
+	if recommendations[0].Provider != "blacksmith-testbox" {
+		t.Fatalf("top failure-diagnostics provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
+	}
+	foundProof := false
+	foundSession := false
+	foundDownload := false
+	foundPreview := false
+	foundSSHDebug := false
+	for _, recommendation := range recommendations {
+		hasProof := providerRecommendationHasFeature(recommendation.Features, FeatureRunProof)
+		hasSession := providerRecommendationHasFeature(recommendation.Features, FeatureRunSession)
+		hasArtifact := providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts)
+		hasDownload := providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads)
+		hasPreview := providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge)
+		hasSSHDebug := providerRecommendationHasFeature(recommendation.Features, FeatureSSH) &&
+			providerRecommendationHasFeature(recommendation.Features, FeatureCrabboxSync)
+		if !hasProof && !hasSession && !hasArtifact && !hasDownload && !hasPreview && !hasSSHDebug {
+			t.Fatalf("failure-diagnostics recommendation lacks diagnostic signal: %#v", recommendation)
+		}
+		foundProof = foundProof || hasProof
+		foundSession = foundSession || hasSession
+		foundDownload = foundDownload || hasDownload
+		foundPreview = foundPreview || hasPreview
+		foundSSHDebug = foundSSHDebug || hasSSHDebug
+	}
+	if !foundProof || !foundSession || !foundDownload || !foundPreview || !foundSSHDebug {
+		t.Fatalf("failure-diagnostics should include proof, session, download, preview, and SSH-debuggable providers: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendFailedRunAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "failed-run",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend failed-run error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 || entries[0].Provider != "blacksmith-testbox" {
+		t.Fatalf("failed-run alias entries=%#v", entries)
 	}
 }
 

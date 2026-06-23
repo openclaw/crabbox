@@ -107,6 +107,7 @@ crabbox providers recommend artifact-download
 crabbox providers recommend ci-proof
 crabbox providers recommend cost-control
 crabbox providers recommend fast-feedback --feature cache-volume
+crabbox providers recommend failure-diagnostics
 crabbox providers recommend fanout-testing --workspace fork
 crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
@@ -146,6 +147,9 @@ Supported use cases:
 - `desktop`: providers with desktop/browser/code-server capabilities.
 - `fast-feedback`: providers suited to repeated test loops with reusable cache
   volumes, checkout sync, cleanup, or reusable validation evidence.
+- `failure-diagnostics`: providers with proof, sessions, artifacts, downloads,
+  preview URLs, or SSH/sync support useful for debugging failed runs. Aliases
+  include `failed-run`, `failure-triage`, and `run-debugging`.
 - `fanout-testing`: providers that can fork a prepared workspace for parallel
   branch, best-of-N, or snapshot-fanout experiments. Aliases include
   `best-of-n`, `parallel-testing`, and `snapshot-fanout`. This is provider

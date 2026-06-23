@@ -113,6 +113,9 @@ Ship these in small PRs:
    reusable provider session handle for later inspection.
    Use `crabbox providers recommend artifact-download` when a workflow needs
    retained files or downloadable results from provider-owned execution.
+   Use `crabbox providers recommend failure-diagnostics` when failed-run triage
+   needs proof, reusable sessions, retained outputs, preview URLs, or SSH access
+   to a synced checkout.
    Use `crabbox providers recommend preview-url` when the workflow specifically
    needs provider-native app or service URLs.
    Use `crabbox providers --reachability provider-url` or

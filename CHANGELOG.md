@@ -10,6 +10,7 @@
 - Added normalized provider reachability capabilities and `--reachability` filters to `crabbox providers` and `crabbox providers recommend`.
 - Added `crabbox providers recommend offline-validation` for credentialless local, BYO SSH, and external-provider validation guidance.
 - Added normalized provider lifecycle capabilities and `--lifecycle` filters to `crabbox providers` and `crabbox providers recommend`.
+- Added `crabbox providers recommend failure-diagnostics` for failed-run triage guidance across proof, session, artifact, download, preview, and SSH-debuggable providers.
 
 ### Fixed
 
