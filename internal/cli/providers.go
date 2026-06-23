@@ -465,6 +465,7 @@ func providerRecommendationUseCases() []string {
 		"preview-url",
 		"reachability",
 		"remote-dev",
+		"resource-observability",
 		"run-evidence",
 		"run-session",
 		"self-hosted",
@@ -539,6 +540,11 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		"cloud-dev", "cloud-development", "cde",
 		"codespace", "codespaces", "remote-workspace":
 		return "remote-dev", true
+	case "resource-observability", "resource-observe", "observability",
+		"resource-telemetry", "telemetry", "usage-observability",
+		"usage-visibility", "usage-metadata", "metering",
+		"cost-observability", "cost-visibility", "billing-visibility":
+		return "resource-observability", true
 	case "run-evidence", "evidence", "artifacts", "artifact", "downloads", "download":
 		return "run-evidence", true
 	case "run-session", "run-sessions", "session", "sessions",
@@ -1146,6 +1152,39 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasTarget(targetLinux) {
 			add(8, "supports common Linux development workloads")
 		}
+	case "resource-observability":
+		hasTelemetrySignal := entry.Coordinator == string(CoordinatorSupported) ||
+			(hasFeature(FeatureSSH) && hasFeature(FeatureCrabboxSync)) ||
+			hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) ||
+			hasFeature(FeatureRunDownloads) || hasFeature(FeatureRunSession) ||
+			hasFeature(FeatureURLBridge)
+		if !hasTelemetrySignal {
+			break
+		}
+		if entry.Coordinator == string(CoordinatorSupported) {
+			add(45, "coordinator can centralize lease usage and cost visibility")
+		}
+		if hasFeature(FeatureSSH) && hasFeature(FeatureCrabboxSync) {
+			add(35, "SSH sync providers can report host resource telemetry during runs")
+		}
+		if hasFeature(FeatureRunProof) {
+			add(28, "retains proof suitable for run-level audit trails")
+		}
+		if hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(24, "retains artifacts or downloads for later inspection")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(20, "returns reusable sessions for post-run inspection")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(12, "can expose preview URLs alongside run records")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(10, "can close the resource lifecycle after observation")
+		}
+		if strings.HasPrefix(category, "local-") {
+			add(8, "local runtime makes resource inspection credentialless")
+		}
 	case "run-evidence":
 		hasEvidenceCapability := hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) || hasFeature(FeatureURLBridge)
 		if !hasEvidenceCapability {
@@ -1379,6 +1418,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend preview-url")
 	fmt.Fprintln(out, "  crabbox providers recommend reachability")
 	fmt.Fprintln(out, "  crabbox providers recommend remote-dev")
+	fmt.Fprintln(out, "  crabbox providers recommend resource-observability")
 	fmt.Fprintln(out, "  crabbox providers recommend run-evidence")
 	fmt.Fprintln(out, "  crabbox providers recommend run-session")
 	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")

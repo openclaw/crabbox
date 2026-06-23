@@ -12,6 +12,7 @@
 - Added normalized provider lifecycle capabilities and `--lifecycle` filters to `crabbox providers` and `crabbox providers recommend`.
 - Added `crabbox providers recommend failure-diagnostics` for failed-run triage guidance across proof, session, artifact, download, preview, and SSH-debuggable providers.
 - Added `crabbox providers recommend warm-start` for low-latency repeated-run guidance across local runtimes, cache volumes, retained sessions, pause/resume, and workspace-state providers.
+- Added `crabbox providers recommend resource-observability` for coordinator usage/cost visibility, SSH resource telemetry, retained run evidence, reusable sessions, and preview URL guidance.
 
 ### Fixed
 

@@ -507,6 +507,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"preview-url",
 		"reachability",
 		"remote-dev",
+		"resource-observability",
 		"run-evidence",
 		"run-session",
 		"team-cloud",
@@ -880,6 +881,61 @@ func TestProvidersRecommendRunEvidence(t *testing.T) {
 		if recommendation.Provider == "wandb" {
 			t.Fatalf("run-evidence should not recommend session-only providers: %#v", recommendation)
 		}
+	}
+}
+
+func TestProvidersRecommendResourceObservability(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "resource-observability", 16)
+	if len(recommendations) == 0 {
+		t.Fatal("expected resource-observability recommendations")
+	}
+	foundCoordinator := false
+	foundSSHTelemetry := false
+	foundRunSession := false
+	foundRunEvidence := false
+	for _, recommendation := range recommendations {
+		hasCoordinator := recommendation.Provider == "aws" || recommendation.Provider == "azure" ||
+			recommendation.Provider == "gcp" || recommendation.Provider == "hetzner"
+		hasSSHTelemetry := providerRecommendationHasFeature(recommendation.Features, FeatureSSH) &&
+			providerRecommendationHasFeature(recommendation.Features, FeatureCrabboxSync)
+		hasRunEvidence := providerRecommendationHasFeature(recommendation.Features, FeatureRunProof) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge)
+		hasRunSession := providerRecommendationHasFeature(recommendation.Features, FeatureRunSession)
+		if !hasCoordinator && !hasSSHTelemetry && !hasRunEvidence && !hasRunSession {
+			t.Fatalf("resource-observability recommendation lacks telemetry or evidence signal: %#v", recommendation)
+		}
+		foundCoordinator = foundCoordinator || hasCoordinator
+		foundSSHTelemetry = foundSSHTelemetry || hasSSHTelemetry
+		foundRunSession = foundRunSession || hasRunSession
+		foundRunEvidence = foundRunEvidence || hasRunEvidence
+	}
+	if !foundCoordinator || !foundSSHTelemetry || !foundRunSession || !foundRunEvidence {
+		t.Fatalf("resource-observability should include coordinator, SSH telemetry, run-session, and run-evidence providers: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendTelemetryAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "telemetry",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend telemetry error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("telemetry alias entries=%#v", entries)
+	}
+	if entries[0].Provider != "aws" && entries[0].Provider != "azure" &&
+		entries[0].Provider != "gcp" && entries[0].Provider != "hetzner" {
+		t.Fatalf("telemetry alias should prefer coordinator-backed SSH providers: %#v", entries)
 	}
 }
 

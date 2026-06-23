@@ -124,6 +124,9 @@ Ship these in small PRs:
    Use `crabbox providers recommend network-isolation` when the workflow runs
    untrusted code and network exposure should stay inside a delegated or local
    sandbox boundary.
+   Use `crabbox providers recommend resource-observability` when the workflow
+   needs coordinator usage/cost visibility, SSH resource telemetry, retained run
+   evidence, reusable sessions, or preview URLs for later inspection.
 3. Add live smoke docs where credentials are required.
    Provider adapters can be valuable before broad live access exists, but each
    one needs an opt-in smoke contract that says what real behavior proves. Use

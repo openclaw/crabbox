@@ -119,6 +119,7 @@ crabbox providers recommend pause-resume
 crabbox providers recommend preview-url
 crabbox providers recommend reachability
 crabbox providers recommend remote-dev
+crabbox providers recommend resource-observability
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --reachability provider-url --evidence preview-url
 crabbox providers recommend run-session
@@ -183,6 +184,10 @@ Supported use cases:
   HTTPS endpoints, outbound-only tailnet egress, or operator-side SSH tunnels.
 - `remote-dev`: managed developer environments and SSH-capable remote
   workspaces for local-editor, remote-compute workflows.
+- `resource-observability`: providers with coordinator-backed usage/cost
+  visibility, SSH resource telemetry, run proof, retained outputs, sessions, or
+  preview URLs for later inspection. Aliases include `telemetry`,
+  `usage-observability`, `metering`, and `cost-visibility`.
 - `run-evidence`: providers that can return run proof, collect artifacts,
   materialize downloads, or expose preview URLs.
 - `run-session`: providers that return reusable run/session handles for later
