@@ -170,7 +170,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return result, cleanupErr
 		}
 		if req.TimingJSON {
-			if err := writeTimingJSON(b.rt.Stderr, timingReport{
+			report := timingReportWithRunResult(timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -181,7 +181,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 				TotalMs:       result.Total.Milliseconds(),
 				ExitCode:      result.ExitCode,
 				Label:         strings.TrimSpace(req.Label),
-			}); err != nil {
+			}, result, activityErr)
+			if activityErr != nil {
+				report = timingReportWithProviderError(report)
+			}
+			if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 				return result, err
 			}
 		}
@@ -248,7 +252,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		commandErr = errors.Join(commandErr, cleanupErr)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		timingErr := commandErr
+		if timingErr == nil {
+			timingErr = activityErr
+		}
+		report := timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -260,7 +268,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, timingErr)
+		if commandErr == nil && activityErr != nil {
+			report = timingReportWithProviderError(report)
+		}
+		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}

@@ -562,13 +562,14 @@ func TestE2BRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *testing.T)
 	client := &fakeE2BSyncClient{processCodes: []int{0, 7}}
 	restore := swapNewE2BClient(client)
 	defer restore()
+	var stderr bytes.Buffer
 	backend := &e2bBackend{
 		cfg: Config{
 			IdleTimeout: 30 * time.Minute,
 			TTL:         2 * time.Minute,
 			E2B:         E2BConfig{APIKey: "test", Workdir: "repo"},
 		},
-		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt: Runtime{Stdout: io.Discard, Stderr: &stderr},
 	}
 
 	result, err := backend.Run(context.Background(), RunRequest{
@@ -576,6 +577,7 @@ func TestE2BRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *testing.T)
 		Command:       []string{"false"},
 		KeepOnFailure: true,
 		NoSync:        true,
+		TimingJSON:    true,
 	})
 	var ee ExitError
 	if !errors.As(err, &ee) || ee.Code != 7 {
@@ -586,6 +588,19 @@ func TestE2BRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *testing.T)
 	}
 	if len(client.deleteIDs) != 0 {
 		t.Fatalf("deleteIDs=%#v, want kept sandbox", client.deleteIDs)
+	}
+	var report map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err == nil {
+			report = candidate
+		}
+	}
+	if report == nil {
+		t.Fatalf("stderr does not contain timing JSON: %q", stderr.String())
+	}
+	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
+		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
 	}
 }
 

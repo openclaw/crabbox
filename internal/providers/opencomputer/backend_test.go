@@ -979,13 +979,23 @@ func TestRunSurfacesNonZeroExit(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 7}} // mkdir, user cmd exits 7
 	backend := newAPIBackend(t, f)
-	res, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"false"}, NoSync: true})
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+	res, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"false"}, NoSync: true, TimingJSON: true})
 	if res.ExitCode != 7 {
 		t.Fatalf("exit=%d want 7", res.ExitCode)
 	}
 	ee, ok := err.(ExitError)
 	if !ok || ee.Code != 7 {
 		t.Fatalf("err=%v want ExitError code 7", err)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatalf("final stderr line is not timing JSON: %q: %v", lines[len(lines)-1], err)
+	}
+	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
+		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
 	}
 }
 
