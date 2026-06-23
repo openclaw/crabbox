@@ -185,6 +185,32 @@ func TestPrepareLeaseSetsPublicHost(t *testing.T) {
 	}
 }
 
+func TestPrepareLeaseUsesOpenSSHReadinessTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	cfg.SSHFallbackPorts = []string{"2222"}
+	runner := &recordingRunner{}
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	inst := tartInstance{Name: "crabbox-blue-1234abcd", State: "running"}
+	lt, err := b.prepareLease(context.Background(), cfg, inst, "192.0.2.10", core.LeaseClaim{LeaseID: "cbx_test"}, false)
+	if err != nil {
+		t.Fatalf("prepareLease: %v", err)
+	}
+	if !lt.SSH.SSHConfigProxy {
+		t.Fatal("SSHConfigProxy = false, want true so Tart readiness uses OpenSSH")
+	}
+	if lt.SSH.Port != sshPort {
+		t.Fatalf("SSH.Port = %q, want %s", lt.SSH.Port, sshPort)
+	}
+	if len(lt.SSH.FallbackPorts) != 0 {
+		t.Fatalf("SSH.FallbackPorts = %v, want empty", lt.SSH.FallbackPorts)
+	}
+	if lt.SSH.ReadyCheck != "uname -s && test -d ~" {
+		t.Fatalf("SSH.ReadyCheck = %q, want Tart ready check", lt.SSH.ReadyCheck)
+	}
+}
+
 func TestListInstancesFiltersCrabboxPrefix(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: sampleListJSON()},

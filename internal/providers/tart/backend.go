@@ -697,6 +697,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg Config, inst tartInstanc
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
 	target.ReadyCheck = "uname -s && test -d ~"
+	target.SSHConfigProxy = true
 	if wait {
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "tart ssh", bootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
