@@ -89,6 +89,9 @@ Per-provider smoke prerequisites:
   snapshot is configured, then runs one delegated command and normalized list
   proof.
 - **Namespace** — the authenticated `devbox` CLI on `PATH`.
+  `scripts/live-smoke.sh` refuses to call Namespace until `devbox` is available,
+  then creates a delete-on-release Devbox, runs one no-sync command, and prints a
+  normalized list proof.
 - **Namespace Compute** — the authenticated `nsc` CLI on `PATH`; run `nsc login` first.
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
 - **Tenki** — the authenticated `tenki` CLI on `PATH`; run `tenki login` and complete the browser flow.

@@ -44,6 +44,22 @@ crabbox stop --provider namespace-devbox swift-crab
 
 Aliases for the provider name: `namespace`, `namespace-devboxes`.
 
+## Live Smoke
+
+The shared live-smoke harness can validate Namespace Devbox without a
+coordinator:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+```
+
+The smoke requires the authenticated Namespace `devbox` CLI on `PATH`. It exits
+before any Namespace `run`, `list`, `warmup`, or `stop` command when the CLI is
+missing, so credentialless machines can verify the guard without mutating
+provider state. With `devbox` available and logged in, the harness creates a
+delete-on-release Devbox with size `S` by default, runs one no-sync command, and
+then lists normalized Namespace inventory.
+
 ## Configuration
 
 ```yaml
