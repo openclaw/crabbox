@@ -3,6 +3,7 @@ package dockersandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -459,6 +460,17 @@ func TestRunEnvSummaryTimingAndNoEnvBranches(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "env forwarding") || !strings.Contains(stderr.String(), `"provider":"docker-sandbox"`) {
 		t.Fatalf("stderr=%s missing env summary or timing JSON", stderr.String())
+	}
+	var report struct {
+		RunStatus string `json:"runStatus"`
+		ErrorKind string `json:"errorKind"`
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatalf("timing json: %v\nstderr=%s", err, stderr.String())
+	}
+	if report.RunStatus != "succeeded" || report.ErrorKind != "" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 	execCall := findCall(runner, "exec")
 	if execCall == nil {

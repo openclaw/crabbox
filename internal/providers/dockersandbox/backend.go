@@ -145,7 +145,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	fmt.Fprintf(b.rt.Stderr, "docker-sandbox run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -156,7 +156,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      exitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, runErr)); err != nil {
 			return result, err
 		}
 	}
