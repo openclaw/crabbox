@@ -23,6 +23,7 @@
 - Added run-session metadata for Upstash Box runs so retained and reused boxes can be written through `--lease-output`.
 - Added run-session metadata for Azure Dynamic Sessions runs so retained and reused sessions can be written through `--lease-output`.
 - Added run-session metadata for Freestyle runs so retained and reused VMs can be written through `--lease-output`.
+- Added run-session metadata for Tensorlake runs so retained and reused sandboxes can be written through `--lease-output`.
 
 ### Fixed
 

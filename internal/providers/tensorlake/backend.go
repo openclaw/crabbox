@@ -53,7 +53,7 @@ func (b *tensorlakeBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	return nil
 }
 
-func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := rejectIncompatibleSyncOptions(req); err != nil {
 		return RunResult{}, err
 	}
@@ -83,16 +83,50 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		}
 	}
 	shouldStop := acquired && !req.Keep
+	cleanedUp := false
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: tensorlakeCleanupCommand(leaseID),
+	}
+	finishResult := func(result RunResult) RunResult {
+		if result.Provider == "" {
+			result.Provider = providerName
+		}
+		if result.LeaseID == "" {
+			result.LeaseID = leaseID
+		}
+		if result.Slug == "" {
+			result.Slug = slug
+		}
+		result.Session = session
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
+	defer func() {
+		result = finishResult(result)
+	}()
+	cleanupSandbox := func() error {
+		if !shouldStop {
+			return nil
+		}
+		if termErr := cli.terminate(context.Background(), sandboxID); termErr != nil {
+			shouldStop = false
+			return termErr
+		}
+		removeLeaseClaim(leaseID)
+		cleanedUp = true
+		shouldStop = false
+		return nil
+	}
 	if shouldStop {
 		defer func() {
-			if !shouldStop {
-				return
-			}
-			if termErr := cli.terminate(context.Background(), sandboxID); termErr != nil {
+			if termErr := cleanupSandbox(); termErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: tensorlake terminate failed for %s: %v\n", sandboxID, termErr)
-				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
@@ -128,7 +162,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	commandStart := b.now()
 	exitCode, runErr := cli.execStream(ctx, sandboxID, workdir, command, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
+	result = RunResult{
 		ExitCode:      exitCode,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),

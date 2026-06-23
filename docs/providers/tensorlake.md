@@ -131,6 +131,10 @@ local `tensorlake` process argv.
    unless `--keep` was set. `--keep-on-failure` retains a newly created sandbox
    after a failed run and prints a rerun/stop hint.
 
+`run --lease-output` records the Tensorlake lease, reuse/retention state, and
+matching `crabbox stop --provider tensorlake --id ...` cleanup command for
+orchestrators that need to inspect or clean up retained sandboxes later.
+
 ## Capabilities
 
 - SSH: not driven by Crabbox. The `tensorlake` CLI offers its own
