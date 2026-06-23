@@ -54,6 +54,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=e2b               CRABBOX_LIVE_REPO=/path/
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=modal             CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox  CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-instance CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore         CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=sprites           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tenki CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
@@ -110,6 +111,9 @@ Per-provider smoke prerequisites:
   then creates a delete-on-release Devbox, runs one no-sync command, and prints a
   normalized list proof.
 - **Namespace Compute** — the authenticated `nsc` CLI on `PATH`; run `nsc login` first.
+  `scripts/live-smoke.sh` runs `doctor`, snapshots existing Crabbox-owned
+  inventory, creates one short-lived Compute Instance, runs the normal SSH lease
+  lifecycle, stops the lease, and fails if the post-smoke inventory changed.
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token
   in the environment. `scripts/live-smoke.sh` refuses to call Sprites until the
   CLI is available, then creates one sprite, verifies SSH, runs one command,
