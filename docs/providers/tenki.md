@@ -170,6 +170,12 @@ CRABBOX_LIVE_PROVIDERS=tenki \
 scripts/live-smoke.sh
 ```
 
+The smoke exits before any Crabbox `doctor`, `warmup`, `status`, `run`, `list`,
+or `stop` call when `tenki status --json` does not report a logged-in CLI. With
+an authenticated CLI, it creates one sandbox session, waits for status, runs one
+no-sync command, pauses the Tenki session directly, verifies a Crabbox
+`status --wait` timeout does not resume it, then stops the lease.
+
 Expected results:
 
 - `warmup` prints `provider=tenki`, the Crabbox lease ID, slug, and Tenki session
