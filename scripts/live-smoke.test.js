@@ -424,6 +424,59 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Semaphore live smoke requires host before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-semaphore-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "semaphore",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_SEMAPHORE_HOST: "",
+      CRABBOX_SEMAPHORE_PROJECT: "",
+      CRABBOX_SEMAPHORE_TOKEN: "",
+      SEMAPHORE_API_TOKEN: "",
+      SEMAPHORE_HOST: "",
+      SEMAPHORE_PROJECT: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /semaphore smoke requires CRABBOX_SEMAPHORE_HOST, SEMAPHORE_HOST, or semaphore\.host/,
+  );
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^warmup --provider semaphore/m);
+  assert.doesNotMatch(calls, /^run --provider semaphore/m);
+  assert.doesNotMatch(calls, /^list --provider semaphore/m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

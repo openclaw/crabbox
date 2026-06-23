@@ -83,7 +83,11 @@ Per-provider smoke prerequisites:
 - **Blacksmith** — a workflow containing a `useblacksmith/testbox`, `useblacksmith/begin-testbox`, or `useblacksmith/run-testbox` step; set `CRABBOX_BLACKSMITH_WORKFLOW` when the default path is wrong.
 - **E2B** — `E2B_API_KEY`.
 - **Modal** — an authenticated Modal Python client (`python3 -m modal setup` or Modal token env vars).
-- **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`, and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
+- **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`,
+  and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
+  `scripts/live-smoke.sh` refuses to call Semaphore until those values are
+  configured, then creates one testbox, runs one no-sync command, lists
+  normalized inventory, and stops the lease.
 - **Daytona** — `CRABBOX_DAYTONA_SNAPSHOT`, `DAYTONA_SNAPSHOT`, or
   `daytona.snapshot`. `scripts/live-smoke.sh` refuses to call Daytona until a
   snapshot is configured, then runs one delegated command and normalized list
