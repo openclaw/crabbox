@@ -98,6 +98,7 @@ crabbox providers recommend artifact-download
 crabbox providers recommend ci-proof
 crabbox providers recommend cost-control
 crabbox providers recommend fast-feedback --feature cache-volume
+crabbox providers recommend fanout-testing --workspace fork
 crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend live-smoke
@@ -135,6 +136,11 @@ Supported use cases:
 - `desktop`: providers with desktop/browser/code-server capabilities.
 - `fast-feedback`: providers suited to repeated test loops with reusable cache
   volumes, checkout sync, cleanup, or reusable validation evidence.
+- `fanout-testing`: providers that can fork a prepared workspace for parallel
+  branch, best-of-N, or snapshot-fanout experiments. Aliases include
+  `best-of-n`, `parallel-testing`, and `snapshot-fanout`. This is provider
+  selection guidance over existing fork/checkpoint capabilities, not a
+  Mitos-style live microVM swarm API.
 - `gpu`: GPU-oriented execution providers.
 - `isolated-execution`: delegated and local sandbox providers for disposable or
   untrusted command execution. This is routing guidance, not a security

@@ -63,6 +63,8 @@ The better path is to make the generic seams real first:
   portable across delegated sandboxes and proof runners.
 - `remote-dev`, `mcp-sandbox`, `isolated-execution`, and
   `versioned-workspace` keep recommendations workflow-oriented.
+- `fanout-testing` and its `best-of-n` alias route operators to existing
+  fork-capable providers without adding a Mitos-only live-fork API.
 
 Revisit Mitos only when there is a concrete use case that needs live microVM
 forking and the provider contract can be tested with offline unit coverage plus
@@ -123,6 +125,8 @@ Ship these in small PRs:
    through the CLI before adding live microVM fan-out. Use
    `crabbox providers recommend workspace-reuse` as the workflow entry point
    when the operator cares about reusable state more than a specific fork API.
+   Use `crabbox providers recommend fanout-testing` when the workflow needs
+   parallel branch or best-of-N experimentation from forkable state.
 5. Keep edge/worker execution separate from Linux sandboxes.
    A Worker module runtime is not the same thing as a Linux shell. Make the
    target and feature names say that clearly.
