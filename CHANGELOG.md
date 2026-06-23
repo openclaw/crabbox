@@ -239,6 +239,7 @@
 
 ### Fixed
 
+- Fixed Tart SSH readiness on hosts where OpenSSH can reach the guest but Go's raw TCP probe cannot. Thanks @kmcquade.
 - Fixed `stop` and `pond release` to preserve claims, SSH credentials, lifecycle metadata, and restart routing when providers intentionally retain reusable stopped resources.
 - Fixed external lease commands to reuse each lease's persisted provider routing after the current external configuration changes.
 - Fixed `local-container` stop cleanup when a Docker container was removed externally, including stale claim and stored-key removal. Thanks @hxy91819.
