@@ -922,6 +922,10 @@ if has_provider anthropic-sandbox-runtime || has_provider srt; then
   "$root/scripts/live-anthropic-sandbox-runtime-smoke.sh"
 fi
 
+if has_provider opensandbox; then
+  "$root/scripts/live-opensandbox-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi

@@ -210,6 +210,12 @@ CRABBOX_OPENSANDBOX_API_URL=... \
 scripts/live-opensandbox-smoke.sh
 ```
 
+It can also be selected through the guarded top-level provider matrix:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=opensandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+```
+
 It prints exactly one classification:
 
 - `live_opensandbox_smoke_passed`
