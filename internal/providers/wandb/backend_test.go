@@ -584,6 +584,9 @@ func TestWandbRunEmitsTimingJSONOnFailure(t *testing.T) {
 	if report.Provider != providerName || report.Slug != "sb-abc" || report.ExitCode != 7 {
 		t.Fatalf("timing report = %#v", report)
 	}
+	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
+	}
 }
 
 func TestWandbRunTimingJSONUsesExecErrorCode(t *testing.T) {
@@ -614,6 +617,9 @@ func TestWandbRunTimingJSONUsesExecErrorCode(t *testing.T) {
 	}
 	if report.ExitCode != 69 {
 		t.Fatalf("timing exit = %d, want 69; stderr=%s", report.ExitCode, stderr.String())
+	}
+	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
 

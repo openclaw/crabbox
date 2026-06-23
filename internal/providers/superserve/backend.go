@@ -220,7 +220,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			return result, cleanupErr
 		}
 		if req.TimingJSON {
-			if err := writeTimingJSON(b.rt.Stderr, timingReport{
+			report := timingReportWithRunResult(timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -231,7 +231,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 				TotalMs:       result.Total.Milliseconds(),
 				ExitCode:      result.ExitCode,
 				Label:         strings.TrimSpace(req.Label),
-			}); err != nil {
+			}, result, activityErr)
+			if activityErr != nil {
+				report = timingReportWithProviderError(report)
+			}
+			if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 				return result, err
 			}
 		}
@@ -289,6 +293,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		commandErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("superserve run exited %d", result.ExitCode)}
 	}
+	commandFailed := commandErr != nil
 	activityErr := b.refreshSuperserveActivityIfRetained(leaseID, shouldStop)
 	if activityErr != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: refresh superserve lease activity failed lease=%s: %v\n", leaseID, activityErr)
@@ -303,7 +308,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		commandErr = errors.Join(commandErr, cleanupErr)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		timingErr := commandErr
+		if timingErr == nil {
+			timingErr = activityErr
+		}
+		report := timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -315,7 +324,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, timingErr)
+		if (!commandFailed && activityErr != nil) || (!commandFailed && commandErr != nil) {
+			report = timingReportWithProviderError(report)
+		}
+		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}

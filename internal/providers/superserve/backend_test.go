@@ -461,6 +461,7 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 		NoSync:        true,
 		Command:       []string{"false"},
 		KeepOnFailure: true,
+		TimingJSON:    true,
 	})
 	if err == nil {
 		t.Fatal("expected nonzero run error")
@@ -477,6 +478,19 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+	var report map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err == nil {
+			report = candidate
+		}
+	}
+	if report == nil {
+		t.Fatalf("stderr does not contain timing JSON: %q", stderr.String())
+	}
+	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
+		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
 	}
 }
 
@@ -533,11 +547,14 @@ func TestRunPropagatesOneShotDeleteFailureAndPreservesClaim(t *testing.T) {
 	fake.execResults = []execResult{{}, {ExitCode: 0}}
 	fake.deleteErr = errors.New("delete denied")
 	backend := newSuperserveTestBackend(t, fake)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
-		NoSync:  true,
-		Command: []string{"true"},
+		Repo:       Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:     true,
+		Command:    []string{"true"},
+		TimingJSON: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "delete denied") {
 		t.Fatalf("Run err=%v, want delete failure", err)
@@ -548,6 +565,17 @@ func TestRunPropagatesOneShotDeleteFailureAndPreservesClaim(t *testing.T) {
 	leaseID := leasePrefix + fake.sandbox.ID
 	if claim, claimErr := readLeaseClaim(leaseID); claimErr != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim should remain for cleanup retry: %#v err=%v", claim, claimErr)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report struct {
+		RunStatus string `json:"runStatus"`
+		ErrorKind string `json:"errorKind"`
+	}
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatalf("timing json: %v\nstderr=%s", err, stderr.String())
+	}
+	if report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
 
