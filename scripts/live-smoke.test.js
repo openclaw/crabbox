@@ -184,6 +184,48 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Agent Sandbox live smoke dispatches to the provider-specific Kubernetes script", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-agent-sandbox-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const home = path.join(dir, "home");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(home);
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "agent-sandbox",
+      CRABBOX_LIVE_REPO: repoRoot,
+      HOME: home,
+      KUBECONFIG: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^environment_blocked reason=missing_kubeconfig/m);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^doctor --provider agent-sandbox/m);
+  assert.doesNotMatch(calls, /^warmup /m);
+  assert.doesNotMatch(calls, /^run /m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

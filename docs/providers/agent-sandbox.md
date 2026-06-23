@@ -85,6 +85,27 @@ crabbox stop --provider agent-sandbox linux-pool-smoke
 crabbox cleanup --provider agent-sandbox --dry-run
 ```
 
+## Live Smoke
+
+The provider-specific live smoke is guarded by `CRABBOX_LIVE=1` and an explicit
+provider selection. It builds `bin/crabbox` unless `CRABBOX_BIN` points at an
+existing binary, verifies `doctor`, creates a short-lived `SandboxClaim`,
+proves archive sync and env forwarding with a tiny Git fixture, reuses the
+retained claim for a replacement-sync proof, checks status/list, then deletes
+the claim.
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=agent-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+# or, directly:
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=agent-sandbox scripts/live-agent-sandbox-smoke.sh
+```
+
+The script emits one machine-readable classification:
+`live_agent_sandbox_smoke_passed`, `environment_blocked`, `quota_blocked`, or
+`diagnostic_only`. Missing kubeconfig, context, warm pool, RBAC, cluster
+connectivity, and API readiness issues are reported without pretending a live
+mutation succeeded.
+
 `warmup` keeps the sandbox available until explicit `stop` or the configured
 Crabbox TTL expires. At expiry, the controller tears down the sandbox workload
 but retains the `SandboxClaim` as an exact cleanup handle.

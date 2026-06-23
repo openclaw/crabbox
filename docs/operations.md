@@ -74,6 +74,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=anthropic-sandbox-runtime scripts/live-smo
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=opensandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=proxmox CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=xcp-ng CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=agent-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 ```
 
 Per-provider smoke prerequisites:
@@ -88,6 +89,11 @@ Per-provider smoke prerequisites:
 - **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
 - **Tenki** — the authenticated `tenki` CLI on `PATH`; run `tenki login` and complete the browser flow.
 - **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.
+- **Agent Sandbox** — `kubectl`, an absolute kubeconfig or inherited
+  `KUBECONFIG`, an explicit context, a namespace, and a configured
+  `SandboxWarmPool`. `scripts/live-agent-sandbox-smoke.sh` is coordinator-free,
+  creates a short-lived `SandboxClaim`, verifies archive sync, env forwarding,
+  retained-claim reuse, replacement sync, status/list, and claim deletion.
 - **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
 - **Docker Sandbox** — the standalone `sbx` CLI on `PATH` or configured with `CRABBOX_DOCKER_SANDBOX_CLI`; run `sbx login` first when your account requires authentication.
 - **SmolVM** — `CRABBOX_SMOLVM_API_KEY`, `SMOLMACHINES_API_KEY`, or `SMK_API_KEY`.
