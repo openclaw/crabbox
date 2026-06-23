@@ -970,6 +970,10 @@ if has_provider apple-container || has_provider apple || has_provider appleconta
   provider_smoke apple-container --ttl 15m --idle-timeout 5m
 fi
 
+if has_provider local-container || has_provider docker || has_provider container || has_provider local-docker; then
+  provider_smoke local-container --ttl 15m --idle-timeout 5m
+fi
+
 if has_provider apple-vz || has_provider applevz; then
   apple_vz_args=(--ttl 15m --idle-timeout 5m)
   apple_vz_helper=""

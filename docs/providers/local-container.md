@@ -244,7 +244,19 @@ other runtimes exposing the standard Docker-compatible CLI.
 
 ## Optional live smoke
 
-Run the local Docker-backed smoke when a Docker daemon is available:
+Run the guarded local smoke when a Docker-compatible daemon is available:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=local-container scripts/live-smoke.sh
+```
+
+The smoke creates one short-lived local container, waits for SSH readiness,
+syncs the current checkout, runs the shared live-smoke command, prints recent
+history/log evidence when available, then stops only the lease it created. It
+uses `--ttl 15m --idle-timeout 5m` and the same cleanup path as normal
+`crabbox stop --provider local-container`.
+
+For lower-level Docker-backed E2E coverage, run:
 
 ```sh
 go test -tags localcontainer ./cmd/crabbox
