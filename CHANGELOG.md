@@ -25,6 +25,7 @@
 - Added run-session metadata for Freestyle runs so retained and reused VMs can be written through `--lease-output`.
 - Added run-session metadata for Tensorlake runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for Superserve runs so retained and reused sandboxes can be written through `--lease-output`.
+- Added run-session metadata for SmolVM runs so retained and reused machines can be written through `--lease-output`.
 
 ### Fixed
 

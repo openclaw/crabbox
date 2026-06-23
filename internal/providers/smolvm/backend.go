@@ -89,16 +89,27 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	shouldStop := acquired && !effectiveKeep
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: smolvmCleanupCommand(leaseID),
+	}
 	if shouldStop {
 		defer func() {
 			if !shouldStop {
+				session.Kept = true
 				return
 			}
 			if err := client.DeleteMachine(context.Background(), machineID); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: smolvm delete failed for %s: %v\n", machineID, err)
+				session.Kept = true
 				return
 			}
 			removeLeaseClaim(leaseID)
+			session.Kept = false
 		}()
 	}
 
@@ -107,14 +118,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if !req.NoSync {
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, machineID, req, workdir, folder)
 		if err != nil {
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
+			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.prepareWorkspace(ctx, client, machineID, folder, false); err != nil {
-		return RunResult{}, err
+		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 	}
 	if req.SyncOnly {
-		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true}
+		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
 			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
@@ -136,7 +147,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 
 	command, err := buildCommand(req.Command, req.ShellMode)
 	if err != nil {
-		return RunResult{}, err
+		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 	}
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
@@ -144,7 +155,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if len(req.Env) > 0 {
 		envPath := path.Join(workdir, ".crabbox-env-"+leaseID+".sh")
 		if err := client.WriteFile(ctx, machineID, envPath, shellEnvProfile(req.Env)); err != nil {
-			return RunResult{}, err
+			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 		}
 		defer func() {
 			_, _ = client.Exec(context.Background(), machineID, "rm -f "+shellQuote(envPath), "")
@@ -163,6 +174,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		LeaseID:       leaseID,
 		Slug:          slug,
 		CommandText:   strings.Join(req.Command, " "),
+		Session:       session,
 	}
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "smolvm run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
@@ -199,6 +211,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("smolvm run exited %d", exitCode)}
 	}
 	return result, nil
+}
+
+func smolvmCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

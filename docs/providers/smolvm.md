@@ -100,6 +100,7 @@ Defaults: image `alpine` (lightweight; provides the standard shell tools needed 
 3. By default `run` archive-syncs the working tree using a direct API call to `/exec` (the tarball is base64-encoded and sent in a shell heredoc; the guest decodes + extracts with `base64 -d | tar`).
 4. The user command executes inside the microVM. Because the smolfleet API does not stream live output, command output appears after the command completes.
 5. One-shot sandboxes are deleted after a `run` that did not pass `--keep`. `--keep` and `--keep-on-failure` retain the sandbox until `crabbox stop`.
+6. `run --lease-output <path>` writes the SmolVM lease ID, slug, reuse/retention state, and exact cleanup command for orchestration handoff.
 
 Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
@@ -110,6 +111,7 @@ Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you
 - Provider sync: no separate SmolVM sync step.
 - Desktop / browser / code: no.
 - Actions hydration: no.
+- Run-session output: yes — `--lease-output` records the SmolVM lease, reuse/retention state, and cleanup command.
 - Coordinator (broker): no — SmolVM always runs direct from the CLI.
 
 ## Notes

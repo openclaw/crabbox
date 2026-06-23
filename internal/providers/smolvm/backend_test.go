@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -44,6 +45,9 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	}
 	if !hasFeature(spec.Features, core.FeatureArchiveSync) {
 		t.Fatalf("features=%#v want archive sync", spec.Features)
+	}
+	if !hasFeature(spec.Features, core.FeatureRunSession) {
+		t.Fatalf("features=%#v want run session", spec.Features)
 	}
 }
 
@@ -297,6 +301,15 @@ func TestRunCreatesExecsAndDeletesOneShotMachine(t *testing.T) {
 	if result.ExitCode != 0 || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil {
+		t.Fatal("result.Session is nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Slug != result.Slug || result.Session.Reused || result.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+	if result.Session.CleanupCommand != "crabbox stop --provider smolvm --id "+shellQuote(result.LeaseID) {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	if fake.createReq.Name == "" || !strings.HasPrefix(fake.createReq.Name, "crabbox-") {
 		t.Fatalf("create req=%#v", fake.createReq)
 	}
@@ -321,18 +334,73 @@ func TestRunHonorsProviderKeepConfig(t *testing.T) {
 	cfg := testConfig()
 	cfg.Smolvm.Keep = true
 	backend := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
-	if _, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:    Repo{Name: "repo", Root: t.TempDir()},
 		Command: []string{"echo", "hello"},
 		NoSync:  true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if result.Session == nil || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained new machine", result.Session)
 	}
 	if fake.createReq.Ephemeral || fake.createReq.TTLSeconds != 0 {
 		t.Fatalf("provider keep should create retained machine: %#v", fake.createReq)
 	}
 	if reflect.DeepEqual(fake.verbs, []string{"create", "exec", "stream", "delete"}) || fake.deletedID != "" {
 		t.Fatalf("provider keep should not delete machine: verbs=%v deleted=%q", fake.verbs, fake.deletedID)
+	}
+}
+
+func TestRunReturnsReusedMachineSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := t.TempDir()
+	leaseID := "cbx_123456789abc"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue", providerName, repo, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running"}}
+	withFakeAPI(t, fake)
+	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	result, err := backend.Run(context.Background(), RunRequest{
+		ID:      leaseID,
+		Repo:    Repo{Name: "repo", Root: repo},
+		Command: []string{"echo", "hello"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil || result.Session.LeaseID != leaseID || result.Session.Slug != "blue" || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if fake.deletedID != "" {
+		t.Fatalf("reused machine should not be deleted, deleted=%q", fake.deletedID)
+	}
+}
+
+func TestRunPreservesSessionAfterDeleteFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{deleteErr: errors.New("delete denied")}
+	withFakeAPI(t, fake)
+	var stderr bytes.Buffer
+	rt := testRuntime()
+	rt.Stderr = &stderr
+	backend := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Command: []string{"echo", "hello"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
+		t.Fatalf("session=%#v, want retained cleanup handle", result.Session)
+	}
+	if !strings.Contains(stderr.String(), "smolvm delete failed") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
@@ -499,6 +567,7 @@ type fakeAPI struct {
 	writeContents  []string
 	execResults    []execResult
 	deletedID      string
+	deleteErr      error
 	injected       bool
 }
 
@@ -532,7 +601,7 @@ func (f *fakeAPI) ListMachines(context.Context) ([]machineData, error) {
 func (f *fakeAPI) DeleteMachine(_ context.Context, id string) error {
 	f.verbs = append(f.verbs, "delete")
 	f.deletedID = id
-	return nil
+	return f.deleteErr
 }
 
 func (f *fakeAPI) StartMachine(context.Context, string) error { return nil }
