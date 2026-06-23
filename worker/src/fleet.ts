@@ -637,6 +637,8 @@ type BridgeAttachment =
       id: string;
       agentID: string;
       owner: string;
+      org?: string;
+      admin?: boolean;
       label: string;
     }
   | { kind: "code-agent"; leaseID: string }
@@ -645,6 +647,9 @@ type BridgeAttachment =
       leaseID: string;
       id: string;
       auth: AuthContext["auth"];
+      owner?: string;
+      org?: string;
+      admin?: boolean;
       portalSessionHash?: string;
     }
   | { kind: "egress-host"; leaseID: string; sessionID: string }
@@ -687,6 +692,8 @@ interface WebVNCViewerSession {
   agentID: string;
   socket: WebSocket;
   owner: string;
+  org?: string;
+  admin?: boolean;
   label: string;
   connectedAt: string;
 }
@@ -1041,7 +1048,7 @@ export class FleetCoordinator {
     const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
     const now = Date.now();
     const revoked = new Map<string, string>();
-    const revokedCodeViewers = new Map<WebSocket, string>();
+    const revokedViewers = new Map<WebSocket, string>();
     const codeViewersToCheck: Array<{ socket: WebSocket; portalSessionHash?: string }> = [];
     for (const socket of this.restoredLeaseBridgeSockets) {
       const attachment = this.bridgeAttachment(socket);
@@ -1054,6 +1061,14 @@ export class FleetCoordinator {
           attachment.leaseID,
           lease && leaseIsLive(lease) ? "lease expired" : "lease ended",
         );
+        continue;
+      }
+      if (
+        (attachment.kind === "webvnc-viewer" ||
+          (attachment.kind === "code-viewer" && completeBridgePrincipal(attachment))) &&
+        !this.leaseViewerAuthorized(lease, attachment)
+      ) {
+        revokedViewers.set(socket, "lease access revoked");
         continue;
       }
       if (attachment.kind === "code-viewer" && attachment.auth === "github") {
@@ -1075,7 +1090,7 @@ export class FleetCoordinator {
     );
     for (const { socket, revoked: portalSessionRevoked } of codeViewerRevocations) {
       if (portalSessionRevoked) {
-        revokedCodeViewers.set(socket, "portal session ended");
+        revokedViewers.set(socket, "portal session ended");
       }
     }
     for (const [leaseID, reason] of revoked) {
@@ -1089,13 +1104,15 @@ export class FleetCoordinator {
         closeSocket(socket, 1008, reason);
       }
     }
-    for (const [socket, reason] of revokedCodeViewers) {
+    for (const [socket, reason] of revokedViewers) {
       const attachment = this.bridgeAttachment(socket);
-      if (attachment?.kind !== "code-viewer") {
-        continue;
+      if (attachment?.kind === "webvnc-viewer") {
+        this.clearWebVNCViewer(attachment.leaseID, attachment.id, socket);
+        closeSocket(socket, 1008, reason);
+      } else if (attachment?.kind === "code-viewer") {
+        this.clearCodeViewer(attachment.leaseID, attachment.id, socket, 1008, reason);
+        closeSocket(socket, 1008, reason);
       }
-      this.clearCodeViewer(attachment.leaseID, attachment.id, socket, 1008, reason);
-      closeSocket(socket, 1008, reason);
     }
     this.restoredLeaseBridgeSockets.clear();
   }
@@ -1186,6 +1203,8 @@ export class FleetCoordinator {
           agentID: attachment.agentID,
           socket,
           owner: attachment.owner,
+          ...(attachment.org ? { org: attachment.org } : {}),
+          ...(attachment.admin !== undefined ? { admin: attachment.admin } : {}),
           label: attachment.label,
           connectedAt: new Date().toISOString(),
         });
@@ -4329,12 +4348,14 @@ export class FleetCoordinator {
     }
     if (method === "PUT") {
       const input = await readJson<Partial<LeaseShare>>(request);
+      const previousShare = normalizedLeaseShare(lease.share);
       lease.share = sanitizeLeaseShare(input, requestOwner(request));
       lease.updatedAt = new Date().toISOString();
-      await this.putLease(lease);
+      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
       return json({ leaseID: lease.id, share: normalizedLeaseShare(lease.share) });
     }
     if (method === "DELETE") {
+      const previousShare = normalizedLeaseShare(lease.share);
       const input = await optionalJson<{ user?: string; org?: boolean }>(request);
       const share = normalizedLeaseShare(lease.share);
       const user = normalizeShareUser(input.user);
@@ -4350,10 +4371,73 @@ export class FleetCoordinator {
         lease.share = sanitizeLeaseShare(share, requestOwner(request));
       }
       lease.updatedAt = new Date().toISOString();
-      await this.putLease(lease);
+      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
       return json({ leaseID: lease.id, share: normalizedLeaseShare(lease.share) });
     }
     return json({ error: "not_found" }, { status: 404 });
+  }
+
+  private async putLeaseShareAndRevokeViewers(
+    lease: LeaseRecord,
+    previousShare: NormalizedLeaseShare,
+  ): Promise<void> {
+    await this.withBridgeTicketLock(async () => {
+      await this.putLease(lease);
+      if (leaseShareAccessShrank(previousShare, normalizedLeaseShare(lease.share))) {
+        this.revokeUnauthorizedLeaseViewers(lease);
+      }
+    });
+  }
+
+  private revokeUnauthorizedLeaseViewers(lease: LeaseRecord): void {
+    const code = 1008;
+    const reason = "lease access revoked";
+    for (const viewer of this.openWebVNCViewers(lease.id)) {
+      if (this.leaseViewerAuthorized(lease, viewer)) {
+        continue;
+      }
+      this.clearWebVNCViewer(lease.id, viewer.id, viewer.socket);
+      closeSocket(viewer.socket, code, reason);
+    }
+    for (const [id, viewer] of this.codeViewers) {
+      const attachment = this.bridgeAttachment(viewer);
+      if (
+        attachment?.kind !== "code-viewer" ||
+        attachment.leaseID !== lease.id ||
+        !completeBridgePrincipal(attachment) ||
+        this.leaseViewerAuthorized(lease, attachment)
+      ) {
+        continue;
+      }
+      this.clearCodeViewer(lease.id, id, viewer, code, reason);
+      closeSocket(viewer, code, reason);
+    }
+  }
+
+  private leaseViewerAuthorized(
+    lease: LeaseRecord,
+    principal: { owner?: string; org?: string; admin?: boolean },
+  ): boolean {
+    if (principal.admin === true) {
+      return true;
+    }
+    if (principal.owner && principal.org) {
+      return (
+        this.leaseAccessRoleForPrincipal(lease, {
+          owner: principal.owner,
+          org: principal.org,
+          admin: false,
+        }) !== undefined
+      );
+    }
+    if (!principal.owner) {
+      return false;
+    }
+    // Restored pre-hardening WebVNC attachments have no org binding.
+    return (
+      principal.owner === lease.owner ||
+      normalizedLeaseShare(lease.share).users[normalizeShareUser(principal.owner)] !== undefined
+    );
   }
 
   private whoami(request: Request): Response {
@@ -5504,9 +5588,10 @@ export class FleetCoordinator {
     const url = new URL(request.url);
     if (request.headers.get("content-type")?.includes("application/json")) {
       const input = await readJson<Partial<LeaseShare>>(request);
+      const previousShare = normalizedLeaseShare(lease.share);
       lease.share = sanitizeLeaseShare(input, requestOwner(request));
       lease.updatedAt = new Date().toISOString();
-      await this.putLease(lease);
+      await this.putLeaseShareAndRevokeViewers(lease, previousShare);
       return json({
         leaseID: lease.id,
         slug: lease.slug || lease.id,
@@ -5517,6 +5602,7 @@ export class FleetCoordinator {
     }
     const form = await request.formData();
     const action = String(form.get("action") || "");
+    const previousShare = normalizedLeaseShare(lease.share);
     const share = normalizedLeaseShare(lease.share);
     if (action === "add-user") {
       const user = normalizeShareUser(String(form.get("user") || ""));
@@ -5542,7 +5628,7 @@ export class FleetCoordinator {
     }
     lease.share = sanitizeLeaseShare(share, requestOwner(request));
     lease.updatedAt = new Date().toISOString();
-    await this.putLease(lease);
+    await this.putLeaseShareAndRevokeViewers(lease, previousShare);
     const embedded = url.searchParams.get("embed") === "1";
     return new Response(null, {
       status: 303,
@@ -7160,6 +7246,10 @@ export class FleetCoordinator {
     portalSessionHash?: string,
   ): Promise<Response> {
     return await this.withBridgeTicketLock(async () => {
+      const currentLease = await this.resolvePortalLease(lease.id, request);
+      if (!currentLease) {
+        return notFound();
+      }
       if (
         (auth === "github" && !validPortalSessionHash(portalSessionHash)) ||
         (portalSessionHash && (await this.codeViewerPortalSessionRevoked(portalSessionHash)))
@@ -7178,6 +7268,9 @@ export class FleetCoordinator {
         leaseID: lease.id,
         id,
         auth,
+        owner: requestOwner(request),
+        org: requestOrg(request, this.env),
+        admin: isAdminRequest(request),
         ...(portalSessionHash ? { portalSessionHash } : {}),
       });
       const url = new URL(request.url);
@@ -7471,63 +7564,71 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    const lease = await this.resolvePortalLease(identifier, request);
-    if (!lease) {
-      return notFound();
-    }
-    const error = webVNCLeaseError(lease);
-    if (error) {
-      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
-    }
-    const agent = this.claimIdleWebVNCAgent(lease.id);
-    if (!agent) {
-      const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
-      const command = canManage ? webVNCBridgeCommand(lease) : "";
-      return json(
-        {
-          error: "webvnc_bridge_missing",
-          message: canManage
-            ? `No WebVNC backend is available yet; start or refresh the bridge with: ${command}`
-            : "No WebVNC backend is available yet; ask a lease manager to start or refresh the bridge.",
-          command,
-        },
-        { status: 409 },
-      );
-    }
-    const url = new URL(request.url);
-    const requestedViewerID = url.searchParams.get("viewer") || "";
-    const viewerID = validWebVNCSessionID(requestedViewerID)
-      ? requestedViewerID
-      : newWebVNCSessionID("viewer");
+    return await this.withBridgeTicketLock(async () => {
+      const lease = await this.resolvePortalLease(identifier, request);
+      if (!lease) {
+        return notFound();
+      }
+      const error = webVNCLeaseError(lease);
+      if (error) {
+        return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+      }
+      const agent = this.claimIdleWebVNCAgent(lease.id);
+      if (!agent) {
+        const canManage = this.leaseManageableByRequest(lease, request, isAdminRequest(request));
+        const command = canManage ? webVNCBridgeCommand(lease) : "";
+        return json(
+          {
+            error: "webvnc_bridge_missing",
+            message: canManage
+              ? `No WebVNC backend is available yet; start or refresh the bridge with: ${command}`
+              : "No WebVNC backend is available yet; ask a lease manager to start or refresh the bridge.",
+            command,
+          },
+          { status: 409 },
+        );
+      }
+      const url = new URL(request.url);
+      const requestedViewerID = url.searchParams.get("viewer") || "";
+      const viewerID = validWebVNCSessionID(requestedViewerID)
+        ? requestedViewerID
+        : newWebVNCSessionID("viewer");
 
-    const upgrade = this.state.createWebSocketUpgrade();
-    const viewer = upgrade.socket;
-    const owner = requestOwner(request);
-    const label = webVNCViewerLabel(owner);
+      const upgrade = this.state.createWebSocketUpgrade();
+      const viewer = upgrade.socket;
+      const owner = requestOwner(request);
+      const org = requestOrg(request, this.env);
+      const admin = isAdminRequest(request);
+      const label = webVNCViewerLabel(owner);
 
-    this.trackWebVNCViewer(lease.id, {
-      id: viewerID,
-      agentID: agent.id,
-      socket: viewer,
-      owner,
-      label,
-      connectedAt: new Date().toISOString(),
+      this.trackWebVNCViewer(lease.id, {
+        id: viewerID,
+        agentID: agent.id,
+        socket: viewer,
+        owner,
+        org,
+        admin,
+        label,
+        connectedAt: new Date().toISOString(),
+      });
+      if (!this.activeWebVNCControllerID(lease.id)) {
+        this.webVNCControllers.set(lease.id, viewerID);
+        this.recordWebVNCEvent(lease.id, "control_taken", `${label} is controlling`);
+      }
+      this.recordWebVNCEvent(lease.id, "viewer_connected", label);
+      this.acceptBridgeWebSocket(viewer, {
+        kind: "webvnc-viewer",
+        leaseID: lease.id,
+        id: viewerID,
+        agentID: agent.id,
+        owner,
+        org,
+        admin,
+        label,
+      });
+      flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
+      return upgrade.response;
     });
-    if (!this.activeWebVNCControllerID(lease.id)) {
-      this.webVNCControllers.set(lease.id, viewerID);
-      this.recordWebVNCEvent(lease.id, "control_taken", `${label} is controlling`);
-    }
-    this.recordWebVNCEvent(lease.id, "viewer_connected", label);
-    this.acceptBridgeWebSocket(viewer, {
-      kind: "webvnc-viewer",
-      leaseID: lease.id,
-      id: viewerID,
-      agentID: agent.id,
-      owner,
-      label,
-    });
-    flushPendingWebVNC(this.pendingWebVNCToViewer, webVNCBufferKey(lease.id, agent.id), viewer);
-    return upgrade.response;
   }
 
   private clearWebVNCAgent(leaseID: string, agentID: string, socket: WebSocket): void {
@@ -10316,15 +10417,23 @@ export class FleetCoordinator {
     request: Request,
     admin: boolean,
   ): "owner" | LeaseShareRole | undefined {
-    if (
-      admin ||
-      (lease.owner === requestOwner(request) && lease.org === requestOrg(request, this.env))
-    ) {
+    return this.leaseAccessRoleForPrincipal(lease, {
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+      admin,
+    });
+  }
+
+  private leaseAccessRoleForPrincipal(
+    lease: LeaseRecord,
+    principal: { owner: string; org: string; admin: boolean },
+  ): "owner" | LeaseShareRole | undefined {
+    if (principal.admin || (lease.owner === principal.owner && lease.org === principal.org)) {
       return "owner";
     }
     const share = normalizedLeaseShare(lease.share);
-    const userRole = share.users[normalizeShareUser(requestOwner(request))];
-    const orgRole = lease.org === requestOrg(request, this.env) ? share.org : undefined;
+    const userRole = share.users[normalizeShareUser(principal.owner)];
+    const orgRole = lease.org === principal.org ? share.org : undefined;
     if (userRole === "manage" || orgRole === "manage") {
       return "manage";
     }
@@ -12968,6 +13077,7 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
         validWebVNCSessionID(attachment.id) &&
         validWebVNCSessionID(attachment.agentID) &&
         typeof attachment.owner === "string" &&
+        validOptionalBridgePrincipal(attachment) &&
         typeof attachment.label === "string"
         ? attachment
         : undefined;
@@ -12993,6 +13103,7 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
       return (attachment.auth === "bearer" ||
         attachment.auth === "github" ||
         attachment.auth === "proxy") &&
+        validOptionalBridgePrincipal(attachment) &&
         (attachment.auth !== "github" || validPortalSessionHash(attachment.portalSessionHash))
         ? attachment
         : undefined;
@@ -13024,6 +13135,31 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
     default:
       return undefined;
   }
+}
+
+function validOptionalBridgePrincipal(value: {
+  owner?: unknown;
+  org?: unknown;
+  admin?: unknown;
+}): boolean {
+  const absent = value.org === undefined && value.admin === undefined;
+  const complete =
+    typeof value.owner === "string" &&
+    typeof value.org === "string" &&
+    typeof value.admin === "boolean";
+  return absent || complete;
+}
+
+function completeBridgePrincipal(value: {
+  owner?: unknown;
+  org?: unknown;
+  admin?: unknown;
+}): value is { owner: string; org: string; admin: boolean } {
+  return (
+    typeof value.owner === "string" &&
+    typeof value.org === "string" &&
+    typeof value.admin === "boolean"
+  );
 }
 
 function bridgeTags(attachment: BridgeAttachment): string[] {
@@ -14074,6 +14210,16 @@ function normalizedLeaseShare(share: LeaseShare | undefined): NormalizedLeaseSha
     normalized.updatedBy = share.updatedBy;
   }
   return normalized;
+}
+
+function leaseShareAccessShrank(
+  previous: NormalizedLeaseShare,
+  current: NormalizedLeaseShare,
+): boolean {
+  if (previous.org && !current.org) {
+    return true;
+  }
+  return Object.keys(previous.users).some((user) => current.users[user] === undefined);
 }
 
 function sanitizeLeaseShare(input: Partial<LeaseShare>, updatedBy: string): LeaseShare | undefined {

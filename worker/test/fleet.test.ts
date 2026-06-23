@@ -276,6 +276,102 @@ describe("runtime adapter relay", () => {
     expect(agent.sentJSON()).toHaveLength(2);
   });
 
+  it("reconciles hibernated viewer principals against the current lease share", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000001",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      owner: "owner@example.com",
+      org: "example-org",
+      share: { users: { "retained@example.com": "use" } },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+    const revokedCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "code-revoked",
+      auth: "bearer",
+      owner: "revoked@example.com",
+      org: "other-org",
+      admin: false,
+    });
+    const ownerCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID: lease.id,
+      id: "code-owner",
+      auth: "bearer",
+      owner: "owner@example.com",
+      org: "example-org",
+      admin: false,
+    });
+    const revokedWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      id: "agent_revoked",
+      capabilities: new Set<string>(),
+    });
+    const revokedWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID: lease.id,
+      id: "viewer_revoked",
+      agentID: "agent_revoked",
+      owner: "revoked@example.com",
+      label: "revoked@example.com",
+    });
+    const retainedWebAgent = new FakeWebSocket({
+      kind: "webvnc-agent",
+      leaseID: lease.id,
+      id: "agent_retained",
+      capabilities: new Set<string>(),
+    });
+    const retainedWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID: lease.id,
+      id: "viewer_retained",
+      agentID: "agent_retained",
+      owner: "owner@example.com",
+      label: "owner@example.com",
+    });
+    const fleet = new FleetDurableObject(
+      {
+        storage,
+        getWebSockets: () =>
+          [
+            codeAgent,
+            revokedCodeViewer,
+            ownerCodeViewer,
+            revokedWebAgent,
+            revokedWebViewer,
+            retainedWebAgent,
+            retainedWebViewer,
+          ] as unknown as WebSocket[],
+      } as unknown as DurableObjectState,
+      { CRABBOX_DEFAULT_ORG: "default-org" } as Env,
+    );
+
+    expect((await fleet.fetch(request("GET", "/v1/health"))).status).toBe(200);
+    expect(revokedCodeViewer.closeCode).toBe(1008);
+    expect(revokedCodeViewer.closeReason).toBe("lease access revoked");
+    expect(ownerCodeViewer.closeCode).toBeUndefined();
+    expect(revokedWebViewer.closeCode).toBe(1008);
+    expect(revokedWebViewer.closeReason).toBe("lease access revoked");
+    expect(revokedWebAgent.closeCode).toBe(1011);
+    expect(retainedWebViewer.closeCode).toBeUndefined();
+    expect(retainedWebAgent.closeCode).toBeUndefined();
+    expect(codeAgent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: "code-revoked",
+        code: 1008,
+        reason: "lease access revoked",
+      },
+    ]);
+  });
+
   it("fails closed ambiguous and invalid hibernated bridge sockets", () => {
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");
@@ -7746,6 +7842,312 @@ describe("fleet lease identity and idle", () => {
       request("GET", "/v1/leases/blue-lobster", { headers: strangerHeaders }),
     );
     expect(stranger.status).toBe(404);
+  });
+
+  it("revokes only unauthorized live viewers after an API share removal", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    const ownerHeaders = {
+      "x-crabbox-owner": "owner@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "shared-live-viewers",
+        owner: "owner@example.com",
+        org: "example-org",
+        desktop: true,
+        code: true,
+        share: {
+          users: {
+            "revoked@example.com": "use",
+            "retained@example.com": "use",
+          },
+        },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const revokedWebAgent = new FakeWebSocket();
+    const retainedWebAgent = new FakeWebSocket();
+    const ownerWebAgent = new FakeWebSocket();
+    const revokedWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_revoked",
+      agentID: "agent_revoked",
+      owner: "revoked@example.com",
+      org: "other-org",
+      admin: false,
+      label: "revoked@example.com",
+    });
+    const retainedWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_retained",
+      agentID: "agent_retained",
+      owner: "retained@example.com",
+      org: "other-org",
+      admin: false,
+      label: "retained@example.com",
+    });
+    const ownerWebViewer = new FakeWebSocket({
+      kind: "webvnc-viewer",
+      leaseID,
+      id: "viewer_owner",
+      agentID: "agent_owner",
+      owner: "owner@example.com",
+      org: "example-org",
+      admin: false,
+      label: "owner@example.com",
+    });
+    const revokedCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-revoked",
+      auth: "bearer",
+      owner: "revoked@example.com",
+      org: "other-org",
+      admin: false,
+    });
+    const retainedCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-retained",
+      auth: "bearer",
+      owner: "retained@example.com",
+      org: "other-org",
+      admin: false,
+    });
+    const ownerCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-owner",
+      auth: "bearer",
+      owner: "owner@example.com",
+      org: "example-org",
+      admin: false,
+    });
+    const adminCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-admin",
+      auth: "bearer",
+      owner: "admin@example.com",
+      org: "other-org",
+      admin: true,
+    });
+    const legacyCodeViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-legacy",
+      auth: "github",
+      portalSessionHash: "a".repeat(64),
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const relay = fleet as unknown as {
+      webVNCAgents: Map<string, Map<string, WebSocket>>;
+      webVNCViewers: Map<
+        string,
+        Map<
+          string,
+          {
+            id: string;
+            agentID: string;
+            socket: WebSocket;
+            owner: string;
+            org?: string;
+            admin?: boolean;
+            label: string;
+            connectedAt: string;
+          }
+        >
+      >;
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+    };
+    relay.webVNCAgents.set(
+      leaseID,
+      new Map([
+        ["agent_revoked", revokedWebAgent as unknown as WebSocket],
+        ["agent_retained", retainedWebAgent as unknown as WebSocket],
+        ["agent_owner", ownerWebAgent as unknown as WebSocket],
+      ]),
+    );
+    relay.webVNCViewers.set(
+      leaseID,
+      new Map([
+        [
+          "viewer_revoked",
+          {
+            id: "viewer_revoked",
+            agentID: "agent_revoked",
+            socket: revokedWebViewer as unknown as WebSocket,
+            owner: "revoked@example.com",
+            org: "other-org",
+            admin: false,
+            label: "revoked@example.com",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+        [
+          "viewer_retained",
+          {
+            id: "viewer_retained",
+            agentID: "agent_retained",
+            socket: retainedWebViewer as unknown as WebSocket,
+            owner: "retained@example.com",
+            org: "other-org",
+            admin: false,
+            label: "retained@example.com",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+        [
+          "viewer_owner",
+          {
+            id: "viewer_owner",
+            agentID: "agent_owner",
+            socket: ownerWebViewer as unknown as WebSocket,
+            owner: "owner@example.com",
+            org: "example-org",
+            admin: false,
+            label: "owner@example.com",
+            connectedAt: new Date().toISOString(),
+          },
+        ],
+      ]),
+    );
+    relay.codeAgents.set(leaseID, codeAgent as unknown as WebSocket);
+    relay.codeViewers.set("code-revoked", revokedCodeViewer as unknown as WebSocket);
+    relay.codeViewers.set("code-retained", retainedCodeViewer as unknown as WebSocket);
+    relay.codeViewers.set("code-owner", ownerCodeViewer as unknown as WebSocket);
+    relay.codeViewers.set("code-admin", adminCodeViewer as unknown as WebSocket);
+    relay.codeViewers.set("code-legacy", legacyCodeViewer as unknown as WebSocket);
+
+    const removed = await fleet.fetch(
+      request("DELETE", "/v1/leases/shared-live-viewers/share", {
+        headers: ownerHeaders,
+        body: { user: "revoked@example.com" },
+      }),
+    );
+    expect(removed.status).toBe(200);
+    expect(revokedWebViewer.closeCode).toBe(1008);
+    expect(revokedWebViewer.closeReason).toBe("lease access revoked");
+    expect(revokedWebAgent.closeCode).toBe(1011);
+    expect(retainedWebViewer.closeCode).toBeUndefined();
+    expect(ownerWebViewer.closeCode).toBeUndefined();
+    expect(relay.webVNCViewers.get(leaseID)?.has("viewer_revoked")).toBe(false);
+    expect(relay.webVNCViewers.get(leaseID)?.has("viewer_retained")).toBe(true);
+    expect(relay.webVNCViewers.get(leaseID)?.has("viewer_owner")).toBe(true);
+
+    expect(revokedCodeViewer.closeCode).toBe(1008);
+    expect(revokedCodeViewer.closeReason).toBe("lease access revoked");
+    expect(retainedCodeViewer.closeCode).toBeUndefined();
+    expect(ownerCodeViewer.closeCode).toBeUndefined();
+    expect(adminCodeViewer.closeCode).toBeUndefined();
+    expect(legacyCodeViewer.closeCode).toBeUndefined();
+    expect(relay.codeViewers.has("code-revoked")).toBe(false);
+    expect(relay.codeViewers.has("code-retained")).toBe(true);
+    expect(relay.codeViewers.has("code-owner")).toBe(true);
+    expect(relay.codeViewers.has("code-admin")).toBe(true);
+    expect(relay.codeViewers.has("code-legacy")).toBe(true);
+    expect(codeAgent.sentJSON()).toEqual([
+      {
+        type: "ws_close",
+        id: "code-revoked",
+        code: 1008,
+        reason: "lease access revoked",
+      },
+    ]);
+
+    await fleet.webSocketMessage(
+      retainedCodeViewer as unknown as WebSocket,
+      JSON.stringify({ retained: true }),
+    );
+    expect(codeAgent.sentJSON()).toHaveLength(2);
+    expect(codeAgent.sentJSON()[1]).toMatchObject({ type: "ws_data", id: "code-retained" });
+    await fleet.webSocketMessage(
+      retainedWebViewer as unknown as WebSocket,
+      JSON.stringify({ retained: true }),
+    );
+    expect(retainedWebAgent.sentJSON()).toEqual([{ retained: true }]);
+  });
+
+  it("revokes org-only live viewers after a portal share update", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const leaseID = "cbx_000000000001";
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "portal-share-viewers",
+        owner: "owner@example.com",
+        org: "example-org",
+        code: true,
+        share: {
+          users: { "explicit@example.com": "use" },
+          org: "use",
+        },
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+    const orgViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-org",
+      auth: "bearer",
+      owner: "org-viewer@example.com",
+      org: "example-org",
+      admin: false,
+    });
+    const explicitViewer = new FakeWebSocket({
+      kind: "code-viewer",
+      leaseID,
+      id: "code-explicit",
+      auth: "bearer",
+      owner: "explicit@example.com",
+      org: "other-org",
+      admin: false,
+    });
+    const codeAgent = new FakeWebSocket({ kind: "code-agent", leaseID });
+    const relay = fleet as unknown as {
+      codeAgents: Map<string, WebSocket>;
+      codeViewers: Map<string, WebSocket>;
+    };
+    relay.codeAgents.set(leaseID, codeAgent as unknown as WebSocket);
+    relay.codeViewers.set("code-org", orgViewer as unknown as WebSocket);
+    relay.codeViewers.set("code-explicit", explicitViewer as unknown as WebSocket);
+
+    const updated = await fleet.fetch(
+      request("POST", "/portal/leases/portal-share-viewers/share?format=json", {
+        headers: {
+          "x-crabbox-owner": "owner@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { users: { "explicit@example.com": "use" } },
+      }),
+    );
+    expect(updated.status).toBe(200);
+    expect(orgViewer.closeCode).toBe(1008);
+    expect(orgViewer.closeReason).toBe("lease access revoked");
+    expect(explicitViewer.closeCode).toBeUndefined();
+    expect(relay.codeViewers.has("code-org")).toBe(false);
+    expect(relay.codeViewers.has("code-explicit")).toBe(true);
+
+    const revokedPage = await fleet.fetch(
+      request("GET", "/portal/leases/portal-share-viewers/code/", {
+        headers: {
+          "x-crabbox-owner": "org-viewer@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(revokedPage.status).toBe(404);
   });
 
   it("requires manage access for shared lease heartbeat and Tailscale metadata updates", async () => {
