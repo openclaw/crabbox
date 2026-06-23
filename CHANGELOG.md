@@ -19,6 +19,7 @@
 - Added `crabbox providers recommend interactive-debug` for live inspection guidance across synced SSH, browser/code/desktop access, reusable sessions, provider URLs, and retained evidence.
 - Added a provider live-smoke contract doc for opt-in validation of adapters that need credentials, quota, local runtimes, or private control planes.
 - Tuned `crabbox providers recommend live-smoke` to keep local runtime smoke paths visible when cloud credentials are unavailable.
+- Added Apple Container to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for CodeSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for OpenSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
