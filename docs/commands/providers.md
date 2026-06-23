@@ -111,6 +111,7 @@ crabbox providers recommend disposable-execution
 crabbox providers recommend fast-feedback --feature cache-volume
 crabbox providers recommend failure-diagnostics
 crabbox providers recommend fanout-testing --workspace fork
+crabbox providers recommend interactive-debug
 crabbox providers recommend isolated-execution
 crabbox providers recommend linux-vm --limit 8
 crabbox providers recommend live-smoke
@@ -169,6 +170,10 @@ Supported use cases:
   selection guidance over existing fork/checkpoint capabilities, not a
   Mitos-style live microVM swarm API.
 - `gpu`: GPU-oriented execution providers.
+- `interactive-debug`: providers with live inspection surfaces such as
+  synced SSH, browser/code/desktop access, reusable sessions, provider URLs, or
+  retained evidence after debugging. Aliases include `live-debug`,
+  `debug-session`, `ssh-debug`, and `browser-debug`.
 - `isolated-execution`: delegated and local sandbox providers for disposable or
   untrusted command execution. This is routing guidance, not a security
   certification for a specific provider.

@@ -116,6 +116,9 @@ Ship these in small PRs:
    Use `crabbox providers recommend failure-diagnostics` when failed-run triage
    needs proof, reusable sessions, retained outputs, preview URLs, or SSH access
    to a synced checkout.
+   Use `crabbox providers recommend interactive-debug` when triage needs a live
+   inspection surface such as synced SSH, browser/code/desktop access, reusable
+   sessions, provider URLs, or retained evidence after the debug session.
    Use `crabbox providers recommend preview-url` when the workflow specifically
    needs provider-native app or service URLs.
    Use `crabbox providers --reachability provider-url` or

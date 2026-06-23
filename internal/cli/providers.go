@@ -455,6 +455,7 @@ func providerRecommendationUseCases() []string {
 		"failure-diagnostics",
 		"fanout-testing",
 		"gpu",
+		"interactive-debug",
 		"isolated-execution",
 		"linux-vm",
 		"live-smoke",
@@ -517,6 +518,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		return "fanout-testing", true
 	case "gpu", "cuda", "ml":
 		return "gpu", true
+	case "interactive-debug", "interactive-debugging", "live-debug",
+		"live-debugging", "debug-session", "debug-sessions",
+		"ssh-debug", "browser-debug", "code-debug", "inspectable-debug":
+		return "interactive-debug", true
 	case "isolated", "isolated-execution", "isolation", "secure", "secure-sandbox", "untrusted", "untrusted-code":
 		return "isolated-execution", true
 	case "linux", "linux-vm", "vm":
@@ -900,6 +905,47 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		}
 		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
 			add(6, "supports common diagnostic run targets")
+		}
+	case "interactive-debug":
+		hasDebugSurface := (hasFeature(FeatureSSH) && hasFeature(FeatureCrabboxSync)) ||
+			hasFeature(FeatureDesktop) || hasFeature(FeatureBrowser) ||
+			hasFeature(FeatureCode) || hasFeature(FeatureRunSession) ||
+			hasFeature(FeatureURLBridge)
+		if !hasDebugSurface {
+			break
+		}
+		if hasFeature(FeatureSSH) && hasFeature(FeatureCrabboxSync) {
+			add(45, "can debug a synced checkout through SSH")
+		}
+		if hasFeature(FeatureBrowser) {
+			add(35, "can inspect browser-visible behavior")
+		}
+		if hasFeature(FeatureCode) {
+			add(30, "can inspect and edit through code-server access")
+		}
+		if hasFeature(FeatureDesktop) {
+			add(24, "can inspect interactive desktop state")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(26, "returns reusable sessions for interactive inspection")
+		}
+		if hasFeature(FeatureURLBridge) {
+			add(20, "can expose provider-native URLs during debugging")
+		}
+		if capabilities.Tailscale || capabilities.SSHMesh {
+			add(14, "has a routable operator access plane")
+		}
+		if hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) || hasFeature(FeatureRunProof) {
+			add(12, "can retain evidence after the debug session")
+		}
+		if hasFeature(FeaturePauseResume) {
+			add(10, "can preserve runtime state while debugging")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(8, "can clean up debug resources")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetWindows) || hasTarget(targetMacOS) || hasTarget(targetWorkerRuntime) {
+			add(6, "supports common interactive debug targets")
 		}
 	case "fanout-testing":
 		if !hasFeature(FeatureFork) {
@@ -1541,6 +1587,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend fast-feedback --feature cache-volume")
 	fmt.Fprintln(out, "  crabbox providers recommend failure-diagnostics")
 	fmt.Fprintln(out, "  crabbox providers recommend fanout-testing --workspace fork")
+	fmt.Fprintln(out, "  crabbox providers recommend interactive-debug")
 	fmt.Fprintln(out, "  crabbox providers recommend isolated-execution")
 	fmt.Fprintln(out, "  crabbox providers recommend linux-vm --limit 8")
 	fmt.Fprintln(out, "  crabbox providers recommend live-smoke")
