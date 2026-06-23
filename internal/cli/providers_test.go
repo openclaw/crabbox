@@ -500,6 +500,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"fast-feedback",
 		"failure-diagnostics",
 		"fanout-testing",
+		"interactive-debug",
 		"isolated-execution",
 		"live-smoke",
 		"mcp-sandbox",
@@ -987,6 +988,68 @@ func TestProvidersRecommendFailedRunAlias(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Provider != "blacksmith-testbox" {
 		t.Fatalf("failed-run alias entries=%#v", entries)
+	}
+}
+
+func TestProvidersRecommendInteractiveDebugSurfaces(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "interactive-debug", 16)
+	if len(recommendations) == 0 {
+		t.Fatal("expected interactive-debug recommendations")
+	}
+	foundSSH := false
+	foundInteractive := false
+	foundSession := false
+	foundURLBridge := false
+	foundEvidence := false
+	for _, recommendation := range recommendations {
+		hasSSHDebug := providerRecommendationHasFeature(recommendation.Features, FeatureSSH) &&
+			providerRecommendationHasFeature(recommendation.Features, FeatureCrabboxSync)
+		hasInteractive := providerRecommendationHasFeature(recommendation.Features, FeatureBrowser) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureCode) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureDesktop)
+		hasSession := providerRecommendationHasFeature(recommendation.Features, FeatureRunSession)
+		hasURLBridge := providerRecommendationHasFeature(recommendation.Features, FeatureURLBridge)
+		hasEvidence := providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunProof)
+		if !hasSSHDebug && !hasInteractive && !hasSession && !hasURLBridge {
+			t.Fatalf("interactive-debug recommendation lacks debug surface: %#v", recommendation)
+		}
+		foundSSH = foundSSH || hasSSHDebug
+		foundInteractive = foundInteractive || hasInteractive
+		foundSession = foundSession || hasSession
+		foundURLBridge = foundURLBridge || hasURLBridge
+		foundEvidence = foundEvidence || hasEvidence
+	}
+	if !foundSSH || !foundInteractive || !foundSession || !foundURLBridge || !foundEvidence {
+		t.Fatalf("interactive-debug should include SSH, interactive, session, URL bridge, and evidence signals: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendLiveDebugAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "live-debug",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend live-debug error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("live-debug alias entries=%#v", entries)
+	}
+	hasSSHDebug := providerRecommendationHasFeature(entries[0].Features, FeatureSSH) &&
+		providerRecommendationHasFeature(entries[0].Features, FeatureCrabboxSync)
+	hasInteractive := providerRecommendationHasFeature(entries[0].Features, FeatureBrowser) ||
+		providerRecommendationHasFeature(entries[0].Features, FeatureCode) ||
+		providerRecommendationHasFeature(entries[0].Features, FeatureDesktop)
+	if !hasSSHDebug && !hasInteractive && !providerRecommendationHasFeature(entries[0].Features, FeatureRunSession) {
+		t.Fatalf("live-debug alias should prefer live inspection providers: %#v", entries)
 	}
 }
 
