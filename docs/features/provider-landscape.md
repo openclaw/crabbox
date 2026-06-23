@@ -135,6 +135,9 @@ Ship these in small PRs:
    workloads should prefer cleanup-capable delegated or local sandboxes before
    retaining only the proof, outputs, session, or preview metadata needed for
    inspection.
+   Use `crabbox providers recommend web-app-smoke` when app or service smoke
+   tests need provider-native URLs, SSH tunnels, tailnet reachability,
+   browser/code/desktop access, sessions, or retained outputs.
 3. Add live smoke docs where credentials are required.
    Provider adapters can be valuable before broad live access exists, but each
    one needs an opt-in smoke contract that says what real behavior proves. Use

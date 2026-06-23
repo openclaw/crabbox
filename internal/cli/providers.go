@@ -474,6 +474,7 @@ func providerRecommendationUseCases() []string {
 		"team-cloud",
 		"versioned-workspace",
 		"warm-start",
+		"web-app-smoke",
 		"windows",
 		"worker-runtime",
 	}
@@ -577,6 +578,10 @@ func normalizeProviderRecommendationUseCase(value string) (string, bool) {
 		"prewarm", "pre-warm", "prewarmed", "pre-warmed", "low-latency-start",
 		"low-latency", "reuse-state", "reuse-runtime":
 		return "warm-start", true
+	case "web-app-smoke", "web-smoke", "app-smoke", "service-smoke",
+		"preview-smoke", "browser-smoke", "url-smoke", "http-smoke",
+		"web-preview-smoke":
+		return "web-app-smoke", true
 	case "windows", "win":
 		return "windows", true
 	case "worker", "worker-runtime", "module", "module-run":
@@ -1413,6 +1418,52 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
 			add(6, "supports common warm-start targets")
 		}
+	case "web-app-smoke":
+		hasAccessPlane := capabilities.URLBridge || capabilities.SSHMesh ||
+			capabilities.Tailscale || capabilities.TailscaleEgress ||
+			hasFeature(FeatureBrowser) || hasFeature(FeatureCode) || hasFeature(FeatureDesktop)
+		if !hasAccessPlane {
+			break
+		}
+		if capabilities.URLBridge {
+			add(70, "can expose provider-native app or service URLs")
+		}
+		if capabilities.SSHMesh && hasFeature(FeatureCrabboxSync) {
+			add(32, "can smoke a synced web app through operator-side SSH tunnels")
+		}
+		if capabilities.Tailscale {
+			add(28, "can reach services over a bidirectional tailnet plane")
+		}
+		if hasFeature(FeatureBrowser) {
+			add(25, "can pair smoke tests with browser access")
+		}
+		if hasFeature(FeatureCode) {
+			add(18, "can inspect web app state through code-server access")
+		}
+		if hasFeature(FeatureDesktop) {
+			add(14, "can inspect interactive desktop app state")
+		}
+		if hasFeature(FeatureRunSession) {
+			add(20, "returns reusable sessions for post-smoke inspection")
+		}
+		if hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+			add(16, "can retain smoke outputs or downloads")
+		}
+		if hasFeature(FeatureCrabboxSync) || hasFeature(FeatureArchiveSync) {
+			add(14, "can seed the web app workload from the current checkout")
+		}
+		if capabilities.TailscaleEgress {
+			add(10, "can use outbound-only tailnet egress for web smoke flows")
+		}
+		if category == "delegated-sandbox" {
+			add(18, "delegated sandbox can host app smoke workloads")
+		}
+		if hasFeature(FeatureCleanup) {
+			add(10, "can clean up smoke resources")
+		}
+		if hasTarget(targetLinux) || hasTarget(targetWorkerRuntime) {
+			add(8, "supports common web app smoke targets")
+		}
 	case "windows":
 		if hasTarget(targetWindows + "/" + WindowsModeNormal) {
 			add(80, "supports native Windows")
@@ -1506,6 +1557,7 @@ func printProviderRecommendationUseCases(out io.Writer) {
 	fmt.Fprintln(out, "  crabbox providers recommend team-cloud")
 	fmt.Fprintln(out, "  crabbox providers recommend versioned-workspace")
 	fmt.Fprintln(out, "  crabbox providers recommend warm-start")
+	fmt.Fprintln(out, "  crabbox providers recommend web-app-smoke")
 	fmt.Fprintln(out, "  crabbox providers recommend forkable-workspace --workspace fork")
 }
 

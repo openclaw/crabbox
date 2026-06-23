@@ -129,6 +129,7 @@ crabbox providers recommend team-cloud
 crabbox providers recommend workspace-reuse
 crabbox providers recommend versioned-workspace
 crabbox providers recommend warm-start
+crabbox providers recommend web-app-smoke
 crabbox providers recommend forkable-workspace --workspace fork
 crabbox providers recommend versioned-workspace --target macos --workspace fork
 crabbox providers recommend worker-runtime --json
@@ -213,6 +214,10 @@ Supported use cases:
   setup overhead. Aliases include `warm-pool`, `prewarm`, and
   `low-latency-start`. This is provider selection guidance over existing
   reuse signals, not a guarantee of native warm-pool APIs.
+- `web-app-smoke`: providers that can expose or reach app/service smoke
+  targets through provider-native URLs, SSH tunnels, tailnet planes,
+  browser/code/desktop access, sessions, or retained outputs. Aliases include
+  `web-smoke`, `app-smoke`, `service-smoke`, and `browser-smoke`.
 - `windows`: native Windows and WSL2 targets.
 - `worker-runtime`: Worker/module-runtime execution.
 

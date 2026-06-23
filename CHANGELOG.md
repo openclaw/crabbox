@@ -15,6 +15,7 @@
 - Added `crabbox providers recommend resource-observability` for coordinator usage/cost visibility, SSH resource telemetry, retained run evidence, reusable sessions, and preview URL guidance.
 - Added `crabbox providers recommend code-interpreter` for generated-code and script execution guidance across delegated and local sandbox providers.
 - Added `crabbox providers recommend disposable-execution` for cleanup-capable temporary sandbox guidance across delegated and local sandbox providers.
+- Added `crabbox providers recommend web-app-smoke` for app and service smoke guidance across provider URLs, SSH tunnels, tailnet reachability, browser/code/desktop access, sessions, and retained outputs.
 
 ### Fixed
 

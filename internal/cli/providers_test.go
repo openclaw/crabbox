@@ -515,6 +515,7 @@ func TestProvidersRecommendListsUseCases(t *testing.T) {
 		"team-cloud",
 		"versioned-workspace",
 		"warm-start",
+		"web-app-smoke",
 		"worker-runtime",
 	} {
 		if !strings.Contains(text, want) {
@@ -908,6 +909,65 @@ func TestProvidersRecommendWarmPoolAlias(t *testing.T) {
 	}
 	if entries[0].Provider != "local-container" && entries[0].Provider != "parallels" {
 		t.Fatalf("warm-pool alias should prefer local reusable state providers: %#v", entries)
+	}
+}
+
+func TestProvidersRecommendWebAppSmokeUsesReachableAppSurfaces(t *testing.T) {
+	recommendations := recommendProvidersForUseCase(providerMatrix(), "web-app-smoke", 16)
+	if len(recommendations) == 0 {
+		t.Fatal("expected web-app-smoke recommendations")
+	}
+	foundURLBridge := false
+	foundInteractive := false
+	foundSSHTunnel := false
+	foundTailnet := false
+	foundSessionOrEvidence := false
+	for _, recommendation := range recommendations {
+		capabilities := providerCapabilities(recommendation.Provider)
+		hasInteractive := providerRecommendationHasFeature(recommendation.Features, FeatureBrowser) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureCode) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureDesktop)
+		hasSessionOrEvidence := providerRecommendationHasFeature(recommendation.Features, FeatureRunSession) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunArtifacts) ||
+			providerRecommendationHasFeature(recommendation.Features, FeatureRunDownloads)
+		if !capabilities.URLBridge && !capabilities.SSHMesh && !capabilities.Tailscale &&
+			!capabilities.TailscaleEgress && !hasInteractive {
+			t.Fatalf("web-app-smoke recommendation lacks web access plane: %#v", recommendation)
+		}
+		foundURLBridge = foundURLBridge || capabilities.URLBridge
+		foundInteractive = foundInteractive || hasInteractive
+		foundSSHTunnel = foundSSHTunnel || capabilities.SSHMesh
+		foundTailnet = foundTailnet || capabilities.Tailscale || capabilities.TailscaleEgress
+		foundSessionOrEvidence = foundSessionOrEvidence || hasSessionOrEvidence
+	}
+	if !foundURLBridge || !foundInteractive || !foundSSHTunnel || !foundTailnet || !foundSessionOrEvidence {
+		t.Fatalf("web-app-smoke should include URL bridge, interactive, SSH/tunnel, tailnet, and session/evidence signals: %#v", recommendations)
+	}
+}
+
+func TestProvidersRecommendBrowserSmokeAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", "browser-smoke",
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend browser-smoke error=%v stderr=%q", err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("browser-smoke alias entries=%#v", entries)
+	}
+	capabilities := providerCapabilities(entries[0].Provider)
+	hasInteractive := providerRecommendationHasFeature(entries[0].Features, FeatureBrowser) ||
+		providerRecommendationHasFeature(entries[0].Features, FeatureCode) ||
+		providerRecommendationHasFeature(entries[0].Features, FeatureDesktop)
+	if !capabilities.URLBridge && !capabilities.SSHMesh && !capabilities.Tailscale && !hasInteractive {
+		t.Fatalf("browser-smoke alias should prefer reachable app providers: %#v", entries)
 	}
 }
 
