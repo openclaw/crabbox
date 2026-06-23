@@ -22,6 +22,7 @@
 - Added Apple Container to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Local Container to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Multipass to the guarded `scripts/live-smoke.sh` provider smoke matrix.
+- Added Tart to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for CodeSandbox runs so retained and reused sandboxes can be written through `--lease-output`.
 - Added run-session metadata for OpenSandbox runs so retained and reused sandboxes can be written through `--lease-output`.

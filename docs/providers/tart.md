@@ -18,6 +18,22 @@ The provider is local only. It never uses the coordinator or cloud credentials.
 
 **Hosts:** Apple Silicon Macs with tart installed (`brew install cirruslabs/cli/tart`).
 
+## Optional live smoke
+
+Run the guarded local smoke when Tart is installed and the configured macOS base
+image is available or can be downloaded:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tart scripts/live-smoke.sh
+```
+
+The smoke creates one short-lived Tart VM, waits for SSH readiness, syncs the
+current checkout, runs the shared live-smoke command, prints recent history/log
+evidence when available, then stops and deletes only the VM it created. It uses
+`--ttl 30m --idle-timeout 5m` because the first run may need to pull and boot a
+macOS base image, and it follows the same cleanup path as normal
+`crabbox stop --provider tart`.
+
 ## Configuration
 
 CLI flags:
