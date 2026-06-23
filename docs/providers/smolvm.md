@@ -127,6 +127,12 @@ Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you
 Run the guarded hosted lifecycle smoke with an exported API key:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=smolvm scripts/live-smoke.sh
+```
+
+That top-level smoke dispatches to the provider-specific script:
+
+```sh
 CRABBOX_SMOLVM_LIVE_SMOKE=1 scripts/live-smolvm-smoke.sh
 ```
 
