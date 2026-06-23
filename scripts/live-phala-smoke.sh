@@ -84,7 +84,7 @@ if [[ "${CRABBOX_LIVE:-}" != "1" ]]; then
   classify_and_exit environment_blocked "reason=CRABBOX_LIVE_not_enabled missing=CRABBOX_LIVE=1"
 fi
 
-if [[ "$providers" != *",phala,"* ]]; then
+if [[ "$providers" != *",phala,"* && "$providers" != *",phala-cloud,"* && "$providers" != *",dstack,"* ]]; then
   classify_and_exit environment_blocked "reason=provider_not_selected missing=CRABBOX_LIVE_PROVIDERS=phala"
 fi
 

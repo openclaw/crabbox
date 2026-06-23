@@ -69,6 +69,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=ovh scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nvidia-brev scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=phala CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=anthropic-sandbox-runtime scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=opensandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=proxmox CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
@@ -110,6 +111,11 @@ Per-provider smoke prerequisites:
   is coordinator-free, creates one short-lived GPU workspace, verifies
   `nvidia-smi`, deletes the workspace with `crabbox stop`, and prints a final
   classification.
+- **Phala** — authenticated `phala` CLI on `PATH` (or `CRABBOX_PHALA_CLI`),
+  Phala auth, and enough confidential CVM quota. `scripts/live-phala-smoke.sh`
+  is coordinator-free, classifies missing auth/quota before or during
+  provisioning, verifies sync/env forwarding on a tiny Git fixture, and
+  hard-deletes any created CVM on failure.
 - **Anthropic Sandbox Runtime** — `srt` and `curl` on `PATH` plus host sandbox
   support. `scripts/live-anthropic-sandbox-runtime-smoke.sh` is coordinator-free
   and local-only; it verifies `doctor`, one-shot command execution, allowed

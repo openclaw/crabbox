@@ -39,6 +39,26 @@ The SSH transport uses Crabbox's native TLS client to tunnel through the
 gateway's authenticated TLS endpoint rather than dialing a raw TCP port (see
 [Lifecycle](#lifecycle)).
 
+## Live smoke
+
+The provider-specific live smoke is guarded by `CRABBOX_LIVE=1` and an explicit
+provider selection. It builds `bin/crabbox` unless `CRABBOX_BIN` is set, runs
+`doctor`, provisions a short-lived confidential CVM, proves sync/env forwarding
+with a tiny Git fixture, then stops the lease. If a CVM ID is observed during a
+failed run, cleanup also calls the Phala CLI directly.
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=phala CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
+# or, directly:
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=phala CRABBOX_BIN=./bin/crabbox scripts/live-phala-smoke.sh
+```
+
+The script emits one machine-readable classification:
+`live_phala_smoke_passed`, `environment_blocked`, `quota_blocked`, or
+`diagnostic_only`. Missing auth, unavailable CLI state, TLS/connectivity
+problems, or quota/balance failures are reported without pretending a live
+mutation succeeded.
+
 ## Configuration
 
 ```yaml

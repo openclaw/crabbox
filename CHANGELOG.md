@@ -30,6 +30,7 @@
 - Added Nebius to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added OVHcloud to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added NVIDIA Brev to the guarded `scripts/live-smoke.sh` provider smoke matrix.
+- Added Phala to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Anthropic Sandbox Runtime to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added OpenSandbox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Proxmox to the guarded `scripts/live-smoke.sh` provider smoke matrix.

@@ -95,6 +95,45 @@ esac
   assert.doesNotMatch(calls, /\brun --provider phala/);
 });
 
+test("Phala smoke accepts provider aliases", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-phala-alias-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"${crabboxLog}"
+case "$1" in
+  doctor)
+    printf 'phala status failed: not logged in; run phala login\\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-phala-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "dstack",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^environment_blocked .*not logged in/m);
+  const calls = fs.readFileSync(crabboxLog, "utf8");
+  assert.match(calls, /doctor --provider phala/);
+  assert.doesNotMatch(result.stdout, /provider_not_selected/);
+});
+
 test("Phala smoke classifies an unfunded account as quota_blocked", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-phala-unfunded-"));
   const fakeCrabbox = path.join(dir, "crabbox");

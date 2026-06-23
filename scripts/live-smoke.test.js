@@ -138,6 +138,52 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Phala live smoke dispatches to the provider-specific confidential VM script", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-phala-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$1" in
+  doctor)
+    printf 'phala status failed: not logged in; run phala login\\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "phala",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^environment_blocked .*not logged in/m);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^doctor --provider phala$/m);
+  assert.doesNotMatch(calls, /^list --provider phala/m);
+  assert.doesNotMatch(calls, /^warmup /m);
+  assert.doesNotMatch(calls, /^run /m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

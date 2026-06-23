@@ -969,17 +969,7 @@ if has_provider namespace-instance || has_provider namespace-compute; then
 fi
 
 if has_provider phala || has_provider phala-cloud || has_provider dstack; then
-  run_in_repo "$cb" doctor --provider phala
-  phala_baseline="$(run_in_repo "$cb" list --provider phala --json | jq -c 'map(.CloudID) | sort')"
-  provider_smoke phala \
-    --class "${CRABBOX_LIVE_PHALA_CLASS:-standard}" \
-    --ttl "${CRABBOX_LIVE_PHALA_TTL:-15m}" \
-    --idle-timeout 5m
-  phala_after="$(run_in_repo "$cb" list --provider phala --json | jq -c 'map(.CloudID) | sort')"
-  if [[ "$phala_after" != "$phala_baseline" ]]; then
-    echo "Phala smoke changed the pre-existing Crabbox-owned inventory" >&2
-    exit 1
-  fi
+  "$root/scripts/live-phala-smoke.sh"
 fi
 
 if has_provider semaphore; then
