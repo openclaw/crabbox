@@ -24,6 +24,7 @@ type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -122,6 +123,10 @@ func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []s
 
 func shellQuote(value string) string {
 	return core.ShellQuote(value)
+}
+
+func azureDynamicSessionsCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " " + shellQuote(leaseID)
 }
 
 func shellScriptFromArgv(command []string) string {

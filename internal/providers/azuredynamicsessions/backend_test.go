@@ -9,9 +9,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const testAzureDynamicSessionsEndpoint = "http://127.0.0.1:8787"
+
+func TestProviderSpec(t *testing.T) {
+	spec := Provider{}.Spec()
+	if spec.Kind != core.ProviderKindDelegatedRun {
+		t.Fatalf("kind=%v want delegated-run", spec.Kind)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) {
+		t.Fatalf("features=%#v want archive-sync", spec.Features)
+	}
+	if !spec.Features.Has(core.FeatureRunSession) {
+		t.Fatalf("features=%#v want run-session", spec.Features)
+	}
+}
 
 func TestRunStopsNewSessionByDefault(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -30,6 +45,21 @@ func TestRunStopsNewSessionByDefault(t *testing.T) {
 	}
 	if result.ExitCode != 0 || result.Provider != providerName || result.LeaseID == "" {
 		t.Fatalf("result = %#v", result)
+	}
+	if result.Session == nil {
+		t.Fatal("result.Session is nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Slug != result.Slug {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+	if result.Session.Reused {
+		t.Fatalf("session.Reused=true, want false")
+	}
+	if result.Session.Kept {
+		t.Fatalf("session.Kept=true, want false after cleanup")
+	}
+	if !strings.Contains(result.Session.CleanupCommand, "crabbox stop --provider azure-dynamic-sessions") {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != result.LeaseID {
 		t.Fatalf("deleted sessions = %#v, want %s", fake.deleted, result.LeaseID)
@@ -59,6 +89,9 @@ func TestRunCleanupUsesBoundedContext(t *testing.T) {
 	}
 	if time.Since(started) > time.Second {
 		t.Fatal("bounded cleanup did not return promptly")
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained session after cleanup failure", result.Session)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != result.LeaseID {
 		t.Fatalf("deleted sessions = %#v, want %s", fake.deleted, result.LeaseID)
@@ -103,6 +136,9 @@ func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 	}
 	if result.LeaseID == "" {
 		t.Fatalf("result missing lease: %#v", result)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.Reused {
+		t.Fatalf("session=%#v, want retained new session", result.Session)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted sessions = %#v, want retained session", fake.deleted)
@@ -149,6 +185,12 @@ func TestRunReusesClaimWithoutStoppingSession(t *testing.T) {
 	}
 	if result.LeaseID != "azds-kept" || result.Slug != "kept-session" {
 		t.Fatalf("result = %#v", result)
+	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained reused session", result.Session)
+	}
+	if result.Session.LeaseID != "azds-kept" || result.Session.Slug != "kept-session" {
+		t.Fatalf("session=%#v", result.Session)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted reused session: %#v", fake.deleted)
@@ -333,7 +375,8 @@ func restoreAzureDynamicSessionsClient(t *testing.T, api azureDynamicSessionsAPI
 
 func testAzureDynamicSessionsBackend() *azureDynamicSessionsBackend {
 	return &azureDynamicSessionsBackend{
-		cfg: Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Endpoint: testAzureDynamicSessionsEndpoint}},
+		spec: Provider{}.Spec(),
+		cfg:  Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Endpoint: testAzureDynamicSessionsEndpoint}},
 		rt: Runtime{
 			Stdout: &bytes.Buffer{},
 			Stderr: &bytes.Buffer{},

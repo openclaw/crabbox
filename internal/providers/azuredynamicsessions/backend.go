@@ -58,7 +58,7 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequ
 	return nil
 }
 
-func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
 		return RunResult{}, err
 	}
@@ -87,16 +87,50 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 	}
 
 	shouldStop := acquired && !req.Keep
+	cleanedUp := false
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: azureDynamicSessionsCleanupCommand(leaseID),
+	}
+	finishResult := func(result RunResult) RunResult {
+		if result.Provider == "" {
+			result.Provider = providerName
+		}
+		if result.LeaseID == "" {
+			result.LeaseID = leaseID
+		}
+		if result.Slug == "" {
+			result.Slug = slug
+		}
+		result.Session = session
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
+	defer func() {
+		result = finishResult(result)
+	}()
+	cleanupSession := func() error {
+		if !shouldStop {
+			return nil
+		}
+		if err := b.deleteSessionBounded(client, leaseID); err != nil {
+			shouldStop = false
+			return err
+		}
+		removeLeaseClaim(leaseID)
+		cleanedUp = true
+		shouldStop = false
+		return nil
+	}
 	if shouldStop {
 		defer func() {
-			if !shouldStop {
-				return
-			}
-			if err := b.deleteSessionBounded(client, leaseID); err != nil {
+			if err := cleanupSession(); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %s stop failed for %s: %v\n", providerName, leaseID, err)
-				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 
@@ -156,7 +190,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 		exitCode = 1
 	}
 
-	result := RunResult{
+	result = RunResult{
 		ExitCode:      exitCode,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
