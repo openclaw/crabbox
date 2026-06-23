@@ -535,6 +535,59 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("W&B live smoke requires an API key before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-wandb-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "wandb",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_WANDB_API_KEY: "",
+      WANDB_API_KEY: "",
+      WANDB_ENTITY_NAME: "example-org",
+      PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /wandb smoke requires CRABBOX_WANDB_API_KEY or WANDB_API_KEY/,
+  );
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^doctor --provider wandb/m);
+  assert.doesNotMatch(calls, /^run --provider wandb/m);
+  assert.doesNotMatch(calls, /^list --provider wandb/m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

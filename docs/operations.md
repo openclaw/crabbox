@@ -121,7 +121,10 @@ Per-provider smoke prerequisites:
 - **SmolVM** — `CRABBOX_SMOLVM_API_KEY`, `SMOLMACHINES_API_KEY`, or `SMK_API_KEY`.
 - **Superserve** — `CRABBOX_SUPERSERVE_API_KEY` or `SUPERSERVE_API_KEY`.
 - **Vercel Sandbox** — authenticated `sandbox` CLI on `PATH`; project and team scope may come from `CRABBOX_VERCEL_SANDBOX_PROJECT_ID` plus `CRABBOX_VERCEL_SANDBOX_TEAM_ID`, `CRABBOX_VERCEL_SANDBOX_SCOPE`, or the Vercel OIDC environment.
-- **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or `WANDB_API_KEY` (from `wandb login`). `scripts/wandb-smoke.sh` is a coordinator-free, wandb-only gate.
+- **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or
+  `WANDB_API_KEY` (from `wandb login`). `scripts/live-smoke.sh` refuses to call
+  W&B until an API key is exported, then runs `doctor`, executes one no-sync
+  command, and prints normalized inventory.
 - **Linode** — `LINODE_TOKEN` with Linode instance, image, type, SSH key, and tag access.
 - **DigitalOcean** — `DIGITALOCEAN_TOKEN` with account-read, Droplet, image-read, SSH key, and tag scopes. `scripts/live-digitalocean-smoke.sh` is coordinator-free, requires an empty Crabbox-owned inventory, creates a small short-lived Droplet, verifies status and execution, and prints a final cleanup classification.
 - **Nebius** — authenticated Nebius CLI profile plus `nebius.parentId` and

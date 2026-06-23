@@ -161,6 +161,24 @@ the API key in the environment; never pass it as an argument.
 export CRABBOX_WANDB_API_KEY=wandb_v1_...
 export WANDB_ENTITY_NAME=my-team
 go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_PROVIDERS=wandb \
+CRABBOX_LIVE_COORDINATOR=0 \
+CRABBOX_LIVE_REPO=/path/to/my-app \
+scripts/live-smoke.sh
+```
+
+The shared harness exits before any W&B `doctor`, `run`, or `list` command when
+no API key is exported. With the API key and entity configured, it runs
+`doctor`, executes one no-sync command with a 60-second sandbox lifetime, and
+prints normalized W&B inventory.
+
+For manual debugging, run the same lifecycle directly:
+
+```sh
+export CRABBOX_WANDB_API_KEY=wandb_v1_...
+export WANDB_ENTITY_NAME=my-team
+go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox doctor --provider wandb
 bin/crabbox run --provider wandb --no-sync --wandb-max-lifetime 60 -- echo crabbox-wandb-ok
