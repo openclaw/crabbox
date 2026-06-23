@@ -96,7 +96,7 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	return nil
 }
 
-func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if req.Options.Tailscale.Enabled {
 		return RunResult{}, exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
 	}
@@ -119,6 +119,31 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	deadline := time.Time{}
 	acquired := false
 	shouldStop := false
+	cleanedUp := false
+	var session *RunSessionHandle
+	finishResult := func(result RunResult) RunResult {
+		if session == nil {
+			return result
+		}
+		if result.Provider == "" {
+			result.Provider = providerName
+		}
+		if result.LeaseID == "" {
+			result.LeaseID = leaseID
+		}
+		if result.Slug == "" {
+			result.Slug = slug
+		}
+		result.Session = session
+		if slug != "" {
+			result.Session.Slug = slug
+		}
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
+	defer func() {
+		result = finishResult(result)
+	}()
 	var unlockOperation func()
 	defer func() {
 		if unlockOperation != nil {
@@ -156,6 +181,15 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if err := authorizeOpenSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim); err != nil {
 			return RunResult{}, err
 		}
+		slug = blank(claim.Slug, newLeaseSlug(leaseID))
+		session = &RunSessionHandle{
+			Provider:       providerName,
+			LeaseID:        leaseID,
+			Slug:           slug,
+			Reused:         true,
+			Kept:           true,
+			CleanupCommand: openSandboxCleanupCommand(leaseID),
+		}
 		if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
 			sb, err = verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
 			if err != nil {
@@ -187,11 +221,32 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if err != nil {
 			return RunResult{}, err
 		}
+		if session != nil {
+			session.Slug = slug
+		}
 	}
 	shouldStop = acquired && !req.Keep
+	if session == nil {
+		session = &RunSessionHandle{
+			Provider:       providerName,
+			LeaseID:        leaseID,
+			Slug:           slug,
+			Reused:         false,
+			Kept:           !shouldStop,
+			CleanupCommand: openSandboxCleanupCommand(leaseID),
+		}
+	}
+	cleanupCreated := func() error {
+		cleanupPending := shouldStop
+		err := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop)
+		if cleanupPending && err == nil {
+			cleanedUp = true
+		}
+		return err
+	}
 	if shouldStop {
 		defer func() {
-			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+			if cleanupErr := cleanupCreated(); cleanupErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
 			}
 		}()
@@ -243,7 +298,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			result.ExitCode = 1
 		}
 		if req.TimingJSON {
-			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+			if cleanupErr := cleanupCreated(); cleanupErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
 			}
 			report := timingReportWithRunResult(timingReport{
@@ -293,7 +348,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		TimeoutSecs: b.execTimeoutSecs(),
 	})
 	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
+	result = RunResult{
 		ExitCode:      exitCode,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
@@ -320,7 +375,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		}
 	}
 	if req.TimingJSON {
-		if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+		if cleanupErr := cleanupCreated(); cleanupErr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
 		}
 		timingErr := commandErr

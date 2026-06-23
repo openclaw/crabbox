@@ -163,6 +163,9 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
 - SSH: not driven by Crabbox.
 - Crabbox sync: yes, via gzipped archive upload and in-sandbox extraction.
 - Env forwarding: yes, off-argv in the exec request body.
+- Run session: yes. `--lease-output` records the OpenSandbox lease, whether it
+  was reused, whether it was retained, and the matching `crabbox stop`
+  cleanup command.
 - Provider sync: no separate provider-side copy command is required.
 - URL bridge: no Crabbox bridge integration in v1.
 - Desktop / browser / code: no Crabbox VNC or code-server surface.

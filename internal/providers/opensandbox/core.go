@@ -17,6 +17,7 @@ type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -142,6 +143,10 @@ func shellScriptFromArgv(command []string) string {
 
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
+}
+
+func openSandboxCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " " + shellQuote(leaseID)
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {

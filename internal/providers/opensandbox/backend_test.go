@@ -50,6 +50,9 @@ func TestProviderSpec(t *testing.T) {
 	if !spec.Features.Has(core.FeatureCleanup) {
 		t.Fatalf("features=%#v want cleanup", spec.Features)
 	}
+	if !spec.Features.Has(core.FeatureRunSession) {
+		t.Fatalf("features=%#v want run-session", spec.Features)
+	}
 }
 
 func TestProviderForResolvesNameOnly(t *testing.T) {
@@ -480,6 +483,21 @@ func TestRunCreatesSandboxForwardsEnvAndCleansUp(t *testing.T) {
 	if result.ExitCode != 0 || !result.SyncDelegated {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil {
+		t.Fatal("result.Session is nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != leasePrefix+fake.sandbox.ID {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if result.Session.Reused {
+		t.Fatalf("session.Reused=true, want false")
+	}
+	if result.Session.Kept {
+		t.Fatalf("session.Kept=true, want false after cleanup")
+	}
+	if !strings.Contains(result.Session.CleanupCommand, "crabbox stop --provider opensandbox") {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	if fake.created.Image != "ubuntu:24.04" || fake.created.Metadata[openSandboxClaimKey] == "" || fake.created.Metadata[openSandboxNameKey] == "" {
 		t.Fatalf("create request not populated: %#v", fake.created)
 	}
@@ -674,7 +692,7 @@ func TestRunKeepsSandboxOnFailureWhenRequested(t *testing.T) {
 	fake := newFakeClient()
 	fake.runExit = 7
 	backend := newTestBackend(fake)
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:          Repo{Name: "my-app", Root: tempGitRepo(t)},
 		NoSync:        true,
 		Command:       []string{"false"},
@@ -685,6 +703,9 @@ func TestRunKeepsSandboxOnFailureWhenRequested(t *testing.T) {
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%#v, want kept on failure", fake.deleted)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.Reused {
+		t.Fatalf("session=%#v, want retained new sandbox", result.Session)
 	}
 	claim, err := readLeaseClaim(leasePrefix + fake.sandbox.ID)
 	if err != nil {
@@ -778,11 +799,17 @@ func TestRunResumesPausedSandboxBeforeReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = scope
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/repo"}, NoSync: true, Command: []string{"true"},
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v, want retained reused sandbox", result.Session)
+	}
+	if result.Session.LeaseID != leaseID || result.Session.Slug != "mine" {
+		t.Fatalf("session=%#v, want lease=%s slug=mine", result.Session, leaseID)
 	}
 	if len(fake.resumed) != 1 || fake.resumed[0] != fake.sandbox.ID {
 		t.Fatalf("resumed=%#v", fake.resumed)
