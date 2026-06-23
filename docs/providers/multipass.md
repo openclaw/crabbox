@@ -85,6 +85,20 @@ crabbox run --provider multipass \
   -- go test ./...
 ```
 
+## Optional live smoke
+
+Run the guarded local smoke when the Multipass CLI and daemon are available:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=multipass scripts/live-smoke.sh
+```
+
+The smoke creates one short-lived Multipass VM, waits for SSH readiness, syncs
+the current checkout, runs the shared live-smoke command, prints recent
+history/log evidence when available, then deletes and purges only the VM it
+created. It uses `--ttl 15m --idle-timeout 5m` and the same cleanup path as
+normal `crabbox stop --provider multipass`.
+
 ## Configuration
 
 ```yaml
