@@ -97,7 +97,10 @@ Per-provider smoke prerequisites:
   then creates a delete-on-release Devbox, runs one no-sync command, and prints a
   normalized list proof.
 - **Namespace Compute** — the authenticated `nsc` CLI on `PATH`; run `nsc login` first.
-- **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token in the environment.
+- **Sprites** — the authenticated `sprite` CLI on `PATH` plus a Sprites token
+  in the environment. `scripts/live-smoke.sh` refuses to call Sprites until the
+  CLI is available, then creates one sprite, verifies SSH, runs one command,
+  lists normalized inventory, and stops the lease.
 - **Tenki** — the authenticated `tenki` CLI on `PATH`; run `tenki login` and complete the browser flow.
 - **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.
 - **Agent Sandbox** — `kubectl`, an absolute kubeconfig or inherited

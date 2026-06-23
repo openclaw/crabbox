@@ -477,6 +477,64 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Sprites live smoke requires the sprite CLI before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-sprites-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(path.join(bin, "rg"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "sprites",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_SPRITES_TOKEN: "",
+      PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+      SETUP_SPRITE_TOKEN: "",
+      SPRITE_TOKEN: "",
+      SPRITES_TOKEN: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /sprites smoke requires the authenticated Sprites sprite CLI on PATH/,
+  );
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^warmup --provider sprites/m);
+  assert.doesNotMatch(calls, /^status --provider sprites/m);
+  assert.doesNotMatch(calls, /^ssh --provider sprites/m);
+  assert.doesNotMatch(calls, /^run --provider sprites/m);
+  assert.doesNotMatch(calls, /^list --provider sprites/m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

@@ -125,6 +125,23 @@ command, or cleanup behavior.
 ```sh
 export SPRITES_TOKEN=...
 go build -trimpath -o bin/crabbox ./cmd/crabbox
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_PROVIDERS=sprites \
+CRABBOX_LIVE_REPO=/path/to/my-app \
+scripts/live-smoke.sh
+```
+
+The shared harness exits before any Sprites `warmup`, `status`, `ssh`, `run`,
+`list`, or `stop` command when the authenticated `sprite` CLI is missing. With
+the CLI and token configured, it creates one short-lived sprite, waits for SSH,
+verifies `ssh`, runs one command, lists normalized Sprites inventory, and stops
+the lease.
+
+For manual debugging, run the same lifecycle directly:
+
+```sh
+export SPRITES_TOKEN=...
+go build -trimpath -o bin/crabbox ./cmd/crabbox
 
 bin/crabbox warmup --provider sprites --timing-json
 lease=<slug-or-cbx_id-from-warmup-output>
