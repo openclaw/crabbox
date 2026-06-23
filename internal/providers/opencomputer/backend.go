@@ -102,18 +102,29 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		}
 	}
 	shouldStop := acquired && !req.Keep
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: openComputerCleanupCommand(leaseID),
+	}
 	if shouldStop {
 		defer func() {
 			if !shouldStop {
+				session.Kept = true
 				return
 			}
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
 			if killErr := api.killSandbox(cleanupCtx, sandboxID); killErr != nil && !isOCNotFound(killErr) {
 				fmt.Fprintf(b.rt.Stderr, "warning: opencomputer kill failed for %s: %v\n", sandboxID, killErr)
+				session.Kept = true
 				return
 			}
 			removeLeaseClaim(leaseID)
+			session.Kept = false
 		}()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
@@ -124,16 +135,16 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, sandboxID, req, workdir)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
+			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
+		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 	}
 
 	if req.SyncOnly {
-		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true}
+		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
 			return result, writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
@@ -154,7 +165,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 
 	command, err := buildCommand(req.Command, req.ShellMode)
 	if err != nil {
-		return RunResult{}, err
+		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 	}
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
@@ -169,6 +180,11 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
+		Provider:      providerName,
+		LeaseID:       leaseID,
+		Slug:          slug,
+		CommandText:   strings.Join(req.Command, " "),
+		Session:       session,
 	}
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "opencomputer run summary sync_skipped=true command=%s total=%s exit=%d\n",
@@ -203,6 +219,10 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("opencomputer run exited %d", exitCode)}
 	}
 	return result, nil
+}
+
+func openComputerCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
 func (b *openComputerBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

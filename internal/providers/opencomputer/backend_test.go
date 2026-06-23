@@ -46,6 +46,9 @@ func TestProviderSpec(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v want [{linux}]", spec.Targets)
 	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureRunSession) {
+		t.Fatalf("features=%#v want archive sync and run session", spec.Features)
+	}
 }
 
 func TestProviderForResolvesNameAndAliases(t *testing.T) {
@@ -534,6 +537,18 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	if res.ExitCode != 0 {
 		t.Fatalf("exit=%d", res.ExitCode)
 	}
+	if res.Provider != providerName || res.LeaseID == "" || res.Slug == "" {
+		t.Fatalf("result=%#v", res)
+	}
+	if res.Session == nil {
+		t.Fatal("res.Session is nil")
+	}
+	if res.Session.Provider != providerName || res.Session.LeaseID != res.LeaseID || res.Session.Slug != res.Slug || res.Session.Reused || res.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", res.Session, res)
+	}
+	if res.Session.CleanupCommand != "crabbox stop --provider opencomputer --id "+shellQuote(res.LeaseID) {
+		t.Fatalf("cleanup command=%q", res.Session.CleanupCommand)
+	}
 	if f.callsExact(http.MethodPost, "/api/sandboxes") != 1 {
 		t.Fatalf("want 1 create, got %d", f.callsExact(http.MethodPost, "/api/sandboxes"))
 	}
@@ -572,6 +587,9 @@ func TestRunCleanupCannotBlockForever(t *testing.T) {
 	}
 	if res.ExitCode != 0 {
 		t.Fatalf("exit=%d", res.ExitCode)
+	}
+	if res.Session == nil || !res.Session.Kept {
+		t.Fatalf("session=%#v, want retained cleanup handle", res.Session)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("Run took %s, cleanup should be bounded", elapsed)
@@ -962,8 +980,12 @@ func TestSyncOnlySkipsUserCommand(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}} // mkdir, extract
 	backend := newAPIBackend(t, f)
-	if _, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"echo", "should-not-run"}, SyncOnly: true}); err != nil {
+	res, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: newGitRepo(t)}, Command: []string{"echo", "should-not-run"}, SyncOnly: true})
+	if err != nil {
 		t.Fatalf("Run err=%v", err)
+	}
+	if res.Session == nil || res.Session.Kept {
+		t.Fatalf("session=%#v, want cleaned sync-only handle", res.Session)
 	}
 	for _, e := range f.allExecs() {
 		if e.req.Cmd == "echo" {
@@ -1003,11 +1025,41 @@ func TestKeepRetainsSandbox(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
 	backend := newAPIBackend(t, f)
-	if _, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Keep: true}); err != nil {
+	res, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Keep: true})
+	if err != nil {
 		t.Fatalf("Run err=%v", err)
+	}
+	if res.Session == nil || res.Session.Reused || !res.Session.Kept {
+		t.Fatalf("session=%#v, want retained new sandbox", res.Session)
 	}
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
 		t.Fatalf("kill must not run with --keep")
+	}
+}
+
+func TestRunReturnsReusedSandboxSession(t *testing.T) {
+	f := newFakeAPI(t)
+	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
+	backend := newAPIBackend(t, f)
+	repoRoot := t.TempDir()
+	leaseID := leasePrefix + f.sandboxID
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "blue", providerName, testOCClaimScope(f.server.URL), "", repoRoot, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	res, err := backend.Run(context.Background(), RunRequest{
+		ID:      leaseID,
+		Repo:    Repo{Name: "carbbox", Root: repoRoot},
+		Command: []string{"true"},
+		NoSync:  true,
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if res.Session == nil || res.Session.LeaseID != leaseID || res.Session.Slug != "blue" || !res.Session.Reused || !res.Session.Kept {
+		t.Fatalf("session=%#v", res.Session)
+	}
+	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
+		t.Fatalf("reused sandbox should not be deleted")
 	}
 }
 
