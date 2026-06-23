@@ -1063,6 +1063,97 @@ esac
   assert.match(seen, /^sandbox list --all --name-prefix test --sort-by name --limit 50$/m);
 });
 
+test("linode live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-linode-dispatch-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+if [[ "\${LINODE_TOKEN:-}" != "linode_fake_value" ]]; then
+  printf 'missing Linode auth\\n' >&2
+  exit 91
+fi
+case "$1" in
+  doctor)
+    printf 'auth=ready control_plane=ready inventory=ready api=list mutation=false leases=0 runtime=unchecked default_type=g6-standard-1 region=us-ord image=linode/ubuntu24.04\\n'
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\\n'
+    else
+      printf '[{"labels":{"slug":"%s"}}]\\n' "$slug"
+    fi
+    ;;
+  warmup)
+    requested_slug=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --slug)
+          requested_slug="\${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\\n' "$requested_slug" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\\n'
+    ;;
+  run)
+    printf 'ok\\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  cleanup)
+    printf 'skip server id=none name=none reason=missing labels\\n'
+    ;;
+  *)
+    printf 'unexpected args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "linode",
+      LINODE_TOKEN: "linode_fake_value",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_linode_smoke_passed slug=linode-smoke-/);
+  assert.doesNotMatch(result.stdout + result.stderr, /linode_fake_value/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen[0], "doctor --provider linode");
+  assert.equal(seen[1], "list --provider linode --json");
+  assert.match(seen[2], /^warmup --provider linode --slug linode-smoke-\d{14}-\d+ --keep --type g6-standard-1 --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[3], /^status --provider linode --id linode-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider linode --id linode-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
+  assert.equal(seen[5], "list --provider linode --json");
+  assert.match(seen[6], /^stop --provider linode linode-smoke-\d{14}-\d+$/);
+  assert.equal(seen[7], "cleanup --provider linode --dry-run");
+  assert.equal(seen[8], "list --provider linode --json");
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");

@@ -898,6 +898,10 @@ if has_provider scaleway; then
   "$root/scripts/live-scaleway-smoke.sh"
 fi
 
+if has_provider linode; then
+  "$root/scripts/live-linode-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi
