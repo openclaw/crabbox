@@ -67,6 +67,11 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=docker-sandbox CRABBOX_LIVE_COORDINATOR=0 
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=smolvm CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=superserve CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=vercel-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=apple-container CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=local-container CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=multipass CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tart CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=apple-vz CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=linode scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=nebius scripts/live-smoke.sh
@@ -152,6 +157,23 @@ Per-provider smoke prerequisites:
 - **SmolVM** — `CRABBOX_SMOLVM_API_KEY`, `SMOLMACHINES_API_KEY`, or `SMK_API_KEY`.
 - **Superserve** — `CRABBOX_SUPERSERVE_API_KEY` or `SUPERSERVE_API_KEY`.
 - **Vercel Sandbox** — authenticated `sandbox` CLI on `PATH`; project and team scope may come from `CRABBOX_VERCEL_SANDBOX_PROJECT_ID` plus `CRABBOX_VERCEL_SANDBOX_TEAM_ID`, `CRABBOX_VERCEL_SANDBOX_SCOPE`, or the Vercel OIDC environment.
+- **Apple Container** — Apple silicon macOS with Apple's `container` CLI on
+  `PATH` and `container system start` already run. `scripts/live-smoke.sh` uses
+  the normal SSH lease lifecycle with a short TTL and no coordinator.
+- **Local Container** — a working Docker-compatible CLI and daemon such as
+  Docker Desktop, OrbStack, or Colima. `scripts/live-smoke.sh` uses the normal
+  SSH lease lifecycle with a short TTL and no coordinator.
+- **Multipass** — Canonical Multipass installed locally and able to launch
+  Ubuntu VMs. `scripts/live-smoke.sh` uses the normal SSH lease lifecycle with a
+  short TTL and no coordinator.
+- **Tart** — Apple silicon macOS with the `tart` CLI installed, a reachable base
+  image, and guest login credentials configured when the selected image needs a
+  password. `scripts/live-smoke.sh` uses the normal SSH lease lifecycle with a
+  longer TTL and no coordinator.
+- **Apple VZ** — Apple silicon macOS, a locally built Crabbox binary
+  (`CRABBOX_BIN`), and the bundled or explicit `crabbox-apple-vz-helper`.
+  `scripts/live-smoke.sh` uses the normal SSH lease lifecycle and preserves
+  `CRABBOX_LIVE_APPLE_VZ_HELPER` for the whole run when set.
 - **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or
   `WANDB_API_KEY` (from `wandb login`). `scripts/live-smoke.sh` refuses to call
   W&B until an API key is exported, then runs `doctor`, executes one no-sync

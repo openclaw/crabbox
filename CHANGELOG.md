@@ -41,6 +41,7 @@
 - Added Daytona live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Namespace Devbox live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Namespace Compute live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
+- Added local runtime live-smoke documentation coverage for Apple Container, Local Container, Multipass, Tart, and Apple VZ.
 - Added Semaphore live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Sprites live-smoke documentation and dispatch regression coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Blacksmith Testbox live-smoke documentation and workflow preflight coverage for the guarded `scripts/live-smoke.sh` matrix.

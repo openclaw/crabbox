@@ -12,6 +12,16 @@ function writeExecutable(file, body) {
   fs.chmodSync(file, 0o755);
 }
 
+test("operations docs cover local runtime live-smoke dispatches", () => {
+  const docs = fs.readFileSync(path.join(repoRoot, "docs", "operations.md"), "utf8");
+  for (const provider of ["apple-container", "local-container", "multipass", "tart", "apple-vz"]) {
+    assert.match(docs, new RegExp(`CRABBOX_LIVE_PROVIDERS=${provider}\\b`));
+  }
+  for (const heading of ["Apple Container", "Local Container", "Multipass", "Tart", "Apple VZ"]) {
+    assert.match(docs, new RegExp(`\\*\\*${heading}\\*\\*`));
+  }
+});
+
 test("OpenSandbox live smoke dispatches to the provider-specific script", () => {
   const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
     cwd: repoRoot,
