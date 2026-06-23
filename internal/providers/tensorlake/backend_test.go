@@ -41,6 +41,9 @@ func TestProviderSpec(t *testing.T) {
 	if spec.Features.Has(core.FeatureURLBridge) {
 		t.Fatalf("features=%#v should not advertise unsupported URL bridge", spec.Features)
 	}
+	if !spec.Features.Has(core.FeatureRunSession) {
+		t.Fatalf("features=%#v should advertise run-session", spec.Features)
+	}
 }
 
 func TestProviderForResolvesNameAndAliases(t *testing.T) {
@@ -453,6 +456,15 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	if result.Status != core.RunStatusSucceeded || result.ErrorKind != core.RunErrorNone {
 		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
 	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != "tlsbx_3pryjysezwsnlex226i5h" || result.Session.Slug == "" || result.Session.Reused || result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if result.Session.CleanupCommand != "crabbox stop --provider tensorlake --id 'tlsbx_3pryjysezwsnlex226i5h'" {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	verbs := callVerbs(runner)
 	// With --no-sync we still prepare the workdir (mkdir) before the user's command.
 	want := []string{"sbx create", "sbx exec", "sbx exec", "sbx terminate"}
@@ -841,11 +853,89 @@ func TestKeepRetainsSandbox(t *testing.T) {
 		Keep:    true,
 		Reclaim: true,
 	}
-	if _, err := backend.Run(context.Background(), req); err != nil {
+	result, err := backend.Run(context.Background(), req)
+	if err != nil {
 		t.Fatalf("Run err=%v", err)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || !result.Session.Kept || result.Session.Reused || result.Session.CleanupCommand == "" {
+		t.Fatalf("session=%#v", result.Session)
 	}
 	if findCall(runner, "sbx terminate") != nil {
 		t.Fatalf("sbx terminate called despite Keep=true")
+	}
+}
+
+func TestRunReusedSandboxReportsKeptSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	sandboxID := "reuseidsession1234"
+	leaseID := leasePrefix + sandboxID
+	repoRoot := t.TempDir()
+	if err := claimLeaseForRepoProvider(leaseID, "reuse-session", providerName, repoRoot, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	defer removeLeaseClaim(leaseID)
+	runner := newRunner(map[string]scriptedReply{
+		"sbx exec": {stdout: "hi\n"},
+	}, nil)
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
+	req := RunRequest{
+		ID:      "reuse-session",
+		Repo:    Repo{Name: "carbbox", Root: repoRoot},
+		Command: []string{"echo", "hi"},
+		NoSync:  true,
+	}
+	result, err := backend.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != leaseID || result.Session.Slug != "reuse-session" || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if findCall(runner, "sbx terminate") != nil {
+		t.Fatalf("reused sandbox should not be terminated")
+	}
+}
+
+func TestRunTerminateFailureReportsRetainedSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	runner := newRunner(
+		map[string]scriptedReply{
+			"sbx create": {stdout: "termfail0123456789\n"},
+			"sbx exec":   {stdout: "hi\n"},
+		},
+		map[string][]scriptedReply{
+			"sbx terminate": {
+				{stderr: "terminate failed\n", exitCode: 1},
+			},
+		},
+	)
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	req := RunRequest{
+		Repo:    Repo{Name: "carbbox", Root: t.TempDir()},
+		Command: []string{"echo", "hi"},
+		NoSync:  true,
+	}
+	result, err := backend.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if !strings.Contains(stderr.String(), "warning: tensorlake terminate failed for termfail0123456789") {
+		t.Fatalf("stderr=%q, want terminate warning", stderr.String())
 	}
 }
 

@@ -25,6 +25,7 @@ type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
+type RunSessionHandle = core.RunSessionHandle
 type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
@@ -124,6 +125,10 @@ func shellScriptFromArgv(command []string) string {
 
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
+}
+
+func tensorlakeCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
 func syncExcludes(root string, cfg Config) ([]string, error) {
