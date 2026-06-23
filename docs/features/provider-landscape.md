@@ -21,6 +21,9 @@ That means:
 - support stable execution substrates as providers;
 - expose shared workflow capabilities through `crabbox providers` and
   `crabbox providers recommend`;
+- keep runtime-shape labels provider-neutral (`managed-sandbox`,
+  `delegated-command`, `ssh-host`, `worker-module`) instead of copying one
+  vendor's control-plane terms;
 - use `ssh` or `external` for tools that already produce a normal host contract;
 - defer first-class support for runtimes whose useful behavior is still too
   product-specific to test offline.
@@ -52,6 +55,9 @@ The better path is to make the generic seams real first:
 
 - `workspace-checkpoint`, `workspace-fork`, `workspace-restore`, and
   `provider-snapshot` keep forkable workspace language provider-neutral.
+- `runtime` filter values like `managed-sandbox`, `delegated-command`, and
+  `worker-module` describe the execution shape without implying Mitos-style
+  live microVM forking.
 - `mcp-attachments` stays a capability, not a Mitos-only command mode.
 - `run-proof`, `run-artifacts`, `run-downloads`, and `url-bridge` keep evidence
   portable across delegated sandboxes and proof runners.
