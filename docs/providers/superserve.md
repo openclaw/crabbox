@@ -149,6 +149,10 @@ sandbox data plane.
 7. One-shot sandboxes are deleted after successful `run` unless `--keep` is set.
    Retained sandboxes can be reused with `--id` and later removed with `stop`.
 
+`run --lease-output` records the Superserve lease, reuse/retention state, and
+matching `crabbox stop --provider superserve --id ...` cleanup command for
+orchestrators that need to inspect or clean up retained sandboxes later.
+
 ## Capabilities
 
 - SSH: no.

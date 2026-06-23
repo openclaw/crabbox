@@ -23,6 +23,7 @@ type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type CleanupRequest = core.CleanupRequest
+type RunSessionHandle = core.RunSessionHandle
 type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
@@ -103,6 +104,10 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 
 func shellQuote(value string) string {
 	return core.ShellQuote(value)
+}
+
+func superserveCleanupCommand(leaseID string) string {
+	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
 func shellScriptFromArgv(command []string) string {

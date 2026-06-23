@@ -413,6 +413,15 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 	if result.ExitCode != 0 || result.Provider != providerName || result.LeaseID == "" || !result.SyncDelegated {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Reused || result.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+	if result.Session.CleanupCommand != "crabbox stop --provider superserve --id "+shellQuote(result.LeaseID) {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
 	if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "warn\n") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -472,6 +481,12 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 	}
 	if result.ExitCode != 7 {
 		t.Fatalf("result=%#v", result)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("keep-on-failure deleted sandbox: %#v", fake.deleted)
@@ -562,6 +577,12 @@ func TestRunPropagatesOneShotDeleteFailureAndPreservesClaim(t *testing.T) {
 	if result.ExitCode != 1 {
 		t.Fatalf("result=%#v, want cleanup failure exit 1", result)
 	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
 	leaseID := leasePrefix + fake.sandbox.ID
 	if claim, claimErr := readLeaseClaim(leaseID); claimErr != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim should remain for cleanup retry: %#v err=%v", claim, claimErr)
@@ -633,6 +654,12 @@ func TestRunRefreshesRetainedClaimActivityAfterSuccessfulCommand(t *testing.T) {
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("result=%#v", result)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != leaseID || result.Session.Slug != "retained" || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
 	}
 	claim, err := readLeaseClaim(leaseID)
 	if err != nil {
@@ -728,6 +755,12 @@ func TestRunSyncOnlyUploadsArchiveExtractsAndCleansRemoteArchive(t *testing.T) {
 	if result.ExitCode != 0 || !strings.Contains(stdout.String(), "synced "+defaultWorkdir) {
 		t.Fatalf("result=%#v stdout=%q", result, stdout.String())
 	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
 	if len(fake.uploads) != 1 || !strings.HasPrefix(fake.uploads[0].path, "/tmp/crabbox-sync-") || fake.uploads[0].size == 0 {
 		t.Fatalf("uploads=%#v", fake.uploads)
 	}
@@ -767,6 +800,9 @@ func TestRunRejectsTailscaleBeforeCreate(t *testing.T) {
 func TestProviderDoesNotAdvertisePauseResume(t *testing.T) {
 	if (Provider{}).Spec().Features.Has(core.FeaturePauseResume) {
 		t.Fatal("superserve must not advertise pause/resume until backend methods are implemented")
+	}
+	if !(Provider{}).Spec().Features.Has(core.FeatureRunSession) {
+		t.Fatal("superserve should advertise run-session")
 	}
 }
 

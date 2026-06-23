@@ -171,9 +171,43 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if access.Sandbox.ID == "" {
 		access.Sandbox.ID = sandboxID
 	}
+	cleanedUp := false
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: superserveCleanupCommand(leaseID),
+	}
+	finishResult := func(result RunResult) RunResult {
+		if result.Provider == "" {
+			result.Provider = providerName
+		}
+		if result.LeaseID == "" {
+			result.LeaseID = leaseID
+		}
+		if result.Slug == "" {
+			result.Slug = slug
+		}
+		result.Session = session
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
+	defer func() {
+		result = finishResult(result)
+	}()
+	cleanupCreatedRun := func() error {
+		before := shouldStop
+		err := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop)
+		if before && err == nil {
+			cleanedUp = true
+		}
+		return err
+	}
 	if shouldStop {
 		defer func() {
-			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+			if cleanupErr := cleanupCreatedRun(); cleanupErr != nil {
 				if result.ExitCode == 0 {
 					result.ExitCode = 1
 				}
@@ -215,7 +249,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			fmt.Fprintf(b.rt.Stderr, "warning: refresh superserve lease activity failed lease=%s: %v\n", leaseID, activityErr)
 			result.ExitCode = 1
 		}
-		if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+		if cleanupErr := cleanupCreatedRun(); cleanupErr != nil {
 			result.ExitCode = 1
 			return result, cleanupErr
 		}
@@ -301,7 +335,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			result.ExitCode = 1
 		}
 	}
-	if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+	if cleanupErr := cleanupCreatedRun(); cleanupErr != nil {
 		if result.ExitCode == 0 {
 			result.ExitCode = 1
 		}
