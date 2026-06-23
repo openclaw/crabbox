@@ -750,10 +750,6 @@ func wrapRemoteForTargetWithWaitTimeout(target SSHTarget, remote string, waitTim
 	return remote
 }
 
-func wsl2Command(remote string) string {
-	return wsl2CommandWithWaitTimeout(remote, 0)
-}
-
 func wsl2CommandWithWaitTimeout(remote string, waitTimeout time.Duration) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(remote))
 	wait := `$process.WaitForExit()

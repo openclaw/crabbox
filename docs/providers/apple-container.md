@@ -167,6 +167,21 @@ variable consumed by the bootstrap script.
   the runtime reports the stopped state and includes a short `container logs`
   tail instead of waiting for the full SSH timeout.
 
+## Optional live smoke
+
+Run the guarded local smoke on an Apple silicon Mac with Apple's `container`
+service running:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=apple-container scripts/live-smoke.sh
+```
+
+The smoke creates one short-lived Apple container, waits for SSH readiness,
+syncs the current checkout, runs the shared live-smoke command, prints recent
+history/log evidence when available, then stops only the lease it created. It
+uses `--ttl 15m --idle-timeout 5m` and the same cleanup path as normal
+`crabbox stop --provider apple-container`.
+
 ## Runtime expectations
 
 The backend relies on the documented Apple `container` CLI surface:

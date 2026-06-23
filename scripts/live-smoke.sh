@@ -966,6 +966,10 @@ if has_provider incus; then
   incus_smoke
 fi
 
+if has_provider apple-container || has_provider apple || has_provider applecontainer; then
+  provider_smoke apple-container --ttl 15m --idle-timeout 5m
+fi
+
 if has_provider apple-vz || has_provider applevz; then
   apple_vz_args=(--ttl 15m --idle-timeout 5m)
   apple_vz_helper=""
