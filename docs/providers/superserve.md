@@ -172,6 +172,15 @@ short-lived Superserve sandbox:
 CRABBOX_LIVE=1 \
 CRABBOX_LIVE_PROVIDERS=superserve \
 CRABBOX_SUPERSERVE_API_KEY=ss_live_... \
+scripts/live-smoke.sh
+```
+
+The top-level smoke dispatches to the provider-specific script:
+
+```sh
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_PROVIDERS=superserve \
+CRABBOX_SUPERSERVE_API_KEY=ss_live_... \
 scripts/live-superserve-smoke.sh
 ```
 
