@@ -306,6 +306,13 @@ go build -trimpath -o bin/crabbox ./cmd/crabbox
 CRABBOX_BIN=./bin/crabbox scripts/proxmox-live-smoke.sh
 ```
 
+The same proof script can be selected through the guarded top-level live smoke
+matrix:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=proxmox CRABBOX_LIVE_COORDINATOR=0 CRABBOX_BIN=./bin/crabbox scripts/live-smoke.sh
+```
+
 The read-only path runs `doctor --provider proxmox --json`, validates the JSON
 shape, runs `list --provider proxmox --json`, and writes raw plus redacted logs
 under a temporary proof directory. If you also set

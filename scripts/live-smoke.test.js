@@ -30,6 +30,61 @@ test("OpenSandbox live smoke dispatches to the provider-specific script", () => 
   assert.match(result.stderr, /admin active-lease check skipped/);
 });
 
+test("Proxmox live smoke dispatches to the provider-specific proof script", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-proxmox-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const proof = path.join(dir, "proof");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(proof, { mode: 0o700 });
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$1" in
+  config)
+    printf '{}\\n'
+    ;;
+  doctor)
+    printf '{"ok":true,"provider":"proxmox","checks":[]}\\n'
+    ;;
+  list)
+    printf '[]\\n'
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "proxmox",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_PROXMOX_LIVE_SMOKE_DIR: proof,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=external_user_owned/);
+  assert.match(result.stdout, /proof_dir=<proof-dir>/);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^doctor --provider proxmox --json$/m);
+  assert.match(calls, /^list --provider proxmox --json$/m);
+  assert.doesNotMatch(calls, /^warmup /m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");

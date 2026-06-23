@@ -926,6 +926,10 @@ if has_provider opensandbox; then
   "$root/scripts/live-opensandbox-smoke.sh"
 fi
 
+if has_provider proxmox; then
+  "$root/scripts/proxmox-live-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi
