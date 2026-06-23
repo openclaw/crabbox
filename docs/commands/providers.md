@@ -11,6 +11,7 @@ crabbox providers --json
 crabbox providers filters
 crabbox providers filters --json
 crabbox providers --reachability provider-url --evidence preview-url
+crabbox providers --lifecycle cleanup --lifecycle workspace-state
 crabbox providers --target linux --workspace checkpoint --workspace fork --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
@@ -46,6 +47,9 @@ crabbox providers recommend versioned-workspace
 - `--evidence <capability>`: keep providers that advertise this normalized
   evidence capability, such as `proof`, `artifacts`, `downloads`,
   `preview-url`, or `session`. Repeatable.
+- `--lifecycle <capability>`: keep providers that advertise this normalized
+  lifecycle capability, such as `cleanup`, `pause-resume`, `run-session`,
+  `workspace-state`, or `coordinator-governed`. Repeatable.
 
 Repeated filters are combined with AND semantics. Comma-separated values are also
 accepted, so `--workspace checkpoint,fork` means the same thing as passing
@@ -83,10 +87,11 @@ provider filter values:
   reachability: provider-url,ssh-tunnel,tailnet-egress,tailnet-peer
   workspace: checkpoint,fork,restore,snapshot-ref
   evidence: artifacts,downloads,preview-url,proof,session
+  lifecycle: cleanup,coordinator-governed,pause-resume,run-session,workspace-state
 ```
 
 JSON output returns one object with `kind`, `category`, `target`, `feature`,
-`runtime`, `reachability`, `workspace`, and `evidence` arrays.
+`runtime`, `reachability`, `workspace`, `evidence`, and `lifecycle` arrays.
 
 ## `providers recommend`
 
@@ -192,9 +197,9 @@ Recommendation flags:
 - `--limit <n>`: maximum recommendations to print. Defaults to `5`.
 - `--json`: emit recommendations as JSON.
 - `--kind`, `--category`, `--target`, `--feature`, `--runtime`,
-  `--reachability`, `--workspace`, `--evidence`: filter the candidate provider
-  matrix before scoring. These flags use the same values and repeat/comma
-  semantics as the base `providers` matrix command.
+  `--reachability`, `--workspace`, `--evidence`, `--lifecycle`: filter the
+  candidate provider matrix before scoring. These flags use the same values and
+  repeat/comma semantics as the base `providers` matrix command.
 
 ## Output
 
@@ -220,6 +225,7 @@ parallels
   runtime: ssh-host,local-runtime,interactive
   reachability: ssh-tunnel
   workspace: checkpoint,fork,restore,snapshot-ref
+  lifecycle: cleanup,workspace-state
   coordinator: never
 
 blacksmith-testbox
@@ -230,6 +236,7 @@ blacksmith-testbox
   features: cache-volume,run-proof,run-session,run-artifacts
   runtime: delegated-command,ci-runner
   evidence: proof,artifacts,session
+  lifecycle: run-session
   coordinator: never
   aliases: blacksmith
 
@@ -242,6 +249,7 @@ e2b
   runtime: delegated-command,managed-sandbox
   reachability: provider-url
   evidence: preview-url,session
+  lifecycle: run-session
   coordinator: never
 
 wandb
@@ -271,6 +279,7 @@ hostinger
   features: ssh,crabbox-sync,cleanup
   runtime: ssh-host
   reachability: ssh-tunnel
+  lifecycle: cleanup
   coordinator: never
 ```
 
@@ -295,6 +304,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "features": ["ssh", "crabbox-sync", "cleanup"],
     "runtime": ["ssh-host"],
     "reachability": ["ssh-tunnel"],
+    "lifecycle": ["cleanup"],
     "coordinator": "never"
   },
   {
@@ -307,6 +317,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
     "runtime": ["delegated-command", "ci-runner"],
     "evidence": ["proof", "artifacts", "session"],
+    "lifecycle": ["run-session"],
     "coordinator": "never"
   }
 ]
@@ -362,6 +373,10 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
   feature flags. Possible values are `proof`, `artifacts`, `downloads`,
   `preview-url`, and `session`. The field is omitted when a provider does not
   advertise any run evidence or preview capabilities.
+- `lifecycle`: normalized lifecycle controls derived from provider metadata and
+  feature flags. Possible values are `cleanup`, `pause-resume`, `run-session`,
+  `workspace-state`, and `coordinator-governed`. The field is omitted when a
+  provider does not advertise any lifecycle controls.
 - `coordinator`: whether the provider can route leases through the broker.
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.
@@ -379,6 +394,7 @@ Recommendation JSON returns ranked objects:
     "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
     "runtime": ["delegated-command", "ci-runner"],
     "evidence": ["proof", "artifacts", "session"],
+    "lifecycle": ["run-session"],
     "score": 158,
     "reasons": [
       "CI proof runner",

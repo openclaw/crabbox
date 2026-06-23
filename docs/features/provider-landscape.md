@@ -64,6 +64,9 @@ The better path is to make the generic seams real first:
 - `mcp-attachments` stays a capability, not a Mitos-only command mode.
 - `run-proof`, `run-artifacts`, `run-downloads`, and `url-bridge` keep evidence
   portable across delegated sandboxes and proof runners.
+- `lifecycle` filter values like `cleanup`, `pause-resume`, `run-session`,
+  `workspace-state`, and `coordinator-governed` expose stateful sandbox and
+  devbox controls without baking in one provider's lifecycle API.
 - `reachability` filter values describe access planes without claiming a
   provider-specific network isolation model.
 - `remote-dev`, `mcp-sandbox`, `isolated-execution`, and

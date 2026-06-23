@@ -123,6 +123,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if !containsString(aws.Reachability, "ssh-tunnel") {
 		t.Fatalf("aws reachability=%v missing ssh-tunnel", aws.Reachability)
 	}
+	for _, capability := range []string{"coordinator-governed", "cleanup"} {
+		if !containsString(aws.Lifecycle, capability) {
+			t.Fatalf("aws lifecycle=%v missing %s", aws.Lifecycle, capability)
+		}
+	}
 	if incus.Kind != ProviderKindSSHLease || incus.Family != "local-vm" {
 		t.Fatalf("incus kind/family=%q/%q", incus.Kind, incus.Family)
 	}
@@ -205,6 +210,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if !containsString(localContainer.Workspace, "checkpoint") || !containsString(localContainer.Workspace, "fork") {
 		t.Fatalf("local-container workspace=%v", localContainer.Workspace)
 	}
+	for _, capability := range []string{"cleanup", "workspace-state"} {
+		if !containsString(localContainer.Lifecycle, capability) {
+			t.Fatalf("local-container lifecycle=%v missing %s", localContainer.Lifecycle, capability)
+		}
+	}
 	for _, capability := range []string{"checkpoint", "fork", "restore", "snapshot-ref"} {
 		if !containsString(parallels.Workspace, capability) {
 			t.Fatalf("parallels workspace=%v missing %s", parallels.Workspace, capability)
@@ -215,6 +225,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 			t.Fatalf("blacksmith evidence=%v missing %s", blacksmith.Evidence, capability)
 		}
 	}
+	if !containsString(blacksmith.Lifecycle, "run-session") {
+		t.Fatalf("blacksmith lifecycle=%v missing run-session", blacksmith.Lifecycle)
+	}
 	for _, capability := range []string{"delegated-command", "ci-runner"} {
 		if !containsString(blacksmith.Runtime, capability) {
 			t.Fatalf("blacksmith runtime=%v missing %s", blacksmith.Runtime, capability)
@@ -224,6 +237,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		if !containsString(e2b.Evidence, capability) {
 			t.Fatalf("e2b evidence=%v missing %s", e2b.Evidence, capability)
 		}
+	}
+	if !containsString(e2b.Lifecycle, "run-session") {
+		t.Fatalf("e2b lifecycle=%v missing run-session", e2b.Lifecycle)
 	}
 	if !containsString(e2b.Reachability, "provider-url") {
 		t.Fatalf("e2b reachability=%v missing provider-url", e2b.Reachability)
@@ -236,6 +252,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	for _, capability := range []string{"downloads", "preview-url", "session"} {
 		if !containsString(islo.Evidence, capability) {
 			t.Fatalf("islo evidence=%v missing %s", islo.Evidence, capability)
+		}
+	}
+	for _, capability := range []string{"pause-resume", "run-session"} {
+		if !containsString(islo.Lifecycle, capability) {
+			t.Fatalf("islo lifecycle=%v missing %s", islo.Lifecycle, capability)
 		}
 	}
 	for _, capability := range []string{"tailnet-egress", "provider-url"} {
@@ -271,11 +292,20 @@ func TestProvidersCommandJSON(t *testing.T) {
 		if entry.Provider == "aws" && !containsString(entry.Reachability, "ssh-tunnel") {
 			t.Fatalf("aws json missing ssh-tunnel reachability: %#v", entry)
 		}
+		if entry.Provider == "aws" && !containsString(entry.Lifecycle, "coordinator-governed") {
+			t.Fatalf("aws json missing coordinator-governed lifecycle: %#v", entry)
+		}
 		if entry.Provider == "parallels" && !containsString(entry.Workspace, "snapshot-ref") {
 			t.Fatalf("parallels json missing workspace snapshot-ref: %#v", entry)
 		}
+		if entry.Provider == "parallels" && !containsString(entry.Lifecycle, "workspace-state") {
+			t.Fatalf("parallels json missing workspace-state lifecycle: %#v", entry)
+		}
 		if entry.Provider == "blacksmith-testbox" && !containsString(entry.Evidence, "proof") {
 			t.Fatalf("blacksmith json missing evidence proof: %#v", entry)
+		}
+		if entry.Provider == "blacksmith-testbox" && !containsString(entry.Lifecycle, "run-session") {
+			t.Fatalf("blacksmith json missing run-session lifecycle: %#v", entry)
 		}
 	}
 }
@@ -287,7 +317,7 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 		t.Fatalf("providers error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  category: brokerable-cloud\n", "  features: ", "  runtime: ssh-host,interactive\n", "  reachability: ssh-tunnel\n"} {
+	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  category: brokerable-cloud\n", "  features: ", "  runtime: ssh-host,interactive\n", "  reachability: ssh-tunnel\n", "  lifecycle: coordinator-governed,cleanup\n"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers output missing %q:\n%s", want, text)
 		}
@@ -301,8 +331,14 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	if !strings.Contains(text, "parallels\n") || !strings.Contains(text, "  workspace: checkpoint,fork,restore,snapshot-ref\n") {
 		t.Fatalf("providers output missing workspace contract:\n%s", text)
 	}
+	if !strings.Contains(text, "parallels\n") || !strings.Contains(text, "  lifecycle: cleanup,workspace-state\n") {
+		t.Fatalf("providers output missing lifecycle contract:\n%s", text)
+	}
 	if !strings.Contains(text, "blacksmith-testbox\n") || !strings.Contains(text, "  evidence: proof,artifacts,session\n") {
 		t.Fatalf("providers output missing evidence contract:\n%s", text)
+	}
+	if !strings.Contains(text, "blacksmith-testbox\n") || !strings.Contains(text, "  lifecycle: run-session\n") {
+		t.Fatalf("providers output missing run-session lifecycle:\n%s", text)
 	}
 }
 
@@ -315,6 +351,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 		"--runtime", "managed-sandbox",
 		"--reachability", "provider-url",
 		"--evidence", "preview-url",
+		"--lifecycle", "run-session",
 		"--json",
 	})
 	if err != nil {
@@ -328,7 +365,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 		t.Fatal("expected delegated preview providers")
 	}
 	for _, entry := range entries {
-		if entry.Kind != ProviderKindDelegatedRun || entry.Category != "delegated-sandbox" || !containsString(entry.Targets, targetLinux) || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Reachability, "provider-url") || !containsString(entry.Evidence, "preview-url") {
+		if entry.Kind != ProviderKindDelegatedRun || entry.Category != "delegated-sandbox" || !containsString(entry.Targets, targetLinux) || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Reachability, "provider-url") || !containsString(entry.Evidence, "preview-url") || !containsString(entry.Lifecycle, "run-session") {
 			t.Fatalf("entry escaped filters: %#v", entry)
 		}
 	}
@@ -338,19 +375,20 @@ func TestProvidersCommandFiltersRequireAllCapabilities(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
 		"--workspace", "checkpoint,fork",
+		"--lifecycle", "cleanup,workspace-state",
 	})
 	if err != nil {
 		t.Fatalf("providers workspace filter error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
 	if !strings.Contains(text, "local-container\n") {
-		t.Fatalf("workspace filter should include local-container:\n%s", text)
+		t.Fatalf("workspace/lifecycle filter should include local-container:\n%s", text)
 	}
 	if !strings.Contains(text, "parallels\n") {
-		t.Fatalf("workspace filter should include parallels:\n%s", text)
+		t.Fatalf("workspace/lifecycle filter should include parallels:\n%s", text)
 	}
 	if strings.Contains(text, "blacksmith-testbox\n") {
-		t.Fatalf("workspace filter should exclude providers without workspace capabilities:\n%s", text)
+		t.Fatalf("workspace/lifecycle filter should exclude providers without workspace capabilities:\n%s", text)
 	}
 }
 
@@ -362,6 +400,18 @@ func TestProvidersCommandRejectsUnknownFilter(t *testing.T) {
 		t.Fatalf("providers unknown filter error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(err.Error(), `unknown provider runtime filter "microvm-fork"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestProvidersCommandRejectsUnknownLifecycleFilter(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"--lifecycle", "immortal"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("providers unknown lifecycle filter error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(err.Error(), `unknown provider lifecycle filter "immortal"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -385,6 +435,8 @@ func TestProvidersFiltersCommandHumanOutput(t *testing.T) {
 		"provider-url",
 		"  evidence: ",
 		"preview-url",
+		"  lifecycle: ",
+		"run-session",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers filters output missing %q:\n%s", want, text)
@@ -413,6 +465,7 @@ func TestProvidersFiltersCommandJSON(t *testing.T) {
 		{name: "reachability", values: values.Reachability, want: "provider-url"},
 		{name: "evidence", values: values.Evidence, want: "preview-url"},
 		{name: "workspace", values: values.Workspace, want: "fork"},
+		{name: "lifecycle", values: values.Lifecycle, want: "workspace-state"},
 	} {
 		if !containsString(tc.values, tc.want) {
 			t.Fatalf("%s values=%v missing %q", tc.name, tc.values, tc.want)

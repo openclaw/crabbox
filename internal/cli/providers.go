@@ -22,6 +22,7 @@ type providerMatrixEntry struct {
 	Reachability []string     `json:"reachability,omitempty"`
 	Workspace    []string     `json:"workspace,omitempty"`
 	Evidence     []string     `json:"evidence,omitempty"`
+	Lifecycle    []string     `json:"lifecycle,omitempty"`
 	Coordinator  string       `json:"coordinator"`
 }
 
@@ -35,6 +36,7 @@ type providerRecommendationEntry struct {
 	Reachability []string     `json:"reachability,omitempty"`
 	Workspace    []string     `json:"workspace,omitempty"`
 	Evidence     []string     `json:"evidence,omitempty"`
+	Lifecycle    []string     `json:"lifecycle,omitempty"`
 	Score        int          `json:"score"`
 	Reasons      []string     `json:"reasons"`
 }
@@ -48,6 +50,7 @@ type providerFilterValuesEntry struct {
 	Reachability []string `json:"reachability"`
 	Workspace    []string `json:"workspace"`
 	Evidence     []string `json:"evidence"`
+	Lifecycle    []string `json:"lifecycle"`
 }
 
 type providerMatrixFilters struct {
@@ -59,6 +62,7 @@ type providerMatrixFilters struct {
 	Reachability []string
 	Workspaces   []string
 	Evidence     []string
+	Lifecycle    []string
 }
 
 type providerMatrixFilterFlagValues struct {
@@ -70,6 +74,7 @@ type providerMatrixFilterFlagValues struct {
 	Reachability stringListFlag
 	Workspaces   stringListFlag
 	Evidence     stringListFlag
+	Lifecycle    stringListFlag
 }
 
 func (a App) providers(_ context.Context, args []string) error {
@@ -86,7 +91,7 @@ func (a App) providers(_ context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
+		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] [--lifecycle CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	entries := providerMatrix()
 	filters := filterFlags.filters()
@@ -205,6 +210,7 @@ func providerMatrix() []providerMatrixEntry {
 			Reachability: reachabilityCapabilitiesForProvider(firstNonBlank(spec.Name, provider.Name())),
 			Workspace:    workspaceCapabilitiesForFeatures(spec.Features),
 			Evidence:     evidenceCapabilitiesForFeatures(spec.Features),
+			Lifecycle:    lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
 			Coordinator:  string(spec.Coordinator),
 		})
 	}
@@ -221,6 +227,7 @@ func registerProviderMatrixFilterFlags(fs *flag.FlagSet) *providerMatrixFilterFl
 	fs.Var(&values.Reachability, "reachability", "filter by normalized reachability capability; repeatable")
 	fs.Var(&values.Workspaces, "workspace", "filter by normalized workspace capability; repeatable")
 	fs.Var(&values.Evidence, "evidence", "filter by normalized evidence capability; repeatable")
+	fs.Var(&values.Lifecycle, "lifecycle", "filter by normalized lifecycle capability; repeatable")
 	return values
 }
 
@@ -237,6 +244,7 @@ func (values *providerMatrixFilterFlagValues) filters() providerMatrixFilters {
 		Reachability: providerFilterValues(values.Reachability),
 		Workspaces:   providerFilterValues(values.Workspaces),
 		Evidence:     providerFilterValues(values.Evidence),
+		Lifecycle:    providerFilterValues(values.Lifecycle),
 	}
 }
 
@@ -263,6 +271,7 @@ func providerMatrixFilterValues(entries []providerMatrixEntry) providerFilterVal
 		"reachability": {},
 		"workspace":    {},
 		"evidence":     {},
+		"lifecycle":    {},
 	}
 	for _, entry := range entries {
 		addProviderFilterAllowed(allowed["kind"], []string{string(entry.Kind)})
@@ -273,6 +282,7 @@ func providerMatrixFilterValues(entries []providerMatrixEntry) providerFilterVal
 		addProviderFilterAllowed(allowed["reachability"], entry.Reachability)
 		addProviderFilterAllowed(allowed["workspace"], entry.Workspace)
 		addProviderFilterAllowed(allowed["evidence"], entry.Evidence)
+		addProviderFilterAllowed(allowed["lifecycle"], entry.Lifecycle)
 	}
 	return providerFilterValuesEntry{
 		Kind:         sortedProviderFilterValues(allowed["kind"]),
@@ -283,6 +293,7 @@ func providerMatrixFilterValues(entries []providerMatrixEntry) providerFilterVal
 		Reachability: sortedProviderFilterValues(allowed["reachability"]),
 		Workspace:    sortedProviderFilterValues(allowed["workspace"]),
 		Evidence:     sortedProviderFilterValues(allowed["evidence"]),
+		Lifecycle:    sortedProviderFilterValues(allowed["lifecycle"]),
 	}
 }
 
@@ -317,7 +328,10 @@ func validateProviderMatrixFilters(filters providerMatrixFilters, entries []prov
 	if err := check("workspace", filters.Workspaces); err != nil {
 		return err
 	}
-	return check("evidence", filters.Evidence)
+	if err := check("evidence", filters.Evidence); err != nil {
+		return err
+	}
+	return check("lifecycle", filters.Lifecycle)
 }
 
 func providerMatrixFilterAllowedValues(entries []providerMatrixEntry) map[string]map[string]bool {
@@ -331,6 +345,7 @@ func providerMatrixFilterAllowedValues(entries []providerMatrixEntry) map[string
 		"reachability": providerFilterAllowedSet(values.Reachability),
 		"workspace":    providerFilterAllowedSet(values.Workspace),
 		"evidence":     providerFilterAllowedSet(values.Evidence),
+		"lifecycle":    providerFilterAllowedSet(values.Lifecycle),
 	}
 }
 
@@ -370,6 +385,7 @@ func printProviderFilterValues(out io.Writer, values providerFilterValuesEntry) 
 	fmt.Fprintf(out, "  reachability: %s\n", providerFilterValueLine(values.Reachability))
 	fmt.Fprintf(out, "  workspace: %s\n", providerFilterValueLine(values.Workspace))
 	fmt.Fprintf(out, "  evidence: %s\n", providerFilterValueLine(values.Evidence))
+	fmt.Fprintf(out, "  lifecycle: %s\n", providerFilterValueLine(values.Lifecycle))
 }
 
 func providerFilterValueLine(values []string) string {
@@ -394,7 +410,7 @@ func filterProviderMatrix(entries []providerMatrixEntry, filters providerMatrixF
 }
 
 func providerMatrixFiltersEmpty(filters providerMatrixFilters) bool {
-	return len(filters.Kinds) == 0 && len(filters.Categories) == 0 && len(filters.Targets) == 0 && len(filters.Features) == 0 && len(filters.Runtimes) == 0 && len(filters.Reachability) == 0 && len(filters.Workspaces) == 0 && len(filters.Evidence) == 0
+	return len(filters.Kinds) == 0 && len(filters.Categories) == 0 && len(filters.Targets) == 0 && len(filters.Features) == 0 && len(filters.Runtimes) == 0 && len(filters.Reachability) == 0 && len(filters.Workspaces) == 0 && len(filters.Evidence) == 0 && len(filters.Lifecycle) == 0
 }
 
 func providerEntryMatchesFilters(entry providerMatrixEntry, filters providerMatrixFilters) bool {
@@ -405,7 +421,8 @@ func providerEntryMatchesFilters(entry providerMatrixEntry, filters providerMatr
 		providerFieldContainsAll(entry.Runtime, filters.Runtimes) &&
 		providerFieldContainsAll(entry.Reachability, filters.Reachability) &&
 		providerFieldContainsAll(entry.Workspace, filters.Workspaces) &&
-		providerFieldContainsAll(entry.Evidence, filters.Evidence)
+		providerFieldContainsAll(entry.Evidence, filters.Evidence) &&
+		providerFieldContainsAll(entry.Lifecycle, filters.Lifecycle)
 }
 
 func providerFieldContainsAll(values, wants []string) bool {
@@ -559,6 +576,7 @@ func recommendProvidersForUseCase(entries []providerMatrixEntry, useCase string,
 			Reachability: append([]string(nil), entry.Reachability...),
 			Workspace:    append([]string(nil), entry.Workspace...),
 			Evidence:     append([]string(nil), entry.Evidence...),
+			Lifecycle:    append([]string(nil), entry.Lifecycle...),
 			Score:        score,
 			Reasons:      reasons,
 		})
@@ -1299,6 +1317,9 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 		if len(entry.Evidence) > 0 {
 			fmt.Fprintf(out, "  evidence: %s\n", commaOrDash(entry.Evidence))
 		}
+		if len(entry.Lifecycle) > 0 {
+			fmt.Fprintf(out, "  lifecycle: %s\n", commaOrDash(entry.Lifecycle))
+		}
 		fmt.Fprintf(out, "  reasons: %s\n", strings.Join(entry.Reasons, "; "))
 	}
 }
@@ -1322,6 +1343,9 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 		}
 		if len(entry.Evidence) > 0 {
 			fmt.Fprintf(out, "  evidence: %s\n", commaOrDash(entry.Evidence))
+		}
+		if len(entry.Lifecycle) > 0 {
+			fmt.Fprintf(out, "  lifecycle: %s\n", commaOrDash(entry.Lifecycle))
 		}
 		fmt.Fprintf(out, "  coordinator: %s\n", blank(entry.Coordinator, "never"))
 		if len(entry.Aliases) > 0 {
@@ -1431,6 +1455,26 @@ func evidenceCapabilitiesForFeatures(features []Feature) []string {
 	add(FeatureRunDownloads, "downloads")
 	add(FeatureURLBridge, "preview-url")
 	add(FeatureRunSession, "session")
+	return out
+}
+
+func lifecycleCapabilitiesForProvider(coordinator CoordinatorMode, features []Feature) []string {
+	var out []string
+	addFeature := func(feature Feature, capability string) {
+		if FeatureSet(features).Has(feature) {
+			out = append(out, capability)
+		}
+	}
+	if coordinator == CoordinatorSupported {
+		out = append(out, "coordinator-governed")
+	}
+	addFeature(FeatureCleanup, "cleanup")
+	addFeature(FeaturePauseResume, "pause-resume")
+	addFeature(FeatureRunSession, "run-session")
+	if FeatureSet(features).Has(FeatureCheckpoint) || FeatureSet(features).Has(FeatureFork) ||
+		FeatureSet(features).Has(FeatureRestore) || FeatureSet(features).Has(FeatureSnapshot) {
+		out = append(out, "workspace-state")
+	}
 	return out
 }
 
