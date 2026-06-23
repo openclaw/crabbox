@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -432,7 +433,7 @@ func TestRunMapsRemoteExitStatus(t *testing.T) {
 	backend := testBackend(cfg, fake, nil, nil)
 	repo := testGitRepo(t)
 
-	result, err := backend.Run(context.Background(), RunRequest{Repo: repo, Keep: true, NoSync: true, Command: []string{"false"}})
+	result, err := backend.Run(context.Background(), RunRequest{Repo: repo, Keep: true, NoSync: true, TimingJSON: true, Command: []string{"false"}})
 	if err == nil {
 		t.Fatal("nonzero remote exit returned nil error")
 	}
@@ -441,6 +442,10 @@ func TestRunMapsRemoteExitStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exited 42") {
 		t.Fatalf("err=%v", err)
+	}
+	report := decodeLastTimingReport(t, backend.rt.Stderr.(*bytes.Buffer).String())
+	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
 
@@ -561,6 +566,28 @@ func TestRunFailsWhenDefaultOneShotCleanupFails(t *testing.T) {
 	if got := backend.rt.Stderr.(*bytes.Buffer).String(); !strings.Contains(got, `"exitCode":1`) {
 		t.Fatalf("timing JSON did not report cleanup failure: %s", got)
 	}
+	report := decodeLastTimingReport(t, backend.rt.Stderr.(*bytes.Buffer).String())
+	if report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
+	}
+}
+
+func decodeLastTimingReport(t *testing.T, output string) timingReport {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var report timingReport
+		if err := json.Unmarshal([]byte(line), &report); err != nil {
+			t.Fatalf("timing json: %v\noutput=%s", err, output)
+		}
+		return report
+	}
+	t.Fatalf("output does not contain timing JSON: %s", output)
+	return timingReport{}
 }
 
 func TestStopReportsLocalClaimRemovalFailureAfterRemoteDelete(t *testing.T) {

@@ -187,9 +187,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	shouldStop = acquired && !req.Keep && b.cfg.AgentSandbox.DeleteOnRelease
 	var pendingTiming *timingReport
+	commandFailed := false
+	providerFailure := false
 	defer func() {
 		if claim.LeaseID != "" && claimTTLExpired(claim, b.now().UTC()) {
 			shouldStop = true
+			providerFailure = true
 			expiryErr := exit(1, "agent-sandbox claim %s reached its TTL expiry during the run", claim.LeaseID)
 			if result.ExitCode == 0 {
 				result.ExitCode = 1
@@ -207,6 +210,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 				if result.ExitCode == 0 {
 					result.ExitCode = 1
 				}
+				if !commandFailed {
+					providerFailure = true
+				}
 				if retErr == nil {
 					retErr = exit(1, "%v", cleanupErr)
 				} else {
@@ -219,7 +225,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			if result.Total > 0 {
 				pendingTiming.TotalMs = result.Total.Milliseconds()
 			}
-			_ = writeTimingJSON(b.rt.Stderr, *pendingTiming)
+			report := timingReportWithRunResult(*pendingTiming, result, retErr)
+			if providerFailure {
+				report = timingReportWithProviderError(report)
+			}
+			_ = writeTimingJSON(b.rt.Stderr, report)
 		}
 	}()
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s claim=%s sandbox=%s pod=%s workdir=%s\n", providerName, leaseID, claimName, ready.SandboxName, ready.PodName, workdir)
@@ -251,6 +261,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil && claim.LeaseID != "" {
 				fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
 				result.ExitCode = 1
+				providerFailure = true
 			}
 		}
 		if req.TimingJSON {
@@ -274,12 +285,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		handleDelegatedRunFailure(b.rt.Stderr, b.cfg, req, leaseID, slug, acquired, &shouldStop)
 		commandErr = exit(exitCode, "agent-sandbox run exited %d", exitCode)
 	}
+	commandFailed = commandErr != nil
 	if !shouldStop {
 		if err := refreshClaimLeaseActivity(b.cfg, claim); err != nil && claim.LeaseID != "" {
 			fmt.Fprintf(b.rt.Stderr, "warning: refresh agent-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
 			if commandErr == nil {
 				result.ExitCode = 1
 				commandErr = err
+				providerFailure = true
 			} else {
 				commandErr = errors.Join(commandErr, fmt.Errorf("refresh agent-sandbox lease activity: %w", err))
 			}

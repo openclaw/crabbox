@@ -943,13 +943,18 @@ func TestRunTimingJSONRemainsFinalLineAfterUnterminatedLoaderOutput(t *testing.T
 		t.Fatalf("stderr lines=%q", lines)
 	}
 	var timing struct {
-		LeaseID string `json:"leaseId"`
+		LeaseID   string `json:"leaseId"`
+		RunStatus string `json:"runStatus"`
+		ErrorKind string `json:"errorKind"`
 	}
 	if err := json.Unmarshal([]byte(lines[2]), &timing); err != nil {
 		t.Fatalf("timing line=%q err=%v", lines[2], err)
 	}
 	if timing.LeaseID != result.LeaseID {
 		t.Fatalf("timing lease=%q result=%q", timing.LeaseID, result.LeaseID)
+	}
+	if timing.RunStatus != "succeeded" || timing.ErrorKind != "" {
+		t.Fatalf("timing outcome status=%q kind=%q", timing.RunStatus, timing.ErrorKind)
 	}
 }
 
@@ -983,6 +988,7 @@ func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
 		Repo:            Repo{Root: t.TempDir()},
 		KeepOnFailure:   true,
 		RequestedSlug:   "debug-failure",
+		TimingJSON:      true,
 		ScriptRequested: true,
 		Script: &RunScriptSpec{
 			Source:     "../worker module.mjs",
@@ -1001,6 +1007,10 @@ func TestRunPreservesStructuredFailedRunAndKeepOnFailureClaim(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "-- <command>") || !strings.Contains(stderr.String(), "crabbox status") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+	report := decodeLastTimingReport(t, stderr.String())
+	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
 
@@ -1250,6 +1260,28 @@ func TestRunPreservesKeepOnFailureClaimWhenPostResponseIsLost(t *testing.T) {
 		!strings.Contains(stderr.String(), `"leaseId":"`+submittedID+`"`) {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
+	report := decodeLastTimingReport(t, stderr.String())
+	if report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
+		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
+	}
+}
+
+func decodeLastTimingReport(t *testing.T, output string) timingReport {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var report timingReport
+		if err := json.Unmarshal([]byte(line), &report); err != nil {
+			t.Fatalf("timing json: %v\noutput=%s", err, output)
+		}
+		return report
+	}
+	t.Fatalf("output does not contain timing JSON: %s", output)
+	return timingReport{}
 }
 
 func TestRunPreservesKeepOnFailureClaimAfterUnstructuredServerError(t *testing.T) {

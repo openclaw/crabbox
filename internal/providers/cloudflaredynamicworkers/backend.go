@@ -103,6 +103,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	commandDuration := now(b.rt).Sub(commandStarted)
 	if err != nil {
 		total := now(b.rt).Sub(started)
+		timingWritten := false
 		result := RunResult{
 			ExitCode:    1,
 			Command:     commandDuration,
@@ -156,7 +157,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			total = now(b.rt).Sub(started)
 			result.Total = total
 			if req.TimingJSON {
-				if timingErr := writeTimingJSON(b.rt.Stderr, timingReport{
+				report := timingReportWithProviderError(timingReportWithRunResult(timingReport{
 					Provider:  providerName,
 					LeaseID:   leaseID,
 					Slug:      slug,
@@ -164,9 +165,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 					TotalMs:   total.Milliseconds(),
 					ExitCode:  1,
 					Label:     strings.TrimSpace(req.Label),
-				}); timingErr != nil {
+				}, result, err))
+				if timingErr := writeTimingJSON(b.rt.Stderr, report); timingErr != nil {
 					return result, timingErr
 				}
+				timingWritten = true
 			}
 		}
 		cleanupID := leaseID
@@ -179,6 +182,20 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			cancel()
 			if cleanupErr != nil && !notFoundError(cleanupErr) {
 				fmt.Fprintf(b.rt.Stderr, "warning: %s malformed response cleanup failed for %s: %v\n", providerName, cleanupID, cleanupErr)
+			}
+		}
+		if req.TimingJSON && !timingWritten {
+			report := timingReportWithProviderError(timingReportWithRunResult(timingReport{
+				Provider:  providerName,
+				LeaseID:   leaseID,
+				Slug:      slug,
+				CommandMs: commandDuration.Milliseconds(),
+				TotalMs:   result.Total.Milliseconds(),
+				ExitCode:  result.ExitCode,
+				Label:     strings.TrimSpace(req.Label),
+			}, result, err))
+			if timingErr := writeTimingJSON(b.rt.Stderr, report); timingErr != nil {
+				return result, timingErr
 			}
 		}
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, err)}
@@ -267,7 +284,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		var runErr error
+		if exitCode != 0 {
+			runErr = ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
+		}
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:  providerName,
 			LeaseID:   leaseID,
 			Slug:      slug,
@@ -275,7 +296,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			TotalMs:   total.Milliseconds(),
 			ExitCode:  exitCode,
 			Label:     strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, runErr)); err != nil {
 			return result, err
 		}
 	}
