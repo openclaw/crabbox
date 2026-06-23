@@ -11,60 +11,65 @@ import (
 )
 
 type providerMatrixEntry struct {
-	Provider    string       `json:"provider"`
-	Family      string       `json:"family"`
-	Aliases     []string     `json:"aliases,omitempty"`
-	Kind        ProviderKind `json:"kind"`
-	Category    string       `json:"category,omitempty"`
-	Targets     []string     `json:"targets"`
-	Features    []Feature    `json:"features"`
-	Runtime     []string     `json:"runtime,omitempty"`
-	Workspace   []string     `json:"workspace,omitempty"`
-	Evidence    []string     `json:"evidence,omitempty"`
-	Coordinator string       `json:"coordinator"`
+	Provider     string       `json:"provider"`
+	Family       string       `json:"family"`
+	Aliases      []string     `json:"aliases,omitempty"`
+	Kind         ProviderKind `json:"kind"`
+	Category     string       `json:"category,omitempty"`
+	Targets      []string     `json:"targets"`
+	Features     []Feature    `json:"features"`
+	Runtime      []string     `json:"runtime,omitempty"`
+	Reachability []string     `json:"reachability,omitempty"`
+	Workspace    []string     `json:"workspace,omitempty"`
+	Evidence     []string     `json:"evidence,omitempty"`
+	Coordinator  string       `json:"coordinator"`
 }
 
 type providerRecommendationEntry struct {
-	Provider  string       `json:"provider"`
-	Kind      ProviderKind `json:"kind"`
-	Category  string       `json:"category,omitempty"`
-	Targets   []string     `json:"targets"`
-	Features  []Feature    `json:"features"`
-	Runtime   []string     `json:"runtime,omitempty"`
-	Workspace []string     `json:"workspace,omitempty"`
-	Evidence  []string     `json:"evidence,omitempty"`
-	Score     int          `json:"score"`
-	Reasons   []string     `json:"reasons"`
+	Provider     string       `json:"provider"`
+	Kind         ProviderKind `json:"kind"`
+	Category     string       `json:"category,omitempty"`
+	Targets      []string     `json:"targets"`
+	Features     []Feature    `json:"features"`
+	Runtime      []string     `json:"runtime,omitempty"`
+	Reachability []string     `json:"reachability,omitempty"`
+	Workspace    []string     `json:"workspace,omitempty"`
+	Evidence     []string     `json:"evidence,omitempty"`
+	Score        int          `json:"score"`
+	Reasons      []string     `json:"reasons"`
 }
 
 type providerFilterValuesEntry struct {
-	Kind      []string `json:"kind"`
-	Category  []string `json:"category"`
-	Target    []string `json:"target"`
-	Feature   []string `json:"feature"`
-	Runtime   []string `json:"runtime"`
-	Workspace []string `json:"workspace"`
-	Evidence  []string `json:"evidence"`
+	Kind         []string `json:"kind"`
+	Category     []string `json:"category"`
+	Target       []string `json:"target"`
+	Feature      []string `json:"feature"`
+	Runtime      []string `json:"runtime"`
+	Reachability []string `json:"reachability"`
+	Workspace    []string `json:"workspace"`
+	Evidence     []string `json:"evidence"`
 }
 
 type providerMatrixFilters struct {
-	Kinds      []string
-	Categories []string
-	Targets    []string
-	Features   []string
-	Runtimes   []string
-	Workspaces []string
-	Evidence   []string
+	Kinds        []string
+	Categories   []string
+	Targets      []string
+	Features     []string
+	Runtimes     []string
+	Reachability []string
+	Workspaces   []string
+	Evidence     []string
 }
 
 type providerMatrixFilterFlagValues struct {
-	Kinds      stringListFlag
-	Categories stringListFlag
-	Targets    stringListFlag
-	Features   stringListFlag
-	Runtimes   stringListFlag
-	Workspaces stringListFlag
-	Evidence   stringListFlag
+	Kinds        stringListFlag
+	Categories   stringListFlag
+	Targets      stringListFlag
+	Features     stringListFlag
+	Runtimes     stringListFlag
+	Reachability stringListFlag
+	Workspaces   stringListFlag
+	Evidence     stringListFlag
 }
 
 func (a App) providers(_ context.Context, args []string) error {
@@ -81,7 +86,7 @@ func (a App) providers(_ context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
+		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	entries := providerMatrix()
 	filters := filterFlags.filters()
@@ -189,17 +194,18 @@ func providerMatrix() []providerMatrixEntry {
 		category := benchmarkProviderCategories[firstNonBlank(spec.Name, provider.Name())]
 		targets := formatProviderTargets(spec.Targets)
 		entries = append(entries, providerMatrixEntry{
-			Provider:    firstNonBlank(spec.Name, provider.Name()),
-			Family:      firstNonBlank(spec.Family, provider.Name()),
-			Aliases:     append([]string(nil), provider.Aliases()...),
-			Kind:        spec.Kind,
-			Category:    category,
-			Targets:     targets,
-			Features:    append(FeatureSet{}, spec.Features...),
-			Runtime:     runtimeCapabilitiesForProvider(firstNonBlank(spec.Name, provider.Name()), spec.Kind, category, targets, spec.Features),
-			Workspace:   workspaceCapabilitiesForFeatures(spec.Features),
-			Evidence:    evidenceCapabilitiesForFeatures(spec.Features),
-			Coordinator: string(spec.Coordinator),
+			Provider:     firstNonBlank(spec.Name, provider.Name()),
+			Family:       firstNonBlank(spec.Family, provider.Name()),
+			Aliases:      append([]string(nil), provider.Aliases()...),
+			Kind:         spec.Kind,
+			Category:     category,
+			Targets:      targets,
+			Features:     append(FeatureSet{}, spec.Features...),
+			Runtime:      runtimeCapabilitiesForProvider(firstNonBlank(spec.Name, provider.Name()), spec.Kind, category, targets, spec.Features),
+			Reachability: reachabilityCapabilitiesForProvider(firstNonBlank(spec.Name, provider.Name())),
+			Workspace:    workspaceCapabilitiesForFeatures(spec.Features),
+			Evidence:     evidenceCapabilitiesForFeatures(spec.Features),
+			Coordinator:  string(spec.Coordinator),
 		})
 	}
 	return entries
@@ -212,6 +218,7 @@ func registerProviderMatrixFilterFlags(fs *flag.FlagSet) *providerMatrixFilterFl
 	fs.Var(&values.Targets, "target", "filter by target such as linux or worker-runtime; repeatable")
 	fs.Var(&values.Features, "feature", "filter by raw feature flag such as ssh or run-proof; repeatable")
 	fs.Var(&values.Runtimes, "runtime", "filter by normalized runtime capability; repeatable")
+	fs.Var(&values.Reachability, "reachability", "filter by normalized reachability capability; repeatable")
 	fs.Var(&values.Workspaces, "workspace", "filter by normalized workspace capability; repeatable")
 	fs.Var(&values.Evidence, "evidence", "filter by normalized evidence capability; repeatable")
 	return values
@@ -222,13 +229,14 @@ func (values *providerMatrixFilterFlagValues) filters() providerMatrixFilters {
 		return providerMatrixFilters{}
 	}
 	return providerMatrixFilters{
-		Kinds:      providerFilterValues(values.Kinds),
-		Categories: providerFilterValues(values.Categories),
-		Targets:    providerFilterValues(values.Targets),
-		Features:   providerFilterValues(values.Features),
-		Runtimes:   providerFilterValues(values.Runtimes),
-		Workspaces: providerFilterValues(values.Workspaces),
-		Evidence:   providerFilterValues(values.Evidence),
+		Kinds:        providerFilterValues(values.Kinds),
+		Categories:   providerFilterValues(values.Categories),
+		Targets:      providerFilterValues(values.Targets),
+		Features:     providerFilterValues(values.Features),
+		Runtimes:     providerFilterValues(values.Runtimes),
+		Reachability: providerFilterValues(values.Reachability),
+		Workspaces:   providerFilterValues(values.Workspaces),
+		Evidence:     providerFilterValues(values.Evidence),
 	}
 }
 
@@ -247,13 +255,14 @@ func providerFilterValues(values stringListFlag) []string {
 
 func providerMatrixFilterValues(entries []providerMatrixEntry) providerFilterValuesEntry {
 	allowed := map[string]map[string]bool{
-		"kind":      {},
-		"category":  {},
-		"target":    {},
-		"feature":   {},
-		"runtime":   {},
-		"workspace": {},
-		"evidence":  {},
+		"kind":         {},
+		"category":     {},
+		"target":       {},
+		"feature":      {},
+		"runtime":      {},
+		"reachability": {},
+		"workspace":    {},
+		"evidence":     {},
 	}
 	for _, entry := range entries {
 		addProviderFilterAllowed(allowed["kind"], []string{string(entry.Kind)})
@@ -261,17 +270,19 @@ func providerMatrixFilterValues(entries []providerMatrixEntry) providerFilterVal
 		addProviderFilterAllowed(allowed["target"], entry.Targets)
 		addProviderFilterAllowed(allowed["feature"], featuresToStrings(entry.Features))
 		addProviderFilterAllowed(allowed["runtime"], entry.Runtime)
+		addProviderFilterAllowed(allowed["reachability"], entry.Reachability)
 		addProviderFilterAllowed(allowed["workspace"], entry.Workspace)
 		addProviderFilterAllowed(allowed["evidence"], entry.Evidence)
 	}
 	return providerFilterValuesEntry{
-		Kind:      sortedProviderFilterValues(allowed["kind"]),
-		Category:  sortedProviderFilterValues(allowed["category"]),
-		Target:    sortedProviderFilterValues(allowed["target"]),
-		Feature:   sortedProviderFilterValues(allowed["feature"]),
-		Runtime:   sortedProviderFilterValues(allowed["runtime"]),
-		Workspace: sortedProviderFilterValues(allowed["workspace"]),
-		Evidence:  sortedProviderFilterValues(allowed["evidence"]),
+		Kind:         sortedProviderFilterValues(allowed["kind"]),
+		Category:     sortedProviderFilterValues(allowed["category"]),
+		Target:       sortedProviderFilterValues(allowed["target"]),
+		Feature:      sortedProviderFilterValues(allowed["feature"]),
+		Runtime:      sortedProviderFilterValues(allowed["runtime"]),
+		Reachability: sortedProviderFilterValues(allowed["reachability"]),
+		Workspace:    sortedProviderFilterValues(allowed["workspace"]),
+		Evidence:     sortedProviderFilterValues(allowed["evidence"]),
 	}
 }
 
@@ -300,6 +311,9 @@ func validateProviderMatrixFilters(filters providerMatrixFilters, entries []prov
 	if err := check("runtime", filters.Runtimes); err != nil {
 		return err
 	}
+	if err := check("reachability", filters.Reachability); err != nil {
+		return err
+	}
 	if err := check("workspace", filters.Workspaces); err != nil {
 		return err
 	}
@@ -309,13 +323,14 @@ func validateProviderMatrixFilters(filters providerMatrixFilters, entries []prov
 func providerMatrixFilterAllowedValues(entries []providerMatrixEntry) map[string]map[string]bool {
 	values := providerMatrixFilterValues(entries)
 	return map[string]map[string]bool{
-		"kind":      providerFilterAllowedSet(values.Kind),
-		"category":  providerFilterAllowedSet(values.Category),
-		"target":    providerFilterAllowedSet(values.Target),
-		"feature":   providerFilterAllowedSet(values.Feature),
-		"runtime":   providerFilterAllowedSet(values.Runtime),
-		"workspace": providerFilterAllowedSet(values.Workspace),
-		"evidence":  providerFilterAllowedSet(values.Evidence),
+		"kind":         providerFilterAllowedSet(values.Kind),
+		"category":     providerFilterAllowedSet(values.Category),
+		"target":       providerFilterAllowedSet(values.Target),
+		"feature":      providerFilterAllowedSet(values.Feature),
+		"runtime":      providerFilterAllowedSet(values.Runtime),
+		"reachability": providerFilterAllowedSet(values.Reachability),
+		"workspace":    providerFilterAllowedSet(values.Workspace),
+		"evidence":     providerFilterAllowedSet(values.Evidence),
 	}
 }
 
@@ -352,6 +367,7 @@ func printProviderFilterValues(out io.Writer, values providerFilterValuesEntry) 
 	fmt.Fprintf(out, "  target: %s\n", providerFilterValueLine(values.Target))
 	fmt.Fprintf(out, "  feature: %s\n", providerFilterValueLine(values.Feature))
 	fmt.Fprintf(out, "  runtime: %s\n", providerFilterValueLine(values.Runtime))
+	fmt.Fprintf(out, "  reachability: %s\n", providerFilterValueLine(values.Reachability))
 	fmt.Fprintf(out, "  workspace: %s\n", providerFilterValueLine(values.Workspace))
 	fmt.Fprintf(out, "  evidence: %s\n", providerFilterValueLine(values.Evidence))
 }
@@ -378,7 +394,7 @@ func filterProviderMatrix(entries []providerMatrixEntry, filters providerMatrixF
 }
 
 func providerMatrixFiltersEmpty(filters providerMatrixFilters) bool {
-	return len(filters.Kinds) == 0 && len(filters.Categories) == 0 && len(filters.Targets) == 0 && len(filters.Features) == 0 && len(filters.Runtimes) == 0 && len(filters.Workspaces) == 0 && len(filters.Evidence) == 0
+	return len(filters.Kinds) == 0 && len(filters.Categories) == 0 && len(filters.Targets) == 0 && len(filters.Features) == 0 && len(filters.Runtimes) == 0 && len(filters.Reachability) == 0 && len(filters.Workspaces) == 0 && len(filters.Evidence) == 0
 }
 
 func providerEntryMatchesFilters(entry providerMatrixEntry, filters providerMatrixFilters) bool {
@@ -387,6 +403,7 @@ func providerEntryMatchesFilters(entry providerMatrixEntry, filters providerMatr
 		providerFieldContainsAll(entry.Targets, filters.Targets) &&
 		providerFieldContainsAll(featuresToStrings(entry.Features), filters.Features) &&
 		providerFieldContainsAll(entry.Runtime, filters.Runtimes) &&
+		providerFieldContainsAll(entry.Reachability, filters.Reachability) &&
 		providerFieldContainsAll(entry.Workspace, filters.Workspaces) &&
 		providerFieldContainsAll(entry.Evidence, filters.Evidence)
 }
@@ -528,16 +545,17 @@ func recommendProvidersForUseCase(entries []providerMatrixEntry, useCase string,
 			continue
 		}
 		recommendations = append(recommendations, providerRecommendationEntry{
-			Provider:  entry.Provider,
-			Kind:      entry.Kind,
-			Category:  benchmarkProviderCategories[entry.Provider],
-			Targets:   append([]string(nil), entry.Targets...),
-			Features:  append([]Feature(nil), entry.Features...),
-			Runtime:   append([]string(nil), entry.Runtime...),
-			Workspace: append([]string(nil), entry.Workspace...),
-			Evidence:  append([]string(nil), entry.Evidence...),
-			Score:     score,
-			Reasons:   reasons,
+			Provider:     entry.Provider,
+			Kind:         entry.Kind,
+			Category:     benchmarkProviderCategories[entry.Provider],
+			Targets:      append([]string(nil), entry.Targets...),
+			Features:     append([]Feature(nil), entry.Features...),
+			Runtime:      append([]string(nil), entry.Runtime...),
+			Reachability: append([]string(nil), entry.Reachability...),
+			Workspace:    append([]string(nil), entry.Workspace...),
+			Evidence:     append([]string(nil), entry.Evidence...),
+			Score:        score,
+			Reasons:      reasons,
 		})
 	}
 	sort.SliceStable(recommendations, func(i, j int) bool {
@@ -1229,6 +1247,9 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 		if len(entry.Runtime) > 0 {
 			fmt.Fprintf(out, "  runtime: %s\n", commaOrDash(entry.Runtime))
 		}
+		if len(entry.Reachability) > 0 {
+			fmt.Fprintf(out, "  reachability: %s\n", commaOrDash(entry.Reachability))
+		}
 		if len(entry.Workspace) > 0 {
 			fmt.Fprintf(out, "  workspace: %s\n", commaOrDash(entry.Workspace))
 		}
@@ -1249,6 +1270,9 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 		fmt.Fprintf(out, "  features: %s\n", commaOrDash(featuresToStrings(entry.Features)))
 		if len(entry.Runtime) > 0 {
 			fmt.Fprintf(out, "  runtime: %s\n", commaOrDash(entry.Runtime))
+		}
+		if len(entry.Reachability) > 0 {
+			fmt.Fprintf(out, "  reachability: %s\n", commaOrDash(entry.Reachability))
 		}
 		if len(entry.Workspace) > 0 {
 			fmt.Fprintf(out, "  workspace: %s\n", commaOrDash(entry.Workspace))
@@ -1330,6 +1354,24 @@ func runtimeCapabilitiesForProvider(provider string, kind ProviderKind, category
 	}
 	if FeatureSet(features).Has(FeatureDesktop) || FeatureSet(features).Has(FeatureBrowser) || FeatureSet(features).Has(FeatureCode) {
 		add("interactive")
+	}
+	return out
+}
+
+func reachabilityCapabilitiesForProvider(provider string) []string {
+	capabilities := providerCapabilities(provider)
+	var out []string
+	if capabilities.Tailscale {
+		out = append(out, "tailnet-peer")
+	}
+	if capabilities.TailscaleEgress {
+		out = append(out, "tailnet-egress")
+	}
+	if capabilities.URLBridge {
+		out = append(out, "provider-url")
+	}
+	if capabilities.SSHMesh {
+		out = append(out, "ssh-tunnel")
 	}
 	return out
 }

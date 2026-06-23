@@ -120,6 +120,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 			t.Fatalf("aws runtime=%v missing %s", aws.Runtime, capability)
 		}
 	}
+	if !containsString(aws.Reachability, "ssh-tunnel") {
+		t.Fatalf("aws reachability=%v missing ssh-tunnel", aws.Reachability)
+	}
 	if incus.Kind != ProviderKindSSHLease || incus.Family != "local-vm" {
 		t.Fatalf("incus kind/family=%q/%q", incus.Kind, incus.Family)
 	}
@@ -161,6 +164,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	for _, feature := range []Feature{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale} {
 		if !containsFeature(scaleway.Features, feature) {
 			t.Fatalf("scaleway features=%v missing %s", scaleway.Features, feature)
+		}
+	}
+	for _, capability := range []string{"tailnet-peer", "ssh-tunnel"} {
+		if !containsString(scaleway.Reachability, capability) {
+			t.Fatalf("scaleway reachability=%v missing %s", scaleway.Reachability, capability)
 		}
 	}
 	if moduleRuntime == nil {
@@ -217,6 +225,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 			t.Fatalf("e2b evidence=%v missing %s", e2b.Evidence, capability)
 		}
 	}
+	if !containsString(e2b.Reachability, "provider-url") {
+		t.Fatalf("e2b reachability=%v missing provider-url", e2b.Reachability)
+	}
 	for _, capability := range []string{"delegated-command", "managed-sandbox"} {
 		if !containsString(e2b.Runtime, capability) {
 			t.Fatalf("e2b runtime=%v missing %s", e2b.Runtime, capability)
@@ -225,6 +236,11 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	for _, capability := range []string{"downloads", "preview-url", "session"} {
 		if !containsString(islo.Evidence, capability) {
 			t.Fatalf("islo evidence=%v missing %s", islo.Evidence, capability)
+		}
+	}
+	for _, capability := range []string{"tailnet-egress", "provider-url"} {
+		if !containsString(islo.Reachability, capability) {
+			t.Fatalf("islo reachability=%v missing %s", islo.Reachability, capability)
 		}
 	}
 }
@@ -252,6 +268,9 @@ func TestProvidersCommandJSON(t *testing.T) {
 		if entry.Provider == "aws" && !containsString(entry.Runtime, "ssh-host") {
 			t.Fatalf("aws json missing ssh-host runtime: %#v", entry)
 		}
+		if entry.Provider == "aws" && !containsString(entry.Reachability, "ssh-tunnel") {
+			t.Fatalf("aws json missing ssh-tunnel reachability: %#v", entry)
+		}
 		if entry.Provider == "parallels" && !containsString(entry.Workspace, "snapshot-ref") {
 			t.Fatalf("parallels json missing workspace snapshot-ref: %#v", entry)
 		}
@@ -268,7 +287,7 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 		t.Fatalf("providers error=%v stderr=%q", err, stderr.String())
 	}
 	text := stdout.String()
-	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  category: brokerable-cloud\n", "  features: ", "  runtime: ssh-host,interactive\n"} {
+	for _, want := range []string{"aws\n", "  family: aws\n", "  kind: ssh-lease\n", "  category: brokerable-cloud\n", "  features: ", "  runtime: ssh-host,interactive\n", "  reachability: ssh-tunnel\n"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("providers output missing %q:\n%s", want, text)
 		}
@@ -294,6 +313,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 		"--category", "delegated-sandbox",
 		"--target", "linux",
 		"--runtime", "managed-sandbox",
+		"--reachability", "provider-url",
 		"--evidence", "preview-url",
 		"--json",
 	})
@@ -308,7 +328,7 @@ func TestProvidersCommandFiltersJSON(t *testing.T) {
 		t.Fatal("expected delegated preview providers")
 	}
 	for _, entry := range entries {
-		if entry.Kind != ProviderKindDelegatedRun || entry.Category != "delegated-sandbox" || !containsString(entry.Targets, targetLinux) || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Evidence, "preview-url") {
+		if entry.Kind != ProviderKindDelegatedRun || entry.Category != "delegated-sandbox" || !containsString(entry.Targets, targetLinux) || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Reachability, "provider-url") || !containsString(entry.Evidence, "preview-url") {
 			t.Fatalf("entry escaped filters: %#v", entry)
 		}
 	}
@@ -361,6 +381,8 @@ func TestProvidersFiltersCommandHumanOutput(t *testing.T) {
 		"delegated-sandbox",
 		"  runtime: ",
 		"managed-sandbox",
+		"  reachability: ",
+		"provider-url",
 		"  evidence: ",
 		"preview-url",
 	} {
@@ -388,6 +410,7 @@ func TestProvidersFiltersCommandJSON(t *testing.T) {
 		{name: "kind", values: values.Kind, want: "delegated-run"},
 		{name: "category", values: values.Category, want: "delegated-sandbox"},
 		{name: "runtime", values: values.Runtime, want: "managed-sandbox"},
+		{name: "reachability", values: values.Reachability, want: "provider-url"},
 		{name: "evidence", values: values.Evidence, want: "preview-url"},
 		{name: "workspace", values: values.Workspace, want: "fork"},
 	} {
@@ -710,6 +733,9 @@ func TestProvidersRecommendReachabilityUsesTransportCapabilities(t *testing.T) {
 		}
 		if !capabilities.Tailscale && !capabilities.TailscaleEgress && !capabilities.URLBridge && !capabilities.SSHMesh {
 			t.Fatalf("reachability recommendation lacks any transport plane: %#v", recommendation)
+		}
+		if len(recommendation.Reachability) == 0 {
+			t.Fatalf("reachability recommendation missing normalized reachability capabilities: %#v", recommendation)
 		}
 	}
 	if !foundTailnet {
@@ -1172,6 +1198,7 @@ func TestProvidersRecommendCommandAppliesFilters(t *testing.T) {
 		"recommend", "run-evidence",
 		"--category", "delegated-sandbox",
 		"--runtime", "managed-sandbox",
+		"--reachability", "provider-url",
 		"--evidence", "preview-url",
 		"--json",
 	})
@@ -1186,7 +1213,7 @@ func TestProvidersRecommendCommandAppliesFilters(t *testing.T) {
 		t.Fatal("expected filtered run-evidence recommendations")
 	}
 	for _, entry := range entries {
-		if entry.Category != "delegated-sandbox" || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Evidence, "preview-url") {
+		if entry.Category != "delegated-sandbox" || !containsString(entry.Runtime, "managed-sandbox") || !containsString(entry.Reachability, "provider-url") || !containsString(entry.Evidence, "preview-url") {
 			t.Fatalf("recommendation escaped filters: %#v", entry)
 		}
 	}

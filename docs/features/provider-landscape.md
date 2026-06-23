@@ -24,6 +24,9 @@ That means:
 - keep runtime-shape labels provider-neutral (`managed-sandbox`,
   `delegated-command`, `ssh-host`, `worker-module`) instead of copying one
   vendor's control-plane terms;
+- keep reachability labels provider-neutral (`provider-url`, `ssh-tunnel`,
+  `tailnet-peer`, `tailnet-egress`) so preview URL, tailnet, and SSH tunnel
+  workflows can be compared without provider-specific docs scraping;
 - use `ssh` or `external` for tools that already produce a normal host contract;
 - defer first-class support for runtimes whose useful behavior is still too
   product-specific to test offline.
@@ -61,6 +64,8 @@ The better path is to make the generic seams real first:
 - `mcp-attachments` stays a capability, not a Mitos-only command mode.
 - `run-proof`, `run-artifacts`, `run-downloads`, and `url-bridge` keep evidence
   portable across delegated sandboxes and proof runners.
+- `reachability` filter values describe access planes without claiming a
+  provider-specific network isolation model.
 - `remote-dev`, `mcp-sandbox`, `isolated-execution`, and
   `versioned-workspace` keep recommendations workflow-oriented.
 - `fanout-testing` and its `best-of-n` alias route operators to existing
@@ -107,6 +112,9 @@ Ship these in small PRs:
    retained files or downloadable results from provider-owned execution.
    Use `crabbox providers recommend preview-url` when the workflow specifically
    needs provider-native app or service URLs.
+   Use `crabbox providers --reachability provider-url` or
+   `crabbox providers recommend reachability --reachability tailnet-peer` when
+   the operator needs an explicit access plane.
    Use `crabbox providers recommend network-isolation` when the workflow runs
    untrusted code and network exposure should stay inside a delegated or local
    sandbox boundary.

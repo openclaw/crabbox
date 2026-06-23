@@ -10,12 +10,12 @@ crabbox providers
 crabbox providers --json
 crabbox providers filters
 crabbox providers filters --json
-crabbox providers --runtime managed-sandbox --evidence preview-url
+crabbox providers --reachability provider-url --evidence preview-url
 crabbox providers --target linux --workspace checkpoint --workspace fork --json
 crabbox providers recommend ci-proof
 crabbox providers recommend agent-sandbox --json
 crabbox providers recommend run-evidence
-crabbox providers recommend run-evidence --runtime managed-sandbox --evidence preview-url
+crabbox providers recommend run-evidence --reachability provider-url --evidence preview-url
 crabbox providers recommend versioned-workspace
 ```
 
@@ -37,6 +37,9 @@ crabbox providers recommend versioned-workspace
   runtime capability, such as `ssh-host`, `delegated-command`,
   `managed-sandbox`, `local-runtime`, `ci-runner`, `remote-dev`,
   `worker-module`, or `interactive`. Repeatable.
+- `--reachability <capability>`: keep providers that advertise this normalized
+  access-plane capability, such as `ssh-tunnel`, `tailnet-peer`,
+  `tailnet-egress`, or `provider-url`. Repeatable.
 - `--workspace <capability>`: keep providers that advertise this normalized
   workspace capability, such as `checkpoint`, `fork`, `restore`, or
   `snapshot-ref`. Repeatable.
@@ -77,12 +80,13 @@ provider filter values:
   target: linux,macos,windows/normal,windows/wsl2,worker-runtime
   feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
   runtime: ci-runner,delegated-command,interactive,local-runtime,local-sandbox,managed-sandbox,remote-dev,service-control,ssh-host,worker-module
+  reachability: provider-url,ssh-tunnel,tailnet-egress,tailnet-peer
   workspace: checkpoint,fork,restore,snapshot-ref
   evidence: artifacts,downloads,preview-url,proof,session
 ```
 
 JSON output returns one object with `kind`, `category`, `target`, `feature`,
-`runtime`, `workspace`, and `evidence` arrays.
+`runtime`, `reachability`, `workspace`, and `evidence` arrays.
 
 ## `providers recommend`
 
@@ -109,7 +113,7 @@ crabbox providers recommend preview-url
 crabbox providers recommend reachability
 crabbox providers recommend remote-dev
 crabbox providers recommend run-evidence
-crabbox providers recommend run-evidence --runtime managed-sandbox --evidence preview-url
+crabbox providers recommend run-evidence --reachability provider-url --evidence preview-url
 crabbox providers recommend run-session
 crabbox providers recommend team-cloud
 crabbox providers recommend workspace-reuse
@@ -181,10 +185,10 @@ Recommendation flags:
 - `--use-case <name>`: pass the use case by flag instead of positionally.
 - `--limit <n>`: maximum recommendations to print. Defaults to `5`.
 - `--json`: emit recommendations as JSON.
-- `--kind`, `--category`, `--target`, `--feature`, `--runtime`, `--workspace`,
-  `--evidence`: filter the candidate provider matrix before scoring. These flags
-  use the same values and repeat/comma semantics as the base `providers` matrix
-  command.
+- `--kind`, `--category`, `--target`, `--feature`, `--runtime`,
+  `--reachability`, `--workspace`, `--evidence`: filter the candidate provider
+  matrix before scoring. These flags use the same values and repeat/comma
+  semantics as the base `providers` matrix command.
 
 ## Output
 
@@ -198,6 +202,7 @@ aws
   targets: linux,windows/normal,windows/wsl2,macos
   features: ssh,crabbox-sync,cleanup,desktop,browser,code
   runtime: ssh-host,interactive
+  reachability: ssh-tunnel
   coordinator: supported
 
 parallels
@@ -207,6 +212,7 @@ parallels
   targets: linux,macos,windows/normal,windows/wsl2
   features: ssh,crabbox-sync,cleanup,desktop,browser,code,workspace-checkpoint,workspace-fork,workspace-restore,provider-snapshot
   runtime: ssh-host,local-runtime,interactive
+  reachability: ssh-tunnel
   workspace: checkpoint,fork,restore,snapshot-ref
   coordinator: never
 
@@ -228,6 +234,7 @@ e2b
   targets: linux
   features: url-bridge,run-session
   runtime: delegated-command,managed-sandbox
+  reachability: provider-url
   evidence: preview-url,session
   coordinator: never
 
@@ -257,6 +264,7 @@ hostinger
   targets: linux
   features: ssh,crabbox-sync,cleanup
   runtime: ssh-host
+  reachability: ssh-tunnel
   coordinator: never
 ```
 
@@ -280,6 +288,7 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
     "targets": ["linux"],
     "features": ["ssh", "crabbox-sync", "cleanup"],
     "runtime": ["ssh-host"],
+    "reachability": ["ssh-tunnel"],
     "coordinator": "never"
   },
   {
@@ -334,6 +343,11 @@ Direct self-hosted SSH-lease providers such as `proxmox` and `xcp-ng` report
   `delegated-command`, `managed-sandbox`, `local-runtime`, `local-sandbox`,
   `ci-runner`, `remote-dev`, `worker-module`, `interactive`, and
   `service-control`. These are routing hints, not isolation certifications.
+- `reachability`: normalized access-plane capabilities derived from provider
+  transport features. Possible values are `ssh-tunnel`, `tailnet-peer`,
+  `tailnet-egress`, and `provider-url`. These say how an operator or workflow
+  can reach a lease or provider-owned endpoint; they are not exposure or
+  isolation guarantees.
 - `workspace`: normalized versioned-workspace capabilities derived from feature
   flags. Possible values are `checkpoint`, `fork`, `restore`, and
   `snapshot-ref`. The field is omitted when a provider does not advertise any
