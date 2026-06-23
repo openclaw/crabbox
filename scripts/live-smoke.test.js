@@ -1154,6 +1154,117 @@ esac
   assert.equal(seen[8], "list --provider linode --json");
 });
 
+test("digitalocean live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-digitalocean-dispatch-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const fakePython = path.join(bin, "python3");
+  const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+  const realPython = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(realPython, "python3 is required for DigitalOcean dispatch smoke");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakePython,
+    `#!/usr/bin/env bash
+if [[ "$*" == *"/account/keys"* ]]; then
+  printf '[]\\n'
+  exit 0
+fi
+if [[ "$*" == *"urllib.request"* ]]; then
+  exit 1
+fi
+exec ${JSON.stringify(realPython)} "$@"
+`,
+  );
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+if [[ "\${DIGITALOCEAN_TOKEN:-}" != "digitalocean_fake_value" ]]; then
+  printf 'missing DigitalOcean auth\\n' >&2
+  exit 91
+fi
+case "$1" in
+  doctor)
+    printf 'auth=ready control_plane=ready inventory=ready api=list mutation=false leases=0 runtime=unchecked default_type=s-1vcpu-1gb region=nyc3 image=ubuntu-24-04-x64\\n'
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\\n'
+    else
+      printf '[{"labels":{"slug":"%s"}}]\\n' "$slug"
+    fi
+    ;;
+  warmup)
+    requested_slug=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --slug)
+          requested_slug="\${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\\n' "$requested_slug" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\\n'
+    ;;
+  run)
+    printf 'ok\\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  cleanup)
+    printf 'skip server id=none name=none reason=missing labels\\n'
+    ;;
+  *)
+    printf 'unexpected args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "digitalocean",
+      DIGITALOCEAN_TOKEN: "digitalocean_fake_value",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_digitalocean_smoke_passed slug=digitalocean-smoke-/);
+  assert.doesNotMatch(result.stdout + result.stderr, /digitalocean_fake_value/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen[0], "doctor --provider digitalocean");
+  assert.equal(seen[1], "list --provider digitalocean --json");
+  assert.match(seen[2], /^warmup --provider digitalocean --slug digitalocean-smoke-\d{14}-\d+ --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[3], /^status --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
+  assert.equal(seen[5], "list --provider digitalocean --json");
+  assert.match(seen[6], /^stop --provider digitalocean digitalocean-smoke-\d{14}-\d+$/);
+  assert.equal(seen[7], "cleanup --provider digitalocean --dry-run");
+  assert.equal(seen[8], "list --provider digitalocean --json");
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");

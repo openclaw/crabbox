@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -2266,24 +2265,6 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	if !strings.Contains(payload, `preflight_cmd '\''node'\'' '\''node'\'' node --version`) {
 		t.Fatalf("WSL2 preflight payload missing node probe in %q", payload)
 	}
-}
-
-func wsl2CommandPayload(t *testing.T, decoded string) string {
-	t.Helper()
-	start := strings.Index(decoded, `[Convert]::FromBase64String("`)
-	if start < 0 {
-		t.Fatalf("WSL2 command missing base64 payload: %q", decoded)
-	}
-	start += len(`[Convert]::FromBase64String("`)
-	end := strings.Index(decoded[start:], `")`)
-	if end < 0 {
-		t.Fatalf("WSL2 command has unterminated base64 payload: %q", decoded)
-	}
-	raw, err := base64.StdEncoding.DecodeString(decoded[start : start+end])
-	if err != nil {
-		t.Fatalf("WSL2 command payload is not base64: %v", err)
-	}
-	return string(raw)
 }
 
 func TestRemotePreflightNonePrintsWorkspaceOnly(t *testing.T) {

@@ -26,6 +26,7 @@
 - Added Superserve to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Vercel Sandbox to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Linode to the guarded `scripts/live-smoke.sh` provider smoke matrix.
+- Added DigitalOcean to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Multipass to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Tart to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.

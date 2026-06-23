@@ -175,10 +175,17 @@ crabbox cleanup --provider digitalocean
 The repeatable live check is opt-in:
 
 ```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-smoke.sh
+```
+
+The top-level smoke dispatches to the provider-specific script:
+
+```sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=digitalocean scripts/live-digitalocean-smoke.sh
 ```
 
-The script builds `bin/crabbox`, uses `DIGITALOCEAN_TOKEN` from the environment,
+The script builds `bin/crabbox` unless `CRABBOX_BIN` points at an existing
+binary, uses `DIGITALOCEAN_TOKEN` from the environment,
 requires an empty Crabbox-owned DigitalOcean inventory, creates a small
 `s-1vcpu-1gb` Droplet, waits for ready status, runs `echo ok`, verifies
 `list --json`, stops the lease, runs dry-run cleanup, and verifies the

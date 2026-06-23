@@ -211,6 +211,7 @@ local_testbox_key_snapshot() {
 
 cleanup_armed=0
 slug="digitalocean-smoke-$(date +%Y%m%d%H%M%S)-$$"
+crabbox_bin=""
 config_file=""
 initial_managed_key_snapshot=""
 initial_local_key_snapshot=""
@@ -223,7 +224,7 @@ cleanup() {
     local attempt
     for attempt in 1 2 3; do
       set +e
-      cleanup_output="$(bin/crabbox stop --provider digitalocean "$slug" 2>&1)"
+      cleanup_output="$("$crabbox_bin" stop --provider digitalocean "$slug" 2>&1)"
       cleanup_status=$?
       set -e
       if [ "$cleanup_status" -eq 0 ]; then
@@ -261,7 +262,7 @@ cleanup() {
       sleep 2
     done
     if [ "$cleanup_status" -ne 0 ]; then
-      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "bin/crabbox stop --provider digitalocean $slug" "$cleanup_status" "$slug" >&2
+      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "$crabbox_bin stop --provider digitalocean $slug" "$cleanup_status" "$slug" >&2
       printf '%s\n' "$cleanup_output" >&2
       if [ "$status" -eq 0 ]; then
         status="$cleanup_status"
@@ -290,8 +291,11 @@ if [[ -z "${DIGITALOCEAN_TOKEN:-}" ]]; then
   exit 0
 fi
 
-mkdir -p bin
-go build -trimpath -o bin/crabbox ./cmd/crabbox
+crabbox_bin="${CRABBOX_BIN:-bin/crabbox}"
+if [[ -z "${CRABBOX_BIN:-}" ]]; then
+  mkdir -p "$(dirname "$crabbox_bin")"
+  go build -trimpath -o "$crabbox_bin" ./cmd/crabbox
+fi
 
 config_file="$(mktemp)"
 cat >"$config_file" <<'YAML'
@@ -306,24 +310,24 @@ export CRABBOX_CONFIG="$config_file"
 export CRABBOX_COORDINATOR=
 export DIGITALOCEAN_TOKEN
 
-doctor_output="$(run_capture "bin/crabbox doctor --provider digitalocean" bin/crabbox doctor --provider digitalocean)"
+doctor_output="$(run_capture "$crabbox_bin doctor --provider digitalocean" "$crabbox_bin" doctor --provider digitalocean)"
 printf '%s\n' "$doctor_output"
-initial_list_output="$(run_capture "bin/crabbox list --provider digitalocean --json" bin/crabbox list --provider digitalocean --json)"
-validate_list_json_empty "bin/crabbox list --provider digitalocean --json" "$initial_list_output"
+initial_list_output="$(run_capture "$crabbox_bin list --provider digitalocean --json" "$crabbox_bin" list --provider digitalocean --json)"
+validate_list_json_empty "$crabbox_bin list --provider digitalocean --json" "$initial_list_output"
 initial_managed_key_snapshot="$(run_capture "digitalocean managed SSH key snapshot" raw_digitalocean_managed_key_snapshot)"
 initial_local_key_snapshot="$(local_testbox_key_snapshot)"
 cleanup_armed=1
-run_capture "bin/crabbox warmup --provider digitalocean --slug $slug --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m" bin/crabbox warmup --provider digitalocean --slug "$slug" --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m >/dev/null
-run_capture "bin/crabbox status --provider digitalocean --id $slug --wait --wait-timeout 300s" bin/crabbox status --provider digitalocean --id "$slug" --wait --wait-timeout 300s >/dev/null
-run_capture "bin/crabbox run --provider digitalocean --id $slug --no-sync -- echo ok" bin/crabbox run --provider digitalocean --id "$slug" --no-sync -- echo ok >/dev/null
-list_output="$(run_capture "bin/crabbox list --provider digitalocean --json" bin/crabbox list --provider digitalocean --json)"
+run_capture "$crabbox_bin warmup --provider digitalocean --slug $slug --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m" "$crabbox_bin" warmup --provider digitalocean --slug "$slug" --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m >/dev/null
+run_capture "$crabbox_bin status --provider digitalocean --id $slug --wait --wait-timeout 300s" "$crabbox_bin" status --provider digitalocean --id "$slug" --wait --wait-timeout 300s >/dev/null
+run_capture "$crabbox_bin run --provider digitalocean --id $slug --no-sync -- echo ok" "$crabbox_bin" run --provider digitalocean --id "$slug" --no-sync -- echo ok >/dev/null
+list_output="$(run_capture "$crabbox_bin list --provider digitalocean --json" "$crabbox_bin" list --provider digitalocean --json)"
 printf '%s\n' "$list_output"
-validate_list_json_contains_slug "bin/crabbox list --provider digitalocean --json" "$list_output"
-run_capture "bin/crabbox stop --provider digitalocean $slug" bin/crabbox stop --provider digitalocean "$slug" >/dev/null
+validate_list_json_contains_slug "$crabbox_bin list --provider digitalocean --json" "$list_output"
+run_capture "$crabbox_bin stop --provider digitalocean $slug" "$crabbox_bin" stop --provider digitalocean "$slug" >/dev/null
 cleanup_armed=0
-cleanup_output="$(run_capture "bin/crabbox cleanup --provider digitalocean --dry-run" bin/crabbox cleanup --provider digitalocean --dry-run)"
-post_list_output="$(run_capture "bin/crabbox list --provider digitalocean --json" bin/crabbox list --provider digitalocean --json)"
-validate_list_json_empty "bin/crabbox list --provider digitalocean --json" "$post_list_output"
+cleanup_output="$(run_capture "$crabbox_bin cleanup --provider digitalocean --dry-run" "$crabbox_bin" cleanup --provider digitalocean --dry-run)"
+post_list_output="$(run_capture "$crabbox_bin list --provider digitalocean --json" "$crabbox_bin" list --provider digitalocean --json)"
+validate_list_json_empty "$crabbox_bin list --provider digitalocean --json" "$post_list_output"
 printf '%s\n' "$cleanup_output"
 printf '%s\n' "$post_list_output"
 printf 'classification=live_digitalocean_smoke_passed slug=%s cleanup=complete\n' "$slug"
