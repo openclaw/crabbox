@@ -3158,14 +3158,24 @@ func (a App) writeActionsHydrationStopBestEffort(ctx context.Context, target SSH
 	}
 	stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	hydrated := false
+	if state, err := readActionsHydrationState(stopCtx, target, leaseID); err == nil && state.Workspace != "" {
+		hydrated = true
+	}
 	if err := writeActionsHydrationStop(stopCtx, target, leaseID); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: could not stop GitHub Actions hydration for %s: %v\n", leaseID, err)
+		return
+	}
+	if hydrated {
+		time.Sleep(actionsHydrationStopSettleDelay)
 	}
 }
 
 func shouldWriteActionsHydrationStop(leaseID string, target SSHTarget) bool {
 	return leaseID != "" && target.Host != ""
 }
+
+const actionsHydrationStopSettleDelay = 20 * time.Second
 
 func leaseDisplayID(lease CoordinatorLease) string {
 	if lease.CloudID != "" {
