@@ -110,6 +110,10 @@ before workspace preparation and sync.
 4. Execute commands through Freestyle's exec API in that workdir via `bash -lc`.
 5. Stop deletes the VM and removes the local lease claim.
 
+`run --lease-output` records the Freestyle lease, reuse/retention state, and
+matching `crabbox stop --provider freestyle --id ...` cleanup command for
+orchestrators that need to inspect or clean up retained VMs later.
+
 ## Sync
 
 Freestyle advertises archive sync (`FeatureArchiveSync`). Crabbox supports

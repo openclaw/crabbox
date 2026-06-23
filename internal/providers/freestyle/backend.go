@@ -29,6 +29,7 @@ type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
+type RunSessionHandle = core.RunSessionHandle
 type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
@@ -128,7 +129,7 @@ func (b *freestyleBackend) Warmup(ctx context.Context, req WarmupRequest) error 
 	return nil
 }
 
-func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
 		return RunResult{}, err
 	}
@@ -161,16 +162,50 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 		slug = freestyleClaimSlug(leaseID)
 	}
 	shouldStop := acquired && !req.Keep
+	cleanedUp := false
+	session := &RunSessionHandle{
+		Provider:       freestyleProvider,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: freestyleCleanupCommand(leaseID),
+	}
+	finishResult := func(result RunResult) RunResult {
+		if result.Provider == "" {
+			result.Provider = freestyleProvider
+		}
+		if result.LeaseID == "" {
+			result.LeaseID = leaseID
+		}
+		if result.Slug == "" {
+			result.Slug = slug
+		}
+		result.Session = session
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
+	defer func() {
+		result = finishResult(result)
+	}()
+	cleanupFreestyle := func() error {
+		if !shouldStop {
+			return nil
+		}
+		if err := deleteFreestyleVMForCleanup(client, name); err != nil {
+			shouldStop = false
+			return err
+		}
+		removeLeaseClaim(leaseID)
+		cleanedUp = true
+		shouldStop = false
+		return nil
+	}
 	if shouldStop {
 		defer func() {
-			if !shouldStop {
-				return
-			}
-			if err := deleteFreestyleVMForCleanup(client, name); err != nil {
+			if err := cleanupFreestyle(); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: freestyle stop failed for %s: %v\n", name, err)
-				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=freestyle lease=%s sandbox=%s\n", leaseID, name)
@@ -217,7 +252,7 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, 
 	commandStart := b.now()
 	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
 	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
+	result = RunResult{
 		ExitCode:      exitCode,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
@@ -387,6 +422,10 @@ func deleteFreestyleVMForCleanup(client freestyleAPI, vmID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), freestyleCleanupTimeout)
 	defer cancel()
 	return client.DeleteVM(ctx, vmID)
+}
+
+func freestyleCleanupCommand(leaseID string) string {
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", freestyleProvider, shellQuote(leaseID))
 }
 
 func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, command []string, shellMode bool, env map[string]string) (int, error) {

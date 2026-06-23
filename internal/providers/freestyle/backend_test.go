@@ -15,7 +15,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestFreestyleProviderSpec(t *testing.T) {
+	spec := Provider{}.Spec()
+	if spec.Kind != core.ProviderKindDelegatedRun {
+		t.Fatalf("kind=%q", spec.Kind)
+	}
+	for _, feature := range []core.Feature{core.FeatureArchiveSync, core.FeatureRunSession} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("missing feature %s in %#v", feature, spec.Features)
+		}
+	}
+}
 
 func TestFreestyleExecCommandPreservesShellString(t *testing.T) {
 	got := freestyleExecCommand([]string{"pnpm install && pnpm test"}, true)
@@ -354,7 +368,7 @@ func TestFreestyleRunCleansNewSandboxAfterPrepareFailure(t *testing.T) {
 		cfg:  Config{Freestyle: FreestyleConfig{}},
 		rt:   Runtime{Stderr: io.Discard},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:  true,
 		Command: []string{"true"},
@@ -364,6 +378,15 @@ func TestFreestyleRunCleansNewSandboxAfterPrepareFailure(t *testing.T) {
 	}
 	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm123" {
 		t.Fatalf("deleteIDs=%#v want vm123", client.deleteIDs)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != freestyleProvider || result.Session.LeaseID != "fsb_vm123" || result.Session.Reused || result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if !strings.Contains(result.Session.CleanupCommand, "crabbox stop --provider freestyle --id") {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
 }
 
@@ -386,7 +409,7 @@ func TestFreestyleRunKeepsNewSandboxAfterPrepareFailureWhenRequested(t *testing.
 		},
 		rt: Runtime{Stderr: &stderr},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:          Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:        true,
 		KeepOnFailure: true,
@@ -400,6 +423,15 @@ func TestFreestyleRunKeepsNewSandboxAfterPrepareFailureWhenRequested(t *testing.
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=fsb_vm123") {
 		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != freestyleProvider || result.Session.LeaseID != "fsb_vm123" || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if result.Session.CleanupCommand == "" {
+		t.Fatal("cleanup command is empty")
 	}
 }
 
@@ -469,7 +501,7 @@ func TestFreestyleRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 		},
 		rt: Runtime{Stderr: io.Discard},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		ID:      "fsb_vm123",
 		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:  true,
@@ -487,6 +519,58 @@ func TestFreestyleRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(prepare, "mkdir -p") {
 		t.Fatalf("--no-sync prepare should ensure workspace: %q", prepare)
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != freestyleProvider || result.Session.LeaseID != "fsb_vm123" || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if result.Session.CleanupCommand == "" {
+		t.Fatal("cleanup command is empty")
+	}
+}
+
+func TestFreestyleRunCleanupFailureReportsRetainedSession(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeFreestyleClient{
+		createID:  "vm123",
+		deleteErr: errors.New("delete failed"),
+	}
+	oldClient := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { newFreestyleClient = oldClient })
+
+	var stderr bytes.Buffer
+	backend := &freestyleBackend{
+		spec: Provider{}.Spec(),
+		cfg:  Config{Freestyle: FreestyleConfig{}},
+		rt:   Runtime{Stderr: &stderr},
+	}
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err != nil {
+		t.Fatalf("Run err=%v", err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm123" {
+		t.Fatalf("deleteIDs=%#v want vm123", client.deleteIDs)
+	}
+	if !strings.Contains(stderr.String(), "warning: freestyle stop failed for vm123") {
+		t.Fatalf("stderr=%q, want cleanup warning", stderr.String())
+	}
+	if result.Session == nil {
+		t.Fatal("session=nil")
+	}
+	if result.Session.Provider != freestyleProvider || result.Session.LeaseID != "fsb_vm123" || result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
+	if result.Session.CleanupCommand != "crabbox stop --provider freestyle --id 'fsb_vm123'" {
+		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
 }
 

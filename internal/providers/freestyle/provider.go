@@ -27,7 +27,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:        "freestyle",
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureArchiveSync},
+		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureRunSession},
 		Coordinator: core.CoordinatorNever,
 	}
 }
