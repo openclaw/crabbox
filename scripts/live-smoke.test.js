@@ -382,10 +382,19 @@ test("Namespace Devbox live smoke requires the devbox CLI before provider mutati
   const fakeCrabbox = path.join(dir, "crabbox");
   const log = path.join(dir, "calls.log");
   fs.mkdirSync(bin);
+  writeExecutable(
+    path.join(bin, "dirname"),
+    `#!/bin/bash
+case "$1" in
+  */*) printf '%s\\n' "\${1%/*}" ;;
+  *) printf '.\\n' ;;
+esac
+`,
+  );
   writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\nexit 0\n");
   writeExecutable(
     fakeCrabbox,
-    `#!/usr/bin/env bash
+    `#!/bin/bash
 set -euo pipefail
 printf '%s\\n' "$*" >>"${log}"
 case "$*" in
@@ -400,7 +409,7 @@ esac
 `,
   );
 
-  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+  const result = spawnSync("/bin/bash", ["scripts/live-smoke.sh"], {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -409,7 +418,7 @@ esac
       CRABBOX_LIVE_COORDINATOR: "0",
       CRABBOX_LIVE_PROVIDERS: "namespace-devbox",
       CRABBOX_LIVE_REPO: repoRoot,
-      PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+      PATH: bin,
     },
     encoding: "utf8",
   });
@@ -541,10 +550,19 @@ test("W&B live smoke requires an API key before provider mutation", () => {
   const fakeCrabbox = path.join(dir, "crabbox");
   const log = path.join(dir, "calls.log");
   fs.mkdirSync(bin);
+  writeExecutable(
+    path.join(bin, "dirname"),
+    `#!/bin/bash
+case "$1" in
+  */*) printf '%s\\n' "\${1%/*}" ;;
+  *) printf '.\\n' ;;
+esac
+`,
+  );
   writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\nexit 0\n");
   writeExecutable(
     fakeCrabbox,
-    `#!/usr/bin/env bash
+    `#!/bin/bash
 set -euo pipefail
 printf '%s\\n' "$*" >>"${log}"
 case "$*" in
@@ -586,6 +604,56 @@ esac
   assert.doesNotMatch(calls, /^doctor --provider wandb/m);
   assert.doesNotMatch(calls, /^run --provider wandb/m);
   assert.doesNotMatch(calls, /^list --provider wandb/m);
+});
+
+test("Incus live smoke requires rg before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-incus-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("/bin/bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "incus",
+      CRABBOX_LIVE_REPO: repoRoot,
+      HOME: dir,
+      PATH: bin,
+      TMPDIR: dir,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /missing required tool: rg/);
+  const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "";
+  assert.doesNotMatch(calls, /^doctor --provider incus/m);
+  assert.doesNotMatch(calls, /^warmup --provider incus/m);
+  assert.doesNotMatch(calls, /^status --provider incus/m);
+  assert.doesNotMatch(calls, /^run --provider incus/m);
+  assert.doesNotMatch(calls, /^list --provider incus/m);
+  assert.doesNotMatch(calls, /^stop /m);
 });
 
 test("Tenki live smoke proves paused status waits do not resume the session", () => {

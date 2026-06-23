@@ -272,13 +272,18 @@ The default live-smoke matrix still skips Incus. Opt in explicitly:
 ```sh
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 CRABBOX_BIN=bin/crabbox CRABBOX_LIVE_DOCTOR_PROVIDERS=incus scripts/live-doctor-smoke.sh
-CRABBOX_LIVE=1 CRABBOX_BIN=bin/crabbox CRABBOX_LIVE_PROVIDERS=incus CRABBOX_LIVE_REPO=$PWD scripts/live-smoke.sh
+CRABBOX_LIVE=1 \
+CRABBOX_BIN=bin/crabbox \
+CRABBOX_LIVE_PROVIDERS=incus \
+CRABBOX_LIVE_REPO=$PWD \
+scripts/live-smoke.sh
 ```
 
 The doctor smoke only proves daemon/control-plane readiness. The full live
-smoke proves `warmup`, `status --wait`, `run`, `list`, `stop`, and one retained
-reuse cycle from the Mac, then forces a final delete so repeat runs do not
-strand test instances.
+smoke first requires local `jq` and `rg` before it calls Incus. It then proves
+`doctor`, `warmup`, `status --wait`, `run`, `list`, `stop`, and one retained
+reuse cycle from the Mac, then forces a final delete so repeat runs do not strand
+test instances.
 
 ## Limits
 
