@@ -85,7 +85,11 @@ Per-provider smoke prerequisites:
   `scripts/live-smoke.sh` refuses to call E2B until an API key is exported, then
   creates one sandbox, runs one no-sync command, lists normalized inventory, and
   stops the lease.
-- **Modal** — an authenticated Modal Python client (`python3 -m modal setup` or Modal token env vars).
+- **Modal** — an authenticated Modal Python client (`python3 -m modal setup`
+  or Modal token env vars). `scripts/live-smoke.sh` refuses to call Modal until
+  the configured Python binary can import the Modal client, then creates one
+  sandbox, waits for status, runs one no-sync command, lists normalized
+  inventory, and stops the lease.
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`,
   and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
   `scripts/live-smoke.sh` refuses to call Semaphore until those values are

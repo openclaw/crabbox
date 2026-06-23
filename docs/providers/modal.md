@@ -50,6 +50,20 @@ crabbox status --provider modal --id swift-crab
 crabbox stop --provider modal swift-crab
 ```
 
+## Live Smoke
+
+Run the shared smoke only after the Modal Python client is installed and
+authenticated:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=modal CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+```
+
+The smoke exits before any Modal `warmup`, `status`, `run`, `list`, or `stop`
+call when the configured Python binary cannot import the Modal client. With a
+working client and auth state, it creates one sandbox, waits for status, runs
+one no-sync command, lists normalized inventory, and stops the lease.
+
 ## Config
 
 ```yaml

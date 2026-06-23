@@ -711,6 +711,67 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Modal live smoke requires the Python client before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-modal-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  fs.mkdirSync(bin);
+  writeExecutable(path.join(bin, "jq"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(path.join(bin, "rg"), "#!/usr/bin/env bash\nexit 0\n");
+  writeExecutable(
+    path.join(bin, "python3"),
+    `#!/usr/bin/env bash
+printf 'missing modal client\\n' >&2
+exit 1
+`,
+  );
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$*" in
+  "config path")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "modal",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_MODAL_PYTHON: "",
+      PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin`,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(
+    result.stderr,
+    /modal smoke requires the Modal Python client for python3/,
+  );
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^config path$/m);
+  assert.doesNotMatch(calls, /^warmup --provider modal/m);
+  assert.doesNotMatch(calls, /^status --provider modal/m);
+  assert.doesNotMatch(calls, /^run --provider modal/m);
+  assert.doesNotMatch(calls, /^list --provider modal/m);
+  assert.doesNotMatch(calls, /^stop /m);
+});
+
 test("Tenki live smoke proves paused status waits do not resume the session", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-tenki-"));
   const bin = path.join(dir, "bin");
