@@ -16,7 +16,7 @@ func TestVercelSandboxProviderSpec(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v", spec.Targets)
 	}
-	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) {
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureCleanup) || !spec.Features.Has(core.FeatureRunSession) {
 		t.Fatalf("features=%v", spec.Features)
 	}
 	if aliases := (Provider{}).Aliases(); len(aliases) != 0 {

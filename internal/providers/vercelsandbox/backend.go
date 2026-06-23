@@ -121,9 +121,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 	}
 	shouldStop := acquired && !req.Keep
+	cleanedUp := false
+	cleanupCreated := func() error {
+		cleanupPending := shouldStop
+		err := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop)
+		if cleanupPending && err == nil {
+			cleanedUp = true
+		}
+		return err
+	}
 	if shouldStop {
 		defer func() {
-			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+			if cleanupErr := cleanupCreated(); cleanupErr != nil {
 				if result.ExitCode == 0 {
 					result.ExitCode = 1
 				}
@@ -135,6 +144,19 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			}
 		}()
 	}
+	session := &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		CleanupCommand: vercelSandboxCleanupCommand(leaseID),
+	}
+	finishResult := func(result RunResult) RunResult {
+		result.Session = session
+		result.Session.Kept = !cleanedUp && !shouldStop
+		return result
+	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
 
 	syncDuration := time.Duration(0)
@@ -143,32 +165,34 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, sandboxID, req, workdir)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}, err
+			return finishResult(RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}), err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
+		return finishResult(RunResult{}), err
 	}
 
 	if req.SyncOnly {
-		result = RunResult{
+		result = finishResult(RunResult{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
 			Total:         b.now().Sub(started),
 			SyncDelegated: true,
-		}
+		})
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		activityErr := b.refreshLeaseActivityIfRetained(leaseID, shouldStop)
 		if activityErr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: refresh vercel-sandbox lease activity failed lease=%s: %v\n", leaseID, activityErr)
 			result.ExitCode = 1
 		}
-		if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+		if cleanupErr := cleanupCreated(); cleanupErr != nil {
 			result.ExitCode = 1
+			result = finishResult(result)
 			return result, cleanupErr
 		}
+		result = finishResult(result)
 		if req.TimingJSON {
 			report := timingReportWithRunResult(timingReport{
 				Provider:      providerName,
@@ -194,7 +218,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 
 	command, err := buildCommand(req.Command, req.ShellMode)
 	if err != nil {
-		return RunResult{}, err
+		return finishResult(RunResult{}), err
 	}
 	commandText := commandScript(command)
 	commandEnv, strippedAuthEnv := vercelSandboxCommandEnv(req.Env)
@@ -212,7 +236,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		TimeoutSecs: b.execTimeoutSecs(),
 	}, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
-	result = RunResult{
+	result = finishResult(RunResult{
 		Provider:      providerName,
 		LeaseID:       leaseID,
 		Slug:          slug,
@@ -221,7 +245,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
-	}
+	})
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "vercel-sandbox run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	} else {
@@ -245,12 +269,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			result.ExitCode = 1
 		}
 	}
-	if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
+	if cleanupErr := cleanupCreated(); cleanupErr != nil {
 		if result.ExitCode == 0 {
 			result.ExitCode = 1
 		}
 		commandErr = errors.Join(commandErr, cleanupErr)
 	}
+	result = finishResult(result)
 	if req.TimingJSON {
 		timingErr := commandErr
 		if timingErr == nil {
