@@ -246,7 +246,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
 			}
-			if err := writeTimingJSON(b.rt.Stderr, timingReport{
+			report := timingReportWithRunResult(timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -257,7 +257,11 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 				TotalMs:       result.Total.Milliseconds(),
 				ExitCode:      result.ExitCode,
 				Label:         strings.TrimSpace(req.Label),
-			}); err != nil {
+			}, result, activityErr)
+			if activityErr != nil {
+				report = timingReportWithProviderError(report)
+			}
+			if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 				return result, err
 			}
 		}
@@ -319,7 +323,11 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop); cleanupErr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
 		}
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		timingErr := commandErr
+		if timingErr == nil {
+			timingErr = activityErr
+		}
+		report := timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -331,7 +339,11 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      result.ExitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, timingErr)
+		if commandErr == nil && activityErr != nil {
+			report = timingReportWithProviderError(report)
+		}
+		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
 			return result, err
 		}
 	}

@@ -602,6 +602,9 @@ func TestRunTimingJSONRemainsFinalLineWhenActivityRefreshFails(t *testing.T) {
 	if report["exitCode"] != float64(1) {
 		t.Fatalf("timing exitCode=%v want 1", report["exitCode"])
 	}
+	if report["runStatus"] != "failed" || report["errorKind"] != "provider-error" {
+		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
+	}
 }
 
 func TestRunTimingJSONRemainsFinalLineWhenCleanupFails(t *testing.T) {

@@ -136,7 +136,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
-			return result, writeTimingJSON(b.rt.Stderr, timingReport{
+			return result, writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 				Provider:      providerName,
 				LeaseID:       leaseID,
 				Slug:          slug,
@@ -147,7 +147,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 				TotalMs:       result.Total.Milliseconds(),
 				ExitCode:      0,
 				Label:         strings.TrimSpace(req.Label),
-			})
+			}, result, nil))
 		}
 		return result, nil
 	}
@@ -178,7 +178,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
+		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:      providerName,
 			LeaseID:       leaseID,
 			Slug:          slug,
@@ -190,7 +190,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			TotalMs:       result.Total.Milliseconds(),
 			ExitCode:      exitCode,
 			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
+		}, result, runErr)); err != nil {
 			return result, err
 		}
 	}

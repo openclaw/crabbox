@@ -108,7 +108,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		result := RunResult{Total: time.Since(started), SyncDelegated: true}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReport{
+			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 				Provider:    daytonaProvider,
 				LeaseID:     leaseID,
 				Slug:        slug,
@@ -118,7 +118,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 				TotalMs:     result.Total.Milliseconds(),
 				ExitCode:    0,
 				Label:       strings.TrimSpace(req.Label),
-			})
+			}, result, nil))
 			return result, err
 		}
 		return result, nil
@@ -149,7 +149,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	}
 	fmt.Fprintf(b.rt.Stderr, "daytona run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
 	if req.TimingJSON {
-		if timingErr := writeTimingJSON(b.rt.Stderr, timingReport{
+		if timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:    daytonaProvider,
 			LeaseID:     leaseID,
 			Slug:        slug,
@@ -160,7 +160,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			TotalMs:     result.Total.Milliseconds(),
 			ExitCode:    result.ExitCode,
 			Label:       strings.TrimSpace(req.Label),
-		}); timingErr != nil {
+		}, result, err)); timingErr != nil {
 			return result, timingErr
 		}
 	}

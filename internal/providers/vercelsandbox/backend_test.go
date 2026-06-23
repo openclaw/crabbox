@@ -3,6 +3,7 @@ package vercelsandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -487,12 +488,14 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	fake.exitCode = 7
-	backend := testBackend(fake, io.Discard, io.Discard)
+	var stderr bytes.Buffer
+	backend := testBackend(fake, io.Discard, &stderr)
 	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:          Repo{Name: "my-app", Root: tempRepo(t)},
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"false"},
+		TimingJSON:    true,
 	})
 	if err == nil || result.ExitCode != 7 {
 		t.Fatalf("result=%#v err=%v", result, err)
@@ -509,6 +512,14 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	}
 	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID == "" {
 		t.Fatalf("claim should be retained: claim=%#v err=%v", claim, err)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatalf("final stderr line is not timing JSON: %q: %v", lines[len(lines)-1], err)
+	}
+	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
+		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
 	}
 }
 
