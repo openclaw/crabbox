@@ -725,6 +725,99 @@ chmod +x "$out"
   assert.match(calls, /^stop --provider docker-sandbox docker-sandbox-smoke-\d{14}-\d+$/m);
 });
 
+test("smolvm live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-smolvm-dispatch-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const calls = path.join(dir, "calls.log");
+  const state = path.join(dir, "lease.state");
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+case "$1" in
+  run)
+    if [[ "$*" == *"SMOLVM_SMOKE_V1_OK"* ]]; then
+      requested_slug=""
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --slug)
+            requested_slug="\${2:-}"
+            shift 2
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+      printf '%s\\n' "$requested_slug" >"${state}"
+      printf 'SMOLVM_SMOKE_V1_OK\\n'
+      printf '{"provider":"smolvm","leaseId":"cbx_test"}\\n' >&2
+    elif [[ "$*" == *"SMOLVM_SMOKE_V2_OK"* ]]; then
+      test -f "${state}"
+      printf 'SMOLVM_SMOKE_V2_OK\\n'
+      printf '{"provider":"smolvm","leaseId":"cbx_test"}\\n' >&2
+    elif [[ "$*" == *"SMOLVM_SMOKE_EXIT_23"* ]]; then
+      test -f "${state}"
+      printf 'SMOLVM_SMOKE_EXIT_23\\n'
+      exit 23
+    else
+      printf 'unexpected run command\\n' >&2
+      exit 64
+    fi
+    ;;
+  status)
+    test -f "${state}"
+    printf '{"id":"cbx_test","slug":"%s","provider":"smolvm","state":"running"}\\n' "$(cat "${state}")"
+    ;;
+  list)
+    if [[ -f "${state}" ]]; then
+      printf '[{"Provider":"smolvm","slug":"%s","state":"running"}]\\n' "$(cat "${state}")"
+    else
+      printf '[]\\n'
+    fi
+    ;;
+  doctor)
+    printf '{"ok":true,"provider":"smolvm"}\\n'
+    ;;
+  stop)
+    rm -f "${state}"
+    ;;
+  *)
+    printf 'unexpected command %s\\n' "$1" >&2
+    exit 64
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "smolvm",
+      CRABBOX_SMOLVM_API_KEY: "smk_test",
+      CRABBOX_SMOLVM_CLEANUP_RETRY_DELAY_SECONDS: "0",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_smolvm_smoke_passed/);
+  assert.equal(fs.existsSync(state), false);
+  const seen = fs.readFileSync(calls, "utf8");
+  assert.match(seen, /^run --provider smolvm --keep --slug smolvm-live-smoke-/m);
+  assert.match(seen, /^status --provider smolvm --id smolvm-live-smoke-.* --wait --json$/m);
+  assert.match(seen, /^doctor --provider smolvm --json$/m);
+  assert.match(seen, /^run --provider smolvm --id smolvm-live-smoke-.* --no-sync -- /m);
+  assert.match(seen, /^stop --provider smolvm smolvm-live-smoke-/m);
+});
+
 test("multipass live smoke uses the generic SSH lease lifecycle", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-multipass-"));
   const bin = path.join(dir, "bin");
