@@ -60,6 +60,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tenki CRABBOX_LIVE_COORDINATOR=0 CRABBOX_L
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=kubevirt CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_KUBEVIRT_TEMPLATE=/path/to/vm.yaml scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=external CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_EXTERNAL_COMMAND=/path/to/provider scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=morph CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_MORPH_SNAPSHOT=snapshot_xxx scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=scaleway CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=docker-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=smolvm CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
@@ -125,6 +126,11 @@ Per-provider smoke prerequisites:
   creates a short-lived `SandboxClaim`, verifies archive sync, env forwarding,
   retained-claim reuse, replacement sync, status/list, and claim deletion.
 - **External** — a configured provider executable through `external.command` or `CRABBOX_LIVE_EXTERNAL_COMMAND`.
+- **Morph** — `CRABBOX_MORPH_API_KEY`, `MORPH_API_KEY`, or `morph.apiKey`,
+  plus `CRABBOX_LIVE_MORPH_SNAPSHOT`. `scripts/live-smoke.sh` refuses to call
+  Morph until both are configured, then creates one delete-on-release instance,
+  runs the normal SSH lease lifecycle, lists normalized inventory, and stops the
+  lease.
 - **Scaleway** — `SCW_ACCESS_KEY`, `SCW_SECRET_KEY`,
   `SCW_DEFAULT_ORGANIZATION_ID`, `SCW_DEFAULT_PROJECT_ID`,
   `SCW_DEFAULT_REGION`, and `SCW_DEFAULT_ZONE`, or equivalent

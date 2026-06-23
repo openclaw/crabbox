@@ -3055,3 +3055,44 @@ exit 0
   const calls = fs.existsSync(crabboxLog) ? fs.readFileSync(crabboxLog, "utf8") : "";
   assert.doesNotMatch(calls, /--provider morph/, "no morph-specific crabbox call may be issued when the key is missing");
 });
+
+test("morph live smoke requires a snapshot before provider mutation", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-morph-nosnapshot-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const crabboxLog = path.join(dir, "crabbox.log");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+exit 99
+`,
+  );
+
+  const env = { ...process.env };
+  delete env.CRABBOX_LIVE_MORPH_SNAPSHOT;
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...env,
+      PATH: `${bin}${path.delimiter}${env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_FAKE_LOG: crabboxLog,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "morph",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_MORPH_API_KEY: "dummy-morph-key",
+    },
+    encoding: "utf8",
+  });
+
+  assert.notEqual(result.status, 0, "expected non-zero exit when morph snapshot is missing");
+  assert.match(result.stderr, /CRABBOX_LIVE_MORPH_SNAPSHOT/);
+  const calls = fs.existsSync(crabboxLog) ? fs.readFileSync(crabboxLog, "utf8") : "";
+  assert.doesNotMatch(calls, /--provider morph/, "no morph-specific crabbox call may be issued when the snapshot is missing");
+});

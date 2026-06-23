@@ -48,6 +48,7 @@
 - Added E2B live-smoke documentation and API-key preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Modal live-smoke documentation and Python-client preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Tenki live-smoke documentation and CLI-auth preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
+- Added Morph live-smoke documentation and snapshot preflight coverage for the guarded `scripts/live-smoke.sh` matrix.
 - Added Multipass to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added Tart to the guarded `scripts/live-smoke.sh` provider smoke matrix.
 - Added run-session metadata for Vercel Sandbox runs so retained and reused sandboxes can be written through `--lease-output`.
