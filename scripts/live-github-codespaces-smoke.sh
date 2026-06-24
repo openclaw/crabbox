@@ -221,6 +221,19 @@ if [[ "$auth_status" -ne 0 ]]; then
   exit 0
 fi
 
+scope_output=""
+scope_status=0
+set +e
+scope_output="$("$gh_bin" codespace list --limit 1 2>&1)"
+scope_status=$?
+set -e
+if [[ "$scope_status" -ne 0 ]]; then
+  printf 'classification=credential_bound command=%q exit=%s reason=github_codespaces_scope_missing\n' "$gh_bin codespace list --limit 1" "$scope_status" >&2
+  redact_output "$scope_output" >&2
+  printf '\n' >&2
+  exit 0
+fi
+
 if [[ ! -x "$crabbox_bin" ]]; then
   mkdir -p bin
   go build -trimpath -o bin/crabbox ./cmd/crabbox

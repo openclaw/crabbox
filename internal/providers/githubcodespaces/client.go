@@ -293,7 +293,8 @@ func githubAPIError(status int, retryAfter, body string) error {
 	action := "check GitHub Codespaces access"
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		action = "check gh auth or GH_TOKEN/GITHUB_TOKEN scopes"
+		action = "check gh auth or GH_TOKEN/GITHUB_TOKEN scopes; " +
+			"GitHub Codespaces requires the codespace scope (for gh, run gh auth refresh -h github.com -s codespace)"
 	case http.StatusNotFound:
 		action = "check repository and Codespaces availability"
 	case http.StatusConflict:

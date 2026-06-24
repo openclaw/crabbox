@@ -54,7 +54,12 @@ refuses to manage an unclaimed Codespace by name.
   ```
 
 - Ensure `GH_TOKEN`, `GITHUB_TOKEN`, or the `gh` credential store has a token
-  with access to Codespaces and the selected repository.
+  with access to Codespaces and the selected repository. For local `gh` auth,
+  refresh the missing OAuth scope before live smoke:
+  ```sh
+  gh auth refresh -h github.com -s codespace
+  gh codespace list --limit 1
+  ```
 - Configure the repository with an SSH-enabled Linux devcontainer. The image
   must run an SSH server and include Git, `rsync`, and `tar`. A common
   devcontainer feature is `ghcr.io/devcontainers/features/sshd:1`.
