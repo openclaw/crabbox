@@ -5189,49 +5189,49 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.SealosDevbox != nil {
-		if file.SealosDevbox.Kubectl != "" {
+		if trusted && file.SealosDevbox.Kubectl != "" {
 			cfg.SealosDevbox.Kubectl = expandUserPath(file.SealosDevbox.Kubectl)
 		}
-		if file.SealosDevbox.Kubeconfig != "" {
+		if trusted && file.SealosDevbox.Kubeconfig != "" {
 			cfg.SealosDevbox.Kubeconfig = expandUserPath(file.SealosDevbox.Kubeconfig)
 		}
-		if file.SealosDevbox.Context != "" {
+		if trusted && file.SealosDevbox.Context != "" {
 			cfg.SealosDevbox.Context = file.SealosDevbox.Context
 		}
-		if file.SealosDevbox.Namespace != "" {
+		if trusted && file.SealosDevbox.Namespace != "" {
 			cfg.SealosDevbox.Namespace = file.SealosDevbox.Namespace
 		}
-		if file.SealosDevbox.Image != "" {
+		if trusted && file.SealosDevbox.Image != "" {
 			cfg.SealosDevbox.Image = file.SealosDevbox.Image
 		}
-		if file.SealosDevbox.TemplateID != "" {
+		if trusted && file.SealosDevbox.TemplateID != "" {
 			cfg.SealosDevbox.TemplateID = file.SealosDevbox.TemplateID
 		}
-		if file.SealosDevbox.CPU != "" {
+		if trusted && file.SealosDevbox.CPU != "" {
 			cfg.SealosDevbox.CPU = file.SealosDevbox.CPU
 		}
-		if file.SealosDevbox.Memory != "" {
+		if trusted && file.SealosDevbox.Memory != "" {
 			cfg.SealosDevbox.Memory = file.SealosDevbox.Memory
 		}
-		if file.SealosDevbox.StorageLimit != "" {
+		if trusted && file.SealosDevbox.StorageLimit != "" {
 			cfg.SealosDevbox.StorageLimit = file.SealosDevbox.StorageLimit
 		}
-		if file.SealosDevbox.Network != "" {
+		if trusted && file.SealosDevbox.Network != "" {
 			cfg.SealosDevbox.Network = file.SealosDevbox.Network
 		}
-		if file.SealosDevbox.SSHGatewayHost != "" {
+		if trusted && file.SealosDevbox.SSHGatewayHost != "" {
 			cfg.SealosDevbox.SSHGatewayHost = file.SealosDevbox.SSHGatewayHost
 		}
-		if file.SealosDevbox.SSHGatewayPort != "" {
+		if trusted && file.SealosDevbox.SSHGatewayPort != "" {
 			cfg.SealosDevbox.SSHGatewayPort = file.SealosDevbox.SSHGatewayPort
 		}
-		if file.SealosDevbox.SSHUser != "" {
+		if trusted && file.SealosDevbox.SSHUser != "" {
 			cfg.SealosDevbox.SSHUser = file.SealosDevbox.SSHUser
 		}
-		if file.SealosDevbox.WorkRoot != "" {
+		if trusted && file.SealosDevbox.WorkRoot != "" {
 			cfg.SealosDevbox.WorkRoot = file.SealosDevbox.WorkRoot
 		}
-		if file.SealosDevbox.NodeHost != "" {
+		if trusted && file.SealosDevbox.NodeHost != "" {
 			cfg.SealosDevbox.NodeHost = file.SealosDevbox.NodeHost
 		}
 		if file.SealosDevbox.DeleteOnRelease != nil {

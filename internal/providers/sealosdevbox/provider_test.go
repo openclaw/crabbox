@@ -17,6 +17,8 @@ func testConfig() core.Config {
 	cfg.Provider = providerName
 	cfg.SealosDevbox.Context = "sealos-context"
 	cfg.SealosDevbox.Namespace = "team-a"
+	cfg.SealosDevbox.Image = "ubuntu:24.04"
+	cfg.SealosDevbox.TemplateID = "tpl-devbox"
 	cfg.SealosDevbox.SSHGatewayHost = "ssh.sealos.example.test"
 	return cfg
 }
@@ -102,7 +104,7 @@ func TestConfigureRejectsNonLinuxTarget(t *testing.T) {
 
 func TestDoctorUsesReadOnlyKubectlCommands(t *testing.T) {
 	runner := &recordingRunner{}
-	doctor, err := (Provider{}).ConfigureDoctor(testConfig(), core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := (Provider{}).ConfigureDoctor(lifecycleConfig(), core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
