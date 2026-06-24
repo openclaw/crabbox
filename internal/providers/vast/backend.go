@@ -423,7 +423,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	action := normalizeVastReleaseAction(b.cfg.Vast.ReleaseAction)
+	action := normalizeVastReleaseAction(firstNonBlank(lease.Server.Labels[vastReleaseActionLabel], b.cfg.Vast.ReleaseAction))
 	if action == "stop" || action == "keep" {
 		return fmt.Sprintf("%s lease=%s vast=%s name=%s", action, lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 	}
@@ -453,7 +453,45 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	servers, err = b.prepareCleanupServers(servers)
+	if err != nil {
+		return err
+	}
 	return b.CleanupServers(ctx, req, servers)
+}
+
+func (b *backend) prepareCleanupServers(servers []core.Server) ([]core.Server, error) {
+	for i := range servers {
+		updated, err := b.prepareCleanupServer(servers[i])
+		if err != nil {
+			return nil, err
+		}
+		servers[i] = updated
+	}
+	return servers, nil
+}
+
+func (b *backend) prepareCleanupServer(server core.Server) (core.Server, error) {
+	if server.Provider != providerName {
+		return server, nil
+	}
+	leaseID := strings.TrimSpace(server.Labels["lease"])
+	if leaseID == "" {
+		return server, nil
+	}
+	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.Server{}, fmt.Errorf("read vast cleanup claim: %w", err)
+	}
+	if claimExists && claim.Provider == providerName && (claim.CloudID == "" || server.CloudID == "" || claim.CloudID == server.CloudID) {
+		return server, nil
+	}
+
+	labels := cloneLabels(server.Labels)
+	labels["state"] = "expired"
+	labels["expires_at"] = core.LeaseLabelTime(b.now().Add(-time.Second))
+	server.Labels = labels
+	return server, nil
 }
 
 func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
@@ -579,6 +617,14 @@ func vastLeaseLabels(cfg core.Config, leaseID, slug, state string, keep bool, no
 	labels["state"] = state
 	labels[vastReleaseActionLabel] = normalizeVastReleaseAction(cfg.Vast.ReleaseAction)
 	return labels
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels))
+	for key, value := range labels {
+		out[key] = value
+	}
+	return out
 }
 
 func isOwnedVastInstance(item vastInstance) bool {
