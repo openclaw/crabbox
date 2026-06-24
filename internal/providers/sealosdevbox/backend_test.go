@@ -3,6 +3,7 @@ package sealosdevbox
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -226,6 +227,73 @@ func TestAcquireAppliesManifestPersistsClaimAndKey(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(flattenArgs(runner.requests), " "), "secret-private") {
 		t.Fatal("private key leaked into kubectl args")
+	}
+}
+
+func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_rollback1234"
+	slug := "failssh"
+	name := core.LeaseProviderName(leaseID, slug)
+	privateKey := "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret-private\n-----END OPENSSH PRIVATE KEY-----\n"
+	publicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public"
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"data":{"` + devboxPublicKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(publicKey)) + `","` + devboxPrivateKeyField + `":"` + base64.StdEncoding.EncodeToString([]byte(privateKey)) + `"}}`
+	runner := &lifecycleRunner{outputs: []string{
+		`{"items":[]}`,
+		`devbox applied`,
+		devboxJSON,
+		secretJSON,
+		`{"items":[]}`,
+		"deleted",
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	backend.sshReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+		return errors.New("ssh not ready")
+	}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedLeaseID: leaseID, RequestedSlug: slug, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "ssh not ready") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	got := strings.Join(flattenArgs(runner.requests), " ")
+	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
+		t.Fatalf("failed acquire did not delete devbox; commands=%s", got)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v after rollback", exists, err)
+	}
+	target := core.SSHTarget{}
+	core.UseStoredTestboxKey(&target, leaseID)
+	if target.Key != "" {
+		t.Fatalf("stored key still exists after rollback: %s", target.Key)
+	}
+}
+
+func TestDoctorBlocksWhenImageAndTemplateAreMissing(t *testing.T) {
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Image = ""
+	cfg.SealosDevbox.TemplateID = ""
+	runner := &lifecycleRunner{}
+	backend := lifecycleBackend(cfg, runner)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "blocked" {
+		t.Fatalf("status=%q want blocked; checks=%#v", result.Status, result.Checks)
+	}
+	found := false
+	for _, check := range result.Checks {
+		if check.Check == "devbox.source" {
+			found = true
+			if check.Status != "failed" || !strings.Contains(check.Message, "requires image or templateID") {
+				t.Fatalf("devbox.source check=%#v", check)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing devbox.source check: %#v", result.Checks)
 	}
 }
 

@@ -52,6 +52,15 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	for _, verb := range []string{"create", "update", "delete"} {
 		add(b.canI(ctx, verb, devboxResource))
 	}
+	creationDetails := map[string]string{
+		"image_configured":       boolString(strings.TrimSpace(b.cfg.SealosDevbox.Image) != ""),
+		"template_id_configured": boolString(strings.TrimSpace(b.cfg.SealosDevbox.TemplateID) != ""),
+	}
+	if strings.TrimSpace(b.cfg.SealosDevbox.Image) == "" && strings.TrimSpace(b.cfg.SealosDevbox.TemplateID) == "" {
+		add(doctorCheck("failed", "devbox.source", "sealos-devbox requires image or templateID before creating a DevBox", creationDetails))
+	} else {
+		add(doctorCheck("ok", "devbox.source", "configured", creationDetails))
+	}
 	networkDetails := map[string]string{"network": normalizeNetwork(b.cfg.SealosDevbox.Network)}
 	switch normalizeNetwork(b.cfg.SealosDevbox.Network) {
 	case networkSSHGate:
@@ -91,7 +100,7 @@ func boolString(value bool) string {
 	return "false"
 }
 
-func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease core.LeaseTarget, err error) {
 	if AutomationSurfaceDecision != "crd_first" {
 		return core.LeaseTarget{}, core.Exit(2, "sealos-devbox lifecycle plan requires automation_surface=crd_first, found %s", AutomationSurfaceDecision)
 	}
@@ -115,6 +124,28 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err := b.applyDevbox(ctx, manifest); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	applied := true
+	keyPersisted := false
+	claimPersisted := false
+	defer func() {
+		if err == nil || req.Keep || !applied {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if cleanupErr := b.deleteDevbox(cleanupCtx, name); cleanupErr != nil {
+			if b.rt.Stderr != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: failed to delete Sealos DevBox %s after acquire failure for lease %s: %v\n", name, leaseID, cleanupErr)
+			}
+			return
+		}
+		if claimPersisted {
+			core.RemoveLeaseClaim(leaseID)
+		}
+		if keyPersisted {
+			core.RemoveStoredTestboxKey(leaseID)
+		}
+	}()
 	item, err := b.waitForDevboxPrepared(ctx, name, bootstrapWaitTimeout(b.cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -131,6 +162,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	keyPersisted = true
 	server := b.serverFromDevbox(item)
 	target, err := b.sshTarget(item, keyPath, true)
 	if err != nil {
@@ -139,6 +171,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	claimPersisted = true
 	if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
 		events, _ := b.listEvents(ctx, name)
 		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))

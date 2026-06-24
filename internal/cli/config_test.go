@@ -1134,6 +1134,68 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestSealosDevboxUntrustedConfigCannotRedirectClusterWorkload(t *testing.T) {
+	cfg := baseConfig()
+	cfg.SealosDevbox.Kubectl = "/trusted/kubectl"
+	cfg.SealosDevbox.Kubeconfig = "/trusted/kubeconfig"
+	cfg.SealosDevbox.Context = "trusted-context"
+	cfg.SealosDevbox.Namespace = "trusted-namespace"
+	cfg.SealosDevbox.Image = "trusted-image"
+	cfg.SealosDevbox.TemplateID = "trusted-template"
+	cfg.SealosDevbox.CPU = "2"
+	cfg.SealosDevbox.Memory = "4Gi"
+	cfg.SealosDevbox.StorageLimit = "20Gi"
+	cfg.SealosDevbox.Network = "SSHGate"
+	cfg.SealosDevbox.SSHGatewayHost = "trusted-ssh.example.test"
+	cfg.SealosDevbox.SSHGatewayPort = "2222"
+	cfg.SealosDevbox.SSHUser = "trusted-user"
+	cfg.SealosDevbox.WorkRoot = "/trusted/work"
+	cfg.SealosDevbox.NodeHost = "trusted-node.example.test"
+	deleteOnRelease := true
+	if err := applyFileConfigWithTrust(&cfg, fileConfig{
+		SealosDevbox: &fileSealosDevboxConfig{
+			Kubectl:         "./payload",
+			Kubeconfig:      "./exec-plugin-kubeconfig",
+			Context:         "attacker-context",
+			Namespace:       "attacker-namespace",
+			Image:           "attacker-image",
+			TemplateID:      "attacker-template",
+			CPU:             "64",
+			Memory:          "1Ti",
+			StorageLimit:    "10Ti",
+			Network:         "NodePort",
+			SSHGatewayHost:  "attacker-ssh.example.test",
+			SSHGatewayPort:  "2022",
+			SSHUser:         "attacker-user",
+			WorkRoot:        "/attacker/work",
+			NodeHost:        "attacker-node.example.test",
+			DeleteOnRelease: &deleteOnRelease,
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SealosDevbox.Kubectl != "/trusted/kubectl" ||
+		cfg.SealosDevbox.Kubeconfig != "/trusted/kubeconfig" ||
+		cfg.SealosDevbox.Context != "trusted-context" ||
+		cfg.SealosDevbox.Namespace != "trusted-namespace" ||
+		cfg.SealosDevbox.Image != "trusted-image" ||
+		cfg.SealosDevbox.TemplateID != "trusted-template" ||
+		cfg.SealosDevbox.CPU != "2" ||
+		cfg.SealosDevbox.Memory != "4Gi" ||
+		cfg.SealosDevbox.StorageLimit != "20Gi" ||
+		cfg.SealosDevbox.Network != "SSHGate" ||
+		cfg.SealosDevbox.SSHGatewayHost != "trusted-ssh.example.test" ||
+		cfg.SealosDevbox.SSHGatewayPort != "2222" ||
+		cfg.SealosDevbox.SSHUser != "trusted-user" ||
+		cfg.SealosDevbox.WorkRoot != "/trusted/work" ||
+		cfg.SealosDevbox.NodeHost != "trusted-node.example.test" {
+		t.Fatalf("untrusted sealos cluster workload override applied: %#v", cfg.SealosDevbox)
+	}
+	if !cfg.SealosDevbox.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
+		t.Fatalf("untrusted deleteOnRelease should still apply explicitly: %#v", cfg.SealosDevbox)
+	}
+}
+
 func TestAgentSandboxUntrustedConfigCannotRedirectClusterWorkload(t *testing.T) {
 	cfg := baseConfig()
 	cfg.AgentSandbox.Kubectl = "/trusted/kubectl"
