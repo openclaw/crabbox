@@ -126,6 +126,27 @@ func TestListWorkspacesReadsLiveProjectsEnvelope(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorRedactsAPIKeyFromResponseBody(t *testing.T) {
+	const apiKey = "orgo-secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `upstream echoed Authorization: Bearer orgo-secret-token and raw orgo-secret-token`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &orgoHTTPClient{baseURL: server.URL, apiKey: apiKey, http: server.Client()}
+	_, err := client.ListWorkspaces(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	got := err.Error()
+	if strings.Contains(got, apiKey) {
+		t.Fatalf("error leaked api key: %q", got)
+	}
+	if !strings.Contains(got, "Bearer [REDACTED]") || !strings.Contains(got, "raw [REDACTED]") {
+		t.Fatalf("error was not redacted as expected: %q", got)
+	}
+}
+
 func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", "test-key")
 	t.Setenv("CRABBOX_ORGO_API_BASE", "http://api.example.test")

@@ -284,7 +284,7 @@ func (c *orgoHTTPClient) doJSON(ctx context.Context, method, path string, body a
 		return err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return &orgoHTTPError{StatusCode: res.StatusCode, Body: string(data)}
+		return &orgoHTTPError{StatusCode: res.StatusCode, Body: redactOrgoSecrets(string(data), c.apiKey)}
 	}
 	if out == nil {
 		return nil
@@ -300,4 +300,17 @@ func (c *orgoHTTPClient) doJSON(ctx context.Context, method, path string, body a
 		return fmt.Errorf("decode orgo response: %w", err)
 	}
 	return nil
+}
+
+func redactOrgoSecrets(text string, secrets ...string) string {
+	redacted := text
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		redacted = strings.ReplaceAll(redacted, "Bearer "+secret, "Bearer [REDACTED]")
+		redacted = strings.ReplaceAll(redacted, secret, "[REDACTED]")
+	}
+	return redacted
 }
