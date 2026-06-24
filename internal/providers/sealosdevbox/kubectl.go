@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -17,6 +18,10 @@ const (
 )
 
 func (b *backend) kubectl(ctx context.Context, stdout io.Writer, namespace bool, args ...string) (string, error) {
+	return b.kubectlWithInput(ctx, stdout, nil, namespace, args...)
+}
+
+func (b *backend) kubectlWithInput(ctx context.Context, stdout io.Writer, stdin io.Reader, namespace bool, args ...string) (string, error) {
 	commandArgs := b.kubeArgs(namespace)
 	commandArgs = append(commandArgs, args...)
 	runner := b.rt.Exec
@@ -26,6 +31,7 @@ func (b *backend) kubectl(ctx context.Context, stdout io.Writer, namespace bool,
 	result, err := runner.Run(ctx, core.LocalCommandRequest{
 		Name:   strings.TrimSpace(b.cfg.SealosDevbox.Kubectl),
 		Args:   commandArgs,
+		Stdin:  stdin,
 		Stdout: stdout,
 		Stderr: b.rt.Stderr,
 	})
@@ -63,6 +69,67 @@ func (b *backend) canI(ctx context.Context, verb, resource string) core.DoctorCh
 	return doctorCheck("ok", check, "allowed", map[string]string{"mutation": "false", "dry_permission_check": "true"})
 }
 
+func (b *backend) applyDevbox(ctx context.Context, manifest []byte) error {
+	_, err := b.kubectlWithInput(ctx, b.rt.Stdout, strings.NewReader(string(manifest)), true, "apply", "-f", "-")
+	return err
+}
+
+func (b *backend) listDevboxes(ctx context.Context) ([]devboxItem, error) {
+	out, err := b.kubectl(ctx, nil, true, "get", devboxResource, "-l", managedByLabel+"=crabbox", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list devboxList
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return nil, core.Exit(5, "sealos-devbox inventory returned invalid JSON: %v", err)
+	}
+	return list.Items, nil
+}
+
+func (b *backend) getDevbox(ctx context.Context, name string) (devboxItem, error) {
+	out, err := b.kubectl(ctx, nil, true, "get", devboxResource+"/"+name, "-o", "json")
+	if err != nil {
+		return devboxItem{}, err
+	}
+	var item devboxItem
+	if err := json.Unmarshal([]byte(out), &item); err != nil {
+		return devboxItem{}, core.Exit(5, "sealos-devbox Devbox lookup returned invalid JSON: %v", err)
+	}
+	return item, nil
+}
+
+func (b *backend) getSecret(ctx context.Context, name string) (devboxSecret, error) {
+	out, err := b.kubectl(ctx, nil, true, "get", "secret/"+name, "-o", "json")
+	if err != nil {
+		return devboxSecret{}, err
+	}
+	var secret devboxSecret
+	if err := json.Unmarshal([]byte(out), &secret); err != nil {
+		return devboxSecret{}, core.Exit(5, "sealos-devbox Secret lookup returned invalid JSON: %v", err)
+	}
+	return secret, nil
+}
+
+func (b *backend) listEvents(ctx context.Context, name string) ([]devboxEvent, error) {
+	out, err := b.kubectl(ctx, nil, true, "get", "events", "--field-selector", "involvedObject.name="+name, "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list devboxEventList
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return nil, core.Exit(5, "sealos-devbox Events lookup returned invalid JSON: %v", err)
+	}
+	return list.Items, nil
+}
+
+func kubectlNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "notfound") || strings.Contains(text, "not found") || strings.Contains(text, "notfound")
+}
+
 func commandString(req core.LocalCommandRequest) string {
 	return strings.TrimSpace(req.Name + " " + strings.Join(req.Args, " "))
 }
@@ -71,11 +138,11 @@ func redactSensitive(message string) string {
 	if strings.TrimSpace(message) == "" {
 		return ""
 	}
+	redacted := regexp.MustCompile(`(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----`).ReplaceAllString(message, "[redacted]")
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)(token|password|secret|private[_ -]?key|authorization|bearer)(\s*[=:]\s*)\S+`),
 		regexp.MustCompile(`(?i)(client-certificate-data|client-key-data|certificate-authority-data)(\s*[=:]\s*)\S+`),
 	}
-	redacted := message
 	for _, pattern := range patterns {
 		redacted = pattern.ReplaceAllString(redacted, `${1}${2}[redacted]`)
 	}
