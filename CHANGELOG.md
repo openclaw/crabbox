@@ -73,7 +73,6 @@
 - Revoked active WebVNC and Code viewers when their lease share access is removed while preserving owner, admin, and still-authorized sessions. Thanks @coygeek.
 - Prevented E2B and Upstash Box credentials from following redirects outside each request's trusted origin while preserving same-origin redirects. Thanks @coygeek.
 - Prevented SmolVM API credentials from following redirects outside the configured API origin while preserving same-origin redirects. Thanks @coygeek.
-- Hardened AGX SSH gateway user and workspace validation so unsafe provider configuration cannot be interpreted as SSH destinations. Thanks @zozo123.
 - Made direct and brokered Azure Windows desktop leases converge on working SSH/SFTP, first-logon readiness, terminal extension state, retryable disk cleanup, and actionable bootstrap diagnostics. Thanks @fcoury-oai.
 
 ## 0.33.0 - 2026-06-22
