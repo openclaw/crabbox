@@ -60,7 +60,10 @@ func applyVastDefaults(cfg *core.Config) {
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
-	if cfg.Vast.User != "" {
+	if core.IsSSHUserExplicit(cfg) {
+		// The generic SSH user is the operator-facing override. Vast.User only
+		// provides the provider default when that override was not used.
+	} else if cfg.Vast.User != "" {
 		cfg.SSHUser = cfg.Vast.User
 	} else if cfg.SSHUser == "" {
 		cfg.SSHUser = "root"

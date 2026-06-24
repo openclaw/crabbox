@@ -196,6 +196,22 @@ func newTestBackend(t *testing.T, api *fakeVastAPI) *backend {
 	return b
 }
 
+func TestNewBackendPreservesExplicitGenericSSHUser(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.SSHUser = "ubuntu"
+	core.MarkSSHUserExplicit(&cfg)
+	cfg.Vast.User = "root"
+
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard})
+	if b.cfg.SSHUser != "ubuntu" {
+		t.Fatalf("backend SSHUser=%q want explicit generic user", b.cfg.SSHUser)
+	}
+	if b.DirectSSHBackend.Cfg.SSHUser != "ubuntu" {
+		t.Fatalf("direct SSH backend SSHUser=%q want explicit generic user", b.DirectSSHBackend.Cfg.SSHUser)
+	}
+}
+
 func TestDoctorIsReadOnlyAndCountsOwnedInventory(t *testing.T) {
 	api := &fakeVastAPI{instances: []vastInstance{
 		{ID: 1, Label: encodeVastOwnershipLabel("cbx_owned", "owned", "ready"), Status: "running"},
