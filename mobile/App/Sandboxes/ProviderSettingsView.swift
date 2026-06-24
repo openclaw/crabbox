@@ -2,12 +2,11 @@
 //  ProviderSettingsView.swift
 //  Crabbox
 //
-//  The provider configuration sheet for the Sandboxes tab. crabbox.sh (the
-//  coordinator) is the primary manager — the phone holds only a session token,
-//  and the coordinator owns the real provider credentials. islo.dev is an
-//  OPTIONAL direct provider (islo is the one brokerless crabbox provider, so it
-//  can't be driven through crabbox.sh) that the user can enable with their own
-//  key.
+//  The provider configuration sheet for the Sandboxes tab. crabbox.sh credentials
+//  are used for portal/workspace flows, but coordinator sandbox lifecycle is
+//  intentionally unavailable until the API exists. islo.dev is an OPTIONAL direct
+//  provider (islo is the one brokerless crabbox provider, so it can't be driven
+//  through crabbox.sh) that the user can enable with their own key.
 //
 //  Secrets are written straight to the Keychain via AppSettings' Keychain-backed
 //  @Published properties; nothing here persists to UserDefaults.
@@ -33,7 +32,7 @@ struct ProviderSettingsView: View {
                 VStack(spacing: 20) {
                     coordinatorCard
                     isloCard
-                    Text("crabbox.sh manages providers and owns their credentials. islo.dev is a direct, optional provider for advanced use.")
+                    Text("crabbox.sh supports portal and workspace flows. Enable islo.dev direct when you need sandbox lifecycle from the app.")
                         .font(.footnote)
                         .foregroundStyle(Theme.textMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -63,7 +62,7 @@ struct ProviderSettingsView: View {
                 Label("crabbox.sh", systemImage: "shippingbox.fill")
                     .font(.headline)
                     .foregroundStyle(Theme.textPrimary)
-                Text("Primary control plane. Provisions sandboxes through the coordinator; you only store a session token.")
+                Text("Portal and workspace control plane. Sandbox lifecycle is unavailable until the coordinator API supports it.")
                     .font(.caption)
                     .foregroundStyle(Theme.textMuted)
 

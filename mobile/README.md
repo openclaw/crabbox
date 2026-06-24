@@ -24,15 +24,17 @@ Four native tabs over one portable brain (`CrabboxKit`):
   Guideline 4.2.
 - **Assistant** — a provider-agnostic chat. Pick an engine kind and talk to it:
   - **On-device** (MLX) — runs a small model locally, fully offline.
-  - **Sandbox** (Ollama) — talks to a model running on a crabbox.sh- or
-    islo.dev-provisioned sandbox via `CrabboxKit.SandboxEngine`.
+  - **Sandbox** (Ollama) — talks to a model running on an islo.dev-provisioned
+    sandbox via `CrabboxKit.SandboxEngine`; crabbox.sh sandbox lifecycle stays
+    unavailable until the coordinator API supports it.
   - **System** (Apple Foundation Models) — the OS-provided on-device model on
     supported hardware.
 - **Sandboxes** — list / create / stop sandboxes through the
-  `SandboxProvisioner` abstraction. The crabbox.sh coordinator is the primary
-  provider; an optional islo.dev section lets you paste and save (Keychain) a
-  direct islo key. Launching an LLM sandbox makes its Ollama endpoint
-  immediately selectable as an Assistant engine.
+  `SandboxProvisioner` abstraction. crabbox.sh tokens are accepted for portal and
+  workspace flows, while sandbox lifecycle requires the optional direct islo.dev
+  provider until the coordinator exposes a supported sandbox API. Launching an
+  LLM sandbox makes its Ollama endpoint immediately selectable as an Assistant
+  engine.
 
 ## Architecture
 
@@ -180,8 +182,9 @@ The Assistant is engine-agnostic (`protocol LLMEngine`). Three engine kinds ship
 
 Sandboxes are managed through the `SandboxProvisioner` protocol:
 
-- **crabbox.sh coordinator (primary)** — `CoordinatorProvisioner`. The
-  coordinator brokers sandbox lifecycle for you.
+- **crabbox.sh coordinator (portal/workspace)** — `CoordinatorProvisioner`.
+  Holds only a coordinator session token. Sandbox lifecycle fails closed until
+  crabbox.sh exposes a supported endpoint for it.
 - **islo.dev (optional, direct)** — `IsloProvisioner`. islo is brokerless by
   Crabbox design, so the app talks to islo.dev directly with a key you save in
   the Keychain. Use this if you want to bring your own islo account.

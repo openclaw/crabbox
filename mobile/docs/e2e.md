@@ -99,8 +99,8 @@ so it runs anywhere a Swift toolchain exists, including a freshly provisioned
 sandbox. The `--agent` and `--chat` paths additionally need an Ollama endpoint
 (local to the sandbox, or reachable via `OLLAMA_HOST`) with the relevant model
 pulled. See [`../e2e/islo/run-on-sandbox.sh`](../e2e/islo/run-on-sandbox.sh) for
-a script that provisions a sandbox (crabbox.sh as manager, islo.dev as the
-direct provider), installs Swift, builds the package, and runs the simulator.
+a script that provisions an islo.dev sandbox directly, installs Swift, builds
+the package, and runs the simulator.
 
 ## In CI
 

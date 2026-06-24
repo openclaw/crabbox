@@ -115,10 +115,10 @@ protocol SandboxProvisioner: Sendable {
 
 Two providers ship:
 
-- **`CoordinatorProvisioner` (crabbox.sh — primary).** The crabbox.sh
-  coordinator is the manager: it brokers sandbox creation, listing, and
-  teardown, and returns an Ollama endpoint for LLM sandboxes. This is the
-  default path and needs only a coordinator token.
+- **`CoordinatorProvisioner` (crabbox.sh — portal/workspace).** The crabbox.sh
+  coordinator token is used for portal and workspace flows. Sandbox creation,
+  listing, and teardown fail closed until the coordinator exposes a supported
+  sandbox lifecycle API.
 - **`IsloProvisioner` (islo.dev — optional, direct).** islo is **brokerless by
   Crabbox design** — there is no coordinator in front of it — so the app talks
   to `https://api.islo.dev` directly using a key the user pastes and saves in

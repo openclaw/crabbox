@@ -17,8 +17,8 @@ public struct SandboxHandle: Sendable, Equatable {
     public let id: String
     public let provider: String
     public var status: String
-    /// Public Ollama endpoint once exposed (e.g. an islo share URL or a
-    /// coordinator-managed sandbox URL). `nil` until `expose` is called.
+    /// Public Ollama endpoint once exposed by a sandbox-capable provider.
+    /// `nil` until `expose` is called.
     public var ollamaEndpoint: String?
     public init(id: String, provider: String, status: String = "unknown", ollamaEndpoint: String? = nil) {
         self.id = id
@@ -29,8 +29,8 @@ public struct SandboxHandle: Sendable, Equatable {
 }
 
 /// The seam that lets the app provision a sandbox without caring which provider
-/// is behind it. crabbox.sh (the coordinator) is the primary manager; islo.dev
-/// is an optional direct provider the user can enable and save a key for.
+/// is behind it. crabbox.sh credentials cover portal/workspace flows; islo.dev
+/// is an optional direct sandbox provider the user can enable and save a key for.
 ///
 /// Extended with pause/resume for direct control of remote sandboxes (primarily
 /// supported by islo.dev). Coordinator may report unavailable.
@@ -91,9 +91,9 @@ public struct IsloProvisioner: SandboxProvisioner {
     }
 }
 
-// MARK: - crabbox.sh (coordinator) provisioner — primary
+// MARK: - crabbox.sh (coordinator) provisioner — portal/workspace
 
-/// The primary provisioner: holds a crabbox.sh session token only. Coordinator
+/// The coordinator provisioner: holds a crabbox.sh session token only. Coordinator
 /// workspace APIs are supported by `CoordinatorClient`; sandbox lifecycle is
 /// intentionally fail-closed until crabbox.sh exposes a supported endpoint for it.
 public struct CoordinatorProvisioner: SandboxProvisioner {
@@ -120,11 +120,11 @@ public struct CoordinatorProvisioner: SandboxProvisioner {
     }
 
     public func pause(id: String) async throws {
-        throw LLMError.unavailable("pause/resume not supported for crabbox.sh managed sandboxes (use islo.dev direct for full control)")
+        throw LLMError.unavailable("pause/resume is not supported by the current coordinator API; use islo.dev direct for full control")
     }
 
     public func resume(id: String) async throws {
-        throw LLMError.unavailable("pause/resume not supported for crabbox.sh managed sandboxes (use islo.dev direct for full control)")
+        throw LLMError.unavailable("pause/resume is not supported by the current coordinator API; use islo.dev direct for full control")
     }
 }
 

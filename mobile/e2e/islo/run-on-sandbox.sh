@@ -3,11 +3,12 @@
 # run-on-sandbox.sh — run the Crabbox headless e2e (crabbox-sim) on a leased
 # Linux sandbox, the same way the iOS app's "LLM on a sandbox" feature works.
 #
-# crabbox.sh is the manager. islo is the one brokerless crabbox provider, so the
-# crabbox CLI drives it directly (`--provider islo`). This script leases a box,
-# installs the Swift toolchain, builds CrabboxKit, and runs the deterministic
-# headless e2e (17 scenarios / 13 invariants) — plus, optionally, the tiny-LLM
-# agentic driver against a local Ollama on the box.
+# islo.dev is the direct sandbox lifecycle provider. crabbox.sh tokens are for
+# portal/workspace flows until coordinator sandbox lifecycle exists. This script
+# leases a box directly (`--provider islo`), installs the Swift toolchain, builds
+# CrabboxKit, and runs the deterministic headless e2e (17 scenarios / 13
+# invariants) — plus, optionally, the tiny-LLM agentic driver against a local
+# Ollama on the box.
 #
 # Prereqs:
 #   - the crabbox CLI on PATH
