@@ -811,6 +811,20 @@
     "caveat": "Depends on debug SSH metadata from the job",
     "docs": "semaphore.md"
   },
+  "sealos-devbox": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Sealos DevBox CRD",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "unknown",
+    "lifecycle": "Sealos DevBox CRD",
+    "cleanup": "deferred; doctor-only foundation",
+    "bestFit": "Sealos DevBox Linux workspace over SSHGate or NodePort",
+    "caveat": "PLAN-01 registers config and read-only doctor only; mutating lifecycle is gated on the crd_first automation-surface decision",
+    "docs": "sealos-devbox.md"
+  },
   "smolvm": {
     "status": "built-in",
     "category": "delegated-sandbox",
