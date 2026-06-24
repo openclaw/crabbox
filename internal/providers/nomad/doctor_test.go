@@ -54,6 +54,10 @@ func (f *fakeClient) DeregisterJob(context.Context, string, bool) (string, error
 	return "", nil
 }
 
+func (f *fakeClient) AllocationExec(context.Context, nomadExecRequest) (int, error) {
+	return 0, nil
+}
+
 func TestDoctorReportsMissingConfigWithoutClientCall(t *testing.T) {
 	t.Setenv("NOMAD_TOKEN", "secret-token")
 	cfg := core.BaseConfig()

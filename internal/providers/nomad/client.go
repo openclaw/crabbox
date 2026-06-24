@@ -2,7 +2,9 @@ package nomad
 
 import (
 	"context"
+	"io"
 	"os"
+	"strings"
 
 	nomadapi "github.com/hashicorp/nomad/api"
 )
@@ -16,6 +18,7 @@ type Client interface {
 	JobAllocations(context.Context, string, bool) ([]*nomadapi.AllocationListStub, error)
 	EvaluationInfo(context.Context, string) (*nomadapi.Evaluation, error)
 	DeregisterJob(context.Context, string, bool) (string, error)
+	AllocationExec(context.Context, nomadExecRequest) (int, error)
 }
 
 type liveClient struct {
@@ -104,6 +107,29 @@ func (c liveClient) EvaluationInfo(_ context.Context, evalID string) (*nomadapi.
 func (c liveClient) DeregisterJob(_ context.Context, jobID string, purge bool) (string, error) {
 	evalID, _, err := c.client.Jobs().Deregister(jobID, purge, c.writeOptions())
 	return evalID, err
+}
+
+func (c liveClient) AllocationExec(ctx context.Context, req nomadExecRequest) (int, error) {
+	stdin := req.Stdin
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
+	stdout := req.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	stderr := req.Stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	alloc := &nomadapi.Allocation{
+		ID:        req.AllocationID,
+		NodeID:    req.NodeID,
+		NodeName:  req.NodeName,
+		JobID:     req.JobID,
+		Namespace: normalizeNamespace(c.cfg.Nomad.Namespace),
+	}
+	return c.client.Allocations().Exec(ctx, alloc, req.Task, false, req.Command, stdin, stdout, stderr, nil, c.queryOptions())
 }
 
 func (c liveClient) queryOptions() *nomadapi.QueryOptions {

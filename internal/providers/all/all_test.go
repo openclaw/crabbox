@@ -178,8 +178,8 @@ func TestNomadRegistersWithoutAliases(t *testing.T) {
 	if !spec.Features.Has(core.FeatureCleanup) {
 		t.Fatalf("nomad features=%v, want cleanup after Wave 2 lifecycle", spec.Features)
 	}
-	if spec.Features.Has(core.FeatureArchiveSync) {
-		t.Fatalf("nomad features=%v, archive-sync belongs to Wave 3", spec.Features)
+	if !spec.Features.Has(core.FeatureArchiveSync) {
+		t.Fatalf("nomad features=%v, want archive-sync after Wave 3 run sync", spec.Features)
 	}
 	for _, alias := range []string{"nomad-provider", "nomad-run", "hashicorp-nomad"} {
 		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "nomad" {
