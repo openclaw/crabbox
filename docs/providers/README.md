@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 67 providers (39 SSH lease, 26 delegated run, 2 service control).
+Current built-in surface: 68 providers (40 SSH lease, 26 delegated run, 2 service control).
 
 Access terms:
 
@@ -133,6 +133,7 @@ Access terms:
 | [tenki](tenki.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Tenki sandbox VM | `provider-managed`; GPU: unknown | Tenki; sandbox release | Managed Linux sandbox with SSH proxy | Gateway auth uses Tenki-managed key and certificate files |
 | [tensorlake](tensorlake.md) (`tl`, `tensorlake-sbx`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Tensorlake Firecracker sandbox | `provider-managed`; GPU: unknown | Tensorlake; provider sandbox cleanup | Hosted Firecracker-backed delegated execution | Does not expose raw Firecracker provisioning |
 | [upstash-box](upstash-box.md) (`upstash`, `box`, `upstashbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Upstash Box sandbox | `provider-managed`; GPU: no | Upstash; sandbox cleanup | Hosted short-lived delegated sandbox | No normal SSH access or coordinator routing |
+| [vast](vast.md) (`vast-ai`, `vastai`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Vast.ai direct GPU instance | `provider-managed`; GPU: yes | Crabbox; destroy by default; optional stop or keep | Direct Linux GPU lease from the Vast.ai offer market | Direct-only and billable; capacity, quota, and offer availability vary |
 | [vercel-sandbox](vercel-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Vercel Sandbox microVM | `provider-managed`; GPU: no | Vercel Sandbox; sandbox delete | Hosted delegated Linux microVM execution | Requires SDK bridge support and Vercel Sandbox auth |
 | [vultr](vultr.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Vultr instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Direct Linux VM on Vultr | Direct-only; firewall groups and VPCs must already exist |
 | [wandb](wandb.md) (`weights-and-biases`) | built-in; `delegated-run` · gpu-cloud | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Weights & Biases run sandbox | `provider-managed`; GPU: optional | Weights & Biases; run termination | Delegated ML or GPU run environment | Execution follows the W&B run contract |
