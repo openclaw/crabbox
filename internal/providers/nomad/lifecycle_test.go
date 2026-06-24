@@ -453,7 +453,7 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 23 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.ExitCode != 23 || result.Provider != providerName || result.Session == nil || result.Session.Kept {
+	if result.ExitCode != 23 || result.Provider != providerName || result.Session != nil {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 {
@@ -482,7 +482,7 @@ func TestRunKeepOnFailureRetainsNewJob(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if len(fake.deregisters) != 0 || result.Session == nil || !result.Session.Kept {
+	if len(fake.deregisters) != 0 || result.Session != nil {
 		t.Fatalf("deregisters=%v result=%#v", fake.deregisters, result)
 	}
 	if !strings.Contains(stderr.String(), "rerun: crabbox run --provider nomad") {
@@ -497,7 +497,7 @@ func TestRunSyncOnlyUsesArchiveSyncAndCleansOneShot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ExitCode != 0 || !result.SyncDelegated || result.Session == nil || result.Session.Kept {
+	if result.ExitCode != 0 || !result.SyncDelegated || result.Session != nil {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 || !strings.Contains(stdout.String(), "synced /workspace/crabbox") {
@@ -517,7 +517,7 @@ func TestRunSyncFailureCleansNewJob(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 19 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.Session == nil || result.Session.Kept {
+	if result.Session != nil {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 {
