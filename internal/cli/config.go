@@ -5867,8 +5867,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		}
 	}
 	if file.Nomad != nil {
-		if file.Nomad.Address != "" {
+		if trusted && file.Nomad.Address != "" {
 			cfg.Nomad.Address = file.Nomad.Address
+			cfg.credentialProvenance.nomadAddress = credentialSource
 		}
 		if file.Nomad.Region != "" {
 			cfg.Nomad.Region = file.Nomad.Region
@@ -5876,25 +5877,26 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Nomad.Namespace != "" {
 			cfg.Nomad.Namespace = file.Nomad.Namespace
 		}
-		if file.Nomad.TokenEnv != "" {
+		if trusted && file.Nomad.TokenEnv != "" {
 			cfg.Nomad.TokenEnv = file.Nomad.TokenEnv
+			cfg.credentialProvenance.nomadTokenEnv = credentialSource
 		}
-		if file.Nomad.CACert != "" {
+		if trusted && file.Nomad.CACert != "" {
 			cfg.Nomad.CACert = expandUserPath(file.Nomad.CACert)
 		}
-		if file.Nomad.CAPath != "" {
+		if trusted && file.Nomad.CAPath != "" {
 			cfg.Nomad.CAPath = expandUserPath(file.Nomad.CAPath)
 		}
-		if file.Nomad.ClientCert != "" {
+		if trusted && file.Nomad.ClientCert != "" {
 			cfg.Nomad.ClientCert = expandUserPath(file.Nomad.ClientCert)
 		}
-		if file.Nomad.ClientKey != "" {
+		if trusted && file.Nomad.ClientKey != "" {
 			cfg.Nomad.ClientKey = expandUserPath(file.Nomad.ClientKey)
 		}
-		if file.Nomad.TLSServerName != "" {
+		if trusted && file.Nomad.TLSServerName != "" {
 			cfg.Nomad.TLSServerName = file.Nomad.TLSServerName
 		}
-		if file.Nomad.SkipVerify != nil {
+		if trusted && file.Nomad.SkipVerify != nil {
 			cfg.Nomad.SkipVerify = *file.Nomad.SkipVerify
 		}
 		if file.Nomad.Task != nil {
@@ -5909,7 +5911,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		if file.Nomad.Workdir != nil {
 			cfg.Nomad.Workdir = *file.Nomad.Workdir
 		}
-		if file.Nomad.JobSpecTemplate != "" {
+		if trusted && file.Nomad.JobSpecTemplate != "" {
 			cfg.Nomad.JobSpecTemplate = expandUserPath(file.Nomad.JobSpecTemplate)
 		}
 		if file.Nomad.NodePool != "" {
@@ -7717,10 +7719,19 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
 		cfg.OpenSandbox.UseServerProxy = v
 	}
-	cfg.Nomad.Address = getenv("CRABBOX_NOMAD_ADDR", getenv("NOMAD_ADDR", cfg.Nomad.Address))
+	if value := os.Getenv("CRABBOX_NOMAD_ADDR"); value != "" {
+		cfg.Nomad.Address = value
+		cfg.credentialProvenance.nomadAddress = credentialSourceEnvironment
+	} else if value := os.Getenv("NOMAD_ADDR"); value != "" {
+		cfg.Nomad.Address = value
+		cfg.credentialProvenance.nomadAddress = credentialSourceEnvironment
+	}
 	cfg.Nomad.Region = getenv("CRABBOX_NOMAD_REGION", getenv("NOMAD_REGION", cfg.Nomad.Region))
 	cfg.Nomad.Namespace = getenv("CRABBOX_NOMAD_NAMESPACE", getenv("NOMAD_NAMESPACE", cfg.Nomad.Namespace))
-	cfg.Nomad.TokenEnv = getenv("CRABBOX_NOMAD_TOKEN_ENV", cfg.Nomad.TokenEnv)
+	if value := os.Getenv("CRABBOX_NOMAD_TOKEN_ENV"); value != "" {
+		cfg.Nomad.TokenEnv = value
+		cfg.credentialProvenance.nomadTokenEnv = credentialSourceEnvironment
+	}
 	cfg.Nomad.CACert = expandUserPath(getenv("CRABBOX_NOMAD_CA_CERT", getenv("NOMAD_CACERT", cfg.Nomad.CACert)))
 	cfg.Nomad.CAPath = expandUserPath(getenv("CRABBOX_NOMAD_CA_PATH", getenv("NOMAD_CAPATH", cfg.Nomad.CAPath)))
 	cfg.Nomad.ClientCert = expandUserPath(getenv("CRABBOX_NOMAD_CLIENT_CERT", getenv("NOMAD_CLIENT_CERT", cfg.Nomad.ClientCert)))

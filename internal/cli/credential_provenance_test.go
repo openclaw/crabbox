@@ -208,6 +208,30 @@ func TestRepositoryCredentialDestinationsRejectInheritedCredentials(t *testing.T
 			want: "cloudflare.apiUrl",
 		},
 		{
+			name: "nomad address",
+			cfg: Config{
+				Provider: "nomad",
+				Nomad:    NomadConfig{Address: "https://repo.example.test:4646", TokenEnv: "CRABBOX_TEST_NOMAD_TOKEN"},
+				credentialProvenance: credentialDestinationProvenance{
+					nomadAddress:  credentialSourceRepository,
+					nomadTokenEnv: credentialSourceEnvironment,
+				},
+			},
+			want: "nomad.address or nomad.tokenEnv",
+		},
+		{
+			name: "nomad token env",
+			cfg: Config{
+				Provider: "nomad",
+				Nomad:    NomadConfig{Address: "https://trusted.example.test:4646", TokenEnv: "CRABBOX_TEST_NOMAD_TOKEN"},
+				credentialProvenance: credentialDestinationProvenance{
+					nomadAddress:  credentialSourceTrustedFile,
+					nomadTokenEnv: credentialSourceRepository,
+				},
+			},
+			want: "nomad.address or nomad.tokenEnv",
+		},
+		{
 			name: "semaphore host",
 			cfg: Config{
 				Provider:  "semaphore",
@@ -233,6 +257,7 @@ func TestRepositoryCredentialDestinationsRejectInheritedCredentials(t *testing.T
 		},
 	}
 
+	t.Setenv("CRABBOX_TEST_NOMAD_TOKEN", "secret")
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err := validateProviderCredentialDestination(test.cfg)
@@ -422,6 +447,21 @@ func TestRepositoryCredentialDestinationWithoutCredentialRemainsInspectable(t *t
 	}
 	if err := validateProviderCredentialDestination(cfg); err != nil {
 		t.Fatalf("credential-free repository endpoint rejected: %v", err)
+	}
+}
+
+func TestRepositoryNomadDestinationWithoutSelectedTokenRemainsInspectable(t *testing.T) {
+	t.Setenv("CRABBOX_TEST_EMPTY_NOMAD_TOKEN", "")
+	cfg := Config{
+		Provider: "nomad",
+		Nomad:    NomadConfig{Address: "https://repo.example.test:4646", TokenEnv: "CRABBOX_TEST_EMPTY_NOMAD_TOKEN"},
+		credentialProvenance: credentialDestinationProvenance{
+			nomadAddress:  credentialSourceRepository,
+			nomadTokenEnv: credentialSourceRepository,
+		},
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("credential-free repository Nomad destination rejected: %v", err)
 	}
 }
 
