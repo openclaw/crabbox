@@ -140,18 +140,20 @@ class SlurmCrabboxAdapter:
         slug = required_string(desired, "slug")
         name = required_string(desired, "name")
         job_dir = self.job_dir(lease_id)
-        self.ensure_private_dir(job_dir)
 
         existing = self.load_state(lease_id)
         if existing and existing.get("jobId"):
             return self.wait_for_endpoint(existing, config, keep=bool(request.get("keep")))
 
-        key_path = self.ensure_ssh_key(job_dir, lease_id, config)
-        public_key_path = Path(str(key_path) + ".pub")
-        endpoint_path = job_dir / "endpoint.json"
         runner = self.runner(config)
         if not runner.exists():
             raise AdapterError(f"runner script does not exist: {runner}")
+        command = self.sbatch_command(config, name, job_dir, runner)
+
+        self.ensure_private_dir(job_dir)
+        key_path = self.ensure_ssh_key(job_dir, lease_id, config)
+        public_key_path = Path(str(key_path) + ".pub")
+        endpoint_path = job_dir / "endpoint.json"
 
         state = {
             "leaseId": lease_id,
@@ -168,7 +170,6 @@ class SlurmCrabboxAdapter:
         }
         self.save_state(lease_id, state)
 
-        command = self.sbatch_command(config, name, job_dir, runner)
         env = os.environ.copy()
         env.update(
             {
