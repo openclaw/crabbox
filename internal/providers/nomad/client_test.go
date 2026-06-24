@@ -1,6 +1,7 @@
 package nomad
 
 import (
+	"context"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -43,6 +44,28 @@ func TestNewNomadAPIConfigMapsSafeConfigAndTokenEnv(t *testing.T) {
 		apiConfig.TLSConfig.TLSServerName != cfg.Nomad.TLSServerName ||
 		!apiConfig.TLSConfig.Insecure {
 		t.Fatalf("tlsConfig=%#v", apiConfig.TLSConfig)
+	}
+}
+
+func TestLiveClientOptionsCarryContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := liveClient{cfg: Config{
+		Nomad: NomadConfig{Region: "global", Namespace: "team-a"},
+	}}
+	query := client.queryOptions(ctx)
+	if query.Region != "global" || query.Namespace != "team-a" {
+		t.Fatalf("query options=%#v", query)
+	}
+	if err := query.Context().Err(); err != context.Canceled {
+		t.Fatalf("query context err=%v, want canceled", err)
+	}
+	write := client.writeOptions(ctx)
+	if write.Region != "global" || write.Namespace != "team-a" {
+		t.Fatalf("write options=%#v", write)
+	}
+	if err := write.Context().Err(); err != context.Canceled {
+		t.Fatalf("write context err=%v, want canceled", err)
 	}
 }
 

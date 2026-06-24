@@ -73,13 +73,13 @@ func (c liveClient) Regions(context.Context) ([]string, error) {
 	return c.client.Regions().List()
 }
 
-func (c liveClient) NamespaceInfo(_ context.Context, namespace string) (*nomadapi.Namespace, error) {
-	ns, _, err := c.client.Namespaces().Info(namespace, nil)
+func (c liveClient) NamespaceInfo(ctx context.Context, namespace string) (*nomadapi.Namespace, error) {
+	ns, _, err := c.client.Namespaces().Info(namespace, c.queryOptions(ctx))
 	return ns, err
 }
 
-func (c liveClient) RegisterJob(_ context.Context, job *nomadapi.Job) (string, error) {
-	resp, _, err := c.client.Jobs().Register(job, c.writeOptions())
+func (c liveClient) RegisterJob(ctx context.Context, job *nomadapi.Job) (string, error) {
+	resp, _, err := c.client.Jobs().Register(job, c.writeOptions(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -89,23 +89,23 @@ func (c liveClient) RegisterJob(_ context.Context, job *nomadapi.Job) (string, e
 	return resp.EvalID, nil
 }
 
-func (c liveClient) JobInfo(_ context.Context, jobID string) (*nomadapi.Job, error) {
-	job, _, err := c.client.Jobs().Info(jobID, c.queryOptions())
+func (c liveClient) JobInfo(ctx context.Context, jobID string) (*nomadapi.Job, error) {
+	job, _, err := c.client.Jobs().Info(jobID, c.queryOptions(ctx))
 	return job, err
 }
 
-func (c liveClient) JobAllocations(_ context.Context, jobID string, all bool) ([]*nomadapi.AllocationListStub, error) {
-	allocs, _, err := c.client.Jobs().Allocations(jobID, all, c.queryOptions())
+func (c liveClient) JobAllocations(ctx context.Context, jobID string, all bool) ([]*nomadapi.AllocationListStub, error) {
+	allocs, _, err := c.client.Jobs().Allocations(jobID, all, c.queryOptions(ctx))
 	return allocs, err
 }
 
-func (c liveClient) EvaluationInfo(_ context.Context, evalID string) (*nomadapi.Evaluation, error) {
-	eval, _, err := c.client.Evaluations().Info(evalID, c.queryOptions())
+func (c liveClient) EvaluationInfo(ctx context.Context, evalID string) (*nomadapi.Evaluation, error) {
+	eval, _, err := c.client.Evaluations().Info(evalID, c.queryOptions(ctx))
 	return eval, err
 }
 
-func (c liveClient) DeregisterJob(_ context.Context, jobID string, purge bool) (string, error) {
-	evalID, _, err := c.client.Jobs().Deregister(jobID, purge, c.writeOptions())
+func (c liveClient) DeregisterJob(ctx context.Context, jobID string, purge bool) (string, error) {
+	evalID, _, err := c.client.Jobs().Deregister(jobID, purge, c.writeOptions(ctx))
 	return evalID, err
 }
 
@@ -129,19 +129,21 @@ func (c liveClient) AllocationExec(ctx context.Context, req nomadExecRequest) (i
 		JobID:     req.JobID,
 		Namespace: normalizeNamespace(c.cfg.Nomad.Namespace),
 	}
-	return c.client.Allocations().Exec(ctx, alloc, req.Task, false, req.Command, stdin, stdout, stderr, nil, c.queryOptions())
+	return c.client.Allocations().Exec(ctx, alloc, req.Task, false, req.Command, stdin, stdout, stderr, nil, c.queryOptions(ctx))
 }
 
-func (c liveClient) queryOptions() *nomadapi.QueryOptions {
-	return &nomadapi.QueryOptions{
+func (c liveClient) queryOptions(ctx context.Context) *nomadapi.QueryOptions {
+	opts := &nomadapi.QueryOptions{
 		Region:    c.cfg.Nomad.Region,
 		Namespace: c.cfg.Nomad.Namespace,
 	}
+	return opts.WithContext(ctx)
 }
 
-func (c liveClient) writeOptions() *nomadapi.WriteOptions {
-	return &nomadapi.WriteOptions{
+func (c liveClient) writeOptions(ctx context.Context) *nomadapi.WriteOptions {
+	opts := &nomadapi.WriteOptions{
 		Region:    c.cfg.Nomad.Region,
 		Namespace: c.cfg.Nomad.Namespace,
 	}
+	return opts.WithContext(ctx)
 }
