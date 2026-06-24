@@ -936,6 +936,10 @@ if has_provider opensandbox; then
   "$root/scripts/live-opensandbox-smoke.sh"
 fi
 
+if has_provider github-codespaces || has_provider codespaces || has_provider gh-codespaces; then
+  "$root/scripts/live-github-codespaces-smoke.sh"
+fi
+
 if has_provider proxmox; then
   "$root/scripts/proxmox-live-smoke.sh"
 fi

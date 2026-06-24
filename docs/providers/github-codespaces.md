@@ -207,7 +207,7 @@ CRABBOX_LIVE=1 \
 CRABBOX_LIVE_PROVIDERS=github-codespaces \
 CRABBOX_GITHUB_CODESPACES_SMOKE_REPO=example-org/my-app \
 GH_TOKEN=... \
-scripts/live-github-codespaces-smoke.sh
+scripts/live-smoke.sh
 ```
 
 The script defaults to a skipped classification and does not call Crabbox unless
@@ -216,6 +216,9 @@ is supplied, and GitHub credentials are explicitly available. It runs a read-onl
 doctor first, creates a short-lived Codespace lease, runs a command through the
 normal synced Crabbox path, prints the Crabbox SSH command, releases the lease,
 runs dry-run cleanup, and verifies the claim-owned inventory is empty.
+`scripts/live-smoke.sh` delegates this provider to the standalone
+`scripts/live-github-codespaces-smoke.sh`, so the standalone script can also be
+run directly when isolating Codespaces smoke failures.
 
 Final classifications include:
 
