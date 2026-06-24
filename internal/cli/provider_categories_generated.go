@@ -67,6 +67,7 @@ var benchmarkProviderCategories = map[string]string{
 	"tenki":                      "direct-cloud",
 	"tensorlake":                 "delegated-sandbox",
 	"upstash-box":                "delegated-sandbox",
+	"vast":                       "gpu-cloud",
 	"vercel-sandbox":             "delegated-sandbox",
 	"vultr":                      "direct-cloud",
 	"wandb":                      "gpu-cloud",

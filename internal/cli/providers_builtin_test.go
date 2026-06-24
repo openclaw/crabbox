@@ -32,6 +32,7 @@ func init() {
 	RegisterProvider(testExternalProvider{})
 	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
+	RegisterProvider(testVastProvider{})
 	RegisterProvider(testNvidiaBrevProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
@@ -1079,6 +1080,38 @@ func (testRunPodProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
+}
+
+type testVastProvider struct{}
+
+func (testVastProvider) Name() string { return "vast" }
+func (testVastProvider) Aliases() []string {
+	return []string{"vast-ai", "vastai"}
+}
+func (testVastProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "vast",
+		Family:      "vast",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testVastProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
+	return struct{ APIURL *string }{
+		APIURL: fs.String("vast-api-url", defaults.Vast.APIURL, ""),
+	}
+}
+func (testVastProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	v, _ := values.(struct{ APIURL *string })
+	if flagWasSet(fs, "vast-api-url") && v.APIURL != nil {
+		cfg.Vast.APIURL = *v.APIURL
+	}
+	return nil
+}
+func (p testVastProvider) Configure(Config, Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
