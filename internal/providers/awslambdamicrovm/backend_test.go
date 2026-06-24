@@ -70,14 +70,20 @@ func (f *fakeControlPlane) Resume(_ context.Context, id string) error {
 func (f *fakeControlPlane) AuthToken(context.Context, string) (string, error) { return "token", nil }
 
 type fakeRunner struct {
-	healthErr error
-	exitCode  int
-	execErr   error
-	commands  []string
-	uploads   []string
+	healthErr   error
+	healthCheck func(context.Context, microVM) error
+	exitCode    int
+	execErr     error
+	commands    []string
+	uploads     []string
 }
 
-func (f *fakeRunner) Health(context.Context, microVM) error { return f.healthErr }
+func (f *fakeRunner) Health(ctx context.Context, vm microVM) error {
+	if f.healthCheck != nil {
+		return f.healthCheck(ctx, vm)
+	}
+	return f.healthErr
+}
 
 func (f *fakeRunner) Upload(_ context.Context, _ microVM, path string, body io.Reader) error {
 	_, _ = io.Copy(io.Discard, body)
@@ -207,17 +213,39 @@ func TestCreateRollsBackWhenRunnerIsUnhealthy(t *testing.T) {
 	}
 }
 
+func TestWaitReadyBoundsRunnerHealthProbe(t *testing.T) {
+	control := &fakeControlPlane{
+		vm: microVM{ID: "mvm-test", Endpoint: "mvm-test.lambda-microvm.eu-west-1.on.aws", ImageARN: testImageARN, ImageVersion: "1", State: "RUNNING"},
+	}
+	runner := &fakeRunner{
+		healthCheck: func(ctx context.Context, _ microVM) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("runner health context had no deadline")
+			}
+			if remaining := time.Until(deadline); remaining <= 0 || remaining > runnerHealthProbeTimeout+time.Second {
+				t.Fatalf("runner health deadline remaining=%s", remaining)
+			}
+			return nil
+		},
+	}
+	b := testBackend(control, runner, io.Discard)
+	if _, err := b.waitReady(context.Background(), control, runner, control.vm); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProviderFlagsAndEndpointValidation(t *testing.T) {
 	cfg := core.BaseConfig()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := registerFlags(fs, cfg)
-	if err := fs.Parse([]string{"--aws-lambda-microvm-region", "eu-west-1", "--aws-lambda-microvm-image", testImageARN, "--aws-lambda-microvm-workdir", "/work", "--aws-lambda-microvm-forget-missing"}); err != nil {
+	if err := fs.Parse([]string{"--aws-lambda-microvm-region", "eu-west-1", "--aws-lambda-microvm-image", testImageARN, "--aws-lambda-microvm-workdir", "/work/project", "--aws-lambda-microvm-forget-missing"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AWSLambdaMicroVM.Workdir != "/work" || !cfg.AWSLambdaMicroVM.ForgetMissing {
+	if cfg.AWSLambdaMicroVM.Workdir != "/work/project" || !cfg.AWSLambdaMicroVM.ForgetMissing {
 		t.Fatalf("config=%#v", cfg.AWSLambdaMicroVM)
 	}
 	if _, err := endpointURL("mvm-test.lambda-microvm.eu-west-1.on.aws", "eu-west-1"); err != nil {
@@ -227,6 +255,79 @@ func TestProviderFlagsAndEndpointValidation(t *testing.T) {
 		if _, err := endpointURL(endpoint, "eu-west-1"); err == nil {
 			t.Fatalf("accepted endpoint %q", endpoint)
 		}
+	}
+}
+
+func TestProviderRejectsBroadWorkdirs(t *testing.T) {
+	for _, workdir := range []string{"/", "/tmp", "/work", "/workspace", "/home", "/root", "/usr", "/var", "/etc"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		cfg.AWSRegion = "eu-west-1"
+		cfg.AWSLambdaMicroVM.Image = testImageARN
+		cfg.AWSLambdaMicroVM.Workdir = workdir
+		if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
+			t.Fatalf("validateConfig(%q) err=%v, want too broad", workdir, err)
+		}
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AWSRegion = "eu-west-1"
+	cfg.AWSLambdaMicroVM.Image = testImageARN
+	cfg.AWSLambdaMicroVM.Workdir = "/workspace/crabbox"
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("validateConfig dedicated workdir: %v", err)
+	}
+}
+
+func TestProviderRejectsTailscaleOptions(t *testing.T) {
+	base := func() core.Config {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		cfg.AWSRegion = "eu-west-1"
+		cfg.AWSLambdaMicroVM.Image = testImageARN
+		cfg.AWSLambdaMicroVM.Workdir = "/workspace/crabbox"
+		return cfg
+	}
+	cfg := base()
+	cfg.Tailscale.Enabled = true
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "does not support Tailscale") {
+		t.Fatalf("tailscale enabled err=%v", err)
+	}
+	cfg = base()
+	cfg.Network = core.NetworkTailscale
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "does not support Tailscale") {
+		t.Fatalf("tailscale network err=%v", err)
+	}
+}
+
+func TestProviderRejectsSubMinuteIdleTimeout(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.AWSRegion = "eu-west-1"
+	cfg.AWSLambdaMicroVM.Image = testImageARN
+	cfg.AWSLambdaMicroVM.Workdir = "/workspace/crabbox"
+	cfg.IdleTimeout = 59 * time.Second
+	if err := (Provider{}).ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "at least 60s") {
+		t.Fatalf("sub-minute idle timeout err=%v", err)
+	}
+	cfg.IdleTimeout = time.Minute
+	if err := (Provider{}).ValidateConfig(cfg); err != nil {
+		t.Fatalf("one-minute idle timeout err=%v", err)
+	}
+}
+
+func TestLeaseOperationLockRejectsConcurrentOwner(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := leasePrefix + "locktest"
+	unlock, err := lockAWSLambdaMicroVMLeaseOperation(context.Background(), leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := lockAWSLambdaMicroVMLeaseOperation(ctx, leaseID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second lock err=%v, want context deadline", err)
 	}
 }
 

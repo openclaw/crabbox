@@ -28,7 +28,12 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return applyFlags(cfg, fs, values)
 }
-func (Provider) ValidateConfig(cfg core.Config) error { return validateConfig(cfg) }
+func (Provider) ValidateConfig(cfg core.Config) error {
+	if cfg.Tailscale.Enabled || cfg.Network == core.NetworkTailscale {
+		return core.Exit(2, "provider=%s does not support Tailscale options", providerName)
+	}
+	return validateConfig(cfg)
+}
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err

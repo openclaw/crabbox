@@ -80,8 +80,8 @@ esac
 	return { dir, calls, state, fake };
 }
 
-function runSmoke(fake, overrides = {}) {
-	return spawnSync("bash", ["scripts/live-aws-lambda-microvm-smoke.sh"], {
+function runSmoke(fake, overrides = {}, args = []) {
+	return spawnSync("bash", ["scripts/live-aws-lambda-microvm-smoke.sh", ...args], {
 		cwd: repoRoot,
 		env: {
 			...process.env,
@@ -94,6 +94,15 @@ function runSmoke(fake, overrides = {}) {
 		encoding: "utf8",
 	});
 }
+
+test("dry-run prints planned doctor command without invoking crabbox", () => {
+	const fake = setupFake();
+	const result = runSmoke(fake, {}, ["--dry-run"]);
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /classification=dry_run provider=aws-lambda-microvm mutation=false/);
+	assert.match(result.stdout, new RegExp(`command=${fake.fake.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} doctor --provider aws-lambda-microvm --json`));
+	assert.equal(fs.existsSync(fake.calls), false);
+});
 
 test("requires explicit live opt-in before any command", () => {
 	const fake = setupFake();

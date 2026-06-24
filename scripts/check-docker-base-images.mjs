@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const runtimeDockerfiles = [
+  "runtimes/aws-lambda-microvm/Dockerfile",
   "worker/cloudflare-container.Dockerfile",
   "worker/azure-dynamic-sessions.Dockerfile",
   "worker/Dockerfile.node",

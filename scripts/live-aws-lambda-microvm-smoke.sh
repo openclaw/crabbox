@@ -50,6 +50,25 @@ unexpected_failure() {
 trap cleanup EXIT
 trap 'unexpected_failure "$?" "$LINENO"' ERR
 
+if [[ "$#" -gt 1 ]]; then
+  printf 'live AWS Lambda MicroVM smoke accepts at most one argument\n' >&2
+  exit 2
+fi
+case "${1:-}" in
+  "")
+    ;;
+  --dry-run)
+    bin="${CRABBOX_BIN:-./bin/crabbox}"
+    printf 'classification=dry_run provider=aws-lambda-microvm mutation=false\n'
+    printf 'command=%s doctor --provider aws-lambda-microvm --json\n' "$bin"
+    exit 0
+    ;;
+  *)
+    printf 'unknown argument: %s\n' "$1" >&2
+    exit 2
+    ;;
+esac
+
 if [[ "${CRABBOX_LIVE:-0}" != "1" ]]; then
   classify_and_exit environment_blocked set_CRABBOX_LIVE=1
 fi

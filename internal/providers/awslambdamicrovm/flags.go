@@ -6,6 +6,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
 )
@@ -89,8 +90,14 @@ func validateConfig(cfg Config) error {
 		}
 	}
 	workdir := strings.TrimSpace(cfg.AWSLambdaMicroVM.Workdir)
-	if workdir == "" || !strings.HasPrefix(workdir, "/") || path.Clean(workdir) != workdir || workdir == "/" {
+	if workdir == "" || !strings.HasPrefix(workdir, "/") || path.Clean(workdir) != workdir || strings.Contains(workdir, "\x00") {
 		return exit(2, "aws-lambda-microvm workdir must be a clean absolute path below /")
+	}
+	if awsLambdaMicroVMBroadWorkdir(workdir) {
+		return exit(2, "aws-lambda-microvm workdir %q is too broad; choose a dedicated subdirectory", workdir)
+	}
+	if cfg.IdleTimeout > 0 && cfg.IdleTimeout < time.Minute {
+		return exit(2, "aws-lambda-microvm idle timeout must be at least 60s")
 	}
 	for kind, connectors := range map[string][]string{
 		"ingress": cfg.AWSLambdaMicroVM.IngressConnectors,
@@ -103,6 +110,15 @@ func validateConfig(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func awsLambdaMicroVMBroadWorkdir(workdir string) bool {
+	switch path.Clean(workdir) {
+	case "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var", "/work", "/workspace":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateConnectorARN(value, region string) error {

@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const lifecycleWaitTimeout = 5 * time.Minute
+const (
+	lifecycleWaitTimeout     = 5 * time.Minute
+	runnerHealthProbeTimeout = 10 * time.Second
+)
 
 type runnerAPI interface {
 	Health(context.Context, microVM) error
@@ -85,6 +88,15 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	} else {
 		var claim LeaseClaim
 		claim, vm, server, err = b.resolve(ctx, control, req.ID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		unlockOperation, err := lockAWSLambdaMicroVMLeaseOperation(ctx, claim.LeaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer unlockOperation()
+		claim, vm, server, err = b.resolve(ctx, control, claim.LeaseID)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -268,6 +280,18 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if !ok || claim.ProviderScope != b.scope() {
 		return exit(4, "%s lease not found: %s", providerName, req.ID)
 	}
+	unlockOperation, err := lockAWSLambdaMicroVMLeaseOperation(ctx, claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	defer unlockOperation()
+	claim, ok, err = resolveLeaseClaim(claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	if !ok || claim.ProviderScope != b.scope() {
+		return exit(4, "%s lease not found: %s", providerName, req.ID)
+	}
 	if err := control.Terminate(ctx, claim.CloudID); err != nil {
 		if !isNotFound(err) || !b.cfg.AWSLambdaMicroVM.ForgetMissing {
 			return err
@@ -402,7 +426,10 @@ func (b *backend) waitReady(ctx context.Context, control controlPlane, runner ru
 			return microVM{}, exit(5, "AWS Lambda MicroVM %s entered %s: %s", vm.ID, vm.State, vm.StateReason)
 		}
 		if strings.EqualFold(vm.State, "RUNNING") {
-			if err := runner.Health(ctx, vm); err == nil {
+			healthCtx, cancel := context.WithTimeout(ctx, runnerHealthProbeTimeout)
+			err := runner.Health(healthCtx, vm)
+			cancel()
+			if err == nil {
 				return vm, nil
 			}
 		}
@@ -421,6 +448,15 @@ func (b *backend) changeState(ctx context.Context, identifier, target string) er
 		return err
 	}
 	claim, vm, _, err := b.resolve(ctx, control, identifier)
+	if err != nil {
+		return err
+	}
+	unlockOperation, err := lockAWSLambdaMicroVMLeaseOperation(ctx, claim.LeaseID)
+	if err != nil {
+		return err
+	}
+	defer unlockOperation()
+	claim, vm, _, err = b.resolve(ctx, control, claim.LeaseID)
 	if err != nil {
 		return err
 	}
