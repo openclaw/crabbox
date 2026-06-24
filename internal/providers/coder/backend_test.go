@@ -232,13 +232,17 @@ func TestCoderAcquireRollbackUsesStopByDefaultAndSkipsCreateFailureRollback(t *t
 		name                    string
 		createErr               error
 		createErrWorkspaceFound bool
+		deleteOnRelease         bool
 		wantErr                 string
 		wantRollback            bool
+		wantAction              string
 		wantListCalls           int
 	}{
-		{name: "inventory miss deletes created workspace", wantErr: "created but not found", wantRollback: true, wantListCalls: 2},
+		{name: "inventory miss stops created workspace by default", wantErr: "created but not found", wantRollback: true, wantAction: "stop --yes", wantListCalls: 2},
+		{name: "inventory miss deletes created workspace when configured", deleteOnRelease: true, wantErr: "created but not found", wantRollback: true, wantAction: "delete --yes", wantListCalls: 2},
 		{name: "create failure without workspace removes claim only", createErr: errors.New("build failed"), wantErr: "build failed", wantListCalls: 2},
-		{name: "create failure with workspace deletes created workspace", createErr: errors.New("build failed"), createErrWorkspaceFound: true, wantErr: "build failed", wantRollback: true, wantListCalls: 2},
+		{name: "create failure with workspace stops created workspace by default", createErr: errors.New("build failed"), createErrWorkspaceFound: true, wantErr: "build failed", wantRollback: true, wantAction: "stop --yes", wantListCalls: 2},
+		{name: "create failure with workspace deletes created workspace when configured", createErr: errors.New("build failed"), createErrWorkspaceFound: true, deleteOnRelease: true, wantErr: "build failed", wantRollback: true, wantAction: "delete --yes", wantListCalls: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			installCoderClaimState(t)
@@ -260,6 +264,8 @@ func TestCoderAcquireRollbackUsesStopByDefaultAndSkipsCreateFailureRollback(t *t
 						return LocalCommandResult{ExitCode: 1, Stderr: tc.createErr.Error()}, tc.createErr
 					}
 					return LocalCommandResult{}, nil
+				case strings.HasPrefix(command, "stop --yes crabbox-blue"):
+					return LocalCommandResult{}, nil
 				case strings.HasPrefix(command, "delete --yes crabbox-blue"):
 					return LocalCommandResult{}, nil
 				default:
@@ -267,7 +273,7 @@ func TestCoderAcquireRollbackUsesStopByDefaultAndSkipsCreateFailureRollback(t *t
 				}
 				return LocalCommandResult{}, nil
 			}
-			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{IdleTimeout: time.Hour, Coder: CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			backend, err := NewCoderLeaseBackend(Provider{}.Spec(), Config{IdleTimeout: time.Hour, Coder: CoderConfig{CLIPath: "coder", Template: "go-dev", WorkspacePrefix: "crabbox-", WorkRoot: "/home/coder/crabbox", Wait: "yes", DeleteOnRelease: tc.deleteOnRelease}}, Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -281,13 +287,13 @@ func TestCoderAcquireRollbackUsesStopByDefaultAndSkipsCreateFailureRollback(t *t
 			if !tc.wantRollback {
 				for _, call := range runner.calls {
 					command := strings.Join(call.Args, " ")
-					if strings.HasPrefix(command, "delete --yes") {
+					if strings.HasPrefix(command, "delete --yes") || strings.HasPrefix(command, "stop --yes") {
 						t.Fatalf("unexpected rollback call: %#v", runner.calls)
 					}
 				}
 				return
 			}
-			wantAction := "delete --yes " + createdName
+			wantAction := tc.wantAction + " " + createdName
 			if got := strings.Join(runner.calls[len(runner.calls)-1].Args, " "); got != wantAction {
 				t.Fatalf("final rollback command=%q want %q", got, wantAction)
 			}
@@ -365,6 +371,8 @@ func TestCoderAcquireRollbackFailureHintMatchesReleasePolicy(t *testing.T) {
 				case strings.HasPrefix(command, "create --yes --template go-dev crabbox-blue"):
 					createdName = req.Args[len(req.Args)-1]
 					return LocalCommandResult{}, nil
+				case strings.HasPrefix(command, "stop --yes crabbox-blue"):
+					return LocalCommandResult{ExitCode: 1, Stderr: "release failed"}, errors.New("release failed")
 				case strings.HasPrefix(command, "delete --yes crabbox-blue"):
 					return LocalCommandResult{ExitCode: 1, Stderr: "release failed"}, errors.New("release failed")
 				default:
@@ -377,7 +385,10 @@ func TestCoderAcquireRollbackFailureHintMatchesReleasePolicy(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = backend.(*coderLeaseBackend).Acquire(context.Background(), AcquireRequest{RequestedSlug: "blue", Repo: Repo{Root: t.TempDir()}})
-			want := "manual cleanup: crabbox stop --provider coder --coder-delete-on-release --id " + createdName
+			want := "manual cleanup: crabbox stop --provider coder --id " + createdName
+			if tc.delete {
+				want = "manual cleanup: crabbox stop --provider coder --coder-delete-on-release --id " + createdName
+			}
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("rollback hint missing %q: %v", want, err)
 			}

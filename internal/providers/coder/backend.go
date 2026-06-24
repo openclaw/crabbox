@@ -131,8 +131,8 @@ func (b *coderLeaseBackend) rollbackCreateError(name, leaseID string, client *co
 func (b *coderLeaseBackend) rollbackCreatedWorkspace(name, leaseID string, client *coderClient, cause error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := client.delete(cleanupCtx, name); err != nil {
-		return exit(coderExitCode(cause), "%v; coder cleanup failed for workspace %s; manual cleanup: crabbox stop --provider coder --coder-delete-on-release --id %s: %v", cause, name, name, err)
+	if err := b.releaseWorkspace(cleanupCtx, client, name); err != nil {
+		return exit(coderExitCode(cause), "%v; coder rollback %s failed for workspace %s; manual cleanup: %s: %v", cause, coderReleaseActionFromConfig(b.cfg), name, coderManualCleanupCommand(b.cfg, name), err)
 	}
 	removeLeaseClaim(leaseID)
 	return cause
@@ -708,6 +708,13 @@ func coderReleaseActionFromConfig(cfg Config) string {
 		return coderReleaseActionDelete
 	}
 	return coderReleaseActionStop
+}
+
+func coderManualCleanupCommand(cfg Config, name string) string {
+	if cfg.Coder.DeleteOnRelease {
+		return fmt.Sprintf("crabbox stop --provider coder --coder-delete-on-release --id %s", name)
+	}
+	return fmt.Sprintf("crabbox stop --provider coder --id %s", name)
 }
 
 func coderReleaseAction(value string) (string, bool) {
