@@ -18,6 +18,10 @@ type fixedClock struct{ t time.Time }
 
 func (c fixedClock) Now() time.Time { return c.t }
 
+func noopSSHReady(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+	return nil
+}
+
 type lifecycleRunner struct {
 	requests []core.LocalCommandRequest
 	inputs   []string
@@ -62,6 +66,7 @@ func lifecycleBackend(cfg core.Config, runner *lifecycleRunner) *backend {
 			Exec:   runner,
 			Clock:  fixedClock{t: time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)},
 		},
+		sshReady: noopSSHReady,
 	}
 }
 
@@ -206,7 +211,7 @@ func TestAcquireAppliesManifestPersistsClaimAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.LeaseID != leaseID || lease.Server.Name != name || lease.SSH.Host != "" || lease.SSH.Key == "" {
+	if lease.LeaseID != leaseID || lease.Server.Name != name || lease.SSH.Host != "ssh.sealos.example.test" || lease.SSH.Port != "2222" || lease.SSH.Key == "" {
 		t.Fatalf("lease=%#v", lease)
 	}
 	claim, err := core.ReadLeaseClaim(leaseID)
@@ -240,7 +245,7 @@ func TestListAndStatusAreReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.ID != "cbx_111111111111" || status.State != "Running" || status.Ready {
+	if status.ID != "cbx_111111111111" || status.State != "Running" || !status.Ready || status.SSHHost != "ssh.sealos.example.test" {
 		t.Fatalf("status=%#v", status)
 	}
 	for _, req := range runner.requests {

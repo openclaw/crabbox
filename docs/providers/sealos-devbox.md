@@ -111,6 +111,35 @@ key to the normal per-lease local key store with restrictive permissions, and
 keeps key material out of command arguments, logs, claim JSON, and status
 output.
 
-Final SSH target construction, SSH readiness probing, retained release,
-delete-on-release, and cleanup are deferred to the SSH/release implementation
-phase.
+## SSH, Release, and Cleanup
+
+Crabbox returns a normal Linux SSH lease for `sealos-devbox`, so existing
+`crabbox run`, `crabbox ssh`, `crabbox status --json`, `crabbox stop`, and
+`crabbox cleanup --dry-run` behavior stays provider-neutral after the adapter
+has resolved a DevBox.
+
+`SSHGate` is the default network mode. Crabbox connects to
+`sealosDevbox.sshGatewayHost:sealosDevbox.sshGatewayPort` as
+`sealosDevbox.sshUser` using the Sealos-managed DevBox private key stored in
+Crabbox's local per-lease key path. This relies on SSHGate public-key routing;
+username-encoded SSHGate routing is not the default. `NodePort` is available
+as a fallback mode when `sealosDevbox.nodeHost` is configured and Sealos
+reports an SSH NodePort in the DevBox status.
+
+Before handing a lease to the normal SSH runner, Crabbox waits for SSH and
+verifies `git`, `rsync`, and `tar` on the remote host. `status --json` may show
+the configured route without probing SSH or reading Secret data.
+
+`crabbox stop` retains a DevBox by patching its Sealos state to `Paused`,
+clearing the live SSH endpoint from the local claim, and keeping the local
+claim so the lease can be resolved later. When
+`sealosDevbox.deleteOnRelease: true` or `--sealos-devbox-delete-on-release` is
+set, release validates the DevBox identity, marks it for shutdown, deletes the
+DevBox CR, and removes the matching local claim and generated key.
+
+`crabbox cleanup --provider sealos-devbox --dry-run` lists only Crabbox-owned
+DevBoxes in the active kubeconfig/context/namespace/route scope and prints the
+candidate or skip reason without mutating resources. Non-dry-run cleanup
+revalidates identity immediately before deleting an expired owned DevBox and
+removes stale local claims only after a refreshed inventory proves the DevBox
+is absent in the active scope.
