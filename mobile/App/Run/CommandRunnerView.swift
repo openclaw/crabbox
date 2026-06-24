@@ -416,7 +416,7 @@ struct CommandRunnerView: View {
         output = "$ distributing \(commandLine) to \(targets.map { $0.id }.joined(separator: ", "))\n"
 
         // Capture MainActor-isolated settings on the actor before entering concurrent tasks.
-        let isloKey = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let isloKey = settings.hasIsloProvider ? (settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") : ""
         let coordinator = settings.coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let crabboxToken = settings.crabboxToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         // Writable state/config dirs for the Go core's lease-claim system, shared
@@ -472,10 +472,11 @@ struct CommandRunnerView: View {
     /// phone (REDUCE). The iOS app as a command center over islo.dev.
     @MainActor
     private func mapReduceDemo() async {
-        guard let key = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
+        guard settings.hasIsloProvider,
+              let key = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
               let client = IsloClient(apiKey: key, baseURL: settings.isloBaseURL) else {
             status = "islo key missing"
-            output = "Add your islo key in provider settings to map-reduce over islo.\n"
+            output = "Enable islo and add your key in provider settings to map-reduce over islo.\n"
             showingProviderSettings = true
             return
         }
@@ -585,7 +586,8 @@ struct CommandRunnerView: View {
         // islo lease-claim system (crabboxStateDir -> XDG_STATE_HOME/$HOME) works
         // inside the iOS app container.
         var env: [String: String] = CrabboxRuntimePaths.sandboxEnvironment()
-        if let key = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+        if settings.hasIsloProvider,
+           let key = settings.isloKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
             env["ISLO_API_KEY"] = key
             env["CRABBOX_ISLO_API_KEY"] = key
         }
