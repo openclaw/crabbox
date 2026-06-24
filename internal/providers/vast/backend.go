@@ -386,9 +386,10 @@ func (b *backend) targetFromInstance(item vastInstance, req core.ResolveRequest)
 		return core.LeaseTarget{}, exit(5, "vast instance %d reached terminal status %s", item.ID, item.Status)
 	}
 	server := serverFromInstance(item, b.cfg)
+	server = mergeVastClaimMetadata(server)
 	leaseID := server.Labels["lease"]
 	target := core.LeaseTarget{Server: server, LeaseID: leaseID}
-	if !req.ReleaseOnly {
+	if !req.ReleaseOnly && !req.StatusOnly {
 		ssh, err := sshTargetFromInstance(b.cfg, item)
 		if err != nil {
 			return core.LeaseTarget{}, err
@@ -588,6 +589,22 @@ func mergeVastClaimLabels(server core.Server) core.Server {
 	return server
 }
 
+func mergeVastClaimMetadata(server core.Server) core.Server {
+	leaseID := strings.TrimSpace(server.Labels["lease"])
+	if leaseID == "" {
+		return server
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !ok || claim.Provider != providerName {
+		return server
+	}
+	if claim.CloudID != "" && server.CloudID != "" && claim.CloudID != server.CloudID {
+		return server
+	}
+	server.Labels = preserveVastClaimMetadata(server.Labels, claim.Labels)
+	return server
+}
+
 func serverFromInstance(item vastInstance, cfg core.Config) core.Server {
 	labels := labelsFromVastInstance(item, cfg)
 	server := core.Server{
@@ -623,6 +640,23 @@ func cloneLabels(labels map[string]string) map[string]string {
 	out := make(map[string]string, len(labels))
 	for key, value := range labels {
 		out[key] = value
+	}
+	return out
+}
+
+func preserveVastClaimMetadata(labels, existing map[string]string) map[string]string {
+	out := cloneLabels(labels)
+	for _, key := range []string{
+		vastReleaseActionLabel,
+		vastKeyIDLabel,
+		vastKeyOwnedLabel,
+		vastOfferIDLabel,
+		"provider_key",
+		"recovery",
+	} {
+		if value, ok := existing[key]; ok {
+			out[key] = value
+		}
 	}
 	return out
 }

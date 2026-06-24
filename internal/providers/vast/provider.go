@@ -39,6 +39,26 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return ApplyVastProviderFlags(cfg, fs, values)
 }
 
+func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
+	if provider != providerName {
+		return core.Server{}, core.Exit(2, "refusing to rewrite vast lease=%s as provider=%s", existing.LeaseID, provider)
+	}
+	if slug != existing.Slug {
+		return core.Server{}, core.Exit(2, "refusing to rewrite vast lease=%s with slug=%s", existing.LeaseID, slug)
+	}
+	if server.Labels["lease"] != existing.LeaseID || server.Labels["slug"] != existing.Slug {
+		return core.Server{}, core.Exit(2, "refusing to rewrite vast lease=%s with mismatched label identity", existing.LeaseID)
+	}
+	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
+		return core.Server{}, core.Exit(2, "refusing to rewrite vast lease=%s with stale instance identity", existing.LeaseID)
+	}
+	if allowProviderMetadata {
+		return server, nil
+	}
+	server.Labels = preserveVastClaimMetadata(server.Labels, existing.Labels)
+	return server, nil
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
