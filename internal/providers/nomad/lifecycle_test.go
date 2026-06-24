@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +24,25 @@ type lifecycleFakeClient struct {
 	deregisters  []string
 	deregistered map[string]bool
 	jobInfoErr   map[string]error
+	execs        []recordedNomadExec
+	execResults  []fakeNomadExecResult
+}
+
+type recordedNomadExec struct {
+	JobID        string
+	AllocationID string
+	NodeID       string
+	NodeName     string
+	Task         string
+	Command      []string
+	Stdin        string
+}
+
+type fakeNomadExecResult struct {
+	ExitCode int
+	Stdout   string
+	Stderr   string
+	Err      error
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
@@ -85,6 +106,38 @@ func (f *lifecycleFakeClient) DeregisterJob(_ context.Context, jobID string, pur
 	f.deregisters = append(f.deregisters, jobID)
 	f.deregistered[jobID] = true
 	return "eval-deregister-" + jobID, nil
+}
+
+func (f *lifecycleFakeClient) AllocationExec(_ context.Context, req nomadExecRequest) (int, error) {
+	stdin := ""
+	if req.Stdin != nil {
+		data, err := io.ReadAll(req.Stdin)
+		if err != nil {
+			return 1, err
+		}
+		stdin = string(data)
+	}
+	f.execs = append(f.execs, recordedNomadExec{
+		JobID:        req.JobID,
+		AllocationID: req.AllocationID,
+		NodeID:       req.NodeID,
+		NodeName:     req.NodeName,
+		Task:         req.Task,
+		Command:      append([]string(nil), req.Command...),
+		Stdin:        stdin,
+	})
+	result := fakeNomadExecResult{}
+	if len(f.execResults) > 0 {
+		result = f.execResults[0]
+		f.execResults = f.execResults[1:]
+	}
+	if req.Stdout != nil && result.Stdout != "" {
+		_, _ = io.WriteString(req.Stdout, result.Stdout)
+	}
+	if req.Stderr != nil && result.Stderr != "" {
+		_, _ = io.WriteString(req.Stderr, result.Stderr)
+	}
+	return result.ExitCode, result.Err
 }
 
 type fakeClock struct{ now time.Time }
@@ -289,6 +342,201 @@ func TestCleanupRefusesUnownedExpiredRemoteJob(t *testing.T) {
 	}
 }
 
+func TestExecAdapterForwardsStreamsAndExitCode(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.execResults = []fakeNomadExecResult{{ExitCode: 17, Stdout: "remote out\n", Stderr: "remote err\n"}}
+	b, stdout, stderr := testBackend(t, fake)
+	ready := allocationReadiness{JobID: "job-1", AllocationID: "alloc-1", NodeID: "node-1", NodeName: "worker-1", Task: "crabbox"}
+	code, err := b.allocationExec(context.Background(), fake, ready, []string{"sh", "-s"}, strings.NewReader("printf hi"), stdout, stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 17 || stdout.String() != "remote out\n" || stderr.String() != "remote err\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if len(fake.execs) != 1 {
+		t.Fatalf("execs=%#v", fake.execs)
+	}
+	got := fake.execs[0]
+	if got.JobID != "job-1" || got.AllocationID != "alloc-1" || got.NodeID != "node-1" || got.Task != "crabbox" ||
+		strings.Join(got.Command, " ") != "sh -s" || got.Stdin != "printf hi" {
+		t.Fatalf("exec=%#v", got)
+	}
+}
+
+func TestSyncWorkspaceStreamsArchiveThroughAllocationExec(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, _, stderr := testBackend(t, fake)
+	repo := newNomadRunRepo(t)
+	ready := allocationReadiness{JobID: "job-sync", AllocationID: "alloc-sync", NodeID: "node-1", NodeName: "worker-1", Task: "crabbox"}
+	phases, _, err := b.syncWorkspace(context.Background(), fake, ready, RunRequest{Repo: repo}, b.cfg.Nomad.Workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uploaded *recordedNomadExec
+	for i := range fake.execs {
+		if strings.Contains(strings.Join(fake.execs[i].Command, " "), "cat >") {
+			uploaded = &fake.execs[i]
+			break
+		}
+	}
+	if uploaded == nil || len(uploaded.Stdin) == 0 {
+		t.Fatalf("upload exec missing or empty: %#v", fake.execs)
+	}
+	if !containsExecCommand(fake.execs, "tar -xzf") {
+		t.Fatalf("missing extract execs=%#v", fake.execs)
+	}
+	if !containsPhase(phases, "nomad_sync") || !strings.Contains(stderr.String(), "sync candidate:") {
+		t.Fatalf("phases=%#v stderr=%q", phases, stderr.String())
+	}
+}
+
+func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.execResults = []fakeNomadExecResult{
+		{ExitCode: 0},
+		{ExitCode: 23, Stdout: "out\n", Stderr: "err\n"},
+	}
+	b, stdout, stderr := testBackend(t, fake)
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:    newNomadRunRepo(t),
+		NoSync:  true,
+		Env:     map[string]string{"TOKEN": "secret", "BAD-NAME": "skip"},
+		Command: []string{"go", "test", "./..."},
+	})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 23 {
+		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
+	}
+	if result.ExitCode != 23 || result.Provider != providerName || result.Session == nil || result.Session.Kept {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(fake.deregisters) != 1 {
+		t.Fatalf("deregisters=%v", fake.deregisters)
+	}
+	if stdout.String() != "out\n" || !strings.Contains(stderr.String(), "err\n") {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if len(fake.execs) < 2 || !strings.Contains(fake.execs[1].Stdin, "export TOKEN='secret'") ||
+		strings.Contains(fake.execs[1].Stdin, "BAD-NAME") {
+		t.Fatalf("execs=%#v", fake.execs)
+	}
+}
+
+func TestRunKeepOnFailureRetainsNewJob(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.execResults = []fakeNomadExecResult{{ExitCode: 0}, {ExitCode: 7}}
+	b, _, stderr := testBackend(t, fake)
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:          newNomadRunRepo(t),
+		NoSync:        true,
+		KeepOnFailure: true,
+		Command:       []string{"false"},
+	})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
+	}
+	if len(fake.deregisters) != 0 || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("deregisters=%v result=%#v", fake.deregisters, result)
+	}
+	if !strings.Contains(stderr.String(), "rerun: crabbox run --provider nomad") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunSyncOnlyUsesArchiveSyncAndCleansOneShot(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, stdout, _ := testBackend(t, fake)
+	result, err := b.Run(context.Background(), RunRequest{Repo: newNomadRunRepo(t), SyncOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || !result.SyncDelegated || result.Session == nil || result.Session.Kept {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(fake.deregisters) != 1 || !strings.Contains(stdout.String(), "synced /workspace/crabbox") {
+		t.Fatalf("deregisters=%v stdout=%q", fake.deregisters, stdout.String())
+	}
+	if !containsExecCommand(fake.execs, "tar -xzf") {
+		t.Fatalf("missing tar execs=%#v", fake.execs)
+	}
+}
+
+func TestRunSyncFailureCleansNewJob(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.execResults = []fakeNomadExecResult{{ExitCode: 19}}
+	b, _, _ := testBackend(t, fake)
+	result, err := b.Run(context.Background(), RunRequest{Repo: newNomadRunRepo(t), SyncOnly: true})
+	var exitErr ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 19 {
+		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
+	}
+	if result.Session == nil || result.Session.Kept {
+		t.Fatalf("result=%#v", result)
+	}
+	if len(fake.deregisters) != 1 {
+		t.Fatalf("deregisters=%v", fake.deregisters)
+	}
+}
+
+func TestRunTimingJSONIncludesDelegatedSyncEvidence(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.execResults = []fakeNomadExecResult{{ExitCode: 0}, {ExitCode: 0}}
+	b, _, stderr := testBackend(t, fake)
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:       newNomadRunRepo(t),
+		NoSync:     true,
+		TimingJSON: true,
+		Label:      "unit",
+		Command:    []string{"true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	out := stderr.String()
+	for _, want := range []string{`"provider":"nomad"`, `"syncSkipped":true`, `"syncDelegated":true`, `"exitCode":0`, `"label":"unit"`, `"workdir":"/workspace/crabbox"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("timing JSON missing %s in %q", want, out)
+		}
+	}
+}
+
+func TestNomadArchiveSyncFeatureGatesUnsupportedOptions(t *testing.T) {
+	spec := Provider{}.Spec()
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{SyncOnly: true}); err != nil {
+		t.Fatalf("--sync-only should be allowed: %v", err)
+	}
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, RunRequest{ForceSyncLarge: true}); err != nil {
+		t.Fatalf("--force-sync-large should be allowed: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		req  RunRequest
+	}{
+		{name: "checksum", req: RunRequest{ChecksumSync: true}},
+		{name: "full resync", req: RunRequest{FullResync: true}},
+		{name: "capture stdout", req: RunRequest{CaptureStdout: "stdout.log"}},
+		{name: "capture stderr", req: RunRequest{CaptureStderr: "stderr.log"}},
+		{name: "capture on fail", req: RunRequest{CaptureOnFail: true}},
+		{name: "download", req: RunRequest{Downloads: []string{"out.txt"}}},
+		{name: "artifact", req: RunRequest{ArtifactGlobs: []string{"dist/**"}}},
+		{name: "required artifact", req: RunRequest{RequiredArtifactGlobs: []string{"dist/app"}}},
+		{name: "proof", req: RunRequest{EmitProof: "proof.md"}},
+		{name: "script", req: RunRequest{ScriptRequested: true}},
+		{name: "fresh pr", req: RunRequest{FreshPR: core.FreshPRSpec{Owner: "example-org", Repo: "my-app", Number: 1}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := core.RejectDelegatedSyncOptionsForSpec(spec, tc.req); err == nil {
+				t.Fatalf("expected rejection for %#v", tc.req)
+			}
+		})
+	}
+}
+
 func TestSelectAllocationPrefersRunningTask(t *testing.T) {
 	allocs := []*nomadapi.AllocationListStub{
 		runningAlloc("job", "alloc-pending", "node-0", "pending", "other"),
@@ -330,6 +578,45 @@ func createClaim(t *testing.T, b *backend, leaseID, slug, jobID, allocID string)
 		fake.allocs[jobID] = []*nomadapi.AllocationListStub{runningAlloc(jobID, allocID, "node-1", "worker-1", b.cfg.Nomad.Task)}
 	}
 	return claim
+}
+
+func newNomadRunRepo(t *testing.T) Repo {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("hello nomad\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "init")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init")
+	return Repo{Root: root, Name: "my-app"}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func containsExecCommand(execs []recordedNomadExec, needle string) bool {
+	for _, exec := range execs {
+		if strings.Contains(strings.Join(exec.Command, " "), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPhase(phases []timingPhase, name string) bool {
+	for _, phase := range phases {
+		if phase.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func mustClient(t *testing.T, b *backend) Client {

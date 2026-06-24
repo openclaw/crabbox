@@ -32,8 +32,8 @@ func TestProviderSpecIsDelegatedRunLinuxWithoutAliases(t *testing.T) {
 	if !spec.Features.Has(core.FeatureCleanup) {
 		t.Fatalf("spec.Features=%#v, want cleanup after Wave 2 lifecycle", spec.Features)
 	}
-	if spec.Features.Has(core.FeatureArchiveSync) {
-		t.Fatalf("spec.Features=%#v, archive-sync belongs to Wave 3", spec.Features)
+	if !spec.Features.Has(core.FeatureArchiveSync) {
+		t.Fatalf("spec.Features=%#v, want archive-sync after Wave 3 sync implementation", spec.Features)
 	}
 }
 
