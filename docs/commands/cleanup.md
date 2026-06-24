@@ -56,6 +56,10 @@ What cleanup does depends on the selected provider:
   provider scope. It deletes idle-expired Crabbox-owned sandboxes and keeps
   missing-or-inaccessible claims unless
   `--cloudflare-sandbox-forget-missing` is explicit.
+- **`nomad`** sweeps only local `cbx_...` claims in the active Nomad namespace,
+  region, and task scope. It deregisters idle-expired or TTL-expired
+  Crabbox-owned jobs, removes stale local claims for missing jobs, and skips
+  active claims.
 - **`coder`** lists workspaces with Crabbox ownership evidence, such as the
   configured workspace prefix or Crabbox labels in Coder JSON, but mutates only
   workspaces that also have a local Crabbox claim with cleanup metadata. It
