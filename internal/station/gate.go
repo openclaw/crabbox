@@ -1,6 +1,9 @@
 package station
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Gate is the feature gate for the Station primitive. Its zero value is the
 // safe default: every phase is disabled, so no station lifecycle, no agent
@@ -117,14 +120,43 @@ func (g Gate) AuthorizeModelAccess(p StationProfile, envAllow []string) error {
 	if err := p.ModelAccess.validate(p.Name); err != nil {
 		return err
 	}
-	// Model/tool credentials must never travel through ordinary repo env.allow.
-	// The gateway name doubles as the credential channel identifier, so its
-	// appearance in env.allow signals an attempt to smuggle credentials through
-	// the unaudited path.
 	for _, name := range envAllow {
-		if name == p.ModelAccess.Gateway {
-			return fmt.Errorf("station profile %q modelAccess gateway %q must not be forwarded via env.allow; it uses the separate audited delivery path", p.Name, p.ModelAccess.Gateway)
+		if conflict, reason := modelAccessEnvAllowConflict(name, p.ModelAccess); conflict {
+			return fmt.Errorf("station profile %q modelAccess cannot authorize env.allow entry %q: %s; use the separate audited delivery path", p.Name, name, reason)
 		}
 	}
 	return nil
+}
+
+func modelAccessEnvAllowConflict(entry string, policy ModelAccessPolicy) (bool, string) {
+	name := strings.TrimSpace(entry)
+	if name == "" {
+		return false, ""
+	}
+	if name == strings.TrimSpace(policy.Gateway) {
+		return true, "gateway credential channel overlap"
+	}
+	if strings.HasSuffix(name, "*") {
+		prefix := strings.TrimSuffix(name, "*")
+		if prefix == "" {
+			return false, ""
+		}
+		return true, "wildcard forwarding is not allowed with modelAccess"
+	}
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{
+		"API_KEY",
+		"ACCESS_KEY",
+		"AUTH_TOKEN",
+		"BEARER_TOKEN",
+		"CREDENTIAL",
+		"PASSWORD",
+		"SECRET",
+		"TOKEN",
+	} {
+		if strings.Contains(upper, marker) {
+			return true, "credential-like environment name"
+		}
+	}
+	return false, ""
 }
