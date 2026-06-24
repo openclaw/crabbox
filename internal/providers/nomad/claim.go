@@ -161,10 +161,6 @@ func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
 	return false, "retained"
 }
 
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-
 func formatScope(namespace, region string) string {
 	return fmt.Sprintf("namespace=%s region=%s", normalizeNamespace(namespace), normalizeRegion(region))
 }
