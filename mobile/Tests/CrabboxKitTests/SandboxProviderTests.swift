@@ -83,6 +83,11 @@ final class SandboxProviderTests: XCTestCase {
         XCTAssertEqual(engine.displayName, "test-engine")
     }
 
+    func testSandboxEngineDisplayNameUsesHandleID() {
+        let handle = SandboxHandle(id: "sbx_123", provider: "fake", status: "running", ollamaEndpoint: "https://example.com")
+        XCTAssertEqual(sandboxEngineDisplayName(for: handle), "Sandbox · sbx_123")
+    }
+
     func testLaunchLLMSandboxFailsBeforeReturningUnreadyEngine() async {
         let provisioner = FakeProvisioner(handle: SandboxHandle(id: "cold", provider: "fake", status: "running", ollamaEndpoint: "https://example.com"))
         do {

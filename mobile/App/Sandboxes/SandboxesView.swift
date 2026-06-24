@@ -414,7 +414,7 @@ struct SandboxesView: View {
         do {
             try await provisioner.stop(id: handle.id)
             await sandboxStore.refresh(using: settings)
-            engineHub.remove(displayName: "Sandbox · \(handle.id)")
+            engineHub.remove(displayName: sandboxEngineDisplayName(for: handle))
         } catch {
             // store will have the error surfaced on next refresh if needed
             print("stop error: \(error)")

@@ -19,10 +19,12 @@ public func runUnitChecks() async -> [String] {
     eq(normalizeCoordinatorURL("http://localhost:8787"), nil, "reject localhost http in prod")
     eq(normalizeCoordinatorURL("http://localhost:8787", allowLocalHTTP: true), "http://localhost:8787", "allow localhost http in dev")
     eq(normalizeCoordinatorURL("http://127.0.0.1:8787", allowLocalHTTP: true), "http://127.0.0.1:8787", "allow ipv4 loopback dev")
+    eq(normalizeCoordinatorURL("http://127.999.999.999:8787", allowLocalHTTP: true), nil, "reject malformed ipv4 loopback dev")
     eq(normalizeCoordinatorURL("http://[::1]:8787", allowLocalHTTP: true), "http://[::1]:8787", "allow ipv6 loopback dev")
     eq(normalizeCoordinatorURL("http://192.168.1.50:8787", allowLocalHTTP: true), nil, "reject LAN http even in dev")
     eq(normalizeCoordinatorURL(""), nil, "reject empty")
     eq(normalizeCoordinatorURL("   "), nil, "reject whitespace")
+    eq(normalizeCredentialEndpointURL("https://alice:secret@api.islo.dev"), nil, "reject credential endpoint userinfo")
     eq(webViewOriginWhitelist("https://crabbox.sh"), ["https://*", "about:*"], "https-only whitelist")
     eq(webViewOriginWhitelist("http://localhost:8787"), ["https://*", "about:*", "http://localhost:8787"], "loopback whitelist")
 
@@ -49,6 +51,11 @@ public func runUnitChecks() async -> [String] {
     eq(selectSandboxProvider(isloEnabled: false, isloKey: nil, crabboxToken: nil), .none, "no sandbox provider")
     eq(sandboxProviderLabel(for: .isloDirect), "islo.dev (direct)", "islo label")
     eq(sandboxProviderLabel(for: .workspaceOnly), "crabbox.sh (workspace only)", "workspace-only label")
+    eq(
+        sandboxEngineDisplayName(for: SandboxHandle(id: "sbx_123", provider: "unit", status: "running")),
+        "Sandbox · sbx_123",
+        "sandbox engine identity"
+    )
 
     // map-reduce planner/reducer
     let shards = planMapReduceShards(total: 1000, sandboxIDs: ["a", "b", "c"])

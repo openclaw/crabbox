@@ -26,6 +26,10 @@ final class CoordinatorURLTests: XCTestCase {
         XCTAssertEqual(normalizeCoordinatorURL("http://127.0.0.1:8787", allowLocalHTTP: true), "http://127.0.0.1:8787")
     }
 
+    func testRejectsMalformedIPv4LoopbackHTTPInDev() {
+        XCTAssertNil(normalizeCoordinatorURL("http://127.999.999.999:8787", allowLocalHTTP: true))
+    }
+
     func testAllowsIPv6LoopbackHTTPInDev() {
         XCTAssertEqual(normalizeCoordinatorURL("http://[::1]:8787", allowLocalHTTP: true), "http://[::1]:8787")
     }
@@ -45,6 +49,10 @@ final class CoordinatorURLTests: XCTestCase {
 
     func testCredentialEndpointRejectsHTTP() {
         XCTAssertNil(normalizeCredentialEndpointURL("http://api.islo.dev"))
+    }
+
+    func testCredentialEndpointRejectsURLCredentials() {
+        XCTAssertNil(normalizeCredentialEndpointURL("https://alice:secret@api.islo.dev"))
     }
 
     func testWhitelistIsHTTPSOnlyByDefault() {

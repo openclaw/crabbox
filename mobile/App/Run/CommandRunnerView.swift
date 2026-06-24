@@ -15,7 +15,7 @@ struct CommandRunnerView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var sandboxStore: SandboxStore
 
-    @State private var repo = "openclaw/crabbox"
+    @State private var repo = "example-org/my-app"
     @State private var branch = "main"
     @State private var commandLine = "crabbox run --provider islo --no-sync -- uname -a"
     @State private var output = "$ ready\n"

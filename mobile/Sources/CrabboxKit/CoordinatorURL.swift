@@ -29,6 +29,10 @@ public func normalizeCredentialEndpointURL(_ value: String, allowLocalHTTP: Bool
           let host = components.host, !host.isEmpty
     else { return nil }
 
+    if components.user != nil || components.password != nil {
+        return nil
+    }
+
     if scheme != "https" {
         guard allowLocalHTTP, scheme == "http", isLoopbackHost(host) else { return nil }
     }
@@ -83,5 +87,10 @@ func isLoopbackHost(_ hostname: String) -> Bool {
 
     if host == "localhost" || host == "::1" { return true }
 
-    return host.range(of: "^127(\\.[0-9]{1,3}){0,3}$", options: .regularExpression) != nil
+    let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+    guard !parts.isEmpty, parts.count <= 4, parts[0] == "127" else { return false }
+    for part in parts.dropFirst() {
+        guard let octet = Int(part), octet >= 0, octet <= 255 else { return false }
+    }
+    return true
 }

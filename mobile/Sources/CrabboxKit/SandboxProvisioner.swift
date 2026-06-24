@@ -133,6 +133,10 @@ public struct CoordinatorProvisioner: SandboxProvisioner {
 /// provider.
 public typealias SandboxEngineFactory = @Sendable (SandboxHandle, String) -> (any LLMEngine)?
 
+public func sandboxEngineDisplayName(for handle: SandboxHandle) -> String {
+    "Sandbox · \(handle.id)"
+}
+
 public func launchLLMSandbox(
     provisioner: SandboxProvisioner,
     name: String,
@@ -143,7 +147,7 @@ public func launchLLMSandbox(
     },
     engineFactory: SandboxEngineFactory = { handle, model in
         guard let endpoint = handle.ollamaEndpoint else { return nil }
-        return SandboxEngine(endpoint: endpoint, model: model)
+        return SandboxEngine(endpoint: endpoint, model: model, displayName: sandboxEngineDisplayName(for: handle))
     }
 ) async throws -> (handle: SandboxHandle, engine: any LLMEngine) {
     let handle = try await provisioner.launch(name: name, model: model)

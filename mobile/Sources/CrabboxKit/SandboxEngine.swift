@@ -17,8 +17,12 @@ public struct SandboxEngine: LLMEngine {
 
     /// Convenience for pointing at an islo share URL (or any Ollama endpoint).
     public init?(endpoint: String, model: String) {
+        self.init(endpoint: endpoint, model: model, displayName: nil)
+    }
+
+    public init?(endpoint: String, model: String, displayName: String?) {
         guard let client = OllamaClient(host: endpoint) else { return nil }
-        self.init(client: client, model: model)
+        self.init(client: client, model: model, displayName: displayName)
     }
 
     public func isReady() async -> Bool {
