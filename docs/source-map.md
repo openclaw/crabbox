@@ -109,6 +109,8 @@ Delegated-run providers (no SSH lease):
   `internal/providers/blacksmith`, `internal/providers/wandb`
 - Superserve delegated lifecycle, archive sync, data-plane file upload, exec,
   and live smoke: `internal/providers/superserve`, `scripts/live-superserve-smoke.sh`
+- CUA delegated lifecycle, archive sync, Python SDK bridge, owned cleanup, and
+  live smoke: `internal/providers/cua`, `docs/providers/cua.md`, `scripts/live-cua-smoke.sh`
 - Anthropic Sandbox Runtime live local enforcement smoke: `scripts/live-anthropic-sandbox-runtime-smoke.sh`
 - Azure Container Apps dynamic sessions (shares the `azure` family, but
   delegated-run): `internal/providers/azuredynamicsessions`, runner image `worker/azure-dynamic-sessions.Dockerfile`
@@ -236,5 +238,5 @@ Provider docs:
 - Release workflow and Homebrew tap fallback: `.github/workflows/release.yml`
 - GoReleaser archives and Homebrew formula config: `.goreleaser.yaml`
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
-- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-vultr-smoke.sh`, and `scripts/live-superserve-smoke.sh`
+- Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-cua-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-vultr-smoke.sh`, and `scripts/live-superserve-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`

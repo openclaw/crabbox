@@ -2,6 +2,8 @@ package cua
 
 import (
 	"flag"
+	"io"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -25,8 +27,12 @@ type StopRequest = core.StopRequest
 type CleanupRequest = core.CleanupRequest
 type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
+type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
+type ExitError = core.ExitError
+type timingReport = core.TimingReport
+type timingPhase = core.TimingPhase
 
 const (
 	providerName             = "cua"
@@ -51,4 +57,72 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
+}
+
+func writeTimingJSON(w io.Writer, report timingReport) error {
+	return core.WriteTimingJSON(w, report)
+}
+
+func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
+	return core.TimingReportWithRunResult(report, result, err)
+}
+
+func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
+	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
+}
+
+func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
+	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
+}
+
+func newLeaseSlug(leaseID string) string {
+	return core.NewLeaseSlug(leaseID)
+}
+
+func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
+	return core.AllocateClaimLeaseSlug(leaseID, requested)
+}
+
+func claimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server) error {
+	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, core.SSHTarget{})
+}
+
+func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
+}
+
+func readLeaseClaim(leaseID string) (LeaseClaim, error) {
+	return core.ReadLeaseClaim(leaseID)
+}
+
+func listCUALeaseClaims() ([]LeaseClaim, error) {
+	return core.ListLeaseClaimsWithPrefix(leasePrefix)
+}
+
+func removeLeaseClaim(leaseID string) {
+	core.RemoveLeaseClaim(leaseID)
+}
+
+func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
+	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
+	return core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
+}
+
+func shellQuote(value string) string {
+	return core.ShellQuote(value)
+}
+
+func shellScriptFromArgv(command []string) string {
+	return core.ShellScriptFromArgv(command)
+}
+
+func shouldUseShell(command []string) bool {
+	return core.ShouldUseShell(command)
+}
+
+func leadingEnvAssignment(command []string) bool {
+	return core.LeadingEnvAssignment(command)
 }

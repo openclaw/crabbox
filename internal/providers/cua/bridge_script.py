@@ -1,6 +1,10 @@
 import importlib
+import asyncio
+import base64
 import json
 import os
+import re
+import shlex
 import sys
 import traceback
 
@@ -87,6 +91,65 @@ def summarize_sandbox(value):
     }
 
 
+def image_for_config(mod, cfg):
+    image_cls = getattr(mod, "Image", None)
+    if image_cls is None:
+        image_cls = importlib.import_module("cua_sandbox").Image
+    raw = str(cfg.get("image") or "ubuntu:24.04").strip()
+    kind = str(cfg.get("kind") or "container").strip().lower() or "container"
+    if raw.startswith("ubuntu:"):
+        return image_cls.linux("ubuntu", raw.split(":", 1)[1] or "24.04", kind=kind)
+    if raw == "ubuntu":
+        return image_cls.linux("ubuntu", "24.04", kind=kind)
+    if hasattr(image_cls, "from_registry"):
+        img = image_cls.from_registry(raw)
+        if getattr(img, "kind", None) is None:
+            img = image_cls.from_dict({**img.to_dict(), "kind": kind})
+        return img
+    return image_cls.linux("ubuntu", "24.04", kind=kind)
+
+
+def sandbox_kwargs(cfg):
+    kwargs = {"local": False}
+    if cfg.get("region"):
+        kwargs["region"] = str(cfg.get("region"))
+    if int(cfg.get("vcpus") or 0) > 0:
+        kwargs["cpu"] = int(cfg.get("vcpus"))
+    if int(cfg.get("memoryMb") or 0) > 0:
+        kwargs["memory_mb"] = int(cfg.get("memoryMb"))
+    if int(cfg.get("diskGb") or 0) > 0:
+        kwargs["disk_gb"] = int(cfg.get("diskGb"))
+    if int(cfg.get("startupTimeoutSecs") or 0) > 0:
+        kwargs["time_to_start"] = int(cfg.get("startupTimeoutSecs"))
+    return kwargs
+
+
+def command_text(argv):
+    values = [str(v) for v in (argv or [])]
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    return shlex.join(values)
+
+
+def valid_env_name(name):
+    return re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name or "") is not None
+
+
+def error_response(exc, klass="environment_blocked"):
+    code = exc.__class__.__name__
+    message = str(exc)
+    lower = message.lower()
+    if "not found" in lower or "404" in lower:
+        klass = "not_found"
+    elif "quota" in lower or "capacity" in lower or "rate limit" in lower or "429" in lower:
+        klass = "quota_blocked"
+    elif "unauthorized" in lower or "forbidden" in lower or "api key" in lower:
+        klass = "environment_blocked"
+    return {"ok": False, "class": klass, "error": {"code": code, "message": message, "class": klass}}
+
+
 def auth_state():
     if os.environ.get("CUA_API_KEY"):
         return "env"
@@ -140,31 +203,133 @@ def doctor(req, mod, import_path, import_error):
 
 
 def list_sandboxes(mod):
-    cls = sandbox_class(mod)
-    if cls is None or not hasattr(cls, "list"):
-        return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_list", "message": "CUA SDK Sandbox.list is unavailable", "class": "environment_blocked"}}
-    values = cls.list()
-    return {"ok": True, "sandboxes": [summarize_sandbox(v) for v in (values or [])]}
+    async def _run():
+        cls = sandbox_class(mod)
+        if cls is None or not hasattr(cls, "list"):
+            return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_list", "message": "CUA SDK Sandbox.list is unavailable", "class": "environment_blocked"}}
+        values = await cls.list()
+        return {"ok": True, "sandboxes": [summarize_sandbox(v) for v in (values or [])]}
+
+    return asyncio.run(_run())
 
 
 def info(req, mod):
-    cls = sandbox_class(mod)
-    sid = str(req.get("sandboxId") or "").strip()
-    if not sid:
-        return {"ok": False, "class": "validation_failed", "error": {"code": "missing_sandbox_id", "message": "sandboxId is required", "class": "validation_failed"}}
-    if cls is None:
-        return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_sandbox", "message": "CUA SDK Sandbox is unavailable", "class": "environment_blocked"}}
-    if hasattr(cls, "get_info"):
-        value = cls.get_info(sid)
-    elif hasattr(cls, "connect"):
-        value = cls.connect(sid).get_info()
-    else:
-        return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_info", "message": "CUA SDK info operation is unavailable", "class": "environment_blocked"}}
-    return {"ok": True, "sandbox": summarize_sandbox(value)}
+    async def _run():
+        cls = sandbox_class(mod)
+        sid = str(req.get("sandboxId") or "").strip()
+        if not sid:
+            return {"ok": False, "class": "validation_failed", "error": {"code": "missing_sandbox_id", "message": "sandboxId is required", "class": "validation_failed"}}
+        if cls is None:
+            return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_sandbox", "message": "CUA SDK Sandbox is unavailable", "class": "environment_blocked"}}
+        if hasattr(cls, "get_info"):
+            value = await cls.get_info(sid)
+        elif hasattr(cls, "connect"):
+            sb = await cls.connect(sid)
+            try:
+                value = {"id": sid, "name": getattr(sb, "name", sid), "status": "running", "state": "running"}
+            finally:
+                await sb.disconnect()
+        else:
+            return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_info", "message": "CUA SDK info operation is unavailable", "class": "environment_blocked"}}
+        return {"ok": True, "sandbox": summarize_sandbox(value)}
+
+    return asyncio.run(_run())
 
 
-def unsupported(action):
-    return {"ok": False, "class": "diagnostic_only", "error": {"code": "action_deferred", "message": f"CUA bridge action {action} is deferred to lifecycle implementation", "class": "diagnostic_only"}}
+def create(req, mod):
+    async def _run():
+        cls = sandbox_class(mod)
+        if cls is None or not hasattr(cls, "create"):
+            return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_create", "message": "CUA SDK Sandbox.create is unavailable", "class": "environment_blocked"}}
+        cfg = req.get("config") or {}
+        name = str((req.get("sandbox") or {}).get("name") or "").strip()
+        if not name:
+            return {"ok": False, "class": "validation_failed", "error": {"code": "missing_sandbox_name", "message": "sandbox.name is required", "class": "validation_failed"}}
+        try:
+            sb = await cls.create(image_for_config(mod, cfg), name=name, **sandbox_kwargs(cfg))
+            try:
+                return {"ok": True, "sandbox": summarize_sandbox({"id": name, "name": getattr(sb, "name", name), "status": "running", "metadata": (req.get("sandbox") or {}).get("metadata") or {}})}
+            finally:
+                await sb.disconnect()
+        except Exception as exc:
+            return error_response(exc)
+
+    return asyncio.run(_run())
+
+
+def delete(req, mod):
+    async def _run():
+        cls = sandbox_class(mod)
+        sid = str(req.get("sandboxId") or "").strip()
+        if not sid:
+            return {"ok": False, "class": "validation_failed", "error": {"code": "missing_sandbox_id", "message": "sandboxId is required", "class": "validation_failed"}}
+        if cls is None or not hasattr(cls, "delete"):
+            return {"ok": False, "class": "environment_blocked", "error": {"code": "sdk_missing_delete", "message": "CUA SDK Sandbox.delete is unavailable", "class": "environment_blocked"}}
+        try:
+            await cls.delete(sid)
+            return {"ok": True, "sandbox": summarize_sandbox({"id": sid, "name": sid, "status": "deleted"})}
+        except Exception as exc:
+            return error_response(exc)
+
+    return asyncio.run(_run())
+
+
+def upload_bytes(req, mod):
+    async def _run():
+        cls = sandbox_class(mod)
+        sid = str(req.get("sandboxId") or "").strip()
+        files = req.get("files") or []
+        if not sid or not files:
+            return {"ok": False, "class": "validation_failed", "error": {"code": "missing_upload_input", "message": "sandboxId and files are required", "class": "validation_failed"}}
+        sb = None
+        try:
+            sb = await cls.connect(sid)
+            for item in files:
+                path = str(item.get("path") or "").strip()
+                content = base64.b64decode(str(item.get("contentBase64") or ""))
+                await sb.files.write_bytes(path, content)
+            return {"ok": True, "sandbox": summarize_sandbox({"id": sid, "name": sid, "status": "running"})}
+        except Exception as exc:
+            return error_response(exc)
+        finally:
+            if sb is not None:
+                await sb.disconnect()
+
+    return asyncio.run(_run())
+
+
+def exec_command(req, mod):
+    async def _run():
+        cls = sandbox_class(mod)
+        sid = str(req.get("sandboxId") or "").strip()
+        command = command_text(req.get("command") or [])
+        if not sid or not command:
+            return {"ok": False, "class": "validation_failed", "error": {"code": "missing_exec_input", "message": "sandboxId and command are required", "class": "validation_failed"}}
+        timeout = int(req.get("timeout") or (req.get("config") or {}).get("execTimeoutSecs") or 600)
+        workdir = str(req.get("workdir") or "").strip()
+        env = {str(k): str(v) for k, v in (req.get("env") or {}).items()}
+        invalid_env = sorted(k for k in env if not valid_env_name(k))
+        if invalid_env:
+            return {"ok": False, "class": "validation_failed", "error": {"code": "invalid_env_name", "message": "invalid environment variable name: " + ", ".join(invalid_env), "class": "validation_failed"}}
+        env_prefix = ""
+        if env:
+            env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(env.items())) + " "
+        if workdir:
+            script = "cd " + shlex.quote(workdir) + " && " + env_prefix + command
+        else:
+            script = env_prefix + command
+        sb = None
+        try:
+            sb = await cls.connect(sid)
+            result = await sb.shell.run(script, timeout=timeout)
+            return {"ok": True, "stdout": result.stdout, "stderr": result.stderr, "exitCode": int(result.returncode), "sandbox": summarize_sandbox({"id": sid, "name": sid, "status": "running"})}
+        except Exception as exc:
+            return error_response(exc)
+        finally:
+            if sb is not None:
+                await sb.disconnect()
+
+    return asyncio.run(_run())
 
 
 def main():
@@ -185,8 +350,14 @@ def main():
             emit(list_sandboxes(mod))
         if action == "info":
             emit(info(req, mod))
-        if action in {"create", "delete", "upload_bytes", "exec"}:
-            emit(unsupported(action))
+        if action == "create":
+            emit(create(req, mod))
+        if action == "delete":
+            emit(delete(req, mod))
+        if action == "upload_bytes":
+            emit(upload_bytes(req, mod))
+        if action == "exec":
+            emit(exec_command(req, mod))
         emit({"ok": False, "class": "validation_failed", "error": {"code": "unknown_action", "message": f"unknown CUA bridge action {action}", "class": "validation_failed"}})
     except SystemExit:
         raise

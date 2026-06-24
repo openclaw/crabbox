@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,8 +16,9 @@ import (
 )
 
 const (
-	bridgeOutputLimit = 1 << 20
-	bridgeVersion     = 1
+	bridgeOutputLimit     = 1 << 20
+	bridgeExecOutputLimit = 64 << 20
+	bridgeVersion         = 1
 )
 
 //go:embed bridge_script.py
@@ -34,6 +36,8 @@ type bridgeRequest struct {
 	SandboxID string              `json:"sandboxId,omitempty"`
 	Sandbox   bridgeSandboxConfig `json:"sandbox,omitempty"`
 	Command   []string            `json:"command,omitempty"`
+	Env       map[string]string   `json:"env,omitempty"`
+	Workdir   string              `json:"workdir,omitempty"`
 	Files     []bridgeFile        `json:"files,omitempty"`
 	Timeout   int                 `json:"timeout,omitempty"`
 }
@@ -47,6 +51,8 @@ type bridgeConfig struct {
 	VCPUs          int    `json:"vcpus,omitempty"`
 	MemoryMB       int    `json:"memoryMb,omitempty"`
 	DiskGB         int    `json:"diskGb,omitempty"`
+	StartupTimeout int    `json:"startupTimeoutSecs,omitempty"`
+	ExecTimeout    int    `json:"execTimeoutSecs,omitempty"`
 	SDKPackage     string `json:"sdkPackage,omitempty"`
 	SDKImport      string `json:"sdkImport,omitempty"`
 	FallbackImport string `json:"fallbackImport,omitempty"`
@@ -112,6 +118,129 @@ func newBridgeClient(cfg Config, rt Runtime) *bridgeClient {
 	return &bridgeClient{cfg: cfg, rt: rt}
 }
 
+func (c *bridgeClient) CreateSandbox(ctx context.Context, name string, metadata map[string]string) (bridgeSandboxSummary, error) {
+	resp, err := c.RoundTrip(ctx, bridgeRequest{
+		Action: "create",
+		Sandbox: bridgeSandboxConfig{
+			Name: name,
+			Meta: metadata,
+		},
+	})
+	if err != nil {
+		return bridgeSandboxSummary{}, err
+	}
+	if err := bridgeResponseError("create", resp); err != nil {
+		return bridgeSandboxSummary{}, err
+	}
+	return resp.Sandbox, nil
+}
+
+func (c *bridgeClient) ListSandboxes(ctx context.Context) ([]bridgeSandboxSummary, error) {
+	resp, err := c.RoundTrip(ctx, bridgeRequest{Action: "list"})
+	if err != nil {
+		return nil, err
+	}
+	if err := bridgeResponseError("list", resp); err != nil {
+		return nil, err
+	}
+	return resp.Sandboxes, nil
+}
+
+func (c *bridgeClient) GetSandbox(ctx context.Context, sandboxID string) (bridgeSandboxSummary, error) {
+	resp, err := c.RoundTrip(ctx, bridgeRequest{Action: "info", SandboxID: sandboxID})
+	if err != nil {
+		return bridgeSandboxSummary{}, err
+	}
+	if err := bridgeResponseError("info", resp); err != nil {
+		return bridgeSandboxSummary{}, err
+	}
+	return resp.Sandbox, nil
+}
+
+func (c *bridgeClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
+	resp, err := c.RoundTrip(ctx, bridgeRequest{Action: "delete", SandboxID: sandboxID})
+	if err != nil {
+		return err
+	}
+	return bridgeResponseError("delete", resp)
+}
+
+func (c *bridgeClient) UploadBytes(ctx context.Context, sandboxID string, file bridgeFile) error {
+	resp, err := c.RoundTrip(ctx, bridgeRequest{Action: "upload_bytes", SandboxID: sandboxID, Files: []bridgeFile{file}})
+	if err != nil {
+		return err
+	}
+	return bridgeResponseError("upload_bytes", resp)
+}
+
+func (c *bridgeClient) Exec(ctx context.Context, sandboxID string, command []string, workdir string, env map[string]string, stdout, stderr *bytes.Buffer) (bridgeResponse, error) {
+	resp, err := c.RoundTrip(ctx, bridgeRequest{
+		Action:    "exec",
+		SandboxID: sandboxID,
+		Command:   command,
+		Workdir:   workdir,
+		Env:       env,
+	})
+	if err != nil {
+		return bridgeResponse{}, err
+	}
+	if stdout != nil && resp.Stdout != "" {
+		stdout.WriteString(resp.Stdout)
+	}
+	if stderr != nil && resp.Stderr != "" {
+		stderr.WriteString(resp.Stderr)
+	}
+	if err := bridgeResponseError("exec", resp); err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
+
+type bridgeActionError struct {
+	action string
+	code   string
+	class  string
+	msg    string
+}
+
+func (e *bridgeActionError) Error() string {
+	parts := []string{"provider=cua", "bridge", e.action}
+	if e.code != "" {
+		parts = append(parts, "code="+e.code)
+	}
+	if e.class != "" {
+		parts = append(parts, "class="+e.class)
+	}
+	if e.msg != "" {
+		parts = append(parts, e.msg)
+	}
+	return redactSecrets(strings.Join(parts, " "))
+}
+
+func bridgeResponseError(action string, resp bridgeResponse) error {
+	if resp.OK {
+		return nil
+	}
+	if resp.Error == nil {
+		return &bridgeActionError{action: action, class: strings.TrimSpace(resp.Class), msg: "operation failed"}
+	}
+	return &bridgeActionError{
+		action: action,
+		code:   strings.TrimSpace(resp.Error.Code),
+		class:  strings.TrimSpace(blank(resp.Error.Class, resp.Class)),
+		msg:    strings.TrimSpace(resp.Error.Message),
+	}
+}
+
+func isCUANotFound(err error) bool {
+	var actionErr *bridgeActionError
+	if !errors.As(err, &actionErr) {
+		return false
+	}
+	text := strings.ToLower(actionErr.code + " " + actionErr.class + " " + actionErr.msg)
+	return strings.Contains(text, "not_found") || strings.Contains(text, "not found") || strings.Contains(text, "404")
+}
+
 func (c *bridgeClient) RoundTrip(ctx context.Context, req bridgeRequest) (bridgeResponse, error) {
 	if c.rt.Exec == nil {
 		return bridgeResponse{}, exit(2, "provider=cua bridge requires Runtime.Exec")
@@ -141,7 +270,7 @@ func (c *bridgeClient) RoundTrip(ctx context.Context, req bridgeRequest) (bridge
 		Stdin:                  bytes.NewReader(payload),
 		Stdout:                 &stdout,
 		Stderr:                 &stderr,
-		MaxCapturedOutputBytes: bridgeOutputLimit,
+		MaxCapturedOutputBytes: bridgeOutputLimitForRequest(req),
 		CancelGracePeriod:      2 * time.Second,
 	})
 	if runErr != nil || result.ExitCode != 0 {
@@ -159,6 +288,13 @@ func (c *bridgeClient) RoundTrip(ctx context.Context, req bridgeRequest) (bridge
 	return resp, nil
 }
 
+func bridgeOutputLimitForRequest(req bridgeRequest) int {
+	if req.Action == "exec" {
+		return bridgeExecOutputLimit
+	}
+	return bridgeOutputLimit
+}
+
 func bridgeConfigForConfig(cfg Config) bridgeConfig {
 	apiURL, _ := cuaAPIURL(cfg)
 	workdir, _ := cuaWorkdir(cfg)
@@ -171,6 +307,8 @@ func bridgeConfigForConfig(cfg Config) bridgeConfig {
 		VCPUs:          cfg.Cua.VCPUs,
 		MemoryMB:       cfg.Cua.MemoryMB,
 		DiskGB:         cfg.Cua.DiskGB,
+		StartupTimeout: cfg.Cua.StartupTimeoutSecs,
+		ExecTimeout:    cfg.Cua.ExecTimeoutSecs,
 		SDKPackage:     strings.TrimSpace(blank(cfg.Cua.SDKPackage, defaultSDKPackage)),
 		SDKImport:      strings.TrimSpace(blank(cfg.Cua.SDKImport, defaultSDKImport)),
 		FallbackImport: strings.TrimSpace(blank(cfg.Cua.SDKFallbackImport, defaultSDKFallbackImport)),

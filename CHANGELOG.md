@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added CUA delegated-run lifecycle support with archive sync, retained sandbox reuse, owned cleanup, provider docs, and opt-in live smoke classification.
 - Added direct FastAPI Cloud application and deployment inspection through `status`, `list`, and `doctor`, including configured default application support. Thanks @zozo123.
 - Added normalized provider runtime capabilities and `--runtime` filters to `crabbox providers` and `crabbox providers recommend`.
 - Added `crabbox providers recommend fanout-testing` for forkable workspace and best-of-N test selection guidance.

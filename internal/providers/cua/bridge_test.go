@@ -88,7 +88,7 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 		if err := json.Unmarshal([]byte(requestBody(t, req)), &payload); err != nil {
 			t.Fatalf("stdin payload: %v", err)
 		}
-		if payload.Action != "doctor" || payload.Version != bridgeVersion || payload.Config.APIURL != "https://api.cua.example/v1" {
+		if payload.Action != "doctor" || payload.Version != bridgeVersion || payload.Config.APIURL != "https://api.cua.example/v1" || payload.Config.ExecTimeout != 60 {
 			t.Fatalf("payload=%#v", payload)
 		}
 		_, _ = io.WriteString(req.Stdout, `{"ok":true,"doctor":{"importPath":"cua","auth":"env","checks":[{"status":"ok","check":"sdk"}]}}`)
@@ -131,6 +131,20 @@ func TestBridgeRedactsSecretFromCommandFailure(t *testing.T) {
 	}
 }
 
+func TestBridgeExecUsesRunOutputCaptureLimit(t *testing.T) {
+	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if req.MaxCapturedOutputBytes != bridgeExecOutputLimit {
+			t.Fatalf("exec output limit=%d want %d", req.MaxCapturedOutputBytes, bridgeExecOutputLimit)
+		}
+		_, _ = io.WriteString(req.Stdout, `{"ok":true,"exitCode":0}`)
+		return LocalCommandResult{ExitCode: 0}, nil
+	}}
+	client := newBridgeClient(testConfig(), Runtime{Exec: runner})
+	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "exec", SandboxID: "crabbox-cua-test", Command: []string{"true"}}); err != nil {
+		t.Fatalf("RoundTrip exec: %v", err)
+	}
+}
+
 func TestBridgeRejectsMalformedJSON(t *testing.T) {
 	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `not-json`)
@@ -143,10 +157,16 @@ func TestBridgeRejectsMalformedJSON(t *testing.T) {
 }
 
 func TestBridgeScriptKeepsLifecycleActionsExplicitlyDispatched(t *testing.T) {
-	for _, snippet := range []string{`action == "doctor"`, `action == "list"`, `action == "info"`, `{"create", "delete", "upload_bytes", "exec"}`} {
+	for _, snippet := range []string{`action == "doctor"`, `action == "list"`, `action == "info"`, `action == "create"`, `action == "delete"`, `action == "upload_bytes"`, `action == "exec"`} {
 		if !strings.Contains(bridgeScript, snippet) {
 			t.Fatalf("bridge script missing %q", snippet)
 		}
+	}
+	if !strings.Contains(bridgeScript, `" && " + env_prefix + command`) {
+		t.Fatalf("bridge script must apply forwarded env to the user command after cd")
+	}
+	if !strings.Contains(bridgeScript, `invalid_env`) || !strings.Contains(bridgeScript, `valid_env_name`) {
+		t.Fatalf("bridge script must validate forwarded env names before shell construction")
 	}
 	if strings.Contains(bridgeScript, "CUA_API_BASE") {
 		t.Fatalf("bridge script must use SDK CUA_BASE_URL, not CLI-only CUA_API_BASE")
