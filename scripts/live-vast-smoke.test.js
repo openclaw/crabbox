@@ -258,6 +258,52 @@ exit 99
   assert.match(fs.readFileSync(calls, "utf8"), /stop --provider vast vast-smoke-\d{14}-\d+/);
 });
 
+test("live vast smoke preserves capacity classification when pre-acquire cleanup finds no lease", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vast-no-lease-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const calls = path.join(dir, "calls.log");
+  fs.mkdirSync(binDir, { recursive: true });
+
+  writeGoStub(
+    binDir,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+if [[ "$1" == "doctor" || "$1" == "list" ]]; then
+  [[ "$1" == "list" ]] && printf '[]\\n' || printf 'auth=ready\\n'
+  exit 0
+fi
+if [[ "$1" == "warmup" ]]; then
+  printf 'no eligible offers found\\n' >&2
+  exit 37
+fi
+if [[ "$1" == "stop" ]]; then
+  printf 'lease not found\\n' >&2
+  exit 44
+fi
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "vast",
+      CRABBOX_VAST_API_KEY: "test-secret-token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=capacity_blocked/);
+  assert.doesNotMatch(result.stderr, /classification=cleanup_failed/);
+  assert.match(fs.readFileSync(calls, "utf8"), /stop --provider vast vast-smoke-\d{14}-\d+/);
+});
+
 test("live vast smoke validates nvidia-smi output", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vast-bad-run-"));
   const binDir = path.join(dir, "bin");
