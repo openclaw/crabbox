@@ -77,6 +77,34 @@ func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestVastRegistersCanonicalAndAliases(t *testing.T) {
+	for _, name := range []string{"vast", "vast-ai", "vastai"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", name, err)
+		}
+		if provider.Name() != "vast" {
+			t.Fatalf("ProviderFor(%q).Name=%q want vast", name, provider.Name())
+		}
+	}
+	provider, err := core.ProviderFor("vast")
+	if err != nil {
+		t.Fatalf("ProviderFor(vast): %v", err)
+	}
+	spec := provider.Spec()
+	if spec.Family != "vast" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("vast spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("vast targets=%#v", spec.Targets)
+	}
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("vast features=%v missing %s", spec.Features, feature)
+		}
+	}
+}
+
 func TestLambdaRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("lambda")
 	if err != nil {
@@ -1186,6 +1214,7 @@ func allBuiltInProviderNames() []string {
 		"tenki",
 		"tensorlake",
 		"upstash-box",
+		"vast",
 		"vercel-sandbox",
 		"vultr",
 		"wandb",
