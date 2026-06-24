@@ -61,6 +61,8 @@ type credentialDestinationProvenance struct {
 	asciiBoxAPIKey      credentialValueSource
 	cloudflareAPIURL    credentialValueSource
 	cloudflareToken     credentialValueSource
+	nomadAddress        credentialValueSource
+	nomadTokenEnv       credentialValueSource
 	semaphoreHost       credentialValueSource
 	semaphoreToken      credentialValueSource
 	spritesAPIURL       credentialValueSource
@@ -156,6 +158,12 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	}
 	if flagWasSet(fs, "cloudflare-url") {
 		provenance.cloudflareAPIURL = credentialSourceFlag
+	}
+	if flagWasSet(fs, "nomad-address") {
+		provenance.nomadAddress = credentialSourceFlag
+	}
+	if flagWasSet(fs, "nomad-token-env") {
+		provenance.nomadTokenEnv = credentialSourceFlag
 	}
 	if flagWasSet(fs, "semaphore-host") {
 		provenance.semaphoreHost = credentialSourceFlag
@@ -287,6 +295,11 @@ func validateProviderCredentialDestination(cfg Config) error {
 			inheritedCredential(sourcedCredential{cfg.Cloudflare.Token, provenance.cloudflareToken}) {
 			return repositoryCredentialDestinationError("cloudflare", "cloudflare.apiUrl", "CRABBOX_CLOUDFLARE_RUNNER_URL or --cloudflare-url")
 		}
+	case "nomad":
+		if (provenance.nomadAddress == credentialSourceRepository || provenance.nomadTokenEnv == credentialSourceRepository) &&
+			nomadSelectedTokenEnvHasValue(cfg) {
+			return repositoryCredentialDestinationError("nomad", "nomad.address or nomad.tokenEnv", "CRABBOX_NOMAD_ADDR/CRABBOX_NOMAD_TOKEN_ENV or --nomad-address/--nomad-token-env")
+		}
 	case "semaphore":
 		if provenance.semaphoreHost == credentialSourceRepository &&
 			inheritedCredential(sourcedCredential{cfg.Semaphore.Token, provenance.semaphoreToken}) {
@@ -335,6 +348,14 @@ func inheritedCredential(credentials ...sourcedCredential) bool {
 		}
 	}
 	return false
+}
+
+func nomadSelectedTokenEnvHasValue(cfg Config) bool {
+	envName := strings.TrimSpace(cfg.Nomad.TokenEnv)
+	if envName == "" {
+		envName = "NOMAD_TOKEN"
+	}
+	return strings.TrimSpace(os.Getenv(envName)) != ""
 }
 
 func repositoryCredentialDestinationError(provider, field, override string) error {
