@@ -105,7 +105,7 @@ first-class providers just because they are adjacent.
 | [Modal](../providers/modal.md) | Already supported as delegated run. Use it for provider-owned container execution, especially Python/GPU-shaped jobs. |
 | [Morph](../providers/morph.md) | Already supported as an SSH lease. Use it when a managed Linux VM with provider-side state reuse fits better than a pure delegated sandbox. |
 | [Kubernetes Agent Sandbox](../providers/agent-sandbox.md) | Already supported as delegated run. Use it for Kubernetes-hosted SandboxClaim workflows. |
-| [Coder](https://github.com/coder/coder) | Do not mirror as a first-class provider unless there is a narrow lifecycle contract. For now, connect through `ssh` or an `external` provider when a Coder workspace exposes a stable host contract. |
+| [Coder](../providers/coder.md) | Supported as a narrow direct SSH-lease provider. Crabbox uses the local `coder` CLI, stops claimed workspaces by default, deletes only by opt-in, and mutates cleanup-eligible workspaces only when a local Crabbox claim exists. Use `ssh` or `external` instead when you want to target an existing Coder workspace without Crabbox lifecycle ownership. |
 | [DevPod](https://github.com/loft-sh/devpod) | Do not mirror as a first-class provider. It is already a provider-agnostic dev environment layer; use its resulting SSH/container target through `ssh`, `local-container`, or `external` when needed. |
 | [Cloudflare Sandbox SDK](https://developers.cloudflare.com/sandbox/) | Keep separate from the existing Cloudflare providers until the runtime contract maps cleanly to a Crabbox backend. Prefer the current Cloudflare providers for built-in Worker/container flows. |
 

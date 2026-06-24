@@ -1,9 +1,10 @@
 # Coder
 
-`provider: coder` leases Linux Coder workspaces through the local `coder` CLI
-and exposes them to Crabbox as normal SSH leases. Crabbox uses Coder for
-workspace lifecycle, authentication, and tunneling, then runs its usual SSH
-sync, command execution, status, and cleanup flow over `coder ssh --stdio`.
+`provider: coder` is a narrow direct SSH-lease integration for Linux Coder
+workspaces. Crabbox asks the local `coder` CLI to create, start, stop, or
+optionally delete Crabbox-claimed workspaces, while Coder keeps authentication,
+workspace policy, and tunneling ownership. Crabbox then runs its usual SSH sync,
+command execution, status, and cleanup flow over `coder ssh --stdio`.
 
 Coder is direct-only. It never routes through the Crabbox coordinator and it
 does not store Coder API tokens in Crabbox config.
