@@ -778,9 +778,9 @@
     "sync": "crabbox-sync",
     "gpu": "unknown",
     "lifecycle": "Sealos DevBox CRD",
-    "cleanup": "deferred; doctor-only foundation",
+    "cleanup": "pause or DevBox delete",
     "bestFit": "Sealos DevBox Linux workspace over SSHGate or NodePort",
-    "caveat": "PLAN-01 registers config and read-only doctor only; mutating lifecycle is gated on the crd_first automation-surface decision",
+    "caveat": "Requires kubectl, explicit context, DevBox CRD/RBAC, image or template ID, and SSHGate or NodePort route configuration",
     "docs": "sealos-devbox.md"
   },
   "smolvm": {
