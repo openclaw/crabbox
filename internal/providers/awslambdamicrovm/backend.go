@@ -56,6 +56,9 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 		return err
 	}
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s microvm=%s region=%s image_version=%s\n", leaseID, slug, providerName, vm.ID, b.cfg.AWSRegion, vm.ImageVersion)
+	if !req.Keep {
+		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the MicroVM until explicit stop\n", providerName)
+	}
 	total := now(b.rt).Sub(started)
 	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
 	if req.TimingJSON {

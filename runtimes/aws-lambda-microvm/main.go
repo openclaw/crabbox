@@ -37,7 +37,7 @@ type execRequest struct {
 
 type streamEvent struct {
 	Stream   string `json:"stream,omitempty"`
-	Data     string `json:"data,omitempty"`
+	Data     []byte `json:"data,omitempty"`
 	ExitCode *int   `json:"exitCode,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
@@ -154,41 +154,29 @@ func (s *server) exec(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.CommandContext(r.Context(), "/bin/sh", scriptPath)
 	cmd.Dir = req.Workdir
 	cmd.Env = append(os.Environ(), envList(req.Env)...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		http.Error(w, "create stdout pipe", http.StatusInternalServerError)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		http.Error(w, "create stderr pipe", http.StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 	stream := newEventStream(w)
+	cmd.Stdout = stream.writer("stdout")
+	cmd.Stderr = stream.writer("stderr")
+	// Bound inherited pipes when a background child outlives the requested shell.
+	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
-		stream.write(streamEvent{Error: "start command: " + err.Error()})
+		_ = stream.write(streamEvent{Error: "start command: " + err.Error()})
 		return
 	}
-	var readers sync.WaitGroup
-	readers.Add(2)
-	go stream.copy(&readers, "stdout", stdout)
-	go stream.copy(&readers, "stderr", stderr)
-	// StdoutPipe and StderrPipe must drain before Wait closes their descriptors.
-	readers.Wait()
 	waitErr := cmd.Wait()
 	exitCode := 0
-	if waitErr != nil {
+	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
-			stream.write(streamEvent{Error: "wait command: " + waitErr.Error()})
+			_ = stream.write(streamEvent{Error: "wait command: " + waitErr.Error()})
 			return
 		}
 	}
-	stream.write(streamEvent{ExitCode: &exitCode})
+	_ = stream.write(streamEvent{ExitCode: &exitCode})
 }
 
 func validateExecRequest(req execRequest) error {
@@ -228,24 +216,30 @@ func newEventStream(w http.ResponseWriter) *eventStream {
 	return &eventStream{encoder: json.NewEncoder(w), flusher: flusher}
 }
 
-func (s *eventStream) write(event streamEvent) {
+func (s *eventStream) write(event streamEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.encoder.Encode(event); err == nil && s.flusher != nil {
+	if err := s.encoder.Encode(event); err != nil {
+		return err
+	}
+	if s.flusher != nil {
 		s.flusher.Flush()
 	}
+	return nil
 }
 
-func (s *eventStream) copy(wg *sync.WaitGroup, name string, reader io.Reader) {
-	defer wg.Done()
-	buffer := make([]byte, 32*1024)
-	for {
-		count, err := reader.Read(buffer)
-		if count > 0 {
-			s.write(streamEvent{Stream: name, Data: string(buffer[:count])})
-		}
-		if err != nil {
-			return
-		}
+func (s *eventStream) writer(name string) io.Writer {
+	return streamWriter{stream: s, name: name}
+}
+
+type streamWriter struct {
+	stream *eventStream
+	name   string
+}
+
+func (w streamWriter) Write(data []byte) (int, error) {
+	if err := w.stream.write(streamEvent{Stream: w.name, Data: data}); err != nil {
+		return 0, err
 	}
+	return len(data), nil
 }

@@ -3,9 +3,11 @@ package awslambdamicrovm
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +79,10 @@ type fakeRunner struct {
 	commands    []string
 	uploads     []string
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func (f *fakeRunner) Health(ctx context.Context, vm microVM) error {
 	if f.healthCheck != nil {
@@ -210,6 +216,55 @@ func TestCreateRollsBackWhenRunnerIsUnhealthy(t *testing.T) {
 	}
 	if !slices.Contains(control.calls, "terminate:mvm-test") {
 		t.Fatalf("rollback missing: %v", control.calls)
+	}
+}
+
+func TestWarmupWarnsWhenKeepIsFalse(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	control := &fakeControlPlane{}
+	runner := &fakeRunner{}
+	b := testBackend(control, runner, io.Discard)
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "warmup keeps the MicroVM until explicit stop") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunnerClientExecPreservesBinaryOutput(t *testing.T) {
+	want := []byte{0xff, 0x00, 0xfe}
+	dataEvent, err := json.Marshal(runnerEvent{Stream: "stdout", Data: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode := 0
+	exitEvent, err := json.Marshal(runnerEvent{ExitCode: &exitCode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := append(append(dataEvent, '\n'), append(exitEvent, '\n')...)
+	httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("X-aws-proxy-auth") != "token" {
+			t.Fatalf("missing auth header: %v", req.Header)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    req,
+		}, nil
+	})}
+	client := newRunnerClient(&fakeControlPlane{}, httpClient, "eu-west-1")
+	var stdout bytes.Buffer
+	gotExit, err := client.Exec(context.Background(), microVM{ID: "mvm-test", Endpoint: "mvm-test.lambda-microvm.eu-west-1.on.aws"}, "true", "/workspace/crabbox", nil, &stdout, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotExit != 0 || !bytes.Equal(stdout.Bytes(), want) {
+		t.Fatalf("exit=%d stdout=%x want=%x", gotExit, stdout.Bytes(), want)
 	}
 }
 

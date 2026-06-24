@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUploadAndExec(t *testing.T) {
@@ -35,7 +37,7 @@ func TestUploadAndExec(t *testing.T) {
 	if execRes.Code != http.StatusOK {
 		t.Fatalf("exec status=%d body=%s", execRes.Code, execRes.Body.String())
 	}
-	var stdout, stderr string
+	var stdout, stderr bytes.Buffer
 	exitCode := -1
 	scanner := bufio.NewScanner(execRes.Body)
 	for scanner.Scan() {
@@ -44,17 +46,17 @@ func TestUploadAndExec(t *testing.T) {
 			t.Fatal(err)
 		}
 		if event.Stream == "stdout" {
-			stdout += event.Data
+			_, _ = stdout.Write(event.Data)
 		}
 		if event.Stream == "stderr" {
-			stderr += event.Data
+			_, _ = stderr.Write(event.Data)
 		}
 		if event.ExitCode != nil {
 			exitCode = *event.ExitCode
 		}
 	}
-	if stdout != "stdout-proof" || stderr != "stderr-proof" || exitCode != 7 {
-		t.Fatalf("stdout=%q stderr=%q exit=%d", stdout, stderr, exitCode)
+	if stdout.String() != "stdout-proof" || stderr.String() != "stderr-proof" || exitCode != 7 {
+		t.Fatalf("stdout=%q stderr=%q exit=%d", stdout.String(), stderr.String(), exitCode)
 	}
 	if _, err := os.Stat(filepath.Join(workdir, "missing")); !os.IsNotExist(err) {
 		t.Fatalf("unexpected command side effect: %v", err)
@@ -81,7 +83,7 @@ func TestExecKeepsScriptSeparateFromCommandStdin(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
 	}
-	var stdout string
+	var stdout bytes.Buffer
 	scanner := bufio.NewScanner(res.Body)
 	for scanner.Scan() {
 		var event streamEvent
@@ -89,14 +91,71 @@ func TestExecKeepsScriptSeparateFromCommandStdin(t *testing.T) {
 			t.Fatal(err)
 		}
 		if event.Stream == "stdout" {
-			stdout += event.Data
+			_, _ = stdout.Write(event.Data)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if stdout != "after" {
-		t.Fatalf("stdout=%q", stdout)
+	if stdout.String() != "after" {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestExecPreservesBinaryOutput(t *testing.T) {
+	s := &server{execSlot: make(chan struct{}, 1)}
+	payload, _ := json.Marshal(execRequest{Command: `printf '\377\000\376'`, Workdir: t.TempDir()})
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(payload))
+	res := httptest.NewRecorder()
+	s.exec(res, req)
+
+	var stdout bytes.Buffer
+	scanner := bufio.NewScanner(res.Body)
+	for scanner.Scan() {
+		var event streamEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Stream == "stdout" {
+			_, _ = stdout.Write(event.Data)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0xff, 0x00, 0xfe}
+	if !bytes.Equal(stdout.Bytes(), want) {
+		t.Fatalf("stdout=%x want=%x", stdout.Bytes(), want)
+	}
+}
+
+func TestExecDoesNotWaitForInheritedBackgroundPipe(t *testing.T) {
+	s := &server{execSlot: make(chan struct{}, 1)}
+	workdir := t.TempDir()
+	payload, _ := json.Marshal(execRequest{Command: `sleep 60 & echo $! > child.pid`, Workdir: workdir})
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(payload))
+	res := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.exec(res, req)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		data, err := os.ReadFile(filepath.Join(workdir, "child.pid"))
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err == nil {
+			if process, findErr := os.FindProcess(pid); findErr == nil {
+				_ = process.Kill()
+			}
+		}
+	})
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("exec waited for a background child that inherited output pipes")
 	}
 }
 

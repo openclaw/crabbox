@@ -182,7 +182,7 @@ type runnerExecRequest struct {
 
 type runnerEvent struct {
 	Stream   string `json:"stream,omitempty"`
-	Data     string `json:"data,omitempty"`
+	Data     []byte `json:"data,omitempty"`
 	ExitCode *int   `json:"exitCode,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
@@ -253,9 +253,9 @@ func (c *runnerClient) Exec(ctx context.Context, vm microVM, command, workdir st
 		}
 		switch event.Stream {
 		case "stdout":
-			_, _ = io.WriteString(stdout, event.Data)
+			_, _ = stdout.Write(event.Data)
 		case "stderr":
-			_, _ = io.WriteString(stderr, event.Data)
+			_, _ = stderr.Write(event.Data)
 		}
 		if event.Error != "" {
 			return 1, fmt.Errorf("%s runner: %s", providerName, event.Error)
