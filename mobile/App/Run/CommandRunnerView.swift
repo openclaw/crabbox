@@ -530,30 +530,26 @@ struct CommandRunnerView: View {
             status = "No live sandboxes"; exitCode = 1; return
         }
 
-        let s = live.count
+        let plannedShards = planMapReduceShards(total: n, sandboxIDs: live)
+        let s = plannedShards.count
         status = "Map-reduce across \(s) sandbox(es)…"
         output += "\n"
 
         // MAP: one shard per LIVE sandbox, executed in parallel over islo.
-        let shards = live.enumerated().map { (idx: $0.offset, name: $0.element) }
-        var lines: [(name: String, sum: Int, mn: Int, mx: Int)] = []
+        var lines: [MapReduceMapResult] = []
         await withTaskGroup(of: (String, String).self) { group in
-            for shard in shards {
-                let per = n / s
-                let a = shard.idx * per + 1
-                let b = (shard.idx == s - 1) ? n : (shard.idx + 1) * per
-                let name = shard.name
+            for shard in plannedShards {
+                let name = shard.sandboxID
                 group.addTask {
-                    let script = "seq \(a) \(b) | awk '{sum+=$1; if(mn==\"\"||$1<mn)mn=$1; if($1>mx)mx=$1} END{print sum, mn, mx}'"
+                    let script = "seq \(shard.lowerBound) \(shard.upperBound) | awk '{sum+=$1; if(mn==\"\"||$1<mn)mn=$1; if($1>mx)mx=$1} END{print sum, mn, mx}'"
                     let res = try? await client.exec(name: name, script: script)
                     return (name, (res?.stdout ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
                 }
             }
             for await (name, out) in group {
-                let parts = out.split(separator: " ").compactMap { Int($0) }
-                if parts.count == 3 {
-                    lines.append((name, parts[0], parts[1], parts[2]))
-                    output += "  [map] \(name) → sum=\(parts[0]) min=\(parts[1]) max=\(parts[2])\n"
+                if let result = parseMapReduceOutput(out, sandboxID: name) {
+                    lines.append(result)
+                    output += "  [map] \(name) → sum=\(result.sum) min=\(result.min) max=\(result.max)\n"
                 } else {
                     output += "  [map] \(name) → \(out.isEmpty ? "(no output)" : out)\n"
                 }
@@ -561,15 +557,12 @@ struct CommandRunnerView: View {
         }
 
         // REDUCE on the phone.
-        let total = lines.reduce(0) { $0 + $1.sum }
-        let gmin = lines.map(\.mn).min()
-        let gmax = lines.map(\.mx).max()
-        let expected = n * (n + 1) / 2
-        output += "\n  [reduce] Σ = \(total)  ·  min = \(gmin.map(String.init) ?? "—")  ·  max = \(gmax.map(String.init) ?? "—")  across \(lines.count) sandbox(es)\n"
-        let ok = total == expected && gmin == 1 && gmax == n
-        output += ok ? "  ✅ matches Σ(1…\(n)) = \(expected)\n" : "  expected Σ = \(expected)\n"
+        let summary = reduceMapResults(total: n, results: lines)
+        output += "\n  [reduce] Σ = \(summary.total)  ·  min = \(summary.min.map(String.init) ?? "—")  ·  max = \(summary.max.map(String.init) ?? "—")  across \(summary.resultCount) sandbox(es)\n"
+        let ok = summary.ok
+        output += ok ? "  ✅ matches Σ(1…\(n)) = \(summary.expected)\n" : "  expected Σ = \(summary.expected)\n"
         exitCode = ok ? 0 : 1
-        status = ok ? "✓ Σ=\(total) · \(lines.count) boxes" : "Map-reduce done"
+        status = ok ? "✓ Σ=\(summary.total) · \(summary.resultCount) boxes" : "Map-reduce done"
         runningMode = nil
     }
 

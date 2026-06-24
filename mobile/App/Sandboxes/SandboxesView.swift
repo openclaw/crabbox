@@ -395,16 +395,6 @@ struct SandboxesView: View {
                 model: model
             )
             ticker.cancel()
-            // Don't offer the engine for chat until Ollama is actually serving the
-            // model — the bootstrap runs detached, so poll readiness rather than
-            // optimistically marking it ready.
-            phase = .exposing
-            let ready = await waitForEngineReady(engine, attempts: 90) {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-            }
-            guard ready else {
-                throw LLMError.unavailable("sandbox \(handle.id) did not become ready")
-            }
             engineHub.register(engine)
             lastLaunchedEngineName = engine.displayName
             phase = .ready

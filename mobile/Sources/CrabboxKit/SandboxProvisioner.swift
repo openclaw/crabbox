@@ -131,14 +131,28 @@ public struct CoordinatorProvisioner: SandboxProvisioner {
 /// Provisions a sandbox running Ollama and returns a ready-to-chat engine. This
 /// is the one call the "Sandboxes" tab makes for the demo, regardless of
 /// provider.
+public typealias SandboxEngineFactory = @Sendable (SandboxHandle, String) -> (any LLMEngine)?
+
 public func launchLLMSandbox(
     provisioner: SandboxProvisioner,
     name: String,
-    model: String
-) async throws -> (handle: SandboxHandle, engine: SandboxEngine) {
+    model: String,
+    readinessAttempts: Int = 90,
+    readinessSleep: @Sendable () async -> Void = {
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+    },
+    engineFactory: SandboxEngineFactory = { handle, model in
+        guard let endpoint = handle.ollamaEndpoint else { return nil }
+        return SandboxEngine(endpoint: endpoint, model: model)
+    }
+) async throws -> (handle: SandboxHandle, engine: any LLMEngine) {
     let handle = try await provisioner.launch(name: name, model: model)
-    guard let endpoint = handle.ollamaEndpoint, let engine = SandboxEngine(endpoint: endpoint, model: model) else {
+    guard let engine = engineFactory(handle, model) else {
         throw LLMError.unavailable("sandbox \(handle.id) did not expose an Ollama endpoint")
+    }
+    let ready = await waitForEngineReady(engine, attempts: readinessAttempts, sleep: readinessSleep)
+    guard ready else {
+        throw LLMError.unavailable("sandbox \(handle.id) did not become ready")
     }
     return (handle, engine)
 }

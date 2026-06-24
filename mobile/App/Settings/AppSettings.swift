@@ -97,15 +97,21 @@ final class AppSettings: ObservableObject {
 
     /// True when islo is enabled and a non-empty key is present.
     var hasIsloProvider: Bool {
-        isloEnabled && (isloKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+        sandboxSelection == .isloDirect
+    }
+
+    private var sandboxSelection: SandboxProviderSelection {
+        selectSandboxProvider(
+            isloEnabled: isloEnabled,
+            isloKey: isloKey,
+            crabboxToken: crabboxToken
+        )
     }
 
     /// A short, user-facing label for whichever sandbox provider `makeProvisioner()`
     /// will select, or a prompt to configure one. Mirrors the selection policy exactly.
     var providerLabel: String {
-        if hasIsloProvider { return "islo.dev (direct)" }
-        if hasCrabboxToken { return "crabbox.sh (workspace only)" }
-        return "No sandbox provider configured"
+        sandboxProviderLabel(for: sandboxSelection)
     }
 
     // MARK: - Provisioner factory

@@ -121,7 +121,7 @@ struct ScenarioResult { let name: String; let steps: Int; let violations: [Strin
 
 var results: [ScenarioResult] = []
 
-let unitViolations = runUnitChecks()
+let unitViolations = await runUnitChecks()
 results.append(ScenarioResult(name: "unit_vectors", steps: 0, violations: unitViolations))
 
 for scenario in scenarios {
