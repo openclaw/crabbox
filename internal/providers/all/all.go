@@ -18,6 +18,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflaresandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/coder"
 	_ "github.com/openclaw/crabbox/internal/providers/codesandbox"
+	_ "github.com/openclaw/crabbox/internal/providers/cua"
 	_ "github.com/openclaw/crabbox/internal/providers/daytona"
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"
 	_ "github.com/openclaw/crabbox/internal/providers/dockersandbox"
