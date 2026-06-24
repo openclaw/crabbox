@@ -158,11 +158,15 @@ Run live smoke only after `coder whoami -o json` succeeds and you have selected
 a safe disposable template:
 
 ```sh
-crabbox doctor --provider coder
-crabbox warmup --provider coder --coder-template go-dev --slug coder-smoke
-crabbox run --provider coder --id coder-smoke -- bash -lc 'command -v git && command -v rsync && command -v tar && echo ok'
-crabbox stop --provider coder coder-smoke
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=coder CRABBOX_LIVE_COORDINATOR=0 \
+  CRABBOX_LIVE_CODER_TEMPLATE=go-dev \
+  CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 ```
+
+The shared smoke runs `doctor`, `cleanup --dry-run`, stop-by-default warmup,
+`status --wait`, `inspect`, SSH command rendering, a synced command, history/log
+capture, stop, stopped-workspace status, delete-on-release warmup/run/stop, list,
+and a final dry-run cleanup.
 
 If login, template, or quota is unavailable, classify the live smoke as
 `environment_blocked` instead of treating deterministic unit tests as live

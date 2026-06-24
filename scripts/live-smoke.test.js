@@ -386,6 +386,122 @@ esac
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Coder live smoke proves stop and delete release actions", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-coder-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+has_arg() {
+  local needle="$1"
+  shift
+  for arg in "$@"; do
+    [[ "$arg" == "$needle" ]] && return 0
+  done
+  return 1
+}
+case "$1" in
+  config)
+    exit 0
+    ;;
+  doctor)
+    printf 'ok provider=coder mutation=false\\n'
+    ;;
+  cleanup)
+    printf 'coder cleanup dry_run=true\\n'
+    ;;
+  warmup)
+    if [[ "\${2:-}" != "--provider" || "\${3:-}" != "coder" ]]; then
+      printf 'warmup missing coder provider: %s\\n' "$*" >&2
+      exit 97
+    fi
+    if ! has_arg "--coder-template" "$@"; then
+      printf 'warmup missing coder template: %s\\n' "$*" >&2
+      exit 96
+    fi
+    if has_arg "--coder-delete-on-release" "$@"; then
+      printf 'provisioning provider=coder lease=cbx_abcdef123456 slug=coder-smoke-test-delete workspace=crabbox-coder-smoke-test-delete-def456\\n'
+      printf 'provisioned lease=cbx_abcdef123456 slug=coder-smoke-test-delete state=ready workspace=crabbox-coder-smoke-test-delete-def456\\n'
+    else
+      printf 'provisioning provider=coder lease=cbx_123456789abc slug=coder-smoke-test-stop workspace=crabbox-coder-smoke-test-stop-abc123\\n'
+      printf 'provisioned lease=cbx_123456789abc slug=coder-smoke-test-stop state=ready workspace=crabbox-coder-smoke-test-stop-abc123\\n'
+    fi
+    ;;
+  status)
+    if has_arg "--json" "$@"; then
+      printf '{"id":"cbx_123456789abc","slug":"coder-smoke-test-stop","provider":"coder","state":"stopped","ready":false,"labels":{"coder_workspace":"crabbox-coder-smoke-test-stop-abc123"}}\\n'
+    else
+      printf 'lease=cbx_123456789abc slug=coder-smoke-test-stop provider=coder state=ready ready=true\\n'
+    fi
+    ;;
+  inspect)
+    printf '{"id":"cbx_123456789abc","slug":"coder-smoke-test-stop","provider":"coder","state":"ready","serverType":"coder","host":"coder-proxy","ready":true,"lastTouchedAt":"2026-06-24T00:00:00Z","expiresAt":"2026-06-24T00:15:00Z","labels":{"coder_workspace":"crabbox-coder-smoke-test-stop-abc123"}}\\n'
+    ;;
+  ssh)
+    exit 0
+    ;;
+  run)
+    printf 'crabbox-live-ok\\nrun_deadbeef1234\\n'
+    ;;
+  history)
+    printf 'history ok\\n'
+    ;;
+  logs)
+    printf 'log ok\\n'
+    ;;
+  stop)
+    printf 'stopped %s\\n' "\${*: -1}"
+    ;;
+  list)
+    printf '[{"id":"cbx_123456789abc","slug":"coder-smoke-test-stop","provider":"coder","state":"stopped","host":"coder-proxy","labels":{"coder_workspace":"crabbox-coder-smoke-test-stop-abc123"}}]\\n'
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_CODER_SLUG_PREFIX: "coder-smoke-test",
+      CRABBOX_LIVE_CODER_TEMPLATE: "go-dev",
+      CRABBOX_LIVE_PROVIDERS: "coder",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /crabbox-live-ok/);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+  const calls = fs.readFileSync(log, "utf8");
+  assert.match(calls, /^doctor --provider coder$/m);
+  assert.equal((calls.match(/^cleanup --provider coder --dry-run$/gm) ?? []).length, 2);
+  assert.match(
+    calls,
+    /^warmup --provider coder --coder-template go-dev --ttl 15m --idle-timeout 5m --slug coder-smoke-test-stop --timing-json$/m,
+  );
+  assert.match(calls, /^stop --provider coder coder-smoke-test-stop$/m);
+  assert.match(
+    calls,
+    /^warmup --provider coder --coder-template go-dev --ttl 15m --idle-timeout 5m --coder-delete-on-release --slug coder-smoke-test-delete --timing-json$/m,
+  );
+  assert.match(calls, /^stop --provider coder --coder-delete-on-release coder-smoke-test-delete$/m);
+  for (const command of ["status", "inspect", "ssh", "run", "history", "logs", "list"]) {
+    assert.match(calls, new RegExp(`^${command}(?: |$)`, "m"));
+  }
+});
+
 test("Namespace Devbox live smoke requires the devbox CLI before provider mutation", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-namespace-"));
   const bin = path.join(dir, "bin");

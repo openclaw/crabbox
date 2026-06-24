@@ -141,6 +141,10 @@ extract_tenki_session() {
   sed -n 's/.*tenki_session=\([^ ]*\).*/\1/p' | tail -1
 }
 
+extract_coder_workspace() {
+  sed -n 's/.*workspace=\([^ ]*\).*/\1/p' | tail -1
+}
+
 stop_lease() {
   local id="$1"
   local slug="${2:-}"
@@ -350,6 +354,108 @@ modal_smoke() {
   run_in_repo "$cb" list --provider modal --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status)})'
   stop_provider_lease modal "$lease" "$slug"
   lease=""
+}
+
+coder_stop_lease() {
+  local action="$1"
+  local id="$2"
+  local slug="${3:-}"
+  local args=(stop --provider coder)
+  if [[ "$action" == "delete" ]]; then
+    args+=(--coder-delete-on-release)
+  fi
+  if [[ -n "$slug" ]]; then
+    run_in_repo "$cb" "${args[@]}" "$slug" || run_in_repo "$cb" "${args[@]}" "$id" || true
+  else
+    run_in_repo "$cb" "${args[@]}" "$id" || true
+  fi
+}
+
+coder_smoke() {
+  need_tool jq
+  need_tool rg
+
+  local template="${CRABBOX_LIVE_CODER_TEMPLATE:-${CRABBOX_CODER_TEMPLATE:-$(config_value coder.template || true)}}"
+  if [[ -z "$template" ]]; then
+    echo "coder smoke requires CRABBOX_LIVE_CODER_TEMPLATE, CRABBOX_CODER_TEMPLATE, or coder.template" >&2
+    return 2
+  fi
+
+  local ttl="${CRABBOX_LIVE_CODER_TTL:-15m}"
+  local idle_timeout="${CRABBOX_LIVE_CODER_IDLE_TIMEOUT:-5m}"
+  local slug_prefix="${CRABBOX_LIVE_CODER_SLUG_PREFIX:-coder-smoke-$$}"
+  local stop_slug="${slug_prefix}-stop"
+  local delete_slug="${slug_prefix}-delete"
+  local coder_args=(--provider coder --coder-template "$template" --ttl "$ttl" --idle-timeout "$idle_timeout")
+  if [[ -n "${CRABBOX_LIVE_CODER_PRESET:-}" ]]; then
+    coder_args+=(--coder-preset "$CRABBOX_LIVE_CODER_PRESET")
+  fi
+
+  local lease=""
+  local slug=""
+  local delete_lease=""
+  local delete_workspace=""
+  cleanup() {
+    trap - RETURN ERR
+    if [[ -n "$delete_lease" ]]; then
+      coder_stop_lease delete "$delete_lease" "$delete_slug"
+      delete_lease=""
+      delete_workspace=""
+    fi
+    if [[ -n "$lease" ]]; then
+      coder_stop_lease stop "$lease" "$slug"
+      lease=""
+      slug=""
+    fi
+  }
+  trap cleanup RETURN ERR
+
+  run_in_repo "$cb" doctor --provider coder
+  run_in_repo "$cb" cleanup --provider coder --dry-run
+
+  local out
+  log_step "coder warmup stop_on_release slug=$stop_slug"
+  capture_run_live out run_in_repo "$cb" warmup "${coder_args[@]}" --slug "$stop_slug" --timing-json
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  local workspace
+  workspace="$(printf '%s\n' "$out" | extract_coder_workspace)"
+  test -n "$lease"
+  test -n "$slug"
+  test -n "$workspace"
+
+  run_in_repo "$cb" status --provider coder --id "$slug" --wait --wait-timeout 120s
+  run_in_repo "$cb" inspect --provider coder --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt,labels}'
+  run_in_repo "$cb" ssh --provider coder --id "$slug"
+  local runout
+  capture_run_live runout run_in_repo "$cb" run --provider coder --id "$slug" --shell -- "$live_command"
+  local runid
+  runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
+  run_in_repo "$cb" history --lease "$lease" --limit 5
+  if [[ -n "$runid" ]]; then
+    run_in_repo "$cb" logs "$runid" | tail -80
+  fi
+  log_step "coder stop stop_on_release slug=$slug workspace=$workspace"
+  run_in_repo "$cb" stop --provider coder "$slug" || run_in_repo "$cb" stop --provider coder "$lease"
+  lease=""
+  slug=""
+  run_in_repo "$cb" status --provider coder --id "$workspace" --json | jq '{id,slug,provider,state,ready,labels}'
+
+  log_step "coder warmup delete_on_release slug=$delete_slug"
+  capture_run_live out run_in_repo "$cb" warmup "${coder_args[@]}" --coder-delete-on-release --slug "$delete_slug" --timing-json
+  delete_lease="$(printf '%s\n' "$out" | extract_lease)"
+  delete_workspace="$(printf '%s\n' "$out" | extract_coder_workspace)"
+  test -n "$delete_lease"
+  test -n "$delete_workspace"
+  run_in_repo "$cb" status --provider coder --id "$delete_slug" --wait --wait-timeout 120s
+  run_in_repo "$cb" run --provider coder --id "$delete_slug" --shell -- "$live_command"
+  log_step "coder stop delete_on_release slug=$delete_slug workspace=$delete_workspace"
+  run_in_repo "$cb" stop --provider coder --coder-delete-on-release "$delete_slug" || run_in_repo "$cb" stop --provider coder --coder-delete-on-release "$delete_lease"
+  delete_lease=""
+  delete_workspace=""
+
+  run_in_repo "$cb" list --provider coder --json | jq 'map({id:(.id // .CloudID),slug:(.slug // .labels.slug),provider:(.provider // .Provider // .labels.provider),state:(.state // .labels.state // .status),host:(.host // .Host),workspace:(.labels.coder_workspace // .labels.coder_workspace_ref // null)})'
+  run_in_repo "$cb" cleanup --provider coder --dry-run
 }
 
 daytona_smoke() {
@@ -954,6 +1060,10 @@ fi
 
 if has_provider modal; then
   modal_smoke
+fi
+
+if has_provider coder; then
+  coder_smoke
 fi
 
 if has_provider daytona; then

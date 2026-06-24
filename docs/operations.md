@@ -52,6 +52,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=hetzner           CRABBOX_LIVE_REPO=/path/
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=blacksmith-testbox CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=e2b               CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=modal             CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=coder CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_CODER_TEMPLATE=go-dev CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox  CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-instance CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
@@ -103,6 +104,12 @@ Per-provider smoke prerequisites:
   the configured Python binary can import the Modal client, then creates one
   sandbox, waits for status, runs one no-sync command, lists normalized
   inventory, and stops the lease.
+- **Coder** — authenticated `coder` CLI on `PATH` plus an explicit disposable
+  template from `CRABBOX_LIVE_CODER_TEMPLATE`, `CRABBOX_CODER_TEMPLATE`, or
+  `coder.template`. `scripts/live-smoke.sh` refuses to mutate Coder until a
+  template is selected, then proves doctor, dry-run cleanup, stop-by-default
+  warmup/run/stop/status, delete-on-release warmup/run/stop, list, and final
+  dry-run cleanup.
 - **Semaphore** — `CRABBOX_SEMAPHORE_HOST`, `CRABBOX_SEMAPHORE_PROJECT`,
   and `CRABBOX_SEMAPHORE_TOKEN`, or the equivalent user config.
   `scripts/live-smoke.sh` refuses to call Semaphore until those values are
