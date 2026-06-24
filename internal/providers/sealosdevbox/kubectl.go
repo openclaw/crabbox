@@ -110,6 +110,38 @@ func (b *backend) getSecret(ctx context.Context, name string) (devboxSecret, err
 	return secret, nil
 }
 
+func (b *backend) patchDevboxState(ctx context.Context, name, state string, annotations map[string]string) error {
+	patch := map[string]any{
+		"spec": map[string]any{"state": state},
+	}
+	if len(annotations) > 0 {
+		patch["metadata"] = map[string]any{"annotations": annotations}
+	}
+	payload, err := json.Marshal(patch)
+	if err != nil {
+		return core.Exit(5, "encode Sealos DevBox patch: %v", err)
+	}
+	_, err = b.kubectl(ctx, b.rt.Stdout, true, "patch", devboxResource+"/"+name, "--type", "merge", "-p", string(payload))
+	return err
+}
+
+func (b *backend) patchDevboxAnnotations(ctx context.Context, name string, annotations map[string]string) error {
+	if len(annotations) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": annotations}})
+	if err != nil {
+		return core.Exit(5, "encode Sealos DevBox annotation patch: %v", err)
+	}
+	_, err = b.kubectl(ctx, b.rt.Stdout, true, "patch", devboxResource+"/"+name, "--type", "merge", "-p", string(payload))
+	return err
+}
+
+func (b *backend) deleteDevbox(ctx context.Context, name string) error {
+	_, err := b.kubectl(ctx, b.rt.Stdout, true, "delete", devboxResource+"/"+name, "--ignore-not-found=true")
+	return err
+}
+
 func (b *backend) listEvents(ctx context.Context, name string) ([]devboxEvent, error) {
 	out, err := b.kubectl(ctx, nil, true, "get", "events", "--field-selector", "involvedObject.name="+name, "-o", "json")
 	if err != nil {
