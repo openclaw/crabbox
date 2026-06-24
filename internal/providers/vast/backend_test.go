@@ -379,6 +379,27 @@ func TestReleaseStopIsExplicitAndTested(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseMessageUsesPersistedReleaseAction(t *testing.T) {
+	b := newTestBackend(t, &fakeVastAPI{})
+	b.cfg.Vast.ReleaseAction = "destroy"
+	lease := core.LeaseTarget{
+		LeaseID: "cbx_message",
+		Server: core.Server{
+			CloudID:  "100",
+			Name:     "message-me",
+			Provider: providerName,
+			Labels: map[string]string{
+				vastReleaseActionLabel: "stop",
+			},
+		},
+	}
+
+	msg := b.ReleaseLeaseMessage(lease)
+	if !strings.Contains(msg, "stop lease=cbx_message") || strings.Contains(msg, "destroyed") {
+		t.Fatalf("message=%q", msg)
+	}
+}
+
 func TestCleanupDryRunDoesNotDestroyExpiredOwnedInstance(t *testing.T) {
 	api := &fakeVastAPI{instances: []vastInstance{{ID: 8, Label: encodeVastOwnershipLabel("cbx_old", "old", "ready"), Status: "running"}}}
 	b := newTestBackend(t, api)
@@ -397,6 +418,25 @@ func TestCleanupDryRunDoesNotDestroyExpiredOwnedInstance(t *testing.T) {
 		t.Fatalf("destroyed=%v", api.destroyed)
 	}
 	if !strings.Contains(stderr.String(), "delete server id=8") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestCleanupReportsMissingClaimForOwnedInstance(t *testing.T) {
+	api := &fakeVastAPI{instances: []vastInstance{{ID: 9, Label: encodeVastOwnershipLabel("cbx_orphan", "orphan", "ready"), Status: "running"}}}
+	b := newTestBackend(t, api)
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+	b.DirectSSHBackend.RT = b.rt
+
+	err := b.Cleanup(context.Background(), core.CleanupRequest{})
+	if err == nil || !strings.Contains(err.Error(), "lease=cbx_orphan has no local Vast claim") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.destroyed) != 0 {
+		t.Fatalf("destroyed=%v", api.destroyed)
+	}
+	if !strings.Contains(stderr.String(), "delete server id=9") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
