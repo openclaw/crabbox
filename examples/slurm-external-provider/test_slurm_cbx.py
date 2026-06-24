@@ -80,6 +80,7 @@ class FakeSlurm:
         self.sacct_returncode = 0
         self.sacct_available = True
         self.scancel_returncode = 0
+        self.sbatch_error = ""
         self.cancelled: List[str] = []
         self._module = module
         monkeypatch.setattr(module, "run", self._run)
@@ -91,6 +92,8 @@ class FakeSlurm:
         self.calls.append(list(command))
         prog = command[0]
         if prog == "sbatch":
+            if self.sbatch_error:
+                raise self._module.AdapterError(self.sbatch_error)
             return types.SimpleNamespace(stdout=f"{self.job_id};cluster\n", stderr="", returncode=0)
         if prog == "ssh-keygen":
             # Emulate ssh-keygen by writing private + public key files.
@@ -277,6 +280,33 @@ def test_acquire_cancels_when_endpoint_never_appears(
     # Rollback cancelled the job and removed the state directory.
     assert fake_slurm.cancelled == ["123456"]
     assert not adapter.job_dir(LEASE_ID).exists()
+
+
+def test_acquire_removes_state_when_sbatch_rejects_before_job_id(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
+) -> None:
+    fake_slurm.sbatch_error = "sbatch: invalid partition"
+
+    with pytest.raises(slurm_cbx.AdapterError) as excinfo:
+        adapter.handle(acquire_request())
+
+    assert "invalid partition" in str(excinfo.value)
+    assert fake_slurm.cancelled == []
+    assert not adapter.job_dir(LEASE_ID).exists()
+
+
+def test_acquire_keeps_state_when_sbatch_rejects_and_keep_set(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
+) -> None:
+    fake_slurm.sbatch_error = "sbatch: account rejected"
+
+    with pytest.raises(slurm_cbx.AdapterError):
+        adapter.handle(acquire_request(keep=True))
+
+    state = adapter.load_state(LEASE_ID)
+    assert state is not None
+    assert "jobId" not in state
+    assert adapter.job_dir(LEASE_ID).exists()
 
 
 def test_acquire_keeps_job_on_failure_when_keep_set(

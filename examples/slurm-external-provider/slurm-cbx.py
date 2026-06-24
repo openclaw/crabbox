@@ -185,17 +185,22 @@ class SlurmCrabboxAdapter:
         if not env["CBX_WORK_ROOT"]:
             env["CBX_WORK_ROOT"] = str(Path("~/crabbox-slurm-work").expanduser())
 
-        result = run(command, env=env)
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        raw_job_id = lines[-1] if lines else ""
-        if not raw_job_id:
-            raise AdapterError("sbatch returned no job id")
-        # ``sbatch --parsable`` prints "<jobid>" or "<jobid>;<cluster>". Keep the
-        # bare numeric job id for squeue/sacct/scancel but persist the raw value
-        # for display and cloud-id purposes.
-        job_id = raw_job_id.split(";", 1)[0].strip()
-        if not job_id:
-            raise AdapterError(f"sbatch returned an unparsable job id: {raw_job_id!r}")
+        try:
+            result = run(command, env=env)
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            raw_job_id = lines[-1] if lines else ""
+            if not raw_job_id:
+                raise AdapterError("sbatch returned no job id")
+            # ``sbatch --parsable`` prints "<jobid>" or "<jobid>;<cluster>". Keep the
+            # bare numeric job id for squeue/sacct/scancel but persist the raw value
+            # for display and cloud-id purposes.
+            job_id = raw_job_id.split(";", 1)[0].strip()
+            if not job_id:
+                raise AdapterError(f"sbatch returned an unparsable job id: {raw_job_id!r}")
+        except Exception:
+            if not request.get("keep"):
+                self.remove_job_dir(lease_id)
+            raise
         state.update(
             {
                 "jobId": job_id,
