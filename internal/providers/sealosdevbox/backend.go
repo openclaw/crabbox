@@ -3,6 +3,7 @@ package sealosdevbox
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -10,9 +11,10 @@ import (
 )
 
 type backend struct {
-	spec core.ProviderSpec
-	cfg  core.Config
-	rt   core.Runtime
+	spec     core.ProviderSpec
+	cfg      core.Config
+	rt       core.Runtime
+	sshReady func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
@@ -130,9 +132,16 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	server := b.serverFromDevbox(item)
-	target := b.preparedTarget(leaseID, keyPath)
+	target, err := b.sshTarget(item, keyPath, true)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
+		events, _ := b.listEvents(ctx, name)
+		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
 	}
 	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 		return core.LeaseTarget{}, err
@@ -146,7 +155,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	server := b.serverFromDevbox(item)
-	target := b.preparedTarget(leaseID, "")
+	target, err := b.sshTarget(item, b.statusSSHKey(leaseID), false)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if !req.StatusOnly && !req.ReleaseOnly {
 		secret, err := b.getSecret(ctx, devboxSecretName(item))
 		if err != nil {
@@ -160,11 +172,20 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
-		target = b.preparedTarget(leaseID, keyPath)
+		target, err = b.sshTarget(item, keyPath, true)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 		if req.Repo.Root != "" && !req.NoLocalStateMutations {
 			if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 				return core.LeaseTarget{}, err
 			}
+		}
+		if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
+			events, _ := b.listEvents(ctx, item.Metadata.Name)
+			return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
+		}
+		if req.Repo.Root != "" && !req.NoLocalStateMutations {
 			if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 				return core.LeaseTarget{}, err
 			}
@@ -209,7 +230,7 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		return core.StatusView{}, err
 	}
 	server := b.serverFromDevbox(item)
-	target := b.preparedTarget(leaseID, "")
+	target, _ := b.sshTarget(item, b.statusSSHKey(leaseID), false)
 	return core.StatusView{
 		ID:            leaseID,
 		Slug:          slug,
@@ -232,26 +253,6 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		HasHost:       target.Host != "",
 		Ready:         devboxReady(item) && target.Host != "",
 	}, nil
-}
-
-func (b *backend) ReleaseLease(context.Context, core.ReleaseLeaseRequest) error {
-	return unsupportedLifecycleError("release")
-}
-
-func (b *backend) Cleanup(context.Context, core.CleanupRequest) error {
-	return unsupportedLifecycleError("cleanup")
-}
-
-func (b *backend) preparedTarget(leaseID, keyPath string) core.SSHTarget {
-	if keyPath == "" {
-		keyPath = b.statusSSHKey(leaseID)
-	}
-	return core.SSHTarget{
-		User:     b.cfg.SealosDevbox.SSHUser,
-		Key:      keyPath,
-		Port:     b.cfg.SealosDevbox.SSHGatewayPort,
-		TargetOS: core.TargetLinux,
-	}
 }
 
 func (b *backend) statusSSHKey(leaseID string) string {
