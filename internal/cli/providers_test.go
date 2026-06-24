@@ -1579,6 +1579,12 @@ func TestProvidersRecommendRemoteDevPrefersManagedDevEnvironments(t *testing.T) 
 	}
 }
 
+func TestSealosDevboxIsRemoteDevProvider(t *testing.T) {
+	if !isRemoteDevProvider("sealos-devbox") {
+		t.Fatal("sealos-devbox should advertise the remote-dev runtime capability")
+	}
+}
+
 func TestProvidersRecommendRemoteDevAlias(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{

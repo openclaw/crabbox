@@ -75,6 +75,12 @@ cannot:
 - **SSH lease providers**: acquire or resolve one lease, wait for SSH, sync a
   tiny checkout, run `true` or a small repository command, then release or
   cleanup the lease.
+- **Kubernetes-backed SSH lease providers**: also prove the selected context,
+  namespace, CRD, RBAC, route configuration, and dry-run cleanup before creating
+  a resource. For example, `sealos-devbox` must classify missing kubeconfig,
+  context, image/template, SSHGateway or NodePort route, DevBox RBAC, or
+  SSHGate availability as `environment_blocked` instead of claiming live proof
+  from unit tests.
 - **Delegated run providers**: create or reuse one provider-owned runtime, send a
   tiny command, stream or collect the result, record any session/proof/output
   metadata the provider advertises, then stop or cleanup when the lifecycle
