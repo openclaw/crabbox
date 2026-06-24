@@ -32,6 +32,10 @@ printf '%s\\n' "$*" >>${JSON.stringify(callsFile)}
 if [[ "$*" == "auth status" ]]; then
   exit 0
 fi
+if [[ "$*" == "codespace list --limit 1" ]]; then
+  printf '[]\\n'
+  exit 0
+fi
 printf 'unexpected gh args: %s\\n' "$*" >&2
 exit 97
 `,
@@ -113,6 +117,51 @@ test("live github codespaces smoke requires explicit credential source before gh
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /classification=credential_bound reason=github_token_missing_or_gh_auth_not_enabled/);
   assert.equal(fs.existsSync(ghCalls), false);
+});
+
+test("live github codespaces smoke stops before mutation when codespace scope is missing", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ghcs-scope-"));
+  const binDir = path.join(dir, "bin");
+  const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
+  const ghCalls = path.join(dir, "gh.log");
+  fs.mkdirSync(binDir, { recursive: true });
+  writeExecutable(
+    path.join(binDir, "gh"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>${JSON.stringify(ghCalls)}
+if [[ "$*" == "auth status" ]]; then
+  exit 0
+fi
+if [[ "$*" == "codespace list --limit 1" ]]; then
+  printf 'HTTP 403: Must have admin rights to Repository. This API operation needs the "codespace" scope. token test-secret-token\\n' >&2
+  exit 1
+fi
+exit 97
+`,
+  );
+
+  const result = spawnSync("bash", [smokeScript], {
+    cwd: tempRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_PROVIDERS: "github-codespaces",
+      CRABBOX_GITHUB_CODESPACES_SMOKE_REPO: "example-org/my-app",
+      GH_TOKEN: "test-secret-token",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /classification=credential_bound/);
+  assert.match(result.stderr, /reason=github_codespaces_scope_missing/);
+  assert.doesNotMatch(result.stdout + result.stderr, /test-secret-token/);
+  assert.deepEqual(fs.readFileSync(ghCalls, "utf8").trim().split("\n"), [
+    "auth status",
+    "codespace list --limit 1",
+  ]);
 });
 
 test("live github codespaces smoke runs guarded lifecycle and redacts token", () => {

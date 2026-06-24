@@ -189,7 +189,7 @@ func TestGitHubAPIErrorRedactsTokensAndReportsRetryAfter(t *testing.T) {
 	if strings.Contains(text, "ghp_this_token_value_is_redacted") {
 		t.Fatalf("token leaked: %s", text)
 	}
-	for _, want := range []string{"status=403", "retry_after=3s", "check gh auth"} {
+	for _, want := range []string{"status=403", "retry_after=3s", "check gh auth", "codespace scope"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("error %q missing %q", text, want)
 		}
