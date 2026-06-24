@@ -99,4 +99,49 @@ final class CoordinatorURLTests: XCTestCase {
         XCTAssertTrue(script.contains("model='qwen'\"'\"'; touch /tmp/pwn #'"))
         XCTAssertTrue(script.contains("ollama pull \"$model\""))
     }
+
+    func testWaitForEngineReadyFailsWhenAttemptsAreExhausted() async {
+        let engine = TestReadinessEngine(successAfter: nil)
+        let ready = await waitForEngineReady(engine, attempts: 2) {}
+        XCTAssertFalse(ready)
+    }
+
+    func testWaitForEngineReadyReturnsWhenEngineBecomesReady() async {
+        let engine = TestReadinessEngine(successAfter: 2)
+        let ready = await waitForEngineReady(engine, attempts: 3) {}
+        XCTAssertTrue(ready)
+    }
+}
+
+private actor ReadinessCounter {
+    var checks = 0
+    let successAfter: Int?
+
+    init(successAfter: Int?) {
+        self.successAfter = successAfter
+    }
+
+    func next() -> Bool {
+        checks += 1
+        guard let successAfter else { return false }
+        return checks > successAfter
+    }
+}
+
+private struct TestReadinessEngine: LLMEngine {
+    let displayName = "test"
+    let kind: EngineKind = .sandbox
+    let counter: ReadinessCounter
+
+    init(successAfter: Int?) {
+        self.counter = ReadinessCounter(successAfter: successAfter)
+    }
+
+    func isReady() async -> Bool {
+        await counter.next()
+    }
+
+    func reply(messages: [ChatMessage], options: LLMOptions) async throws -> String {
+        "ok"
+    }
 }

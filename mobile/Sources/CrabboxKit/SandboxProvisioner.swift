@@ -142,3 +142,16 @@ public func launchLLMSandbox(
     }
     return (handle, engine)
 }
+
+public func waitForEngineReady(
+    _ engine: any LLMEngine,
+    attempts: Int = 90,
+    sleep: @Sendable () async -> Void
+) async -> Bool {
+    guard attempts > 0 else { return await engine.isReady() }
+    for _ in 0..<attempts {
+        if await engine.isReady() { return true }
+        await sleep()
+    }
+    return await engine.isReady()
+}

@@ -195,11 +195,11 @@ struct CommandRunnerView: View {
                 // Command center targeting & distribution UI.
                 // Populated live from the shared SandboxStore (refreshed by Sandboxes tab
                 // or on-demand). Lets the iOS app act as orchestrator: pick one or many
-                // remote islo.dev (or coordinator) sandboxes and distribute the exact
+                // remote islo.dev sandboxes and distribute the exact
                 // same command to all of them in parallel. Results are shown per-sandbox.
                 if !sandboxStore.handles.isEmpty || settings.makeProvisioner() != nil {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("TARGET SANDBOXES (islo.dev / coordinator)")
+                        Text("TARGET SANDBOXES (islo.dev)")
                             .font(.caption.bold())
                             .foregroundStyle(Theme.textMuted)
 

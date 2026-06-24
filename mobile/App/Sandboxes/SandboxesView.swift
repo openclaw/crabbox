@@ -6,9 +6,8 @@
 //  runs Ollama, then handing the resulting `SandboxEngine` to the Assistant tab.
 //
 //  Everything provider-specific is funnelled through CrabboxKit's
-//  `SandboxProvisioner` seam — this view never knows whether it is talking to
-//  crabbox.sh or directly to islo.dev. It asks `AppSettings.makeProvisioner()`
-//  for whatever is configured and drives the provider-agnostic flow:
+//  `SandboxProvisioner` seam. It asks `AppSettings.makeProvisioner()` for the
+//  configured sandbox-capable provider and drives the provider-agnostic flow:
 //
 //      list()                         -> render existing leases
 //      launchLLMSandbox(provisioner:) -> create -> bootstrap -> expose -> ready
@@ -181,8 +180,8 @@ struct SandboxesView: View {
     }
 
     private var providerSymbol: String {
-        if settings.hasCrabboxToken { return "shippingbox.fill" }
         if settings.hasIsloProvider { return "cube.transparent.fill" }
+        if settings.hasCrabboxToken { return "shippingbox.fill" }
         return "exclamationmark.shield.fill"
     }
 
@@ -197,7 +196,7 @@ struct SandboxesView: View {
                 Text("Connect a provider")
                     .font(.headline)
                     .foregroundStyle(Theme.textPrimary)
-                Text("Add a crabbox.sh token to provision sandboxes through the coordinator, or enable the optional islo.dev provider with your own key.")
+                Text("Enable the optional islo.dev provider with your own key. crabbox.sh tokens are supported for portal and workspace flows, but not sandbox lifecycle yet.")
                     .font(.subheadline)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Theme.textMuted)
@@ -397,13 +396,14 @@ struct SandboxesView: View {
             )
             ticker.cancel()
             // Don't offer the engine for chat until Ollama is actually serving the
-            // model — the bootstrap (apt + install + model pull) runs detached, so
-            // poll readiness rather than optimistically marking it ready.
+            // model — the bootstrap runs detached, so poll readiness rather than
+            // optimistically marking it ready.
             phase = .exposing
-            var attempts = 0
-            while !(await engine.isReady()) && attempts < 90 {
+            let ready = await waitForEngineReady(engine, attempts: 90) {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                attempts += 1
+            }
+            guard ready else {
+                throw LLMError.unavailable("sandbox \(handle.id) did not become ready")
             }
             engineHub.register(engine)
             lastLaunchedEngineName = engine.displayName

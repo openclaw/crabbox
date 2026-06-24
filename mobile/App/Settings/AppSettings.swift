@@ -8,12 +8,11 @@
 //  in the Keychain via `KeychainStore` and are *mirrored* into @Published
 //  properties so SwiftUI can bind to them without ever writing them to a plist.
 //
-//  Provider selection policy (see `makeProvisioner()`):
-//    1. If a crabbox.sh token exists -> CoordinatorProvisioner (the primary path;
-//       the phone holds only a session token, never raw provider keys).
-//    2. Else if islo is enabled and a key exists -> IsloProvisioner (the direct,
-//       brokerless fallback the user opts into).
-//    3. Else nil -> the Sandboxes tab shows its "configure a provider" state.
+//  Sandbox provider selection policy (see `makeProvisioner()`):
+//    1. If islo is enabled and a key exists -> IsloProvisioner.
+//    2. Else nil -> the Sandboxes tab shows its "configure a provider" state.
+//  The crabbox.sh token is still used by portal/workspace flows, but crabbox.sh
+//  sandbox lifecycle stays unavailable until the coordinator exposes it.
 //
 
 import Foundation
@@ -31,9 +30,8 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(coordinatorURL, forKey: Keys.coordinatorURL) }
     }
 
-    /// Whether the optional direct islo.dev provider is enabled at all. When off,
-    /// the islo key is ignored even if present and the crabbox path is the only
-    /// provisioner candidate.
+    /// Whether the optional direct islo.dev sandbox provider is enabled at all.
+    /// When off, the islo key is ignored even if present.
     @Published var isloEnabled: Bool {
         didSet { defaults.set(isloEnabled, forKey: Keys.isloEnabled) }
     }
@@ -102,29 +100,19 @@ final class AppSettings: ObservableObject {
         isloEnabled && (isloKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
     }
 
-    /// A short, user-facing label for whichever provider `makeProvisioner()` will
-    /// select, or a prompt to configure one. Mirrors the selection policy exactly.
+    /// A short, user-facing label for whichever sandbox provider `makeProvisioner()`
+    /// will select, or a prompt to configure one. Mirrors the selection policy exactly.
     var providerLabel: String {
-        if hasCrabboxToken { return "crabbox.sh" }
         if hasIsloProvider { return "islo.dev (direct)" }
-        return "No provider configured"
+        if hasCrabboxToken { return "crabbox.sh (workspace only)" }
+        return "No sandbox provider configured"
     }
 
     // MARK: - Provisioner factory
 
     /// Builds the active `SandboxProvisioner` per the selection policy, or `nil`
-    /// when nothing is configured. crabbox.sh (the coordinator) is always
-    /// preferred over the direct islo path when both are available.
+    /// when no supported sandbox lifecycle provider is configured.
     func makeProvisioner() -> (any SandboxProvisioner)? {
-        // 1. Primary: crabbox.sh coordinator, identified only by a session token.
-        if let token = crabboxToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !token.isEmpty,
-           let normalizedCoordinator = normalizeCoordinatorURL(coordinatorURL),
-           let provisioner = CoordinatorProvisioner(coordinatorURL: normalizedCoordinator, token: token) {
-            return provisioner
-        }
-
-        // 2. Optional direct: islo.dev, only when explicitly enabled with a key.
         if isloEnabled,
            let key = isloKey?.trimmingCharacters(in: .whitespacesAndNewlines),
            !key.isEmpty,
@@ -133,7 +121,6 @@ final class AppSettings: ObservableObject {
             return provisioner
         }
 
-        // 3. Nothing configured.
         return nil
     }
 
