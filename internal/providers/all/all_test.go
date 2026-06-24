@@ -987,6 +987,10 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 		cfg.CloudflareDynamicWorkers.LoaderURL = "https://loader.example.test"
 		cfg.CloudflareDynamicWorkers.Token = "test-token"
 		return cfg, true
+	case "cloudflare-sandbox":
+		cfg.CloudflareSandbox.BridgeURL = "https://bridge.example.test"
+		cfg.CloudflareSandbox.Token = "test-token"
+		return cfg, true
 	case "e2b":
 		return cfg, true
 	case "external":
@@ -1036,6 +1040,7 @@ func allBuiltInProviderNames() []string {
 		"blacksmith-testbox",
 		"cloudflare",
 		"cloudflare-dynamic-workers",
+		"cloudflare-sandbox",
 		"codesandbox",
 		"daytona",
 		"digitalocean",

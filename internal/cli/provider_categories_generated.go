@@ -15,6 +15,7 @@ var benchmarkProviderCategories = map[string]string{
 	"blacksmith-testbox":         "ci-proof-runner",
 	"cloudflare":                 "delegated-sandbox",
 	"cloudflare-dynamic-workers": "delegated-sandbox",
+	"cloudflare-sandbox":         "delegated-sandbox",
 	"codesandbox":                "delegated-sandbox",
 	"daytona":                    "direct-cloud",
 	"digitalocean":               "direct-cloud",
