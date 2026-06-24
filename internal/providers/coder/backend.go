@@ -543,11 +543,6 @@ func coderWorkspaceHasCrabboxLabel(workspace coderWorkspace) bool {
 	return strings.EqualFold(strings.TrimSpace(workspace.Labels["created_by"]), "crabbox")
 }
 
-func coderServerRunning(status string) bool {
-	status = strings.ToLower(strings.TrimSpace(status))
-	return status == "running" || status == "ready" || status == "starting"
-}
-
 func (b *coderLeaseBackend) resolveWorkspace(identifier string, workspaces []coderWorkspace, claims map[string]LeaseClaim, nameCounts map[string]int) (coderWorkspace, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {

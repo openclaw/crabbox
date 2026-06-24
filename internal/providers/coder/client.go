@@ -3,7 +3,6 @@ package coder
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -331,12 +330,4 @@ func mapField(obj map[string]any, key string) map[string]string {
 		}
 	}
 	return out
-}
-
-func coderCommandError(err error) (ExitError, bool) {
-	var exitErr ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr, true
-	}
-	return ExitError{}, false
 }
