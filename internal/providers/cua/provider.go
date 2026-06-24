@@ -41,12 +41,12 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return validateProviderConfig(cfg)
 }
 
-func (p Provider) Configure(cfg core.Config, _ core.Runtime) (core.Backend, error) {
+func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
 	cfg.Provider = providerName
-	return backend{spec: p.Spec(), cfg: cfg}, nil
+	return backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
