@@ -419,6 +419,32 @@ func configShowView(cfg Config) map[string]any {
 			"execTimeoutSecs": cfg.CloudflareSandbox.ExecTimeoutSecs,
 			"forgetMissing":   cfg.CloudflareSandbox.ForgetMissing,
 		},
+		"nomad": map[string]any{
+			"address":           redactedConfigURL(cfg.Nomad.Address),
+			"region":            cfg.Nomad.Region,
+			"namespace":         cfg.Nomad.Namespace,
+			"tokenEnv":          nomadAuthEnv(cfg),
+			"auth":              nomadAuthState(cfg),
+			"caCert":            cfg.Nomad.CACert,
+			"caPath":            cfg.Nomad.CAPath,
+			"clientCert":        cfg.Nomad.ClientCert,
+			"clientKey":         cfg.Nomad.ClientKey,
+			"tlsServerName":     cfg.Nomad.TLSServerName,
+			"skipVerify":        cfg.Nomad.SkipVerify,
+			"task":              cfg.Nomad.Task,
+			"driver":            cfg.Nomad.Driver,
+			"image":             cfg.Nomad.Image,
+			"workdir":           cfg.Nomad.Workdir,
+			"jobspecTemplate":   cfg.Nomad.JobSpecTemplate,
+			"nodePool":          cfg.Nomad.NodePool,
+			"datacenters":       cfg.Nomad.Datacenters,
+			"cpu":               cfg.Nomad.CPU,
+			"memoryMB":          cfg.Nomad.MemoryMB,
+			"diskMB":            cfg.Nomad.DiskMB,
+			"allocReadyTimeout": cfg.Nomad.AllocReadyTimeout.String(),
+			"evalTimeout":       cfg.Nomad.EvalTimeout.String(),
+			"execTimeoutSecs":   cfg.Nomad.ExecTimeoutSecs,
+		},
 		"upstashBox": map[string]any{
 			"baseUrl":   cfg.UpstashBox.BaseURL,
 			"auth":      tokenState(cfg.UpstashBox.APIKey),
@@ -662,6 +688,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", cfg.UpstashBox.BaseURL, cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
 	fmt.Fprintf(w, "smolvm base_url=%s image=%s workdir=%s cpus=%d memory_mb=%d network=%s keep=%t auth=%s\n", cfg.Smolvm.BaseURL, cfg.Smolvm.Image, cfg.Smolvm.Workdir, cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB, cfg.Smolvm.Network, cfg.Smolvm.Keep, tokenState(cfg.Smolvm.APIKey))
 	fmt.Fprintf(w, "blaxel api_url=%s workspace=%s region=%s image=%s memory_mb=%d ttl=%s idle_ttl=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.Blaxel.APIURL), "-"), blank(cfg.Blaxel.Workspace, "-"), blank(cfg.Blaxel.Region, "-"), cfg.Blaxel.Image, cfg.Blaxel.MemoryMB, blank(cfg.Blaxel.TTL, "-"), blank(cfg.Blaxel.IdleTTL, "-"), cfg.Blaxel.Workdir, cfg.Blaxel.ExecTimeoutSecs, cfg.Blaxel.ForgetMissing, tokenState(cfg.Blaxel.APIKey))
+	fmt.Fprintf(w, "nomad address=%s region=%s namespace=%s auth_env=%s auth=%s tls_ca=%s tls_capath=%s tls_cert=%s tls_key=%s tls_server_name=%s skip_verify=%t task=%s driver=%s image=%s workdir=%s jobspec_template=%s node_pool=%s datacenters=%s cpu=%d memory_mb=%d disk_mb=%d alloc_ready_timeout=%s eval_timeout=%s exec_timeout_secs=%d\n", blank(redactedConfigURL(cfg.Nomad.Address), "-"), blank(cfg.Nomad.Region, "-"), blank(cfg.Nomad.Namespace, "-"), nomadTextAuthEnv(cfg), nomadAuthState(cfg), blank(cfg.Nomad.CACert, "-"), blank(cfg.Nomad.CAPath, "-"), blank(cfg.Nomad.ClientCert, "-"), blank(cfg.Nomad.ClientKey, "-"), blank(cfg.Nomad.TLSServerName, "-"), cfg.Nomad.SkipVerify, cfg.Nomad.Task, cfg.Nomad.Driver, cfg.Nomad.Image, cfg.Nomad.Workdir, blank(cfg.Nomad.JobSpecTemplate, "-"), blank(cfg.Nomad.NodePool, "-"), blank(strings.Join(cfg.Nomad.Datacenters, ","), "-"), cfg.Nomad.CPU, cfg.Nomad.MemoryMB, cfg.Nomad.DiskMB, cfg.Nomad.AllocReadyTimeout, cfg.Nomad.EvalTimeout, cfg.Nomad.ExecTimeoutSecs)
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", cfg.AsciiBox.BaseURL, cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
 	fmt.Fprintf(w, "superserve base_url=%s template=%s snapshot=%s workdir=%s timeout_secs=%d exec_timeout_secs=%d network_allow_out=%s network_deny_out=%s forget_missing=%t auth=%s\n", redactedConfigURL(cfg.Superserve.BaseURL), blank(cfg.Superserve.Template, "-"), blank(cfg.Superserve.Snapshot, "-"), cfg.Superserve.Workdir, cfg.Superserve.TimeoutSecs, cfg.Superserve.ExecTimeoutSecs, blank(strings.Join(cfg.Superserve.NetworkAllowOut, ","), "-"), blank(strings.Join(cfg.Superserve.NetworkDenyOut, ","), "-"), cfg.Superserve.ForgetMissing, superserveAuthState())
 	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
@@ -984,6 +1011,28 @@ func tokenState(token string) string {
 		return "missing"
 	}
 	return "configured"
+}
+
+func nomadAuthEnv(cfg Config) string {
+	envName := strings.TrimSpace(cfg.Nomad.TokenEnv)
+	if envName == "" {
+		return "NOMAD_TOKEN"
+	}
+	return envName
+}
+
+func nomadTextAuthEnv(cfg Config) string {
+	if nomadAuthEnv(cfg) == "NOMAD_TOKEN" {
+		return "default"
+	}
+	return "custom"
+}
+
+func nomadAuthState(cfg Config) string {
+	if strings.TrimSpace(os.Getenv(nomadAuthEnv(cfg))) != "" {
+		return "env"
+	}
+	return "missing"
 }
 
 func superserveAuthState() string {

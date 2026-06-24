@@ -191,6 +191,7 @@ type Config struct {
 	OpenComputer                  OpenComputerConfig
 	CodeSandbox                   CodeSandboxConfig
 	OpenSandbox                   OpenSandboxConfig
+	Nomad                         NomadConfig
 	Blaxel                        BlaxelConfig
 	VercelSandbox                 VercelSandboxConfig
 	CloudflareSandbox             CloudflareSandboxConfig
@@ -800,6 +801,35 @@ type OpenSandboxConfig struct {
 	SecureAccess    bool
 	UseServerProxy  bool
 	ForgetMissing   bool
+}
+
+// NomadConfig configures the delegated Nomad provider. The ACL token is
+// intentionally absent: it is read at runtime from NOMAD_TOKEN or TokenEnv and
+// is never persisted in Crabbox config or placed on argv.
+type NomadConfig struct {
+	Address           string
+	Region            string
+	Namespace         string
+	TokenEnv          string
+	CACert            string
+	CAPath            string
+	ClientCert        string
+	ClientKey         string
+	TLSServerName     string
+	SkipVerify        bool
+	Task              string
+	Driver            string
+	Image             string
+	Workdir           string
+	JobSpecTemplate   string
+	NodePool          string
+	Datacenters       []string
+	CPU               int
+	MemoryMB          int
+	DiskMB            int
+	AllocReadyTimeout time.Duration
+	EvalTimeout       time.Duration
+	ExecTimeoutSecs   int
 }
 
 // BlaxelConfig configures the delegated Blaxel provider. API keys are read
@@ -2076,6 +2106,16 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		}
 		return nil
 	}
+	if cfg.Provider == "nomad" {
+		if !IsTargetExplicit(cfg) {
+			cfg.TargetOS = targetLinux
+		}
+		if cfg.Nomad.Workdir != "" {
+			cfg.WorkRoot = cfg.Nomad.Workdir
+		}
+		cfg.SSHFallbackPorts = nil
+		return nil
+	}
 	if cfg.Provider == "firecracker" {
 		base := baseConfig()
 		if cfg.Firecracker.User != "" && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser || cfg.Firecracker.User != base.Firecracker.User) {
@@ -2836,6 +2876,20 @@ func baseConfig() Config {
 			PlatformOS:      "linux",
 			PlatformArch:    "amd64",
 		},
+		Nomad: NomadConfig{
+			TokenEnv:          "NOMAD_TOKEN",
+			Task:              "crabbox",
+			Driver:            "docker",
+			Image:             "ubuntu:24.04",
+			Workdir:           "/workspace/crabbox",
+			Datacenters:       []string{"dc1"},
+			CPU:               1000,
+			MemoryMB:          2048,
+			DiskMB:            1024,
+			AllocReadyTimeout: 5 * time.Minute,
+			EvalTimeout:       5 * time.Minute,
+			ExecTimeoutSecs:   600,
+		},
 		Blaxel: BlaxelConfig{
 			APIURL:          "https://api.blaxel.ai",
 			Image:           "ubuntu:24.04",
@@ -3085,6 +3139,7 @@ type fileConfig struct {
 	OpenComputer             *fileOpenComputerConfig             `yaml:"openComputer,omitempty"`
 	CodeSandbox              *fileCodeSandboxConfig              `yaml:"codeSandbox,omitempty"`
 	OpenSandbox              *fileOpenSandboxConfig              `yaml:"openSandbox,omitempty"`
+	Nomad                    *fileNomadConfig                    `yaml:"nomad,omitempty"`
 	Blaxel                   *fileBlaxelConfig                   `yaml:"blaxel,omitempty"`
 	VercelSandbox            *fileVercelSandboxConfig            `yaml:"vercelSandbox,omitempty"`
 	CloudflareSandbox        *fileCloudflareSandboxConfig        `yaml:"cloudflareSandbox,omitempty"`
@@ -3784,6 +3839,32 @@ type fileOpenSandboxConfig struct {
 	PlatformArch    *string `yaml:"platformArch,omitempty"`
 	SecureAccess    *bool   `yaml:"secureAccess,omitempty"`
 	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
+}
+
+type fileNomadConfig struct {
+	Address           string   `yaml:"address,omitempty"`
+	Region            string   `yaml:"region,omitempty"`
+	Namespace         string   `yaml:"namespace,omitempty"`
+	TokenEnv          string   `yaml:"tokenEnv,omitempty"`
+	CACert            string   `yaml:"caCert,omitempty"`
+	CAPath            string   `yaml:"caPath,omitempty"`
+	ClientCert        string   `yaml:"clientCert,omitempty"`
+	ClientKey         string   `yaml:"clientKey,omitempty"`
+	TLSServerName     string   `yaml:"tlsServerName,omitempty"`
+	SkipVerify        *bool    `yaml:"skipVerify,omitempty"`
+	Task              *string  `yaml:"task,omitempty"`
+	Driver            *string  `yaml:"driver,omitempty"`
+	Image             *string  `yaml:"image,omitempty"`
+	Workdir           *string  `yaml:"workdir,omitempty"`
+	JobSpecTemplate   string   `yaml:"jobspecTemplate,omitempty"`
+	NodePool          string   `yaml:"nodePool,omitempty"`
+	Datacenters       []string `yaml:"datacenters,omitempty"`
+	CPU               *int     `yaml:"cpu,omitempty"`
+	MemoryMB          *int     `yaml:"memoryMB,omitempty"`
+	DiskMB            *int     `yaml:"diskMB,omitempty"`
+	AllocReadyTimeout string   `yaml:"allocReadyTimeout,omitempty"`
+	EvalTimeout       string   `yaml:"evalTimeout,omitempty"`
+	ExecTimeoutSecs   *int     `yaml:"execTimeoutSecs,omitempty"`
 }
 
 type fileBlaxelConfig struct {
@@ -6212,6 +6293,89 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.OpenSandbox.UseServerProxy = *file.OpenSandbox.UseServerProxy
 		}
 	}
+	if file.Nomad != nil {
+		if file.Nomad.Address != "" {
+			cfg.Nomad.Address = file.Nomad.Address
+		}
+		if file.Nomad.Region != "" {
+			cfg.Nomad.Region = file.Nomad.Region
+		}
+		if file.Nomad.Namespace != "" {
+			cfg.Nomad.Namespace = file.Nomad.Namespace
+		}
+		if file.Nomad.TokenEnv != "" {
+			cfg.Nomad.TokenEnv = file.Nomad.TokenEnv
+		}
+		if file.Nomad.CACert != "" {
+			cfg.Nomad.CACert = expandUserPath(file.Nomad.CACert)
+		}
+		if file.Nomad.CAPath != "" {
+			cfg.Nomad.CAPath = expandUserPath(file.Nomad.CAPath)
+		}
+		if file.Nomad.ClientCert != "" {
+			cfg.Nomad.ClientCert = expandUserPath(file.Nomad.ClientCert)
+		}
+		if file.Nomad.ClientKey != "" {
+			cfg.Nomad.ClientKey = expandUserPath(file.Nomad.ClientKey)
+		}
+		if file.Nomad.TLSServerName != "" {
+			cfg.Nomad.TLSServerName = file.Nomad.TLSServerName
+		}
+		if file.Nomad.SkipVerify != nil {
+			cfg.Nomad.SkipVerify = *file.Nomad.SkipVerify
+		}
+		if file.Nomad.Task != nil {
+			cfg.Nomad.Task = *file.Nomad.Task
+		}
+		if file.Nomad.Driver != nil {
+			cfg.Nomad.Driver = *file.Nomad.Driver
+		}
+		if file.Nomad.Image != nil {
+			cfg.Nomad.Image = *file.Nomad.Image
+		}
+		if file.Nomad.Workdir != nil {
+			cfg.Nomad.Workdir = *file.Nomad.Workdir
+		}
+		if file.Nomad.JobSpecTemplate != "" {
+			cfg.Nomad.JobSpecTemplate = expandUserPath(file.Nomad.JobSpecTemplate)
+		}
+		if file.Nomad.NodePool != "" {
+			cfg.Nomad.NodePool = file.Nomad.NodePool
+		}
+		if len(file.Nomad.Datacenters) > 0 {
+			cfg.Nomad.Datacenters = normalizeList(file.Nomad.Datacenters)
+		}
+		if file.Nomad.CPU != nil {
+			if *file.Nomad.CPU < 0 {
+				return exit(2, "nomad cpu must be non-negative")
+			}
+			cfg.Nomad.CPU = *file.Nomad.CPU
+		}
+		if file.Nomad.MemoryMB != nil {
+			if *file.Nomad.MemoryMB < 0 {
+				return exit(2, "nomad memoryMB must be non-negative")
+			}
+			cfg.Nomad.MemoryMB = *file.Nomad.MemoryMB
+		}
+		if file.Nomad.DiskMB != nil {
+			if *file.Nomad.DiskMB < 0 {
+				return exit(2, "nomad diskMB must be non-negative")
+			}
+			cfg.Nomad.DiskMB = *file.Nomad.DiskMB
+		}
+		if file.Nomad.AllocReadyTimeout != "" {
+			applyLeaseDuration(&cfg.Nomad.AllocReadyTimeout, file.Nomad.AllocReadyTimeout)
+		}
+		if file.Nomad.EvalTimeout != "" {
+			applyLeaseDuration(&cfg.Nomad.EvalTimeout, file.Nomad.EvalTimeout)
+		}
+		if file.Nomad.ExecTimeoutSecs != nil {
+			if *file.Nomad.ExecTimeoutSecs < 0 {
+				return exit(2, "nomad execTimeoutSecs must be non-negative")
+			}
+			cfg.Nomad.ExecTimeoutSecs = *file.Nomad.ExecTimeoutSecs
+		}
+	}
 	if file.Blaxel != nil {
 		if trusted && file.Blaxel.APIURL != "" {
 			cfg.Blaxel.APIURL = file.Blaxel.APIURL
@@ -8058,6 +8222,42 @@ func applyEnv(cfg *Config) error {
 	}
 	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
 		cfg.OpenSandbox.UseServerProxy = v
+	}
+	cfg.Nomad.Address = getenv("CRABBOX_NOMAD_ADDR", getenv("NOMAD_ADDR", cfg.Nomad.Address))
+	cfg.Nomad.Region = getenv("CRABBOX_NOMAD_REGION", getenv("NOMAD_REGION", cfg.Nomad.Region))
+	cfg.Nomad.Namespace = getenv("CRABBOX_NOMAD_NAMESPACE", getenv("NOMAD_NAMESPACE", cfg.Nomad.Namespace))
+	cfg.Nomad.TokenEnv = getenv("CRABBOX_NOMAD_TOKEN_ENV", cfg.Nomad.TokenEnv)
+	cfg.Nomad.CACert = expandUserPath(getenv("CRABBOX_NOMAD_CA_CERT", getenv("NOMAD_CACERT", cfg.Nomad.CACert)))
+	cfg.Nomad.CAPath = expandUserPath(getenv("CRABBOX_NOMAD_CA_PATH", getenv("NOMAD_CAPATH", cfg.Nomad.CAPath)))
+	cfg.Nomad.ClientCert = expandUserPath(getenv("CRABBOX_NOMAD_CLIENT_CERT", getenv("NOMAD_CLIENT_CERT", cfg.Nomad.ClientCert)))
+	cfg.Nomad.ClientKey = expandUserPath(getenv("CRABBOX_NOMAD_CLIENT_KEY", getenv("NOMAD_CLIENT_KEY", cfg.Nomad.ClientKey)))
+	cfg.Nomad.TLSServerName = getenv("CRABBOX_NOMAD_TLS_SERVER_NAME", getenv("NOMAD_TLS_SERVER_NAME", cfg.Nomad.TLSServerName))
+	if v, ok := getenvBool("CRABBOX_NOMAD_SKIP_VERIFY"); ok {
+		cfg.Nomad.SkipVerify = v
+	} else if v, ok := getenvBool("NOMAD_SKIP_VERIFY"); ok {
+		cfg.Nomad.SkipVerify = v
+	}
+	cfg.Nomad.Task = getenv("CRABBOX_NOMAD_TASK", cfg.Nomad.Task)
+	cfg.Nomad.Driver = getenv("CRABBOX_NOMAD_DRIVER", cfg.Nomad.Driver)
+	cfg.Nomad.Image = getenv("CRABBOX_NOMAD_IMAGE", cfg.Nomad.Image)
+	cfg.Nomad.Workdir = getenv("CRABBOX_NOMAD_WORKDIR", cfg.Nomad.Workdir)
+	cfg.Nomad.JobSpecTemplate = expandUserPath(getenv("CRABBOX_NOMAD_JOBSPEC_TEMPLATE", cfg.Nomad.JobSpecTemplate))
+	cfg.Nomad.NodePool = getenv("CRABBOX_NOMAD_NODE_POOL", cfg.Nomad.NodePool)
+	if datacenters, ok := getenvList("CRABBOX_NOMAD_DATACENTERS"); ok {
+		cfg.Nomad.Datacenters = datacenters
+	}
+	cfg.Nomad.CPU = getenvInt("CRABBOX_NOMAD_CPU", cfg.Nomad.CPU)
+	cfg.Nomad.MemoryMB = getenvInt("CRABBOX_NOMAD_MEMORY_MB", cfg.Nomad.MemoryMB)
+	cfg.Nomad.DiskMB = getenvInt("CRABBOX_NOMAD_DISK_MB", cfg.Nomad.DiskMB)
+	if timeout := os.Getenv("CRABBOX_NOMAD_ALLOC_READY_TIMEOUT"); timeout != "" {
+		applyLeaseDuration(&cfg.Nomad.AllocReadyTimeout, timeout)
+	}
+	if timeout := os.Getenv("CRABBOX_NOMAD_EVAL_TIMEOUT"); timeout != "" {
+		applyLeaseDuration(&cfg.Nomad.EvalTimeout, timeout)
+	}
+	cfg.Nomad.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_NOMAD_EXEC_TIMEOUT_SECS", cfg.Nomad.ExecTimeoutSecs)
+	if err != nil {
+		return err
 	}
 	cfg.Blaxel.APIKey = getenv("CRABBOX_BLAXEL_API_KEY", getenv("BL_API_KEY", cfg.Blaxel.APIKey))
 	cfg.Blaxel.APIURL = getenv("CRABBOX_BLAXEL_API_URL", cfg.Blaxel.APIURL)

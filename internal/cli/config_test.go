@@ -180,6 +180,39 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_OPENSANDBOX_PLATFORM_ARCH",
 		"CRABBOX_OPENSANDBOX_SECURE_ACCESS",
 		"CRABBOX_OPENSANDBOX_USE_SERVER_PROXY",
+		"CRABBOX_NOMAD_ADDR",
+		"NOMAD_ADDR",
+		"CRABBOX_NOMAD_REGION",
+		"NOMAD_REGION",
+		"CRABBOX_NOMAD_NAMESPACE",
+		"NOMAD_NAMESPACE",
+		"NOMAD_TOKEN",
+		"CRABBOX_NOMAD_TOKEN_ENV",
+		"CRABBOX_NOMAD_CA_CERT",
+		"NOMAD_CACERT",
+		"CRABBOX_NOMAD_CA_PATH",
+		"NOMAD_CAPATH",
+		"CRABBOX_NOMAD_CLIENT_CERT",
+		"NOMAD_CLIENT_CERT",
+		"CRABBOX_NOMAD_CLIENT_KEY",
+		"NOMAD_CLIENT_KEY",
+		"CRABBOX_NOMAD_TLS_SERVER_NAME",
+		"NOMAD_TLS_SERVER_NAME",
+		"CRABBOX_NOMAD_SKIP_VERIFY",
+		"NOMAD_SKIP_VERIFY",
+		"CRABBOX_NOMAD_TASK",
+		"CRABBOX_NOMAD_DRIVER",
+		"CRABBOX_NOMAD_IMAGE",
+		"CRABBOX_NOMAD_WORKDIR",
+		"CRABBOX_NOMAD_JOBSPEC_TEMPLATE",
+		"CRABBOX_NOMAD_NODE_POOL",
+		"CRABBOX_NOMAD_DATACENTERS",
+		"CRABBOX_NOMAD_CPU",
+		"CRABBOX_NOMAD_MEMORY_MB",
+		"CRABBOX_NOMAD_DISK_MB",
+		"CRABBOX_NOMAD_ALLOC_READY_TIMEOUT",
+		"CRABBOX_NOMAD_EVAL_TIMEOUT",
+		"CRABBOX_NOMAD_EXEC_TIMEOUT_SECS",
 		"CRABBOX_BLAXEL_API_KEY",
 		"BL_API_KEY",
 		"CRABBOX_BLAXEL_API_URL",
@@ -3795,6 +3828,131 @@ func TestBlaxelConfigYAMLAndEnv(t *testing.T) {
 	}
 	if cfg.Blaxel != want {
 		t.Fatalf("env cfg.Blaxel=%#v, want %#v", cfg.Blaxel, want)
+	}
+}
+
+func TestNomadConfigYAMLAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	var file fileConfig
+	yamlText := strings.Join([]string{
+		"nomad:",
+		"  address: https://nomad-file.example.test:4646",
+		"  region: file-region",
+		"  namespace: file-namespace",
+		"  tokenEnv: FILE_NOMAD_TOKEN",
+		"  caCert: ~/nomad/ca.pem",
+		"  caPath: ~/nomad/certs",
+		"  clientCert: ~/nomad/client.pem",
+		"  clientKey: ~/nomad/client.key",
+		"  tlsServerName: nomad-file.example.test",
+		"  skipVerify: true",
+		"  task: file-task",
+		"  driver: raw_exec",
+		"  image: file-image:latest",
+		"  workdir: /workspace/file",
+		"  jobspecTemplate: ~/nomad/job.hcl",
+		"  nodePool: file-pool",
+		"  datacenters: [dc1, dc2]",
+		"  cpu: 500",
+		"  memoryMB: 1024",
+		"  diskMB: 2048",
+		"  allocReadyTimeout: 2m",
+		"  evalTimeout: 3m",
+		"  execTimeoutSecs: 45",
+	}, "\n")
+	if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	if cfg.Nomad.Address != "https://nomad-file.example.test:4646" ||
+		cfg.Nomad.Region != "file-region" ||
+		cfg.Nomad.Namespace != "file-namespace" ||
+		cfg.Nomad.TokenEnv != "FILE_NOMAD_TOKEN" ||
+		cfg.Nomad.CACert != filepath.Join(home, "nomad/ca.pem") ||
+		cfg.Nomad.CAPath != filepath.Join(home, "nomad/certs") ||
+		cfg.Nomad.ClientCert != filepath.Join(home, "nomad/client.pem") ||
+		cfg.Nomad.ClientKey != filepath.Join(home, "nomad/client.key") ||
+		cfg.Nomad.TLSServerName != "nomad-file.example.test" ||
+		!cfg.Nomad.SkipVerify ||
+		cfg.Nomad.Task != "file-task" ||
+		cfg.Nomad.Driver != "raw_exec" ||
+		cfg.Nomad.Image != "file-image:latest" ||
+		cfg.Nomad.Workdir != "/workspace/file" ||
+		cfg.Nomad.JobSpecTemplate != filepath.Join(home, "nomad/job.hcl") ||
+		cfg.Nomad.NodePool != "file-pool" ||
+		!reflect.DeepEqual(cfg.Nomad.Datacenters, []string{"dc1", "dc2"}) ||
+		cfg.Nomad.CPU != 500 ||
+		cfg.Nomad.MemoryMB != 1024 ||
+		cfg.Nomad.DiskMB != 2048 ||
+		cfg.Nomad.AllocReadyTimeout != 2*time.Minute ||
+		cfg.Nomad.EvalTimeout != 3*time.Minute ||
+		cfg.Nomad.ExecTimeoutSecs != 45 {
+		t.Fatalf("file cfg.Nomad=%#v", cfg.Nomad)
+	}
+
+	t.Setenv("NOMAD_ADDR", "https://nomad-vendor.example.test:4646")
+	t.Setenv("NOMAD_REGION", "vendor-region")
+	t.Setenv("NOMAD_NAMESPACE", "vendor-namespace")
+	t.Setenv("NOMAD_CACERT", "/vendor/ca.pem")
+	t.Setenv("NOMAD_CAPATH", "/vendor/certs")
+	t.Setenv("NOMAD_CLIENT_CERT", "/vendor/client.pem")
+	t.Setenv("NOMAD_CLIENT_KEY", "/vendor/client.key")
+	t.Setenv("NOMAD_TLS_SERVER_NAME", "nomad-vendor.example.test")
+	t.Setenv("NOMAD_SKIP_VERIFY", "false")
+	t.Setenv("CRABBOX_NOMAD_ADDR", "https://nomad-env.example.test:4646")
+	t.Setenv("CRABBOX_NOMAD_REGION", "env-region")
+	t.Setenv("CRABBOX_NOMAD_NAMESPACE", "env-namespace")
+	t.Setenv("CRABBOX_NOMAD_TOKEN_ENV", "ENV_NOMAD_TOKEN")
+	t.Setenv("CRABBOX_NOMAD_CA_CERT", "/env/ca.pem")
+	t.Setenv("CRABBOX_NOMAD_CA_PATH", "/env/certs")
+	t.Setenv("CRABBOX_NOMAD_CLIENT_CERT", "/env/client.pem")
+	t.Setenv("CRABBOX_NOMAD_CLIENT_KEY", "/env/client.key")
+	t.Setenv("CRABBOX_NOMAD_TLS_SERVER_NAME", "nomad-env.example.test")
+	t.Setenv("CRABBOX_NOMAD_SKIP_VERIFY", "true")
+	t.Setenv("CRABBOX_NOMAD_TASK", "env-task")
+	t.Setenv("CRABBOX_NOMAD_DRIVER", "docker")
+	t.Setenv("CRABBOX_NOMAD_IMAGE", "env-image:latest")
+	t.Setenv("CRABBOX_NOMAD_WORKDIR", "/workspace/env")
+	t.Setenv("CRABBOX_NOMAD_JOBSPEC_TEMPLATE", "/env/job.hcl")
+	t.Setenv("CRABBOX_NOMAD_NODE_POOL", "env-pool")
+	t.Setenv("CRABBOX_NOMAD_DATACENTERS", "dc3,dc4")
+	t.Setenv("CRABBOX_NOMAD_CPU", "750")
+	t.Setenv("CRABBOX_NOMAD_MEMORY_MB", "1536")
+	t.Setenv("CRABBOX_NOMAD_DISK_MB", "3072")
+	t.Setenv("CRABBOX_NOMAD_ALLOC_READY_TIMEOUT", "4m")
+	t.Setenv("CRABBOX_NOMAD_EVAL_TIMEOUT", "5m")
+	t.Setenv("CRABBOX_NOMAD_EXEC_TIMEOUT_SECS", "60")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Nomad.Address != "https://nomad-env.example.test:4646" ||
+		cfg.Nomad.Region != "env-region" ||
+		cfg.Nomad.Namespace != "env-namespace" ||
+		cfg.Nomad.TokenEnv != "ENV_NOMAD_TOKEN" ||
+		cfg.Nomad.CACert != "/env/ca.pem" ||
+		cfg.Nomad.CAPath != "/env/certs" ||
+		cfg.Nomad.ClientCert != "/env/client.pem" ||
+		cfg.Nomad.ClientKey != "/env/client.key" ||
+		cfg.Nomad.TLSServerName != "nomad-env.example.test" ||
+		!cfg.Nomad.SkipVerify ||
+		cfg.Nomad.Task != "env-task" ||
+		cfg.Nomad.Driver != "docker" ||
+		cfg.Nomad.Image != "env-image:latest" ||
+		cfg.Nomad.Workdir != "/workspace/env" ||
+		cfg.Nomad.JobSpecTemplate != "/env/job.hcl" ||
+		cfg.Nomad.NodePool != "env-pool" ||
+		!reflect.DeepEqual(cfg.Nomad.Datacenters, []string{"dc3", "dc4"}) ||
+		cfg.Nomad.CPU != 750 ||
+		cfg.Nomad.MemoryMB != 1536 ||
+		cfg.Nomad.DiskMB != 3072 ||
+		cfg.Nomad.AllocReadyTimeout != 4*time.Minute ||
+		cfg.Nomad.EvalTimeout != 5*time.Minute ||
+		cfg.Nomad.ExecTimeoutSecs != 60 {
+		t.Fatalf("env cfg.Nomad=%#v", cfg.Nomad)
 	}
 }
 

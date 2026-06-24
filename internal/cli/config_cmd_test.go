@@ -679,6 +679,95 @@ func TestConfigShowIncludesBlaxelWithoutSecret(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesNomadWithoutSecret(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("NOMAD_TOKEN", "nomad-secret-token")
+	t.Setenv("CRABBOX_NOMAD_DATACENTERS", "dc1,dc2")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"nomad:",
+		"  address: https://user:pass@nomad.example.test:4646",
+		"  region: global",
+		"  namespace: team-a",
+		"  task: test-task",
+		"  driver: docker",
+		"  image: ubuntu:24.04",
+		"  workdir: /workspace/test",
+		"  nodePool: pool-a",
+		"  datacenters: [dc1, dc2]",
+		"  cpu: 500",
+		"  memoryMB: 1024",
+		"  diskMB: 2048",
+		"  allocReadyTimeout: 2m",
+		"  evalTimeout: 3m",
+		"  execTimeoutSecs: 45",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "nomad address=https://<redacted>@nomad.example.test:4646 region=global namespace=team-a auth_env=default auth=env") {
+		t.Fatalf("config show missing nomad summary: %q", text)
+	}
+	for _, secret := range []string{"nomad-secret-token", "user:pass"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("config show leaked Nomad secret %q: %q", secret, text)
+		}
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Nomad struct {
+			Address           string   `json:"address"`
+			Auth              string   `json:"auth"`
+			TokenEnv          string   `json:"tokenEnv"`
+			Region            string   `json:"region"`
+			Namespace         string   `json:"namespace"`
+			Datacenters       []string `json:"datacenters"`
+			CPU               int      `json:"cpu"`
+			MemoryMB          int      `json:"memoryMB"`
+			DiskMB            int      `json:"diskMB"`
+			AllocReadyTimeout string   `json:"allocReadyTimeout"`
+			EvalTimeout       string   `json:"evalTimeout"`
+			ExecTimeoutSecs   int      `json:"execTimeoutSecs"`
+		} `json:"nomad"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Nomad.Address != "https://<redacted>@nomad.example.test:4646" ||
+		got.Nomad.Auth != "env" ||
+		got.Nomad.TokenEnv != "NOMAD_TOKEN" ||
+		got.Nomad.Region != "global" ||
+		got.Nomad.Namespace != "team-a" ||
+		strings.Join(got.Nomad.Datacenters, ",") != "dc1,dc2" ||
+		got.Nomad.CPU != 500 ||
+		got.Nomad.MemoryMB != 1024 ||
+		got.Nomad.DiskMB != 2048 ||
+		got.Nomad.AllocReadyTimeout != "2m0s" ||
+		got.Nomad.EvalTimeout != "3m0s" ||
+		got.Nomad.ExecTimeoutSecs != 45 {
+		t.Fatalf("unexpected nomad json: %#v", got.Nomad)
+	}
+	for _, secret := range []string{"nomad-secret-token", "user:pass"} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("config show json leaked Nomad secret %q: %q", secret, stdout.String())
+		}
+	}
+}
+
 func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
