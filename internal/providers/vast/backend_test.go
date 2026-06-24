@@ -44,6 +44,7 @@ type fakeVastAPI struct {
 		id    int
 		keyID string
 	}
+	events []string
 	nextID int
 }
 
@@ -133,6 +134,7 @@ func (f *fakeVastAPI) ManageInstance(_ context.Context, id int, input vastManage
 
 func (f *fakeVastAPI) DestroyInstance(_ context.Context, id int) error {
 	f.destroyed = append(f.destroyed, id)
+	f.events = append(f.events, "destroy:"+strconv.Itoa(id))
 	if f.destroyErr != nil {
 		return f.destroyErr
 	}
@@ -166,6 +168,7 @@ func (f *fakeVastAPI) DetachInstanceSSHKey(_ context.Context, id int, keyID stri
 		id    int
 		keyID string
 	}{id: id, keyID: keyID})
+	f.events = append(f.events, "detach:"+strconv.Itoa(id)+":"+keyID)
 	return f.detachErr
 }
 
@@ -394,6 +397,12 @@ func TestReleaseDestroysByDefaultAndRemovesClaim(t *testing.T) {
 	}
 	if len(api.destroyed) != 1 || api.destroyed[0] != 100 {
 		t.Fatalf("destroyed=%v", api.destroyed)
+	}
+	if len(api.detached) != 1 || api.detached[0].id != 100 || api.detached[0].keyID != "key-100" {
+		t.Fatalf("detached=%v", api.detached)
+	}
+	if got, want := strings.Join(api.events, ","), "detach:100:key-100,destroy:100"; got != want {
+		t.Fatalf("events=%q want %q", got, want)
 	}
 	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("destroy-me", providerName); claimErr != nil || ok {
 		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
