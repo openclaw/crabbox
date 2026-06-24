@@ -295,6 +295,30 @@ def test_acquire_removes_state_when_sbatch_rejects_before_job_id(
     assert not adapter.job_dir(LEASE_ID).exists()
 
 
+def test_acquire_missing_runner_leaves_no_state(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm, tmp_path: Path
+) -> None:
+    missing_runner = tmp_path / "missing-runner.sh"
+
+    with pytest.raises(slurm_cbx.AdapterError) as excinfo:
+        adapter.handle(acquire_request(config={"runnerScript": str(missing_runner)}))
+
+    assert "runner script does not exist" in str(excinfo.value)
+    assert "sbatch" not in fake_slurm.names()
+    assert not adapter.job_dir(LEASE_ID).exists()
+
+
+def test_acquire_invalid_sbatch_args_leave_no_state(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
+) -> None:
+    with pytest.raises(slurm_cbx.AdapterError) as excinfo:
+        adapter.handle(acquire_request(config={"extraSbatchArgs": [123]}))
+
+    assert "extraSbatchArgs must be a string array" in str(excinfo.value)
+    assert "sbatch" not in fake_slurm.names()
+    assert not adapter.job_dir(LEASE_ID).exists()
+
+
 def test_acquire_keeps_state_when_sbatch_rejects_and_keep_set(
     adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
 ) -> None:
