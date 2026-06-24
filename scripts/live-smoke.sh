@@ -458,6 +458,203 @@ coder_smoke() {
   run_in_repo "$cb" cleanup --provider coder --dry-run
 }
 
+sealos_config_value() {
+  local env_name="$1"
+  local config_key="$2"
+  local default_value="${3:-}"
+  local value="${!env_name:-}"
+  if [[ -z "$value" ]]; then
+    value="$(config_value "sealosDevbox.$config_key" || true)"
+  fi
+  printf '%s' "${value:-$default_value}"
+}
+
+sealos_expand_home_path() {
+  local value="$1"
+  if [[ "$value" == "~" ]]; then
+    printf '%s' "$HOME"
+  elif [[ "$value" == "~/"* ]]; then
+    printf '%s/%s' "$HOME" "${value:2}"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+sealos_has_kubeconfig() {
+  local kubeconfig="$1"
+  if [[ -n "$kubeconfig" ]]; then
+    [[ -r "$(sealos_expand_home_path "$kubeconfig")" ]]
+    return
+  fi
+  if [[ -n "${KUBECONFIG:-}" ]]; then
+    return 0
+  fi
+  [[ -r "$HOME/.kube/config" ]]
+}
+
+sealos_blocked() {
+  local reason="$1"
+  shift || true
+  printf 'classification=environment_blocked reason=%s provider=sealos-devbox' "$reason"
+  if [[ "$#" -gt 0 ]]; then
+    printf ' %s' "$*"
+  fi
+  printf '\n'
+}
+
+sealos_smoke() {
+  need_tool jq
+  need_tool rg
+
+  local kubectl
+  local kubeconfig
+  local context
+  local namespace
+  local image
+  local template_id
+  local network
+  local ssh_gateway_host
+  local ssh_gateway_port
+  local node_host
+  local kubectl_path
+  kubectl="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_KUBECTL kubectl kubectl)"
+  kubectl_path="$(sealos_expand_home_path "$kubectl")"
+  kubeconfig="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_KUBECONFIG kubeconfig)"
+  context="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_CONTEXT context)"
+  namespace="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_NAMESPACE namespace default)"
+  image="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_IMAGE image)"
+  template_id="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_TEMPLATE_ID templateID)"
+  network="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_NETWORK network SSHGate)"
+  ssh_gateway_host="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST sshGatewayHost)"
+  ssh_gateway_port="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_PORT sshGatewayPort 2222)"
+  node_host="$(sealos_config_value CRABBOX_SEALOS_DEVBOX_NODE_HOST nodeHost)"
+
+  if ! command -v "$kubectl_path" >/dev/null 2>&1; then
+    sealos_blocked missing_kubectl "kubectl=$kubectl_path"
+    return 0
+  fi
+  if ! sealos_has_kubeconfig "$kubeconfig"; then
+    sealos_blocked missing_kubeconfig
+    return 0
+  fi
+  if [[ -z "$context" ]]; then
+    sealos_blocked missing_context
+    return 0
+  fi
+  if [[ -z "$namespace" ]]; then
+    sealos_blocked missing_namespace
+    return 0
+  fi
+  if [[ -z "$image" && -z "$template_id" ]]; then
+    sealos_blocked missing_image_or_template
+    return 0
+  fi
+  local normalized_network
+  normalized_network="$(printf '%s' "$network" | tr '[:upper:]' '[:lower:]')"
+  case "$normalized_network" in
+    sshgate|ssh-gate|ssh_gate)
+      if [[ -z "$ssh_gateway_host" ]]; then
+        sealos_blocked missing_ssh_gateway_host
+        return 0
+      fi
+      ;;
+    nodeport|node-port|node_port)
+      if [[ -z "$node_host" ]]; then
+        sealos_blocked missing_node_host
+        return 0
+      fi
+      ;;
+    *)
+      sealos_blocked invalid_network "network=$network"
+      return 0
+      ;;
+  esac
+
+  local route_args=(--provider sealos-devbox)
+  route_args+=(--sealos-devbox-kubectl "$kubectl_path")
+  if [[ -n "$kubeconfig" ]]; then
+    route_args+=(--sealos-devbox-kubeconfig "$kubeconfig")
+  fi
+  route_args+=(--sealos-devbox-context "$context")
+  route_args+=(--sealos-devbox-namespace "$namespace")
+  if [[ -n "$image" ]]; then
+    route_args+=(--sealos-devbox-image "$image")
+  fi
+  if [[ -n "$template_id" ]]; then
+    route_args+=(--sealos-devbox-template-id "$template_id")
+  fi
+  route_args+=(--sealos-devbox-network "$network")
+  if [[ -n "$ssh_gateway_host" ]]; then
+    route_args+=(--sealos-devbox-ssh-gateway-host "$ssh_gateway_host")
+  fi
+  if [[ -n "$ssh_gateway_port" ]]; then
+    route_args+=(--sealos-devbox-ssh-gateway-port "$ssh_gateway_port")
+  fi
+  if [[ -n "$node_host" ]]; then
+    route_args+=(--sealos-devbox-node-host "$node_host")
+  fi
+  route_args+=(--sealos-devbox-delete-on-release=false)
+
+  local doctor_json
+  if ! doctor_json="$(run_in_repo "$cb" doctor "${route_args[@]}" --json 2>&1)"; then
+    sealos_blocked doctor_failed
+    printf '%s\n' "$doctor_json"
+    return 0
+  fi
+  printf '%s\n' "$doctor_json"
+  if ! printf '%s\n' "$doctor_json" | jq -e '.status == "ready" or .ok == true' >/dev/null; then
+    sealos_blocked doctor_not_ready
+    return 0
+  fi
+  for check in create update delete; do
+    if ! printf '%s\n' "$doctor_json" | jq -e --arg check "rbac.${check}.devboxes" '.checks[]? | select(.check == $check and .status == "ok")' >/dev/null; then
+      sealos_blocked "missing_rbac_${check}_devboxes"
+      return 0
+    fi
+  done
+
+  run_in_repo "$cb" cleanup "${route_args[@]}" --dry-run
+
+  local lease=""
+  local slug=""
+  local smoke_slug="${CRABBOX_LIVE_SEALOS_DEVBOX_SLUG:-sealos-devbox-smoke-$$}"
+  cleanup() {
+    trap - RETURN ERR
+    if [[ -n "$lease" ]]; then
+      if [[ -n "$slug" ]]; then
+        run_in_repo "$cb" stop "${route_args[@]}" "$slug" || run_in_repo "$cb" stop "${route_args[@]}" "$lease" || true
+      else
+        run_in_repo "$cb" stop "${route_args[@]}" "$lease" || true
+      fi
+      lease=""
+      slug=""
+    fi
+  }
+  trap cleanup RETURN ERR
+
+  local out
+  log_step "sealos-devbox warmup slug=$smoke_slug"
+  capture_run_live out run_in_repo "$cb" warmup "${route_args[@]}" --keep --slug "$smoke_slug" --ttl "${CRABBOX_LIVE_SEALOS_DEVBOX_TTL:-15m}" --idle-timeout "${CRABBOX_LIVE_SEALOS_DEVBOX_IDLE_TIMEOUT:-5m}" --timing-json
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  run_in_repo "$cb" status "${route_args[@]}" --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_SEALOS_DEVBOX_WAIT_TIMEOUT:-5m}" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  run_in_repo "$cb" ssh "${route_args[@]}" --id "$slug"
+  local runout
+  capture_run_live runout run_in_repo "$cb" run "${route_args[@]}" --id "$slug" --shell -- "$live_command"
+  local runid
+  runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
+  if [[ -n "$runid" ]]; then
+    run_in_repo "$cb" logs "$runid" | tail -80
+  fi
+  run_in_repo "$cb" stop "${route_args[@]}" "$slug" || run_in_repo "$cb" stop "${route_args[@]}" "$lease"
+  lease=""
+  run_in_repo "$cb" status "${route_args[@]}" --id "$slug" --json | jq '{id,slug,provider,state,ready,host}'
+  run_in_repo "$cb" cleanup "${route_args[@]}" --dry-run
+}
+
 daytona_smoke() {
   need_tool jq
 
@@ -1064,6 +1261,10 @@ fi
 
 if has_provider coder; then
   coder_smoke
+fi
+
+if has_provider sealos-devbox || has_provider sealos; then
+  sealos_smoke
 fi
 
 if has_provider daytona; then

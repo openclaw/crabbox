@@ -1,24 +1,41 @@
 # Sealos DevBox Provider
 
-`provider: sealos-devbox` is the foundation for a direct Linux SSH-lease
-provider backed by Sealos DevBox. This phase registers the provider, wires its
-typed CLI/config surface, and adds a read-only doctor. Creating, resolving,
-stopping, deleting, SSH target construction, and cleanup are intentionally
-deferred to later implementation phases.
+`provider: sealos-devbox` provisions or reuses Sealos DevBox resources as
+direct Linux SSH leases. Crabbox owns the DevBox lifecycle through the
+`devbox.sealos.io/v1alpha2` Kubernetes CRD, waits for the Sealos SSH route,
+then uses the normal SSH sync, run, status, stop, and cleanup paths.
 
-## Automation Surface Decision
+Sealos DevBox is direct-only. It never routes through the Crabbox coordinator.
+The operator's local Kubernetes credentials, RBAC, Sealos SSHGateway, quota, and
+DevBox templates remain under Sealos and cluster control.
 
-Decision: `crd_first`.
+## Requirements
 
-The local Sealos source evidence exposes `devbox.sealos.io/v1alpha2` Devbox
-CRDs with `Running`, `Paused`, `Stopped`, and `Shutdown` states, plus
-`SSHGate` and `NodePort` network modes. The Sealos SSHGate source watches
-Devbox Secrets and Pods labeled as DevBox resources and routes SSH by public
-key. Current public docs emphasize dashboard and IDE/plugin flows, so mutating
-lifecycle code must continue to validate the CRD contract before it creates or
-updates live DevBoxes.
+- `kubectl` installed and on `PATH`, or configured with
+  `sealosDevbox.kubectl`.
+- A Kubernetes context that can read the configured namespace and the
+  `devboxes.devbox.sealos.io` CRD.
+- RBAC to get/list DevBoxes, Secrets, Pods, and Events.
+- RBAC to create, update, and delete DevBoxes when running `warmup`, `run`,
+  `stop`, or non-dry-run `cleanup`.
+- Either `sealosDevbox.image` or `sealosDevbox.templateID`.
+- A Sealos DevBox image or template with OpenSSH, `git`, `rsync`, and `tar`.
+- For `network: SSHGate`, a reachable Sealos SSHGateway host and port.
+- For `network: NodePort`, `sealosDevbox.nodeHost` and a DevBox status shape
+  that exposes an SSH NodePort.
 
-## Configuration
+Run the read-only preflight before creating resources:
+
+```sh
+crabbox doctor --provider sealos-devbox
+crabbox doctor --provider sealos-devbox --json
+```
+
+Doctor checks local `kubectl`, context, namespace, CRD availability, read RBAC,
+mutating RBAC through `kubectl auth can-i`, and route configuration. It does
+not create, patch, stop, delete, or read Secret data.
+
+## Config
 
 ```yaml
 provider: sealos-devbox
@@ -28,7 +45,7 @@ sealosDevbox:
   kubeconfig: ""
   context: sealos
   namespace: default
-  image: ""
+  image: ubuntu:24.04
   templateID: ""
   cpu: "2"
   memory: 4Gi
@@ -42,7 +59,7 @@ sealosDevbox:
   deleteOnRelease: false
 ```
 
-Environment overrides use `CRABBOX_SEALOS_DEVBOX_*`:
+Environment overrides:
 
 ```text
 CRABBOX_SEALOS_DEVBOX_KUBECTL
@@ -63,83 +80,142 @@ CRABBOX_SEALOS_DEVBOX_NODE_HOST
 CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE
 ```
 
-Flags use the `--sealos-devbox-*` prefix with the same field names. Local path
-expansion applies only to host-side path fields such as `kubectl` and
-`kubeconfig`; `workRoot` is a guest path and is not shell-expanded.
+Flags use the `--sealos-devbox-*` prefix with the same field names, for
+example `--sealos-devbox-context`, `--sealos-devbox-template-id`, and
+`--sealos-devbox-delete-on-release`.
 
-## Doctor
+Local path expansion applies to host-side path fields such as `kubectl` and
+`kubeconfig`. `workRoot` is a guest path and is not shell-expanded.
 
-Run:
+## Lifecycle
+
+`warmup` and one-shot `run` create a Crabbox-owned DevBox CR in the configured
+namespace. The generated manifest sets `spec.state: Running`, resource size,
+image or template ID, storage limit, network mode, SSH user, workdir, and an SSH
+port entry. Crabbox adds deterministic labels and annotations for the provider,
+lease ID, slug, namespace, route scope, TTL, idle timeout, timestamps, and
+release policy.
 
 ```sh
-crabbox doctor --provider sealos-devbox
-crabbox doctor --provider sealos-devbox --json
+crabbox warmup --provider sealos-devbox --slug sealos-smoke --keep
+crabbox run --provider sealos-devbox --id sealos-smoke -- go test ./...
+crabbox status --provider sealos-devbox --id sealos-smoke --json
+crabbox ssh --provider sealos-devbox --id sealos-smoke
+crabbox stop --provider sealos-devbox sealos-smoke
+crabbox cleanup --provider sealos-devbox --dry-run
 ```
 
-Doctor is read-only. It checks:
+Crabbox can resolve a Sealos lease by Crabbox lease ID, slug, or DevBox name
+when it uniquely matches the current kubeconfig/context/namespace/route scope.
+The same slug can exist safely in different Sealos environments because local
+claims include that scope.
 
-- local `kubectl` client availability;
-- configured context and namespace readability;
-- the Devbox CRD;
-- read/list permissions for DevBoxes, Secrets, Pods, and Events;
-- create/update/delete capability only through `kubectl auth can-i` dry
-  permission checks;
-- `SSHGate` host/port or `NodePort` node host configuration.
+Status and list operations are read-only. They normalize Sealos states such as
+`Running`, `Pending`, `Paused`, `Stopped`, `Shutdown`, and `Error`, include
+recent diagnostics when available, and do not read Secret private-key data.
+Commands that need SSH, such as `run` and `ssh`, resolve the live DevBox,
+refresh the route and key, wait for SSH, and then enter the normal Crabbox SSH
+runner.
 
-Doctor never creates, updates, patches, stops, deletes, or reads Secret data.
-Kubeconfig contents, tokens, Secret data, and private keys must not be printed.
+## SSH
 
-## Lifecycle Foundation
+`SSHGate` is the default and recommended network mode when the Sealos
+deployment exposes it:
 
-The CRD-first lifecycle path creates Crabbox-owned `devbox.sealos.io/v1alpha2`
-Devbox resources with deterministic labels and annotations for the lease ID,
-slug, provider, provider scope, namespace/name, timestamps, TTL, idle timeout,
-and configured network route. Local claims are scoped by Kubernetes identity
-and the selected route (`SSHGate` gateway host/port or `NodePort` node host), so
-the same slug can be reused safely across different Sealos clusters,
-namespaces, contexts, or routes.
+```text
+Host: sealosDevbox.sshGatewayHost
+Port: sealosDevbox.sshGatewayPort
+User: sealosDevbox.sshUser
+IdentityFile: Crabbox local per-lease key path
+```
 
-`status` and `list` inspect Devbox resources and normalize Sealos lifecycle
-states such as `Running`, `Pending`, `Paused`, `Stopped`, `Shutdown`, and
-`Error` without starting, patching, deleting, or reading Secret key data.
-Diagnostic text includes phase, conditions, and recent events when available,
-with sensitive-looking values redacted.
+Crabbox uses Sealos' public-key SSHGateway routing. It does not document or rely
+on username-encoded SSHGateway routing as complete. That route remains a
+separate proof gate for a future change.
 
-When Sealos publishes the owned SSH Secret, Crabbox reads
-`SEALOS_DEVBOX_PUBLIC_KEY` and `SEALOS_DEVBOX_PRIVATE_KEY`, writes the private
-key to the normal per-lease local key store with restrictive permissions, and
-keeps key material out of command arguments, logs, claim JSON, and status
-output.
+`NodePort` is available as a fallback when `sealosDevbox.nodeHost` is
+configured and the DevBox status exposes an SSH NodePort. Tailnet is visible in
+Sealos source material but is not implemented or documented as a Crabbox
+`sealos-devbox` route.
 
-## SSH, Release, and Cleanup
+The ready check verifies `git`, `rsync`, and `tar` on the remote host before
+Crabbox syncs or runs project commands.
 
-Crabbox returns a normal Linux SSH lease for `sealos-devbox`, so existing
-`crabbox run`, `crabbox ssh`, `crabbox status --json`, `crabbox stop`, and
-`crabbox cleanup --dry-run` behavior stays provider-neutral after the adapter
-has resolved a DevBox.
+## Secrets
 
-`SSHGate` is the default network mode. Crabbox connects to
-`sealosDevbox.sshGatewayHost:sealosDevbox.sshGatewayPort` as
-`sealosDevbox.sshUser` using the Sealos-managed DevBox private key stored in
-Crabbox's local per-lease key path. This relies on SSHGate public-key routing;
-username-encoded SSHGate routing is not the default. `NodePort` is available
-as a fallback mode when `sealosDevbox.nodeHost` is configured and Sealos
-reports an SSH NodePort in the DevBox status.
+Crabbox never accepts Sealos tokens on argv and should not store kubeconfig
+contents, tokens, Secret data, or private keys in repository config.
 
-Before handing a lease to the normal SSH runner, Crabbox waits for SSH and
-verifies `git`, `rsync`, and `tar` on the remote host. `status --json` may show
-the configured route without probing SSH or reading Secret data.
+When Sealos publishes the DevBox Secret, Crabbox reads only the key fields it
+needs, writes the private key to the normal per-lease local key store with
+restrictive permissions, and keeps key material out of command arguments, logs,
+claims, and status output. `status --json` may show the local key path category
+for the current lease, but it does not print key contents.
 
-`crabbox stop` retains a DevBox by patching its Sealos state to `Paused`,
-clearing the live SSH endpoint from the local claim, and keeping the local
-claim so the lease can be resolved later. When
-`sealosDevbox.deleteOnRelease: true` or `--sealos-devbox-delete-on-release` is
-set, release validates the DevBox identity, marks it for shutdown, deletes the
-DevBox CR, and removes the matching local claim and generated key.
+## Release And Cleanup
 
-`crabbox cleanup --provider sealos-devbox --dry-run` lists only Crabbox-owned
-DevBoxes in the active kubeconfig/context/namespace/route scope and prints the
-candidate or skip reason without mutating resources. Non-dry-run cleanup
-revalidates identity immediately before deleting an expired owned DevBox and
-removes stale local claims only after a refreshed inventory proves the DevBox
-is absent in the active scope.
+By default, `crabbox stop` retains the DevBox by patching the Sealos state to
+`Paused`, clearing the live SSH endpoint from the local claim, and keeping the
+claim so the lease can be resolved later.
+
+Set `sealosDevbox.deleteOnRelease: true` or pass
+`--sealos-devbox-delete-on-release` when the DevBox should be disposable. In
+that mode, release validates the live DevBox identity, marks it for shutdown,
+deletes the DevBox CR, and removes the matching local claim and generated key.
+
+Cleanup is scope-safe:
+
+- dry-run cleanup prints only Crabbox-owned candidates in the active
+  kubeconfig/context/namespace/route scope;
+- resources outside the active provider scope are skipped with a reason;
+- non-dry-run cleanup revalidates identity immediately before deleting;
+- stale local claims are removed only after a refreshed inventory proves the
+  DevBox is absent in the active scope.
+
+## Live Smoke
+
+Run live smoke only in a Sealos environment where it is safe to create and stop
+a short-lived DevBox:
+
+```sh
+CRABBOX_LIVE=1 \
+CRABBOX_LIVE_COORDINATOR=0 \
+CRABBOX_LIVE_PROVIDERS=sealos-devbox \
+CRABBOX_SEALOS_DEVBOX_CONTEXT=sealos \
+CRABBOX_SEALOS_DEVBOX_NAMESPACE=default \
+CRABBOX_SEALOS_DEVBOX_IMAGE=ubuntu:24.04 \
+CRABBOX_SEALOS_DEVBOX_SSH_GATEWAY_HOST=ssh.sealos.example.com \
+scripts/live-smoke.sh
+```
+
+For `NodePort`, set `CRABBOX_SEALOS_DEVBOX_NETWORK=NodePort` and
+`CRABBOX_SEALOS_DEVBOX_NODE_HOST=<node-host>` instead of the SSHGateway host.
+
+The shared smoke refuses to mutate Sealos resources until local credentials,
+context, namespace, image or template, RBAC, and route configuration are
+present. Missing setup is classified as `environment_blocked`, for example
+`missing_context`, `missing_image_or_template`, `missing_ssh_gateway_host`,
+`doctor_failed`, or `missing_rbac_create_devboxes`.
+
+When the prerequisites are present, the smoke runs `doctor`, dry-run cleanup,
+`warmup --keep`, `status --json`, `run`, rendered SSH command proof, `stop`,
+post-stop `status --json`, and final dry-run cleanup. Interactive shell proof
+for a PR should be collected separately in a `tmux` session by running
+`crabbox ssh --provider sealos-devbox --id <slug>` and recording a redacted pane
+log that reaches the shell and exits cleanly.
+
+## Troubleshooting
+
+- `sealos-devbox context is required`: set `sealosDevbox.context` or
+  `CRABBOX_SEALOS_DEVBOX_CONTEXT`; claims intentionally do not follow a
+  kubeconfig's mutable current context.
+- `sealos-devbox requires image or templateID`: set a DevBox image or template
+  ID before `warmup` or `run`.
+- `Sealos DevBox ... has no SSH NodePort in status.network`: use `SSHGate` or
+  confirm the Sealos deployment publishes SSH NodePort status for the DevBox.
+- SSH waits time out: run `doctor --provider sealos-devbox --json`, then inspect
+  DevBox phase, related Pod events, the route mode, and whether the selected
+  image/template includes OpenSSH, `git`, `rsync`, and `tar`.
+- Cleanup skips a DevBox as outside scope: rerun cleanup with the same
+  kubeconfig/context/namespace/network route that created the lease, or delete
+  the provider resource manually after verifying ownership.
