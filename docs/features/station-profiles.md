@@ -79,6 +79,7 @@ station:
   profiles:
     agent:
       enabled: true
+      agent: true
       command: scripts/agent-loop.sh
       ttl: 10h
       idleTimeout: 45m

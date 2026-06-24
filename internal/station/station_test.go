@@ -1,9 +1,13 @@
 package station
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestParseAgentProfile(t *testing.T) {
@@ -38,6 +42,28 @@ profiles:
 	}
 	if profile.RestartPolicy != RestartNever {
 		t.Fatalf("restartPolicy = %q", profile.RestartPolicy)
+	}
+}
+
+func TestRoadmapAgentProfileExampleIsAdmitted(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "features", "station-profiles.md"))
+	if err != nil {
+		t.Fatalf("read roadmap: %v", err)
+	}
+	sample, ok := fencedBlockAfter(string(doc), "## Agent Profile", "```yaml")
+	if !ok {
+		t.Fatalf("agent profile YAML sample missing from roadmap")
+	}
+	cfg, err := parseDocumentedStationSample(sample)
+	if err != nil {
+		t.Fatalf("Parse documented sample: %v", err)
+	}
+	profile, ok := cfg.Profiles["agent"]
+	if !ok {
+		t.Fatalf("documented sample did not define agent profile: %#v", cfg.Profiles)
+	}
+	if _, err := NewAgentProfile(DefaultGate().WithPhase(PhaseAgentProfile), profile); err != nil {
+		t.Fatalf("documented sample should be admitted as agent profile: %v", err)
 	}
 }
 
@@ -223,4 +249,39 @@ profiles:
 			}
 		})
 	}
+}
+
+func fencedBlockAfter(doc, heading, fence string) (string, bool) {
+	headingAt := strings.Index(doc, heading)
+	if headingAt < 0 {
+		return "", false
+	}
+	afterHeading := doc[headingAt+len(heading):]
+	fenceAt := strings.Index(afterHeading, fence)
+	if fenceAt < 0 {
+		return "", false
+	}
+	afterFence := afterHeading[fenceAt+len(fence):]
+	endAt := strings.Index(afterFence, "```")
+	if endAt < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(afterFence[:endAt]), true
+}
+
+func parseDocumentedStationSample(sample string) (Config, error) {
+	var root struct {
+		Station yaml.Node `yaml:"station"`
+	}
+	if err := yaml.Unmarshal([]byte(sample), &root); err != nil {
+		return Config{}, err
+	}
+	if root.Station.Kind == 0 {
+		return Parse([]byte(sample))
+	}
+	stationBlock, err := yaml.Marshal(&root.Station)
+	if err != nil {
+		return Config{}, err
+	}
+	return Parse(stationBlock)
 }
