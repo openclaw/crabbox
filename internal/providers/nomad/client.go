@@ -11,10 +11,16 @@ type Client interface {
 	AgentSelf(context.Context) (*nomadapi.AgentSelf, error)
 	Regions(context.Context) ([]string, error)
 	NamespaceInfo(context.Context, string) (*nomadapi.Namespace, error)
+	RegisterJob(context.Context, *nomadapi.Job) (string, error)
+	JobInfo(context.Context, string) (*nomadapi.Job, error)
+	JobAllocations(context.Context, string, bool) ([]*nomadapi.AllocationListStub, error)
+	EvaluationInfo(context.Context, string) (*nomadapi.Evaluation, error)
+	DeregisterJob(context.Context, string, bool) (string, error)
 }
 
 type liveClient struct {
 	client *nomadapi.Client
+	cfg    Config
 }
 
 func newNomadClient(cfg Config, rt Runtime) (Client, error) {
@@ -29,7 +35,7 @@ func newNomadClient(cfg Config, rt Runtime) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return liveClient{client: client}, nil
+	return liveClient{client: client, cfg: cfg}, nil
 }
 
 func newNomadAPIConfig(cfg Config, lookup func(string) string) (*nomadapi.Config, error) {
@@ -67,4 +73,49 @@ func (c liveClient) Regions(context.Context) ([]string, error) {
 func (c liveClient) NamespaceInfo(_ context.Context, namespace string) (*nomadapi.Namespace, error) {
 	ns, _, err := c.client.Namespaces().Info(namespace, nil)
 	return ns, err
+}
+
+func (c liveClient) RegisterJob(_ context.Context, job *nomadapi.Job) (string, error) {
+	resp, _, err := c.client.Jobs().Register(job, c.writeOptions())
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", nil
+	}
+	return resp.EvalID, nil
+}
+
+func (c liveClient) JobInfo(_ context.Context, jobID string) (*nomadapi.Job, error) {
+	job, _, err := c.client.Jobs().Info(jobID, c.queryOptions())
+	return job, err
+}
+
+func (c liveClient) JobAllocations(_ context.Context, jobID string, all bool) ([]*nomadapi.AllocationListStub, error) {
+	allocs, _, err := c.client.Jobs().Allocations(jobID, all, c.queryOptions())
+	return allocs, err
+}
+
+func (c liveClient) EvaluationInfo(_ context.Context, evalID string) (*nomadapi.Evaluation, error) {
+	eval, _, err := c.client.Evaluations().Info(evalID, c.queryOptions())
+	return eval, err
+}
+
+func (c liveClient) DeregisterJob(_ context.Context, jobID string, purge bool) (string, error) {
+	evalID, _, err := c.client.Jobs().Deregister(jobID, purge, c.writeOptions())
+	return evalID, err
+}
+
+func (c liveClient) queryOptions() *nomadapi.QueryOptions {
+	return &nomadapi.QueryOptions{
+		Region:    c.cfg.Nomad.Region,
+		Namespace: c.cfg.Nomad.Namespace,
+	}
+}
+
+func (c liveClient) writeOptions() *nomadapi.WriteOptions {
+	return &nomadapi.WriteOptions{
+		Region:    c.cfg.Nomad.Region,
+		Namespace: c.cfg.Nomad.Namespace,
+	}
 }

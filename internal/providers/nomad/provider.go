@@ -24,7 +24,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:      providerName,
 		Kind:        core.ProviderKindDelegatedRun,
 		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{},
+		Features:    core.FeatureSet{core.FeatureCleanup},
 		Coordinator: core.CoordinatorNever,
 	}
 }
