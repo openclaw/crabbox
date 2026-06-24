@@ -2,6 +2,7 @@ package agx
 
 import (
 	"context"
+	"flag"
 	"io"
 	"strings"
 	"testing"
@@ -78,6 +79,54 @@ func TestAGXRejectsUnsafeWorkRootBeforeBackend(t *testing.T) {
 	cfg := Config{AGX: AGXConfig{WorkRoot: "/tmp"}}
 	_, err := NewAGXBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestAGXRejectsUnsafeSSHDestinationParts(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace string
+		user      string
+		want      string
+	}{
+		{name: "option user", user: "-oProxyCommand=sh", want: "plain SSH login user"},
+		{name: "separator user", user: "root+prod", want: "may contain only letters"},
+		{name: "spaced user", user: "root prod", want: "must not contain whitespace"},
+		{name: "option workspace", workspace: "-oProxyCommand=sh", want: "must be a hostname"},
+		{name: "url workspace", workspace: "https://workspace.agx.so", want: "hostname only"},
+		{name: "userinfo workspace", workspace: "root@workspace.agx.so", want: "hostname only"},
+		{name: "port workspace", workspace: "workspace.agx.so:22", want: "hostname only"},
+		{name: "bad hostname", workspace: "workspace..agx.so", want: "valid hostname"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{AGX: AGXConfig{Workspace: tt.workspace, User: tt.user, WorkRoot: "/root/crabbox"}}
+			_, err := NewAGXBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err=%v want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestAGXAcceptsPlainSSHDestinationParts(t *testing.T) {
+	cfg := Config{AGX: AGXConfig{Workspace: "eu-1.workspace.agx.so", User: "agent_1", WorkRoot: "/root/crabbox"}}
+	if _, err := NewAGXBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}); err != nil {
+		t.Fatalf("backend rejected plain AGX destination parts: %v", err)
+	}
+}
+
+func TestApplyAGXProviderFlagsValidatesFlagValues(t *testing.T) {
+	fs := flag.NewFlagSet("agx", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := RegisterAGXProviderFlags(fs, Config{AGX: AGXConfig{WorkRoot: "/root/crabbox"}})
+	if err := fs.Parse([]string{"--agx-user=-oProxyCommand=sh", "--agx-workspace", "workspace.agx.so"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Provider: agxProvider, AGX: AGXConfig{WorkRoot: "/root/crabbox"}}
+	err := ApplyAGXProviderFlags(&cfg, fs, values)
+	if err == nil || !strings.Contains(err.Error(), "plain SSH login user") {
 		t.Fatalf("err=%v", err)
 	}
 }

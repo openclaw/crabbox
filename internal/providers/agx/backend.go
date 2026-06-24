@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -26,6 +27,17 @@ func RegisterAGXProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyAGXProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+	if v, ok := values.(agxFlagValues); ok {
+		if flagWasSet(fs, "agx-workspace") {
+			cfg.AGX.Workspace = *v.Workspace
+		}
+		if flagWasSet(fs, "agx-user") {
+			cfg.AGX.User = *v.User
+		}
+		if flagWasSet(fs, "agx-work-root") {
+			cfg.AGX.WorkRoot = *v.WorkRoot
+		}
+	}
 	if cfg.Provider == agxProvider {
 		if flagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=agx")
@@ -39,19 +51,6 @@ func ApplyAGXProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		if err := validateAGXOptions(*cfg); err != nil {
 			return err
 		}
-	}
-	v, ok := values.(agxFlagValues)
-	if !ok {
-		return nil
-	}
-	if flagWasSet(fs, "agx-workspace") {
-		cfg.AGX.Workspace = *v.Workspace
-	}
-	if flagWasSet(fs, "agx-user") {
-		cfg.AGX.User = *v.User
-	}
-	if flagWasSet(fs, "agx-work-root") {
-		cfg.AGX.WorkRoot = *v.WorkRoot
 	}
 	return nil
 }
@@ -77,6 +76,12 @@ func validateAGXOptions(cfg Config) error {
 	}
 	if cfg.Network == core.NetworkTailscale {
 		return exit(2, "--network=tailscale is not supported for provider=agx; AGX exposes SSH through its workspace gateway")
+	}
+	if err := cleanAGXWorkspace(cfg.AGX.Workspace); err != nil {
+		return err
+	}
+	if err := cleanAGXUser(cfg.AGX.User); err != nil {
+		return err
 	}
 	if err := cleanAGXWorkRoot(cfg.AGX.WorkRoot); err != nil {
 		return err
@@ -308,4 +313,81 @@ func cleanAGXWorkRoot(workRoot string) error {
 		return exit(2, "agx.workRoot %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return nil
+}
+
+func cleanAGXUser(user string) error {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return nil
+	}
+	if strings.HasPrefix(user, "-") {
+		return exit(2, "agx.user %q must be a plain SSH login user, not an ssh option", user)
+	}
+	for _, r := range user {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return exit(2, "agx.user %q must not contain whitespace or control characters", user)
+		}
+		if !isAGXUserRune(r) {
+			return exit(2, "agx.user %q may contain only letters, numbers, '.', '_', and '-'", user)
+		}
+	}
+	return nil
+}
+
+func isAGXUserRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') ||
+		r == '.' ||
+		r == '_' ||
+		r == '-'
+}
+
+func cleanAGXWorkspace(workspace string) error {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return nil
+	}
+	if strings.HasPrefix(workspace, "-") {
+		return exit(2, "agx.workspace %q must be a hostname, not an ssh option", workspace)
+	}
+	if strings.Contains(workspace, "://") ||
+		strings.ContainsAny(workspace, "/\\@:") ||
+		containsSpaceOrControl(workspace) {
+		return exit(2, "agx.workspace %q must be a hostname only, without scheme, port, path, userinfo, or whitespace", workspace)
+	}
+	if len(workspace) > 253 {
+		return exit(2, "agx.workspace %q is too long to be a hostname", workspace)
+	}
+	labels := strings.Split(workspace, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 {
+			return exit(2, "agx.workspace %q must be a valid hostname", workspace)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return exit(2, "agx.workspace %q must be a valid hostname", workspace)
+		}
+		for _, r := range label {
+			if !isAGXHostnameRune(r) {
+				return exit(2, "agx.workspace %q must be a valid hostname", workspace)
+			}
+		}
+	}
+	return nil
+}
+
+func isAGXHostnameRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9') ||
+		r == '-'
+}
+
+func containsSpaceOrControl(value string) bool {
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }

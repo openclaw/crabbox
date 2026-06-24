@@ -93,6 +93,12 @@ The work root must be a dedicated absolute path; broad roots such as `/`,
 `/home`, `/root`, `/tmp`, `/etc`, `/usr`, `/var`, and similar system directories
 are rejected before sync.
 
+The workspace must be a bare hostname, not a URL or SSH destination. Do not
+include a scheme, port, path, userinfo, or SSH option. The user must be a plain
+login name containing only letters, numbers, `.`, `_`, and `-`; Crabbox rejects
+values that could be interpreted as SSH options or that would corrupt the
+`<user>+<instance>@<workspace>` gateway address.
+
 ## Commands
 
 ```sh
