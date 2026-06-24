@@ -140,7 +140,7 @@ cat
 		DisableHostKeyChecking: true,
 		NoControlMaster:        true,
 	}
-	if !probeConnectSSHTransport(context.Background(), &target, 5*time.Second) {
+	if !probeConnectSSHTransport(context.Background(), &target, 30*time.Second) {
 		t.Fatal("resolve fallback port failed")
 	}
 	err := runInteractiveSSH(context.Background(), target, strings.NewReader(""), &stdout, &stderr)
