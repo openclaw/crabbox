@@ -119,7 +119,8 @@ final class AppSettings: ObservableObject {
         // 1. Primary: crabbox.sh coordinator, identified only by a session token.
         if let token = crabboxToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !token.isEmpty,
-           let provisioner = CoordinatorProvisioner(coordinatorURL: coordinatorURL, token: token) {
+           let normalizedCoordinator = normalizeCoordinatorURL(coordinatorURL),
+           let provisioner = CoordinatorProvisioner(coordinatorURL: normalizedCoordinator, token: token) {
             return provisioner
         }
 
@@ -127,7 +128,8 @@ final class AppSettings: ObservableObject {
         if isloEnabled,
            let key = isloKey?.trimmingCharacters(in: .whitespacesAndNewlines),
            !key.isEmpty,
-           let provisioner = IsloProvisioner(apiKey: key, baseURL: isloBaseURL) {
+           let normalizedIslo = normalizeCredentialEndpointURL(isloBaseURL),
+           let provisioner = IsloProvisioner(apiKey: key, baseURL: normalizedIslo) {
             return provisioner
         }
 

@@ -13,6 +13,12 @@ public let defaultCoordinatorURL = "https://crabbox.sh"
 ///
 /// Returns `nil` for anything that is not an acceptable coordinator URL.
 public func normalizeCoordinatorURL(_ value: String, allowLocalHTTP: Bool = false) -> String? {
+    normalizeCredentialEndpointURL(value, allowLocalHTTP: allowLocalHTTP)
+}
+
+/// Normalizes a credential-bearing HTTP API endpoint before any client attaches
+/// bearer tokens, session tokens, or API keys.
+public func normalizeCredentialEndpointURL(_ value: String, allowLocalHTTP: Bool = false) -> String? {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty { return nil }
 

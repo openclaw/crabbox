@@ -93,9 +93,9 @@ public struct IsloProvisioner: SandboxProvisioner {
 
 // MARK: - crabbox.sh (coordinator) provisioner — primary
 
-/// The primary provisioner: drives the crabbox coordinator (crabbox.sh) `/v1`
-/// API, which owns provider credentials and lease state. The phone holds only a
-/// crabbox session token, never raw provider keys.
+/// The primary provisioner: holds a crabbox.sh session token only. Coordinator
+/// workspace APIs are supported by `CoordinatorClient`; sandbox lifecycle is
+/// intentionally fail-closed until crabbox.sh exposes a supported endpoint for it.
 public struct CoordinatorProvisioner: SandboxProvisioner {
     public let providerName = "crabbox.sh"
     private let client: CoordinatorClient
@@ -108,15 +108,15 @@ public struct CoordinatorProvisioner: SandboxProvisioner {
     }
 
     public func launch(name: String, model: String) async throws -> SandboxHandle {
-        try await client.launchLLMSandbox(name: name, model: model)
+        throw LLMError.unavailable("crabbox.sh sandbox lifecycle is not supported by the current coordinator API; use workspaces or enable islo.dev direct")
     }
 
     public func list() async throws -> [SandboxHandle] {
-        try await client.listSandboxes()
+        throw LLMError.unavailable("crabbox.sh sandbox lifecycle is not supported by the current coordinator API; use workspaces or enable islo.dev direct")
     }
 
     public func stop(id: String) async throws {
-        try await client.stopSandbox(id: id)
+        throw LLMError.unavailable("crabbox.sh sandbox lifecycle is not supported by the current coordinator API; use workspaces or enable islo.dev direct")
     }
 
     public func pause(id: String) async throws {

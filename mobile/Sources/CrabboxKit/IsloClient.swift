@@ -64,9 +64,11 @@ public actor IsloClient {
     private var tokenExpiry: Date?
 
     public init?(apiKey: String, baseURL: String = "https://api.islo.dev", timeout: TimeInterval = 120) {
-        guard !apiKey.isEmpty, let url = URL(string: baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL)
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let normalized = normalizeCredentialEndpointURL(baseURL),
+              let url = URL(string: normalized)
         else { return nil }
-        self.apiKey = apiKey
+        self.apiKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         self.baseURL = url
         self.timeout = timeout
     }
@@ -269,20 +271,22 @@ public actor IsloClient {
     }
 }
 
-/// The script that turns a fresh Ubuntu islo sandbox into an Ollama LLM server
-/// the phone can chat with. Pulls a small model and serves on 0.0.0.0:11434.
+/// The script that starts an already-installed Ollama LLM server the phone can
+/// chat with. Direct mobile launches must use a maintained image that contains
+/// Ollama instead of downloading and executing a mutable root installer.
 public func isloOllamaBootstrapScript(model: String) -> String {
-    // Deliberately defensive: NO `set` flags and `|| true` on the installer, so
-    // the Ollama install script (which exits non-zero trying to reach systemd in
-    // a non-systemd sandbox) can't abort the serve/pull that follow. islo
-    // sandboxes run as root with no systemd; detached processes persist across
-    // exec calls, so we start Ollama bound to 0.0.0.0 with nohup+setsid.
-    """
-    export DEBIAN_FRONTEND=noninteractive
+    let quotedModel = shellSingleQuote(model)
+    return """
+    set -eu
+    model=\(quotedModel)
+
     if ! command -v ollama >/dev/null 2>&1; then
-      apt-get update -y || true
-      apt-get install -y curl ca-certificates procps zstd || true
-      curl -fsSL https://ollama.com/install.sh | sh || true
+      echo "BOOTSTRAP_FAILED missing_ollama use an islo image with Ollama preinstalled" >&2
+      exit 42
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "BOOTSTRAP_FAILED missing_curl use an islo image with curl preinstalled" >&2
+      exit 42
     fi
 
     pkill -f 'ollama serve' 2>/dev/null || true
@@ -294,17 +298,19 @@ public func isloOllamaBootstrapScript(model: String) -> String {
       sleep 1
     done
 
-    ollama pull \(model) || true
-    echo "BOOTSTRAP_DONE model=\(model) tags=$(curl -s http://127.0.0.1:11434/api/tags | head -c 120)"
+    ollama pull "$model"
+    tags=$(curl -s http://127.0.0.1:11434/api/tags | head -c 120 || true)
+    printf 'BOOTSTRAP_DONE model=%s tags=%s\n' "$model" "$tags"
     """
 }
 
+func shellSingleQuote(_ value: String) -> String {
+    "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+}
+
 /// Wraps a long-running script so it runs fully detached in the sandbox and the
-/// `exec` call returns immediately. islo's `/exec/stream` has a max duration, so
-/// a multi-minute bootstrap (apt + Ollama install + model pull) must NOT run in
-/// the foreground of an exec — it gets SIGTERM'd. We base64 the script (avoiding
-/// all quoting issues), decode it to a file, and launch it with nohup+setsid.
-/// Readiness is then polled separately (the detached job persists across execs).
+/// `exec` call returns immediately. Model pulls can exceed islo's `/exec/stream`
+/// duration, so readiness is polled separately while the detached job persists.
 public func isloDetachedLaunch(script: String) -> String {
     let b64 = Data(script.utf8).base64EncodedString()
     return """
