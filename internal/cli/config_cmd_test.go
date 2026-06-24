@@ -1188,6 +1188,8 @@ func TestConfigShowIncludesVastWithoutSecretSurface(t *testing.T) {
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	t.Setenv("CRABBOX_VAST_API_KEY", "vast-redaction-fixture-secret")
 	if err := os.WriteFile(configPath, []byte(`provider: vast
+ssh:
+  user: ubuntu
 vast:
   apiUrl: https://user:secret@vast.example.test/api/v0?token=hidden
   instanceType: on-demand
@@ -1266,7 +1268,7 @@ vast:
 		got.Vast.ReleaseAction != "stop" {
 		t.Fatalf("unexpected vast json: %#v", got.Vast)
 	}
-	if got.SSHUser != "root" || got.SSHPort != "22" {
+	if got.SSHUser != "ubuntu" || got.SSHPort != "22" {
 		t.Fatalf("unexpected vast ssh json: %#v", got)
 	}
 	if strings.Contains(stdout.String(), "vast-redaction-fixture-secret") || strings.Contains(stdout.String(), "user:secret") || strings.Contains(stdout.String(), "hidden") {
