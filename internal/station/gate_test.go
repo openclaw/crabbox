@@ -102,14 +102,22 @@ func TestAuthorizeModelAccessGatedAndSeparateFromEnvAllow(t *testing.T) {
 		t.Fatalf("AuthorizeModelAccess: %v", err)
 	}
 
-	// The gateway leaking through env.allow is rejected: credentials must use
-	// the separate audited delivery path, never env.allow forwarding.
-	err := g.AuthorizeModelAccess(profile, []string{"scoped-gateway"})
-	if err == nil || IsNotEnabled(err) {
-		t.Fatalf("expected env.allow separation error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "env.allow") {
-		t.Fatalf("error should mention env.allow: %v", err)
+	for name, envAllow := range map[string][]string{
+		"gateway overlap":         {"scoped-gateway"},
+		"exact model secret":      {"OPENAI_API_KEY"},
+		"exact model token":       {"ANTHROPIC_AUTH_TOKEN"},
+		"wildcard model prefix":   {"MODEL_*"},
+		"wildcard project prefix": {"PROJECT_*"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := g.AuthorizeModelAccess(profile, envAllow)
+			if err == nil || IsNotEnabled(err) {
+				t.Fatalf("expected env.allow separation error, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "env.allow") {
+				t.Fatalf("error should mention env.allow: %v", err)
+			}
+		})
 	}
 
 	// A profile with no model access is rejected even when the phase is on.
