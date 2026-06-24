@@ -136,6 +136,18 @@ func TestRepositoryCredentialDestinationsRejectInheritedCredentials(t *testing.T
 			want: "runpod.apiUrl",
 		},
 		{
+			name: "vast api",
+			cfg: Config{
+				Provider: "vast",
+				Vast:     VastConfig{APIURL: "https://repo.example.test", APIKey: "secret"},
+				credentialProvenance: credentialDestinationProvenance{
+					vastAPIURL: credentialSourceRepository,
+					vastAPIKey: credentialSourceEnvironment,
+				},
+			},
+			want: "vast.apiUrl",
+		},
+		{
 			name: "islo api",
 			cfg: Config{
 				Provider: "islo",
@@ -389,6 +401,31 @@ func TestRepositoryCredentialDestinationAllowsExplicitFlagOverride(t *testing.T)
 	}
 }
 
+func TestVastCredentialDestinationAllowsExplicitFlagOverride(t *testing.T) {
+	cfg := Config{
+		Provider: "vast",
+		Vast:     VastConfig{APIURL: "https://repo.example.test", APIKey: "secret"},
+		credentialProvenance: credentialDestinationProvenance{
+			vastAPIURL: credentialSourceRepository,
+			vastAPIKey: credentialSourceEnvironment,
+		},
+	}
+	fs := newFlagSet("test", io.Discard)
+	values := registerProviderFlags(fs, cfg)
+	if err := parseFlags(fs, []string{"--vast-api-url", "https://approved.example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderCredentialDestination(cfg); err != nil {
+		t.Fatalf("explicit vast flag override rejected: %v", err)
+	}
+	if cfg.Vast.APIURL != "https://approved.example.test" {
+		t.Fatalf("vast apiUrl=%q", cfg.Vast.APIURL)
+	}
+}
+
 func TestAzureDynamicSessionsCredentialDestinationAllowsExplicitFlagOverride(t *testing.T) {
 	cfg := Config{
 		Provider: "azure-dynamic-sessions",
@@ -571,6 +608,13 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 			file:          fileConfig{Runpod: &fileRunpodConfig{APIURL: "https://repo.example.test"}},
 			credentialEnv: "CRABBOX_RUNPOD_API_KEY",
 			approveEnv:    "CRABBOX_RUNPOD_API_URL",
+		},
+		{
+			name:          "vast",
+			provider:      "vast",
+			file:          fileConfig{Vast: &fileVastConfig{APIURL: "https://repo.example.test"}},
+			credentialEnv: "CRABBOX_VAST_API_KEY",
+			approveEnv:    "CRABBOX_VAST_API_URL",
 		},
 		{
 			name:          "islo",

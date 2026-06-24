@@ -1179,6 +1179,101 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesVastWithoutSecretSurface(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_VAST_API_KEY", "vast-redaction-fixture-secret")
+	if err := os.WriteFile(configPath, []byte(`provider: vast
+vast:
+  apiUrl: https://user:secret@vast.example.test/api/v0?token=hidden
+  instanceType: on-demand
+  gpuName: RTX 4090
+  gpuCount: 2
+  image: nvidia/cuda:vast
+  templateId: tpl-vast
+  runtype: ssh_direct
+  diskGB: 60
+  maxDphTotal: 3.5
+  minReliability: 0.9
+  order: reliability desc
+  user: root
+  workRoot: /work/vast
+  releaseAction: stop
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.configShow(nil); err != nil {
+		t.Fatal(err)
+	}
+	text := stdout.String()
+	if !strings.Contains(text, "vast api_url=https://<redacted>@vast.example.test/api/v0 instance_type=ondemand gpu_name=RTX 4090 gpu_count=2") ||
+		!strings.Contains(text, "work_root=/work/vast release_action=stop auth=configured") {
+		t.Fatalf("config show missing vast summary: %q", text)
+	}
+	if strings.Contains(text, "vast-redaction-fixture-secret") || strings.Contains(text, "user:secret") || strings.Contains(text, "hidden") {
+		t.Fatalf("config show text leaked Vast secret: %q", text)
+	}
+
+	stdout.Reset()
+	if err := app.configShow([]string{"--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SSHUser string `json:"sshUser"`
+		SSHPort string `json:"sshPort"`
+		Vast    struct {
+			APIURL         string  `json:"apiUrl"`
+			Auth           string  `json:"auth"`
+			InstanceType   string  `json:"instanceType"`
+			GPUName        string  `json:"gpuName"`
+			GPUCount       int     `json:"gpuCount"`
+			Image          string  `json:"image"`
+			TemplateID     string  `json:"templateId"`
+			Runtype        string  `json:"runtype"`
+			DiskGB         int     `json:"diskGB"`
+			MaxDphTotal    float64 `json:"maxDphTotal"`
+			MinReliability float64 `json:"minReliability"`
+			Order          string  `json:"order"`
+			User           string  `json:"user"`
+			WorkRoot       string  `json:"workRoot"`
+			ReleaseAction  string  `json:"releaseAction"`
+		} `json:"vast"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Vast.APIURL != "https://<redacted>@vast.example.test/api/v0" ||
+		got.Vast.Auth != "configured" ||
+		got.Vast.InstanceType != "ondemand" ||
+		got.Vast.GPUName != "RTX 4090" ||
+		got.Vast.GPUCount != 2 ||
+		got.Vast.Image != "nvidia/cuda:vast" ||
+		got.Vast.TemplateID != "tpl-vast" ||
+		got.Vast.Runtype != "ssh_direct" ||
+		got.Vast.DiskGB != 60 ||
+		got.Vast.MaxDphTotal != 3.5 ||
+		got.Vast.MinReliability != 0.9 ||
+		got.Vast.Order != "reliability desc" ||
+		got.Vast.User != "root" ||
+		got.Vast.WorkRoot != "/work/vast" ||
+		got.Vast.ReleaseAction != "stop" {
+		t.Fatalf("unexpected vast json: %#v", got.Vast)
+	}
+	if got.SSHUser != "root" || got.SSHPort != "22" {
+		t.Fatalf("unexpected vast ssh json: %#v", got)
+	}
+	if strings.Contains(stdout.String(), "vast-redaction-fixture-secret") || strings.Contains(stdout.String(), "user:secret") || strings.Contains(stdout.String(), "hidden") {
+		t.Fatalf("config show json leaked Vast secret: %q", stdout.String())
+	}
+}
+
 func TestConfigShowIncludesNebiusWithoutSecretSurface(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
