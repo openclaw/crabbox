@@ -1122,6 +1122,7 @@ func allBuiltInProviderNames() []string {
 		"incus",
 		"islo",
 		"kubevirt",
+		"lambda",
 		"linode",
 		"local-container",
 		"modal",
