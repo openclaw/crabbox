@@ -2219,6 +2219,125 @@ esac
   assert.equal(seen[8], "list --provider linode --json");
 });
 
+test("vultr live smoke dispatches to the provider-specific smoke", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vultr-dispatch-"));
+  const bin = path.join(dir, "bin");
+  const calls = path.join(dir, "calls.log");
+  const slugFile = path.join(dir, "slug.txt");
+  const realPython = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(realPython, "python3 is required for Vultr dispatch smoke");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    path.join(bin, "python3"),
+    `#!/usr/bin/env bash
+if [[ "$*" == *"urllib.request"* ]]; then
+  exit 1
+fi
+exec ${JSON.stringify(realPython)} "$@"
+`,
+  );
+
+  writeExecutable(
+    path.join(bin, "go"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${calls}"
+if [[ "\${VULTR_API_KEY:-}" != "vultr_fake_value" ]]; then
+  printf 'missing Vultr auth\\n' >&2
+  exit 91
+fi
+case "$1" in
+  doctor)
+    printf 'auth=ready control_plane=ready inventory=ready api=list mutation=false leases=0 runtime=unchecked default_type=vc2-1c-1gb region=ewr user_scheme=root\\n'
+    ;;
+  list)
+    slug="$(cat "${slugFile}" 2>/dev/null || true)"
+    if [[ -z "$slug" || -f "${slugFile}.stopped" ]]; then
+      printf '[]\\n'
+    else
+      printf '[{"labels":{"slug":"%s"}}]\\n' "$slug"
+    fi
+    ;;
+  warmup)
+    requested_slug=""
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        --slug)
+          requested_slug="\${2:-}"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\\n' "$requested_slug" >"${slugFile}"
+    ;;
+  status)
+    printf 'status=ready\\n'
+    ;;
+  run)
+    printf 'ok\\n'
+    ;;
+  stop)
+    printf stopped >"${slugFile}.stopped"
+    ;;
+  cleanup)
+    printf 'skip server id=none name=none reason=missing labels\\n'
+    ;;
+  *)
+    printf 'unexpected args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+SCRIPT
+chmod +x "$out"
+`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_CONFIG: path.join(dir, "missing-crabbox.yaml"),
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "vultr",
+      VULTR_API_KEY: "vultr_fake_value",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=live_vultr_smoke_passed slug=vultr-smoke-/);
+  assert.doesNotMatch(result.stdout + result.stderr, /vultr_fake_value/);
+  const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
+  assert.equal(seen[0], "doctor --provider vultr");
+  assert.equal(seen[1], "list --provider vultr --json");
+  assert.match(seen[2], /^warmup --provider vultr --slug vultr-smoke-\d{14}-\d+ --keep --type vc2-1c-1gb --ttl 20m --idle-timeout 5m$/);
+  assert.match(seen[3], /^status --provider vultr --id vultr-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
+  assert.match(seen[4], /^run --provider vultr --id vultr-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
+  assert.equal(seen[5], "list --provider vultr --json");
+  assert.match(seen[6], /^stop --provider vultr vultr-smoke-\d{14}-\d+$/);
+  assert.equal(seen[7], "cleanup --provider vultr --dry-run");
+  assert.equal(seen[8], "list --provider vultr --json");
+});
+
 test("digitalocean live smoke dispatches to the provider-specific smoke", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-digitalocean-dispatch-"));
   const bin = path.join(dir, "bin");

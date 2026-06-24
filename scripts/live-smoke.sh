@@ -908,6 +908,10 @@ if has_provider linode; then
   "$root/scripts/live-linode-smoke.sh"
 fi
 
+if has_provider vultr; then
+  "$root/scripts/live-vultr-smoke.sh"
+fi
+
 if has_provider digitalocean || has_provider do; then
   "$root/scripts/live-digitalocean-smoke.sh"
 fi
