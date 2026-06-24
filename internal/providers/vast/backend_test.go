@@ -409,6 +409,34 @@ func TestReleaseDestroysByDefaultAndRemovesClaim(t *testing.T) {
 	}
 }
 
+func TestReleaseHonorsExplicitReleaseActionOverride(t *testing.T) {
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "keep-me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels[vastReleaseActionLabel] != "destroy" {
+		t.Fatalf("lease labels=%#v", lease.Server.Labels)
+	}
+
+	b.cfg.Vast.ReleaseAction = "keep"
+	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.destroyed) != 0 || len(api.detached) != 0 {
+		t.Fatalf("destroyed=%v detached=%v", api.destroyed, api.detached)
+	}
+	msg := b.ReleaseLeaseMessage(lease)
+	if !strings.Contains(msg, "keep lease=") || strings.Contains(msg, "destroyed") {
+		t.Fatalf("message=%q", msg)
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("keep-me", providerName); claimErr != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
+	}
+}
+
 func TestReleaseStopIsExplicitAndTested(t *testing.T) {
 	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
 	b := newTestBackend(t, api)

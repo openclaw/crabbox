@@ -424,7 +424,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
-	action := normalizeVastReleaseAction(firstNonBlank(lease.Server.Labels[vastReleaseActionLabel], b.cfg.Vast.ReleaseAction))
+	action := effectiveVastReleaseAction(b.cfg, lease.Server.Labels)
 	if action == "stop" || action == "keep" {
 		return fmt.Sprintf("%s lease=%s vast=%s name=%s", action, lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 	}
@@ -528,7 +528,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	} else if !isVastNotFound(getErr) {
 		return getErr
 	}
-	action := normalizeVastReleaseAction(firstNonBlank(claim.Labels[vastReleaseActionLabel], b.cfg.Vast.ReleaseAction))
+	action := effectiveVastReleaseAction(b.cfg, claim.Labels)
 	switch action {
 	case "keep":
 		return nil
@@ -738,6 +738,13 @@ func normalizeVastReleaseAction(value string) string {
 	default:
 		return "destroy"
 	}
+}
+
+func effectiveVastReleaseAction(cfg core.Config, labels map[string]string) string {
+	if core.DeleteOnReleaseExplicit(cfg, providerName) {
+		return normalizeVastReleaseAction(cfg.Vast.ReleaseAction)
+	}
+	return normalizeVastReleaseAction(firstNonBlank(labels[vastReleaseActionLabel], cfg.Vast.ReleaseAction))
 }
 
 func parseVastInstanceID(value string) (int, bool) {
