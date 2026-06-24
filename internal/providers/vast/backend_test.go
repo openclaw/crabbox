@@ -282,6 +282,34 @@ func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 	}
 }
 
+func TestResolvePreservesPersistedVastClaimMetadata(t *testing.T) {
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+	b := newTestBackend(t, api)
+	repoRoot := t.TempDir()
+	b.cfg.Vast.ReleaseAction = "stop"
+	b.DirectSSHBackend.Cfg = b.cfg
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoRoot}, RequestedSlug: "preserve-meta"}); err != nil {
+		t.Fatal(err)
+	}
+
+	b.cfg.Vast.ReleaseAction = "destroy"
+	b.DirectSSHBackend.Cfg = b.cfg
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "preserve-meta", Repo: core.Repo{Root: repoRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Server.Labels[vastReleaseActionLabel] != "stop" || resolved.Server.Labels[vastKeyIDLabel] != "key-100" || resolved.Server.Labels[vastKeyOwnedLabel] != "true" {
+		t.Fatalf("resolved labels=%#v", resolved.Server.Labels)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("preserve-meta", providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
+	}
+	if claim.Labels[vastReleaseActionLabel] != "stop" || claim.Labels[vastKeyIDLabel] != "key-100" || claim.Labels[vastKeyOwnedLabel] != "true" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+}
+
 func TestResolveRejectsTerminalStatusForRunButAllowsRelease(t *testing.T) {
 	api := &fakeVastAPI{instances: []vastInstance{{ID: 9, Label: encodeVastOwnershipLabel("cbx_failed", "failed", "ready"), Status: "failed", SSHHost: "203.0.113.9", SSHPort: 22}}}
 	b := newTestBackend(t, api)
@@ -294,6 +322,19 @@ func TestResolveRejectsTerminalStatusForRunButAllowsRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if lease.LeaseID != "cbx_failed" || lease.Server.CloudID != "9" {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
+func TestResolveStatusOnlyAllowsInstanceWithoutSSHEndpoint(t *testing.T) {
+	api := &fakeVastAPI{instances: []vastInstance{{ID: 10, Label: encodeVastOwnershipLabel("cbx_status", "status-me", "stopped"), Status: "stopped"}}}
+	b := newTestBackend(t, api)
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-me", StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_status" || lease.SSH.Host != "" {
 		t.Fatalf("lease=%#v", lease)
 	}
 }
