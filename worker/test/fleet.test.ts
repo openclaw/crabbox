@@ -15389,7 +15389,16 @@ describe("fleet lease identity and idle", () => {
 
   it("deletes AWS images through admin routes", async () => {
     let deleted = "";
-    const fleet = testFleet(new MemoryStorage(), {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:created:ami-000000000001", {
+      id: "ami-000000000001",
+      name: "openclaw-crabbox-test",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+    });
+    const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, {
         onDeleteImage(imageID) {
           deleted = imageID;
@@ -15412,6 +15421,28 @@ describe("fleet lease identity and idle", () => {
     );
     expect(allowed.status).toBe(200);
     expect(deleted).toBe("ami-000000000001");
+  });
+
+  it("rejects deleting AWS images without Crabbox ownership metadata", async () => {
+    let deleted = "";
+    const fleet = testFleet(new MemoryStorage(), {
+      aws: fakeProvider(undefined, {
+        onDeleteImage(imageID) {
+          deleted = imageID;
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-000000000001", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(deleted).toBe("");
+    await expect(response.json()).resolves.toMatchObject({ error: "image_not_owned" });
   });
 
   it("creates Azure and GCP native disk snapshots through admin routes by default", async () => {
@@ -15478,6 +15509,14 @@ describe("fleet lease identity and idle", () => {
       "azure:disk-snapshot:after-install",
       `gcp:disk-snapshot:${"a".repeat(62)}`,
     ]);
+    expect(storage.value("image:azure:created:checkpoint-azure")).toMatchObject({
+      id: "checkpoint-azure",
+      provider: "azure",
+    });
+    expect(storage.value("image:gcp:created:checkpoint-gcp")).toMatchObject({
+      id: "checkpoint-gcp",
+      provider: "gcp",
+    });
   });
 
   it("rejects Azure managed image creation from active leases", async () => {
@@ -15604,7 +15643,28 @@ describe("fleet lease identity and idle", () => {
     let azureDeletedKind = "";
     let gcpDeleted = "";
     let gcpDeletedKind = "";
-    const fleet = testFleet(new MemoryStorage(), {
+    const storage = new MemoryStorage();
+    const azureResource =
+      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint-azure";
+    const gcpResource = "projects/proj/global/snapshots/checkpoint-gcp";
+    storage.seed(`image:azure:created:${encodeURIComponent(azureResource)}`, {
+      id: azureResource,
+      name: "checkpoint-azure",
+      state: "available",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      region: "eastus",
+    });
+    storage.seed(`image:gcp:created:${encodeURIComponent(gcpResource)}`, {
+      id: gcpResource,
+      name: "checkpoint-gcp",
+      state: "available",
+      provider: "gcp",
+      kind: "gcp-disk-snapshot",
+      region: "us-central1-a",
+      project: "proj",
+    });
+    const fleet = testFleet(storage, {
       azure: fakeProvider(undefined, {
         provider: "azure",
         onDeleteImage(imageID, kind) {
@@ -15617,6 +15677,53 @@ describe("fleet lease identity and idle", () => {
         onDeleteImage(imageID, kind) {
           gcpDeleted = imageID;
           gcpDeletedKind = kind ?? "";
+        },
+      }),
+    });
+
+    const azure = await fleet.fetch(
+      request(
+        "DELETE",
+        `/v1/images/${encodeURIComponent(azureResource)}?provider=azure&region=eastus&kind=azure-os-disk-snapshot`,
+        {
+          headers: { "x-crabbox-admin": "true" },
+          body: {},
+        },
+      ),
+    );
+    const gcp = await fleet.fetch(
+      request(
+        "DELETE",
+        `/v1/images/${encodeURIComponent(gcpResource)}?provider=gcp&region=us-central1-a&project=proj&kind=gcp-disk-snapshot`,
+        {
+          headers: { "x-crabbox-admin": "true" },
+          body: {},
+        },
+      ),
+    );
+
+    expect(azure.status).toBe(200);
+    expect(gcp.status).toBe(200);
+    expect(azureDeleted).toBe(azureResource);
+    expect(azureDeletedKind).toBe("azure-os-disk-snapshot");
+    expect(gcpDeleted).toBe(gcpResource);
+    expect(gcpDeletedKind).toBe("gcp-disk-snapshot");
+  });
+
+  it("rejects deleting provider-native images without Crabbox ownership metadata", async () => {
+    let azureDeleted = "";
+    let gcpDeleted = "";
+    const fleet = testFleet(new MemoryStorage(), {
+      azure: fakeProvider(undefined, {
+        provider: "azure",
+        onDeleteImage(imageID) {
+          azureDeleted = imageID;
+        },
+      }),
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onDeleteImage(imageID) {
+          gcpDeleted = imageID;
         },
       }),
     });
@@ -15645,12 +15752,12 @@ describe("fleet lease identity and idle", () => {
       ),
     );
 
-    expect(azure.status).toBe(200);
-    expect(gcp.status).toBe(200);
-    expect(azureDeleted).toBe(azureResource);
-    expect(azureDeletedKind).toBe("azure-os-disk-snapshot");
-    expect(gcpDeleted).toBe(gcpResource);
-    expect(gcpDeletedKind).toBe("gcp-disk-snapshot");
+    expect(azure.status).toBe(409);
+    expect(gcp.status).toBe(409);
+    expect(azureDeleted).toBe("");
+    expect(gcpDeleted).toBe("");
+    await expect(azure.json()).resolves.toMatchObject({ error: "image_not_owned" });
+    await expect(gcp.json()).resolves.toMatchObject({ error: "image_not_owned" });
   });
 
   it("maps missing provider-native images to 404", async () => {
@@ -18173,6 +18280,16 @@ function fakeProvider(
               region: image.region ?? lease.region,
             })
           : image;
+      await storage?.put(
+        `image:${lease.provider}:created:${encodeURIComponent(enriched.id)}`,
+        enriched,
+      );
+      if (enriched.resourceID && enriched.resourceID !== enriched.id) {
+        await storage?.put(
+          `image:${lease.provider}:created:${encodeURIComponent(enriched.resourceID)}`,
+          enriched,
+        );
+      }
       if (lease.provider === "aws") {
         await storage?.put(`image:aws:created:${enriched.id}`, enriched);
       }
@@ -18254,10 +18371,18 @@ function fakeProvider(
       result.onDeleteImage?.(imageID, kind);
     },
     async storedImageMetadata(imageID: string) {
+      const provider = result.provider ?? "aws";
       const promoted = await storage?.list<ProviderImage>({ prefix: "image:aws:promoted" });
       return (
-        [...(promoted?.values() ?? [])].find((image) => image.id === imageID) ??
-        (await storage?.get<ProviderImage>(`image:aws:created:${imageID}`))
+        (provider === "aws"
+          ? [...(promoted?.values() ?? [])].find((image) => image.id === imageID)
+          : undefined) ??
+        (await storage?.get<ProviderImage>(
+          `image:${provider}:created:${encodeURIComponent(imageID)}`,
+        )) ??
+        (provider === "aws"
+          ? await storage?.get<ProviderImage>(`image:aws:created:${imageID}`)
+          : undefined)
       );
     },
     decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>) {
@@ -18272,6 +18397,15 @@ function fakeProvider(
           body: {
             error: "image_promoted",
             message: `image ${imageID} is the promoted AWS image; promote another image before deleting it`,
+          },
+        };
+      }
+      if (metadata?.id !== imageID && metadata?.resourceID !== imageID) {
+        return {
+          status: 409,
+          body: {
+            error: "image_not_owned",
+            message: `refusing to delete ${result.provider ?? "aws"} image ${imageID}: no Crabbox-created image metadata found`,
           },
         };
       }

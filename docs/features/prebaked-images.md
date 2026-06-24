@@ -138,7 +138,8 @@ provider-side artifacts.
 - `crabbox image fsr-status <ami-id|snapshot-id>` — AWS Fast Snapshot Restore
   status.
 - `crabbox image delete <image-id> [--provider aws|azure|gcp]` — remove a
-  provider image.
+  Crabbox-created provider image. Deletion requires stored Crabbox ownership
+  metadata and refuses unrelated provider-native image or snapshot IDs.
 
 See the [image command reference](../commands/image.md) for full flags.
 

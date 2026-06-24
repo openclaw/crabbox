@@ -196,7 +196,7 @@ fsr snapshot=snap-... az=us-west-2a state=enabled reason=-
 
 ## delete
 
-Delete a provider image.
+Delete a Crabbox-created provider image.
 
 ```sh
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
@@ -213,8 +213,13 @@ Flags:
 ```
 
 AWS deletion deregisters the AMI and then deletes the EBS snapshots referenced by
-its block-device mappings. Azure deletion removes the managed image. GCP deletion
-removes the machine image. Any other `--provider` value is rejected.
+its block-device mappings. Azure deletion removes the managed image or disk
+snapshot. GCP deletion removes the machine image or disk snapshot. Any other
+`--provider` value is rejected.
+
+Deletion fails closed unless the coordinator has stored Crabbox-created image
+metadata for the target. This protects unrelated provider images and snapshots
+that happen to live in the same cloud account, resource group, or project.
 
 ## Related docs
 

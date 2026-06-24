@@ -195,6 +195,7 @@
 ### Fixed
 
 - Hardened Agent Sandbox repository-config workload and workdir selection, mount-safe replacement sync, pinned pod-container execution, absolute and multi-file kubeconfig handling, controller-enforced TTL expiry with retained exact-claim cleanup, warm-pool/lifecycle/downstream identity validation, one-shot cleanup arming, cleanup dry-run identity checks, root-rechecked missing-claim handling, downstream-missing claim retention, recoverable ambiguous-create reconciliation, terminal status detection, retained activity bookkeeping, local claim removal reporting, and UID-pinned recovery leases when failed-readiness cleanup cannot reach Kubernetes; thanks @coygeek.
+- Hardened coordinator image deletion so admin `image delete` requests fail closed unless stored Crabbox-created metadata proves ownership of the AWS, Azure, or GCP image or snapshot.
 - Added an explicit `webvnc local --security-type vnc` mode that forces standard VNC password authentication when a server advertises account authentication first.
 - Fixed coordinator hibernation recovery to preserve unambiguous live bridges while rejecting duplicate or stale restored endpoints.
 - Fixed portable Node coordinator startup when the production bundle loads the external CommonJS `ssh2` dependency.

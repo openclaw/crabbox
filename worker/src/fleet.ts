@@ -9306,6 +9306,14 @@ export class FleetCoordinator {
       return result instanceof Response ? result : json(result);
     }
     if (method === "DELETE" && action === undefined) {
+      const ownershipBlocked = validateProviderImageDeleteOwnership(
+        provider,
+        decodedImageID,
+        metadata,
+      );
+      if (ownershipBlocked) {
+        return json(ownershipBlocked.body, { status: ownershipBlocked.status });
+      }
       const deleteBlocked = await providerForRegion.validateDeleteImage(decodedImageID, metadata);
       if (deleteBlocked) {
         return json(deleteBlocked.body, { status: deleteBlocked.status });
@@ -10690,11 +10698,12 @@ export class FleetCoordinator {
       return new AzureProvider(
         this.env,
         (request) => recordAzureDeferredCleanup(this.state, () => this.scheduleAlarm(), request),
+        this.state.storage,
         region,
       );
     }
     if (provider === "gcp") {
-      return new GCPProvider(this.env, region, project);
+      return new GCPProvider(this.env, this.state.storage, region, project);
     }
     return new HetznerProvider(this.env);
   }
@@ -11237,6 +11246,39 @@ function runEventKey(runID: string, seq: number): string {
 
 function createdAWSImageKey(imageID: string): string {
   return `image:aws:created:${imageID}`;
+}
+
+function createdProviderImageKey(provider: Provider, imageID: string): string {
+  return `image:${provider}:created:${encodeURIComponent(imageID)}`;
+}
+
+function validateProviderImageDeleteOwnership(
+  provider: Provider,
+  imageID: string,
+  metadata?: Partial<ProviderImage>,
+): { status: number; body: Record<string, unknown> } | undefined {
+  const routeMatchesMetadata = metadata?.id === imageID || metadata?.resourceID === imageID;
+  if (routeMatchesMetadata && (!metadata.provider || metadata.provider === provider)) {
+    return undefined;
+  }
+  return {
+    status: 409,
+    body: {
+      error: "image_not_owned",
+      message: `refusing to delete ${provider} image ${imageID}: no Crabbox-created image metadata found`,
+    },
+  };
+}
+
+async function storeCreatedProviderImage(
+  storage: ProviderStateStorage,
+  provider: Provider,
+  image: ProviderImage,
+): Promise<void> {
+  await storage.put(createdProviderImageKey(provider, image.id), image);
+  if (image.resourceID && image.resourceID !== image.id) {
+    await storage.put(createdProviderImageKey(provider, image.resourceID), image);
+  }
 }
 
 function legacyPromotedAWSImageKey(): string {
@@ -14905,6 +14947,7 @@ class AzureProvider implements CloudProvider {
   constructor(
     private readonly env: Env,
     private readonly deferredCleanup?: (request: AzureDeferredCleanupRequest) => Promise<void>,
+    private readonly storage?: ProviderStateStorage,
     private readonly location?: string,
   ) {}
 
@@ -14987,16 +15030,28 @@ class AzureProvider implements CloudProvider {
       : undefined;
   }
 
-  createLeaseImage(
+  async createLeaseImage(
     lease: LeaseRecord,
     name: string,
     _noReboot: boolean,
     _strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage> {
-    return this.client.createDiskSnapshot(
+    const image = await this.client.createDiskSnapshot(
       lease.cloudID,
       providerImageResourceName("azure", name, lease.id),
     );
+    const region = image.region ?? lease.region;
+    const enriched: ProviderImage = {
+      ...image,
+      provider: "azure",
+    };
+    if (region) {
+      enriched.region = region;
+    }
+    if (this.storage) {
+      await storeCreatedProviderImage(this.storage, "azure", enriched);
+    }
+    return enriched;
   }
 
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
@@ -15007,7 +15062,12 @@ class AzureProvider implements CloudProvider {
     return this.client.deleteImage(imageID, kind);
   }
 
-  storedImageMetadata = noStoredImageMetadata;
+  storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
+    return (
+      this.storage?.get<ProviderImage>(createdProviderImageKey("azure", imageID)) ??
+      Promise.resolve(undefined)
+    );
+  }
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
 
@@ -15025,6 +15085,7 @@ class GCPProvider implements CloudProvider {
 
   constructor(
     private readonly env: Env,
+    private readonly storage?: ProviderStateStorage,
     private readonly zone?: string,
     private readonly project?: string,
   ) {}
@@ -15119,18 +15180,38 @@ class GCPProvider implements CloudProvider {
     return undefined;
   }
 
-  createLeaseImage(
+  async createLeaseImage(
     lease: LeaseRecord,
     name: string,
     _noReboot: boolean,
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage> {
-    return strategy === "image"
-      ? this.client.createImage(lease.cloudID, providerImageResourceName("gcp", name, lease.id))
-      : this.client.createDiskSnapshot(
-          lease.cloudID,
-          providerImageResourceName("gcp", name, lease.id),
-        );
+    const image =
+      strategy === "image"
+        ? await this.client.createImage(
+            lease.cloudID,
+            providerImageResourceName("gcp", name, lease.id),
+          )
+        : await this.client.createDiskSnapshot(
+            lease.cloudID,
+            providerImageResourceName("gcp", name, lease.id),
+          );
+    const region = image.region ?? lease.region;
+    const project = image.project ?? lease.providerProject ?? this.project;
+    const enriched: ProviderImage = {
+      ...image,
+      provider: "gcp",
+    };
+    if (region) {
+      enriched.region = region;
+    }
+    if (project) {
+      enriched.project = project;
+    }
+    if (this.storage) {
+      await storeCreatedProviderImage(this.storage, "gcp", enriched);
+    }
+    return enriched;
   }
 
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
@@ -15141,7 +15222,12 @@ class GCPProvider implements CloudProvider {
     return this.client.deleteImage(imageID, kind);
   }
 
-  storedImageMetadata = noStoredImageMetadata;
+  storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
+    return (
+      this.storage?.get<ProviderImage>(createdProviderImageKey("gcp", imageID)) ??
+      Promise.resolve(undefined)
+    );
+  }
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
 
@@ -15503,6 +15589,7 @@ export class AWSProvider implements CloudProvider {
         : await this.client.createDiskSnapshot(lease.cloudID, name);
     const enriched = enrichAWSImage(image, lease);
     await this.storage.put(createdAWSImageKey(enriched.id), enriched);
+    await storeCreatedProviderImage(this.storage, "aws", enriched);
     return enriched;
   }
 
@@ -15531,7 +15618,8 @@ export class AWSProvider implements CloudProvider {
   async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
     return (
       (await this.promotedImageByID(imageID)) ??
-      (await this.storage.get<ProviderImage>(createdAWSImageKey(imageID)))
+      (await this.storage.get<ProviderImage>(createdAWSImageKey(imageID))) ??
+      (await this.storage.get<ProviderImage>(createdProviderImageKey("aws", imageID)))
     );
   }
 
