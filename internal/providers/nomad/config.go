@@ -60,11 +60,21 @@ func validateNomadAddress(address string) error {
 		return nil
 	}
 	parsed, err := url.Parse(address)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || parsed.Scheme == "" {
 		return exit(2, "nomad address must be an absolute http, https, or unix URL")
 	}
 	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https", "unix":
+	case "http", "https":
+		if parsed.Host == "" {
+			return exit(2, "nomad address must be an absolute http, https, or unix URL")
+		}
+	case "unix":
+		if parsed.User != nil || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return exit(2, "nomad unix address must be unix:///absolute/socket/path")
+		}
+		if strings.TrimSpace(parsed.Path) == "" || !filepath.IsAbs(parsed.Path) {
+			return exit(2, "nomad unix address must use an absolute socket path")
+		}
 	default:
 		return exit(2, "nomad address scheme must be http, https, or unix")
 	}
