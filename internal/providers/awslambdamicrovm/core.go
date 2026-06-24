@@ -44,7 +44,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 }
 
 func flagWasSet(fs *flag.FlagSet, name string) bool { return core.FlagWasSet(fs, name) }
-func blank(value, fallback string) string           { return core.Blank(value, fallback) }
 func newLeaseID() string                            { return core.NewLeaseID() }
 func now(rt Runtime) time.Time {
 	if rt.Clock != nil {
