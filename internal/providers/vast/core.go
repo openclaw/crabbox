@@ -22,6 +22,7 @@ type ReleaseLeaseRequest = core.ReleaseLeaseRequest
 type TouchRequest = core.TouchRequest
 type LeaseTarget = core.LeaseTarget
 type Server = core.Server
+type SSHTarget = core.SSHTarget
 
 const (
 	providerName = "vast"

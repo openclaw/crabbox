@@ -1,7 +1,6 @@
 package vast
 
 import (
-	"context"
 	"flag"
 	"net/url"
 	"strings"
@@ -40,14 +39,14 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return ApplyVastProviderFlags(cfg, fs, values)
 }
 
-func (p Provider) Configure(cfg core.Config, _ core.Runtime) (core.Backend, error) {
+func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, exit(2, "provider=%s supports target=linux only", providerName)
 	}
-	return backend{spec: p.Spec()}, nil
+	return newBackend(p.Spec(), cfg, rt), nil
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
@@ -104,42 +103,4 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 		return exit(2, "vast.releaseAction must be destroy, delete, stop, or keep")
 	}
 	return nil
-}
-
-type backend struct {
-	spec core.ProviderSpec
-}
-
-func (b backend) Spec() core.ProviderSpec { return b.spec }
-
-func (b backend) Doctor(context.Context, core.DoctorRequest) (core.DoctorResult, error) {
-	return core.DoctorResult{
-		Provider: providerName,
-		Status:   "unsupported",
-		Message:  "vast lifecycle is not implemented yet",
-	}, nil
-}
-
-func (b backend) Acquire(context.Context, core.AcquireRequest) (core.LeaseTarget, error) {
-	return core.LeaseTarget{}, notImplemented("acquire")
-}
-
-func (b backend) Resolve(context.Context, core.ResolveRequest) (core.LeaseTarget, error) {
-	return core.LeaseTarget{}, notImplemented("resolve")
-}
-
-func (b backend) List(context.Context, core.ListRequest) ([]core.LeaseView, error) {
-	return nil, notImplemented("list")
-}
-
-func (b backend) ReleaseLease(context.Context, core.ReleaseLeaseRequest) error {
-	return notImplemented("release")
-}
-
-func (b backend) Touch(context.Context, core.TouchRequest) (core.Server, error) {
-	return core.Server{}, notImplemented("touch")
-}
-
-func (b backend) Cleanup(context.Context, core.CleanupRequest) error {
-	return notImplemented("cleanup")
 }
