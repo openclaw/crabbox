@@ -10,6 +10,7 @@ var benchmarkProviderCategories = map[string]string{
 	"apple-vz":                   "local-vm",
 	"ascii-box":                  "direct-cloud",
 	"aws":                        "brokerable-cloud",
+	"aws-lambda-microvm":         "delegated-sandbox",
 	"azure":                      "brokerable-cloud",
 	"azure-dynamic-sessions":     "delegated-sandbox",
 	"blacksmith-testbox":         "ci-proof-runner",

@@ -207,6 +207,7 @@ hardware for macOS VM workflows.
 
 | Provider and aliases                                                                                           | Runs on      | Notes                                                                           |
 | -------------------------------------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
+| [AWS Lambda MicroVM](docs/providers/aws-lambda-microvm.md) — `aws-lambda-microvm`                              | Linux ARM64  | Lambda Firecracker MicroVM with archive sync, retained reuse, and pause/resume. |
 | [Cloudflare](docs/providers/cloudflare.md) — `cloudflare` (`cf`)                                               | Linux        | Cloudflare Containers via the Worker runtime.                                   |
 | [Docker Sandbox](docs/providers/docker-sandbox.md) — `docker-sandbox`                                          | Linux        | Docker Sandboxes through the standalone `sbx` CLI.                              |
 | [E2B](docs/providers/e2b.md) — `e2b`                                                                           | Linux        | E2B Firecracker sandbox.                                                        |

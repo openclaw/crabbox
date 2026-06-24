@@ -97,6 +97,20 @@
     "caveat": "Largest configuration, quota, and cost surface",
     "docs": "aws.md"
   },
+  "aws-lambda-microvm": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "AWS Lambda Firecracker MicroVM",
+    "location": "cloud",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox and Lambda MicroVM API",
+    "cleanup": "MicroVM termination",
+    "bestFit": "Isolated stateful ARM64 command execution",
+    "caveat": "Requires a compatible Crabbox runner image; launch Regions and lifetime are limited",
+    "docs": "aws-lambda-microvm.md"
+  },
   "azure": {
     "status": "built-in",
     "category": "brokerable-cloud",

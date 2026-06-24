@@ -67,6 +67,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=docker-sandbox CRABBOX_LIVE_COORDINATOR=0 
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=smolvm CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=superserve CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=vercel-sandbox CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=aws-lambda-microvm CRABBOX_AWS_LAMBDA_MICROVM_IMAGE=arn:aws:lambda:eu-west-1:123456789012:microvm-image:crabbox-runner scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=apple-container CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=local-container CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=multipass CRABBOX_LIVE_COORDINATOR=0 scripts/live-smoke.sh
@@ -157,6 +158,7 @@ Per-provider smoke prerequisites:
 - **SmolVM** — `CRABBOX_SMOLVM_API_KEY`, `SMOLMACHINES_API_KEY`, or `SMK_API_KEY`.
 - **Superserve** — `CRABBOX_SUPERSERVE_API_KEY` or `SUPERSERVE_API_KEY`.
 - **Vercel Sandbox** — authenticated `sandbox` CLI on `PATH`; project and team scope may come from `CRABBOX_VERCEL_SANDBOX_PROJECT_ID` plus `CRABBOX_VERCEL_SANDBOX_TEAM_ID`, `CRABBOX_VERCEL_SANDBOX_SCOPE`, or the Vercel OIDC environment.
+- **AWS Lambda MicroVM** — standard AWS SDK credentials, an explicitly exported `CRABBOX_AWS_LAMBDA_MICROVM_IMAGE`, a launch Region, and quota. `scripts/live-aws-lambda-microvm-smoke.sh` is coordinator-free; it proves archive sync, retained reuse, pause/resume, termination, and empty local inventory after cleanup.
 - **Apple Container** — Apple silicon macOS with Apple's `container` CLI on
   `PATH` and `container system start` already run. `scripts/live-smoke.sh` uses
   the normal SSH lease lifecycle with a short TTL and no coordinator.

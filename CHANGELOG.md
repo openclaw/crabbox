@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an AWS Lambda MicroVM delegated provider with a bundled ARM64 runner image, archive sync, retained reuse, pause/resume, cleanup, docs, and guarded live smoke coverage.
 - Added direct FastAPI Cloud application and deployment inspection through `status`, `list`, and `doctor`, including configured default application support. Thanks @zozo123.
 - Added normalized provider runtime capabilities and `--runtime` filters to `crabbox providers` and `crabbox providers recommend`.
 - Added `crabbox providers recommend fanout-testing` for forkable workspace and best-of-N test selection guidance.

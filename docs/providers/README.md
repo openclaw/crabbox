@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 65 providers (38 SSH lease, 25 delegated run, 2 service control).
+Current built-in surface: 66 providers (38 SSH lease, 26 delegated run, 2 service control).
 
 Access terms:
 
@@ -78,6 +78,7 @@ Access terms:
 | [apple-vz](apple-vz.md) (`applevz`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Apple Virtualization.framework VM | `local`; GPU: no | Crabbox; VM delete | Headless Linux ARM64 VM on Apple silicon | Apple silicon macOS only |
 | [ascii-box](ascii-box.md) (`ascii`, `asciibox`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; ASCII Box managed Linux box | `provider-managed`; GPU: unknown | provider CLI; provider delete | Managed Linux box over SSH | Requires the ASCII Box CLI and account |
 | [aws](aws.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`, `windows/normal`, `windows/wsl2`, `macos`; EC2 VM or dedicated Mac host | `cloud`; GPU: optional | Crabbox or coordinator; instance termination | Broad Linux, Windows, WSL2, and macOS cloud coverage | Largest configuration, quota, and cost surface |
+| [aws-lambda-microvm](aws-lambda-microvm.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session`, `pause-resume` | `linux`; AWS Lambda Firecracker MicroVM | `cloud`; GPU: no | Crabbox and Lambda MicroVM API; MicroVM termination | Isolated stateful ARM64 command execution | Requires a compatible Crabbox runner image; launch Regions and lifetime are limited |
 | [azure](azure.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`, `windows/normal`, `windows/wsl2`; Azure Virtual Machine | `cloud`; GPU: optional | Crabbox or coordinator; VM and owned resource delete | Linux or Windows workloads in Azure | Shared resource and identity setup is substantial |
 | [azure-dynamic-sessions](azure-dynamic-sessions.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Azure Container Apps Dynamic Session | `cloud`; GPU: no | Azure session pool; provider session expiry | Short delegated container sessions in Azure | No Crabbox-managed SSH lease |
 | [blacksmith-testbox](blacksmith-testbox.md) (`blacksmith`) | built-in; `delegated-run` · ci-proof-runner | No SSH; `provider-owned` · direct only; features: `cache-volume`, `run-proof`, `run-session`, `run-artifacts` | `linux`; Blacksmith Testbox runner | `provider-managed`; GPU: no | Blacksmith; provider session cleanup | CI reproduction with proof and reusable sessions | Execution and artifacts follow the Testbox contract |
