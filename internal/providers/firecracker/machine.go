@@ -2,7 +2,6 @@ package firecracker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"syscall"
@@ -123,18 +122,10 @@ func (p localProcessManager) Signal(identity processIdentity, sig syscall.Signal
 	if identity.PID <= 0 || !p.Matches(identity) {
 		return nil
 	}
-	if err := syscall.Kill(identity.PID, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalProcess(identity.PID, sig); err != nil {
 		return err
 	}
 	return nil
-}
-
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func waitForProcessExit(manager processManager, identity processIdentity, timeout time.Duration) error {
