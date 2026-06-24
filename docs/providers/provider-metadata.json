@@ -503,6 +503,20 @@
     "caveat": "Direct-only; firewall groups and VPCs must already exist",
     "docs": "vultr.md"
   },
+  "vast": {
+    "status": "built-in",
+    "category": "gpu-cloud",
+    "substrate": "Vast.ai direct GPU instance",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "yes",
+    "lifecycle": "Crabbox",
+    "cleanup": "destroy by default; optional stop or keep",
+    "bestFit": "Direct Linux GPU lease from the Vast.ai offer market",
+    "caveat": "Direct-only and billable; capacity, quota, and offer availability vary",
+    "docs": "vast.md"
+  },
   "ovh": {
     "status": "built-in",
     "category": "direct-cloud",
