@@ -62,10 +62,11 @@ is "submit through the login node, run inside a scheduled allocation."
 The first adapter should implement the versioned external provider protocol,
 not core provider code. The adapter owns Slurm-specific behavior:
 
-1. `doctor` verifies required Slurm commands, basic scheduler visibility,
-   adapter state paths, runner paths, and the chosen SSH/proxy mode without
-   creating a job. Site policy such as account, partition, and QOS acceptance is
-   proven by `acquire`/`warmup` or by site-specific non-submitting checks.
+1. `doctor` verifies required Slurm command binaries, adapter state paths,
+   runner paths, and the chosen SSH/proxy mode without creating a job or querying
+   scheduler policy. Slurm controller reachability and site policy such as
+   account, partition, and QOS acceptance are proven by `acquire`/`warmup` or by
+   site-specific non-submitting checks.
 2. `acquire` submits an `sbatch --parsable` job with a Crabbox-owned job name,
    resource limits, and a site-owned runner script.
 3. The batch script starts an SSH-reachable runner inside the allocation. Common
