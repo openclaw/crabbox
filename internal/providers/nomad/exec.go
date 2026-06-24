@@ -147,7 +147,3 @@ func validShellEnvName(name string) bool {
 	}
 	return true
 }
-
-func nomadCleanupCommand(leaseID string) string {
-	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
-}

@@ -152,24 +152,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 
 	shouldStop := acquired && !req.Keep
-	cleanedUp := false
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: nomadCleanupCommand(leaseID),
-	}
 	finishResult := func(result RunResult) RunResult {
 		if result.Provider == "" {
 			result.Provider = providerName
 			result.LeaseID = leaseID
 			result.Slug = slug
-		}
-		if result.LeaseID != "" {
-			result.Session = session
-			result.Session.Kept = !cleanedUp && !shouldStop
 		}
 		return result
 	}
@@ -179,8 +166,6 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			defer cancel()
 			if err := b.deleteOwnedRunJob(cleanupCtx, client, claim); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: nomad stop failed for lease=%s job=%s: %v\n", leaseID, claim.Labels[claimLabelJobID], err)
-			} else {
-				cleanedUp = true
 			}
 		}
 		result = finishResult(result)
