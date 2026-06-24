@@ -26,6 +26,7 @@ type lifecycleFakeClient struct {
 	jobInfoErr   map[string]error
 	execs        []recordedNomadExec
 	execResults  []fakeNomadExecResult
+	evalStatus   string
 }
 
 type recordedNomadExec struct {
@@ -74,6 +75,9 @@ func (f *lifecycleFakeClient) RegisterJob(_ context.Context, job *nomadapi.Job) 
 	evalID := "eval-" + jobID
 	f.evals[evalID] = &nomadapi.Evaluation{ID: evalID, JobID: jobID, Status: nomadapi.EvalStatusComplete}
 	f.allocs[jobID] = []*nomadapi.AllocationListStub{runningAlloc(jobID, "alloc-"+jobID, "node-1", "worker-1", "crabbox")}
+	if f.evalStatus != "" {
+		f.evals[evalID].Status = f.evalStatus
+	}
 	return evalID, nil
 }
 
@@ -245,6 +249,27 @@ func TestWarmupRegistersJobAndWritesNomadClaim(t *testing.T) {
 	}
 }
 
+func TestWarmupCleansRegisteredJobWhenReadinessFailsBeforeClaim(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	fake.evalStatus = nomadapi.EvalStatusFailed
+	b, _, _ := testBackend(t, fake)
+	repo := Repo{Root: filepath.Join(t.TempDir(), "repo"), Name: "my-app"}
+	err := b.Warmup(context.Background(), WarmupRequest{Repo: repo, Keep: true, RequestedSlug: "bad-crab"})
+	if err == nil || !strings.Contains(err.Error(), "nomad evaluation") {
+		t.Fatalf("err=%v, want evaluation failure", err)
+	}
+	if len(fake.deregisters) != 1 {
+		t.Fatalf("deregisters=%v, want one cleanup", fake.deregisters)
+	}
+	claims, err := listNomadLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 0 {
+		t.Fatalf("claims=%#v, want no unclaimed job record", claims)
+	}
+}
+
 func TestListAndStatusKeepMissingJobsVisible(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	b, _, _ := testBackend(t, fake)
@@ -321,6 +346,26 @@ func TestCleanupDryRunAndLiveOwnedExpiredClaims(t *testing.T) {
 	}
 	if len(fake.deregisters) != 1 || fake.deregisters[0] != claim.Labels[claimLabelJobID] {
 		t.Fatalf("deregisters=%v", fake.deregisters)
+	}
+	if retained, err := readLeaseClaim(claim.LeaseID); err != nil || retained.LeaseID != "" {
+		t.Fatalf("retained=%#v err=%v", retained, err)
+	}
+}
+
+func TestCleanupRemovesMissingClaimBeforeExpiry(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, stdout, _ := testBackend(t, fake)
+	claim := createClaim(t, b, "cbx_777777777777", "missing-crab", "crabbox-777777777777", "alloc-7")
+	delete(fake.jobs, claim.Labels[claimLabelJobID])
+
+	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deregisters) != 0 {
+		t.Fatalf("deregisters=%v, missing job should not be deregistered", fake.deregisters)
+	}
+	if !strings.Contains(stdout.String(), "remove nomad claim") {
+		t.Fatalf("stdout=%s, want missing claim removal", stdout.String())
 	}
 	if retained, err := readLeaseClaim(claim.LeaseID); err != nil || retained.LeaseID != "" {
 		t.Fatalf("retained=%#v err=%v", retained, err)
