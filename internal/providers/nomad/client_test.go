@@ -55,3 +55,27 @@ func TestNewNomadAPIConfigRequiresAddress(t *testing.T) {
 		t.Fatal("expected missing address error")
 	}
 }
+
+func TestNewNomadAPIConfigAcceptsUnixSocketAddress(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Nomad.Address = "unix:///var/run/nomad.sock"
+	apiConfig, err := newNomadAPIConfig(cfg, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiConfig.Address != cfg.Nomad.Address {
+		t.Fatalf("apiConfig.Address=%q", apiConfig.Address)
+	}
+}
+
+func TestValidateConfigRejectsRelativeUnixSocketAddress(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Nomad.Address = "unix://relative.sock"
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected relative unix socket address error")
+	}
+}
