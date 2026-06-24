@@ -126,7 +126,7 @@ else
 fi
 trap 'unexpected_failure "$?" "$LINENO"' ERR
 if [[ $run_status -ne 0 ]]; then
-  if "$bin" list --provider aws-lambda-microvm --json 2>/dev/null | jq -e --arg slug "$slug" 'any(.[]; ((.slug // .Slug // "") == $slug))' >/dev/null; then
+  if "$bin" list --provider aws-lambda-microvm --json 2>/dev/null | jq -e --arg slug "$slug" 'any(.[]; ((.name // .Name // .slug // .Slug // .labels.slug // "") == $slug))' >/dev/null; then
     lease_created=1
   fi
   classify_failure "$run_output" initial_run_failed
@@ -140,7 +140,7 @@ status_json="$("$bin" status --provider aws-lambda-microvm --id "$slug" --wait -
 if ! jq -e '((.state // .State // "") | ascii_downcase) == "running"' <<<"$status_json" >/dev/null; then
   classify_and_exit diagnostic_only running_status_proof_missing
 fi
-if ! "$bin" list --provider aws-lambda-microvm --json | jq -e --arg slug "$slug" 'any(.[]; ((.slug // .Slug // "") == $slug))' >/dev/null; then
+if ! "$bin" list --provider aws-lambda-microvm --json | jq -e --arg slug "$slug" 'any(.[]; ((.name // .Name // .slug // .Slug // .labels.slug // "") == $slug))' >/dev/null; then
   classify_and_exit diagnostic_only inventory_proof_missing
 fi
 
@@ -162,7 +162,7 @@ fi
 
 "$bin" stop --provider aws-lambda-microvm "$slug" >/dev/null
 lease_created=0
-if "$bin" list --provider aws-lambda-microvm --json | jq -e --arg slug "$slug" 'any(.[]; ((.slug // .Slug // "") == $slug))' >/dev/null; then
+if "$bin" list --provider aws-lambda-microvm --json | jq -e --arg slug "$slug" 'any(.[]; ((.name // .Name // .slug // .Slug // .labels.slug // "") == $slug))' >/dev/null; then
   classify_and_exit diagnostic_only cleanup_proof_failed
 fi
 

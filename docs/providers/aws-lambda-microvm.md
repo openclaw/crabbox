@@ -34,8 +34,7 @@ aws lambda-microvms create-microvm-image \
   --name crabbox-runner \
   --code-artifact uri=s3://my-bucket/crabbox-lambda-microvm.zip \
   --base-image-arn arn:aws:lambda:eu-west-1:aws:microvm-image:al2023-1 \
-  --build-role-arn arn:aws:iam::123456789012:role/MicrovmBuildRole \
-  --hooks '{"port":8080,"microvmImageHooks":{"ready":"ENABLED","validate":"ENABLED"},"microvmHooks":{"run":"ENABLED","resume":"ENABLED","suspend":"ENABLED","terminate":"ENABLED"}}'
+  --build-role-arn arn:aws:iam::123456789012:role/MicrovmBuildRole
 ```
 
 The build role must trust `lambda.amazonaws.com`, read the S3 artifact, and
