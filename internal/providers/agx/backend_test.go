@@ -26,7 +26,7 @@ func TestAGXSSHTargetUsesWorkspaceGatewayAndBYOKey(t *testing.T) {
 	if target.Key != "/home/alice/.ssh/id_ed25519" {
 		t.Fatalf("expected BYO ssh key, got %q", target.Key)
 	}
-	if target.TargetOS != targetLinux || !target.DisableHostKeyChecking {
+	if target.TargetOS != targetLinux || target.DisableHostKeyChecking {
 		t.Fatalf("target=%#v", target)
 	}
 }

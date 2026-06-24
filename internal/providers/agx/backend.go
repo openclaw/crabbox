@@ -263,13 +263,12 @@ func (b *agxBackend) instanceServer(leaseID, slug, instance, state string) Serve
 // standard Crabbox SSH config (cfg.SSHKey) rather than a per-lease Crabbox key.
 func (b *agxBackend) agxSSHTarget(instance string) SSHTarget {
 	return SSHTarget{
-		User:                   b.vmUser() + "+" + instance,
-		Host:                   b.workspaceHost(""),
-		Key:                    strings.TrimSpace(b.cfg.SSHKey),
-		Port:                   "22",
-		TargetOS:               targetLinux,
-		NetworkKind:            networkPublic,
-		DisableHostKeyChecking: true,
+		User:        b.vmUser() + "+" + instance,
+		Host:        b.workspaceHost(""),
+		Key:         strings.TrimSpace(b.cfg.SSHKey),
+		Port:        "22",
+		TargetOS:    targetLinux,
+		NetworkKind: networkPublic,
 	}
 }
 
