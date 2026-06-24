@@ -1917,7 +1917,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.SSHUser = cfg.Firecracker.User
 		}
 		if cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort {
-			cfg.SSHPort = blank(cfg.Firecracker.SSHPort, "22")
+			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil
 		if cfg.Firecracker.WorkRoot != "" && (isDefaultWorkRoot(cfg.WorkRoot) || cfg.Firecracker.WorkRoot != base.Firecracker.WorkRoot) {
