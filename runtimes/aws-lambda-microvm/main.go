@@ -175,8 +175,9 @@ func (s *server) exec(w http.ResponseWriter, r *http.Request) {
 	readers.Add(2)
 	go stream.copy(&readers, "stdout", stdout)
 	go stream.copy(&readers, "stderr", stderr)
-	waitErr := cmd.Wait()
+	// StdoutPipe and StderrPipe must drain before Wait closes their descriptors.
 	readers.Wait()
+	waitErr := cmd.Wait()
 	exitCode := 0
 	if waitErr != nil {
 		var exitErr *exec.ExitError
