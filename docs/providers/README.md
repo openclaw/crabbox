@@ -61,7 +61,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 70 providers (41 SSH lease, 27 delegated run, 2 service control).
+Current built-in surface: 71 providers (41 SSH lease, 28 delegated run, 2 service control).
 
 Access terms:
 
@@ -115,6 +115,7 @@ Access terms:
 | [namespace-devbox](namespace-devbox.md) (`namespace`, `namespace-devboxes`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Namespace Devbox | `provider-managed`; GPU: unknown | Namespace devbox CLI; stop by default; optional delete | Fast managed development box over SSH | Uses the devbox product, not Namespace Compute instances |
 | [namespace-instance](namespace-instance.md) (`namespace-compute`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Namespace Compute instance | `provider-managed`; GPU: unknown | Namespace nsc CLI; instance delete | Short-lived managed Linux compute over SSH | Requires the nsc CLI and direct provider credentials |
 | [nebius](nebius.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Nebius Compute VM | `cloud`; GPU: optional | Nebius CLI; owned VM delete | Direct Linux VM lease with optional GPU selection | Requires Nebius CLI auth, project/subnet setup, quota, and public SSH |
+| [nomad](nomad.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup` | `linux`; HashiCorp Nomad allocation | `self-hosted`; GPU: unknown | Nomad job; owned job deregister | Self-hosted delegated Linux execution on an existing Nomad cluster | Requires Nomad HTTP API access, env-only ACL token handling, and allocation exec privileges |
 | [nvidia-brev](nvidia-brev.md) (`brev`, `nvidia`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; NVIDIA Brev GPU workspace | `provider-managed`; GPU: yes | NVIDIA Brev CLI; delete by default; optional stop | Managed NVIDIA GPU workspace over SSH | Requires Brev CLI auth, quota, and available GPU capacity |
 | [opencomputer](opencomputer.md) (`oc`, `open-computer`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; OpenComputer Linux VM | `provider-managed`; GPU: unknown | OpenComputer; VM delete | Hosted delegated Linux VM execution | REST execution contract, not an SSH lease |
 | [opensandbox](opensandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; OpenSandbox sandbox | `provider-managed`; GPU: unknown | OpenSandbox; sandbox delete | Hosted delegated sandbox through an open SDK | Requires compatible OpenSandbox control and exec endpoints |

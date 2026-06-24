@@ -1132,6 +1132,10 @@ if has_provider smolvm || has_provider smol || has_provider smolmachines || has_
   CRABBOX_SMOLVM_LIVE_SMOKE=1 "$root/scripts/live-smolvm-smoke.sh"
 fi
 
+if has_provider nomad; then
+  "$root/scripts/live-nomad-smoke.sh"
+fi
+
 if has_provider superserve; then
   "$root/scripts/live-superserve-smoke.sh"
 fi

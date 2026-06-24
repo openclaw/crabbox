@@ -86,6 +86,9 @@ Provider readiness validates the selected provider without creating a lease.
   Blaxel validates the configured API URL, reports whether an API key and
   workspace are configured, probes the Blaxel API, and lists inventory with
   `mutation=false`.
+  Nomad validates the configured HTTP API address, env-only ACL token source,
+  `agent.self`, and configured region/namespace values with `mutation=false`;
+  it does not register jobs or execute allocations during doctor.
   Vercel Sandbox checks the SDK bridge
   contract, local `sandbox` CLI, read-only `sandbox list --all --limit 1`
   auth/inventory access, project scoping readiness, and local `vsbx_...`

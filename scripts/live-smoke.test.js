@@ -236,6 +236,42 @@ exit 99
   assert.doesNotMatch(calls, /^stop /m);
 });
 
+test("Nomad live smoke dispatches to the provider-specific script", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nomad-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+printf 'unexpected crabbox args: %s\\n' "$*" >&2
+exit 99
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "nomad",
+      CRABBOX_LIVE_REPO: repoRoot,
+      CRABBOX_CONFIG: path.join(dir, "missing.yaml"),
+      NOMAD_ADDR: "",
+      NOMAD_TOKEN: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /classification=environment_blocked reason=missing_NOMAD_ADDR_or_nomad.address/);
+  assert.match(result.stderr, /admin active-lease check skipped/);
+  assert.equal(fs.existsSync(log), false);
+});
+
 test("Scaleway live smoke dispatches to the provider-specific script", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-scaleway-"));
   const fakeCrabbox = path.join(dir, "crabbox");

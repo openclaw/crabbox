@@ -671,6 +671,20 @@
     "caveat": "Requires the nsc CLI and direct provider credentials",
     "docs": "namespace-instance.md"
   },
+  "nomad": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "HashiCorp Nomad allocation",
+    "location": "self-hosted",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "Nomad job",
+    "cleanup": "owned job deregister",
+    "bestFit": "Self-hosted delegated Linux execution on an existing Nomad cluster",
+    "caveat": "Requires Nomad HTTP API access, env-only ACL token handling, and allocation exec privileges",
+    "docs": "nomad.md"
+  },
   "opencomputer": {
     "status": "built-in",
     "category": "delegated-sandbox",
