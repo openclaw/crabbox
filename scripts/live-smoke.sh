@@ -1026,6 +1026,10 @@ if has_provider vercel-sandbox; then
   "$root/scripts/live-vercel-sandbox-smoke.sh"
 fi
 
+if has_provider aws-lambda-microvm; then
+  "$root/scripts/live-aws-lambda-microvm-smoke.sh"
+fi
+
 if has_provider multipass || has_provider mp || has_provider canonical-multipass; then
   provider_smoke multipass --ttl 15m --idle-timeout 5m
 fi
