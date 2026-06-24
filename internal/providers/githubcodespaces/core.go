@@ -67,10 +67,6 @@ func workRootExplicit(cfg *Config) bool {
 	return core.IsWorkRootExplicit(cfg)
 }
 
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
 func newLeaseID() string {
 	return core.NewLeaseID()
 }
@@ -121,10 +117,6 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 
 func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 	return core.ShouldCleanupServer(server, now)
-}
-
-func serverSlug(server Server) string {
-	return core.ServerSlug(server)
 }
 
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
