@@ -540,13 +540,13 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 			return fmt.Errorf("finalize vast stop claim: %w", err)
 		}
 	default:
-		if err := client.DestroyInstance(ctx, instanceID); err != nil && !isVastNotFound(err) {
-			return err
-		}
 		if keyID := strings.TrimSpace(claim.Labels[vastKeyIDLabel]); keyID != "" && claim.Labels[vastKeyOwnedLabel] == "true" {
 			if err := client.DetachInstanceSSHKey(ctx, instanceID, keyID); err != nil && !isVastNotFound(err) {
 				return err
 			}
+		}
+		if err := client.DestroyInstance(ctx, instanceID); err != nil && !isVastNotFound(err) {
+			return err
 		}
 		if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
 			return fmt.Errorf("finalize vast cleanup claim: %w", err)
