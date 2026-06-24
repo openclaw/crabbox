@@ -111,7 +111,9 @@ func effectiveConfigForShow(cfg Config) Config {
 	switch normalizeProviderName(cfg.Provider) {
 	case "vast", "vast-ai", "vastai":
 		cfg.WorkRoot = cfg.Vast.WorkRoot
-		cfg.SSHUser = cfg.Vast.User
+		if !IsSSHUserExplicit(&cfg) {
+			cfg.SSHUser = cfg.Vast.User
+		}
 		cfg.SSHPort = "22"
 		cfg.SSHFallbackPorts = nil
 	case "nvidia-brev", "brev", "nvidia":
