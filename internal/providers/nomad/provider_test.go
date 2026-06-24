@@ -29,8 +29,11 @@ func TestProviderSpecIsDelegatedRunLinuxWithoutAliases(t *testing.T) {
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("spec.Targets=%#v", spec.Targets)
 	}
-	if len(spec.Features) != 0 {
-		t.Fatalf("spec.Features=%#v, want none for Wave 1 foundation", spec.Features)
+	if !spec.Features.Has(core.FeatureCleanup) {
+		t.Fatalf("spec.Features=%#v, want cleanup after Wave 2 lifecycle", spec.Features)
+	}
+	if spec.Features.Has(core.FeatureArchiveSync) {
+		t.Fatalf("spec.Features=%#v, archive-sync belongs to Wave 3", spec.Features)
 	}
 }
 

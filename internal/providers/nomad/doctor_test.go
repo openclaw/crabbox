@@ -34,6 +34,26 @@ func (f *fakeClient) NamespaceInfo(context.Context, string) (*nomadapi.Namespace
 	return &nomadapi.Namespace{Name: "team-a"}, f.namespaceErr
 }
 
+func (f *fakeClient) RegisterJob(context.Context, *nomadapi.Job) (string, error) {
+	return "", nil
+}
+
+func (f *fakeClient) JobInfo(context.Context, string) (*nomadapi.Job, error) {
+	return nil, nil
+}
+
+func (f *fakeClient) JobAllocations(context.Context, string, bool) ([]*nomadapi.AllocationListStub, error) {
+	return nil, nil
+}
+
+func (f *fakeClient) EvaluationInfo(context.Context, string) (*nomadapi.Evaluation, error) {
+	return nil, nil
+}
+
+func (f *fakeClient) DeregisterJob(context.Context, string, bool) (string, error) {
+	return "", nil
+}
+
 func TestDoctorReportsMissingConfigWithoutClientCall(t *testing.T) {
 	t.Setenv("NOMAD_TOKEN", "secret-token")
 	cfg := core.BaseConfig()
