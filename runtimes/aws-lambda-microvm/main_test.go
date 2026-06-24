@@ -69,6 +69,37 @@ func TestUploadRejectsPathsOutsideDedicatedTempNames(t *testing.T) {
 	}
 }
 
+func TestExecKeepsScriptSeparateFromCommandStdin(t *testing.T) {
+	s := &server{execSlot: make(chan struct{}, 1)}
+	payload, _ := json.Marshal(execRequest{
+		Command: "read line || true\nprintf after",
+		Workdir: t.TempDir(),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(payload))
+	res := httptest.NewRecorder()
+	s.exec(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	var stdout string
+	scanner := bufio.NewScanner(res.Body)
+	for scanner.Scan() {
+		var event streamEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Stream == "stdout" {
+			stdout += event.Data
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if stdout != "after" {
+		t.Fatalf("stdout=%q", stdout)
+	}
+}
+
 func TestUploadReplacesSymlinkWithoutFollowingIt(t *testing.T) {
 	s := &server{execSlot: make(chan struct{}, 1)}
 	target := "/tmp/crabbox-sync-deadbeef.tgz"

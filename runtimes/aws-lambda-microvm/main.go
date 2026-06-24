@@ -100,7 +100,7 @@ func (s *server) upload(w http.ResponseWriter, r *http.Request) {
 	_, copyErr := io.Copy(file, body)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(target)
+		_ = tmp.Remove(name)
 		http.Error(w, "write upload", http.StatusBadRequest)
 		return
 	}
@@ -134,7 +134,24 @@ func (s *server) exec(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	cmd := exec.CommandContext(r.Context(), "/bin/sh", "-lc", req.Command)
+	script, err := os.CreateTemp("/tmp", "crabbox-exec-*.sh")
+	if err != nil {
+		http.Error(w, "create command script", http.StatusInternalServerError)
+		return
+	}
+	scriptPath := script.Name()
+	defer func() { _ = os.Remove(scriptPath) }()
+	if _, err := io.WriteString(script, req.Command); err != nil {
+		_ = script.Close()
+		http.Error(w, "write command script", http.StatusInternalServerError)
+		return
+	}
+	if err := script.Close(); err != nil {
+		http.Error(w, "close command script", http.StatusInternalServerError)
+		return
+	}
+	// Keep user-provided script text out of argv while preserving child-process stdin.
+	cmd := exec.CommandContext(r.Context(), "/bin/sh", scriptPath)
 	cmd.Dir = req.Workdir
 	cmd.Env = append(os.Environ(), envList(req.Env)...)
 	stdout, err := cmd.StdoutPipe()
