@@ -123,6 +123,7 @@ class SlurmCrabboxAdapter:
         missing = [name for name in ("sbatch", "squeue", "scancel") if shutil.which(name) is None]
         if missing:
             raise AdapterError(f"missing Slurm command(s): {', '.join(missing)}")
+        validate_ssh_config(config)
         runner = self.runner(config)
         if not runner.exists():
             raise AdapterError(f"runner script does not exist: {runner}")
@@ -133,6 +134,7 @@ class SlurmCrabboxAdapter:
         }
 
     def acquire(self, request: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+        validate_ssh_config(config)
         desired = request.get("desired") or {}
         lease_id = required_string(desired, "leaseId")
         slug = required_string(desired, "slug")
@@ -424,36 +426,52 @@ class SlurmCrabboxAdapter:
             state["schedulerState"] = status
             if status in TERMINAL_STATES:
                 state["status"] = status.lower()
+            elif status == "MISSING":
+                state["status"] = "missing"
             elif status == "RUNNING" and str(state.get("status")) != "ready":
                 state["status"] = "running"
             elif status == "PENDING":
                 state["status"] = "pending"
         else:
-            state["status"] = "missing"
+            state["status"] = "unknown"
+            state["schedulerStateUnknownAt"] = now()
         state["updatedAt"] = now()
         self.save_state(str(state["leaseId"]), state)
         return state
 
     def query_job_state(self, job_id: str) -> str:
+        return self.query_job_state_observation(job_id)["state"]
+
+    def query_job_state_observation(self, job_id: str) -> Dict[str, str]:
         result = subprocess.run(
             ["squeue", "-h", "-j", job_id, "-o", "%T"],
             text=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             check=False,
         )
+        if result.returncode != 0:
+            return {
+                "state": "",
+                "detail": result.stderr.strip() or result.stdout.strip() or f"squeue exit {result.returncode}",
+            }
         for line in result.stdout.splitlines():
             value = line.strip().upper()
             if value:
-                return value
+                return {"state": value, "detail": ""}
         if shutil.which("sacct"):
             result = subprocess.run(
                 ["sacct", "-n", "-j", job_id, "--format", "State", "--parsable2"],
                 text=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 check=False,
             )
+            if result.returncode != 0:
+                return {
+                    "state": "",
+                    "detail": result.stderr.strip() or result.stdout.strip() or f"sacct exit {result.returncode}",
+                }
             for line in result.stdout.splitlines():
                 # ``State`` can be e.g. "CANCELLED by 1000"; keep only the leading
                 # token. Empty lines (sacct sometimes prints blank step rows) are
@@ -461,8 +479,9 @@ class SlurmCrabboxAdapter:
                 field = line.split("|", 1)[0].strip()
                 tokens = field.split()
                 if tokens:
-                    return tokens[0].upper()
-        return ""
+                    return {"state": tokens[0].upper(), "detail": ""}
+            return {"state": "MISSING", "detail": "squeue and sacct returned no job rows"}
+        return {"state": "", "detail": "squeue returned no rows and sacct is unavailable"}
 
     def cancel_job(self, job_id: str) -> None:
         if not job_id:
@@ -476,10 +495,14 @@ class SlurmCrabboxAdapter:
         )
         if result.returncode == 0:
             return
-        status = self.query_job_state(job_id)
-        if status and status not in TERMINAL_STATES:
+        observation = self.query_job_state_observation(job_id)
+        status = observation["state"]
+        if status and status not in TERMINAL_STATES and status != "MISSING":
             detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
             raise AdapterError(f"scancel {job_id} failed while job is still {status}: {detail}")
+        if not status:
+            detail = result.stderr.strip() or result.stdout.strip() or observation["detail"] or f"exit {result.returncode}"
+            raise AdapterError(f"scancel {job_id} failed and scheduler state is unknown: {detail}")
 
     def ensure_ssh_key(self, job_dir: Path, lease_id: str, config: Dict[str, Any]) -> Path:
         configured = config_string(config, "sshPrivateKey", "")
@@ -630,6 +653,14 @@ def config_string(config: Dict[str, Any], key: str, default: str) -> str:
     if value in (None, ""):
         return default
     return str(value)
+
+
+def validate_ssh_config(config: Dict[str, Any]) -> None:
+    mode = config_string(config, "sshMode", "direct")
+    if mode not in ("direct", "proxy-through-login"):
+        raise AdapterError(f"unsupported sshMode: {mode}")
+    if mode == "proxy-through-login" and not config_string(config, "loginHost", ""):
+        raise AdapterError("sshMode=proxy-through-login requires loginHost")
 
 
 def scheduler_state(state: Dict[str, Any]) -> str:

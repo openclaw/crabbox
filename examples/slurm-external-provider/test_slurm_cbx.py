@@ -75,13 +75,16 @@ class FakeSlurm:
         self.calls: List[List[str]] = []
         self.job_id = "123456"
         self.squeue_states: List[str] = ["PENDING", "RUNNING"]
+        self.squeue_returncode = 0
         self.sacct_state = "COMPLETED"
+        self.sacct_returncode = 0
+        self.sacct_available = True
         self.scancel_returncode = 0
         self.cancelled: List[str] = []
         self._module = module
         monkeypatch.setattr(module, "run", self._run)
         monkeypatch.setattr(module.subprocess, "run", self._subprocess_run)
-        monkeypatch.setattr(module.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(module.shutil, "which", self._which)
 
     # ``run`` raises on failure, matching the real helper.
     def _run(self, command: List[str], env: Dict[str, str] | None = None):
@@ -102,9 +105,13 @@ class FakeSlurm:
         self.calls.append(list(command))
         prog = command[0]
         if prog == "squeue":
+            if self.squeue_returncode != 0:
+                return types.SimpleNamespace(stdout="", stderr="squeue unavailable", returncode=self.squeue_returncode)
             state = self.squeue_states.pop(0) if self.squeue_states else ""
             return types.SimpleNamespace(stdout=(state + "\n") if state else "", stderr="", returncode=0)
         if prog == "sacct":
+            if self.sacct_returncode != 0:
+                return types.SimpleNamespace(stdout="", stderr="sacct unavailable", returncode=self.sacct_returncode)
             return types.SimpleNamespace(stdout=f"{self.sacct_state}\n", stderr="", returncode=0)
         if prog == "scancel":
             self.cancelled.append(command[-1])
@@ -113,6 +120,11 @@ class FakeSlurm:
 
     def names(self) -> List[str]:
         return [call[0] for call in self.calls]
+
+    def _which(self, name: str) -> str | None:
+        if name == "sacct" and not self.sacct_available:
+            return None
+        return f"/usr/bin/{name}"
 
 
 @pytest.fixture()
@@ -160,6 +172,15 @@ def test_doctor_missing_commands(adapter: slurm_cbx.SlurmCrabboxAdapter, monkeyp
     with pytest.raises(slurm_cbx.AdapterError) as excinfo:
         adapter.handle({"operation": "doctor", "config": {}})
     assert "missing Slurm command" in str(excinfo.value)
+
+
+def test_doctor_validates_proxy_config_before_submit(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
+) -> None:
+    with pytest.raises(slurm_cbx.AdapterError) as excinfo:
+        adapter.handle({"operation": "doctor", "config": {"sshMode": "proxy-through-login"}})
+    assert "requires loginHost" in str(excinfo.value)
+    assert "sbatch" not in fake_slurm.names()
 
 
 def test_acquire_resolve_release_happy_path(
@@ -313,6 +334,55 @@ def test_cleanup_removes_terminal_state(
     wet = adapter.handle({"operation": "cleanup", "config": {}})
     assert "removed 1" in wet["message"]
     assert not adapter.job_dir(LEASE_ID).exists()
+
+
+def test_refresh_state_preserves_unknown_scheduler_state(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
+) -> None:
+    _publish_endpoint(adapter, LEASE_ID)
+    adapter.handle(acquire_request())
+
+    fake_slurm.squeue_states = []
+    fake_slurm.sacct_returncode = 1
+    state = adapter.refresh_state(adapter.load_state(LEASE_ID))
+
+    assert state["status"] == "unknown"
+    assert "schedulerStateUnknownAt" in state
+    assert adapter.job_dir(LEASE_ID).exists()
+
+    cleanup = adapter.handle({"operation": "cleanup", "config": {}})
+    assert "removed 0" in cleanup["message"]
+    assert adapter.job_dir(LEASE_ID).exists()
+
+
+def test_release_keeps_state_after_ambiguous_scancel_failure(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
+) -> None:
+    _publish_endpoint(adapter, LEASE_ID)
+    adapter.handle(acquire_request())
+
+    fake_slurm.scancel_returncode = 1
+    fake_slurm.squeue_states = []
+    fake_slurm.sacct_returncode = 1
+    with pytest.raises(slurm_cbx.AdapterError) as excinfo:
+        adapter.handle({"operation": "release", "id": LEASE_ID, "config": {}})
+
+    assert "scheduler state is unknown" in str(excinfo.value)
+    assert adapter.job_dir(LEASE_ID).exists()
+
+
+def test_release_removes_state_when_scancel_fails_but_absence_is_proven(
+    adapter: slurm_cbx.SlurmCrabboxAdapter, fake_slurm: FakeSlurm
+) -> None:
+    _publish_endpoint(adapter, LEASE_ID)
+    adapter.handle(acquire_request())
+
+    fake_slurm.scancel_returncode = 1
+    fake_slurm.squeue_states = []
+    fake_slurm.sacct_state = ""
+    adapter.handle({"operation": "release", "id": LEASE_ID, "config": {}})
+
+    assert adapter.job_dir(LEASE_ID).exists() is False
 
 
 def test_list_skips_corrupt_state_file(
