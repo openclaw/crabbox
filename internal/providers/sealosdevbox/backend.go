@@ -2,6 +2,9 @@ package sealosdevbox
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -86,20 +89,149 @@ func boolString(value bool) string {
 	return "false"
 }
 
-func (b *backend) Acquire(context.Context, core.AcquireRequest) (core.LeaseTarget, error) {
-	return core.LeaseTarget{}, unsupportedLifecycleError("acquire")
+func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if AutomationSurfaceDecision != "crd_first" {
+		return core.LeaseTarget{}, core.Exit(2, "sealos-devbox lifecycle plan requires automation_surface=crd_first, found %s", AutomationSurfaceDecision)
+	}
+	leaseID := strings.TrimSpace(req.RequestedLeaseID)
+	if leaseID == "" {
+		leaseID = core.NewLeaseID()
+	}
+	slug, err := b.allocateLeaseSlug(ctx, leaseID, req.RequestedSlug)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	name := core.LeaseProviderName(leaseID, slug)
+	now := b.now()
+	manifest, err := b.renderDevboxManifest(name, leaseID, slug, req.Keep, now)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if b.rt.Stderr != nil {
+		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s devbox=%s namespace=%s keep=%v\n", providerName, leaseID, slug, name, b.cfg.SealosDevbox.Namespace, req.Keep)
+	}
+	if err := b.applyDevbox(ctx, manifest); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	item, err := b.waitForDevboxPrepared(ctx, name, bootstrapWaitTimeout(b.cfg))
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	secret, err := b.waitForDevboxSecret(ctx, item, bootstrapWaitTimeout(b.cfg))
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	keys, err := parseDevboxSecretKeys(secret)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	keyPath, err := persistDevboxKey(leaseID, keys)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	server := b.serverFromDevbox(item)
+	target := b.preparedTarget(leaseID, keyPath)
+	if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) Resolve(context.Context, core.ResolveRequest) (core.LeaseTarget, error) {
-	return core.LeaseTarget{}, unsupportedLifecycleError("resolve")
+func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+	item, _, leaseID, slug, err := b.resolveDevbox(ctx, req.ID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	server := b.serverFromDevbox(item)
+	target := b.preparedTarget(leaseID, "")
+	if !req.StatusOnly && !req.ReleaseOnly {
+		secret, err := b.getSecret(ctx, devboxSecretName(item))
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		keys, err := parseDevboxSecretKeys(secret)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		keyPath, err := persistDevboxKey(leaseID, keys)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		target = b.preparedTarget(leaseID, keyPath)
+		if req.Repo.Root != "" && !req.NoLocalStateMutations {
+			if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
+				return core.LeaseTarget{}, err
+			}
+		}
+	}
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *backend) Touch(context.Context, core.TouchRequest) (core.Server, error) {
-	return core.Server{}, unsupportedLifecycleError("touch")
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	id := strings.TrimSpace(req.Lease.LeaseID)
+	if id == "" {
+		id = req.Lease.Server.Name
+	}
+	lease, err := b.Resolve(ctx, core.ResolveRequest{ID: id, StatusOnly: true})
+	if err != nil {
+		return core.Server{}, err
+	}
+	server := lease.Server
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, req.State, b.now())
+	_ = core.UpdateLeaseClaimEndpoint(lease.LeaseID, server, lease.SSH)
+	return server, nil
 }
 
-func (b *backend) List(context.Context, core.ListRequest) ([]core.LeaseView, error) {
-	return nil, unsupportedLifecycleError("list")
+func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
+	items, err := b.listDevboxes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	servers := make([]core.LeaseView, 0, len(items))
+	for _, item := range items {
+		if !b.itemMatchesScope(item) {
+			continue
+		}
+		servers = append(servers, b.serverFromDevbox(item))
+	}
+	return servers, nil
+}
+
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
+	item, _, leaseID, slug, err := b.resolveDevbox(ctx, req.ID)
+	if err != nil {
+		return core.StatusView{}, err
+	}
+	server := b.serverFromDevbox(item)
+	target := b.preparedTarget(leaseID, "")
+	return core.StatusView{
+		ID:            leaseID,
+		Slug:          slug,
+		Provider:      providerName,
+		TargetOS:      core.TargetLinux,
+		State:         devboxStatusLabel(item),
+		ServerID:      server.DisplayID(),
+		ServerType:    server.ServerType.Name,
+		Host:          target.Host,
+		Network:       core.NetworkPublic,
+		SSHHost:       target.Host,
+		SSHUser:       target.User,
+		SSHPort:       target.Port,
+		SSHKey:        target.Key,
+		LastTouchedAt: core.Blank(core.LeaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
+		IdleFor:       core.IdleForString(server.Labels["last_touched_at"], b.now()),
+		IdleTimeout:   core.LeaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
+		ExpiresAt:     core.Blank(core.LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
+		Labels:        server.Labels,
+		HasHost:       target.Host != "",
+		Ready:         devboxReady(item) && target.Host != "",
+	}, nil
 }
 
 func (b *backend) ReleaseLease(context.Context, core.ReleaseLeaseRequest) error {
@@ -108,4 +240,98 @@ func (b *backend) ReleaseLease(context.Context, core.ReleaseLeaseRequest) error 
 
 func (b *backend) Cleanup(context.Context, core.CleanupRequest) error {
 	return unsupportedLifecycleError("cleanup")
+}
+
+func (b *backend) preparedTarget(leaseID, keyPath string) core.SSHTarget {
+	if keyPath == "" {
+		keyPath = b.statusSSHKey(leaseID)
+	}
+	return core.SSHTarget{
+		User:     b.cfg.SealosDevbox.SSHUser,
+		Key:      keyPath,
+		Port:     b.cfg.SealosDevbox.SSHGatewayPort,
+		TargetOS: core.TargetLinux,
+	}
+}
+
+func (b *backend) statusSSHKey(leaseID string) string {
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		return ""
+	}
+	return keyPath
+}
+
+func (b *backend) waitForDevboxPrepared(ctx context.Context, name string, timeout time.Duration) (devboxItem, error) {
+	deadline := b.now().Add(timeout)
+	var last devboxItem
+	var lastErr error
+	for {
+		item, err := b.getDevbox(ctx, name)
+		if err == nil {
+			last = item
+			if devboxReady(item) {
+				return item, nil
+			}
+			if devboxTerminalFailure(item) {
+				events, _ := b.listEvents(ctx, name)
+				return item, core.Exit(5, "Sealos DevBox %s reached terminal state before readiness: %s", name, devboxDiagnostics(item, events, nil))
+			}
+		} else if kubectlNotFound(err) {
+			lastErr = err
+		} else {
+			return devboxItem{}, err
+		}
+		if !b.now().Before(deadline) {
+			events, _ := b.listEvents(ctx, name)
+			return last, core.Exit(5, "timed out waiting for Sealos DevBox %s readiness: %s", name, devboxDiagnostics(last, events, lastErr))
+		}
+		if err := sleepContext(ctx, 5*time.Second); err != nil {
+			return last, err
+		}
+	}
+}
+
+func (b *backend) waitForDevboxSecret(ctx context.Context, item devboxItem, timeout time.Duration) (devboxSecret, error) {
+	name := devboxSecretName(item)
+	deadline := b.now().Add(timeout)
+	var lastErr error
+	for {
+		secret, err := b.getSecret(ctx, name)
+		if err == nil {
+			return secret, nil
+		}
+		if !kubectlNotFound(err) {
+			return devboxSecret{}, err
+		}
+		lastErr = err
+		if !b.now().Before(deadline) {
+			return devboxSecret{}, core.Exit(5, "timed out waiting for Sealos DevBox Secret %s: %s", name, redactSensitive(lastErr.Error()))
+		}
+		if err := sleepContext(ctx, 5*time.Second); err != nil {
+			return devboxSecret{}, err
+		}
+	}
+}
+
+func (b *backend) now() time.Time {
+	if b.rt.Clock != nil {
+		return b.rt.Clock.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-timer.C:
+		return nil
+	}
+}
+
+func bootstrapWaitTimeout(cfg core.Config) time.Duration {
+	return core.BootstrapWaitTimeout(cfg)
 }
