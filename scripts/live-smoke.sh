@@ -986,6 +986,13 @@ if has_provider semaphore; then
   semaphore_smoke
 fi
 
+if has_provider agx; then
+  run_in_repo "$cb" doctor --provider agx
+  provider_smoke agx \
+    --ttl "${CRABBOX_LIVE_AGX_TTL:-15m}" \
+    --idle-timeout "${CRABBOX_LIVE_AGX_IDLE_TIMEOUT:-5m}"
+fi
+
 if has_provider sprites; then
   sprites_smoke
 fi

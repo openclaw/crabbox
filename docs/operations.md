@@ -56,6 +56,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=daytona           CRABBOX_LIVE_REPO=/path/
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-devbox  CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-instance CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore         CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=agx CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=sprites           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tenki CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
@@ -176,6 +177,10 @@ Per-provider smoke prerequisites:
   (`CRABBOX_BIN`), and the bundled or explicit `crabbox-apple-vz-helper`.
   `scripts/live-smoke.sh` uses the normal SSH lease lifecycle and preserves
   `CRABBOX_LIVE_APPLE_VZ_HELPER` for the whole run when set.
+- **AGX** — an AGX-registered SSH key available through `ssh.key`,
+  `--ssh-key`, or the SSH agent. `scripts/live-smoke.sh` uses the normal SSH
+  lease lifecycle with no coordinator and shows local claim release because AGX
+  has no remote delete API.
 - **W&B** — `WANDB_ENTITY_NAME` plus `CRABBOX_WANDB_API_KEY` or
   `WANDB_API_KEY` (from `wandb login`). `scripts/live-smoke.sh` refuses to call
   W&B until an API key is exported, then runs `doctor`, executes one no-sync

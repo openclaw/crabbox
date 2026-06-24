@@ -104,6 +104,20 @@ crabbox stop --provider agx swift-crab
 crabbox list --provider agx
 ```
 
+For redacted PR evidence or maintainer validation, run the shared live-smoke
+harness from a repo checkout on a machine with an AGX-registered SSH key:
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=agx CRABBOX_LIVE_COORDINATOR=0 \
+  CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+```
+
+That path runs `doctor`, `warmup`, `status --wait`, `ssh` command rendering,
+cache diagnostics, one synced command, recent history/log capture, and
+`stop`. Because AGX has no remote inventory or delete API, successful proof
+should show the local release message and the AGX gateway reclaim behavior
+expected for idle sandboxes.
+
 ## Lifecycle
 
 1. Allocate a Crabbox lease ID and slug; the slug becomes the AGX `<instance>`
