@@ -55,7 +55,7 @@ accepted.
 
 AGX authenticates SSH connections with **your own SSH key**, registered with AGX
 during early-access onboarding. There is no API token. Crabbox uses the SSH key
-from its standard configuration (`--ssh-key` / `sshKey` in config / your SSH
+from its standard configuration (`--ssh-key` / `ssh.key` in config / your SSH
 agent), exactly as the Static SSH provider does. Crabbox does not mint a
 per-lease key for AGX, because AGX would not trust an unregistered key.
 
@@ -64,7 +64,8 @@ per-lease key for AGX, because AGX would not trust an unregistered key.
 ```yaml
 provider: agx
 target: linux
-sshKey: ~/.ssh/id_ed25519   # the key you registered with AGX
+ssh:
+  key: ~/.ssh/id_ed25519   # the key you registered with AGX
 agx:
   workspace: workspace.agx.so
   user: root
