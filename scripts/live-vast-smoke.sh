@@ -193,8 +193,16 @@ validate_nvidia_smi() {
 }
 
 cleanup_armed=0
+lease_acquired=0
 slug=""
 config_file=""
+
+is_pre_acquire_not_found() {
+  local output="$1"
+  local lower
+  lower="$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')"
+  [[ "$lower" == *"not found"* || "$lower" == *"no lease"* || "$lower" == *"unknown lease"* || "$lower" == *"missing lease"* ]]
+}
 
 cleanup() {
   local status=$?
@@ -214,10 +222,14 @@ cleanup() {
       sleep 2
     done
     if [[ "$cleanup_status" -ne 0 ]]; then
-      printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "bin/crabbox stop --provider vast $slug" "$cleanup_status" "$slug" >&2
-      printf '%s\n' "$cleanup_output" | redact_output >&2
-      if [[ "$status" -eq 0 ]]; then
-        status="$cleanup_status"
+      if [[ "$lease_acquired" -eq 0 && "$status" -eq 0 ]] && is_pre_acquire_not_found "$cleanup_output"; then
+        cleanup_armed=0
+      else
+        printf 'classification=cleanup_failed command=%q exit=%s slug=%s\n' "bin/crabbox stop --provider vast $slug" "$cleanup_status" "$slug" >&2
+        printf '%s\n' "$cleanup_output" | redact_output >&2
+        if [[ "$status" -eq 0 ]]; then
+          status="$cleanup_status"
+        fi
       fi
     fi
   fi
@@ -283,6 +295,7 @@ validate_list_json_empty "bin/crabbox list --provider vast --json" "$initial_lis
 cleanup_armed=1
 run_capture "bin/crabbox warmup --provider vast --slug $slug --keep --ttl 20m --idle-timeout 5m" \
   bin/crabbox warmup --provider vast --slug "$slug" --keep --ttl 20m --idle-timeout 5m
+lease_acquired=1
 
 run_capture_validation "bin/crabbox status --provider vast --id $slug --wait --wait-timeout 600s" \
   bin/crabbox status --provider vast --id "$slug" --wait --wait-timeout 600s
