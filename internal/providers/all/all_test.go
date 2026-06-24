@@ -1072,6 +1072,10 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 		cfg.AgentSandbox.Context = "agent-context"
 		cfg.AgentSandbox.WarmPool = "linux-pool"
 		return cfg, true
+	case "aws-lambda-microvm":
+		cfg.AWSRegion = "eu-west-1"
+		cfg.AWSLambdaMicroVM.Image = "arn:aws:lambda:eu-west-1:123456789012:microvm-image:crabbox-runner"
+		return cfg, true
 	case "blacksmith-testbox":
 		return cfg, true
 	case "cloudflare-dynamic-workers":
@@ -1126,6 +1130,7 @@ func allBuiltInProviderNames() []string {
 		"apple-vz",
 		"ascii-box",
 		"aws",
+		"aws-lambda-microvm",
 		"azure",
 		"azure-dynamic-sessions",
 		"blaxel",

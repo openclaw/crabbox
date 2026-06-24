@@ -207,6 +207,41 @@ func TestValidateProviderTargetRejectsAppleVZExplicitAMD64(t *testing.T) {
 	}
 }
 
+func TestValidateProviderTargetDefaultsAWSLambdaMicroVMToARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws-lambda-microvm"
+	cfg.TargetOS = targetLinux
+	if got := effectiveArchitectureForConfig(cfg); got != ArchitectureARM64 {
+		t.Fatalf("effective architecture=%q want arm64", got)
+	}
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetAllowsAWSLambdaMicroVMExplicitARM64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws-lambda-microvm"
+	cfg.TargetOS = targetLinux
+	cfg.Architecture = ArchitectureARM64
+	cfg.architectureExplicit = true
+	if err := validateProviderTarget(cfg); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestValidateProviderTargetRejectsAWSLambdaMicroVMExplicitAMD64(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws-lambda-microvm"
+	cfg.TargetOS = targetLinux
+	cfg.Architecture = ArchitectureAMD64
+	cfg.architectureExplicit = true
+	err := validateProviderTarget(cfg)
+	if err == nil || !strings.Contains(err.Error(), "supports architecture=arm64 only") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestValidateProviderTargetRejectsAzureWindowsARM64WSL2(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "azure"

@@ -19,6 +19,7 @@ func init() {
 	RegisterProvider(testNebiusProvider{})
 	RegisterProvider(testScalewayProvider{})
 	RegisterProvider(testAWSProvider{})
+	RegisterProvider(testAWSLambdaMicroVMProvider{})
 	RegisterProvider(testAzureProvider{})
 	RegisterProvider(testAzureDynamicSessionsProvider{})
 	RegisterProvider(testBlaxelProvider{})
@@ -54,6 +55,27 @@ func init() {
 	RegisterProvider(testWandbProvider{})
 	RegisterProvider(testServiceControlProvider{})
 	RegisterProvider(testWindowsSandboxProvider{})
+}
+
+type testAWSLambdaMicroVMProvider struct{}
+
+func (testAWSLambdaMicroVMProvider) Name() string      { return "aws-lambda-microvm" }
+func (testAWSLambdaMicroVMProvider) Aliases() []string { return nil }
+func (testAWSLambdaMicroVMProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "aws-lambda-microvm",
+		Family:      "aws",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (testAWSLambdaMicroVMProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (testAWSLambdaMicroVMProvider) ApplyFlags(*Config, *flag.FlagSet, any) error { return nil }
+func (p testAWSLambdaMicroVMProvider) Configure(Config, Runtime) (Backend, error) {
+	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
 type testExternalProvider struct{}

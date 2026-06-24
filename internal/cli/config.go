@@ -67,6 +67,7 @@ type Config struct {
 	AWSRootGB                     int32
 	AWSSSHCIDRs                   []string
 	AWSMacHostID                  string
+	AWSLambdaMicroVM              AWSLambdaMicroVMConfig
 	AzureSubscription             string
 	AzureTenant                   string
 	AzureClientID                 string
@@ -250,6 +251,16 @@ type CapacityConfig struct {
 	Regions           []string
 	AvailabilityZones []string
 	Hints             bool
+}
+
+type AWSLambdaMicroVMConfig struct {
+	Image             string
+	ImageVersion      string
+	ExecutionRoleARN  string
+	Workdir           string
+	IngressConnectors []string
+	EgressConnectors  []string
+	ForgetMissing     bool
 }
 
 type DigitalOceanConfig struct {
@@ -2310,22 +2321,25 @@ func baseConfig() Config {
 	hetznerImage, azureImage, gcpImage, linodeImage, isloImage, containerImage, _ := osImageDefaultProviderImages(osImage)
 	multipassImage, _ := osImageDefaultMultipassImage(osImage)
 	return Config{
-		Profile:            "default",
-		Provider:           provider,
-		TargetOS:           "linux",
-		Architecture:       ArchitectureAMD64,
-		OSImage:            osImage,
-		WindowsMode:        "normal",
-		DesktopEnv:         desktopEnvXFCE,
-		Network:            NetworkAuto,
-		Class:              class,
-		ServerType:         "",
-		BrokerMode:         BrokerModeManaged,
-		BrokerAutoWebVNC:   true,
-		Location:           "fsn1",
-		Image:              hetznerImage,
-		AWSRegion:          "eu-west-1",
-		AWSRootGB:          400,
+		Profile:          "default",
+		Provider:         provider,
+		TargetOS:         "linux",
+		Architecture:     ArchitectureAMD64,
+		OSImage:          osImage,
+		WindowsMode:      "normal",
+		DesktopEnv:       desktopEnvXFCE,
+		Network:          NetworkAuto,
+		Class:            class,
+		ServerType:       "",
+		BrokerMode:       BrokerModeManaged,
+		BrokerAutoWebVNC: true,
+		Location:         "fsn1",
+		Image:            hetznerImage,
+		AWSRegion:        "eu-west-1",
+		AWSRootGB:        400,
+		AWSLambdaMicroVM: AWSLambdaMicroVMConfig{
+			Workdir: "/workspace/crabbox",
+		},
 		AzureBackend:       "vm",
 		AzureLocation:      "eastus",
 		AzureResourceGroup: "crabbox-leases",
@@ -2766,6 +2780,7 @@ type fileConfig struct {
 	OVH                      *fileOVHConfig                      `yaml:"ovh,omitempty"`
 	Scaleway                 *fileScalewayConfig                 `yaml:"scaleway,omitempty"`
 	AWS                      *fileAWSConfig                      `yaml:"aws,omitempty"`
+	AWSLambdaMicroVM         *fileAWSLambdaMicroVMConfig         `yaml:"awsLambdaMicroVM,omitempty"`
 	Azure                    *fileAzureConfig                    `yaml:"azure,omitempty"`
 	AzureDynamicSessions     *fileAzureDynamicSessionsConfig     `yaml:"azureDynamicSessions,omitempty"`
 	GCP                      *fileGCPConfig                      `yaml:"gcp,omitempty"`
@@ -2948,6 +2963,16 @@ type fileAWSConfig struct {
 	RootGB          int32    `yaml:"rootGB,omitempty"`
 	SSHCIDRs        []string `yaml:"sshCIDRs,omitempty"`
 	MacHostID       string   `yaml:"macHostId,omitempty"`
+}
+
+type fileAWSLambdaMicroVMConfig struct {
+	Image             string    `yaml:"image,omitempty"`
+	ImageVersion      string    `yaml:"imageVersion,omitempty"`
+	ExecutionRoleARN  string    `yaml:"executionRoleArn,omitempty"`
+	Workdir           string    `yaml:"workdir,omitempty"`
+	IngressConnectors *[]string `yaml:"ingressConnectors,omitempty"`
+	EgressConnectors  *[]string `yaml:"egressConnectors,omitempty"`
+	ForgetMissing     *bool     `yaml:"forgetMissing,omitempty"`
 }
 
 type fileAzureConfig struct {
@@ -4463,6 +4488,29 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			if cfg.HostID == "" {
 				cfg.HostID = file.AWS.MacHostID
 			}
+		}
+	}
+	if file.AWSLambdaMicroVM != nil {
+		if file.AWSLambdaMicroVM.Image != "" {
+			cfg.AWSLambdaMicroVM.Image = file.AWSLambdaMicroVM.Image
+		}
+		if file.AWSLambdaMicroVM.ImageVersion != "" {
+			cfg.AWSLambdaMicroVM.ImageVersion = file.AWSLambdaMicroVM.ImageVersion
+		}
+		if file.AWSLambdaMicroVM.ExecutionRoleARN != "" {
+			cfg.AWSLambdaMicroVM.ExecutionRoleARN = file.AWSLambdaMicroVM.ExecutionRoleARN
+		}
+		if file.AWSLambdaMicroVM.Workdir != "" {
+			cfg.AWSLambdaMicroVM.Workdir = file.AWSLambdaMicroVM.Workdir
+		}
+		if file.AWSLambdaMicroVM.IngressConnectors != nil {
+			cfg.AWSLambdaMicroVM.IngressConnectors = append([]string(nil), (*file.AWSLambdaMicroVM.IngressConnectors)...)
+		}
+		if file.AWSLambdaMicroVM.EgressConnectors != nil {
+			cfg.AWSLambdaMicroVM.EgressConnectors = append([]string(nil), (*file.AWSLambdaMicroVM.EgressConnectors)...)
+		}
+		if file.AWSLambdaMicroVM.ForgetMissing != nil {
+			cfg.AWSLambdaMicroVM.ForgetMissing = *file.AWSLambdaMicroVM.ForgetMissing
 		}
 	}
 	if file.Azure != nil {
@@ -6633,6 +6681,19 @@ func applyEnv(cfg *Config) error {
 	cfg.AWSProfile = getenv("CRABBOX_AWS_INSTANCE_PROFILE", cfg.AWSProfile)
 	cfg.AWSRootGB = getenvInt32("CRABBOX_AWS_ROOT_GB", cfg.AWSRootGB)
 	cfg.AWSMacHostID = getenv("CRABBOX_AWS_MAC_HOST_ID", cfg.AWSMacHostID)
+	cfg.AWSLambdaMicroVM.Image = getenv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE", cfg.AWSLambdaMicroVM.Image)
+	cfg.AWSLambdaMicroVM.ImageVersion = getenv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE_VERSION", cfg.AWSLambdaMicroVM.ImageVersion)
+	cfg.AWSLambdaMicroVM.ExecutionRoleARN = getenv("CRABBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN", cfg.AWSLambdaMicroVM.ExecutionRoleARN)
+	cfg.AWSLambdaMicroVM.Workdir = getenv("CRABBOX_AWS_LAMBDA_MICROVM_WORKDIR", cfg.AWSLambdaMicroVM.Workdir)
+	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_INGRESS_CONNECTORS"); value != "" {
+		cfg.AWSLambdaMicroVM.IngressConnectors = splitCSV(value)
+	}
+	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_EGRESS_CONNECTORS"); value != "" {
+		cfg.AWSLambdaMicroVM.EgressConnectors = splitCSV(value)
+	}
+	if value, ok := getenvBool("CRABBOX_AWS_LAMBDA_MICROVM_FORGET_MISSING"); ok {
+		cfg.AWSLambdaMicroVM.ForgetMissing = value
+	}
 	if cfg.HostID == "" && cfg.AWSMacHostID != "" {
 		cfg.HostID = cfg.AWSMacHostID
 	}

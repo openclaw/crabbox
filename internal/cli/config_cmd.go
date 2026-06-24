@@ -503,6 +503,15 @@ func configShowView(cfg Config) map[string]any {
 			"rootGB":          cfg.AWSRootGB,
 			"sshCIDRs":        cfg.AWSSSHCIDRs,
 		},
+		"awsLambdaMicroVM": map[string]any{
+			"image":             cfg.AWSLambdaMicroVM.Image,
+			"imageVersion":      cfg.AWSLambdaMicroVM.ImageVersion,
+			"executionRoleArn":  cfg.AWSLambdaMicroVM.ExecutionRoleARN,
+			"workdir":           cfg.AWSLambdaMicroVM.Workdir,
+			"ingressConnectors": cfg.AWSLambdaMicroVM.IngressConnectors,
+			"egressConnectors":  cfg.AWSLambdaMicroVM.EgressConnectors,
+			"forgetMissing":     cfg.AWSLambdaMicroVM.ForgetMissing,
+		},
 		"gcp": map[string]any{
 			"project":        cfg.GCPProject,
 			"zone":           cfg.GCPZone,
@@ -623,6 +632,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 		fmt.Fprintf(w, "jobs=%s\n", strings.Join(names, ","))
 	}
 	fmt.Fprintf(w, "aws region=%s root_gb=%d ssh_cidrs=%s\n", cfg.AWSRegion, cfg.AWSRootGB, blank(strings.Join(cfg.AWSSSHCIDRs, ","), "-"))
+	fmt.Fprintf(w, "aws_lambda_microvm image=%s image_version=%s workdir=%s forget_missing=%t\n", blank(cfg.AWSLambdaMicroVM.Image, "-"), blank(cfg.AWSLambdaMicroVM.ImageVersion, "latest"), cfg.AWSLambdaMicroVM.Workdir, cfg.AWSLambdaMicroVM.ForgetMissing)
 	fmt.Fprintf(w, "azure location=%s resource_group=%s os_disk=%s network=%s ssh_cidrs=%s\n", cfg.AzureLocation, cfg.AzureResourceGroup, cfg.AzureOSDisk, blank(cfg.AzureNetwork, "-"), blank(strings.Join(cfg.AzureSSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "digitalocean region=%s image=%s vpc=%s ssh_cidrs=%s\n", cfg.DigitalOcean.Region, cfg.DigitalOcean.Image, blank(cfg.DigitalOcean.VPCUUID, "-"), blank(strings.Join(cfg.DigitalOcean.SSHCIDRs, ","), "-"))
 	fmt.Fprintf(w, "vultr region=%s os=%s image=%s snapshot=%s firewall_group=%s vpc_ids=%s ssh_cidrs=%s user_scheme=%s\n", cfg.Vultr.Region, blank(cfg.Vultr.OS, "-"), blank(cfg.Vultr.Image, "-"), blank(cfg.Vultr.Snapshot, "-"), blank(cfg.Vultr.FirewallGroup, "-"), blank(strings.Join(cfg.Vultr.VPCIDs, ","), "-"), blank(strings.Join(cfg.Vultr.SSHCIDRs, ","), "-"), blank(cfg.Vultr.UserScheme, "-"))
