@@ -89,8 +89,28 @@ Doctor is read-only. It checks:
 Doctor never creates, updates, patches, stops, deletes, or reads Secret data.
 Kubeconfig contents, tokens, Secret data, and private keys must not be printed.
 
-## Current Limits
+## Lifecycle Foundation
 
-`warmup`, `run`, `ssh`, `status`, `stop`, and `cleanup` are not implemented for
-`sealos-devbox` in this foundation phase. They return explicit deferred errors
-until the later lifecycle and SSH phases land.
+The CRD-first lifecycle path creates Crabbox-owned `devbox.sealos.io/v1alpha2`
+Devbox resources with deterministic labels and annotations for the lease ID,
+slug, provider, provider scope, namespace/name, timestamps, TTL, idle timeout,
+and configured network route. Local claims are scoped by Kubernetes identity
+and the selected route (`SSHGate` gateway host/port or `NodePort` node host), so
+the same slug can be reused safely across different Sealos clusters,
+namespaces, contexts, or routes.
+
+`status` and `list` inspect Devbox resources and normalize Sealos lifecycle
+states such as `Running`, `Pending`, `Paused`, `Stopped`, `Shutdown`, and
+`Error` without starting, patching, deleting, or reading Secret key data.
+Diagnostic text includes phase, conditions, and recent events when available,
+with sensitive-looking values redacted.
+
+When Sealos publishes the owned SSH Secret, Crabbox reads
+`SEALOS_DEVBOX_PUBLIC_KEY` and `SEALOS_DEVBOX_PRIVATE_KEY`, writes the private
+key to the normal per-lease local key store with restrictive permissions, and
+keeps key material out of command arguments, logs, claim JSON, and status
+output.
+
+Final SSH target construction, SSH readiness probing, retained release,
+delete-on-release, and cleanup are deferred to the SSH/release implementation
+phase.
