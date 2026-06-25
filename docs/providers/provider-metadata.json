@@ -223,6 +223,20 @@
     "caveat": "Requires env-only SDK auth and a local Node bridge",
     "docs": "codesandbox.md"
   },
+  "cua": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "CUA cloud Linux sandbox",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "CUA",
+    "cleanup": "owned sandbox delete",
+    "bestFit": "Managed delegated Linux sandbox execution through CUA",
+    "caveat": "Delegated command execution only; not a Crabbox SSH lease",
+    "docs": "cua.md"
+  },
   "coder": {
     "status": "built-in",
     "category": "direct-cloud",
