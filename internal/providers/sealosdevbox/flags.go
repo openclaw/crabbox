@@ -109,10 +109,10 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.SealosDevbox.DeleteOnRelease = *v.DeleteOnRelease
 		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 	}
-	return validateConfig(*cfg)
+	return validateBaseConfig(*cfg)
 }
 
-func validateConfig(cfg core.Config) error {
+func validateBaseConfig(cfg core.Config) error {
 	values := cfg.SealosDevbox
 	for label, value := range map[string]string{
 		"kubectl":   values.Kubectl,
@@ -136,6 +136,22 @@ func validateConfig(cfg core.Config) error {
 			return core.Exit(2, "sealos-devbox SSH gateway port must be between 1 and 65535")
 		}
 	}
+	clean := path.Clean(sealosWorkRoot(cfg))
+	if !strings.HasPrefix(clean, "/") {
+		return core.Exit(2, "sealosDevbox.workRoot %q must resolve to an absolute path", values.WorkRoot)
+	}
+	switch clean {
+	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
+		return core.Exit(2, "sealosDevbox.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+	}
+	return nil
+}
+
+func validateConfig(cfg core.Config) error {
+	if err := validateBaseConfig(cfg); err != nil {
+		return err
+	}
+	values := cfg.SealosDevbox
 	switch normalizeNetwork(values.Network) {
 	case networkSSHGate:
 		if strings.TrimSpace(values.SSHGatewayHost) == "" {
@@ -150,14 +166,6 @@ func validateConfig(cfg core.Config) error {
 		}
 	default:
 		return core.Exit(2, "sealos-devbox network must be SSHGate or NodePort")
-	}
-	clean := path.Clean(sealosWorkRoot(cfg))
-	if !strings.HasPrefix(clean, "/") {
-		return core.Exit(2, "sealosDevbox.workRoot %q must resolve to an absolute path", values.WorkRoot)
-	}
-	switch clean {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var":
-		return core.Exit(2, "sealosDevbox.workRoot %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return nil
 }

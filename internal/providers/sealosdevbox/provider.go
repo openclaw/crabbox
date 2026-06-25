@@ -48,7 +48,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (Provider) ValidateConfig(cfg core.Config) error {
-	return validateConfig(cfg)
+	return validateBaseConfig(cfg)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
@@ -58,6 +58,11 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
+	cfg = prepareBackendConfig(cfg)
+	return &backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
+}
+
+func prepareBackendConfig(cfg core.Config) core.Config {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.SSHUser = cfg.SealosDevbox.SSHUser
@@ -67,13 +72,16 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if strings.EqualFold(cfg.SealosDevbox.Network, networkNodePort) {
 		cfg.SSHPort = "22"
 	}
-	return &backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
+	return cfg
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	configured, err := p.Configure(cfg, rt)
-	if err != nil {
+	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
+		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
+	}
+	if err := validateBaseConfig(cfg); err != nil {
 		return nil, err
 	}
-	return configured.(core.DoctorBackend), nil
+	cfg = prepareBackendConfig(cfg)
+	return &backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
 }

@@ -64,12 +64,23 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	networkDetails := map[string]string{"network": normalizeNetwork(b.cfg.SealosDevbox.Network)}
 	switch normalizeNetwork(b.cfg.SealosDevbox.Network) {
 	case networkSSHGate:
-		networkDetails["host_configured"] = boolString(b.cfg.SealosDevbox.SSHGatewayHost != "")
-		networkDetails["port_configured"] = boolString(b.cfg.SealosDevbox.SSHGatewayPort != "")
-		add(doctorCheck("ok", "network", "SSHGate configured", networkDetails))
+		hostConfigured := strings.TrimSpace(b.cfg.SealosDevbox.SSHGatewayHost) != ""
+		portConfigured := strings.TrimSpace(b.cfg.SealosDevbox.SSHGatewayPort) != ""
+		networkDetails["host_configured"] = boolString(hostConfigured)
+		networkDetails["port_configured"] = boolString(portConfigured)
+		if !hostConfigured || !portConfigured {
+			add(doctorCheck("failed", "network", "SSHGate requires sshGatewayHost and sshGatewayPort", networkDetails))
+		} else {
+			add(doctorCheck("ok", "network", "SSHGate configured", networkDetails))
+		}
 	case networkNodePort:
-		networkDetails["node_host_configured"] = boolString(b.cfg.SealosDevbox.NodeHost != "")
-		add(doctorCheck("ok", "network", "NodePort configured", networkDetails))
+		nodeHostConfigured := strings.TrimSpace(b.cfg.SealosDevbox.NodeHost) != ""
+		networkDetails["node_host_configured"] = boolString(nodeHostConfigured)
+		if !nodeHostConfigured {
+			add(doctorCheck("failed", "network", "NodePort requires nodeHost until live discovery is implemented", networkDetails))
+		} else {
+			add(doctorCheck("ok", "network", "NodePort configured", networkDetails))
+		}
 	default:
 		add(doctorCheck("failed", "network", "network must be SSHGate or NodePort", networkDetails))
 	}
