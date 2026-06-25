@@ -221,8 +221,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	session := crownestRunSession(leaseID, slug, !acquired, req.Keep || !acquired)
 	commandStart := b.now()
 	cancelActiveRun := true
+	var streamErr error
 	defer func(runID string) {
-		if !cancelActiveRun || ctx.Err() == nil {
+		if !cancelActiveRun || (ctx.Err() == nil && streamErr == nil) {
 			return
 		}
 		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)

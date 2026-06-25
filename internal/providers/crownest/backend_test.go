@@ -142,6 +142,39 @@ func TestRunCancelsWorkspaceRunWhenLocalContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestRunCancelsWorkspaceRunWhenStreamFailsBeforeTerminal(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{
+		baseURL:        "https://api.crownest.dev",
+		startSandboxID: "sbx_stream_failed",
+		latestRun:      workspaceRun{ID: "wsr_123", Status: "running", SandboxID: "sbx_stream_failed"},
+		stream: func() (io.ReadCloser, error) {
+			return nil, errors.New("event stream disconnected")
+		},
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+		Keep:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "crownest stream failed") {
+		t.Fatalf("err=%v, want stream failure", err)
+	}
+	if api.canceledRunID != "wsr_123" {
+		t.Fatalf("canceledRunID=%q, want active run cancellation", api.canceledRunID)
+	}
+}
+
 func TestRunReusesClaimWithoutDeletingSandbox(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -406,6 +439,7 @@ type fakeCrownestClient struct {
 	uploadBytes      int
 	started          bool
 	startSandboxID   string
+	latestRun        workspaceRun
 	deletedSandboxID string
 	canceledRunID    string
 	transferErr      error
@@ -465,6 +499,9 @@ func (f *fakeCrownestClient) CancelWorkspaceRun(_ context.Context, id string, _ 
 }
 
 func (f *fakeCrownestClient) GetWorkspaceRun(context.Context, string) (workspaceRun, error) {
+	if f.latestRun.ID != "" {
+		return f.latestRun, nil
+	}
 	code := 0
 	return workspaceRun{ID: "wsr_123", Status: "succeeded", SandboxID: "sbx_123", ExitCode: &code}, nil
 }
