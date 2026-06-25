@@ -130,6 +130,54 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncludesFalConfigWithoutCredentialDetails(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "fal"
+	cfg.Fal.APIKey = "secret-fal-key"
+	cfg.Fal.APIURL = "https://api.fal.example.test/v1"
+	cfg.Fal.InstanceType = "gpu_8x_h100_sxm5"
+	cfg.Fal.Sector = "sector_2"
+	cfg.Fal.User = "root"
+	cfg.Fal.WorkRoot = "/work/fal"
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	view := configShowView(cfg)
+	fal, ok := view["fal"].(map[string]any)
+	if !ok || fal["apiUrl"] != "https://api.fal.example.test/v1" ||
+		fal["instanceType"] != "gpu_8x_h100_sxm5" ||
+		fal["sector"] != "sector_2" ||
+		fal["user"] != "root" ||
+		fal["workRoot"] != "/work/fal" ||
+		fal["auth"] != "env" {
+		t.Fatalf("fal view=%#v", fal)
+	}
+	data, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	for name, output := range map[string]string{"json": string(data), "text": text.String()} {
+		if strings.Contains(output, "secret-fal-key") || strings.Contains(output, "FAL_KEY") || strings.Contains(output, "CRABBOX_FAL_KEY") {
+			t.Fatalf("%s output leaked fal credential details: %s", name, output)
+		}
+		for _, want := range []string{
+			"https://api.fal.example.test/v1",
+			"gpu_8x_h100_sxm5",
+			"sector_2",
+			"/work/fal",
+			"auth",
+			"env",
+		} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("%s output missing %q: %s", name, want, output)
+			}
+		}
+	}
+}
+
 func TestConfigSetBrokerRegisteredMode(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
