@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -97,11 +98,15 @@ func (b replicateBackend) Run(ctx context.Context, req RunRequest) (RunResult, e
 		syncPhases = archive.Phases
 		fmt.Fprintf(b.stderr(), "sync archive complete size=%d duration=%s\n", archive.Size, syncDuration.Round(time.Millisecond))
 	}
+	runnerEnv, strippedAuthEnv := replicateRunnerEnv(req.Env)
+	if len(strippedAuthEnv) > 0 {
+		fmt.Fprintf(b.stderr(), "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
+	}
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.stderr(), providerName, "forwarded", req.Options.EnvAllow, req.Env)
+		printEnvForwardingSummary(b.stderr(), providerName, "forwarded", req.Options.EnvAllow, runnerEnv)
 	}
 
-	input := b.runnerInput(req, command, workdir, archiveURL)
+	input := b.runnerInput(req, command, workdir, archiveURL, runnerEnv)
 	createReq := replicateCreatePredictionRequest{
 		Deployment:      strings.TrimSpace(b.cfg.Replicate.Deployment),
 		Version:         strings.TrimSpace(b.cfg.Replicate.Version),
@@ -334,17 +339,35 @@ func (b replicateBackend) api() (replicateAPI, string, error) {
 	return client, baseURL, nil
 }
 
-func (b replicateBackend) runnerInput(req RunRequest, command []string, workdir, archiveURL string) RunnerInput {
+func (b replicateBackend) runnerInput(req RunRequest, command []string, workdir, archiveURL string, env map[string]string) RunnerInput {
 	return RunnerInput{
 		Command:      append([]string(nil), command...),
 		Workdir:      workdir,
 		ArchiveURL:   archiveURL,
-		Env:          cloneStringMap(req.Env),
+		Env:          cloneStringMap(env),
 		TimeoutSecs:  b.cfg.Replicate.ExecTimeoutSecs,
 		CancelAfter:  b.cfg.Replicate.CancelAfterSecs,
 		Metadata:     b.runnerMetadata(req),
 		OutputSchema: "crabbox.runner.v1",
 	}
+}
+
+func replicateRunnerEnv(env map[string]string) (map[string]string, []string) {
+	if len(env) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(env))
+	var stripped []string
+	for name, value := range env {
+		switch name {
+		case envCrabboxReplicateToken, envReplicateToken:
+			stripped = append(stripped, name)
+		default:
+			out[name] = value
+		}
+	}
+	slices.Sort(stripped)
+	return out, stripped
 }
 
 func (b replicateBackend) runnerMetadata(req RunRequest) map[string]string {

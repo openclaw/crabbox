@@ -14,12 +14,15 @@ run rsync. Instead, Crabbox prepares a small workspace archive, sends it to the
 Replicate prediction as an input, and expects the runner to execute the
 requested command inside the configured workdir.
 
-Current implementation status: this branch registers the provider, config,
-flags, provider metadata, and runner input/output contract. The runtime
-lifecycle backend is still deferred to the Replicate delegated-backend plan.
-Until that backend lands, `run`, `warmup`, `list`, `status`, and `stop` return
-`provider=replicate backend lifecycle is not implemented in this build`.
-`doctor` reports the same not-implemented state without making a live API call.
+Current implementation status: the provider has a delegated-run lifecycle
+backend. `warmup` and `doctor` validate local configuration and API token
+presence without creating a prediction or consuming billing. `run` creates a
+new prediction, sends the archive-backed runner input, polls until the
+prediction reaches a terminal state, maps the runner's command exit code, and
+stores a local claim for later lookup. `status` and `stop` operate on a
+prediction ID, local Crabbox claim, or local claim slug. `list` shows local
+Replicate claims for the configured API endpoint; it is not an account-wide
+Replicate prediction inventory.
 
 ## When To Use
 
@@ -51,9 +54,13 @@ Token precedence:
 1. `CRABBOX_REPLICATE_API_TOKEN`
 2. `REPLICATE_API_TOKEN`
 
-The token is sent only as Replicate API authentication by the provider client
-once lifecycle support lands. Do not place it in `crabbox.yaml`, shell
-history, issue bodies, PR descriptions, logs, or screenshots.
+The token is sent only as Replicate API authentication by the provider client.
+Crabbox strips `CRABBOX_REPLICATE_API_TOKEN` and `REPLICATE_API_TOKEN` from the
+runner environment even if they are selected by `CRABBOX_ENV_ALLOW`,
+`--allow-env`, or a forwarding profile. If the runner command needs secrets,
+use separate non-provider-auth variable names. Do not place the Replicate token
+in `crabbox.yaml`, shell history, issue bodies, PR descriptions, logs, or
+screenshots.
 
 ## Config
 
@@ -144,26 +151,26 @@ string or float, Crabbox treats that as a runner contract failure.
 
 ## Commands
 
-The CLI discovery surface is available as soon as the provider is registered:
+Discovery and non-billing readiness checks:
 
 ```sh
 crabbox providers --json
+crabbox warmup --provider replicate
 crabbox doctor --provider replicate --json
 ```
 
-Lifecycle commands below are the intended provider contract, but remain
-deferred until the backend implementation lands:
+Run lifecycle:
 
 ```sh
 crabbox run --provider replicate -- pnpm test
-crabbox run --provider replicate --id prediction-id -- pnpm test:changed
-crabbox status --provider replicate --id prediction-id --json
+crabbox status --provider replicate --id pred_abc123 --json
 crabbox list --provider replicate --json
-crabbox stop --provider replicate prediction-id
+crabbox stop --provider replicate rbx_pred_abc123
 ```
 
-Use the Replicate prediction ID or a local Crabbox claim/slug that resolves to
-one when targeting an existing run.
+Each `run` creates a new one-shot prediction. `crabbox run --provider replicate
+--id ...` is rejected; use `status` or `stop` with an existing prediction ID,
+local Crabbox claim ID, or local claim slug instead.
 
 ## Capabilities
 
@@ -173,8 +180,9 @@ one when targeting an existing run.
 - Desktop / browser / code / VNC: no.
 - Actions hydration: no.
 - Coordinator broker: no, Replicate runs direct from the CLI.
-- Run sessions: advertised by the provider spec; runtime lifecycle is deferred
-  in the current branch until the backend plan lands.
+- Run sessions: yes, backed by local Crabbox claims for the created prediction.
+  Claims support `status`, `list`, and `stop`; there is no Crabbox-managed VM
+  cleanup resource beyond canceling the Replicate prediction.
 
 ## Archive Limits
 
@@ -197,12 +205,15 @@ billing. A live smoke should only run when all of these are true:
 - the runner is known to implement Crabbox's JSON input/output contract;
 - an explicit arming variable such as `CRABBOX_REPLICATE_LIVE_SMOKE=1` is set.
 
-Until a guarded `scripts/live-replicate-smoke.sh` exists, classify live proof as
-deferred rather than substituting docs checks for real provider behavior. Any
-future smoke must report one of: success, `skipped`, `environment_blocked`,
-`quota_blocked`, `validation_failed`, `cleanup_failed`, or `diagnostic_only`.
-If it creates a prediction, it must preserve the prediction ID long enough to
-attempt `crabbox stop --provider replicate` cleanup and report the result.
+Until a guarded `scripts/live-replicate-smoke.sh` exists, classify live smoke
+script proof as deferred rather than substituting docs checks for real provider
+behavior. Non-mutating local proof can still cover `providers --json`,
+configuration validation, missing-auth `doctor`, and token-redaction behavior.
+Any future smoke must report one of: success, `skipped`,
+`environment_blocked`, `quota_blocked`, `validation_failed`, `cleanup_failed`,
+or `diagnostic_only`. If it creates a prediction, it must preserve the
+prediction ID long enough to attempt `crabbox stop --provider replicate`
+cleanup and report the result.
 
 Related docs:
 

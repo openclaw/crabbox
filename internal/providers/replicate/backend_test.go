@@ -144,9 +144,14 @@ func TestRunCreatesPredictionWithArchiveInputAndMapsExitZero(t *testing.T) {
 	backend := newTestBackend(fake, &stdout, &stderr)
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       core.Repo{Name: "my-app", Root: repoRoot},
-		Command:    []string{"go", "test", "./..."},
-		Env:        map[string]string{"CI": "1"},
+		Repo:    core.Repo{Name: "my-app", Root: repoRoot},
+		Command: []string{"go", "test", "./..."},
+		Env: map[string]string{
+			"CI":                     "1",
+			"PROJECT_TOKEN":          "project-secret",
+			envCrabboxReplicateToken: "crabbox-token",
+			envReplicateToken:        "vendor-token",
+		},
 		Label:      "unit",
 		TimingJSON: true,
 		NoSync:     false,
@@ -175,8 +180,14 @@ func TestRunCreatesPredictionWithArchiveInputAndMapsExitZero(t *testing.T) {
 	if req.Input["workdir"] != "/workspace/crabbox" || req.Input["timeout_secs"] != float64(17) || req.Input["cancel_after_secs"] != float64(9) {
 		t.Fatalf("runner input=%#v", req.Input)
 	}
-	if env, ok := req.Input["env"].(map[string]any); !ok || env["CI"] != "1" {
+	env, ok := req.Input["env"].(map[string]any)
+	if !ok || env["CI"] != "1" || env["PROJECT_TOKEN"] != "project-secret" {
 		t.Fatalf("env input=%#v", req.Input["env"])
+	}
+	for _, name := range []string{envCrabboxReplicateToken, envReplicateToken} {
+		if _, ok := env[name]; ok {
+			t.Fatalf("env input forwarded provider auth %s: %#v", name, env)
+		}
 	}
 	archive, _ := req.Input["archive_url"].(string)
 	if !strings.HasPrefix(archive, replicateArchiveDataURLPrefix) {
@@ -187,6 +198,14 @@ func TestRunCreatesPredictionWithArchiveInputAndMapsExitZero(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "runner boot\nwarn\n") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "did not forward provider authentication variables: CRABBOX_REPLICATE_API_TOKEN,REPLICATE_API_TOKEN") {
+		t.Fatalf("stderr missing auth stripping warning: %q", stderr.String())
+	}
+	for _, leaked := range []string{"crabbox-token", "vendor-token"} {
+		if strings.Contains(stderr.String(), leaked) {
+			t.Fatalf("stderr leaked auth token %q: %q", leaked, stderr.String())
+		}
 	}
 	if _, ok, err := core.ResolveLeaseClaim("rbx_pred_success"); err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
