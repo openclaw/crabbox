@@ -26,7 +26,7 @@ func init() {
 type Provider struct{}
 
 func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
+func (Provider) Aliases() []string { return []string{"sealos", "sealos-dev"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
