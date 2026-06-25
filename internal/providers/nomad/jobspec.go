@@ -208,7 +208,7 @@ func normalizeRegion(region string) string {
 	if region = strings.TrimSpace(region); region != "" {
 		return region
 	}
-	return "default"
+	return nomadapi.GlobalRegion
 }
 
 func scopeFingerprint(scope string) string {

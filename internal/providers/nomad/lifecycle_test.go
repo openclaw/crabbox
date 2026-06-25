@@ -243,6 +243,17 @@ func TestJobspecDefaultKeepaliveUsesPortableSleepLoop(t *testing.T) {
 	}
 }
 
+func TestNormalizeRegionUsesNomadGlobalDefault(t *testing.T) {
+	cfg := testNomadConfig()
+	cfg.Nomad.Region = ""
+	if got := normalizeRegion(cfg.Nomad.Region); got != nomadapi.GlobalRegion {
+		t.Fatalf("normalizeRegion(empty)=%q want %q", got, nomadapi.GlobalRegion)
+	}
+	if scope := claimScope(cfg); !strings.Contains(scope, "region:"+nomadapi.GlobalRegion) {
+		t.Fatalf("claimScope=%q, want global region", scope)
+	}
+}
+
 func TestJobspecTemplateRequiresOwnershipMetadata(t *testing.T) {
 	cfg := testNomadConfig()
 	template := filepath.Join(t.TempDir(), "job.json")
@@ -772,6 +783,39 @@ func TestSelectAllocationPrefersRunningTask(t *testing.T) {
 	}
 	if ready.AllocationID != "alloc-running" || ready.State() != "running" {
 		t.Fatalf("ready=%#v", ready)
+	}
+}
+
+func TestAllocationReadinessStateRequiresRunningTask(t *testing.T) {
+	ready := allocationReadiness{
+		AllocationID:  "alloc-pending",
+		ClientStatus:  nomadapi.AllocClientStatusRunning,
+		DesiredStatus: nomadapi.AllocDesiredStatusRun,
+		TaskState:     "pending",
+	}
+	if got := ready.State(); got != "not-ready" {
+		t.Fatalf("pending task state=%q want not-ready", got)
+	}
+	ready.TaskState = "dead"
+	if got := ready.State(); got != "terminal" {
+		t.Fatalf("dead task state=%q want terminal", got)
+	}
+	ready.TaskState = "running"
+	ready.TaskFailed = true
+	if got := ready.State(); got != "terminal" {
+		t.Fatalf("failed task state=%q want terminal", got)
+	}
+}
+
+func TestSelectAllocationDoesNotReportRunningForPendingTask(t *testing.T) {
+	alloc := runningAlloc("job", "alloc-pending", "node-0", "worker-0", "crabbox")
+	alloc.TaskStates["crabbox"].State = "pending"
+	ready, err := selectAllocation([]*nomadapi.AllocationListStub{alloc}, "job", "crabbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.AllocationID != "alloc-pending" || ready.State() != "not-ready" {
+		t.Fatalf("ready=%#v, want pending allocation to remain not-ready", ready)
 	}
 }
 

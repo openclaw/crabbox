@@ -21,16 +21,18 @@ type allocationReadiness struct {
 	ClientStatus  string
 	DesiredStatus string
 	TaskState     string
+	TaskFailed    bool
 }
 
 func (r allocationReadiness) State() string {
 	if r.AllocationID == "" {
 		return "not-ready"
 	}
-	if r.ClientStatus == nomadapi.AllocClientStatusRunning && r.DesiredStatus == nomadapi.AllocDesiredStatusRun {
+	taskState := strings.ToLower(strings.TrimSpace(r.TaskState))
+	if r.ClientStatus == nomadapi.AllocClientStatusRunning && r.DesiredStatus == nomadapi.AllocDesiredStatusRun && taskState == "running" && !r.TaskFailed {
 		return "running"
 	}
-	if isTerminalAllocationStatus(r.ClientStatus) || r.DesiredStatus != "" && r.DesiredStatus != nomadapi.AllocDesiredStatusRun {
+	if isTerminalAllocationStatus(r.ClientStatus) || r.DesiredStatus != "" && r.DesiredStatus != nomadapi.AllocDesiredStatusRun || r.TaskFailed || isTerminalTaskState(taskState) {
 		return "terminal"
 	}
 	return "not-ready"
@@ -729,8 +731,9 @@ func selectAllocation(allocs []*nomadapi.AllocationListStub, jobID, taskName str
 			ClientStatus:  alloc.ClientStatus,
 			DesiredStatus: alloc.DesiredStatus,
 			TaskState:     state.State,
+			TaskFailed:    state.Failed,
 		}
-		if ready.State() == "running" && strings.EqualFold(state.State, "running") && !state.Failed {
+		if ready.State() == "running" {
 			return ready, nil
 		}
 		if ready.State() == "terminal" {
@@ -814,6 +817,15 @@ func (b *backend) evalTimeout() time.Duration {
 func isTerminalAllocationStatus(status string) bool {
 	switch strings.TrimSpace(status) {
 	case nomadapi.AllocClientStatusComplete, nomadapi.AllocClientStatusFailed, nomadapi.AllocClientStatusLost:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTerminalTaskState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "dead", "failed":
 		return true
 	default:
 		return false
