@@ -45,18 +45,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return core.FlagWasSet(fs, name)
 }
 
-func blank(value, fallback string) string {
-	return core.Blank(value, fallback)
-}
-
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
-func normalizeLeaseSlug(value string) string {
-	return core.NormalizeLeaseSlug(value)
-}
-
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
