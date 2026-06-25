@@ -89,10 +89,41 @@ func devboxSSHNodePort(item devboxItem) (int, bool) {
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return 0, false
 	}
-	return findNodePort(value)
+	if port, ok := findSSHNodePort(value); ok {
+		return port, true
+	}
+	return findAnyNodePort(value)
 }
 
-func findNodePort(value any) (int, bool) {
+func findSSHNodePort(value any) (int, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if port, ok := numericPort(typed["sshNodePort"]); ok {
+			return port, true
+		}
+		if sshPortEntry(typed) {
+			for _, key := range []string{"nodePort", "sshNodePort", "port"} {
+				if port, ok := numericPort(typed[key]); ok {
+					return port, true
+				}
+			}
+		}
+		for _, nested := range typed {
+			if port, ok := findSSHNodePort(nested); ok {
+				return port, true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if port, ok := findSSHNodePort(nested); ok {
+				return port, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func findAnyNodePort(value any) (int, bool) {
 	switch typed := value.(type) {
 	case map[string]any:
 		for _, key := range []string{"nodePort", "sshNodePort", "port"} {
@@ -101,18 +132,41 @@ func findNodePort(value any) (int, bool) {
 			}
 		}
 		for _, nested := range typed {
-			if port, ok := findNodePort(nested); ok {
+			if port, ok := findAnyNodePort(nested); ok {
 				return port, true
 			}
 		}
 	case []any:
 		for _, nested := range typed {
-			if port, ok := findNodePort(nested); ok {
+			if port, ok := findAnyNodePort(nested); ok {
 				return port, true
 			}
 		}
 	}
 	return 0, false
+}
+
+func sshPortEntry(value map[string]any) bool {
+	for _, key := range []string{"name", "protocol", "app", "service"} {
+		if strings.EqualFold(strings.TrimSpace(stringValue(value[key])), "ssh") {
+			return true
+		}
+	}
+	for _, key := range []string{"port", "targetPort", "containerPort"} {
+		if port, ok := numericPort(value[key]); ok && port == 22 {
+			return true
+		}
+	}
+	return false
+}
+
+func stringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return ""
+	}
 }
 
 func numericPort(value any) (int, bool) {
