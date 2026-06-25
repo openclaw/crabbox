@@ -132,6 +132,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
 			return RunResult{}, err
 		}
+		claimedWorkdir := strings.TrimSpace(claim.Labels[claimLabelWorkdir])
+		if claimedWorkdir != "" && claimedWorkdir != workdir {
+			return RunResult{}, exit(2, "nomad lease %s uses workdir %s; requested workdir %s differs; stop the lease or rerun with the matching --nomad-workdir", leaseID, claimedWorkdir, workdir)
+		}
 		ready, err = b.waitForAllocation(ctx, client, jobID, b.allocReadyTimeout())
 		if err != nil {
 			return RunResult{}, err

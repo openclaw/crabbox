@@ -204,6 +204,23 @@ func TestJobspecDefaultContainsOwnershipMetadataWithoutSecretsOrLocalPaths(t *te
 	}
 }
 
+func TestJobspecRawExecDoesNotEmitImageConfig(t *testing.T) {
+	cfg := testNomadConfig()
+	cfg.Nomad.Driver = "raw_exec"
+	cfg.Nomad.Image = ""
+	job, err := buildJobSpec(cfg, jobSpecInput{LeaseID: "cbx_123456789abc", Slug: "blue-lobster", JobID: "crabbox-123456789abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(job, cfg.Nomad.Task)
+	if !ok {
+		t.Fatalf("missing task %q", cfg.Nomad.Task)
+	}
+	if _, ok := task.Config["image"]; ok {
+		t.Fatalf("raw_exec config unexpectedly contains image: %#v", task.Config)
+	}
+}
+
 func TestJobspecTemplateRequiresOwnershipMetadata(t *testing.T) {
 	cfg := testNomadConfig()
 	template := filepath.Join(t.TempDir(), "job.json")
@@ -487,6 +504,33 @@ func TestRunKeepOnFailureRetainsNewJob(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "rerun: crabbox run --provider nomad") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunRejectsReusedLeaseWithDifferentWorkdir(t *testing.T) {
+	fake := newLifecycleFakeClient()
+	b, _, _ := testBackend(t, fake)
+	claim := createClaim(t, b, "cbx_888888888888", "reuse-crab", "crabbox-888888888888", "alloc-8")
+	b.cfg.Nomad.Workdir = "/workspace/other"
+
+	result, err := b.Run(context.Background(), RunRequest{
+		ID:      "reuse-crab",
+		Repo:    newNomadRunRepo(t),
+		NoSync:  true,
+		Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "requested workdir") {
+		t.Fatalf("err=%v, want workdir mismatch", err)
+	}
+	if result.Provider != "" || len(fake.execs) != 0 {
+		t.Fatalf("result=%#v execs=%#v", result, fake.execs)
+	}
+	retained, err := readLeaseClaim(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.Labels[claimLabelWorkdir] != "/workspace/crabbox" {
+		t.Fatalf("labels=%#v", retained.Labels)
 	}
 }
 
