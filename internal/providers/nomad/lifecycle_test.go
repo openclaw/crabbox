@@ -207,7 +207,6 @@ func TestJobspecDefaultContainsOwnershipMetadataWithoutSecretsOrLocalPaths(t *te
 func TestJobspecRawExecDoesNotEmitImageConfig(t *testing.T) {
 	cfg := testNomadConfig()
 	cfg.Nomad.Driver = "raw_exec"
-	cfg.Nomad.Image = ""
 	job, err := buildJobSpec(cfg, jobSpecInput{LeaseID: "cbx_123456789abc", Slug: "blue-lobster", JobID: "crabbox-123456789abc"})
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +217,25 @@ func TestJobspecRawExecDoesNotEmitImageConfig(t *testing.T) {
 	}
 	if _, ok := task.Config["image"]; ok {
 		t.Fatalf("raw_exec config unexpectedly contains image: %#v", task.Config)
+	}
+}
+
+func TestJobspecDefaultKeepaliveUsesPortableSleepLoop(t *testing.T) {
+	cfg := testNomadConfig()
+	job, err := buildJobSpec(cfg, jobSpecInput{LeaseID: "cbx_123456789abc", Slug: "blue-lobster", JobID: "crabbox-123456789abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(job, cfg.Nomad.Task)
+	if !ok {
+		t.Fatalf("missing task %q", cfg.Nomad.Task)
+	}
+	args, ok := task.Config["args"].([]string)
+	if !ok || len(args) != 2 {
+		t.Fatalf("args=%#v", task.Config["args"])
+	}
+	if strings.Contains(args[1], "sleep infinity") || !strings.Contains(args[1], "while :; do sleep 3600; done") {
+		t.Fatalf("keepalive command=%q", args[1])
 	}
 }
 
