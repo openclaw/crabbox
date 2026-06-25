@@ -161,6 +161,20 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	server := b.serverFromDevbox(item)
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	target, err := b.sshTarget(item, keyPath, true)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if req.OnAcquired != nil {
+		if err := req.OnAcquired(core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	secret, err := b.waitForDevboxSecret(ctx, item, bootstrapWaitTimeout(b.cfg))
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -169,16 +183,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPath, err := persistDevboxKey(leaseID, keys)
+	keyPath, err = persistDevboxKey(leaseID, keys)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
 	keyPersisted = true
-	server := b.serverFromDevbox(item)
-	target, err := b.sshTarget(item, keyPath, true)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
 	if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		return core.LeaseTarget{}, err
 	}
