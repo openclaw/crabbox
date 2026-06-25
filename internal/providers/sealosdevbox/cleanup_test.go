@@ -12,7 +12,7 @@ import (
 
 func TestCleanupDryRunSkipsWrongScopeAndDoesNotMutate(t *testing.T) {
 	cfg := lifecycleConfig()
-	owned := cleanupDevboxJSON(cfg, "cbx_owned000000", "owned", "devbox-owned", sealosClaimScope(cfg), "2026-06-24T00:00:00Z")
+	owned := cleanupDevboxJSON(cfg, "cbx_owned000000", "owned", "devbox-owned", sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
 	wrongScope := cleanupDevboxJSON(cfg, "cbx_wrong000000", "wrong", "devbox-wrong", "other-scope", "2026-06-24T00:00:00Z")
 	notOwned := `{"metadata":{"name":"devbox-user","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"dashboard"},"annotations":{}},"status":{"state":"Shutdown"}}`
 	runner := &lifecycleRunner{outputs: []string{`{"items":[` + owned + `,` + wrongScope + `,` + notOwned + `]}`}}
@@ -53,7 +53,7 @@ func TestCleanupDeletesExpiredOwnedDevboxAndRemovesClaimAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := cleanupDevboxJSON(cfg, leaseID, slug, name, sealosClaimScope(cfg), "2026-06-24T00:00:00Z")
+	item := cleanupDevboxJSON(cfg, leaseID, slug, name, sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
 	runner := &lifecycleRunner{outputs: []string{
 		`{"items":[` + item + `]}`,
 		item,
@@ -107,5 +107,5 @@ func TestCleanupRemovesOnlySameScopeStaleClaims(t *testing.T) {
 }
 
 func cleanupDevboxJSON(cfg core.Config, leaseID, slug, name, scope, expiresAt string) string {
-	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + scope + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `","crabbox.dev/expires_at":"` + expiresAt + `"}},"status":{"state":"Shutdown","phase":"Shutdown"}}`
+	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + scope + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `","crabbox.dev/expires_at":"` + expiresAt + `"}},"status":{"state":"Shutdown","phase":"Shutdown"}}`
 }

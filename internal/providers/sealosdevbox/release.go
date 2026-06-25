@@ -111,13 +111,18 @@ func releaseDevboxName(lease core.LeaseTarget, cfg core.Config) string {
 	return ""
 }
 
-func annotationsFromLeaseLabels(labels map[string]string) map[string]string {
-	annotations := make(map[string]string, len(labels))
+func annotationsFromLeaseLabels(labels map[string]string) map[string]any {
+	annotations := make(map[string]any, len(labels)+1)
 	for key, value := range labels {
-		if strings.TrimSpace(key) == "" {
+		key = strings.TrimSpace(key)
+		if key == "" || key == "provider_scope" {
 			continue
 		}
 		annotations[annotationBase+key] = value
 	}
+	annotations[annotationBase+"provider_scope"] = nil
+	annotations[annotationBase+"gateway_host"] = nil
+	annotations[annotationBase+"gateway_port"] = nil
+	annotations[annotationBase+"node_host"] = nil
 	return annotations
 }

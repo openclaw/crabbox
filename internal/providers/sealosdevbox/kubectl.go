@@ -117,7 +117,7 @@ func (b *backend) getSecret(ctx context.Context, name string) (devboxSecret, err
 	return secret, nil
 }
 
-func (b *backend) patchDevboxState(ctx context.Context, name, state string, annotations map[string]string) error {
+func (b *backend) patchDevboxState(ctx context.Context, name, state string, annotations map[string]any) error {
 	patch := map[string]any{
 		"spec": map[string]any{"state": state},
 	}

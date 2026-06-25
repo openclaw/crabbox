@@ -94,8 +94,9 @@ Local path expansion applies to host-side path fields such as `kubectl` and
 namespace. The generated manifest sets `spec.state: Running`, resource size,
 image, optional template ID, storage limit, network mode, SSH user, workdir, and
 an SSH port entry. Crabbox adds deterministic labels and annotations for the provider,
-lease ID, slug, namespace, route scope, TTL, idle timeout, timestamps, and
-release policy.
+lease ID, slug, namespace, non-sensitive route scope fingerprint, TTL, idle
+timeout, timestamps, and release policy. The raw kubeconfig/context/route scope
+stays in the local lease claim and is not written to the remote DevBox object.
 
 ```sh
 crabbox warmup --provider sealos-devbox --slug sealos-smoke --keep
