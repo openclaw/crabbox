@@ -119,6 +119,68 @@ func TestRunReturnsCommandExitCodeFromProtocolResponse(t *testing.T) {
 	}
 }
 
+func TestRunParsesCommandFailureResponseFromNonZeroFlueProcess(t *testing.T) {
+	runner := &recordingRunner{fn: func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+		input := decodeCLIInputArg(t, req.Args)
+		protocolReq := readProtocolRequest(t, input.RequestFile)
+		return LocalCommandResult{ExitCode: 7, Stdout: mustResponseJSON(t, Response{
+			ProtocolVersion: protocolVersion,
+			Operation:       operationRun,
+			LeaseID:         protocolReq.LeaseID,
+			Slug:            protocolReq.Slug,
+			ExitCode:        7,
+			Stdout:          "partial\n",
+			Stderr:          "failed\n",
+			Error:           "command exited 7",
+		})}, errors.New("exit status 7")
+	}}
+	var stdout, stderr bytes.Buffer
+	result, err := testBackend(testConfig(), runner, &stdout, &stderr).Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: newGitRepo(t)},
+		Command: []string{"false"},
+	})
+	var exitErr core.ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("Run err=%v result=%#v", err, result)
+	}
+	if result.ExitCode != 7 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit {
+		t.Fatalf("result=%#v", result)
+	}
+	if stdout.String() != "partial\n" || !strings.Contains(stderr.String(), "failed\n") || strings.Contains(err.Error(), "workflow failed") {
+		t.Fatalf("stdout=%q stderr=%q err=%v", stdout.String(), stderr.String(), err)
+	}
+}
+
+func TestRunKeepsWorkflowFailureWhenNonZeroFlueProcessReportsSuccess(t *testing.T) {
+	runner := &recordingRunner{fn: func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+		input := decodeCLIInputArg(t, req.Args)
+		protocolReq := readProtocolRequest(t, input.RequestFile)
+		return LocalCommandResult{ExitCode: 2, Stdout: mustResponseJSON(t, Response{
+			ProtocolVersion: protocolVersion,
+			Operation:       operationRun,
+			LeaseID:         protocolReq.LeaseID,
+			Slug:            protocolReq.Slug,
+			ExitCode:        0,
+			Stdout:          "ok\n",
+		}), Stderr: "flue transport failed"}, errors.New("exit status 2")
+	}}
+	var stdout, stderr bytes.Buffer
+	result, err := testBackend(testConfig(), runner, &stdout, &stderr).Run(context.Background(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: newGitRepo(t)},
+		Command: []string{"true"},
+	})
+	var exitErr core.ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("Run err=%v result=%#v", err, result)
+	}
+	if result.ExitCode != 2 || result.Status != core.RunStatusFailed {
+		t.Fatalf("result=%#v", result)
+	}
+	if stdout.String() != "" || !strings.Contains(err.Error(), "flue workflow failed") {
+		t.Fatalf("stdout=%q stderr=%q err=%v", stdout.String(), stderr.String(), err)
+	}
+}
+
 func TestRunRejectsMalformedResponseWithoutLeakingEnv(t *testing.T) {
 	secret := "very-secret-value"
 	runner := &recordingRunner{fn: func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {

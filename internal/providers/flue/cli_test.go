@@ -3,6 +3,7 @@ package flue
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -51,6 +52,43 @@ func TestCLIAdapterBuildsFlueRunArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(call.Args, want) {
 		t.Fatalf("args=%#v want %#v", call.Args, want)
+	}
+	rawOutputLimit := defaultStdoutLimitBytes + defaultStderrLimitBytes
+	if call.MaxCapturedOutputBytes <= rawOutputLimit || call.MaxCapturedOutputBytes < 6*rawOutputLimit {
+		t.Fatalf("MaxCapturedOutputBytes=%d too small for JSON protocol output limit %d", call.MaxCapturedOutputBytes, rawOutputLimit)
+	}
+}
+
+func TestCLIAdapterNormalizesRelativeRoot(t *testing.T) {
+	runner := &recordingRunner{fn: func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{ExitCode: 0, Stdout: mustResponseJSON(t, Response{ProtocolVersion: protocolVersion, Operation: operationRun, ExitCode: 0})}, nil
+	}}
+	cfg := testConfig()
+	cfg.Flue.Root = "flue-runner"
+	cli, err := newFlueCLI(cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.run(context.Background(), "/tmp/request.json", nil); err != nil {
+		t.Fatalf("run err=%v", err)
+	}
+	call := runner.onlyCall(t)
+	wantRoot, err := filepath.Abs("flue-runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.Dir != wantRoot {
+		t.Fatalf("Dir=%q want %q", call.Dir, wantRoot)
+	}
+	inputIndex := -1
+	for i, arg := range call.Args {
+		if arg == "--root" {
+			inputIndex = i
+			break
+		}
+	}
+	if inputIndex < 0 || inputIndex+1 >= len(call.Args) || call.Args[inputIndex+1] != wantRoot {
+		t.Fatalf("args=%#v want --root %q", call.Args, wantRoot)
 	}
 }
 

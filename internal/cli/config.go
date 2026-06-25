@@ -7576,6 +7576,24 @@ func applyEnv(cfg *Config) error {
 		cfg.OpenComputer.Burst = v
 	}
 	var err error
+	cfg.Flue.CLIPath = getenv("CRABBOX_FLUE_CLI", cfg.Flue.CLIPath)
+	if root := os.Getenv("CRABBOX_FLUE_ROOT"); root != "" {
+		cfg.Flue.Root = expandUserPath(root)
+	}
+	cfg.Flue.Workflow = getenv("CRABBOX_FLUE_WORKFLOW", cfg.Flue.Workflow)
+	cfg.Flue.Target = getenv("CRABBOX_FLUE_TARGET", cfg.Flue.Target)
+	if config := os.Getenv("CRABBOX_FLUE_CONFIG"); config != "" {
+		cfg.Flue.Config = expandUserPath(config)
+	}
+	if envFile := os.Getenv("CRABBOX_FLUE_ENV"); envFile != "" {
+		cfg.Flue.EnvFile = expandUserPath(envFile)
+	}
+	cfg.Flue.Output = getenv("CRABBOX_FLUE_OUTPUT", cfg.Flue.Output)
+	cfg.Flue.Workdir = getenv("CRABBOX_FLUE_WORKDIR", cfg.Flue.Workdir)
+	cfg.Flue.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_FLUE_TIMEOUT_SECS", cfg.Flue.TimeoutSecs)
+	if err != nil {
+		return err
+	}
 	cfg.CodeSandbox.TemplateID = getenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", cfg.CodeSandbox.TemplateID)
 	cfg.CodeSandbox.Workdir = getenv("CRABBOX_CODESANDBOX_WORKDIR", cfg.CodeSandbox.Workdir)
 	cfg.CodeSandbox.VMTier = getenv("CRABBOX_CODESANDBOX_VM_TIER", cfg.CodeSandbox.VMTier)

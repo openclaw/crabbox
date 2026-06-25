@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-const flueCapturedOutputLimitBytes = defaultStdoutLimitBytes + defaultStderrLimitBytes
+// Protocol stdout wraps delegated stdout/stderr inside JSON, so the process
+// capture ceiling needs room for escaping and response framing.
+const flueCapturedOutputLimitBytes = 1<<20 + 6*(defaultStdoutLimitBytes+defaultStderrLimitBytes)
 
 type flueCLI struct {
 	cfg FlueConfig
@@ -52,7 +54,8 @@ func (c *flueCLI) run(ctx context.Context, requestFile string, redactions []stri
 		return flueRunResult{}, fmt.Errorf("encode flue request pointer: %w", err)
 	}
 	args := []string{"run", workflowSelector(workflow), "--target", target, "--input", string(input)}
-	if root := strings.TrimSpace(c.cfg.Root); root != "" {
+	root := cleanHostPath(c.cfg.Root)
+	if root != "" {
 		args = append(args, "--root", root)
 	}
 	if config := strings.TrimSpace(c.cfg.Config); config != "" {
@@ -73,7 +76,7 @@ func (c *flueCLI) run(ctx context.Context, requestFile string, redactions []stri
 	result, runErr := c.rt.Exec.Run(runCtx, LocalCommandRequest{
 		Name:                   blank(strings.TrimSpace(c.cfg.CLIPath), defaultCLIPath),
 		Args:                   args,
-		Dir:                    strings.TrimSpace(c.cfg.Root),
+		Dir:                    root,
 		MaxCapturedOutputBytes: flueCapturedOutputLimitBytes,
 		CancelGracePeriod:      5 * time.Second,
 	})
@@ -84,11 +87,16 @@ func (c *flueCLI) run(ctx context.Context, requestFile string, redactions []stri
 		if errors.Is(runCtx.Err(), context.Canceled) || errors.Is(runErr, context.Canceled) {
 			return flueRunResult{Raw: result}, context.Canceled
 		}
-		return flueRunResult{Raw: result}, exit(flueProcessExitCode(result.ExitCode), "flue workflow failed: %s", flueFailureDetail(result, runErr, redactions))
 	}
 	resp, err := ParseResponseFromStdout(result.Stdout)
 	if err != nil {
+		if runErr != nil {
+			return flueRunResult{Raw: result}, exit(flueProcessExitCode(result.ExitCode), "flue workflow failed: %s", flueFailureDetail(result, runErr, redactions))
+		}
 		return flueRunResult{Raw: result}, err
+	}
+	if runErr != nil && resp.ExitCode == 0 {
+		return flueRunResult{Response: resp, Raw: result}, exit(flueProcessExitCode(result.ExitCode), "flue workflow failed: %s", flueFailureDetail(result, runErr, redactions))
 	}
 	return flueRunResult{Response: resp, Raw: result}, nil
 }

@@ -285,6 +285,15 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_TENSORLAKE_DISK_MB",
 		"CRABBOX_TENSORLAKE_TIMEOUT_SECS",
 		"CRABBOX_TENSORLAKE_NO_INTERNET",
+		"CRABBOX_FLUE_CLI",
+		"CRABBOX_FLUE_ROOT",
+		"CRABBOX_FLUE_WORKFLOW",
+		"CRABBOX_FLUE_TARGET",
+		"CRABBOX_FLUE_CONFIG",
+		"CRABBOX_FLUE_ENV",
+		"CRABBOX_FLUE_OUTPUT",
+		"CRABBOX_FLUE_WORKDIR",
+		"CRABBOX_FLUE_TIMEOUT_SECS",
 		"CRABBOX_DOCKER_SANDBOX_CLI",
 		"CRABBOX_DOCKER_SANDBOX_AGENT",
 		"CRABBOX_DOCKER_SANDBOX_TEMPLATE",
@@ -5208,6 +5217,15 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_TENSORLAKE_DISK_MB", "20480")
 	t.Setenv("CRABBOX_TENSORLAKE_TIMEOUT_SECS", "900")
 	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "true")
+	t.Setenv("CRABBOX_FLUE_CLI", "/opt/flue/bin/flue")
+	t.Setenv("CRABBOX_FLUE_ROOT", "~/flue-env")
+	t.Setenv("CRABBOX_FLUE_WORKFLOW", "env-runner")
+	t.Setenv("CRABBOX_FLUE_TARGET", "node")
+	t.Setenv("CRABBOX_FLUE_CONFIG", "~/flue.config.ts")
+	t.Setenv("CRABBOX_FLUE_ENV", "~/flue.env")
+	t.Setenv("CRABBOX_FLUE_OUTPUT", "json")
+	t.Setenv("CRABBOX_FLUE_WORKDIR", "/workspace/flue-env")
+	t.Setenv("CRABBOX_FLUE_TIMEOUT_SECS", "777")
 	t.Setenv("OPENCOMPUTER_API_URL", "https://oc-file.example")
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", "https://oc-env.example")
 	t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", "/workspace/oc-env")
@@ -5426,6 +5444,9 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Tensorlake.APIKey != "tl-api-env" || cfg.Tensorlake.APIURL != "https://api.tl-env.example" || cfg.Tensorlake.CLIPath != "/opt/tl/bin/tensorlake" || cfg.Tensorlake.Image != "ubuntu:tl-env" || cfg.Tensorlake.Snapshot != "snap-tl-env" || cfg.Tensorlake.OrganizationID != "org-tl-env" || cfg.Tensorlake.ProjectID != "proj-tl-env" || cfg.Tensorlake.Namespace != "ns-tl-env" || cfg.Tensorlake.Workdir != "/workspace/tl-env" || cfg.Tensorlake.CPUs != 2.5 || cfg.Tensorlake.MemoryMB != 4096 || cfg.Tensorlake.DiskMB != 20480 || cfg.Tensorlake.TimeoutSecs != 900 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("unexpected tensorlake env: %#v", cfg.Tensorlake)
 	}
+	if cfg.Flue.CLIPath != "/opt/flue/bin/flue" || cfg.Flue.Root != filepath.Join(home, "flue-env") || cfg.Flue.Workflow != "env-runner" || cfg.Flue.Target != "node" || cfg.Flue.Config != filepath.Join(home, "flue.config.ts") || cfg.Flue.EnvFile != filepath.Join(home, "flue.env") || cfg.Flue.Output != "json" || cfg.Flue.Workdir != "/workspace/flue-env" || cfg.Flue.TimeoutSecs != 777 {
+		t.Fatalf("unexpected flue env: %#v", cfg.Flue)
+	}
 	if cfg.OpenComputer.APIURL != "https://oc-env.example" || cfg.OpenComputer.Workdir != "/workspace/oc-env" || cfg.OpenComputer.CPU != 6 || cfg.OpenComputer.MemoryMB != 12288 || cfg.OpenComputer.TimeoutSecs != 1200 || cfg.OpenComputer.ExecTimeoutSecs != 2400 {
 		t.Fatalf("unexpected opencomputer env: %#v", cfg.OpenComputer)
 	}
@@ -5495,6 +5516,15 @@ func TestApplyEnvRejectsNegativeOpenSandboxTimeouts(t *testing.T) {
 				t.Fatalf("err=%v, want negative timeout rejection", err)
 			}
 		})
+	}
+}
+
+func TestApplyEnvRejectsNegativeFlueTimeout(t *testing.T) {
+	t.Setenv("CRABBOX_FLUE_TIMEOUT_SECS", "-1")
+	cfg := baseConfig()
+	err := applyEnv(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "CRABBOX_FLUE_TIMEOUT_SECS must be non-negative") {
+		t.Fatalf("err=%v, want negative timeout rejection", err)
 	}
 }
 
