@@ -267,6 +267,12 @@ export NOMAD_TOKEN=...
 scripts/live-nomad-smoke.sh
 ```
 
+`scripts/live-nomad-smoke.sh` accepts Nomad credential destinations only from
+environment variables or an explicit trusted `CRABBOX_CONFIG` file. It does not
+read repo-local `crabbox.yaml` or `.crabbox.yaml` for `nomad.address` or
+`nomad.tokenEnv`, because the script re-emits those values as explicit CLI flags
+while running a live credentialed smoke.
+
 or through the matrix dispatcher:
 
 ```sh
@@ -286,9 +292,9 @@ It emits one classification:
 - `diagnostic_only`
 
 Missing `CRABBOX_LIVE=1`, missing `CRABBOX_LIVE_PROVIDERS=nomad`, missing
-`NOMAD_ADDR` or `nomad.address`, and a missing token env value are classified as
-`environment_blocked` before any mutation. If the smoke is interrupted after a
-job is created, rerun:
+`NOMAD_ADDR` or trusted `nomad.address` from `CRABBOX_CONFIG`, and a missing
+token env value are classified as `environment_blocked` before any mutation. If
+the smoke is interrupted after a job is created, rerun:
 
 ```sh
 crabbox stop --provider nomad <slug-or-cbx-id>
@@ -297,8 +303,8 @@ crabbox cleanup --provider nomad --dry-run
 
 ## Troubleshooting
 
-- `nomad address is required`: set `NOMAD_ADDR`, `nomad.address`, or
-  `--nomad-address`.
+- `nomad address is required`: set `NOMAD_ADDR`, set `nomad.address` in an
+  explicit trusted `CRABBOX_CONFIG` file, or pass `--nomad-address`.
 - `missing_token`: export the environment variable named by `tokenEnv`
   (`NOMAD_TOKEN` by default). Do not place the token on argv.
 - TLS or `x509` errors: configure `caCert`, `caPath`, `clientCert`,

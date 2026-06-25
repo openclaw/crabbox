@@ -138,13 +138,11 @@ add_config_path() {
 }
 if [[ -n "${CRABBOX_CONFIG:-}" ]]; then
   add_config_path "$CRABBOX_CONFIG"
-else
-  add_config_path "$repo_root/crabbox.yaml"
-  add_config_path "$repo_root/.crabbox.yaml"
 fi
 
 config_value() {
   local key_path="$1"
+  ((${#config_paths[@]} > 0)) || return 1
   command -v ruby >/dev/null 2>&1 || return 1
   local config_path
   local candidate
@@ -181,7 +179,7 @@ value_from_env_or_config() {
 
 address="$(value_from_env_or_config NOMAD_ADDR nomad.address || true)"
 if [[ -z "$address" ]]; then
-  classify_and_exit environment_blocked "missing_NOMAD_ADDR_or_nomad.address"
+  classify_and_exit environment_blocked "missing_NOMAD_ADDR_or_trusted_nomad.address"
 fi
 
 token_env="${CRABBOX_NOMAD_TOKEN_ENV:-}"
