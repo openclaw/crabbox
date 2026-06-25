@@ -29,7 +29,7 @@ func TestProviderSpec(t *testing.T) {
 	}
 }
 
-func TestValidateConfigRequiresExactlyOneTarget(t *testing.T) {
+func TestValidateConfigAllowsMissingRunnerTargetForExistingPredictionCommands(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		cfg  core.Config
@@ -37,7 +37,7 @@ func TestValidateConfigRequiresExactlyOneTarget(t *testing.T) {
 	}{
 		{name: "deployment", cfg: core.Config{Provider: "replicate", Replicate: ReplicateConfig{Deployment: "owner/deploy"}}, ok: true},
 		{name: "version", cfg: core.Config{Provider: "replicate", Replicate: ReplicateConfig{Version: "v1"}}, ok: true},
-		{name: "missing", cfg: core.Config{Provider: "replicate"}, ok: false},
+		{name: "missing", cfg: core.Config{Provider: "replicate"}, ok: true},
 		{name: "both", cfg: core.Config{Provider: "replicate", Replicate: ReplicateConfig{Deployment: "owner/deploy", Version: "v1"}}, ok: false},
 		{name: "other provider", cfg: core.Config{Provider: "modal"}, ok: true},
 	} {

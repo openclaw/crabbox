@@ -104,9 +104,6 @@ func ValidateConfig(cfg Config) error {
 	}
 	deployment := strings.TrimSpace(cfg.Replicate.Deployment)
 	version := strings.TrimSpace(cfg.Replicate.Version)
-	if deployment == "" && version == "" {
-		return core.Exit(2, "provider=replicate requires exactly one of replicate.deployment or replicate.version")
-	}
 	if deployment != "" && version != "" {
 		return core.Exit(2, "provider=replicate accepts exactly one of replicate.deployment or replicate.version, not both")
 	}
@@ -124,6 +121,18 @@ func ValidateConfig(cfg Config) error {
 	}
 	if cfg.Replicate.MaxArchiveBytes < 0 {
 		return core.Exit(2, "replicate maxArchiveBytes must be non-negative")
+	}
+	return nil
+}
+
+func validateRunnerTargetConfig(cfg Config) error {
+	deployment := strings.TrimSpace(cfg.Replicate.Deployment)
+	version := strings.TrimSpace(cfg.Replicate.Version)
+	if deployment == "" && version == "" {
+		return core.Exit(2, "provider=replicate requires exactly one of replicate.deployment or replicate.version")
+	}
+	if deployment != "" && version != "" {
+		return core.Exit(2, "provider=replicate accepts exactly one of replicate.deployment or replicate.version, not both")
 	}
 	return nil
 }

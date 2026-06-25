@@ -314,6 +314,9 @@ func (b replicateBackend) validateReadyConfig() (string, string, error) {
 	if err := ValidateConfig(cfg); err != nil {
 		return "", "", err
 	}
+	if err := validateRunnerTargetConfig(cfg); err != nil {
+		return "", "", err
+	}
 	baseURL, source, err := b.validateAPIConfig()
 	if err != nil {
 		return "", "", err
