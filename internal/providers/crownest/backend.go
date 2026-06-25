@@ -373,7 +373,7 @@ func crownestRunSession(leaseID, slug string, reused, kept bool) *RunSessionHand
 		Slug:           slug,
 		Reused:         reused,
 		Kept:           kept,
-		CleanupCommand: "crabbox stop " + shellQuote(blank(slug, leaseID)),
+		CleanupCommand: "crabbox stop --provider " + providerName + " --id " + shellQuote(blank(slug, leaseID)),
 	}
 }
 

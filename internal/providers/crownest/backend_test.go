@@ -54,6 +54,9 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	if result.Session == nil || result.Session.Provider != providerName || result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
+	if !strings.Contains(result.Session.CleanupCommand, "--provider crownest --id ") {
+		t.Fatalf("cleanup command=%q, want provider-scoped stop command", result.Session.CleanupCommand)
+	}
 	if strings.Contains(stderr.String(), "cn_test") {
 		t.Fatalf("stderr leaked secret: %q", stderr.String())
 	}
