@@ -79,6 +79,32 @@ func TestRunRejectsWorkspaceEnvUntilCrownestSupportsIt(t *testing.T) {
 	}
 }
 
+func TestRunRejectsSyncOnlyBeforeCreatingWorkspaceRun(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	calledClient := false
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			calledClient = true
+			return &fakeCrownestClient{baseURL: "https://api.crownest.dev"}, nil
+		},
+	}
+
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo:     Repo{Root: tempGitRepo(t), Name: "demo"},
+		Command:  []string{"echo", "should-not-run"},
+		SyncOnly: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--sync-only") {
+		t.Fatalf("err=%v, want --sync-only rejection", err)
+	}
+	if calledClient {
+		t.Fatalf("sync-only rejection should not create a Crownest client")
+	}
+}
+
 func TestRunCancelsWorkspaceRunWhenLocalContextIsCanceled(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -228,6 +254,33 @@ func TestRunKeepOnFailureRetainsCreatedSandbox(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxCleansUpRemoteWhenLocalClaimFails(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig()
+	api := &fakeCrownestClient{
+		baseURL:         "https://api.crownest.dev",
+		createSandboxID: "sbx_new",
+	}
+	leaseID := leasePrefix + "sbx_new"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "existing", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, filepath.Join(repoRoot, "other"), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	_, _, _, err := b.createSandbox(context.Background(), api, Repo{Root: repoRoot, Name: "demo"}, false, "")
+	if err == nil || !strings.Contains(err.Error(), "claimed by repo") {
+		t.Fatalf("err=%v, want claim repo conflict", err)
+	}
+	if api.deletedSandboxID != "sbx_new" {
+		t.Fatalf("deletedSandboxID=%q, want remote cleanup", api.deletedSandboxID)
+	}
+}
+
 type fakeCrownestClient struct {
 	baseURL          string
 	created          createWorkspaceRunRequest
@@ -245,7 +298,7 @@ type fakeCrownestClient struct {
 func (f *fakeCrownestClient) BaseURL() string { return f.baseURL }
 
 func (f *fakeCrownestClient) CreateSandbox(context.Context, createSandboxRequest) (sandbox, error) {
-	return sandbox{ID: "sbx_123", Status: "running"}, nil
+	return sandbox{ID: blank(f.createSandboxID, "sbx_123"), Status: "running"}, nil
 }
 
 func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error) {

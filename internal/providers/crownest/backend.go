@@ -93,6 +93,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if req.NoSync {
 		return RunResult{}, exit(2, "provider=crownest requires archive sync; --no-sync is not supported")
 	}
+	if req.SyncOnly {
+		return RunResult{}, exit(2, "provider=crownest uses archive sync; --sync-only is not supported")
+	}
 	if req.Options.Tailscale.Enabled {
 		return RunResult{}, exit(2, "provider=crownest is delegated-run only and does not support Tailscale options")
 	}
@@ -483,12 +486,24 @@ func (b *backend) createSandbox(ctx context.Context, api client, repo Repo, recl
 	leaseID := leasePrefix + sb.ID
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return "", "", "", err
+		return leaseID, sb.ID, "", b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		return "", "", "", err
+		return leaseID, sb.ID, slug, b.cleanupCreateFailure(ctx, api, sb.ID, err)
 	}
 	return leaseID, sb.ID, slug, nil
+}
+
+func (b *backend) cleanupCreateFailure(ctx context.Context, api client, sandboxID string, cause error) error {
+	if strings.TrimSpace(sandboxID) == "" {
+		return cause
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isNotFound(err) {
+		return errors.Join(cause, fmt.Errorf("crownest cleanup failed for sandbox %s; delete it in Crownest: %w", sandboxID, err))
+	}
+	return cause
 }
 
 func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*os.File, string, int64, []timingPhase, time.Duration, error) {
