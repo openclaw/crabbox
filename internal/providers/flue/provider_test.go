@@ -146,7 +146,7 @@ func TestValidateFlueConfigRejectsUnsupportedValues(t *testing.T) {
 	}
 }
 
-func TestConfigureReturnsUnsupportedDelegatedBackend(t *testing.T) {
+func TestConfigureReturnsDelegatedBackend(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	var out, stderr bytes.Buffer
@@ -159,7 +159,7 @@ func TestConfigureReturnsUnsupportedDelegatedBackend(t *testing.T) {
 		t.Fatalf("backend does not implement DelegatedRunBackend: %T", backend)
 	}
 	_, err = delegated.Run(context.Background(), core.RunRequest{})
-	if err == nil || !strings.Contains(err.Error(), "run bridge is not implemented yet") {
+	if err == nil || !strings.Contains(err.Error(), "missing command") {
 		t.Fatalf("Run err=%v", err)
 	}
 }

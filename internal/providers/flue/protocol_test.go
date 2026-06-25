@@ -61,6 +61,19 @@ func TestProtocolValidationRejectsMalformedRequests(t *testing.T) {
 	}
 }
 
+func TestProtocolPreservesEmptyCommandArguments(t *testing.T) {
+	req := validRequest()
+	req.Command = []string{"printf", ""}
+	if err := req.Validate(); err != nil {
+		t.Fatalf("Validate rejected empty argv argument: %v", err)
+	}
+	req.Command = []string{""}
+	err := req.Validate()
+	if err == nil || !strings.Contains(err.Error(), "command[0]") {
+		t.Fatalf("Validate err=%v want command[0] rejection", err)
+	}
+}
+
 func TestProtocolErrorsDoNotEchoSecretEnvValues(t *testing.T) {
 	req := validRequest()
 	req.Env = map[string]string{"TOKEN": "super-secret-token"}
