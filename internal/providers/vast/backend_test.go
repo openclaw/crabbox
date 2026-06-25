@@ -257,12 +257,23 @@ func TestListFiltersOwnedByDefaultAndAllShowsManual(t *testing.T) {
 func TestAcquireCreatesAttachesPollsReadinessAndClaims(t *testing.T) {
 	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, GPUName: "RTX 4090", GPUCount: 1, Rentable: true}}}
 	b := newTestBackend(t, api)
+	var readyTarget core.SSHTarget
+	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ string, _ time.Duration) error {
+		readyTarget = *target
+		return nil
+	}
 	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "gpu-box", Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lease.LeaseID == "" || lease.Server.CloudID != "100" || lease.SSH.Host != "203.0.113.24" || lease.SSH.Port != "2201" || lease.SSH.User != "root" || lease.SSH.Key == "" {
 		t.Fatalf("lease=%#v", lease)
+	}
+	if lease.SSH.ReadyCheck != vastReadyCheck || strings.Contains(lease.SSH.ReadyCheck, "crabbox-ready") {
+		t.Fatalf("lease ready check=%q", lease.SSH.ReadyCheck)
+	}
+	if readyTarget.ReadyCheck != vastReadyCheck {
+		t.Fatalf("waitSSH target ready check=%q", readyTarget.ReadyCheck)
 	}
 	if len(api.searches) != 1 || api.searches[0].Config.Order != "dlperf_per_dphtotal desc" {
 		t.Fatalf("searches=%#v", api.searches)
@@ -291,7 +302,8 @@ func TestResolvePreservesPersistedVastClaimMetadata(t *testing.T) {
 	repoRoot := t.TempDir()
 	b.cfg.Vast.ReleaseAction = "stop"
 	b.DirectSSHBackend.Cfg = b.cfg
-	if _, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoRoot}, RequestedSlug: "preserve-meta"}); err != nil {
+	acquired, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: repoRoot}, RequestedSlug: "preserve-meta"})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -303,6 +315,9 @@ func TestResolvePreservesPersistedVastClaimMetadata(t *testing.T) {
 	}
 	if resolved.Server.Labels[vastReleaseActionLabel] != "stop" || resolved.Server.Labels[vastKeyIDLabel] != "key-100" || resolved.Server.Labels[vastKeyOwnedLabel] != "true" {
 		t.Fatalf("resolved labels=%#v", resolved.Server.Labels)
+	}
+	if resolved.SSH.Key != acquired.SSH.Key {
+		t.Fatalf("resolved SSH key=%q want %q", resolved.SSH.Key, acquired.SSH.Key)
 	}
 	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("preserve-meta", providerName)
 	if claimErr != nil || !ok {
@@ -338,6 +353,42 @@ func TestResolveStatusOnlyAllowsInstanceWithoutSSHEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if lease.LeaseID != "cbx_status" || lease.SSH.Host != "" {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
+func TestResolveStatusOnlyReadyProbeIncludesSSHTarget(t *testing.T) {
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+	b := newTestBackend(t, api)
+	acquired, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "status-wait", Keep: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-wait", StatusOnly: true, ReadyProbe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != acquired.LeaseID || lease.SSH.Host != acquired.SSH.Host || lease.SSH.Key != acquired.SSH.Key {
+		t.Fatalf("lease=%#v acquired=%#v", lease, acquired)
+	}
+	if lease.SSH.ReadyCheck != vastReadyCheck {
+		t.Fatalf("ready check=%q", lease.SSH.ReadyCheck)
+	}
+}
+
+func TestResolvePrefersNumericSlugOverInstanceID(t *testing.T) {
+	api := &fakeVastAPI{instances: []vastInstance{
+		{ID: 123, Label: encodeVastOwnershipLabel("cbx_other", "other", "ready"), Status: "running", SSHHost: "203.0.113.123", SSHPort: 22},
+		{ID: 100, Label: encodeVastOwnershipLabel("cbx_numeric", "123", "ready"), Status: "running", SSHHost: "203.0.113.100", SSHPort: 2200},
+	}}
+	b := newTestBackend(t, api)
+
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != "cbx_numeric" || lease.Server.CloudID != "100" || lease.SSH.Host != "203.0.113.100" {
 		t.Fatalf("lease=%#v", lease)
 	}
 }
@@ -454,6 +505,28 @@ func TestReleaseStopIsExplicitAndTested(t *testing.T) {
 	}
 	if len(api.managed) < 2 || api.managed[len(api.managed)-1].input.State != "stopped" {
 		t.Fatalf("managed=%#v", api.managed)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("stop-me", providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
+	}
+	if claim.Labels["state"] != "stopped" || claim.Labels[vastReleaseActionLabel] != "stop" || claim.Labels[vastKeyIDLabel] != "key-100" {
+		t.Fatalf("claim labels=%#v", claim.Labels)
+	}
+
+	b.cfg.Vast.ReleaseAction = "destroy"
+	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.detached) != 1 || api.detached[0].id != 100 || api.detached[0].keyID != "key-100" {
+		t.Fatalf("detached=%v", api.detached)
+	}
+	if len(api.destroyed) != 1 || api.destroyed[0] != 100 {
+		t.Fatalf("destroyed=%v", api.destroyed)
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("stop-me", providerName); claimErr != nil || ok {
+		t.Fatalf("claim after destroy ok=%v err=%v", ok, claimErr)
 	}
 }
 

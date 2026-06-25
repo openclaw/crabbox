@@ -66,6 +66,9 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, exit(2, "provider=%s supports target=linux only", providerName)
 	}
+	if cfg.Tailscale.Enabled || cfg.Network == core.NetworkTailscale {
+		return nil, exit(2, "provider=%s does not support Tailscale options", providerName)
+	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
 

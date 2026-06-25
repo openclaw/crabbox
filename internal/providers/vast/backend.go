@@ -20,6 +20,7 @@ const (
 	vastKeyIDLabel         = "provider_key_id"
 	vastKeyOwnedLabel      = "provider_key_owned"
 	vastOfferIDLabel       = "vast_offer_id"
+	vastReadyCheck         = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	vastReleaseActionLabel = "release_action"
 )
 
@@ -324,19 +325,12 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	for _, item := range instances {
 		byID[item.ID] = item
 	}
-	if id, ok := parseVastInstanceID(req.ID); ok {
-		item, found := byID[id]
-		if !found {
-			item, err = client.GetInstance(ctx, id)
-			if err != nil {
-				return b.releaseTargetFromClaim(req.ID, err, req.ReleaseOnly)
-			}
-		}
-		return b.targetFromInstance(item, req)
-	}
 	servers := serversFromInstances(instances, b.cfg, false)
 	server, leaseID, err := core.FindServerByAlias(servers, req.ID)
-	if err == nil && leaseID != "" {
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if leaseID != "" {
 		if id, ok := parseVastInstanceID(server.CloudID); ok {
 			return b.targetFromInstance(byID[id], req)
 		}
@@ -358,8 +352,15 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			return claimTarget(claim), nil
 		}
 	}
-	if err != nil {
-		return core.LeaseTarget{}, err
+	if id, ok := parseVastInstanceID(req.ID); ok {
+		item, found := byID[id]
+		if !found {
+			item, err = client.GetInstance(ctx, id)
+			if err != nil {
+				return b.releaseTargetFromClaim(req.ID, err, req.ReleaseOnly)
+			}
+		}
+		return b.targetFromInstance(item, req)
 	}
 	return core.LeaseTarget{}, exit(4, "lease/instance not found: %s", req.ID)
 }
@@ -389,11 +390,12 @@ func (b *backend) targetFromInstance(item vastInstance, req core.ResolveRequest)
 	server = mergeVastClaimMetadata(server)
 	leaseID := server.Labels["lease"]
 	target := core.LeaseTarget{Server: server, LeaseID: leaseID}
-	if !req.ReleaseOnly && !req.StatusOnly {
+	if !req.ReleaseOnly && (!req.StatusOnly || req.ReadyProbe) {
 		ssh, err := sshTargetFromInstance(b.cfg, item)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		core.UseStoredTestboxKey(&ssh, leaseID)
 		target.SSH = ssh
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
@@ -536,7 +538,10 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 		if _, err := client.ManageInstance(ctx, instanceID, vastManageInstanceInput{State: "stopped", Label: encodeVastOwnershipLabel(leaseID, server.Labels["slug"], "stopped")}); err != nil {
 			return err
 		}
-		if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+		labels := cloneLabels(claim.Labels)
+		labels["state"] = "stopped"
+		labels[vastReleaseActionLabel] = "stop"
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
 			return fmt.Errorf("finalize vast stop claim: %w", err)
 		}
 	default:
@@ -698,6 +703,7 @@ func sshTargetFromInstance(cfg core.Config, item vastInstance) (core.SSHTarget, 
 	ssh.Port = strconv.Itoa(item.SSHPort)
 	ssh.User = firstNonBlank(cfg.SSHUser, cfg.Vast.User, "root")
 	ssh.TargetOS = core.TargetLinux
+	ssh.ReadyCheck = vastReadyCheck
 	return ssh, nil
 }
 

@@ -84,16 +84,25 @@ func TestOfferSearchPayloadAndDecode(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		query := body["query"].(map[string]any)
-		if body["type"] != "ondemand" || body["order"] != "dlperf_per_dphtotal desc" ||
-			query["gpu_name"] != "H100" || query["verified"] != true || query["rentable"] != true || query["rented"] != false {
+		if body["type"] != "ondemand" ||
+			body["gpu_name"].(map[string]any)["eq"] != "H100" ||
+			body["verified"].(map[string]any)["eq"] != true ||
+			body["rentable"].(map[string]any)["eq"] != true ||
+			body["rented"].(map[string]any)["eq"] != false {
 			t.Fatalf("unexpected search body: %#v", body)
 		}
-		if query["direct_port_count"].(map[string]any)["gte"] != float64(1) ||
-			query["num_gpus"].(map[string]any)["gte"] != float64(4) ||
-			query["reliability2"].(map[string]any)["gte"] != 0.95 ||
-			query["dph_total"].(map[string]any)["lte"] != 3.5 {
-			t.Fatalf("unexpected query filters: %#v", query)
+		order := body["order"].([]any)
+		if len(order) != 1 || order[0].([]any)[0] != "dlperf_per_dphtotal" || order[0].([]any)[1] != "desc" {
+			t.Fatalf("order=%#v", body["order"])
+		}
+		if _, ok := body["query"]; ok {
+			t.Fatalf("search body should use top-level filters: %#v", body)
+		}
+		if body["direct_port_count"].(map[string]any)["gte"] != float64(1) ||
+			body["num_gpus"].(map[string]any)["gte"] != float64(4) ||
+			body["reliability"].(map[string]any)["gte"] != 0.95 ||
+			body["dph_total"].(map[string]any)["lte"] != 3.5 {
+			t.Fatalf("unexpected search filters: %#v", body)
 		}
 		writeJSON(t, w, map[string]any{"offers": []map[string]any{{"id": 11, "gpu_name": "H100", "ssh_host": "203.0.113.10", "ssh_port": 2201}}})
 	}))
@@ -116,6 +125,13 @@ func TestOfferSearchPayloadAndDecode(t *testing.T) {
 	}
 }
 
+func TestOfferSearchPayloadMapsInterruptibleToBid(t *testing.T) {
+	body := buildVastOfferSearchPayload(VastConfig{InstanceType: "interruptible"})
+	if body["type"] != "bid" {
+		t.Fatalf("type=%#v want bid", body["type"])
+	}
+}
+
 func TestCreateInstancePayloadAndDecodeNewContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.URL.Path != "/api/v0/asks/42/" {
@@ -127,14 +143,16 @@ func TestCreateInstancePayloadAndDecodeNewContract(t *testing.T) {
 		}
 		if body["runtype"] != "ssh_direct" || body["target_state"] != "running" ||
 			body["cancel_unavail"] != true || body["vm"] != false ||
-			body["image"] != "nvidia/cuda:12" || body["template_id"] != "tpl-123" ||
+			body["image"] != "nvidia/cuda:12" || body["template_hash_id"] != "tpl-123" ||
 			body["disk"] != float64(80) || body["label"] != "cbx1|lease|slug|active" ||
 			body["ssh_key"] != "ssh-ed25519 AAAA..." {
 			t.Fatalf("unexpected create body: %#v", body)
 		}
-		env := body["env"].(map[string]any)
-		if env["CRABBOX"] != "1" {
-			t.Fatalf("env=%#v", env)
+		if _, ok := body["template_id"]; ok {
+			t.Fatalf("create body should use template_hash_id: %#v", body)
+		}
+		if body["env"] != "-e CRABBOX=1" {
+			t.Fatalf("env=%#v", body["env"])
 		}
 		writeJSON(t, w, map[string]any{"success": true, "new_contract": 99})
 	}))
@@ -158,12 +176,22 @@ func TestCreateInstancePayloadAndDecodeNewContract(t *testing.T) {
 func TestInstanceMethodsAndDecoding(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, r.Method+" "+r.URL.Path)
+		seen = append(seen, r.Method+" "+r.URL.RequestURI())
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/v0/instances/99/":
-			writeJSON(t, w, map[string]any{"id": 99, "actual_status": "running", "ssh_host": "198.51.100.8", "ssh_port": 2222, "gpu_name": "RTX 4090"})
-		case "GET /api/v0/instances/":
-			writeJSON(t, w, map[string]any{"instances": []map[string]any{{"id": 99}, {"contract_id": 100}}})
+			writeJSON(t, w, map[string]any{"instances": map[string]any{"id": 99, "actual_status": "running", "ssh_host": "198.51.100.8", "ssh_port": 2222, "gpu_name": "RTX 4090"}})
+		case "GET /api/v1/instances/":
+			if r.URL.Query().Get("limit") != "25" {
+				t.Fatalf("list query=%s", r.URL.RawQuery)
+			}
+			switch r.URL.Query().Get("after_token") {
+			case "":
+				writeJSON(t, w, map[string]any{"next_token": "page-2", "instances": []map[string]any{{"id": 99}}})
+			case "page-2":
+				writeJSON(t, w, map[string]any{"next_token": nil, "instances": []map[string]any{{"contract_id": 100}}})
+			default:
+				t.Fatalf("unexpected after_token query=%s", r.URL.RawQuery)
+			}
 		case "PUT /api/v0/instances/99/":
 			var body vastManageInstanceInput
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -206,7 +234,8 @@ func TestInstanceMethodsAndDecoding(t *testing.T) {
 	if err := client.DestroyInstance(context.Background(), 99); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(seen, ",") != "GET /api/v0/instances/99/,GET /api/v0/instances/,PUT /api/v0/instances/99/,DELETE /api/v0/instances/99/" {
+	wantSeen := "GET /api/v0/instances/99/,GET /api/v1/instances/?limit=25,GET /api/v1/instances/?after_token=page-2&limit=25,PUT /api/v0/instances/99/,DELETE /api/v0/instances/99/"
+	if strings.Join(seen, ",") != wantSeen {
 		t.Fatalf("seen=%v", seen)
 	}
 }
