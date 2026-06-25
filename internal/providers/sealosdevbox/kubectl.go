@@ -62,10 +62,13 @@ func (b *backend) kubeArgs(namespace bool) []string {
 }
 
 func (b *backend) canI(ctx context.Context, verb, resource string) core.DoctorCheck {
-	_, err := b.kubectl(ctx, nil, true, "auth", "can-i", verb, resource)
+	out, err := b.kubectl(ctx, nil, true, "auth", "can-i", verb, resource)
 	check := "rbac." + verb + "." + strings.TrimSuffix(resource, ".devbox.sealos.io")
 	if err != nil {
 		return doctorCheck("failed", check, err.Error(), nil)
+	}
+	if !strings.EqualFold(strings.TrimSpace(out), "yes") {
+		return doctorCheck("failed", check, "denied", map[string]string{"allowed": "false"})
 	}
 	return doctorCheck("ok", check, "allowed", map[string]string{"mutation": "false", "dry_permission_check": "true"})
 }

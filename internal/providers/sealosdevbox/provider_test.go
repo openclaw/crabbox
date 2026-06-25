@@ -217,6 +217,26 @@ func TestDoctorRedactsSensitiveCommandOutput(t *testing.T) {
 	}
 }
 
+func TestDoctorRequiresExplicitRBACYes(t *testing.T) {
+	runner := &recordingRunner{
+		results: map[int]core.LocalCommandResult{
+			5: {Stdout: "no\n"},
+		},
+	}
+	doctor, err := (Provider{}).ConfigureDoctor(lifecycleConfig(), core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := findDoctorCheck(t, result.Checks, "rbac.get.devboxes")
+	if result.Status != "blocked" || check.Status != "failed" || check.Message != "denied" || check.Details["allowed"] != "false" {
+		t.Fatalf("result=%#v check=%#v", result, check)
+	}
+}
+
 type recordingRunner struct {
 	requests []core.LocalCommandRequest
 	results  map[int]core.LocalCommandResult
@@ -228,6 +248,9 @@ func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 	index := len(r.requests)
 	if result, ok := r.results[index]; ok {
 		return result, r.errors[index]
+	}
+	if isCanIRequest(req) {
+		return core.LocalCommandResult{Stdout: "yes"}, r.errors[index]
 	}
 	return core.LocalCommandResult{Stdout: "ok"}, r.errors[index]
 }
