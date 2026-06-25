@@ -39,11 +39,16 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return doctorResult(checks), nil
 	}
 	add(doctorCheck("ok", "namespace", "found", map[string]string{"namespace": b.cfg.SealosDevbox.Namespace}))
-	if _, err := b.kubectl(ctx, nil, false, "get", "customresourcedefinition", devboxCRD, "-o", "jsonpath={.spec.versions[*].name}"); err != nil {
+	versions, err := b.kubectl(ctx, nil, false, "get", "customresourcedefinition", devboxCRD, "-o", "jsonpath={.spec.versions[*].name}")
+	if err != nil {
 		add(doctorCheck("failed", "crd.devboxes", err.Error(), map[string]string{"groupVersion": devboxGroupVersion}))
 		return doctorResult(checks), nil
 	}
-	add(doctorCheck("ok", "crd.devboxes", "found", map[string]string{"groupVersion": devboxGroupVersion}))
+	if !crdServesVersion(versions, "v1alpha2") {
+		add(doctorCheck("failed", "crd.devboxes", "DevBox CRD does not serve v1alpha2", map[string]string{"groupVersion": devboxGroupVersion, "versions": strings.TrimSpace(versions)}))
+		return doctorResult(checks), nil
+	}
+	add(doctorCheck("ok", "crd.devboxes", "found", map[string]string{"groupVersion": devboxGroupVersion, "versions": strings.TrimSpace(versions)}))
 	for _, resource := range []string{devboxResource, "secrets", "pods", "events"} {
 		for _, verb := range []string{"get", "list"} {
 			add(b.canI(ctx, verb, resource))
@@ -102,6 +107,15 @@ func doctorResult(checks []core.DoctorCheck) core.DoctorResult {
 		Message:  formatDoctorSummary(checks),
 		Checks:   checks,
 	}
+}
+
+func crdServesVersion(versions, version string) bool {
+	for _, candidate := range strings.Fields(versions) {
+		if candidate == version {
+			return true
+		}
+	}
+	return false
 }
 
 func boolString(value bool) string {
