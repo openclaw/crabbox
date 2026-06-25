@@ -351,7 +351,7 @@ func runStart(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			select {
 			case waitErr := <-waitCh:
 				return helperExitFailure(waitErr)
-			default:
+			case <-time.After(500 * time.Millisecond):
 			}
 			failure := errors.Join(
 				fmt.Errorf("timed out waiting for helper daemon to report readiness"),
