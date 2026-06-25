@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	falPollInterval = 3 * time.Second
-	falPollTimeout  = 10 * time.Minute
+	falPollInterval             = 3 * time.Second
+	falPollTimeout              = 10 * time.Minute
+	falCreateReconcileAttempts  = 3
+	falCreateReconcileRetryWait = time.Second
 )
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
@@ -35,20 +37,22 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s instance=%s sector=%s keep=%v\n",
 		providerName, leaseID, slug, cfg.Fal.InstanceType, cfg.Fal.Sector, req.Keep)
 
-	created, err := client.CreateInstance(ctx, CreateInstanceRequest{
+	createRequest := CreateInstanceRequest{
 		InstanceType: InstanceType(cfg.Fal.InstanceType),
 		SSHKey:       publicKey,
 		Sector:       Sector(cfg.Fal.Sector),
-	}, leaseID)
+	}
+	created, err := client.CreateInstance(ctx, createRequest, leaseID)
 	if err != nil {
-		if isAmbiguousFalMutationError(err) {
-			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, "", "ambiguous-create", req.Keep); claimErr != nil {
-				return core.LeaseTarget{}, errors.Join(fmt.Errorf("fal instance creation remains indeterminate"), fmt.Errorf("persist fal recovery claim: %w", claimErr), err)
-			}
-			return core.LeaseTarget{}, fmt.Errorf("fal instance creation remains indeterminate; preserving local recovery state: %w", err)
+		if !isAmbiguousFalMutationError(err) {
+			core.RemoveStoredTestboxKey(leaseID)
+			return core.LeaseTarget{}, err
 		}
-		core.RemoveStoredTestboxKey(leaseID)
-		return core.LeaseTarget{}, err
+		reconciled, reconcileErr := b.reconcileAmbiguousCreate(ctx, client, createRequest, leaseID, err)
+		if reconcileErr != nil {
+			return core.LeaseTarget{}, reconcileErr
+		}
+		created = reconciled
 	}
 	instanceID := strings.TrimSpace(created.ID)
 	if instanceID == "" {
@@ -92,6 +96,38 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s fal=%s state=ready\n", leaseID, instanceID)
 	target := core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}
 	return target, nil
+}
+
+func (b *backend) reconcileAmbiguousCreate(ctx context.Context, client computeAPI, req CreateInstanceRequest, leaseID string, cause error) (ComputeInstance, error) {
+	var lastErr error
+	for attempt := 1; attempt <= falCreateReconcileAttempts; attempt++ {
+		instance, err := client.CreateInstance(ctx, req, leaseID)
+		if err == nil {
+			if strings.TrimSpace(instance.ID) == "" {
+				return ComputeInstance{}, errors.Join(cause, exit(5, "fal idempotent create retry returned an empty id"))
+			}
+			return instance, nil
+		}
+		lastErr = err
+		if !isAmbiguousFalMutationError(err) {
+			return ComputeInstance{}, errors.Join(cause, fmt.Errorf("fal idempotent create retry failed: %w", err))
+		}
+		if attempt == falCreateReconcileAttempts {
+			break
+		}
+		timer := time.NewTimer(falCreateReconcileRetryWait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ComputeInstance{}, errors.Join(cause, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return ComputeInstance{}, errors.Join(
+		fmt.Errorf("fal instance creation remains indeterminate after idempotent retry; no provider id was returned"),
+		cause,
+		lastErr,
+	)
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {

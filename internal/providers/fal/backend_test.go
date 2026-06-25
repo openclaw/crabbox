@@ -17,6 +17,7 @@ type fakeFalAPI struct {
 	instances      map[string]ComputeInstance
 	getErr         error
 	createErr      error
+	createErrs     []error
 	deleteErr      error
 	createRequests []CreateInstanceRequest
 	idempotency    []string
@@ -47,6 +48,13 @@ func (f *fakeFalAPI) GetInstance(_ context.Context, id string) (ComputeInstance,
 func (f *fakeFalAPI) CreateInstance(_ context.Context, req CreateInstanceRequest, idempotencyKey string) (ComputeInstance, error) {
 	f.createRequests = append(f.createRequests, req)
 	f.idempotency = append(f.idempotency, idempotencyKey)
+	if len(f.createErrs) > 0 {
+		err := f.createErrs[0]
+		f.createErrs = f.createErrs[1:]
+		if err != nil {
+			return ComputeInstance{}, err
+		}
+	}
 	if f.createErr != nil {
 		return ComputeInstance{}, f.createErr
 	}
@@ -157,6 +165,48 @@ func TestFalAcquireReturnsSSHPortUpdatedByReadinessProbe(t *testing.T) {
 	}
 	if claim.SSHPort != 22 {
 		t.Fatalf("persisted ssh port=%d, want readiness-updated 22", claim.SSHPort)
+	}
+}
+
+func TestFalAcquireReconcilesAmbiguousCreateWithIdempotentRetry(t *testing.T) {
+	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF}}
+	b := newFalTestBackend(t, api)
+
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "retry-create"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.CloudID != "inst_created" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if len(api.createRequests) != 2 {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+	if api.idempotency[0] == "" || api.idempotency[0] != api.idempotency[1] || api.idempotency[0] != lease.LeaseID {
+		t.Fatalf("idempotency=%#v lease=%s", api.idempotency, lease.LeaseID)
+	}
+	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("retry-create", providerName)
+	if claimErr != nil || !ok {
+		t.Fatalf("claim ok=%v err=%v", ok, claimErr)
+	}
+	if claim.CloudID != "inst_created" {
+		t.Fatalf("claim=%#v", claim)
+	}
+}
+
+func TestFalAcquireAmbiguousCreateRetryFailureDoesNotPersistUnrecoverableClaim(t *testing.T) {
+	api := &fakeFalAPI{createErrs: []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}}
+	b := newFalTestBackend(t, api)
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "unreconciled-create"})
+	if err == nil || !strings.Contains(err.Error(), "indeterminate after idempotent retry") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.createRequests) != 4 {
+		t.Fatalf("createRequests=%#v", api.createRequests)
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaimForProvider("unreconciled-create", providerName); claimErr != nil || ok {
+		t.Fatalf("unrecoverable empty-ID claim persisted ok=%v err=%v", ok, claimErr)
 	}
 }
 
