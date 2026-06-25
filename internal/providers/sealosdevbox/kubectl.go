@@ -3,6 +3,7 @@ package sealosdevbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -89,6 +90,9 @@ func (b *backend) listDevboxes(ctx context.Context) ([]devboxItem, error) {
 func (b *backend) getDevbox(ctx context.Context, name string) (devboxItem, error) {
 	out, err := b.kubectl(ctx, nil, true, "get", devboxResource+"/"+name, "-o", "json")
 	if err != nil {
+		if kubectlAPIObjectNotFound(err) {
+			return devboxItem{}, kubernetesObjectNotFoundError{err: err}
+		}
 		return devboxItem{}, err
 	}
 	var item devboxItem
@@ -154,12 +158,37 @@ func (b *backend) listEvents(ctx context.Context, name string) ([]devboxEvent, e
 	return list.Items, nil
 }
 
+type kubernetesObjectNotFoundError struct {
+	err error
+}
+
+func (e kubernetesObjectNotFoundError) Error() string {
+	return e.err.Error()
+}
+
+func (e kubernetesObjectNotFoundError) Unwrap() error {
+	return e.err
+}
+
+func kubernetesObjectNotFound(err error) bool {
+	var notFound kubernetesObjectNotFoundError
+	return errors.As(err, &notFound)
+}
+
 func kubectlNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "notfound") || strings.Contains(text, "not found") || strings.Contains(text, "notfound")
+}
+
+func kubectlAPIObjectNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "error from server (notfound):") && strings.Contains(text, " not found")
 }
 
 func commandString(req core.LocalCommandRequest) string {

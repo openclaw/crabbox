@@ -27,6 +27,9 @@ type lifecycleRunner struct {
 	requests []core.LocalCommandRequest
 	inputs   []string
 	outputs  []string
+	stderrs  []string
+	exitCode []int
+	errors   []error
 }
 
 func (r *lifecycleRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -38,10 +41,23 @@ func (r *lifecycleRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 		r.inputs = append(r.inputs, "")
 	}
 	index := len(r.requests) - 1
+	result := core.LocalCommandResult{}
 	if index < len(r.outputs) {
-		return core.LocalCommandResult{Stdout: r.outputs[index]}, nil
+		result.Stdout = r.outputs[index]
 	}
-	return core.LocalCommandResult{Stdout: "ok"}, nil
+	if index < len(r.stderrs) {
+		result.Stderr = r.stderrs[index]
+	}
+	if index < len(r.exitCode) {
+		result.ExitCode = r.exitCode[index]
+	}
+	if index < len(r.errors) && r.errors[index] != nil {
+		return result, r.errors[index]
+	}
+	if result.Stdout == "" {
+		result.Stdout = "ok"
+	}
+	return result, nil
 }
 
 func lifecycleConfig() core.Config {
