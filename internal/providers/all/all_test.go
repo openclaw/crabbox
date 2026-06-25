@@ -483,9 +483,6 @@ func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	for _, name := range allBuiltInProviderNames() {
 		t.Run(name, func(t *testing.T) {
-			if name == "flue" {
-				t.Skip("flue doctor is owned by PLAN-03; PLAN-01 only registers the provider contract")
-			}
 			provider, err := core.ProviderFor(name)
 			if err != nil {
 				t.Fatal(err)

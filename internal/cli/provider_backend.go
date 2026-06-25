@@ -78,6 +78,10 @@ type DoctorProvider interface {
 	ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error)
 }
 
+type DoctorConfigValidator interface {
+	ValidateDoctorConfig(cfg Config) error
+}
+
 type DoctorBackend interface {
 	Backend
 	Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error)

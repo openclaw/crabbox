@@ -91,6 +91,22 @@ func TestApplyFlagsRejectsUnsupportedGenericSizing(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsAllowsUnsupportedTargetForDoctorDiagnostics(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := Provider{}.RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--flue-target", "cloudflare"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatalf("ApplyFlags err=%v", err)
+	}
+	if cfg.Flue.Target != "cloudflare" {
+		t.Fatalf("target=%q want cloudflare", cfg.Flue.Target)
+	}
+}
+
 func TestValidateFlueConfigRejectsUnsupportedValues(t *testing.T) {
 	tests := []struct {
 		name string
@@ -146,6 +162,18 @@ func TestValidateFlueConfigRejectsUnsupportedValues(t *testing.T) {
 	}
 }
 
+func TestValidateFlueRunTargetRejectsUnsupportedValues(t *testing.T) {
+	for _, target := range []string{"cloudflare", "server"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		cfg.Flue.Target = target
+		err := ValidateFlueRunTarget(cfg)
+		if err == nil || !strings.Contains(err.Error(), "target=node only") {
+			t.Fatalf("ValidateFlueRunTarget(%q) err=%v", target, err)
+		}
+	}
+}
+
 func TestConfigureReturnsDelegatedBackend(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -161,5 +189,15 @@ func TestConfigureReturnsDelegatedBackend(t *testing.T) {
 	_, err = delegated.Run(context.Background(), core.RunRequest{})
 	if err == nil || !strings.Contains(err.Error(), "missing command") {
 		t.Fatalf("Run err=%v", err)
+	}
+}
+
+func TestConfigureRejectsUnsupportedTarget(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Flue.Target = "cloudflare"
+	_, err := Provider{}.Configure(cfg, core.Runtime{})
+	if err == nil || !strings.Contains(err.Error(), "target=node only") {
+		t.Fatalf("Configure err=%v", err)
 	}
 }

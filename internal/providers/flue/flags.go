@@ -72,28 +72,39 @@ func ApplyFlueProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "flue-timeout-secs") {
 		cfg.Flue.TimeoutSecs = *v.TimeoutSecs
 	}
-	return ValidateFlueConfig(*cfg)
+	return ValidateFlueDoctorConfig(*cfg)
 }
 
 func ValidateFlueConfig(cfg Config) error {
+	if err := ValidateFlueDoctorConfig(cfg); err != nil {
+		return err
+	}
+	return ValidateFlueRunTarget(cfg)
+}
+
+func ValidateFlueDoctorConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Flue.CLIPath) == "" {
 		return exit(2, "flue cliPath must not be empty")
 	}
 	if strings.TrimSpace(cfg.Flue.Workflow) == "" {
 		return exit(2, "flue workflow must not be empty")
 	}
+	if cfg.Flue.TimeoutSecs < 0 {
+		return exit(2, "flue timeoutSecs must be non-negative")
+	}
+	if _, err := cleanWorkdir(cfg.Flue.Workdir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ValidateFlueRunTarget(cfg Config) error {
 	target := strings.ToLower(strings.TrimSpace(cfg.Flue.Target))
 	if target == "" {
 		target = defaultTarget
 	}
 	if target != defaultTarget {
 		return exit(2, "provider=%s supports flue target=node only in v1; upload/HTTP staging is required before %q can be used", providerName, target)
-	}
-	if cfg.Flue.TimeoutSecs < 0 {
-		return exit(2, "flue timeoutSecs must be non-negative")
-	}
-	if _, err := cleanWorkdir(cfg.Flue.Workdir); err != nil {
-		return err
 	}
 	return nil
 }

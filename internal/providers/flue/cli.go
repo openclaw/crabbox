@@ -29,6 +29,9 @@ func newFlueCLI(cfg Config, rt Runtime) (*flueCLI, error) {
 	if err := ValidateFlueConfig(cfg); err != nil {
 		return nil, err
 	}
+	if err := ValidateFlueRunTarget(cfg); err != nil {
+		return nil, err
+	}
 	return &flueCLI{cfg: cfg.Flue, rt: rt}, nil
 }
 
