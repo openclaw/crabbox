@@ -17,6 +17,7 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	var digitalOcean *providerMatrixEntry
 	var vultr *providerMatrixEntry
 	var firecracker *providerMatrixEntry
+	var fal *providerMatrixEntry
 	var nvidiaBrev *providerMatrixEntry
 	var linode *providerMatrixEntry
 	var nebius *providerMatrixEntry
@@ -42,6 +43,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 		}
 		if entries[i].Provider == "firecracker" {
 			firecracker = &entries[i]
+		}
+		if entries[i].Provider == "fal" {
+			fal = &entries[i]
 		}
 		if entries[i].Provider == "nvidia-brev" {
 			nvidiaBrev = &entries[i]
@@ -88,6 +92,9 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if firecracker == nil {
 		t.Fatal("firecracker provider not found")
+	}
+	if fal == nil {
+		t.Fatal("fal provider not found")
 	}
 	if nvidiaBrev == nil {
 		t.Fatal("nvidia-brev provider not found")
@@ -185,6 +192,18 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	}
 	if len(firecracker.Aliases) != 0 {
 		t.Fatalf("firecracker aliases=%v, want none", firecracker.Aliases)
+	}
+	if fal.Kind != ProviderKindServiceControl || fal.Family != "fal" || fal.Coordinator != string(CoordinatorNever) {
+		t.Fatalf("fal kind/family/coordinator=%q/%q/%q", fal.Kind, fal.Family, fal.Coordinator)
+	}
+	if !containsString(fal.Targets, targetLinux) {
+		t.Fatalf("fal targets=%v", fal.Targets)
+	}
+	if len(fal.Features) != 0 {
+		t.Fatalf("fal features=%v, want none until lifecycle backend is implemented", fal.Features)
+	}
+	if !containsString(fal.Aliases, "fal-ai") {
+		t.Fatalf("fal aliases=%v", fal.Aliases)
 	}
 	if linode.Kind != ProviderKindSSHLease || linode.Family != "linode" || linode.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("linode kind/family/coordinator=%q/%q/%q", linode.Kind, linode.Family, linode.Coordinator)
@@ -347,6 +366,9 @@ func TestProvidersCommandJSON(t *testing.T) {
 		}
 		if entry.Provider == "blacksmith-testbox" && !containsString(entry.Lifecycle, "run-session") {
 			t.Fatalf("blacksmith json missing run-session lifecycle: %#v", entry)
+		}
+		if entry.Provider == "fal" && (entry.Kind != ProviderKindServiceControl || len(entry.Features) != 0 || !containsString(entry.Aliases, "fal-ai") || entry.Family != "fal") {
+			t.Fatalf("fal json entry incomplete: %#v", entry)
 		}
 	}
 }
