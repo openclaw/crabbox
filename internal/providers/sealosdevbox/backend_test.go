@@ -329,6 +329,28 @@ func TestListAndStatusAreReadOnly(t *testing.T) {
 	}
 }
 
+func TestStatusWaitRequiresSSHReadiness(t *testing.T) {
+	cfg := lifecycleConfig()
+	item := `{"items":[{"metadata":{"name":"devbox-one","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"cbx_111111111111","crabbox.dev/slug":"blue"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"devbox-one","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}`
+	runner := &lifecycleRunner{outputs: []string{item}}
+	backend := lifecycleBackend(cfg, runner)
+	probed := false
+	backend.sshReady = func(_ context.Context, target *core.SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
+		probed = true
+		if target.Host != "ssh.sealos.example.test" || target.User != cfg.SealosDevbox.SSHUser || phase != "Sealos DevBox status" {
+			t.Fatalf("unexpected SSH probe target=%#v phase=%q", target, phase)
+		}
+		return errors.New("ssh not ready")
+	}
+	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "blue", Wait: true, WaitTimeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "ssh not ready") {
+		t.Fatalf("Status error=%v", err)
+	}
+	if !probed {
+		t.Fatal("status --wait did not probe SSH readiness")
+	}
+}
+
 func flattenArgs(requests []core.LocalCommandRequest) []string {
 	out := []string{}
 	for _, req := range requests {
