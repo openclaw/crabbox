@@ -4607,6 +4607,16 @@ tensorlake:
   diskMB: 30000
   timeoutSecs: 1800
   noInternet: true
+flue:
+  cliPath: /usr/local/bin/flue
+  root: ~/src/flue-project
+  workflow: workflow:crabbox
+  target: node
+  config: ~/.config/flue/flue.config.ts
+  envFile: ~/.config/flue/.env
+  output: json
+  workdir: /workspace/flue-test
+  timeoutSecs: 1200
 openComputer:
   apiUrl: https://opencomputer.example.test
   workdir: /workspace/oc-test
@@ -4824,6 +4834,9 @@ ssh:
 	}
 	if cfg.Tensorlake.APIURL != "https://api.tensorlake.example.test" || cfg.Tensorlake.CLIPath != "/usr/local/bin/tl" || cfg.Tensorlake.Image != "ubuntu-22.04" || cfg.Tensorlake.Snapshot != "snap-tl" || cfg.Tensorlake.OrganizationID != "org-tl" || cfg.Tensorlake.ProjectID != "proj-tl" || cfg.Tensorlake.Namespace != "ns-tl" || cfg.Tensorlake.Workdir != "/workspace/crabbox-test" || cfg.Tensorlake.CPUs != 4 || cfg.Tensorlake.MemoryMB != 8192 || cfg.Tensorlake.DiskMB != 30000 || cfg.Tensorlake.TimeoutSecs != 1800 || !cfg.Tensorlake.NoInternet {
 		t.Fatalf("tensorlake config not loaded: %#v", cfg.Tensorlake)
+	}
+	if cfg.Flue.CLIPath != "/usr/local/bin/flue" || cfg.Flue.Root != filepath.Join(home, "src", "flue-project") || cfg.Flue.Workflow != "workflow:crabbox" || cfg.Flue.Target != "node" || cfg.Flue.Config != filepath.Join(home, ".config", "flue", "flue.config.ts") || cfg.Flue.EnvFile != filepath.Join(home, ".config", "flue", ".env") || cfg.Flue.Output != "json" || cfg.Flue.Workdir != "/workspace/flue-test" || cfg.Flue.TimeoutSecs != 1200 {
+		t.Fatalf("flue config not loaded: %#v", cfg.Flue)
 	}
 	if cfg.OpenComputer.APIURL != "" || cfg.OpenComputer.Workdir != "/workspace/oc-test" || cfg.OpenComputer.CPU != 8 || cfg.OpenComputer.MemoryMB != 16384 || cfg.OpenComputer.TimeoutSecs != 600 || cfg.OpenComputer.ExecTimeoutSecs != 7200 {
 		t.Fatalf("opencomputer config not loaded: %#v", cfg.OpenComputer)

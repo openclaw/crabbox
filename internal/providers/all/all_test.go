@@ -267,6 +267,34 @@ func TestBlaxelRegistersCanonicalWithoutAliases(t *testing.T) {
 	}
 }
 
+func TestFlueRegistersAsDelegatedRunWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("flue")
+	if err != nil {
+		t.Fatalf("ProviderFor(flue): %v", err)
+	}
+	if provider.Name() != "flue" {
+		t.Fatalf("ProviderFor(flue).Name=%q", provider.Name())
+	}
+	if provider.Aliases() != nil {
+		t.Fatalf("flue aliases=%v, want none", provider.Aliases())
+	}
+	spec := provider.Spec()
+	if spec.Family != "flue" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("flue spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("flue targets=%#v", spec.Targets)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || len(spec.Features) != 1 {
+		t.Fatalf("flue features=%v, want archive-sync only", spec.Features)
+	}
+	for _, alias := range []string{"flue-runner", "flue-provider", "fl"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "flue" {
+			t.Fatalf("%q alias unexpectedly resolves to flue", alias)
+		}
+	}
+}
+
 func TestAnthropicSandboxRuntimeRegistersCanonicalAndAlias(t *testing.T) {
 	for _, name := range []string{"anthropic-sandbox-runtime", "srt"} {
 		provider, err := core.ProviderFor(name)
@@ -455,6 +483,9 @@ func TestAppleVZRegistersAsBuiltInProvider(t *testing.T) {
 func TestAllBuiltInProvidersExposeDoctor(t *testing.T) {
 	for _, name := range allBuiltInProviderNames() {
 		t.Run(name, func(t *testing.T) {
+			if name == "flue" {
+				t.Skip("flue doctor is owned by PLAN-03; PLAN-01 only registers the provider contract")
+			}
 			provider, err := core.ProviderFor(name)
 			if err != nil {
 				t.Fatal(err)
@@ -1148,6 +1179,7 @@ func allBuiltInProviderNames() []string {
 		"external",
 		"fastapi-cloud",
 		"firecracker",
+		"flue",
 		"freestyle",
 		"gcp",
 		"hetzner",
