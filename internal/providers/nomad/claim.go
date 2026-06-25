@@ -34,6 +34,7 @@ func newLeaseID() (string, error) {
 
 func claimScope(cfg Config) string {
 	return strings.Join([]string{
+		"address:" + strings.TrimSpace(cfg.Nomad.Address),
 		"namespace:" + normalizeNamespace(cfg.Nomad.Namespace),
 		"region:" + normalizeRegion(cfg.Nomad.Region),
 		"task:" + strings.TrimSpace(cfg.Nomad.Task),

@@ -254,6 +254,24 @@ func TestNormalizeRegionUsesNomadGlobalDefault(t *testing.T) {
 	}
 }
 
+func TestClaimScopeIncludesNomadAddress(t *testing.T) {
+	cfg := testNomadConfig()
+	other := cfg
+	other.Nomad.Address = "https://other-nomad.example.test:4646"
+	if claimScope(cfg) == claimScope(other) {
+		t.Fatalf("claim scopes should differ across nomad addresses: %q", claimScope(cfg))
+	}
+	ready := allocationReadiness{JobID: "job-a", AllocationID: "alloc-a", Task: cfg.Nomad.Task}
+	labels := claimLabels(cfg, "cbx_123456789abc", "blue-crab", ready, time.Time{})
+	otherLabels := claimLabels(other, "cbx_123456789abc", "blue-crab", ready, time.Time{})
+	if labels["ownership_scope_sha256"] == otherLabels["ownership_scope_sha256"] {
+		t.Fatalf("ownership fingerprints should differ across nomad addresses")
+	}
+	if strings.Contains(labels["ownership_scope_sha256"], "nomad.example.test") {
+		t.Fatalf("ownership fingerprint leaked address: %#v", labels)
+	}
+}
+
 func TestJobspecTemplateRequiresOwnershipMetadata(t *testing.T) {
 	cfg := testNomadConfig()
 	template := filepath.Join(t.TempDir(), "job.json")
