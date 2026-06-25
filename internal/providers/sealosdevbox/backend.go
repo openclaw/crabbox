@@ -210,9 +210,16 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	server := b.serverFromDevbox(item)
-	target, err := b.sshTarget(item, b.statusSSHKey(leaseID), false)
-	if err != nil {
-		return core.LeaseTarget{}, err
+	target := core.SSHTarget{}
+	if !req.ReleaseOnly {
+		resolved, err := b.sshTarget(item, b.statusSSHKey(leaseID), false)
+		if err != nil {
+			if !req.StatusOnly {
+				return core.LeaseTarget{}, err
+			}
+		} else {
+			target = resolved
+		}
 	}
 	if !req.StatusOnly && !req.ReleaseOnly {
 		secret, err := b.getSecret(ctx, devboxSecretName(item))
