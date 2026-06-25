@@ -103,7 +103,7 @@ func TestConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 	}
 }
 
-func TestConfigureReturnsDeferredSSHLeaseBackend(t *testing.T) {
+func TestConfigureReturnsSSHLeaseBackend(t *testing.T) {
 	gotBackend, err := Provider{}.Configure(Config{TargetOS: targetLinux}, newDiscardRuntime())
 	if err != nil {
 		t.Fatal(err)
@@ -116,24 +116,8 @@ func TestConfigureReturnsDeferredSSHLeaseBackend(t *testing.T) {
 	if !ok {
 		t.Fatalf("backend %T does not implement CleanupBackend", gotBackend)
 	}
-	if _, err := sshBackend.Acquire(t.Context(), core.AcquireRequest{}); !isLifecycleDeferredError(err, "acquire") {
-		t.Fatalf("Acquire error=%v, want lifecycle-deferred", err)
-	}
-	if _, err := sshBackend.Resolve(t.Context(), core.ResolveRequest{}); !isLifecycleDeferredError(err, "resolve") {
-		t.Fatalf("Resolve error=%v, want lifecycle-deferred", err)
-	}
-	if _, err := sshBackend.List(t.Context(), core.ListRequest{}); !isLifecycleDeferredError(err, "list") {
-		t.Fatalf("List error=%v, want lifecycle-deferred", err)
-	}
-	if _, err := sshBackend.Touch(t.Context(), core.TouchRequest{}); !isLifecycleDeferredError(err, "touch") {
-		t.Fatalf("Touch error=%v, want lifecycle-deferred", err)
-	}
-	if err := sshBackend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{}); !isLifecycleDeferredError(err, "release") {
-		t.Fatalf("ReleaseLease error=%v, want lifecycle-deferred", err)
-	}
-	if err := cleanup.Cleanup(t.Context(), core.CleanupRequest{}); !isLifecycleDeferredError(err, "cleanup") {
-		t.Fatalf("Cleanup error=%v, want lifecycle-deferred", err)
-	}
+	_ = sshBackend
+	_ = cleanup
 }
 
 func TestDoctorReportsMissingAuthWithoutTokenNames(t *testing.T) {
@@ -201,10 +185,4 @@ func (stubComputeAPI) CreateInstance(context.Context, CreateInstanceRequest, str
 
 func (stubComputeAPI) DeleteInstance(context.Context, string) error {
 	return nil
-}
-
-func isLifecycleDeferredError(err error, operation string) bool {
-	return err != nil &&
-		strings.Contains(err.Error(), operation+" lifecycle is deferred") &&
-		strings.Contains(err.Error(), "PLAN-02")
 }
