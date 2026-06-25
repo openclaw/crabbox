@@ -321,6 +321,20 @@
     "caveat": "Safety and semantics depend on the configured executable",
     "docs": "external.md"
   },
+  "fal": {
+    "status": "built-in",
+    "category": "gpu-cloud",
+    "substrate": "fal Compute instance",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "yes",
+    "lifecycle": "Crabbox",
+    "cleanup": "local-claim-owned instance delete",
+    "bestFit": "Direct GPU-backed Linux workload over SSH",
+    "caveat": "Direct-only; live creates are billable and account-gated",
+    "docs": "fal.md"
+  },
   "fastapi-cloud": {
     "status": "specialized",
     "category": "service-control",

@@ -196,6 +196,7 @@ from the CLI.
 | [Daytona](docs/providers/daytona.md) — `daytona` | Linux · direct | Daytona-managed dev sandbox over SSH. |
 | [Morph](docs/providers/morph.md) — `morph` | Linux · direct | Morph Cloud snapshot-backed instances over the shared SSH gateway. |
 | [RunPod](docs/providers/runpod.md) — `runpod` (`run-pod`, `runpodio`) | Linux · direct | RunPod GPU pods with public SSH. |
+| [fal](docs/providers/fal.md) — `fal` (`fal-ai`) | Linux · direct | fal Compute GPU instances with public SSH and local-claim cleanup. |
 | [ASCII Box](docs/providers/ascii-box.md) — `ascii-box` (`ascii`, `asciibox`) | Linux · direct | ASCII Box Ubuntu sandboxes exposed as SSH leases. |
 
 XCP-ng itself can host Linux, Windows, and BSD guests, but Crabbox's current
