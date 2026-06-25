@@ -138,8 +138,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	applied := true
 	keyPersisted := false
 	claimPersisted := false
+	forceRollback := false
 	defer func() {
-		if err == nil || req.Keep || !applied {
+		if err == nil || (req.Keep && !forceRollback) || !applied {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -172,6 +173,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 	}
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}); err != nil {
+			forceRollback = true
 			return core.LeaseTarget{}, err
 		}
 	}

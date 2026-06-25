@@ -55,7 +55,11 @@ func (r *lifecycleRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 		return result, r.errors[index]
 	}
 	if result.Stdout == "" {
-		result.Stdout = "ok"
+		if isCanIRequest(req) {
+			result.Stdout = "yes"
+		} else {
+			result.Stdout = "ok"
+		}
 	}
 	return result, nil
 }
@@ -296,6 +300,38 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 	}
 }
 
+func TestAcquireOnAcquiredErrorRollsBackKeptDevbox(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_ackkeepfail"
+	slug := "rejectkeep"
+	name := core.LeaseProviderName(leaseID, slug)
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	runner := &lifecycleRunner{outputs: []string{
+		`{"items":[]}`,
+		`devbox applied`,
+		devboxJSON,
+		"deleted",
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    slug,
+		Repo:             core.Repo{Root: t.TempDir()},
+		Keep:             true,
+		OnAcquired: func(core.LeaseTarget) error {
+			return errors.New("controller rejected kept identity")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "controller rejected kept identity") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	got := strings.Join(flattenArgs(runner.requests), " ")
+	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
+		t.Fatalf("kept rejected acquire did not delete devbox; commands=%s", got)
+	}
+}
+
 func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
@@ -423,6 +459,15 @@ func flattenArgs(requests []core.LocalCommandRequest) []string {
 		out = append(out, req.Args...)
 	}
 	return out
+}
+
+func isCanIRequest(req core.LocalCommandRequest) bool {
+	for i := 0; i+1 < len(req.Args); i++ {
+		if req.Args[i] == "auth" && req.Args[i+1] == "can-i" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPersistDevboxKeyUsesCrabboxKeyPath(t *testing.T) {
