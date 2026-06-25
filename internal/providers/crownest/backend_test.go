@@ -205,6 +205,48 @@ func TestRunCleansUpCreatedSandboxAfterArchiveSetupFailure(t *testing.T) {
 	}
 }
 
+func TestRunKeepOnFailureRetainsCreatedSandboxAfterArchiveSetupFailure(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	api := &fakeCrownestClient{
+		baseURL:         "https://api.crownest.dev",
+		createSandboxID: "sbx_kept_setup",
+		transferErr:     errors.New("transfer failed"),
+	}
+	var stderr bytes.Buffer
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  testConfig(),
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	result, err := b.Run(context.Background(), RunRequest{
+		Repo:          Repo{Root: repoRoot, Name: "demo"},
+		Command:       []string{"pnpm", "test"},
+		KeepOnFailure: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "transfer failed") {
+		t.Fatalf("err=%v, want transfer failure", err)
+	}
+	if api.deletedSandboxID != "" {
+		t.Fatalf("deletedSandboxID=%q, want retained sandbox", api.deletedSandboxID)
+	}
+	leaseID := leasePrefix + "sbx_kept_setup"
+	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+		t.Fatalf("claim=%#v err=%v, want retained claim", claim, err)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.LeaseID != leaseID {
+		t.Fatalf("session=%#v, want retained setup-failure session", result.Session)
+	}
+	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease="+leaseID) {
+		t.Fatalf("stderr=%q, want keep-on-failure hint", stderr.String())
+	}
+}
+
 func TestRunKeepOnFailureRetainsCreatedSandbox(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

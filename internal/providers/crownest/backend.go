@@ -185,52 +185,40 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if workspaceRun.SandboxID != "" {
 		sandboxID = workspaceRun.SandboxID
 	}
+	if acquired && sandboxID != "" {
+		if err := b.claimAcquiredSandbox(api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
+			return RunResult{}, err
+		}
+	}
 	transfer, err := api.CreateArchiveTransfer(ctx, workspaceRun.ID, createArchiveTransferRequest{SHA256: archiveSHA, SizeBytes: archiveBytes}, idempotencyKey("transfer", workspaceRun.ID))
 	if err != nil {
-		return RunResult{}, err
+		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if transfer.MaxSizeBytes > 0 && archiveBytes > transfer.MaxSizeBytes {
-		return RunResult{}, exit(6, "crownest archive too large: %d > %d bytes", archiveBytes, transfer.MaxSizeBytes)
+		return b.setupFailure(req, api, exit(6, "crownest archive too large: %d > %d bytes", archiveBytes, transfer.MaxSizeBytes), started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
-		return RunResult{}, exit(6, "rewind sync archive: %v", err)
+		return b.setupFailure(req, api, exit(6, "rewind sync archive: %v", err), started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if err := api.UploadArchive(ctx, transfer, archive); err != nil {
-		return RunResult{}, err
+		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if _, err := api.FinalizeArchive(ctx, workspaceRun.ID, finalizeArchiveRequest{SHA256: archiveSHA, SizeBytes: archiveBytes, UploadID: transfer.ID}, idempotencyKey("finalize", workspaceRun.ID)); err != nil {
-		return RunResult{}, err
+		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	workspaceRun, err = api.StartWorkspaceRun(ctx, workspaceRun.ID, idempotencyKey("start", workspaceRun.ID))
 	if err != nil {
-		return RunResult{}, err
+		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if workspaceRun.SandboxID != "" {
 		sandboxID = workspaceRun.SandboxID
 	}
 	if acquired {
-		if sandboxID == "" {
-			return RunResult{}, exit(5, "crownest started workspace run without a sandbox id")
-		}
-		leaseID = leasePrefix + sandboxID
-		var slugErr error
-		slug, slugErr = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
-		if slugErr != nil {
-			return RunResult{}, slugErr
-		}
-		if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		if err := b.claimAcquiredSandbox(api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
 			return RunResult{}, err
 		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
 	}
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           req.Keep || !acquired,
-		CleanupCommand: "crabbox stop " + shellQuote(blank(slug, leaseID)),
-	}
+	session := crownestRunSession(leaseID, slug, !acquired, req.Keep || !acquired)
 	commandStart := b.now()
 	cancelActiveRun := true
 	defer func(runID string) {
@@ -327,6 +315,66 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("crownest run exited %d", result.ExitCode)}
 	}
 	return result, nil
+}
+
+func (b *backend) claimAcquiredSandbox(api client, req RunRequest, currentLeaseID, sandboxID, currentSlug string, leaseID, slug *string) error {
+	if sandboxID == "" {
+		return exit(5, "crownest workspace run did not report a sandbox id")
+	}
+	nextLeaseID := leasePrefix + sandboxID
+	if currentLeaseID == nextLeaseID && currentSlug != "" {
+		*leaseID = currentLeaseID
+		*slug = currentSlug
+		return nil
+	}
+	if currentLeaseID != "" && currentLeaseID != nextLeaseID {
+		return exit(5, "crownest workspace run changed sandbox id from %s to %s", strings.TrimPrefix(currentLeaseID, leasePrefix), sandboxID)
+	}
+	allocatedSlug, err := allocateClaimLeaseSlug(nextLeaseID, req.RequestedSlug)
+	if err != nil {
+		return err
+	}
+	if err := claimLeaseForRepoProviderScopePond(nextLeaseID, allocatedSlug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
+		return err
+	}
+	*leaseID = nextLeaseID
+	*slug = allocatedSlug
+	fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", nextLeaseID, allocatedSlug, providerName, sandboxID)
+	return nil
+}
+
+func (b *backend) setupFailure(req RunRequest, api client, cause error, started time.Time, acquired bool, leaseID, sandboxID, slug string, shouldStop *bool) (RunResult, error) {
+	if acquired && sandboxID != "" && leaseID == "" {
+		if err := b.claimAcquiredSandbox(api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
+			return RunResult{Provider: providerName, ExitCode: 1, Total: b.now().Sub(started), SyncDelegated: true}, errors.Join(cause, err)
+		}
+	}
+	if leaseID != "" {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, shouldStop)
+	}
+	return RunResult{
+		Provider:      providerName,
+		LeaseID:       leaseID,
+		Slug:          slug,
+		ExitCode:      1,
+		Total:         b.now().Sub(started),
+		SyncDelegated: true,
+		Session:       crownestRunSession(leaseID, slug, !acquired, leaseID != "" && !*shouldStop),
+	}, cause
+}
+
+func crownestRunSession(leaseID, slug string, reused, kept bool) *RunSessionHandle {
+	if leaseID == "" {
+		return nil
+	}
+	return &RunSessionHandle{
+		Provider:       providerName,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         reused,
+		Kept:           kept,
+		CleanupCommand: "crabbox stop " + shellQuote(blank(slug, leaseID)),
+	}
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
