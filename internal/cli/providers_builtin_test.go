@@ -1125,9 +1125,9 @@ func (testFalProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "fal",
 		Family:      "fal",
-		Kind:        ProviderKindServiceControl,
+		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    nil,
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
 		Coordinator: CoordinatorNever,
 	}
 }

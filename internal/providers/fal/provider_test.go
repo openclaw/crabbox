@@ -12,14 +12,16 @@ import (
 
 func TestProviderSpecAndAlias(t *testing.T) {
 	spec := Provider{}.Spec()
-	if spec.Name != providerName || spec.Family != providerName || spec.Kind != core.ProviderKindServiceControl || spec.Coordinator != core.CoordinatorNever {
+	if spec.Name != providerName || spec.Family != providerName || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever {
 		t.Fatalf("unexpected spec: %#v", spec)
 	}
 	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
 		t.Fatalf("targets=%#v, want linux only", spec.Targets)
 	}
-	if len(spec.Features) != 0 {
-		t.Fatalf("features=%v, want none until lifecycle backend is implemented", spec.Features)
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
 	}
 	aliases := Provider{}.Aliases()
 	if len(aliases) != 1 || aliases[0] != "fal-ai" {
@@ -101,6 +103,39 @@ func TestConfigureRejectsUnsupportedTargetAndTailscale(t *testing.T) {
 	}
 }
 
+func TestConfigureReturnsDeferredSSHLeaseBackend(t *testing.T) {
+	gotBackend, err := Provider{}.Configure(Config{TargetOS: targetLinux}, newDiscardRuntime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshBackend, ok := gotBackend.(core.SSHLeaseBackend)
+	if !ok {
+		t.Fatalf("backend %T does not implement SSHLeaseBackend", gotBackend)
+	}
+	cleanup, ok := gotBackend.(core.CleanupBackend)
+	if !ok {
+		t.Fatalf("backend %T does not implement CleanupBackend", gotBackend)
+	}
+	if _, err := sshBackend.Acquire(t.Context(), core.AcquireRequest{}); !isLifecycleDeferredError(err, "acquire") {
+		t.Fatalf("Acquire error=%v, want lifecycle-deferred", err)
+	}
+	if _, err := sshBackend.Resolve(t.Context(), core.ResolveRequest{}); !isLifecycleDeferredError(err, "resolve") {
+		t.Fatalf("Resolve error=%v, want lifecycle-deferred", err)
+	}
+	if _, err := sshBackend.List(t.Context(), core.ListRequest{}); !isLifecycleDeferredError(err, "list") {
+		t.Fatalf("List error=%v, want lifecycle-deferred", err)
+	}
+	if _, err := sshBackend.Touch(t.Context(), core.TouchRequest{}); !isLifecycleDeferredError(err, "touch") {
+		t.Fatalf("Touch error=%v, want lifecycle-deferred", err)
+	}
+	if err := sshBackend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{}); !isLifecycleDeferredError(err, "release") {
+		t.Fatalf("ReleaseLease error=%v, want lifecycle-deferred", err)
+	}
+	if err := cleanup.Cleanup(t.Context(), core.CleanupRequest{}); !isLifecycleDeferredError(err, "cleanup") {
+		t.Fatalf("Cleanup error=%v, want lifecycle-deferred", err)
+	}
+}
+
 func TestDoctorReportsMissingAuthWithoutTokenNames(t *testing.T) {
 	gotBackend, err := Provider{}.Configure(Config{TargetOS: targetLinux}, newDiscardRuntime())
 	if err != nil {
@@ -166,4 +201,10 @@ func (stubComputeAPI) CreateInstance(context.Context, CreateInstanceRequest, str
 
 func (stubComputeAPI) DeleteInstance(context.Context, string) error {
 	return nil
+}
+
+func isLifecycleDeferredError(err error, operation string) bool {
+	return err != nil &&
+		strings.Contains(err.Error(), operation+" lifecycle is deferred") &&
+		strings.Contains(err.Error(), "PLAN-02")
 }
