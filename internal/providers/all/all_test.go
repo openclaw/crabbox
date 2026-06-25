@@ -62,6 +62,34 @@ func TestOpenSandboxRegistersWithoutAliasCollision(t *testing.T) {
 	}
 }
 
+func TestReplicateRegistersWithoutAliases(t *testing.T) {
+	provider, err := core.ProviderFor("replicate")
+	if err != nil {
+		t.Fatalf("ProviderFor(replicate): %v", err)
+	}
+	if provider.Name() != "replicate" {
+		t.Fatalf("ProviderFor(replicate).Name=%q", provider.Name())
+	}
+	if provider.Aliases() != nil {
+		t.Fatalf("replicate aliases=%v, want none", provider.Aliases())
+	}
+	spec := provider.Spec()
+	if spec.Family != "replicate" || spec.Kind != core.ProviderKindDelegatedRun || spec.Coordinator != core.CoordinatorNever {
+		t.Fatalf("replicate spec=%#v", spec)
+	}
+	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetLinux {
+		t.Fatalf("replicate targets=%#v", spec.Targets)
+	}
+	if !spec.Features.Has(core.FeatureArchiveSync) || !spec.Features.Has(core.FeatureRunSession) {
+		t.Fatalf("replicate features=%v", spec.Features)
+	}
+	for _, alias := range []string{"rep", "r8", "replicate-ai"} {
+		if got, err := core.ProviderFor(alias); err == nil && got.Name() == "replicate" {
+			t.Fatalf("%q alias unexpectedly resolves to replicate", alias)
+		}
+	}
+}
+
 func TestNvidiaBrevRegistersCanonicalAndAliases(t *testing.T) {
 	for _, name := range []string{"nvidia-brev", "brev", "nvidia"} {
 		provider, err := core.ProviderFor(name)
@@ -1174,6 +1202,7 @@ func allBuiltInProviderNames() []string {
 		"phala",
 		"proxmox",
 		"railway",
+		"replicate",
 		"runpod",
 		"scaleway",
 		"anthropic-sandbox-runtime",
