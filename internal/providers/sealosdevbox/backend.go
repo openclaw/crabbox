@@ -205,6 +205,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (lease c
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if req.ReleaseOnly {
+		if lease, ok, err := b.resolveMissingClaimForRelease(ctx, req.ID); err != nil || ok {
+			return lease, err
+		}
+	}
 	item, _, leaseID, slug, err := b.resolveDevbox(ctx, req.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -263,6 +268,38 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func (b *backend) resolveMissingClaimForRelease(ctx context.Context, identifier string) (core.LeaseTarget, bool, error) {
+	claim, ok, err := b.resolveClaim(identifier)
+	if err != nil || !ok {
+		return core.LeaseTarget{}, false, err
+	}
+	name := devboxNameFromClaim(claim, b.cfg)
+	if name == "" {
+		return core.LeaseTarget{}, false, nil
+	}
+	if item, err := b.getDevbox(ctx, name); err != nil {
+		if kubernetesObjectNotFound(err) {
+			return core.LeaseTarget{Server: serverFromClaim(claim, b.cfg), LeaseID: claim.LeaseID}, true, nil
+		}
+		return core.LeaseTarget{}, true, err
+	} else {
+		actualName, leaseID, slug, err := identityFromDevbox(item, name)
+		if err != nil {
+			return core.LeaseTarget{}, true, err
+		}
+		if leaseID != claim.LeaseID {
+			return core.LeaseTarget{}, true, core.Exit(4, "Sealos DevBox %q lease identity changed: expected %s, found %s", actualName, claim.LeaseID, leaseID)
+		}
+		if core.NormalizeLeaseSlug(claim.Slug) != "" && slug != core.NormalizeLeaseSlug(claim.Slug) {
+			return core.LeaseTarget{}, true, core.Exit(4, "Sealos DevBox %q slug identity changed: expected %s, found %s", actualName, claim.Slug, slug)
+		}
+		if !b.itemMatchesScope(item) {
+			return core.LeaseTarget{}, true, core.Exit(4, "Sealos DevBox %q is outside the active provider scope", name)
+		}
+		return core.LeaseTarget{Server: b.serverFromDevbox(item), LeaseID: claim.LeaseID}, true, nil
+	}
 }
 
 func (b *backend) resumeDevboxIfPaused(ctx context.Context, item devboxItem, server core.Server) (devboxItem, core.Server, error) {

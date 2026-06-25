@@ -111,6 +111,40 @@ func (b *backend) claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout 
 	return core.ClaimLeaseForRepoProviderScope(leaseID, slug, providerName, b.claimScope(), repoRoot, idleTimeout, reclaim)
 }
 
+func devboxNameFromClaim(claim core.LeaseClaim, cfg core.Config) string {
+	if name := strings.TrimSpace(claim.Labels["devbox_name"]); name != "" {
+		return name
+	}
+	if cloudID := strings.TrimSpace(claim.CloudID); cloudID != "" {
+		return strings.TrimPrefix(cloudID, strings.TrimSpace(cfg.SealosDevbox.Namespace)+"/")
+	}
+	return core.LeaseProviderName(claim.LeaseID, claim.Slug)
+}
+
+func serverFromClaim(claim core.LeaseClaim, cfg core.Config) core.Server {
+	labels := map[string]string{}
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	labels["provider"] = providerName
+	labels["lease"] = strings.TrimSpace(claim.LeaseID)
+	labels["slug"] = core.NormalizeLeaseSlug(claim.Slug)
+	labels["provider_scope"] = strings.TrimSpace(claim.ProviderScope)
+	namespace := core.Blank(strings.TrimSpace(labels["devbox_namespace"]), strings.TrimSpace(cfg.SealosDevbox.Namespace))
+	name := devboxNameFromClaim(claim, cfg)
+	labels["devbox_namespace"] = namespace
+	labels["devbox_name"] = name
+	server := core.Server{
+		CloudID:  devboxCloudID(namespace, name),
+		Provider: providerName,
+		Name:     name,
+		Status:   "missing",
+		Labels:   labels,
+	}
+	server.ServerType.Name = "sealos-devbox"
+	return server
+}
+
 func (b *backend) resolveClaim(identifier string) (core.LeaseClaim, bool, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
@@ -213,10 +247,7 @@ func (b *backend) resolveDevbox(ctx context.Context, identifier string) (devboxI
 	if claim, ok, err := b.resolveClaim(identifier); err != nil {
 		return devboxItem{}, "", "", "", err
 	} else if ok {
-		name := core.Blank(claim.Labels["devbox_name"], strings.TrimPrefix(claim.CloudID, b.cfg.SealosDevbox.Namespace+"/"))
-		if name == "" {
-			name = core.LeaseProviderName(claim.LeaseID, claim.Slug)
-		}
+		name := devboxNameFromClaim(claim, b.cfg)
 		item, err := b.getDevbox(ctx, name)
 		if err != nil {
 			return devboxItem{}, "", "", "", err

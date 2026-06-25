@@ -152,6 +152,51 @@ func TestReleaseDeleteRemovesLocalStateWhenDevboxNotFound(t *testing.T) {
 	}
 }
 
+func TestResolveReleaseOnlyAllowsDeleteCleanupWhenDevboxMissing(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.DeleteOnRelease = true
+	leaseID := "cbx_missingresolve"
+	slug := "red"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := releaseServer(cfg, leaseID, slug, name)
+	runner := &lifecycleRunner{
+		stderrs: []string{
+			`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`,
+			`Error from server (NotFound): devboxes.devbox.sealos.io "` + name + `" not found`,
+		},
+		exitCode: []int{1, 1},
+		errors:   []error{errors.New("exit status 1"), errors.New("exit status 1")},
+	}
+	backend := lifecycleBackend(cfg, runner)
+	if err := backend.claimLeaseForRepo(leaseID, slug, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := persistDevboxKey(leaseID, devboxSecretKeys{PublicKey: "ssh-ed25519 AAA test", PrivateKey: "private\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Name != name {
+		t.Fatalf("lease=%#v", lease)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
 func TestReleaseRejectsIdentityMismatchBeforeMutation(t *testing.T) {
 	cfg := lifecycleConfig()
 	leaseID := "cbx_123456abcdef"
