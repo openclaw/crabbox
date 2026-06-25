@@ -7764,11 +7764,25 @@ func applyEnv(cfg *Config) error {
 	cfg.Crownest.APIURL = getenv("CRABBOX_CROWNEST_API_URL", getenv("CROWNEST_API_URL", cfg.Crownest.APIURL))
 	cfg.Crownest.ProjectID = getenv("CRABBOX_CROWNEST_PROJECT_ID", getenv("CROWNEST_PROJECT_ID", cfg.Crownest.ProjectID))
 	cfg.Crownest.Template = getenv("CRABBOX_CROWNEST_TEMPLATE", getenv("CROWNEST_TEMPLATE", cfg.Crownest.Template))
-	cfg.Crownest.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CROWNEST_TIMEOUT_SECS", cfg.Crownest.TimeoutSecs)
-	if err != nil {
-		return err
+	crownestTimeoutEnv := "CRABBOX_CROWNEST_TIMEOUT_SECS"
+	crownestTimeoutValue := os.Getenv(crownestTimeoutEnv)
+	if crownestTimeoutValue == "" {
+		crownestTimeoutEnv = "CROWNEST_TIMEOUT_SECS"
+		crownestTimeoutValue = os.Getenv(crownestTimeoutEnv)
+	}
+	if crownestTimeoutValue != "" {
+		parsed, parseErr := strconv.Atoi(crownestTimeoutValue)
+		if parseErr != nil {
+			return exit(2, "%s must be an integer", crownestTimeoutEnv)
+		}
+		if parsed < 0 {
+			return exit(2, "%s must be non-negative", crownestTimeoutEnv)
+		}
+		cfg.Crownest.TimeoutSecs = parsed
 	}
 	if v, ok := getenvBool("CRABBOX_CROWNEST_FORGET_MISSING"); ok {
+		cfg.Crownest.ForgetMissing = v
+	} else if v, ok := getenvBool("CROWNEST_FORGET_MISSING"); ok {
 		cfg.Crownest.ForgetMissing = v
 	}
 	cfg.CloudflareDynamicWorkers.LoaderURL = getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_URL", getenv("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_LOADER_URL", cfg.CloudflareDynamicWorkers.LoaderURL))

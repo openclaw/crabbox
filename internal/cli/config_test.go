@@ -3450,6 +3450,32 @@ func TestCrownestConfigDefaultsAndNoPersistentSecretSurface(t *testing.T) {
 	}
 }
 
+func TestCrownestUnprefixedEnvAliases(t *testing.T) {
+	cfg := baseConfig()
+	t.Setenv("CROWNEST_TIMEOUT_SECS", "321")
+	t.Setenv("CROWNEST_FORGET_MISSING", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv: %v", err)
+	}
+	if cfg.Crownest.TimeoutSecs != 321 || !cfg.Crownest.ForgetMissing {
+		t.Fatalf("crownest env aliases not applied: %#v", cfg.Crownest)
+	}
+}
+
+func TestCrownestPrefixedEnvOverridesUnprefixedAliases(t *testing.T) {
+	cfg := baseConfig()
+	t.Setenv("CROWNEST_TIMEOUT_SECS", "321")
+	t.Setenv("CRABBOX_CROWNEST_TIMEOUT_SECS", "654")
+	t.Setenv("CROWNEST_FORGET_MISSING", "true")
+	t.Setenv("CRABBOX_CROWNEST_FORGET_MISSING", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv: %v", err)
+	}
+	if cfg.Crownest.TimeoutSecs != 654 || cfg.Crownest.ForgetMissing {
+		t.Fatalf("crownest env precedence not applied: %#v", cfg.Crownest)
+	}
+}
+
 func TestSuperserveRepoConfigCannotSetBaseURL(t *testing.T) {
 	cfg := baseConfig()
 	var file fileConfig

@@ -247,6 +247,41 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAfterArchiveSetupFailure(t *testin
 	}
 }
 
+func TestRunKeepDeletesCreatedSandboxWhenLocalClaimFails(t *testing.T) {
+	repoRoot := tempGitRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := testConfig()
+	api := &fakeCrownestClient{
+		baseURL:         "https://api.crownest.dev",
+		createSandboxID: "sbx_unclaimable",
+	}
+	leaseID := leasePrefix + "sbx_unclaimable"
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "existing", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, filepath.Join(repoRoot, "other"), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeLeaseClaim(leaseID) })
+	b := &backend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		newClient: func(Config, Runtime) (client, error) {
+			return api, nil
+		},
+	}
+
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo:    Repo{Root: repoRoot, Name: "demo"},
+		Command: []string{"pnpm", "test"},
+		Keep:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "claimed by repo") {
+		t.Fatalf("err=%v, want local claim failure", err)
+	}
+	if api.deletedSandboxID != "sbx_unclaimable" {
+		t.Fatalf("deletedSandboxID=%q, want unclaimed sandbox cleanup", api.deletedSandboxID)
+	}
+}
+
 func TestRunKeepOnFailureRetainsCreatedSandbox(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

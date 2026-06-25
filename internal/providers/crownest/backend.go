@@ -186,35 +186,35 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		sandboxID = workspaceRun.SandboxID
 	}
 	if acquired && sandboxID != "" {
-		if err := b.claimAcquiredSandbox(api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
+		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
 			return RunResult{}, err
 		}
 	}
 	transfer, err := api.CreateArchiveTransfer(ctx, workspaceRun.ID, createArchiveTransferRequest{SHA256: archiveSHA, SizeBytes: archiveBytes}, idempotencyKey("transfer", workspaceRun.ID))
 	if err != nil {
-		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if transfer.MaxSizeBytes > 0 && archiveBytes > transfer.MaxSizeBytes {
-		return b.setupFailure(req, api, exit(6, "crownest archive too large: %d > %d bytes", archiveBytes, transfer.MaxSizeBytes), started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, exit(6, "crownest archive too large: %d > %d bytes", archiveBytes, transfer.MaxSizeBytes), started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if _, err := archive.Seek(0, io.SeekStart); err != nil {
-		return b.setupFailure(req, api, exit(6, "rewind sync archive: %v", err), started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, exit(6, "rewind sync archive: %v", err), started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if err := api.UploadArchive(ctx, transfer, archive); err != nil {
-		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if _, err := api.FinalizeArchive(ctx, workspaceRun.ID, finalizeArchiveRequest{SHA256: archiveSHA, SizeBytes: archiveBytes, UploadID: transfer.ID}, idempotencyKey("finalize", workspaceRun.ID)); err != nil {
-		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	workspaceRun, err = api.StartWorkspaceRun(ctx, workspaceRun.ID, idempotencyKey("start", workspaceRun.ID))
 	if err != nil {
-		return b.setupFailure(req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
+		return b.setupFailure(ctx, req, api, err, started, acquired, leaseID, sandboxID, slug, &shouldStop)
 	}
 	if workspaceRun.SandboxID != "" {
 		sandboxID = workspaceRun.SandboxID
 	}
 	if acquired {
-		if err := b.claimAcquiredSandbox(api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
+		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
 			return RunResult{}, err
 		}
 	}
@@ -317,7 +317,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	return result, nil
 }
 
-func (b *backend) claimAcquiredSandbox(api client, req RunRequest, currentLeaseID, sandboxID, currentSlug string, leaseID, slug *string) error {
+func (b *backend) claimAcquiredSandbox(ctx context.Context, api client, req RunRequest, currentLeaseID, sandboxID, currentSlug string, leaseID, slug *string) error {
 	if sandboxID == "" {
 		return exit(5, "crownest workspace run did not report a sandbox id")
 	}
@@ -332,10 +332,10 @@ func (b *backend) claimAcquiredSandbox(api client, req RunRequest, currentLeaseI
 	}
 	allocatedSlug, err := allocateClaimLeaseSlug(nextLeaseID, req.RequestedSlug)
 	if err != nil {
-		return err
+		return b.cleanupCreateFailure(ctx, api, sandboxID, err)
 	}
 	if err := claimLeaseForRepoProviderScopePond(nextLeaseID, allocatedSlug, providerName, claimScope(api.BaseURL(), b.cfg), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-		return err
+		return b.cleanupCreateFailure(ctx, api, sandboxID, err)
 	}
 	*leaseID = nextLeaseID
 	*slug = allocatedSlug
@@ -343,9 +343,9 @@ func (b *backend) claimAcquiredSandbox(api client, req RunRequest, currentLeaseI
 	return nil
 }
 
-func (b *backend) setupFailure(req RunRequest, api client, cause error, started time.Time, acquired bool, leaseID, sandboxID, slug string, shouldStop *bool) (RunResult, error) {
+func (b *backend) setupFailure(ctx context.Context, req RunRequest, api client, cause error, started time.Time, acquired bool, leaseID, sandboxID, slug string, shouldStop *bool) (RunResult, error) {
 	if acquired && sandboxID != "" && leaseID == "" {
-		if err := b.claimAcquiredSandbox(api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
+		if err := b.claimAcquiredSandbox(ctx, api, req, leaseID, sandboxID, slug, &leaseID, &slug); err != nil {
 			return RunResult{Provider: providerName, ExitCode: 1, Total: b.now().Sub(started), SyncDelegated: true}, errors.Join(cause, err)
 		}
 	}
