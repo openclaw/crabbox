@@ -246,6 +246,56 @@ func TestAcquireAppliesManifestPersistsClaimAndKey(t *testing.T) {
 	}
 }
 
+func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_ackrollback"
+	slug := "reject"
+	name := core.LeaseProviderName(leaseID, slug)
+	devboxJSON := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","ssh":{"secretName":"` + name + `-ssh"}}}`
+	runner := &lifecycleRunner{outputs: []string{
+		`{"items":[]}`,
+		`devbox applied`,
+		devboxJSON,
+		"deleted",
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	called := false
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
+		RequestedLeaseID: leaseID,
+		RequestedSlug:    slug,
+		Repo:             core.Repo{Root: t.TempDir()},
+		OnAcquired: func(acquired core.LeaseTarget) error {
+			called = true
+			if acquired.LeaseID != leaseID || acquired.Server.CloudID != "team-a/"+name || acquired.SSH.Host != "ssh.sealos.example.test" || acquired.SSH.Key == "" {
+				t.Fatalf("acquired=%#v", acquired)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("claim exists during OnAcquired=%v err=%v", exists, err)
+			}
+			target := core.SSHTarget{}
+			core.UseStoredTestboxKey(&target, leaseID)
+			if target.Key != "" {
+				t.Fatalf("stored key exists during OnAcquired: %s", target.Key)
+			}
+			return errors.New("controller rejected identity")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "controller rejected identity") {
+		t.Fatalf("Acquire error=%v", err)
+	}
+	if !called {
+		t.Fatal("OnAcquired was not called")
+	}
+	got := strings.Join(flattenArgs(runner.requests), " ")
+	if !strings.Contains(got, "delete "+devboxResource+"/"+name+" --ignore-not-found=true") {
+		t.Fatalf("failed acquire did not delete devbox; commands=%s", got)
+	}
+	if strings.Contains(got, "secret/"+name+"-ssh") {
+		t.Fatalf("acquire read secret after rejected identity: %s", got)
+	}
+}
+
 func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
