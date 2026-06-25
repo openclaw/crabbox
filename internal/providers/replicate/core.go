@@ -2,12 +2,15 @@ package replicate
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -17,8 +20,23 @@ type ReplicateConfig = core.ReplicateConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type DoctorRequest = core.DoctorRequest
+type DoctorResult = core.DoctorResult
+type WarmupRequest = core.WarmupRequest
+type RunRequest = core.RunRequest
+type RunResult = core.RunResult
+type RunSessionHandle = core.RunSessionHandle
+type ListRequest = core.ListRequest
+type LeaseView = core.LeaseView
+type StatusRequest = core.StatusRequest
+type StatusView = core.StatusView
+type StopRequest = core.StopRequest
+type Server = core.Server
 type Repo = core.Repo
 type SyncManifest = core.SyncManifest
+type LeaseClaim = core.LeaseClaim
+type ExitError = core.ExitError
+type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -32,6 +50,10 @@ const (
 	defaultMaxArchiveBytes    = 10 * 1024 * 1024
 	envCrabboxReplicateToken  = "CRABBOX_REPLICATE_API_TOKEN"
 	envReplicateToken         = "REPLICATE_API_TOKEN"
+	leasePrefix               = "rbx_"
+	targetLinux               = core.TargetLinux
+	networkPublic             = core.NetworkPublic
+	statusViewReady           = "succeeded"
 	runnerExitCodeJSONName    = "exit_code"
 	runnerExitCodeAltJSONName = "exitCode"
 )
@@ -138,6 +160,30 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
+func writeTimingJSON(w io.Writer, report timingReport) error {
+	return core.WriteTimingJSON(w, report)
+}
+
+func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
+	return core.TimingReportWithRunResult(report, result, err)
+}
+
+func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
+	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
+}
+
+func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
+	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
+}
+
+func inventoryDoctorResult(provider string, leases int) DoctorResult {
+	return core.InventoryDoctorResult(provider, leases)
+}
+
+func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
+	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
+}
+
 func syncExcludes(root string, cfg Config) ([]string, error) {
 	return core.SyncExcludes(root, cfg)
 }
@@ -156,4 +202,49 @@ func coreCreateSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest
 
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
+}
+
+func newLeaseSlug(leaseID string) string {
+	return core.NewLeaseSlug(leaseID)
+}
+
+func normalizeLeaseSlug(value string) string {
+	return core.NormalizeLeaseSlug(value)
+}
+
+func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
+	return core.AllocateClaimLeaseSlug(leaseID, requested)
+}
+
+func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
+}
+
+func readLeaseClaim(leaseID string) (core.LeaseClaim, error) {
+	return core.ReadLeaseClaim(leaseID)
+}
+
+func listReplicateLeaseClaims() ([]core.LeaseClaim, error) {
+	return core.ListLeaseClaimsWithPrefix(leasePrefix)
+}
+
+func removeLeaseClaim(leaseID string) {
+	core.RemoveLeaseClaim(leaseID)
+}
+
+func shouldUseShell(command []string) bool {
+	return core.ShouldUseShell(command)
+}
+
+func shellScriptFromArgv(command []string) string {
+	return core.ShellScriptFromArgv(command)
+}
+
+func shellQuote(s string) string {
+	return core.ShellQuote(s)
+}
+
+func replicateEndpointScope(baseURL string) string {
+	digest := sha256.Sum256([]byte(baseURL))
+	return "replicate-endpoint-sha256:" + hex.EncodeToString(digest[:])
 }
