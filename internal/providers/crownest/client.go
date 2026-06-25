@@ -251,7 +251,7 @@ func (c *httpClient) UploadArchive(ctx context.Context, transfer archiveTransfer
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("crownest archive upload: %w", err)
+		return fmt.Errorf("crownest archive upload transport failed: %s", sanitizeUploadTransportError(err, req.URL))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -259,6 +259,32 @@ func (c *httpClient) UploadArchive(ctx context.Context, transfer archiveTransfer
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+func sanitizeUploadTransportError(err error, target *url.URL) string {
+	if err == nil {
+		return "unknown error"
+	}
+	message := err.Error()
+	if target == nil {
+		return message
+	}
+	rawURL := target.String()
+	safe := *target
+	safe.User = nil
+	safe.RawQuery = ""
+	safe.Fragment = ""
+	safeURL := safe.String()
+	if safeURL == "" {
+		safeURL = "[redacted-url]"
+	}
+	if rawURL != "" && rawURL != safeURL {
+		message = strings.ReplaceAll(message, rawURL, safeURL+"?[redacted]")
+	}
+	if target.RawQuery != "" {
+		message = strings.ReplaceAll(message, target.RawQuery, "[redacted]")
+	}
+	return message
 }
 
 func (c *httpClient) sameOrigin(target *url.URL) bool {

@@ -3,6 +3,7 @@ package crownest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +136,32 @@ func TestClientRedactsSecretsFromErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "cn_test_key") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("error was not redacted: %v", err)
+	}
+}
+
+func TestUploadArchiveRedactsPresignedURLFromTransportError(t *testing.T) {
+	const signedQuery = "X-Amz-Credential=secret-credential&X-Amz-Signature=secret-signature"
+	client := &httpClient{
+		baseURL: "https://api.crownest.dev",
+		apiKey:  "cn_test_key",
+		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("dial %s: connection refused", req.URL.String())
+		})},
+	}
+
+	err := client.UploadArchive(context.Background(), archiveTransfer{
+		Method:    http.MethodPut,
+		UploadURL: "https://upload.example.test/archive.tgz?" + signedQuery,
+	}, strings.NewReader("archive"))
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	message := err.Error()
+	if strings.Contains(message, "secret-credential") || strings.Contains(message, "secret-signature") || strings.Contains(message, signedQuery) {
+		t.Fatalf("upload error leaked signed query: %v", err)
+	}
+	if !strings.Contains(message, "https://upload.example.test/archive.tgz?[redacted]") {
+		t.Fatalf("upload error omitted redacted URL marker: %v", err)
 	}
 }
 
