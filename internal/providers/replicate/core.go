@@ -1,9 +1,11 @@
 package replicate
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -15,6 +17,9 @@ type ReplicateConfig = core.ReplicateConfig
 type ProviderSpec = core.ProviderSpec
 type Runtime = core.Runtime
 type Backend = core.Backend
+type Repo = core.Repo
+type SyncManifest = core.SyncManifest
+type timingPhase = core.TimingPhase
 
 const (
 	providerName              = "replicate"
@@ -131,4 +136,24 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
+}
+
+func syncExcludes(root string, cfg Config) ([]string, error) {
+	return core.SyncExcludes(root, cfg)
+}
+
+func syncManifest(root string, excludes, includes []string) (SyncManifest, error) {
+	return core.BuildSyncManifestFiltered(root, excludes, includes)
+}
+
+func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
+	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
+}
+
+func coreCreateSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
+}
+
+func blank(value, fallback string) string {
+	return core.Blank(value, fallback)
 }
