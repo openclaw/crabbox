@@ -211,7 +211,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	server := b.serverFromDevbox(item)
 	target := core.SSHTarget{}
-	if !req.ReleaseOnly {
+	if req.ReleaseOnly {
+		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	}
+	if req.StatusOnly || req.NoLocalStateMutations {
 		resolved, err := b.sshTarget(item, b.statusSSHKey(leaseID), false)
 		if err != nil {
 			if !req.StatusOnly {
@@ -220,44 +223,43 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		} else {
 			target = resolved
 		}
-	}
-	if !req.StatusOnly && !req.ReleaseOnly {
 		if req.NoLocalStateMutations {
 			return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 		}
-		item, server, err = b.resumeDevboxIfPaused(ctx, item, server)
-		if err != nil {
+		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	}
+	item, server, err = b.resumeDevboxIfPaused(ctx, item, server)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	secret, err := b.getSecret(ctx, devboxSecretName(item))
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	keys, err := parseDevboxSecretKeys(secret)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	keyPath, err := persistDevboxKey(leaseID, keys)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	target, err = b.sshTarget(item, keyPath, true)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if req.Repo.Root != "" && !req.NoLocalStateMutations {
+		if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		secret, err := b.getSecret(ctx, devboxSecretName(item))
-		if err != nil {
+	}
+	if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
+		events, _ := b.listEvents(ctx, item.Metadata.Name)
+		return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
+	}
+	if req.Repo.Root != "" && !req.NoLocalStateMutations {
+		if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
 			return core.LeaseTarget{}, err
-		}
-		keys, err := parseDevboxSecretKeys(secret)
-		if err != nil {
-			return core.LeaseTarget{}, err
-		}
-		keyPath, err := persistDevboxKey(leaseID, keys)
-		if err != nil {
-			return core.LeaseTarget{}, err
-		}
-		target, err = b.sshTarget(item, keyPath, true)
-		if err != nil {
-			return core.LeaseTarget{}, err
-		}
-		if req.Repo.Root != "" && !req.NoLocalStateMutations {
-			if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-				return core.LeaseTarget{}, err
-			}
-		}
-		if err := b.waitForSSH(ctx, &target, "Sealos DevBox SSH"); err != nil {
-			events, _ := b.listEvents(ctx, item.Metadata.Name)
-			return core.LeaseTarget{}, core.Exit(5, "%v; Sealos DevBox diagnostics: %s", err, devboxDiagnostics(item, events, nil))
-		}
-		if req.Repo.Root != "" && !req.NoLocalStateMutations {
-			if err := core.UpdateLeaseClaimEndpoint(leaseID, server, target); err != nil {
-				return core.LeaseTarget{}, err
-			}
 		}
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil

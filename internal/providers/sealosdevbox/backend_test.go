@@ -576,6 +576,43 @@ func TestResolveResumesPausedDevboxBeforeSSHReuse(t *testing.T) {
 	}
 }
 
+func TestResolveResumesPausedNodePortDevboxBeforeRouteLookup(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	cfg.SealosDevbox.Network = networkNodePort
+	cfg.SealosDevbox.NodeHost = "node-1.example.test"
+	leaseID := "cbx_nodeportres"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	pausedItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Paused","phase":"Paused","ssh":{"secretName":"` + name + `-ssh"}}}`
+	runningItem := `{"metadata":{"name":"` + name + `","namespace":"team-a","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"team-a"}},"status":{"state":"Running","phase":"Running","network":{"ports":[{"name":"ssh","nodePort":32022}]},"ssh":{"secretName":"` + name + `-ssh"}}}`
+	secretJSON := `{"metadata":{"name":"` + name + `-ssh"},"stringData":{"` + devboxPublicKeyField + `":"ssh-ed25519 AAA test","` + devboxPrivateKeyField + `":"private"}}`
+	runner := &lifecycleRunner{outputs: []string{
+		`{"items":[` + pausedItem + `]}`,
+		"patched",
+		runningItem,
+		secretJSON,
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	backend.sshReady = func(_ context.Context, target *core.SSHTarget, _ io.Writer, phase string, _ time.Duration) error {
+		if target.Host != "node-1.example.test" || target.Port != "32022" || target.Key == "" || phase != "Sealos DevBox SSH" {
+			t.Fatalf("unexpected SSH target=%#v phase=%q", target, phase)
+		}
+		return nil
+	}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "node-1.example.test" || lease.SSH.Port != "32022" {
+		t.Fatalf("lease=%#v", lease)
+	}
+	commands := strings.Join(flattenArgs(runner.requests), " ")
+	if !strings.Contains(commands, "patch "+devboxResource+"/"+name) || !strings.Contains(commands, "get secret/"+name+"-ssh") {
+		t.Fatalf("missing resume or secret commands: %s", commands)
+	}
+}
+
 func TestResolveClaimRejectsDevboxOutsideActiveScope(t *testing.T) {
 	isolateSealosState(t)
 	cfg := lifecycleConfig()
