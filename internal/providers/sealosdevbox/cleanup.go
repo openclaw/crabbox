@@ -55,7 +55,7 @@ func (b *backend) cleanupItemMatchesScope(item devboxItem) bool {
 	if item.Metadata.Labels[providerLabel] != providerName {
 		return false
 	}
-	return strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope"]) == b.claimScope()
+	return b.itemHasActiveScope(item)
 }
 
 func (b *backend) printCleanupSkip(item devboxItem, reason string) {

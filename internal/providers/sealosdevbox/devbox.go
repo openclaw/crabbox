@@ -123,7 +123,7 @@ func (b *backend) devboxLabels(leaseID, slug string) map[string]string {
 		providerLabel:      providerName,
 		leaseIDLabel:       strings.TrimSpace(leaseID),
 		slugLabel:          core.NormalizeLeaseSlug(slug),
-		providerScopeLabel: labelValueHash(b.claimScope()),
+		providerScopeLabel: b.claimScopeLabel(),
 	}
 }
 
@@ -132,10 +132,8 @@ func (b *backend) devboxAnnotations(name, leaseID, slug string, keep bool, now t
 	labels["devbox_namespace"] = b.cfg.SealosDevbox.Namespace
 	labels["devbox_name"] = name
 	labels["network"] = normalizeNetwork(b.cfg.SealosDevbox.Network)
-	labels["provider_scope"] = b.claimScope()
-	labels["gateway_host"] = strings.TrimSpace(b.cfg.SealosDevbox.SSHGatewayHost)
-	labels["gateway_port"] = strings.TrimSpace(b.cfg.SealosDevbox.SSHGatewayPort)
-	labels["node_host"] = strings.TrimSpace(b.cfg.SealosDevbox.NodeHost)
+	labels["provider-scope"] = b.claimScopeID()
+	labels["provider_scope_id"] = b.claimScopeID()
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
@@ -146,9 +144,4 @@ func (b *backend) devboxAnnotations(name, leaseID, slug string, keep bool, now t
 		out[annotationBase+key] = labels[key]
 	}
 	return out
-}
-
-func labelValueHash(value string) string {
-	hash := core.SlugWithCollisionSuffix("scope", value)
-	return strings.TrimPrefix(hash, "scope-")
 }

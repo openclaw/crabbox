@@ -2,6 +2,8 @@ package sealosdevbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +14,14 @@ import (
 
 func (b *backend) claimScope() string {
 	return sealosClaimScope(b.cfg)
+}
+
+func (b *backend) claimScopeID() string {
+	return sealosClaimScopeID(b.cfg)
+}
+
+func (b *backend) claimScopeLabel() string {
+	return sealosClaimScopeLabel(b.cfg)
 }
 
 func sealosClaimScope(cfg core.Config) string {
@@ -36,6 +46,19 @@ func sealosClaimScope(cfg core.Config) string {
 		route = "node:" + strings.TrimSpace(cfg.SealosDevbox.NodeHost)
 	}
 	return "kubeconfig:" + kubeconfig + "|context:" + contextName + "|namespace:" + namespace + "|network:" + network + "|" + route
+}
+
+func sealosClaimScopeID(cfg core.Config) string {
+	return sealosScopeFingerprint(sealosClaimScope(cfg))
+}
+
+func sealosClaimScopeLabel(cfg core.Config) string {
+	return sealosClaimScopeID(cfg)[:63]
+}
+
+func sealosScopeFingerprint(scope string) string {
+	sum := sha256.Sum256([]byte(scope))
+	return hex.EncodeToString(sum[:])
 }
 
 func (b *backend) allocateLeaseSlug(ctx context.Context, leaseID, requested string) (string, error) {
@@ -180,8 +203,24 @@ func (b *backend) itemMatchesScope(item devboxItem) bool {
 	if provider := item.Metadata.Labels[providerLabel]; provider != "" && provider != providerName {
 		return false
 	}
-	scope := strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope"])
-	return scope == b.claimScope()
+	return b.itemHasActiveScope(item)
+}
+
+func (b *backend) itemHasActiveScope(item devboxItem) bool {
+	scopeID := strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider-scope"])
+	if scopeID != "" {
+		return scopeID == b.claimScopeID()
+	}
+	scopeID = strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope_id"])
+	if scopeID != "" {
+		return scopeID == b.claimScopeID()
+	}
+	scopeLabel := strings.TrimSpace(item.Metadata.Labels[providerScopeLabel])
+	if scopeLabel != "" && scopeLabel == b.claimScopeLabel() {
+		return true
+	}
+	legacyRawScope := strings.TrimSpace(item.Metadata.Annotations[annotationBase+"provider_scope"])
+	return legacyRawScope != "" && legacyRawScope == b.claimScope()
 }
 
 func (b *backend) serverFromDevbox(item devboxItem) core.Server {
@@ -190,6 +229,8 @@ func (b *backend) serverFromDevbox(item devboxItem) core.Server {
 	labels["devbox_namespace"] = core.Blank(strings.TrimSpace(item.Metadata.Namespace), b.cfg.SealosDevbox.Namespace)
 	labels["devbox_name"] = strings.TrimSpace(item.Metadata.Name)
 	labels["network"] = normalizeNetwork(b.cfg.SealosDevbox.Network)
+	labels["provider-scope"] = b.claimScopeID()
+	labels["provider_scope_id"] = b.claimScopeID()
 	labels["provider_scope"] = b.claimScope()
 	leaseID := core.Blank(strings.TrimSpace(item.Metadata.Labels[leaseIDLabel]), labels["lease"])
 	slug := core.Blank(core.NormalizeLeaseSlug(item.Metadata.Labels[slugLabel]), core.NormalizeLeaseSlug(labels["slug"]))

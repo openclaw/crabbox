@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -39,9 +40,32 @@ func TestReleaseRetainsLeaseByPausingAndClearingEndpoint(t *testing.T) {
 	if !strings.Contains(got, "patch "+devboxResource+"/"+name) || !strings.Contains(got, `"state":"Paused"`) {
 		t.Fatalf("release did not pause devbox: %s", got)
 	}
+	assertReleasePatchUsesScopeFingerprint(t, cfg, runner)
 	if !backend.RetainLeaseClaimAfterRelease(core.LeaseTarget{LeaseID: leaseID, Server: server}) {
 		t.Fatal("retained release should retain local claim")
 	}
+}
+
+func TestReleaseRetainsLegacyRawScopeDevboxMigratesScopeAnnotation(t *testing.T) {
+	isolateSealosState(t)
+	cfg := lifecycleConfig()
+	leaseID := "cbx_legacyraw"
+	slug := "blue"
+	name := core.LeaseProviderName(leaseID, slug)
+	server := releaseServer(cfg, leaseID, slug, name)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{Host: "ssh.sealos.example.test", Port: "2222"}, t.TempDir(), cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	legacyItem := `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
+	runner := &lifecycleRunner{outputs: []string{
+		legacyItem,
+		"patched",
+	}}
+	backend := lifecycleBackend(cfg, runner)
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	assertReleasePatchUsesScopeFingerprint(t, cfg, runner)
 }
 
 func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
@@ -226,10 +250,10 @@ func releaseServer(cfg core.Config, leaseID, slug, name string) core.Server {
 		providerLabel:      providerName,
 		leaseIDLabel:       leaseID,
 		slugLabel:          slug,
-		providerScopeLabel: labelValueHash(sealosClaimScope(cfg)),
+		providerScopeLabel: sealosClaimScopeLabel(cfg),
 	}
 	item.Metadata.Annotations = map[string]string{
-		annotationBase + "provider_scope":   sealosClaimScope(cfg),
+		annotationBase + "provider-scope":   sealosClaimScopeID(cfg),
 		annotationBase + "devbox_name":      name,
 		annotationBase + "devbox_namespace": cfg.SealosDevbox.Namespace,
 	}
@@ -237,5 +261,54 @@ func releaseServer(cfg core.Config, leaseID, slug, name string) core.Server {
 }
 
 func releaseDevboxJSON(cfg core.Config, leaseID, slug, name string) string {
-	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider_scope":"` + sealosClaimScope(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
+	return `{"metadata":{"name":"` + name + `","namespace":"` + cfg.SealosDevbox.Namespace + `","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/provider":"sealos-devbox","crabbox.dev/lease-id":"` + leaseID + `","crabbox.dev/slug":"` + slug + `"},"annotations":{"crabbox.dev/provider-scope":"` + sealosClaimScopeID(cfg) + `","crabbox.dev/devbox_name":"` + name + `","crabbox.dev/devbox_namespace":"` + cfg.SealosDevbox.Namespace + `"}},"status":{"state":"Running","phase":"Running"}}`
+}
+
+func releasePatchPayload(t *testing.T, runner *lifecycleRunner) map[string]any {
+	t.Helper()
+	for _, req := range runner.requests {
+		for i, arg := range req.Args {
+			if arg != "-p" || i+1 >= len(req.Args) {
+				continue
+			}
+			var patch map[string]any
+			if err := json.Unmarshal([]byte(req.Args[i+1]), &patch); err != nil {
+				t.Fatalf("patch payload is invalid JSON: %v", err)
+			}
+			return patch
+		}
+	}
+	t.Fatalf("patch payload not found in %#v", runner.requests)
+	return nil
+}
+
+func assertReleasePatchUsesScopeFingerprint(t *testing.T, cfg core.Config, runner *lifecycleRunner) {
+	t.Helper()
+	patch := releasePatchPayload(t, runner)
+	metadata := patch["metadata"].(map[string]any)
+	annotations := metadata["annotations"].(map[string]any)
+	if annotations[annotationBase+"provider-scope"] != sealosClaimScopeID(cfg) {
+		t.Fatalf("scope fingerprint annotation=%#v", annotations[annotationBase+"provider-scope"])
+	}
+	if annotations[annotationBase+"provider_scope_id"] != sealosClaimScopeID(cfg) {
+		t.Fatalf("scope id annotation=%#v", annotations[annotationBase+"provider_scope_id"])
+	}
+	if raw, ok := annotations[annotationBase+"provider_scope"]; !ok || raw != nil {
+		t.Fatalf("raw scope annotation should be removed, got %#v in %#v", raw, annotations)
+	}
+	for _, key := range []string{"gateway_host", "gateway_port", "node_host"} {
+		if raw, ok := annotations[annotationBase+key]; !ok || raw != nil {
+			t.Fatalf("raw route annotation %s should be removed, got %#v in %#v", key, raw, annotations)
+		}
+	}
+	for key, value := range annotations {
+		if value == sealosClaimScope(cfg) {
+			t.Fatalf("raw provider scope leaked through annotation %s", key)
+		}
+		for _, rawRoute := range []string{cfg.SealosDevbox.SSHGatewayHost, cfg.SealosDevbox.SSHGatewayPort, cfg.SealosDevbox.NodeHost} {
+			if strings.TrimSpace(rawRoute) != "" && value == strings.TrimSpace(rawRoute) {
+				t.Fatalf("raw route value leaked through annotation %s", key)
+			}
+		}
+	}
 }
