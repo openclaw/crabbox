@@ -56,8 +56,8 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		"image_configured":       boolString(strings.TrimSpace(b.cfg.SealosDevbox.Image) != ""),
 		"template_id_configured": boolString(strings.TrimSpace(b.cfg.SealosDevbox.TemplateID) != ""),
 	}
-	if strings.TrimSpace(b.cfg.SealosDevbox.Image) == "" && strings.TrimSpace(b.cfg.SealosDevbox.TemplateID) == "" {
-		add(doctorCheck("failed", "devbox.source", "sealos-devbox requires image or templateID before creating a DevBox", creationDetails))
+	if strings.TrimSpace(b.cfg.SealosDevbox.Image) == "" {
+		add(doctorCheck("failed", "devbox.source", "sealos-devbox requires image before creating a DevBox", creationDetails))
 	} else {
 		add(doctorCheck("ok", "devbox.source", "configured", creationDetails))
 	}

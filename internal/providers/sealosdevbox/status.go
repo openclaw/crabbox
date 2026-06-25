@@ -15,16 +15,16 @@ type devboxItem struct {
 }
 
 type devboxStatus struct {
-	State                string             `json:"state"`
-	Phase                string             `json:"phase"`
-	Network              any                `json:"network"`
-	Conditions           []devboxCondition  `json:"conditions"`
-	ContentID            string             `json:"contentID"`
-	NodeName             string             `json:"nodeName"`
-	LastContainerStatus  string             `json:"lastContainerStatus"`
-	SecretName           string             `json:"secretName"`
-	SSHSecretName        string             `json:"sshSecretName"`
-	SSH                  devboxSSHStatus    `json:"ssh"`
+	State               string            `json:"state"`
+	Phase               string            `json:"phase"`
+	Network             any               `json:"network"`
+	Conditions          []devboxCondition `json:"conditions"`
+	ContentID           string            `json:"contentID"`
+	NodeName            string            `json:"nodeName"`
+	LastContainerStatus any               `json:"lastContainerStatus"`
+	SecretName          string            `json:"secretName"`
+	SSHSecretName       string            `json:"sshSecretName"`
+	SSH                 devboxSSHStatus   `json:"ssh"`
 }
 
 type devboxSSHStatus struct {
@@ -43,11 +43,11 @@ type devboxEventList struct {
 }
 
 type devboxEvent struct {
-	Type           string `json:"type"`
-	Reason         string `json:"reason"`
-	Message        string `json:"message"`
-	LastTimestamp  string `json:"lastTimestamp"`
-	EventTime      string `json:"eventTime"`
+	Type          string `json:"type"`
+	Reason        string `json:"reason"`
+	Message       string `json:"message"`
+	LastTimestamp string `json:"lastTimestamp"`
+	EventTime     string `json:"eventTime"`
 }
 
 func normalizeDevboxState(item devboxItem) string {
