@@ -124,7 +124,7 @@ func (b replicateBackend) Run(ctx context.Context, req RunRequest) (RunResult, e
 	leaseID := leaseIDForPrediction(pred.ID)
 	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
-		return RunResult{Provider: providerName, LeaseID: leaseID, Total: b.now().Sub(started), SyncDelegated: true}, err
+		return RunResult{Provider: providerName, LeaseID: leaseID, Total: b.now().Sub(started), SyncDelegated: true}, b.cleanupCreateFailure(ctx, api, pred.ID, err)
 	}
 	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, replicateEndpointScope(baseURL), b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
 		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}, b.cleanupCreateFailure(ctx, api, pred.ID, err)

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -209,6 +211,33 @@ func TestRunCreatesPredictionWithArchiveInputAndMapsExitZero(t *testing.T) {
 	}
 	if _, ok, err := core.ResolveLeaseClaim("rbx_pred_success"); err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
+	}
+}
+
+func TestRunCancelsPredictionWhenRequestedSlugAllocationFails(t *testing.T) {
+	t.Setenv(envCrabboxReplicateToken, "test-token")
+	stateFile := filepath.Join(t.TempDir(), "state-file")
+	if err := os.WriteFile(stateFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", stateFile)
+	fake := &fakeReplicateAPI{create: replicatePrediction{ID: "pred_slug", Status: "processing"}}
+	backend := newTestBackend(fake, io.Discard, io.Discard)
+
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:          testRepo(t),
+		Command:       []string{"true"},
+		NoSync:        true,
+		RequestedSlug: "needs-claim-store",
+	})
+	if err == nil || !strings.Contains(err.Error(), "read claims directory") {
+		t.Fatalf("err=%v, want claim-store read failure", err)
+	}
+	if result.LeaseID != "rbx_pred_slug" {
+		t.Fatalf("result=%#v", result)
+	}
+	if !reflect.DeepEqual(fake.cancels, []string{"pred_slug"}) {
+		t.Fatalf("cancels=%v, want cleanup cancel", fake.cancels)
 	}
 }
 
