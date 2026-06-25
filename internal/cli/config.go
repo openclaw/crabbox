@@ -178,6 +178,7 @@ type Config struct {
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
 	OpenComputer                  OpenComputerConfig
+	Replicate                     ReplicateConfig
 	CodeSandbox                   CodeSandboxConfig
 	OpenSandbox                   OpenSandboxConfig
 	Blaxel                        BlaxelConfig
@@ -711,6 +712,22 @@ type OpenComputerConfig struct {
 	ExecTimeoutSecs int
 	Burst           bool
 	ForgetMissing   bool
+}
+
+// ReplicateConfig configures the delegated Replicate provider. The API token
+// is intentionally absent: provider clients read CRABBOX_REPLICATE_API_TOKEN
+// before REPLICATE_API_TOKEN at runtime and never persist it in Crabbox config
+// or place it on argv.
+type ReplicateConfig struct {
+	APIURL           string
+	Deployment       string
+	Version          string
+	Workdir          string
+	WaitSecs         int
+	PollIntervalSecs int
+	ExecTimeoutSecs  int
+	CancelAfterSecs  int
+	MaxArchiveBytes  int64
 }
 
 // CodeSandboxConfig configures the delegated CodeSandbox provider. The API key
@@ -2598,6 +2615,13 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 3600,
 		},
+		Replicate: ReplicateConfig{
+			APIURL:           "https://api.replicate.com/v1",
+			Workdir:          "/workspace/crabbox",
+			PollIntervalSecs: 2,
+			ExecTimeoutSecs:  3600,
+			MaxArchiveBytes:  10 * 1024 * 1024,
+		},
 		CodeSandbox: CodeSandboxConfig{
 			Workdir:                  "/project/workspace",
 			Privacy:                  "private",
@@ -2860,6 +2884,7 @@ type fileConfig struct {
 	Tenki                    *fileTenkiConfig                    `yaml:"tenki,omitempty"`
 	Tensorlake               *fileTensorlakeConfig               `yaml:"tensorlake,omitempty"`
 	OpenComputer             *fileOpenComputerConfig             `yaml:"openComputer,omitempty"`
+	Replicate                *fileReplicateConfig                `yaml:"replicate,omitempty"`
 	CodeSandbox              *fileCodeSandboxConfig              `yaml:"codeSandbox,omitempty"`
 	OpenSandbox              *fileOpenSandboxConfig              `yaml:"openSandbox,omitempty"`
 	Blaxel                   *fileBlaxelConfig                   `yaml:"blaxel,omitempty"`
@@ -3498,6 +3523,18 @@ type fileOpenComputerConfig struct {
 	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
 	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
 	Burst           *bool  `yaml:"burst,omitempty"`
+}
+
+type fileReplicateConfig struct {
+	APIURL           *string `yaml:"apiUrl,omitempty"`
+	Deployment       *string `yaml:"deployment,omitempty"`
+	Version          *string `yaml:"version,omitempty"`
+	Workdir          *string `yaml:"workdir,omitempty"`
+	WaitSecs         *int    `yaml:"waitSecs,omitempty"`
+	PollIntervalSecs *int    `yaml:"pollIntervalSecs,omitempty"`
+	ExecTimeoutSecs  *int    `yaml:"execTimeoutSecs,omitempty"`
+	CancelAfterSecs  *int    `yaml:"cancelAfterSecs,omitempty"`
+	MaxArchiveBytes  *int64  `yaml:"maxArchiveBytes,omitempty"`
 }
 
 type fileCodeSandboxConfig struct {
@@ -5703,6 +5740,50 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.OpenComputer.Burst = *file.OpenComputer.Burst
 		}
 	}
+	if file.Replicate != nil {
+		if file.Replicate.APIURL != nil {
+			cfg.Replicate.APIURL = *file.Replicate.APIURL
+		}
+		if file.Replicate.Deployment != nil {
+			cfg.Replicate.Deployment = *file.Replicate.Deployment
+		}
+		if file.Replicate.Version != nil {
+			cfg.Replicate.Version = *file.Replicate.Version
+		}
+		if file.Replicate.Workdir != nil {
+			cfg.Replicate.Workdir = *file.Replicate.Workdir
+		}
+		if file.Replicate.WaitSecs != nil {
+			if *file.Replicate.WaitSecs < 0 {
+				return exit(2, "replicate waitSecs must be non-negative")
+			}
+			cfg.Replicate.WaitSecs = *file.Replicate.WaitSecs
+		}
+		if file.Replicate.PollIntervalSecs != nil {
+			if *file.Replicate.PollIntervalSecs < 0 {
+				return exit(2, "replicate pollIntervalSecs must be non-negative")
+			}
+			cfg.Replicate.PollIntervalSecs = *file.Replicate.PollIntervalSecs
+		}
+		if file.Replicate.ExecTimeoutSecs != nil {
+			if *file.Replicate.ExecTimeoutSecs < 0 {
+				return exit(2, "replicate execTimeoutSecs must be non-negative")
+			}
+			cfg.Replicate.ExecTimeoutSecs = *file.Replicate.ExecTimeoutSecs
+		}
+		if file.Replicate.CancelAfterSecs != nil {
+			if *file.Replicate.CancelAfterSecs < 0 {
+				return exit(2, "replicate cancelAfterSecs must be non-negative")
+			}
+			cfg.Replicate.CancelAfterSecs = *file.Replicate.CancelAfterSecs
+		}
+		if file.Replicate.MaxArchiveBytes != nil {
+			if *file.Replicate.MaxArchiveBytes < 0 {
+				return exit(2, "replicate maxArchiveBytes must be non-negative")
+			}
+			cfg.Replicate.MaxArchiveBytes = *file.Replicate.MaxArchiveBytes
+		}
+	}
 	if file.CodeSandbox != nil {
 		if file.CodeSandbox.TemplateID != nil {
 			cfg.CodeSandbox.TemplateID = *file.CodeSandbox.TemplateID
@@ -7508,6 +7589,30 @@ func applyEnv(cfg *Config) error {
 		cfg.OpenComputer.Burst = v
 	}
 	var err error
+	cfg.Replicate.APIURL = getenv("CRABBOX_REPLICATE_API_URL", getenv("REPLICATE_API_URL", cfg.Replicate.APIURL))
+	cfg.Replicate.Deployment = getenv("CRABBOX_REPLICATE_DEPLOYMENT", cfg.Replicate.Deployment)
+	cfg.Replicate.Version = getenv("CRABBOX_REPLICATE_VERSION", cfg.Replicate.Version)
+	cfg.Replicate.Workdir = getenv("CRABBOX_REPLICATE_WORKDIR", cfg.Replicate.Workdir)
+	cfg.Replicate.WaitSecs, err = getenvNonNegativeInt("CRABBOX_REPLICATE_WAIT_SECS", cfg.Replicate.WaitSecs)
+	if err != nil {
+		return err
+	}
+	cfg.Replicate.PollIntervalSecs, err = getenvNonNegativeInt("CRABBOX_REPLICATE_POLL_INTERVAL_SECS", cfg.Replicate.PollIntervalSecs)
+	if err != nil {
+		return err
+	}
+	cfg.Replicate.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_REPLICATE_EXEC_TIMEOUT_SECS", cfg.Replicate.ExecTimeoutSecs)
+	if err != nil {
+		return err
+	}
+	cfg.Replicate.CancelAfterSecs, err = getenvNonNegativeInt("CRABBOX_REPLICATE_CANCEL_AFTER_SECS", cfg.Replicate.CancelAfterSecs)
+	if err != nil {
+		return err
+	}
+	cfg.Replicate.MaxArchiveBytes, err = getenvNonNegativeInt64("CRABBOX_REPLICATE_MAX_ARCHIVE_BYTES", cfg.Replicate.MaxArchiveBytes)
+	if err != nil {
+		return err
+	}
 	cfg.CodeSandbox.TemplateID = getenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", cfg.CodeSandbox.TemplateID)
 	cfg.CodeSandbox.Workdir = getenv("CRABBOX_CODESANDBOX_WORKDIR", cfg.CodeSandbox.Workdir)
 	cfg.CodeSandbox.VMTier = getenv("CRABBOX_CODESANDBOX_VM_TIER", cfg.CodeSandbox.VMTier)
@@ -8523,6 +8628,21 @@ func getenvNonNegativeInt(name string, fallback int) (int, error) {
 		return fallback, nil
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, exit(2, "%s must be an integer", name)
+	}
+	if parsed < 0 {
+		return 0, exit(2, "%s must be non-negative", name)
+	}
+	return parsed, nil
+}
+
+func getenvNonNegativeInt64(name string, fallback int64) (int64, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, exit(2, "%s must be an integer", name)
 	}
